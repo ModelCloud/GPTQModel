@@ -1,0 +1,2646 @@
+{
+  "state": "complete",
+  "provenance": {
+    "snapshot": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88",
+    "dense": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "historical_run_commit": "0f6cb786c071d00cbba76e7da9f29df80a8e5521",
+    "repository_commit": "dfdd1564faa7ac4f585581065099366a77b8d1e0",
+    "source_hashes": {
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/calibration/source/yaqa182-nm10000.parquet": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+      "/root/polly-work/qvq-gsq/dataset/divergence300-v1/divergence300-locked.jsonl": "17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58",
+      "/root/polly-work/qvq-gsq/dataset/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json": "f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e"
+    },
+    "file_hashes": {
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00001-of-00017.safetensors": "d711d6cdd6eeb90bc4d2afdc90ef0a2a31c914216491681115ae77a3c1faf108",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00002-of-00017.safetensors": "a814ad8c0ae0dcd5f1bf1800c081e34ba056006eee078fd0539377918f27829b",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00003-of-00017.safetensors": "c0b0de9c4b6132d6eda35df390fec90f3205eb1a1a524a673109aea59170371e",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00004-of-00017.safetensors": "71ac42121682ae22f78a661face6f08dabfc6c149dcca01d3f4abc33cb337e17",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00005-of-00017.safetensors": "a097d2459c2723ac4b8020cddcb13d5d536708f816299f5b2b06394f1ea848d2",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00006-of-00017.safetensors": "36fa455afcd0a610bbc63f1b58c14c850077c34fbd98eb464de3fc1e981c01bf",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00007-of-00017.safetensors": "3d5fdb9c731ae3a740078e8410bc1e42200eecc6dab4c5c4320751234908986d",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00008-of-00017.safetensors": "dc9713306fd9c11c622b0aea9ade31f26f8c829654ab54d5616e583a47a5f898",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00009-of-00017.safetensors": "0dc2f1a419f6e74804ddfcb81f7a06eba9c63867c9a77db5f9e3b516f21b1fd0",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00010-of-00017.safetensors": "1a7278a992f77a2ae9e5df389a5d7c2bdbb588b341248730b2747b6531d76dfa",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00011-of-00017.safetensors": "32d65db4b2801103e373e0cf351fab2411130db4beef41ff11c66c04bb7aa585",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00012-of-00017.safetensors": "6272f1111ce49e4268593e7c6e940632a834491cb701710e16871f5c1a93bedb",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00013-of-00017.safetensors": "3f508ac92d95e7f76e3339b013f358459f0c1045f57ff850ad5a5ca9b979b959",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00014-of-00017.safetensors": "be2fc3580719c48cae52ddc8b1f204a51457498e6fd217bc9661c521e8216c83",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00015-of-00017.safetensors": "3a35d1ce091ad76370f0fcf6fe66ae394e806a8ebd22727853b4268b9c215667",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00016-of-00017.safetensors": "ce37069a179cc38ac97e4e5f862924db184df5f05ae81d4d06a2aac202b13401",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/quantize_config.json": "e4f6db43d71c91d91570a5e8e19e5d97bd67e4142cf116f1e77549aa2debefce",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model.safetensors.index.json": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697",
+      "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+      "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer_config.json": "9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e"
+    },
+    "historical_disjointness_verified": true,
+    "refinement": "16 stratified original-corpus documents by default; not a repeat of all 10178 YAQA rows",
+    "seed": 7,
+    "train_rows": 16,
+    "eval_rows": 32,
+    "token_cap": 256,
+    "targets": [
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.self_attn.k_proj",
+      "model.layers.0.self_attn.v_proj"
+    ],
+    "candidate_count": 33,
+    "steps": 100,
+    "gsq_enabled": true,
+    "gsq_lifecycle": false,
+    "target_bits": null,
+    "train_tokens": 3767,
+    "heldout_tokens": 6367,
+    "train_source_weights": {
+      "yaqa": 1.25,
+      "nm": 1.0
+    },
+    "source_code": {
+      "/root/polly-work/qvq-gsq/scripts/validate_gsq_scalar_layers.py": "7314dbc2c77c721f32478e6008cef7e2d0bb87e50fdac1905db22a2a36cb9db4",
+      "/root/polly-work/qvq-gsq/scripts/validate_qvq_gsq_layers.py": "c502e5ee2a2695604c7952425e808b38a6a04fac548c3edb171675502b138961",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/config.py": "772fcbffde0ab9353f9a95d6f5567a5da2c6b69c5e0024be18905de4b556a8b8",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_scalar.py": "a4e660b1c805743513248093a2d722c925d7c6bff103d73c41ace893994a2156",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/gptq.py": "a11dde7f0cc09e8669bb7eba51ca4974e31af439c5955d543c13181545d4964e",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/rtn.py": "4b0b134ebb85b1f16639bfd26473ce2ed2882f79b7359e518c7fcbfaaa24d3d7",
+      "/root/polly-work/qvq-gsq/gptqmodel/nn_modules/qlinear/__init__.py": "fb25aacd82dbb07b4253a977f883dc176d7fd4514c96b3a37df5cdf1d79c7e8f",
+      "/root/polly-work/qvq-gsq/gptqmodel/nn_modules/qlinear/torch.py": "9ff4d3a3d88081b9d7acb728bd99eca1e7a3fd7fe53918fe7ca10f7b581f0388"
+    },
+    "scope": "full QKV projections; GPTQ v2 packing; Torch GPU layer checks; F6 canonical full-model propagation",
+    "experiment": "scalar-qkv-lifecycle",
+    "method": "rtn",
+    "bits": 4,
+    "group_size": 128,
+    "arms": [
+      "baseline",
+      "gsq_fixed",
+      "gsq_scales"
+    ],
+    "inputs_sha256": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1"
+  },
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 98304, 0, 610.43.02",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "layers": {
+    "model.layers.0.self_attn.q_proj": {
+      "shape": [
+        2048,
+        2048
+      ],
+      "arms": {
+        "baseline": {
+          "quantize_seconds": 0.054125308990478516,
+          "gsq": null,
+          "packed_objective": 0.014602630399167538,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.00023754037101753056,
+            "max_abs": 0.008739471435546875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "857314b981a60110ea13cf7c3c4e3c9cdc0e4e9a2e85d2ec20f3013e7bdc553d",
+          "payload_bytes": 2190119,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.0021099532023072243,
+              "nmse": 0.0006836620159447193
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021065890323370695,
+              "nmse": 0.000679437885992229
+            },
+            {
+              "tokens": 202,
+              "mse": 0.002156006172299385,
+              "nmse": 0.00070647441316396
+            },
+            {
+              "tokens": 120,
+              "mse": 0.0021519761066883802,
+              "nmse": 0.0006688865832984447
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002104649320244789,
+              "nmse": 0.0006549163372255862
+            },
+            {
+              "tokens": 251,
+              "mse": 0.0020980280824005604,
+              "nmse": 0.0006744316779077053
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021250974386930466,
+              "nmse": 0.0006934400298632681
+            },
+            {
+              "tokens": 192,
+              "mse": 0.002135727321729064,
+              "nmse": 0.0007282481528818607
+            },
+            {
+              "tokens": 171,
+              "mse": 0.0021114584524184465,
+              "nmse": 0.0007073815795592964
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021185134537518024,
+              "nmse": 0.0006946369539946318
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002106425119563937,
+              "nmse": 0.0007305655162781477
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002131597837433219,
+              "nmse": 0.0007485404494218528
+            },
+            {
+              "tokens": 148,
+              "mse": 0.002134445821866393,
+              "nmse": 0.0007691936334595084
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0020868065766990185,
+              "nmse": 0.0007204401190392673
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0020968099124729633,
+              "nmse": 0.0007403992349281907
+            },
+            {
+              "tokens": 129,
+              "mse": 0.002141799544915557,
+              "nmse": 0.0007691738428547978
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002097494900226593,
+              "nmse": 0.0007497316692024469
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0020955658983439207,
+              "nmse": 0.0007778501021675766
+            },
+            {
+              "tokens": 161,
+              "mse": 0.0021366244181990623,
+              "nmse": 0.0006821444258093834
+            },
+            {
+              "tokens": 96,
+              "mse": 0.002118414733558893,
+              "nmse": 0.0006921556778252125
+            },
+            {
+              "tokens": 116,
+              "mse": 0.0021777311339974403,
+              "nmse": 0.0007990602753125131
+            },
+            {
+              "tokens": 86,
+              "mse": 0.0022074407897889614,
+              "nmse": 0.0008178862044587731
+            },
+            {
+              "tokens": 81,
+              "mse": 0.0021667066030204296,
+              "nmse": 0.0009616446332074702
+            },
+            {
+              "tokens": 57,
+              "mse": 0.002207027282565832,
+              "nmse": 0.0008994874660857022
+            },
+            {
+              "tokens": 50,
+              "mse": 0.0021937736310064793,
+              "nmse": 0.0008993603405542672
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021476242691278458,
+              "nmse": 0.0007004407816566527
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021309005096554756,
+              "nmse": 0.0007060229545459151
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021270914003252983,
+              "nmse": 0.0006728870794177055
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021515015978366137,
+              "nmse": 0.0006968973902985454
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021132228430360556,
+              "nmse": 0.0007931844447739422
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002201553201302886,
+              "nmse": 0.0006401304854080081
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021034874953329563,
+              "nmse": 0.0007139371009543538
+            }
+          ]
+        },
+        "gsq_fixed": {
+          "quantize_seconds": 1.3807294368743896,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.014602630399167538,
+            "after": 0.014602630399167538,
+            "learn_scales": false
+          },
+          "packed_objective": 0.014602630399167538,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.00023754037101753056,
+            "max_abs": 0.008739471435546875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "7f022da9c76f0d69a61effe801de49be8685f4c27d306870d9b9865cddde692a",
+          "payload_bytes": 2190129,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.0021099532023072243,
+              "nmse": 0.0006836620159447193
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021065890323370695,
+              "nmse": 0.000679437885992229
+            },
+            {
+              "tokens": 202,
+              "mse": 0.002156006172299385,
+              "nmse": 0.00070647441316396
+            },
+            {
+              "tokens": 120,
+              "mse": 0.0021519761066883802,
+              "nmse": 0.0006688865832984447
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002104649320244789,
+              "nmse": 0.0006549163372255862
+            },
+            {
+              "tokens": 251,
+              "mse": 0.0020980280824005604,
+              "nmse": 0.0006744316779077053
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021250974386930466,
+              "nmse": 0.0006934400298632681
+            },
+            {
+              "tokens": 192,
+              "mse": 0.002135727321729064,
+              "nmse": 0.0007282481528818607
+            },
+            {
+              "tokens": 171,
+              "mse": 0.0021114584524184465,
+              "nmse": 0.0007073815795592964
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021185134537518024,
+              "nmse": 0.0006946369539946318
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002106425119563937,
+              "nmse": 0.0007305655162781477
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002131597837433219,
+              "nmse": 0.0007485404494218528
+            },
+            {
+              "tokens": 148,
+              "mse": 0.002134445821866393,
+              "nmse": 0.0007691936334595084
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0020868065766990185,
+              "nmse": 0.0007204401190392673
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0020968099124729633,
+              "nmse": 0.0007403992349281907
+            },
+            {
+              "tokens": 129,
+              "mse": 0.002141799544915557,
+              "nmse": 0.0007691738428547978
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002097494900226593,
+              "nmse": 0.0007497316692024469
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0020955658983439207,
+              "nmse": 0.0007778501021675766
+            },
+            {
+              "tokens": 161,
+              "mse": 0.0021366244181990623,
+              "nmse": 0.0006821444258093834
+            },
+            {
+              "tokens": 96,
+              "mse": 0.002118414733558893,
+              "nmse": 0.0006921556778252125
+            },
+            {
+              "tokens": 116,
+              "mse": 0.0021777311339974403,
+              "nmse": 0.0007990602753125131
+            },
+            {
+              "tokens": 86,
+              "mse": 0.0022074407897889614,
+              "nmse": 0.0008178862044587731
+            },
+            {
+              "tokens": 81,
+              "mse": 0.0021667066030204296,
+              "nmse": 0.0009616446332074702
+            },
+            {
+              "tokens": 57,
+              "mse": 0.002207027282565832,
+              "nmse": 0.0008994874660857022
+            },
+            {
+              "tokens": 50,
+              "mse": 0.0021937736310064793,
+              "nmse": 0.0008993603405542672
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021476242691278458,
+              "nmse": 0.0007004407816566527
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021309005096554756,
+              "nmse": 0.0007060229545459151
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021270914003252983,
+              "nmse": 0.0006728870794177055
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021515015978366137,
+              "nmse": 0.0006968973902985454
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021132228430360556,
+              "nmse": 0.0007931844447739422
+            },
+            {
+              "tokens": 256,
+              "mse": 0.002201553201302886,
+              "nmse": 0.0006401304854080081
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0021034874953329563,
+              "nmse": 0.0007139371009543538
+            }
+          ]
+        },
+        "gsq_scales": {
+          "quantize_seconds": 1.3617019653320312,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.014602630399167538,
+            "after": 0.013862417079508305,
+            "learn_scales": true
+          },
+          "packed_objective": 0.013862417079508305,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.0002275724255014211,
+            "max_abs": 0.006314277648925781,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "2a0a9e3c83233abcfa192d1af443b7d912b97512ae4caa704cbd867ae959de41",
+          "payload_bytes": 2190139,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.007076069246977568,
+              "nmse": 0.0022927711252123117
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006983891129493713,
+              "nmse": 0.0022525135427713394
+            },
+            {
+              "tokens": 202,
+              "mse": 0.007130966056138277,
+              "nmse": 0.0023366559762507677
+            },
+            {
+              "tokens": 120,
+              "mse": 0.007343103177845478,
+              "nmse": 0.002282415283843875
+            },
+            {
+              "tokens": 256,
+              "mse": 0.007050957065075636,
+              "nmse": 0.0021940884180366993
+            },
+            {
+              "tokens": 251,
+              "mse": 0.006973782554268837,
+              "nmse": 0.002241790760308504
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006985364016145468,
+              "nmse": 0.0022793924435973167
+            },
+            {
+              "tokens": 192,
+              "mse": 0.0067897154949605465,
+              "nmse": 0.002315182238817215
+            },
+            {
+              "tokens": 171,
+              "mse": 0.007070255000144243,
+              "nmse": 0.002368679502978921
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0066739884205162525,
+              "nmse": 0.0021883263252675533
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0065454645082354546,
+              "nmse": 0.002270145108923316
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006612744648009539,
+              "nmse": 0.002322157844901085
+            },
+            {
+              "tokens": 148,
+              "mse": 0.0067723654210567474,
+              "nmse": 0.002440568059682846
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0065328702330589294,
+              "nmse": 0.002255380153656006
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00682330084964633,
+              "nmse": 0.0024093585088849068
+            },
+            {
+              "tokens": 129,
+              "mse": 0.006930684670805931,
+              "nmse": 0.0024889823980629444
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006761929485946894,
+              "nmse": 0.0024169939570128918
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006315215490758419,
+              "nmse": 0.002344135893508792
+            },
+            {
+              "tokens": 161,
+              "mse": 0.00732673704624176,
+              "nmse": 0.0023391537833958864
+            },
+            {
+              "tokens": 96,
+              "mse": 0.0068398118019104,
+              "nmse": 0.0022347914054989815
+            },
+            {
+              "tokens": 116,
+              "mse": 0.007016805931925774,
+              "nmse": 0.002574629383161664
+            },
+            {
+              "tokens": 86,
+              "mse": 0.0068073756992816925,
+              "nmse": 0.0025222233962267637
+            },
+            {
+              "tokens": 81,
+              "mse": 0.006112676579505205,
+              "nmse": 0.0027129759546369314
+            },
+            {
+              "tokens": 57,
+              "mse": 0.006375913042575121,
+              "nmse": 0.0025985424872487783
+            },
+            {
+              "tokens": 50,
+              "mse": 0.0064086709171533585,
+              "nmse": 0.0026273014955222607
+            },
+            {
+              "tokens": 256,
+              "mse": 0.007250412367284298,
+              "nmse": 0.0023646987974643707
+            },
+            {
+              "tokens": 256,
+              "mse": 0.007187793962657452,
+              "nmse": 0.0023815035820007324
+            },
+            {
+              "tokens": 256,
+              "mse": 0.007216700352728367,
+              "nmse": 0.002282941248267889
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006924205459654331,
+              "nmse": 0.0022428338415920734
+            },
+            {
+              "tokens": 256,
+              "mse": 0.006453070789575577,
+              "nmse": 0.002422118093818426
+            },
+            {
+              "tokens": 256,
+              "mse": 0.007068452890962362,
+              "nmse": 0.002055245451629162
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0066530294716358185,
+              "nmse": 0.002258080756291747
+            }
+          ]
+        }
+      }
+    },
+    "model.layers.0.self_attn.k_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "arms": {
+        "baseline": {
+          "quantize_seconds": 0.008279085159301758,
+          "gsq": null,
+          "packed_objective": 0.0160757414996624,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.00024499735445715487,
+            "max_abs": 0.004017829895019531,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "0fd78c680b026cae0f78acc38ab6e2e161133b3346cf1cee6939679c255d2cb3",
+          "payload_bytes": 555815,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.003817250719293952,
+              "nmse": 0.0011322840582579374
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038450155407190323,
+              "nmse": 0.0011239113518968225
+            },
+            {
+              "tokens": 202,
+              "mse": 0.003907206933945417,
+              "nmse": 0.0011791078140959144
+            },
+            {
+              "tokens": 120,
+              "mse": 0.003908543381839991,
+              "nmse": 0.0011337895411998034
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038185680750757456,
+              "nmse": 0.0010974793694913387
+            },
+            {
+              "tokens": 251,
+              "mse": 0.0038743845652788877,
+              "nmse": 0.001141962013207376
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0037978333421051502,
+              "nmse": 0.0011434736661612988
+            },
+            {
+              "tokens": 192,
+              "mse": 0.0038454700261354446,
+              "nmse": 0.0011934270150959492
+            },
+            {
+              "tokens": 171,
+              "mse": 0.0038392264395952225,
+              "nmse": 0.0011663550976663828
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0037538264878094196,
+              "nmse": 0.0011006012791767716
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038370825350284576,
+              "nmse": 0.0011708720121532679
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003947263117879629,
+              "nmse": 0.0012189482804387808
+            },
+            {
+              "tokens": 148,
+              "mse": 0.003889800049364567,
+              "nmse": 0.0012328868033364415
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0038030764553695917,
+              "nmse": 0.0011304335203021765
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00392422080039978,
+              "nmse": 0.001199742080643773
+            },
+            {
+              "tokens": 129,
+              "mse": 0.003987128380686045,
+              "nmse": 0.0012771033216267824
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038931765593588352,
+              "nmse": 0.0011952404165640473
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003829136723652482,
+              "nmse": 0.0012171959970146418
+            },
+            {
+              "tokens": 161,
+              "mse": 0.003974654711782932,
+              "nmse": 0.001170988893136382
+            },
+            {
+              "tokens": 96,
+              "mse": 0.004008875694125891,
+              "nmse": 0.0011823406675830483
+            },
+            {
+              "tokens": 116,
+              "mse": 0.004074018448591232,
+              "nmse": 0.0013347455533221364
+            },
+            {
+              "tokens": 86,
+              "mse": 0.003998838365077972,
+              "nmse": 0.0013192160986363888
+            },
+            {
+              "tokens": 81,
+              "mse": 0.003955924417823553,
+              "nmse": 0.0014056919608265162
+            },
+            {
+              "tokens": 57,
+              "mse": 0.004071047063916922,
+              "nmse": 0.0014023297699168324
+            },
+            {
+              "tokens": 50,
+              "mse": 0.004051768220961094,
+              "nmse": 0.0014127995818853378
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003850712440907955,
+              "nmse": 0.001164363930001855
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003885930869728327,
+              "nmse": 0.00119027029722929
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038552596233785152,
+              "nmse": 0.0011550751514732838
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00388921401463449,
+              "nmse": 0.00115874910261482
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038041432853788137,
+              "nmse": 0.001174950273707509
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003903124248608947,
+              "nmse": 0.0011366382241249084
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038740558084100485,
+              "nmse": 0.0011789643904194236
+            }
+          ]
+        },
+        "gsq_fixed": {
+          "quantize_seconds": 0.3833136558532715,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.0160757414996624,
+            "after": 0.0160757414996624,
+            "learn_scales": false
+          },
+          "packed_objective": 0.0160757414996624,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.00024499735445715487,
+            "max_abs": 0.004017829895019531,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "f638fdc251b7ddb272b7c6a98bdf9af5818d867b6e14a1594e96c65f04497d85",
+          "payload_bytes": 555825,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.003817250719293952,
+              "nmse": 0.0011322840582579374
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038450155407190323,
+              "nmse": 0.0011239113518968225
+            },
+            {
+              "tokens": 202,
+              "mse": 0.003907206933945417,
+              "nmse": 0.0011791078140959144
+            },
+            {
+              "tokens": 120,
+              "mse": 0.003908543381839991,
+              "nmse": 0.0011337895411998034
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038185680750757456,
+              "nmse": 0.0010974793694913387
+            },
+            {
+              "tokens": 251,
+              "mse": 0.0038743845652788877,
+              "nmse": 0.001141962013207376
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0037978333421051502,
+              "nmse": 0.0011434736661612988
+            },
+            {
+              "tokens": 192,
+              "mse": 0.0038454700261354446,
+              "nmse": 0.0011934270150959492
+            },
+            {
+              "tokens": 171,
+              "mse": 0.0038392264395952225,
+              "nmse": 0.0011663550976663828
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0037538264878094196,
+              "nmse": 0.0011006012791767716
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038370825350284576,
+              "nmse": 0.0011708720121532679
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003947263117879629,
+              "nmse": 0.0012189482804387808
+            },
+            {
+              "tokens": 148,
+              "mse": 0.003889800049364567,
+              "nmse": 0.0012328868033364415
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0038030764553695917,
+              "nmse": 0.0011304335203021765
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00392422080039978,
+              "nmse": 0.001199742080643773
+            },
+            {
+              "tokens": 129,
+              "mse": 0.003987128380686045,
+              "nmse": 0.0012771033216267824
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038931765593588352,
+              "nmse": 0.0011952404165640473
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003829136723652482,
+              "nmse": 0.0012171959970146418
+            },
+            {
+              "tokens": 161,
+              "mse": 0.003974654711782932,
+              "nmse": 0.001170988893136382
+            },
+            {
+              "tokens": 96,
+              "mse": 0.004008875694125891,
+              "nmse": 0.0011823406675830483
+            },
+            {
+              "tokens": 116,
+              "mse": 0.004074018448591232,
+              "nmse": 0.0013347455533221364
+            },
+            {
+              "tokens": 86,
+              "mse": 0.003998838365077972,
+              "nmse": 0.0013192160986363888
+            },
+            {
+              "tokens": 81,
+              "mse": 0.003955924417823553,
+              "nmse": 0.0014056919608265162
+            },
+            {
+              "tokens": 57,
+              "mse": 0.004071047063916922,
+              "nmse": 0.0014023297699168324
+            },
+            {
+              "tokens": 50,
+              "mse": 0.004051768220961094,
+              "nmse": 0.0014127995818853378
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003850712440907955,
+              "nmse": 0.001164363930001855
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003885930869728327,
+              "nmse": 0.00119027029722929
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038552596233785152,
+              "nmse": 0.0011550751514732838
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00388921401463449,
+              "nmse": 0.00115874910261482
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038041432853788137,
+              "nmse": 0.001174950273707509
+            },
+            {
+              "tokens": 256,
+              "mse": 0.003903124248608947,
+              "nmse": 0.0011366382241249084
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0038740558084100485,
+              "nmse": 0.0011789643904194236
+            }
+          ]
+        },
+        "gsq_scales": {
+          "quantize_seconds": 0.4196922779083252,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.0160757414996624,
+            "after": 0.014703593216836452,
+            "learn_scales": true
+          },
+          "packed_objective": 0.014703593216836452,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 0.00023364965454675257,
+            "max_abs": 0.0040264129638671875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "1180f8797a76ca7771ed495190338065b9daa2340cf67371fef820be91f1674a",
+          "payload_bytes": 555835,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.009518434293568134,
+              "nmse": 0.0028233856428414583
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009551886469125748,
+              "nmse": 0.002792049665004015
+            },
+            {
+              "tokens": 202,
+              "mse": 0.009775434620678425,
+              "nmse": 0.0029500077944248915
+            },
+            {
+              "tokens": 120,
+              "mse": 0.00999427493661642,
+              "nmse": 0.0028991373255848885
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009940451011061668,
+              "nmse": 0.002856945153325796
+            },
+            {
+              "tokens": 251,
+              "mse": 0.009572423994541168,
+              "nmse": 0.002821439877152443
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009442578069865704,
+              "nmse": 0.0028430260717868805
+            },
+            {
+              "tokens": 192,
+              "mse": 0.00930527038872242,
+              "nmse": 0.0028878552839159966
+            },
+            {
+              "tokens": 171,
+              "mse": 0.00941894855350256,
+              "nmse": 0.0028614718466997147
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009230518713593483,
+              "nmse": 0.0027063372544944286
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008849777281284332,
+              "nmse": 0.002700478071346879
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008909940719604492,
+              "nmse": 0.0027514651883393526
+            },
+            {
+              "tokens": 148,
+              "mse": 0.008792303502559662,
+              "nmse": 0.002786753699183464
+            },
+            {
+              "tokens": 228,
+              "mse": 0.008783907629549503,
+              "nmse": 0.0026109449099749327
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008642857894301414,
+              "nmse": 0.0026423591189086437
+            },
+            {
+              "tokens": 129,
+              "mse": 0.009112302213907242,
+              "nmse": 0.0029187302570790052
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008914124220609665,
+              "nmse": 0.002736716764047742
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008300796151161194,
+              "nmse": 0.0026386354584246874
+            },
+            {
+              "tokens": 161,
+              "mse": 0.009703079238533974,
+              "nmse": 0.0028586629778146744
+            },
+            {
+              "tokens": 96,
+              "mse": 0.009326642379164696,
+              "nmse": 0.002750713611021638
+            },
+            {
+              "tokens": 116,
+              "mse": 0.009605277329683304,
+              "nmse": 0.003146918024867773
+            },
+            {
+              "tokens": 86,
+              "mse": 0.009313926100730896,
+              "nmse": 0.0030726627446711063
+            },
+            {
+              "tokens": 81,
+              "mse": 0.007911035791039467,
+              "nmse": 0.002811094978824258
+            },
+            {
+              "tokens": 57,
+              "mse": 0.008364652283489704,
+              "nmse": 0.0028813229873776436
+            },
+            {
+              "tokens": 50,
+              "mse": 0.008528072386980057,
+              "nmse": 0.002973629627376795
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009617047384381294,
+              "nmse": 0.002907966496422887
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009640040807425976,
+              "nmse": 0.0029527684673666954
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00971655547618866,
+              "nmse": 0.0029111793264746666
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00962079968303442,
+              "nmse": 0.002866412978619337
+            },
+            {
+              "tokens": 256,
+              "mse": 0.008759373798966408,
+              "nmse": 0.002705426188185811
+            },
+            {
+              "tokens": 256,
+              "mse": 0.010278567671775818,
+              "nmse": 0.002993246540427208
+            },
+            {
+              "tokens": 256,
+              "mse": 0.009268278256058693,
+              "nmse": 0.002820550464093685
+            }
+          ]
+        }
+      }
+    },
+    "model.layers.0.self_attn.v_proj": {
+      "shape": [
+        512,
+        2048
+      ],
+      "arms": {
+        "baseline": {
+          "quantize_seconds": 0.008122444152832031,
+          "gsq": null,
+          "packed_objective": 0.014100269414484501,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 1.4566033314622473e-05,
+            "max_abs": 0.00024771690368652344,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "91e2d9655f2613df8c0dac607a217f5dea097c7a725dd4e12176a3587ac3ac69",
+          "payload_bytes": 555815,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.0001229339832207188,
+              "nmse": 0.017822308465838432
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001224087900482118,
+              "nmse": 0.01770932413637638
+            },
+            {
+              "tokens": 202,
+              "mse": 0.00012479149154387414,
+              "nmse": 0.01838785782456398
+            },
+            {
+              "tokens": 120,
+              "mse": 0.00012489553773775697,
+              "nmse": 0.018240025267004967
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012112228432670236,
+              "nmse": 0.01722351647913456
+            },
+            {
+              "tokens": 251,
+              "mse": 0.00012070153024978936,
+              "nmse": 0.01793668046593666
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012089165829820558,
+              "nmse": 0.01746310107409954
+            },
+            {
+              "tokens": 192,
+              "mse": 0.0001233064103871584,
+              "nmse": 0.01812550611793995
+            },
+            {
+              "tokens": 171,
+              "mse": 0.00012313498882576823,
+              "nmse": 0.017937224358320236
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012230407446622849,
+              "nmse": 0.018573720008134842
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012204279482830316,
+              "nmse": 0.018480531871318817
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012415045057423413,
+              "nmse": 0.0186784528195858
+            },
+            {
+              "tokens": 148,
+              "mse": 0.00012491917004808784,
+              "nmse": 0.01731579750776291
+            },
+            {
+              "tokens": 228,
+              "mse": 0.00012080239685019478,
+              "nmse": 0.01785290800035
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012096345017198473,
+              "nmse": 0.018497759476304054
+            },
+            {
+              "tokens": 129,
+              "mse": 0.0001254207600140944,
+              "nmse": 0.019663749262690544
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012113229604437947,
+              "nmse": 0.01763155311346054
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012069712829543278,
+              "nmse": 0.018236450850963593
+            },
+            {
+              "tokens": 161,
+              "mse": 0.00012484130274970084,
+              "nmse": 0.017336439341306686
+            },
+            {
+              "tokens": 96,
+              "mse": 0.00012388700270093977,
+              "nmse": 0.0174222681671381
+            },
+            {
+              "tokens": 116,
+              "mse": 0.00012777146184816957,
+              "nmse": 0.017644453793764114
+            },
+            {
+              "tokens": 86,
+              "mse": 0.000128988700453192,
+              "nmse": 0.01877242513000965
+            },
+            {
+              "tokens": 81,
+              "mse": 0.00012654320744331926,
+              "nmse": 0.01863783225417137
+            },
+            {
+              "tokens": 57,
+              "mse": 0.00012964090274181217,
+              "nmse": 0.018888477236032486
+            },
+            {
+              "tokens": 50,
+              "mse": 0.00012923860049340874,
+              "nmse": 0.019067883491516113
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001239738194271922,
+              "nmse": 0.018076706677675247
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001230882335221395,
+              "nmse": 0.01727970503270626
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012315709318500012,
+              "nmse": 0.01862061582505703
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001228910405188799,
+              "nmse": 0.01840166002511978
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001228342007379979,
+              "nmse": 0.018128421157598495
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001222949504153803,
+              "nmse": 0.019213078543543816
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001198345489683561,
+              "nmse": 0.018578823655843735
+            }
+          ]
+        },
+        "gsq_fixed": {
+          "quantize_seconds": 0.38243556022644043,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.014100269414484501,
+            "after": 0.014100269414484501,
+            "learn_scales": false
+          },
+          "packed_objective": 0.014100269414484501,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 1.4566033314622473e-05,
+            "max_abs": 0.00024771690368652344,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "c6e425a025a7eff9cfe0de34dd020c08d03c28ee9ed697e3bbf409ee2c545e77",
+          "payload_bytes": 555825,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.0001229339832207188,
+              "nmse": 0.017822308465838432
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001224087900482118,
+              "nmse": 0.01770932413637638
+            },
+            {
+              "tokens": 202,
+              "mse": 0.00012479149154387414,
+              "nmse": 0.01838785782456398
+            },
+            {
+              "tokens": 120,
+              "mse": 0.00012489553773775697,
+              "nmse": 0.018240025267004967
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012112228432670236,
+              "nmse": 0.01722351647913456
+            },
+            {
+              "tokens": 251,
+              "mse": 0.00012070153024978936,
+              "nmse": 0.01793668046593666
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012089165829820558,
+              "nmse": 0.01746310107409954
+            },
+            {
+              "tokens": 192,
+              "mse": 0.0001233064103871584,
+              "nmse": 0.01812550611793995
+            },
+            {
+              "tokens": 171,
+              "mse": 0.00012313498882576823,
+              "nmse": 0.017937224358320236
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012230407446622849,
+              "nmse": 0.018573720008134842
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012204279482830316,
+              "nmse": 0.018480531871318817
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012415045057423413,
+              "nmse": 0.0186784528195858
+            },
+            {
+              "tokens": 148,
+              "mse": 0.00012491917004808784,
+              "nmse": 0.01731579750776291
+            },
+            {
+              "tokens": 228,
+              "mse": 0.00012080239685019478,
+              "nmse": 0.01785290800035
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012096345017198473,
+              "nmse": 0.018497759476304054
+            },
+            {
+              "tokens": 129,
+              "mse": 0.0001254207600140944,
+              "nmse": 0.019663749262690544
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012113229604437947,
+              "nmse": 0.01763155311346054
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012069712829543278,
+              "nmse": 0.018236450850963593
+            },
+            {
+              "tokens": 161,
+              "mse": 0.00012484130274970084,
+              "nmse": 0.017336439341306686
+            },
+            {
+              "tokens": 96,
+              "mse": 0.00012388700270093977,
+              "nmse": 0.0174222681671381
+            },
+            {
+              "tokens": 116,
+              "mse": 0.00012777146184816957,
+              "nmse": 0.017644453793764114
+            },
+            {
+              "tokens": 86,
+              "mse": 0.000128988700453192,
+              "nmse": 0.01877242513000965
+            },
+            {
+              "tokens": 81,
+              "mse": 0.00012654320744331926,
+              "nmse": 0.01863783225417137
+            },
+            {
+              "tokens": 57,
+              "mse": 0.00012964090274181217,
+              "nmse": 0.018888477236032486
+            },
+            {
+              "tokens": 50,
+              "mse": 0.00012923860049340874,
+              "nmse": 0.019067883491516113
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001239738194271922,
+              "nmse": 0.018076706677675247
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001230882335221395,
+              "nmse": 0.01727970503270626
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00012315709318500012,
+              "nmse": 0.01862061582505703
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001228910405188799,
+              "nmse": 0.01840166002511978
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001228342007379979,
+              "nmse": 0.018128421157598495
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001222949504153803,
+              "nmse": 0.019213078543543816
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001198345489683561,
+              "nmse": 0.018578823655843735
+            }
+          ]
+        },
+        "gsq_scales": {
+          "quantize_seconds": 0.42145729064941406,
+          "gsq": {
+            "objective": "weight_mse",
+            "before": 0.014100269414484501,
+            "after": 0.012974613346159458,
+            "learn_scales": true
+          },
+          "packed_objective": 0.012974613346159458,
+          "packed_objective_matches": true,
+          "runtime_parity": {
+            "mean_abs": 1.3820004824083298e-05,
+            "max_abs": 0.00025397539138793945,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          },
+          "payload_sha256": "479a271d4a6e4c754b2974e8e4e1bc476a6fe68cfaacd45088c0662657aa0fbc",
+          "payload_bytes": 555835,
+          "reload_exact": true,
+          "heldout": [
+            {
+              "tokens": 183,
+              "mse": 0.00010888896940741688,
+              "nmse": 0.01578613743185997
+            },
+            {
+              "tokens": 256,
+              "mse": 0.000109643537143711,
+              "nmse": 0.01586252823472023
+            },
+            {
+              "tokens": 202,
+              "mse": 0.00011040484969271347,
+              "nmse": 0.016268005594611168
+            },
+            {
+              "tokens": 120,
+              "mse": 0.00011072652705479413,
+              "nmse": 0.016170751303434372
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010809506056830287,
+              "nmse": 0.015371052548289299
+            },
+            {
+              "tokens": 251,
+              "mse": 0.00010900533379754052,
+              "nmse": 0.01619858480989933
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010943492816295475,
+              "nmse": 0.015808148309588432
+            },
+            {
+              "tokens": 192,
+              "mse": 0.00010999140067724511,
+              "nmse": 0.01616825722157955
+            },
+            {
+              "tokens": 171,
+              "mse": 0.00010965864930767566,
+              "nmse": 0.01597410812973976
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010814050619956106,
+              "nmse": 0.01642276905477047
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010851469414774328,
+              "nmse": 0.0164320170879364
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00011131358041893691,
+              "nmse": 0.016747143119573593
+            },
+            {
+              "tokens": 148,
+              "mse": 0.00011035231727873906,
+              "nmse": 0.015296597965061665
+            },
+            {
+              "tokens": 228,
+              "mse": 0.0001086178162950091,
+              "nmse": 0.01605219766497612
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00011002486280631274,
+              "nmse": 0.016825027763843536
+            },
+            {
+              "tokens": 129,
+              "mse": 0.0001141739048762247,
+              "nmse": 0.017900440841913223
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00011019363591913134,
+              "nmse": 0.01603936403989792
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010934616148006171,
+              "nmse": 0.016521403566002846
+            },
+            {
+              "tokens": 161,
+              "mse": 0.00011169353092554957,
+              "nmse": 0.015510636381804943
+            },
+            {
+              "tokens": 96,
+              "mse": 0.00011151742364745587,
+              "nmse": 0.015682730823755264
+            },
+            {
+              "tokens": 116,
+              "mse": 0.00011250246461713687,
+              "nmse": 0.015535900369286537
+            },
+            {
+              "tokens": 86,
+              "mse": 0.00011718479072442278,
+              "nmse": 0.017054539173841476
+            },
+            {
+              "tokens": 81,
+              "mse": 0.00011495074431877583,
+              "nmse": 0.016930442303419113
+            },
+            {
+              "tokens": 57,
+              "mse": 0.00011965168232563883,
+              "nmse": 0.017433064058423042
+            },
+            {
+              "tokens": 50,
+              "mse": 0.00011915532377315685,
+              "nmse": 0.017580194398760796
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00011063300189562142,
+              "nmse": 0.01613147370517254
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010897316678892821,
+              "nmse": 0.015298166312277317
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001089179131668061,
+              "nmse": 0.016467737033963203
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010872316488530487,
+              "nmse": 0.016280168667435646
+            },
+            {
+              "tokens": 256,
+              "mse": 0.0001102565584005788,
+              "nmse": 0.016272157430648804
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010897405445575714,
+              "nmse": 0.017120305448770523
+            },
+            {
+              "tokens": 256,
+              "mse": 0.00010785476479213685,
+              "nmse": 0.016721509397029877
+            }
+          ]
+        }
+      }
+    }
+  },
+  "model": {
+    "baseline": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.0975111662452498,
+          "top1_agreement": 0.8579234972677595,
+          "top5_agreement": 0.8393442622950821,
+          "top10_agreement": 0.8469945355191257,
+          "tokens": 183,
+          "mse": 0.3370348811149597
+        },
+        {
+          "kl_teacher_candidate": 0.08298115497325029,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.85703125,
+          "top10_agreement": 0.8453125,
+          "tokens": 256,
+          "mse": 0.3450244963169098
+        },
+        {
+          "kl_teacher_candidate": 0.15562851985203946,
+          "top1_agreement": 0.8564356435643564,
+          "top5_agreement": 0.8227722772277228,
+          "top10_agreement": 0.8178217821782179,
+          "tokens": 202,
+          "mse": 0.5321599841117859
+        },
+        {
+          "kl_teacher_candidate": 0.1242607838427357,
+          "top1_agreement": 0.8583333333333333,
+          "top5_agreement": 0.8433333333333334,
+          "top10_agreement": 0.8375,
+          "tokens": 120,
+          "mse": 0.4017728269100189
+        },
+        {
+          "kl_teacher_candidate": 0.08764516280554593,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.8445312500000001,
+          "top10_agreement": 0.8539062500000001,
+          "tokens": 256,
+          "mse": 0.33473774790763855
+        },
+        {
+          "kl_teacher_candidate": 0.08830997467363262,
+          "top1_agreement": 0.8645418326693227,
+          "top5_agreement": 0.8446215139442231,
+          "top10_agreement": 0.8418326693227092,
+          "tokens": 251,
+          "mse": 0.3673361837863922
+        },
+        {
+          "kl_teacher_candidate": 0.07946445872905365,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.8375,
+          "top10_agreement": 0.8464843750000001,
+          "tokens": 256,
+          "mse": 0.3295169770717621
+        },
+        {
+          "kl_teacher_candidate": 0.12099312483754815,
+          "top1_agreement": 0.8333333333333334,
+          "top5_agreement": 0.84375,
+          "top10_agreement": 0.8291666666666667,
+          "tokens": 192,
+          "mse": 0.42272403836250305
+        },
+        {
+          "kl_teacher_candidate": 0.1481262110415483,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8350877192982457,
+          "top10_agreement": 0.8444444444444444,
+          "tokens": 171,
+          "mse": 0.43198728561401367
+        },
+        {
+          "kl_teacher_candidate": 0.09428855903912817,
+          "top1_agreement": 0.8828125,
+          "top5_agreement": 0.846875,
+          "top10_agreement": 0.84765625,
+          "tokens": 256,
+          "mse": 0.356379896402359
+        },
+        {
+          "kl_teacher_candidate": 0.18074572998121152,
+          "top1_agreement": 0.8125,
+          "top5_agreement": 0.8046875,
+          "top10_agreement": 0.7894531250000001,
+          "tokens": 256,
+          "mse": 0.7738631367683411
+        },
+        {
+          "kl_teacher_candidate": 0.09334724615252915,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.84375,
+          "top10_agreement": 0.8285156250000001,
+          "tokens": 256,
+          "mse": 0.39534297585487366
+        },
+        {
+          "kl_teacher_candidate": 0.1339907477739477,
+          "top1_agreement": 0.7837837837837838,
+          "top5_agreement": 0.8216216216216217,
+          "top10_agreement": 0.8128378378378379,
+          "tokens": 148,
+          "mse": 0.37745386362075806
+        },
+        {
+          "kl_teacher_candidate": 0.09115290307936642,
+          "top1_agreement": 0.8991228070175439,
+          "top5_agreement": 0.8517543859649124,
+          "top10_agreement": 0.8267543859649122,
+          "tokens": 228,
+          "mse": 0.4026646614074707
+        },
+        {
+          "kl_teacher_candidate": 0.11524198152428958,
+          "top1_agreement": 0.8125,
+          "top5_agreement": 0.8367187500000001,
+          "top10_agreement": 0.83359375,
+          "tokens": 256,
+          "mse": 0.3966533839702606
+        },
+        {
+          "kl_teacher_candidate": 0.12109946460976556,
+          "top1_agreement": 0.875968992248062,
+          "top5_agreement": 0.8046511627906978,
+          "top10_agreement": 0.8131782945736434,
+          "tokens": 129,
+          "mse": 0.5305472016334534
+        },
+        {
+          "kl_teacher_candidate": 0.12852375135407174,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.81640625,
+          "top10_agreement": 0.81796875,
+          "tokens": 256,
+          "mse": 0.39766445755958557
+        },
+        {
+          "kl_teacher_candidate": 0.07752273633911652,
+          "top1_agreement": 0.90234375,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.830078125,
+          "tokens": 256,
+          "mse": 0.4247269332408905
+        },
+        {
+          "kl_teacher_candidate": 0.08675697141187108,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8422360248447206,
+          "top10_agreement": 0.8596273291925466,
+          "tokens": 161,
+          "mse": 0.3636050522327423
+        },
+        {
+          "kl_teacher_candidate": 0.09394101590751963,
+          "top1_agreement": 0.8958333333333334,
+          "top5_agreement": 0.8770833333333333,
+          "top10_agreement": 0.8572916666666668,
+          "tokens": 96,
+          "mse": 0.43292665481567383
+        },
+        {
+          "kl_teacher_candidate": 0.24999346581271892,
+          "top1_agreement": 0.853448275862069,
+          "top5_agreement": 0.7724137931034484,
+          "top10_agreement": 0.735344827586207,
+          "tokens": 116,
+          "mse": 0.6934880018234253
+        },
+        {
+          "kl_teacher_candidate": 0.20271972224614931,
+          "top1_agreement": 0.7790697674418605,
+          "top5_agreement": 0.7930232558139535,
+          "top10_agreement": 0.7755813953488372,
+          "tokens": 86,
+          "mse": 0.5320445895195007
+        },
+        {
+          "kl_teacher_candidate": 0.22728459540168752,
+          "top1_agreement": 0.8518518518518519,
+          "top5_agreement": 0.7777777777777778,
+          "top10_agreement": 0.760493827160494,
+          "tokens": 81,
+          "mse": 0.5559691786766052
+        },
+        {
+          "kl_teacher_candidate": 0.18168431771360216,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.7894736842105263,
+          "top10_agreement": 0.7824561403508772,
+          "tokens": 57,
+          "mse": 0.49841827154159546
+        },
+        {
+          "kl_teacher_candidate": 0.2223616053087357,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.812,
+          "top10_agreement": 0.76,
+          "tokens": 50,
+          "mse": 0.6003528237342834
+        },
+        {
+          "kl_teacher_candidate": 0.14028220856317258,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8187500000000001,
+          "top10_agreement": 0.8128906250000001,
+          "tokens": 256,
+          "mse": 0.5460609793663025
+        },
+        {
+          "kl_teacher_candidate": 0.10988156467440521,
+          "top1_agreement": 0.82421875,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.8308593750000001,
+          "tokens": 256,
+          "mse": 0.3938487768173218
+        },
+        {
+          "kl_teacher_candidate": 0.14346034600733854,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.8304687500000001,
+          "top10_agreement": 0.8359375,
+          "tokens": 256,
+          "mse": 0.6025329828262329
+        },
+        {
+          "kl_teacher_candidate": 0.12107595515419768,
+          "top1_agreement": 0.78125,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.82578125,
+          "tokens": 256,
+          "mse": 0.4682607054710388
+        },
+        {
+          "kl_teacher_candidate": 0.17064542428002957,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.7515625,
+          "top10_agreement": 0.73984375,
+          "tokens": 256,
+          "mse": 0.7964423894882202
+        },
+        {
+          "kl_teacher_candidate": 0.08312895603785288,
+          "top1_agreement": 0.90234375,
+          "top5_agreement": 0.8265625000000001,
+          "top10_agreement": 0.8187500000000001,
+          "tokens": 256,
+          "mse": 0.3770250678062439
+        },
+        {
+          "kl_teacher_candidate": 0.1475556388806268,
+          "top1_agreement": 0.76953125,
+          "top5_agreement": 0.7828125,
+          "top10_agreement": 0.804296875,
+          "tokens": 256,
+          "mse": 0.5291526317596436
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.12180620987071972,
+        "top1_agreement": 0.8520496309093765,
+        "top5_agreement": 0.8257892256949898,
+        "top10_agreement": 0.822286791267473,
+        "mse": 0.45894558715805334
+      }
+    },
+    "gsq_fixed": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.0975111662452498,
+          "top1_agreement": 0.8579234972677595,
+          "top5_agreement": 0.8393442622950821,
+          "top10_agreement": 0.8469945355191257,
+          "tokens": 183,
+          "mse": 0.3370348811149597
+        },
+        {
+          "kl_teacher_candidate": 0.08298115497325029,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.85703125,
+          "top10_agreement": 0.8453125,
+          "tokens": 256,
+          "mse": 0.3450244963169098
+        },
+        {
+          "kl_teacher_candidate": 0.15562851985203946,
+          "top1_agreement": 0.8564356435643564,
+          "top5_agreement": 0.8227722772277228,
+          "top10_agreement": 0.8178217821782179,
+          "tokens": 202,
+          "mse": 0.5321599841117859
+        },
+        {
+          "kl_teacher_candidate": 0.1242607838427357,
+          "top1_agreement": 0.8583333333333333,
+          "top5_agreement": 0.8433333333333334,
+          "top10_agreement": 0.8375,
+          "tokens": 120,
+          "mse": 0.4017728269100189
+        },
+        {
+          "kl_teacher_candidate": 0.08764516280554593,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.8445312500000001,
+          "top10_agreement": 0.8539062500000001,
+          "tokens": 256,
+          "mse": 0.33473774790763855
+        },
+        {
+          "kl_teacher_candidate": 0.08830997467363262,
+          "top1_agreement": 0.8645418326693227,
+          "top5_agreement": 0.8446215139442231,
+          "top10_agreement": 0.8418326693227092,
+          "tokens": 251,
+          "mse": 0.3673361837863922
+        },
+        {
+          "kl_teacher_candidate": 0.07946445872905365,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.8375,
+          "top10_agreement": 0.8464843750000001,
+          "tokens": 256,
+          "mse": 0.3295169770717621
+        },
+        {
+          "kl_teacher_candidate": 0.12099312483754815,
+          "top1_agreement": 0.8333333333333334,
+          "top5_agreement": 0.84375,
+          "top10_agreement": 0.8291666666666667,
+          "tokens": 192,
+          "mse": 0.42272403836250305
+        },
+        {
+          "kl_teacher_candidate": 0.1481262110415483,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8350877192982457,
+          "top10_agreement": 0.8444444444444444,
+          "tokens": 171,
+          "mse": 0.43198728561401367
+        },
+        {
+          "kl_teacher_candidate": 0.09428855903912817,
+          "top1_agreement": 0.8828125,
+          "top5_agreement": 0.846875,
+          "top10_agreement": 0.84765625,
+          "tokens": 256,
+          "mse": 0.356379896402359
+        },
+        {
+          "kl_teacher_candidate": 0.18074572998121152,
+          "top1_agreement": 0.8125,
+          "top5_agreement": 0.8046875,
+          "top10_agreement": 0.7894531250000001,
+          "tokens": 256,
+          "mse": 0.7738631367683411
+        },
+        {
+          "kl_teacher_candidate": 0.09334724615252915,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.84375,
+          "top10_agreement": 0.8285156250000001,
+          "tokens": 256,
+          "mse": 0.39534297585487366
+        },
+        {
+          "kl_teacher_candidate": 0.1339907477739477,
+          "top1_agreement": 0.7837837837837838,
+          "top5_agreement": 0.8216216216216217,
+          "top10_agreement": 0.8128378378378379,
+          "tokens": 148,
+          "mse": 0.37745386362075806
+        },
+        {
+          "kl_teacher_candidate": 0.09115290307936642,
+          "top1_agreement": 0.8991228070175439,
+          "top5_agreement": 0.8517543859649124,
+          "top10_agreement": 0.8267543859649122,
+          "tokens": 228,
+          "mse": 0.4026646614074707
+        },
+        {
+          "kl_teacher_candidate": 0.11524198152428958,
+          "top1_agreement": 0.8125,
+          "top5_agreement": 0.8367187500000001,
+          "top10_agreement": 0.83359375,
+          "tokens": 256,
+          "mse": 0.3966533839702606
+        },
+        {
+          "kl_teacher_candidate": 0.12109946460976556,
+          "top1_agreement": 0.875968992248062,
+          "top5_agreement": 0.8046511627906978,
+          "top10_agreement": 0.8131782945736434,
+          "tokens": 129,
+          "mse": 0.5305472016334534
+        },
+        {
+          "kl_teacher_candidate": 0.12852375135407174,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.81640625,
+          "top10_agreement": 0.81796875,
+          "tokens": 256,
+          "mse": 0.39766445755958557
+        },
+        {
+          "kl_teacher_candidate": 0.07752273633911652,
+          "top1_agreement": 0.90234375,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.830078125,
+          "tokens": 256,
+          "mse": 0.4247269332408905
+        },
+        {
+          "kl_teacher_candidate": 0.08675697141187108,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8422360248447206,
+          "top10_agreement": 0.8596273291925466,
+          "tokens": 161,
+          "mse": 0.3636050522327423
+        },
+        {
+          "kl_teacher_candidate": 0.09394101590751963,
+          "top1_agreement": 0.8958333333333334,
+          "top5_agreement": 0.8770833333333333,
+          "top10_agreement": 0.8572916666666668,
+          "tokens": 96,
+          "mse": 0.43292665481567383
+        },
+        {
+          "kl_teacher_candidate": 0.24999346581271892,
+          "top1_agreement": 0.853448275862069,
+          "top5_agreement": 0.7724137931034484,
+          "top10_agreement": 0.735344827586207,
+          "tokens": 116,
+          "mse": 0.6934880018234253
+        },
+        {
+          "kl_teacher_candidate": 0.20271972224614931,
+          "top1_agreement": 0.7790697674418605,
+          "top5_agreement": 0.7930232558139535,
+          "top10_agreement": 0.7755813953488372,
+          "tokens": 86,
+          "mse": 0.5320445895195007
+        },
+        {
+          "kl_teacher_candidate": 0.22728459540168752,
+          "top1_agreement": 0.8518518518518519,
+          "top5_agreement": 0.7777777777777778,
+          "top10_agreement": 0.760493827160494,
+          "tokens": 81,
+          "mse": 0.5559691786766052
+        },
+        {
+          "kl_teacher_candidate": 0.18168431771360216,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.7894736842105263,
+          "top10_agreement": 0.7824561403508772,
+          "tokens": 57,
+          "mse": 0.49841827154159546
+        },
+        {
+          "kl_teacher_candidate": 0.2223616053087357,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.812,
+          "top10_agreement": 0.76,
+          "tokens": 50,
+          "mse": 0.6003528237342834
+        },
+        {
+          "kl_teacher_candidate": 0.14028220856317258,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8187500000000001,
+          "top10_agreement": 0.8128906250000001,
+          "tokens": 256,
+          "mse": 0.5460609793663025
+        },
+        {
+          "kl_teacher_candidate": 0.10988156467440521,
+          "top1_agreement": 0.82421875,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.8308593750000001,
+          "tokens": 256,
+          "mse": 0.3938487768173218
+        },
+        {
+          "kl_teacher_candidate": 0.14346034600733854,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.8304687500000001,
+          "top10_agreement": 0.8359375,
+          "tokens": 256,
+          "mse": 0.6025329828262329
+        },
+        {
+          "kl_teacher_candidate": 0.12107595515419768,
+          "top1_agreement": 0.78125,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.82578125,
+          "tokens": 256,
+          "mse": 0.4682607054710388
+        },
+        {
+          "kl_teacher_candidate": 0.17064542428002957,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.7515625,
+          "top10_agreement": 0.73984375,
+          "tokens": 256,
+          "mse": 0.7964423894882202
+        },
+        {
+          "kl_teacher_candidate": 0.08312895603785288,
+          "top1_agreement": 0.90234375,
+          "top5_agreement": 0.8265625000000001,
+          "top10_agreement": 0.8187500000000001,
+          "tokens": 256,
+          "mse": 0.3770250678062439
+        },
+        {
+          "kl_teacher_candidate": 0.1475556388806268,
+          "top1_agreement": 0.76953125,
+          "top5_agreement": 0.7828125,
+          "top10_agreement": 0.804296875,
+          "tokens": 256,
+          "mse": 0.5291526317596436
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.12180620987071972,
+        "top1_agreement": 0.8520496309093765,
+        "top5_agreement": 0.8257892256949898,
+        "top10_agreement": 0.822286791267473,
+        "mse": 0.45894558715805334
+      }
+    },
+    "gsq_scales": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.09352838597283168,
+          "top1_agreement": 0.8579234972677595,
+          "top5_agreement": 0.8273224043715848,
+          "top10_agreement": 0.8360655737704918,
+          "tokens": 183,
+          "mse": 0.39805325865745544
+        },
+        {
+          "kl_teacher_candidate": 0.08284756997597333,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.8500000000000001,
+          "top10_agreement": 0.843359375,
+          "tokens": 256,
+          "mse": 0.4025355577468872
+        },
+        {
+          "kl_teacher_candidate": 0.15104255719893486,
+          "top1_agreement": 0.8415841584158416,
+          "top5_agreement": 0.8198019801980198,
+          "top10_agreement": 0.808910891089109,
+          "tokens": 202,
+          "mse": 0.5415046811103821
+        },
+        {
+          "kl_teacher_candidate": 0.1136766744040293,
+          "top1_agreement": 0.8416666666666667,
+          "top5_agreement": 0.8316666666666668,
+          "top10_agreement": 0.8291666666666667,
+          "tokens": 120,
+          "mse": 0.47328436374664307
+        },
+        {
+          "kl_teacher_candidate": 0.08157812985417649,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.84296875,
+          "top10_agreement": 0.8519531250000001,
+          "tokens": 256,
+          "mse": 0.37448006868362427
+        },
+        {
+          "kl_teacher_candidate": 0.0832068405916227,
+          "top1_agreement": 0.8764940239043825,
+          "top5_agreement": 0.8382470119521913,
+          "top10_agreement": 0.8362549800796812,
+          "tokens": 251,
+          "mse": 0.40328890085220337
+        },
+        {
+          "kl_teacher_candidate": 0.07581194146276533,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.83203125,
+          "top10_agreement": 0.8445312500000001,
+          "tokens": 256,
+          "mse": 0.37496933341026306
+        },
+        {
+          "kl_teacher_candidate": 0.11701574694709511,
+          "top1_agreement": 0.8177083333333334,
+          "top5_agreement": 0.8322916666666668,
+          "top10_agreement": 0.8187500000000001,
+          "tokens": 192,
+          "mse": 0.47606325149536133
+        },
+        {
+          "kl_teacher_candidate": 0.14068632210547458,
+          "top1_agreement": 0.847953216374269,
+          "top5_agreement": 0.8269005847953217,
+          "top10_agreement": 0.8391812865497076,
+          "tokens": 171,
+          "mse": 0.5072434544563293
+        },
+        {
+          "kl_teacher_candidate": 0.0934966332882492,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.8445312500000001,
+          "top10_agreement": 0.839453125,
+          "tokens": 256,
+          "mse": 0.3883274793624878
+        },
+        {
+          "kl_teacher_candidate": 0.18384820182422842,
+          "top1_agreement": 0.8046875,
+          "top5_agreement": 0.7953125000000001,
+          "top10_agreement": 0.784375,
+          "tokens": 256,
+          "mse": 0.7552058100700378
+        },
+        {
+          "kl_teacher_candidate": 0.08707331446666977,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.84140625,
+          "top10_agreement": 0.82578125,
+          "tokens": 256,
+          "mse": 0.4044173061847687
+        },
+        {
+          "kl_teacher_candidate": 0.1283321611634513,
+          "top1_agreement": 0.7837837837837838,
+          "top5_agreement": 0.8135135135135135,
+          "top10_agreement": 0.8060810810810811,
+          "tokens": 148,
+          "mse": 0.4373639225959778
+        },
+        {
+          "kl_teacher_candidate": 0.09587194681249853,
+          "top1_agreement": 0.8859649122807017,
+          "top5_agreement": 0.8482456140350877,
+          "top10_agreement": 0.8232456140350878,
+          "tokens": 228,
+          "mse": 0.44394293427467346
+        },
+        {
+          "kl_teacher_candidate": 0.11514904207898347,
+          "top1_agreement": 0.796875,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.82578125,
+          "tokens": 256,
+          "mse": 0.4405599534511566
+        },
+        {
+          "kl_teacher_candidate": 0.10950110554420474,
+          "top1_agreement": 0.875968992248062,
+          "top5_agreement": 0.7968992248062017,
+          "top10_agreement": 0.8031007751937985,
+          "tokens": 129,
+          "mse": 0.5717873573303223
+        },
+        {
+          "kl_teacher_candidate": 0.11752725156601249,
+          "top1_agreement": 0.85546875,
+          "top5_agreement": 0.8109375000000001,
+          "top10_agreement": 0.816015625,
+          "tokens": 256,
+          "mse": 0.4229341149330139
+        },
+        {
+          "kl_teacher_candidate": 0.07802259092801458,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.8210937500000001,
+          "top10_agreement": 0.827734375,
+          "tokens": 256,
+          "mse": 0.45277655124664307
+        },
+        {
+          "kl_teacher_candidate": 0.08701026307055494,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8347826086956522,
+          "top10_agreement": 0.8422360248447206,
+          "tokens": 161,
+          "mse": 0.462443470954895
+        },
+        {
+          "kl_teacher_candidate": 0.0929497496219322,
+          "top1_agreement": 0.8854166666666666,
+          "top5_agreement": 0.8520833333333334,
+          "top10_agreement": 0.8427083333333334,
+          "tokens": 96,
+          "mse": 0.5254934430122375
+        },
+        {
+          "kl_teacher_candidate": 0.25150409728381223,
+          "top1_agreement": 0.8448275862068966,
+          "top5_agreement": 0.7551724137931035,
+          "top10_agreement": 0.7301724137931035,
+          "tokens": 116,
+          "mse": 0.7450985312461853
+        },
+        {
+          "kl_teacher_candidate": 0.18696526934104374,
+          "top1_agreement": 0.7906976744186046,
+          "top5_agreement": 0.7697674418604652,
+          "top10_agreement": 0.7616279069767442,
+          "tokens": 86,
+          "mse": 0.6195266246795654
+        },
+        {
+          "kl_teacher_candidate": 0.20810050508678202,
+          "top1_agreement": 0.8395061728395061,
+          "top5_agreement": 0.7629629629629631,
+          "top10_agreement": 0.7469135802469136,
+          "tokens": 81,
+          "mse": 0.6457780599594116
+        },
+        {
+          "kl_teacher_candidate": 0.15258954167199912,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.7578947368421053,
+          "top10_agreement": 0.7736842105263159,
+          "tokens": 57,
+          "mse": 0.6237401962280273
+        },
+        {
+          "kl_teacher_candidate": 0.19454556937752354,
+          "top1_agreement": 0.84,
+          "top5_agreement": 0.7879999999999999,
+          "top10_agreement": 0.7440000000000001,
+          "tokens": 50,
+          "mse": 0.7288228273391724
+        },
+        {
+          "kl_teacher_candidate": 0.13564529196880015,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.815625,
+          "top10_agreement": 0.814453125,
+          "tokens": 256,
+          "mse": 0.5681536197662354
+        },
+        {
+          "kl_teacher_candidate": 0.10203734816594842,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.825390625,
+          "tokens": 256,
+          "mse": 0.45243480801582336
+        },
+        {
+          "kl_teacher_candidate": 0.13760136571721396,
+          "top1_agreement": 0.81640625,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.8304687500000001,
+          "tokens": 256,
+          "mse": 0.6299154162406921
+        },
+        {
+          "kl_teacher_candidate": 0.12074308331924774,
+          "top1_agreement": 0.79296875,
+          "top5_agreement": 0.8148437500000001,
+          "top10_agreement": 0.8203125,
+          "tokens": 256,
+          "mse": 0.5361638069152832
+        },
+        {
+          "kl_teacher_candidate": 0.17856764356250115,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.74921875,
+          "top10_agreement": 0.736328125,
+          "tokens": 256,
+          "mse": 0.8864772915840149
+        },
+        {
+          "kl_teacher_candidate": 0.07587460250965347,
+          "top1_agreement": 0.90625,
+          "top5_agreement": 0.8210937500000001,
+          "top10_agreement": 0.8207031250000001,
+          "tokens": 256,
+          "mse": 0.424523264169693
+        },
+        {
+          "kl_teacher_candidate": 0.14382001463613275,
+          "top1_agreement": 0.74609375,
+          "top5_agreement": 0.78125,
+          "top10_agreement": 0.80390625,
+          "tokens": 256,
+          "mse": 0.5805132985115051
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.11785607200319327,
+        "top1_agreement": 0.8460813569970158,
+        "top5_agreement": 0.8191298884875138,
+        "top10_agreement": 0.8170095806502278,
+        "mse": 0.5056033632164382
+      }
+    }
+  },
+  "snapshot_quantized_modules": 112,
+  "snapshot_p32_modules": 94,
+  "paired_intervals": {
+    "gsq_fixed": {
+      "kl_teacher_candidate": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ]
+      },
+      "mse": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ]
+      },
+      "top1_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ]
+      },
+      "top5_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ]
+      },
+      "top10_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "gsq_scales": {
+      "kl_teacher_candidate": {
+        "mean_document_delta": -0.005794834345579147,
+        "bootstrap95": [
+          -0.008754074573516846,
+          -0.003196226665750146
+        ]
+      },
+      "mse": {
+        "mean_document_delta": 0.05469074845314026,
+        "bootstrap95": [
+          0.04429268836975098,
+          0.06619825214147568
+        ]
+      },
+      "top1_agreement": {
+        "mean_document_delta": -0.0061098262667655945,
+        "bootstrap95": [
+          -0.009591981768608093,
+          -0.0026313825510442257
+        ]
+      },
+      "top5_agreement": {
+        "mean_document_delta": -0.008952679112553596,
+        "bootstrap95": [
+          -0.011922234669327736,
+          -0.006517666857689619
+        ]
+      },
+      "top10_agreement": {
+        "mean_document_delta": -0.006562740541994572,
+        "bootstrap95": [
+          -0.008381065912544727,
+          -0.004965728148818016
+        ]
+      }
+    }
+  }
+}

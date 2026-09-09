@@ -1,8 +1,8 @@
 # Scalar GSQ integration work
 
 This extends the optional control beyond the verified [QVQ tile adapters](gsq-qvq-lifecycle.md).
-The scalar paths remain experimental: CPU fitting and packing checks are not
-evidence of a real-model quality improvement or complete backend support.
+The scalar paths remain experimental. Real GPTQ and RTN W4 projection results
+below do not qualify complete-model exports or the untested backends/methods.
 
 ## Current implementation
 
@@ -53,8 +53,11 @@ skips in 211.68 seconds; most cases are existing randomized GPTQ Hessian tests.
 A separate QVQ config/processor and weight-only/AWQ processor run passed 48
 cases with one accelerator skip. All runs hid CUDA; skips do not establish
 accelerator support. Ruff and `git diff --check` passed for the changed files.
-Scalar line/branch coverage, real-model quality and native runtime gates remain
-pending. No scalar quality gain is claimed from these fixtures.
+An expanded 56-case scalar suite adds malformed metadata, mixed-device input,
+storage underflow and finite-objective/gradient/checkpoint failure cases. It
+achieves 100% CPU line/branch coverage of `gsq_scalar.py` (138 statements, 60
+branches); this is not whole-package or GPU branch coverage. No scalar quality
+gain is claimed from fixtures. See the [coverage data](../../artifacts/gsq-scalar/validation/scalar-coverage.json).
 
 The user-requested goal includes every compatible method. This inventory keeps
 that scope open; a missing adapter does not establish mathematical incompatibility.
@@ -62,10 +65,10 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | Method/path | Current evidence or remaining work |
 |---|---|
 | QVQ P32 and ordinary W4–W8 | Published draft PR has all-rate GPU checks and real F6/seed7 W2.5/W4/W8 measurements; no gain in those lifecycle runs |
-| GPTQ | Scalar lifecycle and original-column objective fixtures implemented; real calibration/model, save/reload/native backend matrix pending |
+| GPTQ | Real F6/seed7 W4 QKV, config/packed reload and Torch GPU layer checks pass; other rates/backends and complete-model exports pending |
 | AWQ GEMM | Preclip teacher hook and actual CPU packer checks implemented; full scale-search lifecycle, real-model and native backend validation pending |
 | AWQ GEMV/GEMV_FAST/Marlin/BitBLAS | Audit separate packers, stored scales and code conventions; currently rejected by enabled AWQ GSQ config |
-| RTN | Scalar GPTQ export hook implemented; remaining export adapters and real-model/native checks pending |
+| RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
 | GPTAQ/FOEM | Preserve asymmetric/first-order targets rather than substitute ordinary GPTQ reconstruction; currently rejected |
 | QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
 | ParoQuant | Fit in the learned rotation basis, preserve exported transforms and quantizer metadata |
@@ -78,3 +81,96 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 The implementation is unfinished until those boundaries are resolved and the
 compatible paths are verified. The previous QVQ results must not be cited as
 validation of these scalar paths.
+
+## Real F6/seed7 scalar experiment
+
+`scripts/validate_gsq_scalar_layers.py` reuses the historical F6 snapshot/data
+hash audit and seed-7 token selection: 16 stratified YAQA/NM calibration
+documents (3,767 tokens) and 32 locked, disjoint held-out documents (6,367
+tokens), capped at 256 tokens per document. It verifies and archives the
+executed sources and retains the exact inputs, dense teacher logits, real
+projection weights/activations, per-arm configs and packed exports locally.
+
+The full block-0 Q/K/V matrices are 2048x2048, 512x2048 and 512x2048. Both methods
+use W4, group size 128, symmetric GPTQ v2 storage, and FP16 fitting weights.
+GPTQ uses activation ordering with original-column group ownership and real
+dense-model activations, weighted by the F6 source weights (YAQA 1.25, NM 1).
+RTN has no calibration-dependent fitting objective. Its recorded activations
+are used for evaluation only. All comparisons use 100 GSQ steps, seed 7,
+candidate budget 33 (the full 16-code W4 scalar grid), and learning rate 0.1.
+
+Only these three projections are replaced in the full F6 model. The remaining
+snapshot projections and endpoint/norm tensors are preserved. Full-model
+metrics use FP32 canonical reconstruction against the dense FP32 teacher;
+these are not uniform whole-model W4 quantizations or full native-model runs.
+Both configs and packed tensors are saved/reloaded. Each arm additionally runs
+the public Torch GPU backend on 16 real held-out input rows per full projection,
+against its FP32 canonical reconstruction on identical FP16 inputs.
+
+| Method | Arm | KLD | Logit MSE | Top-1 agreement |
+|---|---|---:|---:|---:|
+| GPTQ | Baseline | 0.110326442 | 0.444875231 | 85.4406% |
+| GPTQ | GSQ fixed scales | 0.110326442 | 0.444875231 | 85.4406% |
+| GPTQ | GSQ learned scales | 0.110326442 | 0.444875231 | 85.4406% |
+| RTN | Baseline | 0.121806210 | 0.458945587 | 85.2050% |
+| RTN | GSQ fixed scales | 0.121806210 | 0.458945587 | 85.2050% |
+| RTN | GSQ learned scales | 0.117856072 | 0.505603363 | 84.6081% |
+
+GPTQ and fixed-scale RTN retained byte-identical packed tensors. Learned-scale
+RTN changed 694,563 Q codes, 194,959 K codes and 194,175 V codes, plus all 49,152
+group scales. Zero-points and group indices stayed exact. Its fitting weight
+NMSE fell 5.069%, 8.536% and 7.983%, respectively. All arms have exactly
+3,293,184 packed tensor bytes across QKV; `.pt` zip file sizes vary slightly
+with filename length and are not used to infer tensor storage changes.
+
+Learned-scale RTN's measured full-model KLD is 3.243% lower, but logit MSE is
+10.166% higher and top-1 agreement falls 0.5968 percentage points. These are
+mixed effects, not an overall quality improvement. Paired document bootstrap
+95% intervals also separate these directions: KLD delta [-0.008754, -0.003196],
+MSE delta [0.044293, 0.066198], top-1 fraction delta [-0.009592, -0.002631]. Those
+intervals average documents; the table above weights tokens. Top-5/top-10
+agreement also declines. KLD measures distributions, logit MSE measures raw
+logits, and top-N agreement measures ranked-token overlap with the dense
+teacher; none is task accuracy. A lower fitting loss does not guarantee
+improvement in each of these different downstream measurements.
+
+All 18 localized Torch GPU cases pass both existing gates independently
+(mean absolute error <= 0.002 and maximum <= 0.046875). The worst mean is
+0.0002450 and worst maximum is 0.0087395. Runs used physical GPU 0,
+`GPU-737e2423-874a-23a4-1126-dfbe3e77c294`, PCI DE:00.0, PG506-230/SM80 with
+124 SMs and 96 GiB; three idle preflights passed per run and leases were
+released. This is correctness evidence for Torch GPU execution, not a speed
+claim or qualification of ExLlama/Marlin/BitBLAS or other native backends.
+
+Raw evidence: [GPTQ report](../../artifacts/gsq-scalar/gptq-w4-seed7-v2/report.json),
+[RTN report](../../artifacts/gsq-scalar/rtn-w4-seed7-v2/report.json), and
+[independent packed-tensor audit](../../artifacts/gsq-scalar/validation/report.json).
+The initial GPTQ runner attempt stopped before baseline quantization because
+`length_aware` was passed at the wrong config level; its failed report and
+capture artifacts remain local. The successful runs use `hessian.length_aware`.
+No failed run is counted as a quality result, and these selected-module
+artifacts are not published under the complete-model snapshot directory.
+
+## Additional AWQ format audit
+
+The GEMM adapter cannot be selected solely from `METHOD.AWQ`. Source inspection
+at `dfdd1564f` identifies these distinct contracts:
+
+- `gemv_awq.py::pack` computes `zero * source_scale` before casting the scale
+  table to FP16, then reconstructs codes with that source offset and the stored
+  FP16 denominator. GEMM instead computes its offset from the already-stored
+  scale table. GEMV stores integer zeros and packs codes along input columns.
+- `gemv_fast_awq.py::pack` uses the GEMV inverse arithmetic, a separate four-row
+  interleaved code layout, and a stored FP16 additive offset
+  `-round_fp16(stored_scale * zero)`. Its canonical decoded operator is
+  `stored_scale * code + stored_offset`; for asymmetric zeros it can differ
+  from `stored_scale * (code - zero)`. The LLM-AWQ subclass shares this packer.
+- Both GEMV packers currently convert rounded weights to integers without a
+  saturation step. A new GSQ adapter must not assume that clamping in its scorer
+  describes those packers for every input. Endpoint/tiny-scale tests and either
+  proven representability or a packing fix are required before enabling them.
+
+These are identified implementation requirements, not a claim that GEMV or
+GEMV_FAST is mathematically incompatible with GSQ. In particular, learned
+scales must be scored after both the returned source dtype and the packer's
+storage dtype conversions, including the separately stored fast-path offset.

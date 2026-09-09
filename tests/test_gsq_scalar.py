@@ -220,3 +220,68 @@ def test_scalar_diagonal_metric_matches_dense():
     diagonal = refine_affine_scalar(torch.zeros(2, 4), scale, zeros, groups, hessian=h, **kwargs)
     dense = refine_affine_scalar(torch.zeros(2, 4), scale, zeros, groups, hessian=h.diag(), **kwargs)
     assert diagonal.history == pytest.approx(dense.history)
+
+
+@pytest.mark.parametrize("invalid", [
+    "bits", "weight_shape", "scale_shape", "group_shape", "group_bounds", "nan_weight",
+    "zero_scale", "fractional_zero", "both_metrics", "hessian_shape", "negative_diagonal",
+    "empty_inputs", "candidate_budget", "storage_underflow", "packing", "baseline_overflow",
+    "relaxed_overflow", "hard_overflow", "device", "gradient_overflow",
+])
+def test_scalar_rejects_invalid_or_nonfinite_fit(invalid):
+    weight, target = torch.zeros(2, 4), torch.ones(2, 4)
+    scales, zeros = torch.ones(2, 1), torch.ones(2, 1)
+    groups = torch.zeros(4, dtype=torch.int32)
+    kw = dict(bits=2, config=GSQConfig(enabled=True, steps=1))
+    if invalid == "bits":
+        kw["bits"] = True
+    elif invalid == "weight_shape":
+        target = torch.ones(4, 2)
+    elif invalid == "scale_shape":
+        scales = scales.flatten()
+    elif invalid == "group_shape":
+        groups = groups.float()
+    elif invalid == "group_bounds":
+        groups[0] = 1
+    elif invalid == "nan_weight":
+        weight[0, 0] = torch.nan
+    elif invalid == "zero_scale":
+        scales.zero_()
+    elif invalid == "fractional_zero":
+        zeros.fill_(0.5)
+    elif invalid == "both_metrics":
+        kw.update(hessian=torch.eye(4), inputs=torch.eye(4))
+    elif invalid == "hessian_shape":
+        kw["hessian"] = torch.eye(3)
+    elif invalid == "negative_diagonal":
+        kw["hessian"] = -torch.ones(4)
+    elif invalid == "empty_inputs":
+        kw["inputs"] = torch.ones(0, 4)
+    elif invalid == "candidate_budget":
+        kw["config"] = GSQConfig(enabled=True, max_candidate_bytes=1)
+    elif invalid == "storage_underflow":
+        scales.fill_(1e-20)
+    elif invalid == "packing":
+        kw["packing"] = "unverified"
+    elif invalid == "baseline_overflow":
+        weight.fill_(1)
+        target.fill_(1e-30)
+    elif invalid == "relaxed_overflow":
+        target.fill_(1e-30)
+        scales.fill_(16)
+    elif invalid == "gradient_overflow":
+        target.fill_(1e-30)
+    elif invalid == "device":
+        target = target.to("meta")
+    elif invalid == "hard_overflow":
+        weight.fill_(0.125)
+        scales.fill_(0.125)
+        zeros.fill_(2)
+        target.fill_(0.2)
+        kw.update(scale_dtype=torch.float32,
+                  config=GSQConfig(enabled=True, steps=1, learn_scales=True, learning_rate=80))
+    message = {"storage_underflow": "checkpoint dtype", "baseline_overflow": "baseline objective",
+               "relaxed_overflow": "relaxed objective", "gradient_overflow": "gradient",
+               "hard_overflow": "hard objective", "device": "share a device"}.get(invalid)
+    with pytest.raises(ValueError, match=message):
+        refine_affine_scalar(weight, scales, zeros, groups, target=target, **kw)

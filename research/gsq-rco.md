@@ -18,6 +18,13 @@ measurements. No author code was copied into the experiment below.
 
 The broader [scalar lifecycle work and compatibility inventory](../docs/experiments/gsq-scalar-lifecycle.md)
 tracks GPTQ, AWQ, RTN and remaining method adapters separately from QVQ results.
+Real F6/seed7 full-QKV W4 checks now retain the GPTQ baseline for both scalar
+GSQ variants. Learned-scale RTN reduces its weight objective, with mixed
+downstream effects: KLD falls 3.243%, logit MSE rises 10.166%, and top-1
+agreement falls 0.5968 percentage points. The linked protocol includes packed
+reload, Torch GPU gates, document intervals and raw reports. This illustrates
+why fitting loss, probability divergence and ranked-token agreement must be
+reported separately; it does not justify enabling GSQ by default.
 
 Current public integration: [optional GSQ lifecycle](../docs/experiments/gsq-qvq-lifecycle.md),
 covering P32 W1–W3.5 and ordinary non-banked V2/L16 W4–W8, including half-bit
