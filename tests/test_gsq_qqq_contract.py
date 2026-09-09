@@ -305,4 +305,32 @@ def test_gsq_qqq_native_reload_matches_torch(group_size, tokens):
     assert delta.mean() <= 0.002
     assert delta.max() <= 0.046875
     print("QQQ_GSQ_NATIVE", group_size, tokens, float(delta.mean()), float(delta.max()))
+
+    # Exercise the public backend on a non-default stream. Keep the input,
+    # module workspace and graph-owned output alive across changed-input replays.
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    static_input = inputs.cuda()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            native(static_input)
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured_output = native(static_input)
+    for _ in range(3):
+        replay_input = torch.randn(tokens, 256, generator=rng).half()
+        with torch.cuda.stream(stream):
+            static_input.copy_(replay_input)
+            graph.replay()
+            replay_output = captured_output.clone()
+            eager_output = native(static_input)
+        stream.synchronize()
+        torch.testing.assert_close(replay_output, eager_output, rtol=0, atol=0)
+        replay_delta = (replay_output.cpu().float() - reference(replay_input).float()).abs()
+        assert torch.isfinite(replay_output).all()
+        assert replay_delta.mean() <= 0.002
+        assert replay_delta.max() <= 0.046875
+    print("QQQ_GSQ_GRAPH", group_size, tokens, "3 changed-input replays passed")
     quantizer.free()

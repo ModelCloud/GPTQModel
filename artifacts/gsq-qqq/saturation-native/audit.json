@@ -1,0 +1,677 @@
+{
+  "old": {
+    "metrics": {
+      "inst_executed": {
+        "value": "197089",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "254",
+        "unit": "register/thread"
+      },
+      "derived__local_spilling_requests": {
+        "value": "0",
+        "unit": ""
+      },
+      "derived__shared_spilling_requests": {
+        "value": "0",
+        "unit": ""
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.394149",
+        "unit": "%"
+      },
+      "smsp__warps_eligible.avg.per_cycle_active": {
+        "value": "0.188635",
+        "unit": "warp"
+      },
+      "gpu__time_duration.sum": {
+        "value": "10.720000",
+        "unit": "us"
+      },
+      "gpu__compute_memory_access_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.768054",
+        "unit": "%"
+      },
+      "gpu__compute_memory_access_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.478908",
+        "unit": "%"
+      },
+      "gpu__compute_memory_request_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.535429",
+        "unit": "%"
+      },
+      "gpu__compute_memory_request_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.768054",
+        "unit": "%"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.240951",
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.535429",
+        "unit": "%"
+      },
+      "sm__instruction_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "sm__memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.510222",
+        "unit": "%"
+      },
+      "sm__memory_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "3.377327",
+        "unit": "%"
+      },
+      "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+        "value": "0.318786",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_branch_resolving_per_issue_active.ratio": {
+        "value": "0.121182",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_dispatch_stall_per_issue_active.ratio": {
+        "value": "0.100031",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_drain_per_issue_active.ratio": {
+        "value": "0.136395",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio": {
+        "value": "7.808560",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio": {
+        "value": "0.000084",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+        "value": "0.054713",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio": {
+        "value": "0.266302",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_membar_per_issue_active.ratio": {
+        "value": "0.001902",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio": {
+        "value": "0.080201",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_misc_per_issue_active.ratio": {
+        "value": "0.006229",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio": {
+        "value": "0.840904",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio": {
+        "value": "0.267806",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_selected_per_issue_active.ratio": {
+        "value": "0.999995",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio": {
+        "value": "0.241952",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_sleeping_per_issue_active.ratio": {
+        "value": "0",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_tex_throttle_per_issue_active.ratio": {
+        "value": "0",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio": {
+        "value": "1.641811",
+        "unit": "inst"
+      }
+    },
+    "executed_opcodes": {
+      "MOV": 9083,
+      "IABS": 4984,
+      "IMAD.MOV.U32": 21098,
+      "ULDC": 992,
+      "I2F.RP": 1984,
+      "UISETP.GT.AND": 992,
+      "SHF.R.S32.HI": 13072,
+      "USHF.R.U32.HI": 992,
+      "S2R": 2000,
+      "LEA.HI": 5976,
+      "USEL": 1984,
+      "IMAD": 19944,
+      "MUFU.RCP": 2976,
+      "IADD3": 18252,
+      "I2F.U32.RP": 992,
+      "F2I.FTZ.U32.TRUNC.NTZ": 2976,
+      "IMAD.MOV": 5056,
+      "LOP3.LUT": 11892,
+      "IMAD.HI.U32": 5976,
+      "ISETP.GE.AND": 8032,
+      "ISETP.GT.U32.AND": 2097,
+      "IMAD.IADD": 6202,
+      "ISETP.NE.AND": 3171,
+      "ISETP.GE.U32.AND": 3984,
+      "ISETP.NE.U32.AND": 992,
+      "BRA": 5252,
+      "SHF.L.U32": 992,
+      "IMAD.WIDE": 6930,
+      "ISETP.GE.OR": 1012,
+      "SEL": 56,
+      "ISETP.GT.AND": 48,
+      "ISETP.LT.OR": 16,
+      "IADD3.X": 16,
+      "UISETP.LT.AND": 992,
+      "ULDC.64": 992,
+      "IMAD.SHL.U32": 5162,
+      "USHF.L.U32": 992,
+      "SHF.R.U32.HI": 4048,
+      "SHF.L.U64.HI": 64,
+      "LDS": 120,
+      "LDGSTS.E.BYPASS.LTC128B.128": 96,
+      "IMAD.X": 24,
+      "LDGDEPBAR": 3002,
+      "DEPBAR.LE": 1034,
+      "BAR.SYNC.DEFER_BLOCKING": 1152,
+      "LDSM.16.M88.2": 2048,
+      "EXIT": 1008,
+      "LDS.128": 936,
+      "CS2R": 512,
+      "LEA.HI.X.SX32": 52,
+      "WARPSYNC": 67,
+      "BSSY": 90,
+      "LEA": 68,
+      "BSYNC": 97,
+      "PRMT": 272,
+      "HADD2": 256,
+      "HFMA2": 768,
+      "IMMA.16816.S8.S8.SAT": 512,
+      "LDGSTS.E.LTC128B": 8,
+      "ISETP.EQ.OR": 16,
+      "STS.128": 512,
+      "LDG.E.STRONG.GPU": 9,
+      "YIELD": 9,
+      "CCTL.IVALL": 10,
+      "STG.E.128": 72,
+      "LEA.HI.X": 16,
+      "MEMBAR.ALL.GPU": 1,
+      "ERRBAR": 1,
+      "RED.E.ADD.S32.STRONG.GPU": 1,
+      "STG.E": 1,
+      "I2F": 512,
+      "FMUL": 1024,
+      "F2FP.PACK_AB": 256,
+      "STS": 256,
+      "IMNMX": 0,
+      "NOP": 0
+    },
+    "timing_us": {
+      "median": 166.4000004529953,
+      "p10": 163.83999586105347,
+      "p90": 177.15199291706085,
+      "samples": [
+        162.81600296497345,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        163.83999586105347,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        172.03199863433838,
+        172.03199863433838,
+        172.03199863433838,
+        172.03199863433838,
+        173.0560064315796,
+        174.0799993276596,
+        175.10400712490082,
+        175.10400712490082,
+        176.12800002098083,
+        176.12800002098083,
+        176.12800002098083,
+        176.12800002098083,
+        176.12800002098083,
+        176.12800002098083,
+        177.15199291706085,
+        177.15199291706085,
+        177.15199291706085,
+        178.17600071430206,
+        179.19999361038208,
+        180.2240014076233,
+        181.2479943037033,
+        181.2479943037033,
+        181.2479943037033,
+        183.29599499702454,
+        192.51200556755066,
+        209.08799767494202,
+        499.7119903564453
+      ]
+    },
+    "bank_conflicts": {
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum": 72,
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum": 3
+    }
+  },
+  "fixed": {
+    "metrics": {
+      "inst_executed": {
+        "value": "198088",
+        "unit": "inst"
+      },
+      "launch__registers_per_thread": {
+        "value": "254",
+        "unit": "register/thread"
+      },
+      "derived__local_spilling_requests": {
+        "value": "0",
+        "unit": ""
+      },
+      "derived__shared_spilling_requests": {
+        "value": "0",
+        "unit": ""
+      },
+      "sm__warps_active.avg.pct_of_peak_sustained_active": {
+        "value": "12.399050",
+        "unit": "%"
+      },
+      "smsp__warps_eligible.avg.per_cycle_active": {
+        "value": "0.207902",
+        "unit": "warp"
+      },
+      "gpu__time_duration.sum": {
+        "value": "10.848000",
+        "unit": "us"
+      },
+      "gpu__compute_memory_access_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.749274",
+        "unit": "%"
+      },
+      "gpu__compute_memory_access_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.414597",
+        "unit": "%"
+      },
+      "gpu__compute_memory_request_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.575740",
+        "unit": "%"
+      },
+      "gpu__compute_memory_request_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.749274",
+        "unit": "%"
+      },
+      "gpu__dram_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.252750",
+        "unit": "%"
+      },
+      "lts__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.575740",
+        "unit": "%"
+      },
+      "sm__instruction_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "sm__memory_throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0.497746",
+        "unit": "%"
+      },
+      "sm__memory_throughput_internal_activity.avg.pct_of_peak_sustained_elapsed": {
+        "value": "0",
+        "unit": "%"
+      },
+      "sm__throughput.avg.pct_of_peak_sustained_elapsed": {
+        "value": "3.310255",
+        "unit": "%"
+      },
+      "smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio": {
+        "value": "0.321213",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_branch_resolving_per_issue_active.ratio": {
+        "value": "0.120857",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_dispatch_stall_per_issue_active.ratio": {
+        "value": "0.098421",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_drain_per_issue_active.ratio": {
+        "value": "0.134548",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_imc_miss_per_issue_active.ratio": {
+        "value": "7.242185",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_lg_throttle_per_issue_active.ratio": {
+        "value": "0.000998",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio": {
+        "value": "0.057161",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_math_pipe_throttle_per_issue_active.ratio": {
+        "value": "0.267870",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_membar_per_issue_active.ratio": {
+        "value": "0.001883",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_mio_throttle_per_issue_active.ratio": {
+        "value": "0.079774",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_misc_per_issue_active.ratio": {
+        "value": "0.006316",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_no_instruction_per_issue_active.ratio": {
+        "value": "0.895650",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_not_selected_per_issue_active.ratio": {
+        "value": "0.267870",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_selected_per_issue_active.ratio": {
+        "value": "1.000037",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio": {
+        "value": "0.240670",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_sleeping_per_issue_active.ratio": {
+        "value": "0",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_tex_throttle_per_issue_active.ratio": {
+        "value": "0",
+        "unit": "inst"
+      },
+      "smsp__average_warps_issue_stalled_wait_per_issue_active.ratio": {
+        "value": "1.636562",
+        "unit": "inst"
+      }
+    },
+    "executed_opcodes": {
+      "MOV": 9083,
+      "IABS": 4984,
+      "IMAD.MOV.U32": 21098,
+      "ULDC": 992,
+      "I2F.RP": 1984,
+      "UISETP.GT.AND": 992,
+      "SHF.R.S32.HI": 13072,
+      "USHF.R.U32.HI": 992,
+      "S2R": 2000,
+      "LEA.HI": 5976,
+      "USEL": 1984,
+      "IMAD": 19944,
+      "MUFU.RCP": 2976,
+      "IADD3": 18250,
+      "I2F.U32.RP": 992,
+      "F2I.FTZ.U32.TRUNC.NTZ": 2976,
+      "IMAD.MOV": 5056,
+      "LOP3.LUT": 11892,
+      "IMAD.HI.U32": 5976,
+      "ISETP.GE.AND": 8032,
+      "ISETP.GT.U32.AND": 2097,
+      "IMAD.IADD": 6202,
+      "ISETP.NE.AND": 3170,
+      "ISETP.GE.U32.AND": 3984,
+      "ISETP.NE.U32.AND": 992,
+      "BRA": 5251,
+      "SHF.L.U32": 992,
+      "IMAD.WIDE": 6930,
+      "ISETP.GE.OR": 1012,
+      "SEL": 56,
+      "ISETP.GT.AND": 48,
+      "ISETP.LT.OR": 16,
+      "IADD3.X": 16,
+      "UISETP.LT.AND": 992,
+      "ULDC.64": 992,
+      "IMAD.SHL.U32": 5162,
+      "USHF.L.U32": 992,
+      "SHF.R.U32.HI": 4048,
+      "SHF.L.U64.HI": 64,
+      "LDS": 120,
+      "LDGSTS.E.BYPASS.LTC128B.128": 96,
+      "IMAD.X": 22,
+      "LDGDEPBAR": 3002,
+      "DEPBAR.LE": 1034,
+      "BAR.SYNC.DEFER_BLOCKING": 1152,
+      "LDSM.16.M88.2": 2048,
+      "EXIT": 1008,
+      "LDS.128": 936,
+      "CS2R": 512,
+      "LEA.HI.X.SX32": 52,
+      "WARPSYNC": 67,
+      "BSSY": 90,
+      "LEA": 68,
+      "BSYNC": 97,
+      "HADD2": 256,
+      "HFMA2": 768,
+      "HMNMX2": 1024,
+      "PRMT": 256,
+      "IMMA.16816.S8.S8.SAT": 512,
+      "LDGSTS.E.LTC128B": 8,
+      "ISETP.EQ.OR": 16,
+      "STS.128": 512,
+      "LDG.E.STRONG.GPU": 8,
+      "YIELD": 8,
+      "CCTL.IVALL": 9,
+      "STG.E.128": 72,
+      "LEA.HI.X": 16,
+      "MEMBAR.ALL.GPU": 1,
+      "ERRBAR": 1,
+      "RED.E.ADD.S32.STRONG.GPU": 1,
+      "STG.E": 1,
+      "I2F": 512,
+      "FMUL": 1024,
+      "F2FP.PACK_AB": 256,
+      "STS": 256,
+      "IMNMX": 0,
+      "NOP": 0
+    },
+    "timing_us": {
+      "median": 168.96000504493713,
+      "p10": 162.81600296497345,
+      "p90": 181.2479943037033,
+      "samples": [
+        160.76800227165222,
+        161.79199516773224,
+        161.79199516773224,
+        161.79199516773224,
+        161.79199516773224,
+        161.79199516773224,
+        162.81600296497345,
+        162.81600296497345,
+        162.81600296497345,
+        162.81600296497345,
+        162.81600296497345,
+        162.81600296497345,
+        162.81600296497345,
+        163.83999586105347,
+        163.83999586105347,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        164.86400365829468,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        165.8879965543747,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        166.9120043516159,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        167.93599724769592,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        168.96000504493713,
+        169.98399794101715,
+        169.98399794101715,
+        169.98399794101715,
+        169.98399794101715,
+        169.98399794101715,
+        169.98399794101715,
+        169.98399794101715,
+        171.00800573825836,
+        171.00800573825836,
+        171.00800573825836,
+        171.00800573825836,
+        172.03199863433838,
+        172.03199863433838,
+        172.03199863433838,
+        172.03199863433838,
+        173.0560064315796,
+        173.0560064315796,
+        173.0560064315796,
+        174.0799993276596,
+        175.10400712490082,
+        175.10400712490082,
+        175.10400712490082,
+        176.12800002098083,
+        176.12800002098083,
+        176.12800002098083,
+        177.15199291706085,
+        177.15199291706085,
+        177.15199291706085,
+        178.17600071430206,
+        180.2240014076233,
+        180.2240014076233,
+        180.2240014076233,
+        181.2479943037033,
+        181.2479943037033,
+        181.2479943037033,
+        181.2479943037033,
+        181.2479943037033,
+        184.32000279426575,
+        185.34399569034576,
+        185.34399569034576,
+        197.63199985027313,
+        212.70400285720825,
+        442.3680007457733,
+        691.2000179290771
+      ]
+    },
+    "bank_conflicts": {
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum": 72,
+      "l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_st.sum": 0
+    }
+  }
+}
