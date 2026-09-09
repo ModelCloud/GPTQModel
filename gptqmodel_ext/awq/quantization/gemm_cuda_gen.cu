@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
+#include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cublas_v2.h>
 #include <cstdlib>
@@ -1244,15 +1245,60 @@ torch::Tensor gemmv2_forward_cuda(
     int group_size,
     int split_k_iters)
 {
+    // Validate the flattened GEMV ABI before allocating or launching. The
+    // caller handles empty batches because this kernel requires M > 0.
+    TORCH_CHECK(_in_feats.is_cuda() && _kernel.is_cuda() &&
+                    _scaling_factors.is_cuda() && _zeros.is_cuda(),
+                "AWQ GEMMV2 expects all tensors on CUDA.");
+    TORCH_CHECK(_in_feats.dim() == 2 && _kernel.dim() == 2 &&
+                    _scaling_factors.dim() == 2 && _zeros.dim() == 2,
+                "AWQ GEMMV2 expects 2D input, weights, scales, and zero-points.");
+    TORCH_CHECK(_in_feats.is_contiguous() && _kernel.is_contiguous() &&
+                    _scaling_factors.is_contiguous() && _zeros.is_contiguous(),
+                "AWQ GEMMV2 expects contiguous input, weights, scales, and zero-points.");
+    TORCH_CHECK(_in_feats.scalar_type() == at::kHalf &&
+                    _scaling_factors.scalar_type() == at::kHalf,
+                "AWQ GEMMV2 only supports float16 input activations and scales.");
+    TORCH_CHECK(_kernel.scalar_type() == at::kInt && _zeros.scalar_type() == at::kInt,
+                "AWQ GEMMV2 packed weights and zero-points must be int32.");
+    TORCH_CHECK(_in_feats.device() == _kernel.device() &&
+                    _in_feats.device() == _scaling_factors.device() &&
+                    _in_feats.device() == _zeros.device(),
+                "AWQ GEMMV2 tensors must be on the same CUDA device.");
+    TORCH_CHECK(group_size == 64 || group_size == 128,
+                "AWQ GEMMV2 supports group_size 64 or 128.");
+    TORCH_CHECK(split_k_iters > 0, "AWQ GEMMV2 split_k_iters must be positive.");
+
     int num_in_feats = _in_feats.size(0);
     int num_in_channels = _in_feats.size(1);
+    int num_out_channels = _kernel.size(0);
+    TORCH_CHECK(num_in_feats > 0, "AWQ GEMMV2 does not support zero-row launches.");
+    TORCH_CHECK(num_in_channels > 0 && num_in_channels % 8 == 0 &&
+                    num_in_channels % group_size == 0,
+                "AWQ GEMMV2 input channels must be divisible by 8 and group_size.");
+    TORCH_CHECK(num_out_channels > 0 && num_out_channels % 64 == 0,
+                "AWQ GEMMV2 output channels must be a positive multiple of 64.");
+    TORCH_CHECK(_kernel.size(1) == num_in_channels / 8,
+                "AWQ GEMMV2 packed weight shape does not match input channels.");
+    const int num_groups = num_in_channels / group_size;
+    const int group_alignment = group_size == 64 ? 2 : 1;
+    const int packed_groups_unaligned = (num_groups + 8 - 1) / 8;
+    const int packed_groups = (packed_groups_unaligned + group_alignment - 1) /
+                              group_alignment * group_alignment;
+    TORCH_CHECK(_zeros.size(0) == num_out_channels &&
+                    _zeros.size(1) == packed_groups,
+                "AWQ GEMMV2 packed zero-point shape does not match input channels.");
+    TORCH_CHECK(_scaling_factors.size(0) == num_out_channels &&
+                    _scaling_factors.size(1) == packed_groups * 8,
+                "AWQ GEMMV2 scale shape does not match input channels.");
+    // Follow the input tensor's device even when it is not the current device.
     const at::cuda::OptionalCUDAGuard device_guard(device_of(_in_feats));
 
     auto options = torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
     // for int4, need _kernel.size(1) * 8
     at::Tensor _out_feats = torch::empty({split_k_iters, num_in_feats, _kernel.size(0)}, options);
     int num_out_feats = _out_feats.size(-2);
-    int num_out_channels = _out_feats.size(-1);
+    num_out_channels = _out_feats.size(-1);
 
     auto in_feats = reinterpret_cast<half*>(_in_feats.data_ptr<at::Half>());
     auto kernel = reinterpret_cast<int*>(_kernel.data_ptr<int>());
@@ -1273,20 +1319,22 @@ torch::Tensor gemmv2_forward_cuda(
     // threadIdx.x: 32
     // threadIdx.y: i_factors[2] * j_factors[2]
     dim3 threads_per_block(32, 4);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     if (group_size == 128)
     {
-      gemmv2_forward_4bit_cuda_m128n64k32<128><<<num_blocks, threads_per_block>>>(
+      gemmv2_forward_4bit_cuda_m128n64k32<128><<<num_blocks, threads_per_block, 0, stream>>>(
         split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else if (group_size == 64)
     {
-      gemmv2_forward_4bit_cuda_m128n64k32<64><<<num_blocks, threads_per_block>>>(
+      gemmv2_forward_4bit_cuda_m128n64k32<64><<<num_blocks, threads_per_block, 0, stream>>>(
         split_k_iters, in_feats, kernel, scaling_factors, zeros, num_in_feats, num_in_channels, num_out_channels, out_feats);
     }
     else
     {
       throw std::invalid_argument("Group size temporarily not supported.");
     }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
     return _out_feats.sum(0);
 }
 
