@@ -23,12 +23,6 @@
     "stored_sha256": "7c5497134ad8a573d7eb51dce5ab0cedacb9e54d7de36014cc28b1f1ce73a2d7",
     "bytes": 224
   },
-  "full-model-w2-nm128-signed-baseline-v1/quantization.log": {
-    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/quantization.log",
-    "source_sha256": "e4d415df811d0881f0edde798fb897f1256b8eaa4005365ec018fe6b8622beff",
-    "stored_sha256": "e4d415df811d0881f0edde798fb897f1256b8eaa4005365ec018fe6b8622beff",
-    "bytes": 55087
-  },
   "full-model-w2-nm128-signed-staged-v1/report.json": {
     "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/report.json",
     "source_sha256": "15c4102124fda7e5ca2691097ee141f8152dad86b548d701604f0ca447260c1e",
@@ -94,12 +88,6 @@
     "source_sha256": "d244896ac112366c1fe4b2651940c716ef8fc2678f3d0a7972e8fe74c96bd0f7",
     "stored_sha256": "d244896ac112366c1fe4b2651940c716ef8fc2678f3d0a7972e8fe74c96bd0f7",
     "bytes": 223
-  },
-  "full-model-w4-nm128-signed-baseline-v1/quantization.log": {
-    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/quantization.log",
-    "source_sha256": "95867d8ad21c9d0ffcc3968119bd6be99ed6a8ad34a0a5c7a60f525bd2217466",
-    "stored_sha256": "95867d8ad21c9d0ffcc3968119bd6be99ed6a8ad34a0a5c7a60f525bd2217466",
-    "bytes": 55054
   },
   "full-model-w4-nm128-signed-staged-v1/report.json": {
     "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/report.json",
@@ -388,5 +376,17 @@
     "source_sha256": "0be699e9db98bcc5c81d93c6778119061d6c57efafe6cccbe1c97e3c6629f8c4",
     "stored_sha256": "a319e8dc91e5aefd178b39346d55447ef5a9e1ee0fd645f0c69f651138a1dad5",
     "bytes": 9700
+  },
+  "full-model-w2-nm128-signed-baseline-v1/quantization.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/quantization.log",
+    "source_sha256": "e4d415df811d0881f0edde798fb897f1256b8eaa4005365ec018fe6b8622beff",
+    "stored_sha256": "ff8fb22afac26eb163044211077d9f4bccf52cd6c631aa82cdc70ad68dd7fe4d",
+    "bytes": 8314
+  },
+  "full-model-w4-nm128-signed-baseline-v1/quantization.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/quantization.log",
+    "source_sha256": "95867d8ad21c9d0ffcc3968119bd6be99ed6a8ad34a0a5c7a60f525bd2217466",
+    "stored_sha256": "a4f7cc87fb21d1e5d501a2200e84f1a54f6954e7316b1faf95fc39d4192c7da1",
+    "bytes": 8272
   }
 }
