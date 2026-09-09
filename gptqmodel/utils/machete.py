@@ -446,16 +446,27 @@ def _generated_machete_sources(generated_dir: Optional[Path] = None) -> list[Pat
     return sorted((generated_dir or _machete_generated_dir()).glob("*.cu"))
 
 
-def _generated_machete_sources_current(cutlass_root: Path, generated_dir: Optional[Path] = None) -> bool:
+def _generated_machete_sources_current(
+    cutlass_root: Path, generated_dir: Optional[Path] = None
+) -> bool:
     generated_dir = generated_dir or _machete_generated_dir()
     marker = _machete_generation_marker(generated_dir)
     manifest_path = _machete_generation_manifest(generated_dir)
-    generated_sources = _generated_machete_sources(generated_dir)
+    try:
+        entries = list(generated_dir.iterdir())
+    except OSError:
+        return False
+    generated_sources = sorted(path for path in entries if path.suffix == ".cu")
+    expected_names = {
+        *(path.name for path in generated_sources),
+        _MACHETE_COMPLETE_MARKER,
+        _MACHETE_MANIFEST_NAME,
+    }
     if (
-        not marker.exists()
-        or not manifest_path.exists()
+        generated_dir.is_symlink()
         or not generated_sources
-        or any(not path.is_file() or path.is_symlink() for path in generated_sources)
+        or {path.name for path in entries} != expected_names
+        or any(not path.is_file() or path.is_symlink() for path in entries)
     ):
         return False
     try:
@@ -467,7 +478,9 @@ def _generated_machete_sources_current(cutlass_root: Path, generated_dir: Option
         if manifest.get("signature") != _machete_generation_signature(cutlass_root):
             return False
         files = manifest.get("files")
-        if not isinstance(files, dict) or set(files) != {path.name for path in generated_sources}:
+        if not isinstance(files, dict) or set(files) != {
+            path.name for path in generated_sources
+        }:
             return False
         for path in generated_sources:
             if _sha256(path) != files.get(path.name):

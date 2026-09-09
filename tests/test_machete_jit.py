@@ -612,16 +612,34 @@ def test_machete_sources_generate_once_when_missing(monkeypatch, tmp_path):
     assert sources_first[1].startswith(str(tmp_path / "cache"))
     assert str(machete_root / "generated") not in sources_first[1]
     generated_dir = Path(sources_first[1]).parent
-    manifest = json.loads((generated_dir / machete_utils._MACHETE_MANIFEST_NAME).read_text(encoding="utf-8"))
-    assert manifest["files"]["machete_dispatch.cu"] == hashlib.sha256(
-        (generated_dir / "machete_dispatch.cu").read_bytes()
-    ).hexdigest()
+    manifest = json.loads(
+        (generated_dir / machete_utils._MACHETE_MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        manifest["files"]["machete_dispatch.cu"]
+        == hashlib.sha256(
+            (generated_dir / "machete_dispatch.cu").read_bytes()
+        ).hexdigest()
+    )
 
-    (generated_dir / "machete_dispatch.cu").write_text("// tampered\n", encoding="utf-8")
+    (generated_dir / "machete_dispatch.cu").write_text(
+        "// tampered\n", encoding="utf-8"
+    )
     sources_repaired = machete_utils._machete_sources()
     assert sources_repaired == sources_first
     assert len(run_calls) == 2
-    assert (generated_dir / "machete_dispatch.cu").read_text(encoding="utf-8") == "// generated\n"
+    assert (generated_dir / "machete_dispatch.cu").read_text(
+        encoding="utf-8"
+    ) == "// generated\n"
+
+    shadow_header = generated_dir / "machete_mm_launcher.cuh"
+    shadow_header.write_text("// shadow trusted launcher\n", encoding="utf-8")
+    sources_repaired = machete_utils._machete_sources()
+    assert sources_repaired == sources_first
+    assert len(run_calls) == 3
+    assert not shadow_header.exists()
 
 
 def test_machete_sources_regenerate_when_cutlass_root_changes(monkeypatch, tmp_path):

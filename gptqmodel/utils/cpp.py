@@ -1285,12 +1285,30 @@ class TorchOpsJitExtension:
     def _load_configured_prebuilt_library(self, library_path: Path) -> bool:
         """Load an explicitly configured library without evaluating JIT callbacks."""
 
-        if self._loaded_prebuilt_library == library_path and self._load_result and library_path.is_file():
+        if (
+            self._loaded_prebuilt_library == library_path
+            and self._load_result
+            and library_path.is_file()
+        ):
             return True
         if not library_path.is_file():
             self._last_error = (
                 f"{self.display_name}: configured prebuilt library `{library_path}` does not exist. "
                 f"Unset `{self.prebuilt_library_env}` to enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        if self._ops_available() and self._loaded_prebuilt_library != library_path:
+            loaded_detail = (
+                f" from `{self._loaded_prebuilt_library}`"
+                if self._loaded_prebuilt_library is not None
+                else ""
+            )
+            self._last_error = (
+                f"{self.display_name}: required torch.ops are already registered{loaded_detail}; cannot verify "
+                f"that configured prebuilt library `{library_path}` provides them. PyTorch cannot unload operator "
+                "registrations in-process, so start a new process before selecting a different prebuilt library."
             )
             self._load_attempted = True
             self._load_result = False
@@ -1339,7 +1357,9 @@ class TorchOpsJitExtension:
             self._load_attempted = False
             self._load_result = False
             self._last_error = ""
-            self._loaded_prebuilt_library = None
+            # torch.ops registrations cannot be unloaded. Keep the artifact
+            # identity so a later environment-path switch cannot claim the
+            # existing namespace as registrations from a different library.
             self._namespace_cache = None
             self._op_cache = {}
             if self._configured_prebuilt_library() is not None:
