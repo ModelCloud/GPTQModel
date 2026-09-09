@@ -56,12 +56,17 @@ def paro_gsq_basis(weight, inputs, pairs, theta, channel_scales, *, group_size, 
     return transformed_teacher, transformed_inputs
 
 
-def refine_paro_export(result, *, teacher, inputs, group_size, config=None, storage_dtype=torch.float16):
+def refine_paro_export(result, *, teacher, inputs, group_size, config=None, storage_dtype=torch.float16,
+                       teacher_inputs=None):
     """Fit the affine grid after rotation export; return tensors and diagnostics.
 
     The returned dictionary deliberately excludes initializer train/validation
     losses: callers must not relabel those as post-GSQ losses. Rotation metadata
-    remains owned by ``result``. This low-level adapter is not processor wiring.
+    remains owned by ``result``. Optional row-aligned ``teacher_inputs`` encode
+    clean targets while ``inputs`` encode noisy runtime activations. In that
+    case losses omit the candidate-independent asymmetric constant; they can
+    be negative and are not normalized clean-target MSE. This low-level adapter
+    is not processor wiring.
     """
     from .config import normalize_gsq_config
     from .gsq_scalar import affine_codes, refine_affine_scalar
@@ -80,12 +85,22 @@ def refine_paro_export(result, *, teacher, inputs, group_size, config=None, stor
         raise ValueError("Paro GSQ fitting requires FP16 or BF16 exported metadata")
     target, features = paro_gsq_basis(teacher, inputs, result.pairs, result.theta,
                                      result.channel_scales, group_size=group_size, storage_dtype=storage_dtype)
+    cross = None
+    if teacher_inputs is not None:
+        if teacher_inputs.shape != inputs.shape:
+            raise ValueError("Paro GSQ clean/noisy inputs must have identical row-aligned shapes")
+        _, clean_features = paro_gsq_basis(teacher, teacher_inputs, result.pairs, result.theta,
+                                          result.channel_scales, group_size=group_size, storage_dtype=storage_dtype)
+        # E = candidate - teacher; expand ||X_noisy E^T -
+        # (X_clean-X_noisy) teacher^T||^2 and omit its constant.
+        cross = (clean_features.float() - features.float()).T @ features.float()
     width = teacher.shape[1]
     group = width if group_size == -1 else group_size
     groups = torch.arange(width, device=teacher.device) // group
     fitted = refine_affine_scalar(
         result.pack_weight.to(storage_dtype), result.q_scales.to(storage_dtype), result.q_zeros, groups,
-        target=target, bits=4, config=config, inputs=features, packing="awq_gemm", scale_dtype=storage_dtype)
+        target=target, bits=4, config=config, inputs=features, cross_moment=cross,
+        packing="awq_gemm", scale_dtype=storage_dtype)
     if fitted.after >= fitted.before:
         return retained(fitted.before, fitted.after, fitted.history)
     # Replay must use the actual packed grid, not merely the floating transport

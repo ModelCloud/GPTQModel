@@ -140,3 +140,15 @@ rather than substituting an implicit split. Final focused CPU validation: 126
 passed, 11 skipped, 47 deselected; log archived in
 `artifacts/gsq-paro/processor-cpu/grouped-gsq.log.gz`. No GPU execution is claimed
 for the newly bound grouped path.
+
+The low-level export fitter now accepts optional row-aligned `teacher_inputs`
+for clean targets and `inputs` for noisy runtime activations. In frozen export
+coordinates it adds D=(Xclean-Xnoisy)^T Xnoisy to the scalar asymmetric
+quadratic. The omitted constant is ||(Xclean-Xnoisy) Wteacher^T||^2; normalization
+remains the noisy-input teacher energy. Its reported objective can therefore
+be negative and must not be labeled normalized clean-target MSE.
+Independent direct-output algebra checks and actual fixed/learned-scale fitting
+through AWQ packing pass on controlled fixtures. Identical clean/noisy inputs
+retain exactly the unpaired tensor outputs and history. These checks are
+correctness evidence only. Processor collection of aligned clean/noisy module
+activations is not yet bound, so the public noisy-input guard remains active.

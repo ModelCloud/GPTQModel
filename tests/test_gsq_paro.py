@@ -457,3 +457,88 @@ def test_paro_group_gsq_does_not_replace_missing_explicit_calibration(missing):
     with pytest.raises(RuntimeError, match='explicit training and validation'):
         processor._refine_group_gsq_export(module, object(), None, 1.)
     assert not module.state
+
+
+def test_paro_paired_objective_matches_direct_clean_target_loss(monkeypatch):
+    from types import SimpleNamespace
+    from gptqmodel.quantization.gsq_paro import refine_paro_export
+    import gptqmodel.quantization.gsq_scalar as scalar
+
+    rng = torch.Generator().manual_seed(7)
+    width = 16
+    teacher = torch.randn(8, width, generator=rng)
+    noisy = torch.randn(27, width, generator=rng)
+    clean = noisy + .2 * torch.randn(27, width, generator=rng)
+    result = SimpleNamespace(pack_weight=torch.zeros_like(teacher).half(), pseudo_weight=torch.zeros_like(teacher),
+                             q_scales=torch.ones(8, 1).half(), q_zeros=torch.full((8, 1), 8.),
+                             pairs=torch.arange(width).reshape(1, width), theta=torch.full((1, width // 2), .3),
+                             channel_scales=torch.linspace(.5, 1.5, width))
+    observed = []
+
+    def fit(*args, **kwargs):
+        target, x, cross = kwargs['target'], kwargs['inputs'], kwargs['cross_moment']
+        _, y = paro_gsq_basis(teacher, clean, result.pairs, result.theta, result.channel_scales, group_size=width)
+        candidate = target + torch.randn(target.shape, generator=rng) * .1
+        error = candidate - target
+        quadratic = (x @ error.T).square().sum() - 2 * (error * (target @ cross)).sum()
+        direct = (x @ candidate.T - y @ target.T).square().sum()
+        constant = ((x-y) @ target.T).square().sum()
+        torch.testing.assert_close(quadratic, direct-constant, rtol=2e-5, atol=2e-5)
+        observed.append(True)
+        return SimpleNamespace(before=1., after=1., history=[1.])
+
+    monkeypatch.setattr(scalar, 'refine_affine_scalar', fit)
+    refine_paro_export(result, teacher=teacher, inputs=noisy, teacher_inputs=clean,
+                       group_size=width, config={'enabled': True})
+    assert observed == [True]
+    with pytest.raises(ValueError, match='row-aligned'):
+        refine_paro_export(result, teacher=teacher, inputs=noisy, teacher_inputs=clean[:-1],
+                           group_size=width, config={'enabled': True})
+
+
+@pytest.mark.parametrize('learn_scales', [False, True])
+def test_paro_paired_fit_improves_actual_clean_target_reconstruction(learn_scales):
+    from types import SimpleNamespace
+    from gptqmodel.quantization.gsq_paro import refine_paro_export
+    from gptqmodel.quantization.paroquant.optimization import _apply_inverse_rotation
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
+
+    width, group = 32, 16
+    rng = torch.Generator().manual_seed(7)
+    pairs = torch.arange(group).repeat(2).reshape(1, width).short()
+    theta = torch.full((1, width // 2), .2).half()
+    channel = torch.linspace(.5, 1.5, width).half()
+    target = torch.full((8, width), .125)
+    teacher = _apply_inverse_rotation(target, pairs, theta.float(), group_size=group,
+                                      fused_rotation=False) * channel.float()
+    noisy = torch.randn(128, width, generator=rng)
+    clean = noisy * 1.2
+    result = SimpleNamespace(pack_weight=torch.zeros_like(target).half(), pseudo_weight=torch.zeros_like(target),
+                             q_scales=torch.full((8, 2), .125).half(), q_zeros=torch.full((8, 2), 8.),
+                             pairs=pairs, theta=theta, channel_scales=channel)
+    config = {'enabled': True, 'learn_scales': learn_scales, 'steps': 80, 'learning_rate': .2, 'seed': 7}
+    fitted = refine_paro_export(result, teacher=teacher, inputs=noisy, teacher_inputs=clean,
+                               group_size=group, config=config)
+    assert fitted['after'] < fitted['before']
+    linear = torch.nn.Linear(width, 8, bias=False, dtype=torch.float16)
+    linear.weight.data.copy_(fitted['pack_weight'])
+    packed = AwqTorchLinear(bits=4, group_size=group, sym=False, desc_act=False, in_features=width,
+                            out_features=8, bias=False, register_buffers=True)
+    packed.pack(linear, fitted['q_scales'], fitted['q_zeros'])
+    decoded = dequantize_gemm(packed.qweight, packed.qzeros, packed.scales.float(), 4, group).T
+    _, features = paro_gsq_basis(teacher, noisy, pairs, theta, channel, group_size=group)
+    output = features @ decoded.T
+    reference = clean @ teacher.T
+    actual_loss = (output-reference).square().sum()
+    assert actual_loss < reference.square().sum()
+    constant = ((clean-noisy) @ teacher.T).square().sum()
+    denominator = (noisy @ teacher.T).square().sum()
+    torch.testing.assert_close((actual_loss-constant)/denominator, torch.tensor(fitted['after']),
+                               rtol=1e-4, atol=1e-6)
+    regular = refine_paro_export(result, teacher=teacher, inputs=noisy, group_size=group, config=config)
+    identical = refine_paro_export(result, teacher=teacher, inputs=noisy, teacher_inputs=noisy,
+                                  group_size=group, config=config)
+    for key in ('pack_weight', 'pseudo_weight', 'q_scales', 'q_zeros'):
+        assert torch.equal(regular[key], identical[key])
+    assert regular['history'] == identical['history']
