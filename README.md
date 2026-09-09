@@ -421,6 +421,21 @@ export GPTQMODEL_FP32_ACCUM=0
 
 JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
 
+Machete's pinned CUTLASS checkout and generated CUDA sources are kept in the
+versioned user cache (`~/.cache/gptqmodel`, or `GPTQMODEL_CACHE_DIR`; when set,
+`XDG_CACHE_HOME/gptqmodel` is used). Set `GPTQMODEL_CUTLASS_DIR` to use an
+already-installed, read-only CUTLASS 4.7.1 checkout. `GPTQMODEL_OFFLINE=1`
+disables downloads and requires that checkout or a verified cache hit already
+exist. For environments where compilation is not allowed, point
+`GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY` at a compatible Machete shared library;
+an invalid or missing explicit library is reported as an error and does not
+fall back to JIT. The generated source cache can be populated ahead of time by
+prewarming the extension:
+
+```shell
+python -c "from gptqmodel import extension; extension.load('machete')"
+```
+
 ```shell
 # optional: relocate the kernel cache (e.g. one cache per process)
 export GPTQMODEL_TORCH_EXTENSIONS_DIR=/path/to/cache

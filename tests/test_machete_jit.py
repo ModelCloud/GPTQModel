@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
+import json
 import os
 import re
 import shutil
@@ -378,23 +381,24 @@ def test_ensure_cutlass_source_bootstraps_repo_local_checkout(monkeypatch, tmp_p
     archive_path = tmp_path / f"cutlass-v{machete_utils._CUTLASS_VERSION}.tar.gz"
     _write_fake_cutlass_archive(archive_path)
 
-    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path)
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path / "project")
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setattr(machete_utils, "_CUTLASS_ARCHIVE_SHA256", hashlib.sha256(archive_path.read_bytes()).hexdigest())
     monkeypatch.setattr(
         machete_utils,
         "_download_cutlass_archive",
-        lambda _url, destination: shutil.copyfile(archive_path, destination),
+        lambda _url, destination: (destination.parent.mkdir(parents=True, exist_ok=True), shutil.copyfile(archive_path, destination)),
     )
 
     cutlass_root = machete_utils._ensure_cutlass_source()
-    monkeypatch.setenv("GPTQMODEL_CUTLASS_DIR", os.environ["GPTQMODEL_CUTLASS_DIR"])
-
-    assert cutlass_root == (tmp_path / "cutlass").resolve()
+    assert cutlass_root == machete_utils._cutlass_cache_dir().resolve()
     assert (cutlass_root / "include" / "cutlass" / "cutlass.h").is_file()
     assert (cutlass_root / "python" / "cutlass_library.py").is_file()
-    assert (cutlass_root / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8").strip() == machete_utils._CUTLASS_VERSION
-    assert str(cutlass_root) == str((tmp_path / "cutlass").resolve())
-    assert str(cutlass_root) == os.environ["GPTQMODEL_CUTLASS_DIR"]
+    marker = json.loads((cutlass_root / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8"))
+    assert marker["version"] == machete_utils._CUTLASS_VERSION
+    assert marker["archive_sha256"] == machete_utils._CUTLASS_ARCHIVE_SHA256
+    assert "gptqmodel_ext/machete/generated" not in str(cutlass_root)
 
 
 def test_cutlass_checkout_complete_accepts_tools_util_layout(tmp_path):
@@ -425,6 +429,81 @@ def test_ensure_cutlass_source_rejects_mismatched_configured_checkout(monkeypatc
         machete_utils._ensure_cutlass_source()
 
 
+def test_cutlass_configured_checkout_is_strictly_read_only(monkeypatch, tmp_path):
+    configured = tmp_path / "cutlass"
+    _write_fake_cutlass_checkout(configured, version=machete_utils._CUTLASS_VERSION)
+    before = sorted(path.relative_to(configured) for path in configured.rglob("*"))
+    monkeypatch.setenv("GPTQMODEL_CUTLASS_DIR", str(configured))
+
+    assert machete_utils._ensure_cutlass_source() == configured.resolve()
+    assert sorted(path.relative_to(configured) for path in configured.rglob("*")) == before
+    assert not (configured / machete_utils._CUTLASS_VERSION_MARKER).exists()
+
+
+def test_cutlass_archive_checksum_is_verified_before_atomic_publish(monkeypatch, tmp_path):
+    destination = tmp_path / "cache" / "cutlass.tar.gz"
+    monkeypatch.setattr(machete_utils, "_CUTLASS_ARCHIVE_SHA256", "0" * 64)
+    monkeypatch.setattr(machete_utils.urllib.request, "urlopen", lambda _url: io.BytesIO(b"bad"))
+
+    with pytest.raises(RuntimeError, match="checksum mismatch"):
+        machete_utils._download_cutlass_archive("https://example.invalid/cutlass", destination)
+
+    assert not destination.exists()
+    assert not list(destination.parent.glob(".*.tmp"))
+
+
+@pytest.mark.parametrize("member_name", ["../escaped", "/absolute"])
+def test_cutlass_archive_rejects_unsafe_paths(member_name, tmp_path):
+    archive_path = tmp_path / "unsafe.tar.gz"
+    payload = b"unsafe"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        member = tarfile.TarInfo(member_name)
+        member.size = len(payload)
+        archive.addfile(member, io.BytesIO(payload))
+
+    destination = tmp_path / "extract"
+    destination.mkdir()
+    with pytest.raises(RuntimeError, match="unsafe CUTLASS archive member"):
+        machete_utils._extract_cutlass_archive(archive_path, destination)
+
+    assert not (tmp_path / "escaped").exists()
+
+
+def test_cutlass_offline_cache_miss_has_remediation(monkeypatch, tmp_path):
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path / "project")
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("GPTQMODEL_OFFLINE", "1")
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setattr(
+        machete_utils,
+        "_download_cutlass_archive",
+        lambda *_args, **_kwargs: pytest.fail("offline mode attempted a download"),
+    )
+
+    with pytest.raises(RuntimeError, match=r"GPTQMODEL_OFFLINE=1.*GPTQMODEL_CUTLASS_DIR"):
+        machete_utils._ensure_cutlass_source()
+
+
+def test_cutlass_offline_uses_complete_extracted_cache_without_archive(monkeypatch, tmp_path):
+    monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path / "project")
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("GPTQMODEL_OFFLINE", "1")
+    monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    checkout = machete_utils._cutlass_cache_dir()
+    _write_fake_cutlass_checkout(checkout, version=machete_utils._CUTLASS_VERSION)
+    (checkout / machete_utils._CUTLASS_VERSION_MARKER).write_text(
+        json.dumps(
+            {
+                "version": machete_utils._CUTLASS_VERSION,
+                "archive_sha256": machete_utils._CUTLASS_ARCHIVE_SHA256,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert machete_utils._ensure_cutlass_source() == checkout.resolve()
+
+
 def test_ensure_cutlass_source_marks_matching_repo_local_checkout_without_redownload(monkeypatch, tmp_path):
     repo_root = tmp_path
     repo_cutlass = repo_root / "cutlass"
@@ -442,7 +521,7 @@ def test_ensure_cutlass_source_marks_matching_repo_local_checkout_without_redown
     cutlass_root = machete_utils._ensure_cutlass_source()
 
     assert cutlass_root == repo_cutlass.resolve()
-    assert (repo_cutlass / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8").strip() == machete_utils._CUTLASS_VERSION
+    assert not (repo_cutlass / machete_utils._CUTLASS_VERSION_MARKER).exists()
     assert download_calls == []
 
 
@@ -453,18 +532,22 @@ def test_ensure_cutlass_source_refreshes_repo_local_checkout_when_version_mismat
     _write_fake_cutlass_checkout(repo_cutlass, version="3.5.0")
 
     monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path)
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("GPTQMODEL_CUTLASS_DIR", raising=False)
+    monkeypatch.setattr(machete_utils, "_CUTLASS_ARCHIVE_SHA256", hashlib.sha256(archive_path.read_bytes()).hexdigest())
     monkeypatch.setattr(
         machete_utils,
         "_download_cutlass_archive",
-        lambda _url, destination: shutil.copyfile(archive_path, destination),
+        lambda _url, destination: (destination.parent.mkdir(parents=True, exist_ok=True), shutil.copyfile(archive_path, destination)),
     )
 
     cutlass_root = machete_utils._ensure_cutlass_source()
 
-    assert cutlass_root == repo_cutlass.resolve()
+    assert cutlass_root == machete_utils._cutlass_cache_dir().resolve()
     assert machete_utils._cutlass_checkout_version(cutlass_root) == machete_utils._CUTLASS_VERSION
-    assert (cutlass_root / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8").strip() == machete_utils._CUTLASS_VERSION
+    marker = json.loads((cutlass_root / machete_utils._CUTLASS_VERSION_MARKER).read_text(encoding="utf-8"))
+    assert marker["version"] == machete_utils._CUTLASS_VERSION
+    assert marker["archive_sha256"] == machete_utils._CUTLASS_ARCHIVE_SHA256
 
 
 def test_scaled_mm_epilogues_c3x_matches_cutlass_442_broadcast_signatures():
@@ -510,22 +593,53 @@ def test_machete_sources_generate_once_when_missing(monkeypatch, tmp_path):
     def fake_run(args, cwd, env, check, capture_output, text):
         del cwd, env, check, capture_output, text
         run_calls.append(list(args))
-        generated_dir = machete_root / "generated"
+        generated_dir = Path(args[args.index("--output-dir") + 1])
         generated_dir.mkdir(parents=True, exist_ok=True)
         (generated_dir / "machete_dispatch.cu").write_text("// generated\n", encoding="utf-8")
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path)
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(machete_utils, "_ensure_cutlass_source", lambda: fake_cutlass)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
     sources_first = machete_utils._machete_sources()
     sources_second = machete_utils._machete_sources()
 
-    assert run_calls == [[sys.executable, str(machete_root / "generate.py")]]
+    assert len(run_calls) == 1
     assert sources_first == sources_second
     assert sources_first[0] == str(machete_root / "machete_pytorch.cu")
-    assert sources_first[1] == str(machete_root / "generated" / "machete_dispatch.cu")
+    assert sources_first[1].startswith(str(tmp_path / "cache"))
+    assert str(machete_root / "generated") not in sources_first[1]
+    generated_dir = Path(sources_first[1]).parent
+    manifest = json.loads(
+        (generated_dir / machete_utils._MACHETE_MANIFEST_NAME).read_text(
+            encoding="utf-8"
+        )
+    )
+    assert (
+        manifest["files"]["machete_dispatch.cu"]
+        == hashlib.sha256(
+            (generated_dir / "machete_dispatch.cu").read_bytes()
+        ).hexdigest()
+    )
+
+    (generated_dir / "machete_dispatch.cu").write_text(
+        "// tampered\n", encoding="utf-8"
+    )
+    sources_repaired = machete_utils._machete_sources()
+    assert sources_repaired == sources_first
+    assert len(run_calls) == 2
+    assert (generated_dir / "machete_dispatch.cu").read_text(
+        encoding="utf-8"
+    ) == "// generated\n"
+
+    shadow_header = generated_dir / "machete_mm_launcher.cuh"
+    shadow_header.write_text("// shadow trusted launcher\n", encoding="utf-8")
+    sources_repaired = machete_utils._machete_sources()
+    assert sources_repaired == sources_first
+    assert len(run_calls) == 3
+    assert not shadow_header.exists()
 
 
 def test_machete_sources_regenerate_when_cutlass_root_changes(monkeypatch, tmp_path):
@@ -549,7 +663,7 @@ def test_machete_sources_regenerate_when_cutlass_root_changes(monkeypatch, tmp_p
     def fake_run(args, cwd, env, check, capture_output, text):
         del cwd, check, capture_output, text
         run_calls.append(list(args))
-        generated_dir = machete_root / "generated"
+        generated_dir = Path(args[args.index("--output-dir") + 1])
         generated_dir.mkdir(parents=True, exist_ok=True)
         (generated_dir / "machete_dispatch.cu").write_text(
             f"// generated for {env['GPTQMODEL_CUTLASS_DIR']}\n",
@@ -558,6 +672,7 @@ def test_machete_sources_regenerate_when_cutlass_root_changes(monkeypatch, tmp_p
         return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(machete_utils, "_machete_project_root", lambda: tmp_path)
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path / "cache"))
     monkeypatch.setattr(machete_utils, "_ensure_cutlass_source", lambda: current_cutlass_root)
     monkeypatch.setattr(subprocess, "run", fake_run)
 
@@ -566,10 +681,7 @@ def test_machete_sources_regenerate_when_cutlass_root_changes(monkeypatch, tmp_p
     current_cutlass_root = cutlass_b
     machete_utils._machete_sources()
 
-    assert run_calls == [
-        [sys.executable, str(machete_root / "generate.py")],
-        [sys.executable, str(machete_root / "generate.py")],
-    ]
+    assert len(run_calls) == 1
 
 
 def test_machete_ldflags_link_cuda_driver():

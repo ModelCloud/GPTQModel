@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import itertools
 import math
 import os
-import shutil
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
@@ -50,7 +50,7 @@ else:
         f"`{_CUTLASS_PYTHON_DIR}`. Set GPTQMODEL_CUTLASS_DIR to a valid CUTLASS checkout."
     )
 
-from vllm_cutlass_library_extension import (
+from vllm_cutlass_library_extension import (  # noqa: E402
     DataType,
     EpilogueScheduleTag,
     EpilogueScheduleType,
@@ -71,7 +71,7 @@ from vllm_cutlass_library_extension import (
 #
 
 DISPATCH_TEMPLATE = """
-#include "../machete_mm_launcher.cuh"
+#include "machete_mm_launcher.cuh"
 
 namespace machete {
 
@@ -197,7 +197,7 @@ std::vector<std::string> supported_schedules_dispatch(
 """
 
 IMPL_TEMPLATE = """
-#include "../machete_mm_launcher.cuh"
+#include "machete_mm_launcher.cuh"
 
 namespace machete {
     
@@ -247,7 +247,7 @@ impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
 """
 
 PREPACK_TEMPLATE = """
-#include "../machete_prepack_launcher.cuh"
+#include "machete_prepack_launcher.cuh"
 
 namespace machete {
 
@@ -534,11 +534,23 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     return sources
 
 
-def generate():
+def _default_output_dir() -> Path:
+    configured = os.environ.get("GPTQMODEL_CACHE_DIR")
+    if configured:
+        cache_root = Path(configured).expanduser()
+    else:
+        xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+        cache_root = (
+            Path(xdg_cache_home).expanduser() / "gptqmodel"
+            if xdg_cache_home
+            else Path.home() / ".cache" / "gptqmodel"
+        )
+    return cache_root / "machete" / "generated" / "manual"
+
+
+def generate(output_dir: str | os.PathLike[str] | None = None):
     # See csrc/quantization/machete/Readme.md, the Codegeneration for more info
     # about how this works
-    SCRIPT_DIR = os.path.dirname(__file__)
-
     sch_common_params = dict(
         kernel_schedule=TmaMI,
         epilogue_schedule=TmaCoop,
@@ -712,22 +724,28 @@ def generate():
     #                  itertools.repeat(qqq_heuristic))
     # ]
 
-    output_dir = os.path.join(SCRIPT_DIR, "generated")
-
-    # Delete the "generated" directory if it exists
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-
-    # Create the "generated" directory
-    os.makedirs(output_dir)
+    if output_dir is None:
+        output_path = _default_output_dir()
+    else:
+        output_path = Path(output_dir).expanduser()
+    if output_path.exists():
+        if not output_path.is_dir():
+            raise RuntimeError(f"Machete output path is not a directory: `{output_path}`.")
+        if any(output_path.iterdir()):
+            raise RuntimeError(f"Machete output directory must be empty: `{output_path}`.")
+    else:
+        output_path.mkdir(parents=True)
 
     # Render each group of configurations into separate files
     for filename, code in create_sources(impl_configs):
-        filepath = os.path.join(output_dir, f"{filename}.cu")
-        with open(filepath, "w") as output_file:
+        filepath = output_path / f"{filename}.cu"
+        with filepath.open("w", encoding="utf-8") as output_file:
             output_file.write(code)
         print(f"Rendered template to {filepath}")
 
 
 if __name__ == "__main__":
-    generate()
+    parser = argparse.ArgumentParser(description="Generate Machete CUDA source files.")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    args = parser.parse_args()
+    generate(args.output_dir)

@@ -510,6 +510,120 @@ def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     assert compile_calls == []
 
 
+def test_torch_ops_jit_extension_explicit_prebuilt_is_authoritative_and_reused(monkeypatch, tmp_path):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    source_calls: list[str] = []
+    load_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root") or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(
+        cpp_module.torch.ops, "load_library", lambda path: load_calls.append(path)
+    )
+    monkeypatch.setattr(loader, "_refresh_runtime_cache", lambda: True)
+
+    assert loader.load() is True
+    assert loader.load() is True
+    assert load_calls == [str(library)]
+    assert source_calls == []
+
+
+def test_torch_ops_jit_extension_rejects_prebuilt_when_ops_are_already_registered(
+    monkeypatch, tmp_path
+):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    loader = _make_loader(tmp_path, prebuilt_library_env="UNIT_TEST_PREBUILT")
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(loader, "_ops_available", lambda: True)
+    monkeypatch.setattr(
+        cpp_module.torch.ops,
+        "load_library",
+        lambda _path: pytest.fail("an unverified prebuilt library was loaded"),
+    )
+
+    assert loader.load() is False
+    assert "already registered" in loader.last_error_message()
+    assert "start a new process" in loader.last_error_message()
+
+
+def test_torch_ops_jit_extension_rejects_in_process_prebuilt_path_switch(
+    monkeypatch, tmp_path
+):
+    first_library = tmp_path / "first.so"
+    second_library = tmp_path / "second.so"
+    first_library.write_bytes(b"first")
+    second_library.write_bytes(b"second")
+    loader = _make_loader(tmp_path, prebuilt_library_env="UNIT_TEST_PREBUILT")
+    state = {"ops_available": False}
+    load_calls: list[str] = []
+
+    def fake_load_library(path: str):
+        load_calls.append(path)
+        state["ops_available"] = True
+
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(first_library))
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ops_available"])
+    monkeypatch.setattr(
+        loader, "_refresh_runtime_cache", lambda: state["ops_available"]
+    )
+    monkeypatch.setattr(cpp_module.torch.ops, "load_library", fake_load_library)
+
+    assert loader.load() is True
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(second_library))
+    loader.clear_cache()
+
+    assert loader.load() is False
+    assert load_calls == [str(first_library)]
+    assert str(first_library) in loader.last_error_message()
+    assert str(second_library) in loader.last_error_message()
+
+
+def test_torch_ops_jit_extension_prebuilt_clear_cache_does_not_touch_jit_root(
+    monkeypatch, tmp_path
+):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    source_calls: list[str] = []
+    load_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root")
+        or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(cpp_module.torch.ops, "load_library", lambda path: load_calls.append(path))
+    monkeypatch.setattr(loader, "_refresh_runtime_cache", lambda: True)
+
+    assert loader.load() is True
+    loader.clear_cache()
+    assert loader.load() is True
+    assert load_calls == [str(library), str(library)]
+    assert source_calls == []
+
+
+def test_torch_ops_jit_extension_missing_prebuilt_does_not_fall_back_to_jit(monkeypatch, tmp_path):
+    source_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root") or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(tmp_path / "missing.so"))
+
+    assert loader.load() is False
+    assert "configured prebuilt library" in loader.last_error_message()
+    assert source_calls == []
+
+
 def test_torch_ops_jit_extension_force_rebuild_clears_cache(monkeypatch, tmp_path):
     """Guard force-rebuild mode so stale cached libraries never short-circuit a requested rebuild."""
 
