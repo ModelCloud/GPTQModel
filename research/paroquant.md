@@ -108,3 +108,12 @@ retain baseline payloads exactly for all projections; no recovery is claimed.
 See the [real-layer report](../docs/experiments/gsq-paro-real-layers.md) and its
 manifest-bound artifacts. Grouped binding and final-model propagation remain
 pending; this result is not a complete native model export.
+
+Implicit-calibration follow-up: matching GSQ modules now reserve disjoint
+whole-sequence prefix/suffix streams before activation concatenation. Short
+calibration sets previously allowed the processor to pass overlapping streams
+as explicit fitter inputs. One sequence leaves validation empty so the module
+path uses its existing internal row split; disabled/unmatched controls preserve
+the previous selection. Seven regression cases include the layer-capture filter
+route. The focused processor/config/GSQ suite passes 119 tests with 11 skips
+(CPU only); this does not change the explicit 12/4-document real experiment.

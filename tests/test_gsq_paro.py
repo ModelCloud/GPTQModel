@@ -304,3 +304,55 @@ def test_paro_gsq_native_reload_and_graph(tokens, learn_scales, krot, tmp_path):
         torch.cuda.synchronize()
         check(captured, x)
         torch.testing.assert_close(captured, restored(x), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('lengths', [(2, 3), (1,), (1, 2, 1)])
+def test_paro_gsq_implicit_feature_streams_reserve_disjoint_sequences(lengths):
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True}, opt_train_samples=2048, opt_validation_samples=64)
+    offset = 0
+    tensors = []
+    for length in lengths:
+        tensors.append(torch.arange(offset, offset + length).reshape(length, 1, 1).float())
+        offset += length
+    train, validation = processor._module_feature_streams(tensors, [])
+    assert train.numel() > 0
+    assert not set(train.flatten().tolist()) & set(validation.flatten().tolist())
+    assert train.numel() + validation.numel() == offset
+    if offset > 1:
+        assert validation.numel() == 1
+
+
+@pytest.mark.parametrize('config', [None, {'enabled': False}, {'enabled': True, 'modules': ['k_proj$']}])
+def test_paro_implicit_stream_selection_unchanged_without_matching_gsq(config):
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq=config)
+    tensors = [torch.arange(6).reshape(2, 3, 1).float()]
+    train, validation = processor._module_feature_streams(tensors, [], 'model.layers.0.self_attn.q_proj')
+    assert torch.equal(train, tensors[0])
+    assert torch.equal(validation, tensors[0])
+
+
+def test_paro_gsq_layer_capture_routes_full_module_filter():
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True, 'modules': ['self_attn.q_proj$']})
+    values = torch.arange(12).reshape(2, 3, 2).float()
+    processor.tasks = {name: {'inputs': [values.clone()], 'batch_indices': [0]} for name in ('q', 'k')}
+    state = SimpleNamespace(modules={
+        name: SimpleNamespace(full_name=f'model.layers.0.self_attn.{name}_proj') for name in ('q', 'k')})
+    processor._layer_input_features(state)
+    q, k = processor.tasks['q'], processor.tasks['k']
+    assert torch.equal(q['train_inputs'], values[:1])
+    assert torch.equal(q['validation_inputs'], values[1:])
+    assert torch.equal(k['train_inputs'], values)
+    assert torch.equal(k['validation_inputs'], values)

@@ -531,6 +531,7 @@ class ParoQuantProcessor(LoopProcessor):
         self,
         tensors: List[torch.Tensor],
         batch_indices: List[Optional[int]],
+        module_name: str = "",
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Separate captured module activations into non-leaking train and validation streams."""
         explicit_validation = bool(getattr(self, "_has_explicit_validation_calibration", False))
@@ -557,15 +558,18 @@ class ParoQuantProcessor(LoopProcessor):
                 self._concat_feature_tensors(validation_tensors),
             )
 
-        train_tensors = self._take_feature_samples(
-            tensors,
-            int(self.qcfg.opt_train_samples),
-        )
-        validation_tensors = self._take_feature_samples(
-            tensors,
-            int(self.qcfg.opt_validation_samples),
-            from_end=True,
-        )
+        train_limit = int(self.qcfg.opt_train_samples)
+        validation_limit = int(self.qcfg.opt_validation_samples)
+        from ..quantization.gsq_scalar import gsq_enabled_for
+        if gsq_enabled_for(getattr(self.qcfg, "gsq", None), module_name):
+            # Reserve whole sequences before concatenation. With a short
+            # calibration set the historical prefix/suffix selections overlap,
+            # which must not be presented to GSQ as independent streams.
+            total = sum(self._feature_tensor_sample_count(tensor) for tensor in tensors)
+            validation_limit = min(validation_limit, max(0, total - 1), max(1, total - train_limit))
+            train_limit = min(train_limit, total - validation_limit)
+        train_tensors = self._take_feature_samples(tensors, train_limit)
+        validation_tensors = self._take_feature_samples(tensors, validation_limit, from_end=True)
         return (
             self._concat_feature_tensors(train_tensors),
             self._concat_feature_tensors(validation_tensors),
@@ -589,7 +593,9 @@ class ParoQuantProcessor(LoopProcessor):
                 entry["train_inputs"] = torch.empty(0)
                 entry["validation_inputs"] = torch.empty(0)
                 continue
-            train_inputs, validation_inputs = self._module_feature_streams(tensors, batch_indices)
+            train_inputs, validation_inputs = self._module_feature_streams(
+                tensors, batch_indices, state.modules[name].full_name,
+            )
             features[name] = self._concat_feature_tensors(tensors)
             entry["inputs"] = [features[name]]
             entry["batch_indices"] = [None]
