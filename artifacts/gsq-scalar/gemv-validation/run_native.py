@@ -1,4 +1,6 @@
-import os, subprocess, time
+import os
+import subprocess
+import time
 uuid=os.environ['CUDA_VISIBLE_DEVICES']
 assert uuid.startswith('GPU-') and ',' not in uuid and os.environ.get('GPU_ALLOCATOR_LEASE_ID')
 for i in range(3):
@@ -8,5 +10,5 @@ for i in range(3):
  assert values[2]==uuid and int(values[4])<=8 and int(values[6])==0 and uuid not in processes,info
  print('IDLE',i+1,info,flush=True)
  time.sleep(1)
-import pytest
+import pytest  # noqa: E402 -- import only after the pre-CUDA idle gate
 raise SystemExit(pytest.main(['-q','-s','tests/test_gsq_awq_gemv.py','-k','native_reloaded','--junitxml=/tmp/gsq-gemv-native.xml']))

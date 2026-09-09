@@ -376,3 +376,13 @@ diagnostic-copy test passed (3.22 seconds). Focused Ruff is clean. Broad Ruff
 reports 94 findings and committed raw logs contain trailing whitespace, so
 branch-wide lint/whitespace are not claimed clean. GitHub's status-check rollup
 is empty, not green CI. These findings remain distinct from local test results.
+
+The subsequent branch-wide cleanup resolves the lint/whitespace findings above.
+All Python files changed relative to `origin/main` now pass Ruff; package imports
+are explicit re-exports. `git diff --check origin/main` passes after normalizing
+readable log whitespace. Byte-exact originals of those four logs and the
+historical launcher are preserved in gzip files with original SHA256 bindings
+in `artifacts/gsq-review/raw-archive/manifest.json`. The launcher keeps its
+pre-CUDA import ordering with an explicit E402 explanation. Related CPU suites
+report 182 passed, four leased-GPU cases skipped (6.64 seconds). This does not
+resolve the separately observed native QQQ saturation failure or constitute CI.

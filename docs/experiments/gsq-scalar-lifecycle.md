@@ -56,7 +56,9 @@ accelerator support. Those historical Ruff and `git diff --check` results covere
 working changes only, not every committed file in the PR. A later broad audit
 found 94 Ruff findings (including historical artifact scripts and package
 re-exports) and trailing whitespace in committed raw logs; the branch-wide
-checks are not clean.
+checks were not clean at that audit. Subsequent cleanup makes Ruff over all
+changed Python paths and `git diff --check origin/main` pass. Original artifact
+bytes are preserved under `artifacts/gsq-review/raw-archive` with SHA256 bindings.
 An expanded 56-case scalar suite adds malformed metadata, mixed-device input,
 storage underflow and finite-objective/gradient/checkpoint failure cases. It
 achieves 100% CPU line/branch coverage of `gsq_scalar.py` (138 statements, 60

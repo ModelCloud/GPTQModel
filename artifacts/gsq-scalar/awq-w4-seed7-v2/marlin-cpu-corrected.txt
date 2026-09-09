@@ -4,14 +4,18 @@ rootdir: /root/polly-work/qvq-gsq/tests
 configfile: pytest.ini
 plugins: anyio-4.14.2
 
-WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
-INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
-INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.           
+
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+
+INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.
 W0909 06:13:32.045000 2592247 torch/utils/cpp_extension.py:183] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
 
 ----------------------------- live log collection ------------------------------
 WARNING  torch.utils.cpp_extension:cpp_extension.py:183 No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
-INFO  
+
+INFO
 
 ┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
 │ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
@@ -32,13 +36,15 @@ tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_skip_static_global_templ
 tests/test_marlin_jit.py::test_marlin_capability_checks_allow_sm75_but_reject_sm70 PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape0--1-expected0] PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape1--1-expected1] PASSED
-tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2] WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2]
+WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
 PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape3--1-expected3] PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape4-128-expected4] PASSED
 tests/test_marlin_jit.py::test_marlin_tile_padding_helpers_preserve_values_and_shapes PASSED
 tests/test_marlin_jit.py::test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order PASSED
-tests/test_marlin_jit.py::test_marlin_checkpoint_alignment_and_runtime_padding INFO  Kernel: automatic packed Marlin W4A16 prefill routing is enabled; decode and unsupported shapes use ordinary Marlin, with no dense-weight cache.
+tests/test_marlin_jit.py::test_marlin_checkpoint_alignment_and_runtime_padding
+INFO  Kernel: automatic packed Marlin W4A16 prefill routing is enabled; decode and unsupported shapes use ordinary Marlin, with no dense-weight cache.
 PASSED
 tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[32] PASSED
 tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[-1] PASSED
@@ -58,7 +64,8 @@ tests/test_marlin_jit.py::test_apply_awq_marlin_linear_pads_input_and_slices_out
 tests/test_marlin_jit.py::test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype PASSED
 tests/test_marlin_jit.py::test_marlin_quant_linear_forward_promotes_bias_to_input_dtype PASSED
 tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape0-output_shape0-1-True] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
-INFO  Kernel: Ampere cooperative Marlin+LoRA inference is enabled for eligible decode/small-M shapes.
+
+INFO  Kernel: Ampere cooperative Marlin+LoRA inference is enabled for eligible decode/small-M shapes.
 PASSED
 tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape1-output_shape1-2-True] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
 PASSED

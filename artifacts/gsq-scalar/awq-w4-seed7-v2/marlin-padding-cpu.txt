@@ -4,14 +4,18 @@ rootdir: /root/polly-work/qvq-gsq/tests
 configfile: pytest.ini
 plugins: anyio-4.14.2
 
-WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
-INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
-INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.           
+
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+
+INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.
 W0909 06:10:27.610000 2586953 torch/utils/cpp_extension.py:183] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
 
 ----------------------------- live log collection ------------------------------
 WARNING  torch.utils.cpp_extension:cpp_extension.py:183 No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
-INFO  
+
+INFO
 
 ┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
 │ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
@@ -24,7 +28,8 @@ collected 57 items / 44 deselected / 13 selected
 
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape0--1-expected0] PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape1--1-expected1] PASSED
-tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2] WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2]
+WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
 PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape3--1-expected3] PASSED
 tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape4-128-expected4] PASSED
@@ -57,7 +62,7 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073b41220>
             "trainable": False,
             "adapter": None,
         }
-    
+
         ok, err = marlin_qlinear_module.MarlinLinear._validate(
             **common, desc_act=False
         )
@@ -81,7 +86,7 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073b40640>
             "bias": False,
             "dtype": torch.float16,
         }
-    
+
         with pytest.raises(NotImplementedError, match="request GPTQ_MARLIN explicitly"):
 >           marlin_qlinear_module.MarlinLinear(**kwargs, backend=BACKEND.AUTO)
                                                                  ^^^^^^^
@@ -104,7 +109,7 @@ monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073c96690>
             "bias": False,
             "dtype": torch.float16,
         }
-    
+
         with pytest.raises(NotImplementedError, match="request AWQ_MARLIN explicitly"):
             marlin_awq_qlinear_module.AwqMarlinLinear(
 >               **kwargs, backend=BACKEND.AUTO
