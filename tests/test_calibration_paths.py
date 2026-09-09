@@ -230,3 +230,22 @@ def test_prepare_calibration_source_weights_fail_closed_on_unmapped_source():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_prepare_calibration_preserves_explicit_sequence_weights():
+    qmodel = SimpleNamespace(tokenizer=None, support_batch_quantize=True,
+        quantize_config=QuantizeConfig(bits=4, group_size=128),
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=32)))
+    rows = [{'input_ids': list(range(12)), 'fisher_sequence_weight': [1.25]},
+            {'input_ids': list(range(13)), 'fisher_sequence_weight': [1.]}]
+    batches = prepare_calibration_dataset(qmodel, rows, batch_size=2)
+    assert torch.equal(batches[0]['fisher_sequence_weight'], torch.tensor([1.25, 1.], dtype=torch.float64))
+
+
+@pytest.mark.parametrize('weights', [[0.], [-1.], [float('nan')], [float('inf')], [1., 2.]])
+def test_prepare_calibration_rejects_invalid_explicit_sequence_weights(weights):
+    qmodel = SimpleNamespace(tokenizer=None, support_batch_quantize=True,
+        quantize_config=QuantizeConfig(bits=4, group_size=128),
+        model=SimpleNamespace(config=SimpleNamespace(max_position_embeddings=32)))
+    with pytest.raises(ValueError, match='fisher_sequence_weight'):
+        prepare_calibration_dataset(qmodel, [{'input_ids': list(range(12)), 'fisher_sequence_weight': weights}])

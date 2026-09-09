@@ -5937,6 +5937,7 @@ class QQQConfig(GPTQConfig):
 @dataclass
 class FP8Config(PreProcessorConfig):
     gsq: Optional["GSQConfig"] = field(default=None)
+    gsq_calibration: bool = field(default=False)
     bits: int = field(default=8, metadata={"choices": [8]})
     method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
@@ -5976,6 +5977,8 @@ class FP8Config(PreProcessorConfig):
 
         self.gsq = normalize_gsq_config(self.gsq)
         self._validate_gsq()
+        if self.gsq_calibration and (self.gsq is None or not self.gsq.enabled):
+            raise ValueError("FP8Config: gsq_calibration requires enabled GSQ")
         self.format = _normalize_fp8_fmt(self.format)
         block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
         self.weight_scale_method = _normalize_fp8_weight_scale_method(
@@ -6033,6 +6036,8 @@ class FP8Config(PreProcessorConfig):
             layer_dict["weight_block_size"] = list(block_size) if block_size is not None else None
 
     def _validate_gsq(self):
+        if not isinstance(self.gsq_calibration, bool):
+            raise TypeError("FP8Config: gsq_calibration must be boolean")
         if self.gsq is not None and self.gsq.enabled:
             if self.gsq.learn_scales:
                 raise ValueError("FP8Config: GSQ scale learning is not implemented")
@@ -6049,13 +6054,14 @@ class FP8Config(PreProcessorConfig):
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out[FORMAT_FIELD_CODE] = self.format
+        out["gsq_calibration"] = self.gsq_calibration
         out["gsq"] = None if self.gsq is None else asdict(self.gsq)
         out["weight_scale_method"] = self.weight_scale_method
         out["weight_block_size"] = self.weight_block_size
         out["weight_scale_semantics"] = self.weight_scale_semantics
 
     def uses_weight_only_lifecycle(self) -> bool:
-        return True
+        return not self.gsq_calibration
 
 
 @dataclass
@@ -7240,6 +7246,8 @@ def clone_weight_only_config_for_module(
             )
         elif isinstance(qcfg_clone, FP8Config):
             qcfg_clone.gsq = normalize_gsq_config(qcfg.dynamic_get(module_full_name, "gsq", qcfg_clone.gsq))
+            if qcfg_clone.gsq is None or not qcfg_clone.gsq.enabled:
+                qcfg_clone.gsq_calibration = False
             dynamic_format = qcfg.dynamic_get(module_full_name, FORMAT_FIELD_CODE, None)
             if dynamic_format is None:
                 dynamic_format = qcfg.dynamic_get(module_full_name, "fmt", qcfg_clone.format)

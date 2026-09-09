@@ -102,3 +102,39 @@ All per-document logits, metrics and execution logs are retained in
 [the propagation record](../../artifacts/gsq-fp8/propagation-seed7-v1/evaluation.md).
 This diagnostic does not establish native FP8 hardware, graph replay, paged
 production inference, full-model export or task accuracy.
+
+
+## Public calibrated lifecycle
+
+`FP8Config(gsq=GSQConfig(enabled=True), gsq_calibration=True)` selects the
+calibration processor. The option defaults to false; ordinary FP8 and
+weight-only GSQ retain their existing data-independent path. The processor
+collects source-weighted Gram statistics with padding masks, fits after ordinary
+FP8 initialization (including smoothing), replays through the runtime decoder's
+dtype convention, and transfers exact payloads/scales to finalization.
+
+The real `public-qkv-seed7-v4` run used the public API on Llama 3.2 1B with
+exactly block-0 Q/K/V selected. All three modules recorded 3767 tokens and 4279
+weighted tokens (YAQA 1.25, NM 1.0); saved payloads strictly reloaded and were
+evaluated on all 32 held-out documents. Every weight and inverse-scale byte
+matches the earlier low-level calibrated arm. The unchanged runtime source and
+format semantics bind the prior mixed propagation result to these exports;
+this is artifact identity evidence, not another propagation execution.
+
+See [public run provenance](../../artifacts/gsq-fp8/public-qkv-seed7-v4/model_run.md)
+and [bytewise comparison](../../artifacts/gsq-fp8/public-qkv-seed7-v4/payload-comparison.json).
+The investigation preserved failed v1/v2 selection runs and unweighted v3.
+Dataset preparation now preserves explicitly provided sequence weights; the
+v4 runner asserts weighted-token counts rather than trusting requested metadata.
+Full-model calibrated exports, broader layers/seeds/disjoint confirmation,
+native FP8 hardware, graph replay and scale learning remain pending.
+
+
+The calibrated lifecycle CPU regression suite passed 131 tests and seven
+subtests, including complete two-layer decoder quantization, selective QKV
+quantization, checkpoint reload and replay/export agreement in FP32/FP16/BF16.
+The final metadata-only changes also record fitting duration and release
+sequence-weight records at finalize. The executed real-run sources are archived
+separately from later cleanup changes; its payload identity evidence remains
+bound to that executed source. `public-qkv-seed7-v4/cpu-validation.log.gz`
+preserves the final focused suite output.

@@ -238,21 +238,33 @@ class WeightOnlyProcessor(LoopProcessor):
                 )
 
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
+            if active_qcfg.method == METHOD.FP8 and "fp8_reference_weight" in module.state:
+                reference_weight = module.state.pop("fp8_reference_weight")
             if active_qcfg.method == METHOD.FP8:
                 from ..quantization.gsq_fp8 import refine_fp8_weight
                 from ..quantization.gsq_scalar import gsq_enabled_for
 
-                if gsq_enabled_for(active_qcfg.gsq, module.full_name):
-                    result = refine_fp8_weight(
-                        qmodule.weight, qmodule.weight_scale_inv,
-                        target=reference_weight.to(qmodule.weight.device), config=active_qcfg.gsq,
-                        method=qmodule.weight_scale_method, block_size=qmodule.weight_block_size,
-                    )
+                result = module.state.get("gsq_fp8_result")
+                if result is not None or gsq_enabled_for(active_qcfg.gsq, module.full_name):
+                    if result is None:
+                        result = refine_fp8_weight(
+                            qmodule.weight, qmodule.weight_scale_inv,
+                            target=reference_weight.to(qmodule.weight.device), config=active_qcfg.gsq,
+                            method=qmodule.weight_scale_method, block_size=qmodule.weight_block_size,
+                        )
+                    if (result["weight"].shape != qmodule.weight.shape
+                            or result["weight"].dtype != qmodule.weight.dtype
+                            or result["scale_inv"].shape != qmodule.weight_scale_inv.shape):
+                        raise ValueError("FP8 GSQ export does not match the destination storage geometry")
                     with torch.inference_mode():
                         qmodule.weight.copy_(result["weight"])
-                    diagnostics = {key: result[key] for key in ("before", "after", "history")}
-                    diagnostics["objective"] = "weight_reconstruction"
+                        qmodule.weight_scale_inv.copy_(result["scale_inv"])
+                    diagnostics = result.get("diagnostics")
+                    if diagnostics is None:
+                        diagnostics = {key: result[key] for key in ("before", "after", "history")}
+                        diagnostics["objective"] = "weight_reconstruction"
                     module.state["gsq_diagnostics"] = diagnostics
+                    module.state.pop("gsq_fp8_result", None)
                     with self.lock:
                         for entry in reversed(self.log):
                             if (entry.get(PROCESS_LOG_LAYER) == module.layer_index

@@ -552,6 +552,13 @@ def prepare_calibration_dataset(
                 float(source_weight_map[source_name]),
                 dtype=torch.float64,
             )
+        elif isinstance(raw_example, dict) and "fisher_sequence_weight" in raw_example:
+            weights = torch.as_tensor(raw_example["fisher_sequence_weight"], dtype=torch.float64).reshape(-1)
+            if weights.numel() != packed["input_ids"].shape[0]:
+                raise ValueError("fisher_sequence_weight must provide one scalar per calibration row")
+            if not torch.isfinite(weights).all() or not weights.gt(0).all():
+                raise ValueError("fisher_sequence_weight must be finite and positive")
+            packed["fisher_sequence_weight"] = weights.detach().clone()
         processed_examples.append(packed)
 
     for idx, example in enumerate(raw_examples):

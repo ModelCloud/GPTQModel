@@ -1,0 +1,37 @@
+{
+  "model.layers.0.self_attn.q_proj": {
+    "earlier_sha256": "18e6c94c42d92d0a8dbfea87c46767437fa07722927ea6405252b2e557bd7622",
+    "public_sha256": "0bc81f327c608d2eed64465dcaea01882275b8d1282f536efed2a0cce8dc1b0c",
+    "same_keys": true,
+    "equal_tensors": {
+      "weight": true,
+      "weight_scale_inv": true
+    }
+  },
+  "model.layers.0.self_attn.k_proj": {
+    "earlier_sha256": "8497c6506baa22e6df9971aa46b78844ec4d6dbbd64e1b3b97f159b82fdde6ff",
+    "public_sha256": "1bb9338ad3a7f80351ea2a348f324d0da83d09d3b3710ca53001297d339a8e90",
+    "same_keys": true,
+    "equal_tensors": {
+      "weight": true,
+      "weight_scale_inv": true
+    }
+  },
+  "model.layers.0.self_attn.v_proj": {
+    "earlier_sha256": "66ad87ac0c8eed5b82cc08713f431f6358997985ab1c49b3bdad58a466e0b459",
+    "public_sha256": "acc78abf97e1cb306822561e402368af5f7c49a6a3a66f744822b205b9ab839e",
+    "same_keys": true,
+    "equal_tensors": {
+      "weight": true,
+      "weight_scale_inv": true
+    }
+  },
+  "runtime": {
+    "path": "/root/polly-work/qvq-gsq/gptqmodel/nn_modules/qlinear/fp8.py",
+    "sha256": "0bb8d6e112ffb7718cea393eaad333a9a6d65c3b3b1644de64e3a9eab426e6ad",
+    "unchanged": true,
+    "format": "float8_e4m3fn",
+    "scale_method": "row",
+    "scale_semantics": "inverse"
+  }
+}

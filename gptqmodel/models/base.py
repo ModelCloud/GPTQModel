@@ -2050,6 +2050,14 @@ class BaseQModel(nn.Module):
             quantize_processor = preprocessors + [
                 EXL3Processor(**exl3_args),
             ]
+        elif self.quantize_config.method == METHOD.FP8:
+            from ..looper.fp8_gsq_processor import FP8GSQProcessor
+
+            if needs_lora:
+                raise NotImplementedError("Calibrated FP8 GSQ does not support adapter/EoRA generation.")
+            fp8_args = dict(args)
+            fp8_args.pop("calculate_w_wq_diff", None)
+            quantize_processor = preprocessors + [FP8GSQProcessor(**fp8_args)]
         elif self.quantize_config.method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 

@@ -158,7 +158,8 @@ def test_fp8_gsq_config_roundtrip_and_dynamic_override():
 
 @pytest.mark.parametrize('enabled,matched', [(False, True), (True, True), (True, False)])
 @pytest.mark.parametrize('force_change', [False, True])
-def test_fp8_processor_pack_refine_reload(enabled, matched, force_change, monkeypatch, tmp_path):
+@pytest.mark.parametrize('prepared', [False, True])
+def test_fp8_processor_pack_refine_reload(enabled, matched, force_change, prepared, monkeypatch, tmp_path):
     import threading
     from types import SimpleNamespace
 
@@ -197,6 +198,21 @@ def test_fp8_processor_pack_refine_reload(enabled, matched, force_change, monkey
     processor.lock = threading.Lock()
     processor.log = []
     model = SimpleNamespace(qlinear_kernel=TorchFP8Linear, model=torch.nn.Module(), lm_head='lm_head')
+    if prepared:
+        # A calibrated task owns the final bytes and scales. The finalizer must
+        # transport them rather than invoking a weight-only fit over its result.
+        import gptqmodel.quantization.gsq_fp8 as fitter
+
+        payload = torch.full((4, 8), 2.).to(packed.weight.dtype)
+        scale_inv = torch.full_like(packed.weight_scale_inv, 2.)
+        named.state['gsq_fp8_result'] = {
+            'weight': payload, 'scale_inv': scale_inv,
+            'diagnostics': {'objective': 'activation_reconstruction', 'tokens': 20}}
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError('must not refit prepared FP8 payload')
+
+        monkeypatch.setattr(fitter, 'refine_fp8_weight', forbidden)
     result = processor.submodule_finalize(named, model, qcfg=cfg)
     restored = TorchFP8Linear(**kwargs)
     checkpoint = tmp_path / 'fp8.pt'
@@ -206,7 +222,12 @@ def test_fp8_processor_pack_refine_reload(enabled, matched, force_change, monkey
     decoded = restored.dequantize_weight(dtype=torch.float32).T
     features = torch.randn(7, 8, generator=torch.Generator().manual_seed(9))
     torch.testing.assert_close(restored(features), features @ decoded.T, rtol=0, atol=0)
-    if enabled and matched:
+    if prepared:
+        assert torch.equal(restored.weight.view(torch.uint8), payload.view(torch.uint8))
+        assert torch.equal(restored.weight_scale_inv, scale_inv)
+        assert named.state['gsq_diagnostics']['objective'] == 'activation_reconstruction'
+        assert 'gsq_fp8_result' not in named.state
+    elif enabled and matched:
         stats = named.state['gsq_diagnostics']
         expected = float((decoded-teacher).square().sum()/teacher.square().sum())
         assert stats['after'] == pytest.approx(expected, rel=1e-5)
@@ -218,3 +239,43 @@ def test_fp8_processor_pack_refine_reload(enabled, matched, force_change, monkey
     else:
         assert torch.equal(restored.weight.view(torch.uint8), baseline_bytes[0])
         assert 'gsq_diagnostics' not in named.state
+
+
+@pytest.mark.parametrize('rank_deficient', [False, True])
+def test_fp8_hessian_matches_activation_objective(rank_deficient):
+    from gptqmodel.quantization.gsq_fp8 import refine_fp8_weight
+
+    weight = torch.ones(4, 8).to(torch.float8_e4m3fn)
+    target = torch.full((4, 8), 1.125)
+    x = torch.randn(32, 8, generator=torch.Generator().manual_seed(7))
+    if rank_deficient:
+        x[:, 4:] = 0
+    config = {'enabled': True, 'steps': 80, 'learning_rate': .2, 'candidates': 3}
+    direct = refine_fp8_weight(weight, torch.ones(4), target=target, inputs=x, config=config)
+    gram = refine_fp8_weight(weight, torch.ones(4), target=target, hessian=x.T @ x, config=config)
+    assert gram['before'] == pytest.approx(direct['before'], rel=1e-5)
+    assert gram['after'] == pytest.approx(direct['after'], rel=1e-5, abs=1e-8)
+    decoded = gram['weight'].float()
+    expected = float(((decoded-target) @ x.T).square().sum()/(target @ x.T).square().sum())
+    assert gram['after'] == pytest.approx(expected, rel=1e-5, abs=1e-8)
+
+
+@pytest.mark.parametrize('case', ['both', 'shape', 'asymmetric', 'negative', 'nonfinite'])
+def test_fp8_rejects_invalid_hessian(case):
+    from gptqmodel.quantization.gsq_fp8 import refine_fp8_weight
+
+    h = torch.eye(8)
+    inputs = None
+    if case == 'both':
+        inputs = torch.ones(2, 8)
+    elif case == 'shape':
+        h = torch.ones(8)
+    elif case == 'asymmetric':
+        h[0, 1] = 1
+    elif case == 'negative':
+        h[0, 0] = -1
+    else:
+        h[0, 0] = float('nan')
+    with pytest.raises(ValueError):
+        refine_fp8_weight(torch.ones(4, 8).to(torch.float8_e4m3fn), torch.ones(4),
+                          target=torch.ones(4, 8), hessian=h, inputs=inputs, config={'enabled': True})

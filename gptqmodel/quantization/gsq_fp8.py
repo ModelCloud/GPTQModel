@@ -86,11 +86,12 @@ def fp8_decoded_candidates(weight, scale_inv, *, method='row', block_size=None, 
     return payloads, decoded
 
 
-def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, method='row', block_size=None):
+def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, hessian=None,
+                      method='row', block_size=None):
     """Fit finite FP8 payload choices with frozen inverse scales and a hard guard.
 
-    Optional input activations define output reconstruction; without them the
-    objective is weight reconstruction. This is GSQ-inspired categorical Adam,
+    Optional input activations or their PSD Gram matrix define output
+    reconstruction; without either the objective is weight reconstruction. This is GSQ-inspired categorical Adam,
     not the paper's full staged optimizer. Public lifecycle binding is separate.
     """
     from .config import normalize_gsq_config
@@ -109,6 +110,14 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, me
                                or inputs.device != weight.device or not inputs.is_floating_point()
                                or not torch.isfinite(inputs).all()):
         raise ValueError('FP8 GSQ inputs must be finite nonempty [tokens,in] on the weight device')
+    if hessian is not None:
+        if inputs is not None:
+            raise ValueError('FP8 GSQ accepts inputs or Hessian, not both')
+        if (hessian.shape != (weight.shape[1], weight.shape[1]) or not hessian.is_floating_point()
+                or hessian.device != weight.device or not torch.isfinite(hessian).all()):
+            raise ValueError('FP8 GSQ Hessian must be finite floating [in,in] on the weight device')
+        if not torch.allclose(hessian, hessian.T, rtol=1e-5, atol=1e-7):
+            raise ValueError('FP8 GSQ Hessian must be symmetric')
     count = min(config.candidates, 256)
     if count * weight.numel() * 4 > config.max_candidate_bytes:
         raise ValueError('FP8 GSQ decoded candidates exceed max_candidate_bytes')
@@ -117,6 +126,13 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, me
                                                  method=method, block_size=block_size, count=count)
         teacher = target.detach().float().clone()
         features = None if inputs is None else inputs.detach().float().T.contiguous().clone()
+        if hessian is not None:
+            from .gsq_scalar import _metric_factor
+
+            metric = hessian.detach().float().clone()
+            if not torch.isfinite(metric).all():
+                raise ValueError('FP8 GSQ Hessian overflows FP32')
+            features = _metric_factor(metric)
 
         def project(x):
             return x if features is None else x @ features

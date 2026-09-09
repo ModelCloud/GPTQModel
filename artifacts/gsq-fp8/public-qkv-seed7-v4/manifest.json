@@ -1,0 +1,126 @@
+{
+  "provenance.json": {
+    "bytes": 4830,
+    "sha256": "e9e39b6a590122a03dc87337d724ce5470eda31b9f35c4f0aa472720b542f4c7"
+  },
+  "documents.json": {
+    "bytes": 148589,
+    "sha256": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1"
+  },
+  "execution.log": {
+    "bytes": 27843,
+    "sha256": "cae06456345f95b47f085f4ca209a1ce3a7afec6c2b9e61172dd3567bbcad3d7"
+  },
+  "quantize_config.json": {
+    "bytes": 1361,
+    "sha256": "175d5c287f2e58feca43187d2f262be771607a7046067a0a35000f29a170f772"
+  },
+  "report.json": {
+    "bytes": 16926,
+    "sha256": "32303f363540fd5aa845928354a3c6ed33b55b02019bc6fc1fb7ea54f548f666"
+  },
+  "quantization-log.json": {
+    "bytes": 11972,
+    "sha256": "411295a9bc3b52efa108bae8b4b8f797dc2eb71f668e2cfe8e0f98b36bf059c2"
+  },
+  "model.layers.0.self_attn.q_proj.pt": {
+    "bytes": 4204773,
+    "sha256": "0bc81f327c608d2eed64465dcaea01882275b8d1282f536efed2a0cce8dc1b0c"
+  },
+  "model.layers.0.self_attn.k_proj.pt": {
+    "bytes": 1052901,
+    "sha256": "1bb9338ad3a7f80351ea2a348f324d0da83d09d3b3710ca53001297d339a8e90"
+  },
+  "model.layers.0.self_attn.v_proj.pt": {
+    "bytes": 1052901,
+    "sha256": "acc78abf97e1cb306822561e402368af5f7c49a6a3a66f744822b205b9ab839e"
+  },
+  "execution.log.gz": {
+    "bytes": 3067,
+    "sha256": "c3320f2c3eda7c48d6e1ad5be5b788f2123c16c11916e0e287aa5ef39755acbe"
+  },
+  "model_run.md": {
+    "bytes": 3705,
+    "sha256": "c34774b75946a71b1e400f9cfab0fa7aebc9bc2f33f70d2a56adefd3037c52bb"
+  },
+  "executed-source/scripts/prepare_gsq_fp8_layers.py": {
+    "bytes": 4608,
+    "sha256": "1ef950081d5c866406e1450e45df5a1dbe9e6bc6f59708036f7b1a6f67c5de9b"
+  },
+  "executed-source/scripts/validate_gsq_fp8_layers.py": {
+    "bytes": 5955,
+    "sha256": "8ab0cfce669de14a434aae0269978f05994343bcc7806c61f84a287648f2d1a4"
+  },
+  "executed-source/scripts/validate_gsq_fp8_public.py": {
+    "bytes": 6329,
+    "sha256": "d26fbba69d24b0379d53ec06206ecf0d8a27b04bd473f3fe5f9be15226de3bb7"
+  },
+  "executed-source/gptqmodel/quantization/gsq_fp8.py": {
+    "bytes": 10686,
+    "sha256": "76cd2916c06d785385aeee0f134414ad55474ce56ec605ba30c64c20c4bd4e1c"
+  },
+  "executed-source/gptqmodel/quantization/gsq_scalar.py": {
+    "bytes": 14507,
+    "sha256": "c1c0f7472e00bf73a51a5808b136e3a25fb2be7224e872476bae194c5bb03989"
+  },
+  "executed-source/gptqmodel/quantization/config.py": {
+    "bytes": 331322,
+    "sha256": "cd1b85755a12cc53a6e43e6a22d0636ca888b3f2f784de4ad01920372e422977"
+  },
+  "executed-source/gptqmodel/quantization/gsq_fp8_task.py": {
+    "bytes": 2983,
+    "sha256": "5eaf085c0c26c7b0d37754f1b5089facda8d99f1cb9e11616c99a5e8d68de9eb"
+  },
+  "executed-source/gptqmodel/quantization/gsq_calibration.py": {
+    "bytes": 3701,
+    "sha256": "5d6a2fcb36a7d72403023226a5d6f4c99a100ff76e7790822c3b27f641994558"
+  },
+  "executed-source/gptqmodel/looper/weight_only_processor.py": {
+    "bytes": 14259,
+    "sha256": "7161b9a2be6bec330d94bab3675df9352ae26955c167f84f7e707b382a562dd4"
+  },
+  "executed-source/gptqmodel/looper/fp8_gsq_processor.py": {
+    "bytes": 6683,
+    "sha256": "203a45c73604eaba0a181cda6f9c6ed2e030ab277e7ff5bcb5c462a7bd7d850f"
+  },
+  "executed-source/gptqmodel/looper/module_looper.py": {
+    "bytes": 82631,
+    "sha256": "b324d69456ec2eb4042489f5bcd093d4a4105c343a707285881a09b20c499d55"
+  },
+  "executed-source/gptqmodel/looper/stage_subset.py": {
+    "bytes": 66552,
+    "sha256": "b11f27f388dd0f0016fab90cc104df070d191f01f5babdc110607a44675eea56"
+  },
+  "executed-source/gptqmodel/looper/stage_layer.py": {
+    "bytes": 63426,
+    "sha256": "370dbeb6214ecd8e484c7ce7610a0df4e303f348eddbfd175394beb612531df7"
+  },
+  "executed-source/gptqmodel/models/base.py": {
+    "bytes": 213289,
+    "sha256": "234de4954a13f2aa2db5bb67d0966dd6e871a140ce6124cbc063d0f1e358fd3e"
+  },
+  "executed-source/gptqmodel/utils/calibration.py": {
+    "bytes": 39018,
+    "sha256": "67b00ce270b50dd40c09dc58e5ce3c738836fd6bd24a4efc443b161e2aef638d"
+  },
+  "executed-source/gptqmodel/utils/data.py": {
+    "bytes": 14574,
+    "sha256": "465824e4bf9451f372124d0a00e2f8beec769d1669daef06c0687a6f40597c95"
+  },
+  "executed-source/gptqmodel/nn_modules/qlinear/fp8.py": {
+    "bytes": 18448,
+    "sha256": "0bb8d6e112ffb7718cea393eaad333a9a6d65c3b3b1644de64e3a9eab426e6ad"
+  },
+  "payload-comparison.json": {
+    "bytes": 1279,
+    "sha256": "abc67dc20f39ff474d58095a14830f514aa58e09fb0bf43c3688d3b6f56c2f0e"
+  },
+  "executed-source.tar.gz": {
+    "bytes": 191265,
+    "sha256": "e47f4976e6698614d41c4efa37f4cfe4b3f50e60f991d7bbb4cafafe61f27282"
+  },
+  "cpu-validation.log.gz": {
+    "bytes": 11715,
+    "sha256": "9dcb3cb12fc0ead663e42f8970b5a555b6dfeca24c08074db171072301893291"
+  }
+}
