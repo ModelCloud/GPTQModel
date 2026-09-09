@@ -298,3 +298,16 @@ Required follow-up validation remains open:
 
 This is a GSQ-inspired experiment, not a reproduction of the paper's joint-scale,
 Lion, scheduled-logit and staged reconstruction optimization method.
+
+Matched-pool preparation: `baseline_bitflip_candidates` now supplies both the
+production prepared-Fisher fitter and the older activation-MSE experiment.
+Tests confirm bitwise equality with the previous RNG loop, baseline/global-RNG
+preservation, and exactly one changed payload bit per tile at W2.5/W4/W8 word
+counts. The QVQ CPU fitter suite reports 33 passed (3.80 seconds).
+
+The experiment's existing greedy comparison applies only to activation MSE.
+Its parallel updates of disjoint output blocks cannot be reused unchanged for
+a dense output Fisher factor: those blocks are coupled by that metric. A
+prepared-Fisher deterministic comparison must evaluate updates with the same
+right factor as GSQ, as well as sharing this exact candidate pool. That extension
+and the real-model comparison remain pending.

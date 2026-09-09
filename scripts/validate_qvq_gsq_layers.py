@@ -396,12 +396,8 @@ def execute(args):
         report["comparison_baseline"] = baseline_label
         evaluate(baseline_label)
     def fit_candidates(base, args, kw, target, x, name):
-        candidates = base.unsqueeze(0).repeat(args.candidates, 1, 1)
-        gen = torch.Generator(device="cuda").manual_seed(7)
-        tiles = torch.arange(len(base), device="cuda")
-        for c in range(1, args.candidates):
-            bit = torch.randint(base.shape[1] * 32, (len(base),), device="cuda", generator=gen)
-            candidates[c, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+        from gptqmodel.quantization.qvq_gsq import baseline_bitflip_candidates
+        candidates = baseline_bitflip_candidates(base, count=args.candidates, seed=7)
         report["state"] = "refining " + name
         write_json(args.output / "report.json", report)
         def progress(step, value):

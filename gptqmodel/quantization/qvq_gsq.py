@@ -203,6 +203,26 @@ def refine_trellis_candidates(
     return GSQResult(words, best_choices, before, best, history)
 
 
+def baseline_bitflip_candidates(baseline, *, count, seed):
+    """Frozen, reproducible pool shared by stochastic and deterministic fits.
+
+    Each non-baseline entry flips exactly one payload bit per tile; duplicates
+    are retained to preserve the historical experiment's distribution.
+    """
+    if baseline.ndim != 2 or baseline.dtype != torch.int32 or min(baseline.shape) <= 0:
+        raise ValueError("GSQ baseline must be nonempty int32 [tiles,words]")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 2:
+        raise ValueError("GSQ candidate count must be an integer >= 2")
+    candidates = baseline.detach().clone().unsqueeze(0).repeat(count, 1, 1)
+    generator = torch.Generator(device=baseline.device).manual_seed(seed)
+    tiles = torch.arange(len(baseline), device=baseline.device)
+    for candidate in range(1, count):
+        bit = torch.randint(baseline.shape[1] * 32, (len(baseline),),
+                            device=baseline.device, generator=generator)
+        candidates[candidate, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+    return candidates
+
+
 def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, config,
                           bits, bank_ids=None, bank_alt_id=None, codebook_version=PGC16_CODEBOOK_VERSION,
                           layout="p32_window"):
@@ -229,13 +249,7 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
         target = target.detach().float().clone()
         left = torch.linalg.cholesky(input_hessian.detach().float().clone()).T.contiguous()
         right = torch.linalg.cholesky(output_hessian.detach().float().clone())
-        candidates = baseline.detach().clone().unsqueeze(0).repeat(config.candidates, 1, 1)
-        generator = torch.Generator(device=baseline.device).manual_seed(config.seed)
-        tiles = torch.arange(len(baseline), device=baseline.device)
-        for candidate in range(1, config.candidates):
-            bit = torch.randint(baseline.shape[1] * 32, (len(baseline),),
-                                device=baseline.device, generator=generator)
-            candidates[candidate, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+        candidates = baseline_bitflip_candidates(baseline, count=config.candidates, seed=config.seed)
         return refine_trellis_candidates(
             candidates, bits=bits, bank_ids=None if bank_ids is None else bank_ids.detach().clone(),
             bank_alt_id=None if bank_alt_id is None else bank_alt_id.detach().clone(), layout=layout,

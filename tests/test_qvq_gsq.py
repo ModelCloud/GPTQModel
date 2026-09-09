@@ -196,3 +196,26 @@ def test_adapter_rejects_mismatched_bank_metadata():
         TrellisCandidateAdapter("p32_window", 2.5).decode(torch.zeros(1, 20, dtype=torch.int32))
     with pytest.raises(ValueError, match="cannot accept bank"):
         TrellisCandidateAdapter("qvq_planar", 4).decode(torch.zeros(1, 32, dtype=torch.int32), torch.ones(1))
+
+
+@pytest.mark.parametrize("words", [20, 32, 64])
+def test_shared_pool_preserves_historical_draws(words):
+    from gptqmodel.quantization.qvq_gsq import baseline_bitflip_candidates
+
+    baseline = torch.arange(3 * words, dtype=torch.int32).reshape(3, words)
+    original = baseline.clone()
+    state = torch.random.get_rng_state().clone()
+    actual = baseline_bitflip_candidates(baseline, count=33, seed=7)
+    expected = baseline.unsqueeze(0).repeat(33, 1, 1)
+    rng = torch.Generator().manual_seed(7)
+    tiles = torch.arange(3)
+    for index in range(1, 33):
+        bit = torch.randint(words * 32, (3,), generator=rng)
+        expected[index, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+    assert torch.equal(actual, expected)
+    assert torch.equal(baseline, original)
+    assert torch.equal(state, torch.random.get_rng_state())
+    xor = (actual[1:].long() ^ baseline.long()) & 0xffffffff
+    for candidate in xor:
+        for tile in candidate:
+            assert sum(int(word).bit_count() for word in tile) == 1
