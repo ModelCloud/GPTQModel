@@ -18,6 +18,7 @@ class GSQTrainingConfig:
 
     enabled: bool = False
     initializer: str = 'gptq'
+    optimizer: str = 'lion'
     seed: int = 7
     epochs: int = 10
     batch_size: int = 1
@@ -37,8 +38,10 @@ class GSQTrainingConfig:
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
             raise TypeError('GSQTrainingConfig: enabled must be boolean')
-        if self.initializer not in ('gptq', 'gptq_signed'):
-            raise ValueError('GSQTrainingConfig: initializer must be gptq or gptq_signed')
+        if self.optimizer not in ('lion', 'adamw'):
+            raise ValueError('GSQTrainingConfig: optimizer must be lion or adamw')
+        if self.initializer not in ('gptq', 'gptq_signed', 'awq'):
+            raise ValueError('GSQTrainingConfig: initializer must be gptq, gptq_signed or awq')
         for name, minimum in (('seed', 0), ('epochs', 1), ('qk_steps', 1), ('warmup_steps', 0),
                               ('batch_size', 1), ('microbatch_size', 1)):
             value = getattr(self, name)

@@ -135,3 +135,123 @@ def test_staged_prepared_documents_preserve_order_and_remove_only_padding():
         staged_documents_from_prepared(batches)
     with pytest.raises(ValueError, match='metadata'):
         staged_documents_from_prepared([{'input_ids': torch.tensor([[1]]), 'weights': [2.]}])
+
+
+@pytest.mark.parametrize('enabled', [False, True])
+def test_prepared_staged_lifecycle_installs_packed_model(tmp_path, enabled):
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig
+    from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_prepared
+
+    model, _ = fixture()
+    wrapper = LlamaQModel(model=model, quantized=False,
+                          quantize_config=GPTQConfig(bits=4, group_size=32),
+                          model_local_path=str(tmp_path))
+    prepared = [{'input_ids': torch.tensor([[0, 1, 2, 3], [4, 5, 6, 0]]),
+                 'attention_mask': torch.tensor([[0, 1, 1, 1], [1, 1, 1, 0]])}]
+    run = quantize_llama_gsq_prepared(wrapper, prepared,
+                                     gsq=GSQTrainingConfig(enabled=enabled, epochs=1, qk_steps=2))
+    assert run['state'] == 'complete' and wrapper.gsq_training_run is run
+    assert wrapper.quantized and wrapper.model is model
+    assert wrapper.quantize_config.meta['gsq_training']['enabled'] is enabled
+    assert all(isinstance(layer.mlp.down_proj, TorchLinear) for layer in model.model.layers)
+    assert torch.isfinite(model(torch.tensor([[1, 2, 3]]), use_cache=False).logits).all()
+
+
+@pytest.mark.parametrize('optimizer', ['lion', 'adamw'])
+def test_public_staged_quantize_config_and_dispatch(tmp_path, optimizer):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from transformers import PreTrainedTokenizerFast
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig, FORMAT
+    from gptqmodel.utils.backend import BACKEND
+
+    config = GPTQConfig(bits=4, group_size=32, format=FORMAT.GPTQ_V2, act_group_aware=False,
+                        device='cpu', offload_to_disk=False,
+                        gsq_training=dict(enabled=True, epochs=1, qk_steps=2, optimizer=optimizer))
+    config.meta['calibration_provenance'] = {'seed': 7, 'fixture': 'public-lifecycle'}
+    restored = GPTQConfig.from_quant_config(config.to_dict())
+    assert restored.gsq_training.enabled and restored.gsq_training.epochs == 1
+    model, documents = fixture()
+    model.save_pretrained(tmp_path/'dense')
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel(
+        {str(i): i for i in range(128)}, unk_token='0')), unk_token='0', pad_token='0')
+    wrapper = LlamaQModel(model=model, quantized=False, quantize_config=restored,
+                          tokenizer=tokenizer, model_local_path=str(tmp_path/'dense'))
+    result = wrapper.quantize(documents, backend=BACKEND.TORCH, calibration_data_min_length=1)
+    assert len(result['gsq_training']) == 2
+    assert wrapper.quantized and wrapper.model is model
+    assert wrapper.quantize_config.gsq_training.enabled
+    assert torch.isfinite(model(torch.tensor([[1, 2, 3]]), use_cache=False).logits).all()
+
+    from gptqmodel import GPTQModel
+
+    tokens = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        before = wrapper.model(tokens, use_cache=False).logits
+    wrapper.save(str(tmp_path/'quantized'))
+    loaded = GPTQModel.load(str(tmp_path/'quantized'), backend=BACKEND.TORCH,
+                            device='cpu', dtype=torch.float16, attn_implementation='eager')
+    assert loaded.quantize_config.gsq_training.to_dict() == restored.gsq_training.to_dict()
+    assert loaded.quantize_config.meta['calibration_provenance'] == config.meta['calibration_provenance']
+    assert loaded.quantize_config.meta['gsq_requested_quantization']['gsq_training']['enabled']
+    with torch.no_grad():
+        after = loaded.model(tokens, use_cache=False).logits
+    torch.testing.assert_close(after, before, rtol=0, atol=0)
+
+
+def test_public_disabled_staged_config_uses_ordinary_dispatch(tmp_path, monkeypatch):
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.looper import gsq_training_model
+
+    model, documents = fixture()
+    config = GPTQConfig(bits=4, group_size=32, device='cpu', offload_to_disk=False,
+                        gsq_training=dict(enabled=False))
+    wrapper = LlamaQModel(model=model, quantized=False, quantize_config=config,
+                          model_local_path=str(tmp_path))
+    sentinel = {'ordinary': []}
+    monkeypatch.setattr(wrapper, '_quantize_with_calibration', lambda **kwargs: sentinel)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail('Disabled staged GSQ entered staged dispatch')
+    monkeypatch.setattr(gsq_training_model, 'quantize_llama_gsq_public', unexpected)
+    assert wrapper.quantize(documents, backend=BACKEND.TORCH) is sentinel
+    assert not hasattr(model, 'gsq_training_runs')
+
+
+def test_public_staged_rejection_precedes_weight_mutation(tmp_path):
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig, FORMAT
+    from gptqmodel.utils.backend import BACKEND
+
+    model, documents = fixture()
+    config = GPTQConfig(bits=4, group_size=32, format=FORMAT.GPTQ_V2, act_group_aware=False,
+                        device='cpu', gsq_training=dict(enabled=True, epochs=1, qk_steps=2))
+    wrapper = LlamaQModel(model=model, quantized=False, quantize_config=config,
+                          model_local_path=str(tmp_path))
+    before = {name: value.clone() for name, value in model.state_dict().items()}
+    with pytest.raises(ValueError, match='additional public'):
+        wrapper.quantize(documents, backend=BACKEND.TORCH, validation_calibration=documents)
+    assert not wrapper.quantized and not hasattr(model, 'gsq_training_runs')
+    assert all(torch.equal(value, before[name]) for name, value in model.state_dict().items())
+
+
+@pytest.mark.parametrize('option,value', [('rotation', 'hadamard'), ('offload_to_disk', True),
+                                         ('pack_dtype', torch.int16)])
+def test_public_staged_rejects_unimplemented_runtime_options(tmp_path, option, value):
+    from gptqmodel.models.definitions.llama import LlamaQModel
+    from gptqmodel.quantization import GPTQConfig, FORMAT
+    from gptqmodel.utils.backend import BACKEND
+
+    model, documents = fixture()
+    kwargs = dict(bits=4, group_size=32, format=FORMAT.GPTQ_V2, act_group_aware=False,
+                  device='cpu', offload_to_disk=False, gsq_training=dict(enabled=True))
+    kwargs[option] = value
+    wrapper = LlamaQModel(model=model, quantized=False, quantize_config=GPTQConfig(**kwargs),
+                          model_local_path=str(tmp_path))
+    with pytest.raises(ValueError, match='Public staged GSQ'):
+        wrapper.quantize(documents, backend=BACKEND.TORCH)
+    assert not hasattr(model, 'gsq_training_runs')

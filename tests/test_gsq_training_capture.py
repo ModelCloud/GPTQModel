@@ -110,3 +110,40 @@ def test_model_capture_preserves_positions_uses_current_prefix_and_cleans_hooks(
     with pytest.raises(ValueError, match='unpadded'):
         capture_llama_gsq_inputs(model, [{'input_ids': [1, 2], 'attention_mask': [1, 0]}], layer_index=1)
     assert not model.model.layers[1]._forward_pre_hooks
+
+
+def test_affine_capture_preserves_scaled_teacher_and_inference_cache():
+    from gptqmodel.looper.gsq_training_capture import fit_llama_awq_gsq_capture
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+
+    torch.manual_seed(7)
+    layer, cache = fixture()
+    prepared, batches = prepare_llama_gsq_capture(layer, cache)
+    hidden, kwargs = batches[0]
+    with torch.no_grad():
+        before = prepared(hidden, **kwargs)
+        channel_scale = torch.linspace(.5, 2., 32)
+        layer.input_layernorm.weight.div_(channel_scale)
+        for name in ('q_proj', 'k_proj', 'v_proj'):
+            getattr(layer.self_attn, name).weight.mul_(channel_scale)
+        torch.testing.assert_close(layer(hidden, **kwargs), before, atol=1e-6, rtol=1e-5)
+    pristine = {key: value.clone() for key, value in layer.state_dict().items()}
+    initializers = {}
+    for name, module in layer.named_modules():
+        if isinstance(module, torch.nn.Linear):
+            grouped = module.weight.detach().reshape(module.out_features, -1, 32)
+            scales = (grouped.amax(-1)-grouped.amin(-1)).clamp_min(1e-6)/15
+            zeros = (-grouped.amin(-1)/scales).round().clamp(0, 15)
+            codes = (grouped/scales.unsqueeze(-1)+zeros.unsqueeze(-1)).round().clamp(0, 15)
+            initializers[name] = (codes.reshape_as(module.weight), scales, zeros)
+    with torch.inference_mode():
+        packed, record = fit_llama_awq_gsq_capture(layer, cache, initializers,
+                                                  group_size=32, epochs=1, qk_steps=2)
+    assert record['initializer'] == 'provided_awq'
+    assert sum(isinstance(m, AwqTorchLinear) for m in packed.modules()) == 7
+    assert cache.layer_inputs[0][0].is_inference()
+    assert all(torch.equal(value, pristine[name]) for name, value in layer.state_dict().items())
+    for module in packed.modules():
+        if isinstance(module, AwqTorchLinear):
+            module.scales = module.scales.float()
+    assert torch.isfinite(packed(hidden, **kwargs)).all()

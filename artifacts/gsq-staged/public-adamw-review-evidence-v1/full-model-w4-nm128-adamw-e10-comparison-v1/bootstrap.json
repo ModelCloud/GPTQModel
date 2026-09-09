@@ -1,0 +1,50 @@
+{
+  "method": "paired document bootstrap; token-weighted means",
+  "seed": 7,
+  "draws": 10000,
+  "baseline": "baseline",
+  "arms": {
+    "staged": {
+      "kl_teacher_candidate": {
+        "candidate_minus_baseline": 0.09916758376713528,
+        "ci95": [
+          0.07787895632623397,
+          0.12556754953978463
+        ],
+        "classification": "clear negative"
+      },
+      "mse": {
+        "candidate_minus_baseline": 0.2949537247002771,
+        "ci95": [
+          0.22600879406542718,
+          0.3691940522562297
+        ],
+        "classification": "clear negative"
+      },
+      "top1_agreement": {
+        "candidate_minus_baseline": -0.033139626197581276,
+        "ci95": [
+          -0.04546957652946215,
+          -0.021092679419124013
+        ],
+        "classification": "clear negative"
+      },
+      "top5_agreement": {
+        "candidate_minus_baseline": -0.03750588974399247,
+        "ci95": [
+          -0.0452265312155031,
+          -0.0306974372521281
+        ],
+        "classification": "clear negative"
+      },
+      "top10_agreement": {
+        "candidate_minus_baseline": -0.0382126590230878,
+        "ci95": [
+          -0.04561073916177934,
+          -0.031613198047617315
+        ],
+        "classification": "clear negative"
+      }
+    }
+  }
+}

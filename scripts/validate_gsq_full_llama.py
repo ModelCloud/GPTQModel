@@ -26,7 +26,11 @@ def main():
     parser.add_argument('--microbatch-size', type=int, default=1, help='Documents per staged forward pass')
     parser.add_argument('--train-precision', choices=('float32', 'bfloat16'), default='float32')
     parser.add_argument('--epochs', type=int, default=5, help='Attention/MLP training epochs; Q/K budget is separate')
+    parser.add_argument('--optimizer', choices=('lion', 'adamw'), default='lion')
+    parser.add_argument('--lifecycle', choices=('dedicated', 'public'), default='dedicated')
     args = parser.parse_args()
+    if args.lifecycle == 'public' and args.arm != 'staged':
+        parser.error('Public lifecycle validation currently selects the staged arm; disabled uses ordinary GPTQ')
     args.output.mkdir(parents=True, exist_ok=False)
     source = json.loads((args.inputs/'provenance.json').read_text())
     documents = json.loads((args.inputs/'inputs.json').read_text())
@@ -67,16 +71,18 @@ def main():
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision('highest')
     config = GSQTrainingConfig(enabled=args.arm == 'staged', initializer=args.initializer,
-                               batch_size=args.batch_size, microbatch_size=args.microbatch_size, epochs=args.epochs)
+                               batch_size=args.batch_size, microbatch_size=args.microbatch_size, epochs=args.epochs,
+                               optimizer=args.optimizer)
     files = [Path(__file__), Path('gptqmodel/looper/gsq_training_model.py'),
              Path('gptqmodel/looper/gsq_training_capture.py'), Path('gptqmodel/quantization/gsq_training.py'),
              Path('gptqmodel/quantization/gsq_training_config.py'), Path('scripts/p32_twenty/scorecard.py'),
              Path('gptqmodel/quantization/gsq_initialization.py'), Path('gptqmodel/quantization/gptq.py'),
-             Path('gptqmodel/quantization/gsq_batching.py'),
+             Path('gptqmodel/quantization/gsq_batching.py'), Path('gptqmodel/models/base.py'),
+             Path('gptqmodel/utils/calibration.py'),
              Path('gptqmodel/quantization/quantizer.py'), Path('gptqmodel/quantization/config.py'),
              args.inputs/'inputs.json', args.inputs/'provenance.json',
              Path(source['dense'])/'model.safetensors', Path(source['dense'])/'config.json']
-    report = dict(state='loading', arm=args.arm, run_id=args.output.name,
+    report = dict(state='loading', arm=args.arm, run_id=args.output.name, lifecycle=args.lifecycle,
                   commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   argv=sys.argv, source_model=source['dense'], gsq_training=config.to_dict(),
                   bits=args.bits, group_size=128, train_precision=args.train_precision, export_precision='float16',
@@ -112,9 +118,24 @@ def main():
                 torch.save(logits.cpu(), args.output/'teacher'/f'{i}.pt')
         report['state'] = 'quantizing'
         write_json(args.output/'report.json', report)
-        run = quantize_llama_gsq_model(model, documents['train'], bits=args.bits, group_size=128, gsq=config)
+        if args.lifecycle == 'public':
+            from gptqmodel.models.definitions.llama import LlamaQModel
+            from gptqmodel.quantization import GPTQConfig, FORMAT
+
+            qcfg = GPTQConfig(bits=args.bits, group_size=128, sym=True, desc_act=False,
+                              act_group_aware=False, format=FORMAT.GPTQ_V2, offload_to_disk=False,
+                              device='cuda:0', gsq_training=config)
+            wrapper = LlamaQModel(model=model, quantized=False, quantize_config=qcfg,
+                                  tokenizer=tokenizer, model_local_path=source['dense'])
+            wrapper.quantize(documents['train'], backend=BACKEND.TORCH, calibration_sort=None,
+                              calibration_data_min_length=1)
+            run = wrapper.gsq_training_run
+            wrapper.save(str(args.output/'model'))
+            del wrapper
+        else:
+            run = quantize_llama_gsq_model(model, documents['train'], bits=args.bits, group_size=128, gsq=config)
+            save_llama_gsq_model(model, run, args.output/'model', tokenizer=tokenizer, source_model=source['dense'])
         write_json(args.output/'training.json', run)
-        save_llama_gsq_model(model, run, args.output/'model', tokenizer=tokenizer, source_model=source['dense'])
         with torch.inference_mode():
             for i, row in enumerate(documents['heldout']):
                 logits = model(torch.tensor([row['input_ids']], device='cuda'), use_cache=False).logits[0]

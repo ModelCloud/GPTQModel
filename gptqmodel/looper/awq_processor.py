@@ -1849,6 +1849,13 @@ class AWQProcessor(LoopProcessor):
             )
             raise
 
+        staged_teacher = None
+        staged_gsq = getattr(self.qcfg, 'gsq_training', None)
+        if staged_gsq is not None and staged_gsq.enabled:
+            from .gsq_training_awq import capture_awq_staged_teacher
+
+            staged_teacher = capture_awq_staged_teacher(self, layer_module_ref, named_childs, fallback_names)
+
         adjacent_targets = {
             name: named
             for name, named in named_childs.items()
@@ -1887,6 +1894,11 @@ class AWQProcessor(LoopProcessor):
             input_features=input_feat if adjacent_references else None,
             adjacent_references=adjacent_references if adjacent_references else None,
         )
+
+        if staged_teacher is not None:
+            from .gsq_training_awq import refine_awq_staged_layer
+
+            refine_awq_staged_layer(self, staged_teacher, named_childs, layer_index=layer_index)
 
         if fallback_named_childs:
             log.warning(

@@ -47,7 +47,10 @@ def main():
     base = Path('/monster/data/model/qvq')
     content = hashlib.sha256(json.dumps(report['model_hashes'], sort_keys=True).encode()).hexdigest()[:12]
     day = datetime.now(timezone.utc).strftime('%Y%m%d')
-    name = (f'modelcloud-qvq__llama-3.2-1b-instruct__gsq-w{report["bits"]}-{report["arm"]}__gptq-v2__'
+    experiment = f'gsq-w{report["bits"]}-{report["arm"]}'
+    if report['gsq_training']['enabled']:
+        experiment += f'-{report["gsq_training"].get("optimizer", "lion")}-e{report["gsq_training"]["epochs"]}'
+    name = (f'modelcloud-qvq__llama-3.2-1b-instruct__{experiment}__gptq-v2__'
             f'calib{calibration_samples}-unweighted__seed7__{day}__commit{report["commit"][:12]}__{content}')
     final = base/name
     staging = base/(name+'.partial')

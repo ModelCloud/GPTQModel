@@ -153,12 +153,83 @@ def finalize_llama_gsq_wrapper(wrapper, run):
     """
     from ..nn_modules.qlinear.torch import TorchLinear
 
+    import copy
+
+    requested = wrapper.quantize_config.to_dict()
+    caller_meta = copy.deepcopy(wrapper.quantize_config.meta)
     config = prepare_llama_gsq_export(wrapper.model, run)
+    caller_meta.update(config.meta)
+    caller_meta['gsq_requested_quantization'] = requested
+    config.meta = caller_meta
     wrapper.quantize_config = config
     wrapper.qlinear_kernel = TorchLinear
     wrapper.quantized = True
     wrapper.gsq_training_run = run
     return wrapper
+
+
+def quantize_llama_gsq_prepared(wrapper, prepared, *, gsq):
+    """Execute staged fitting and finalization from validated prepared inputs.
+
+    Public dispatch owns configuration compatibility and device preparation.
+    This boundary consumes already prepared token batches and preserves the
+    existing wrapper. On failure it retains the model's partial run diagnostics.
+    """
+    documents = staged_documents_from_prepared(prepared)
+    run = quantize_llama_gsq_model(wrapper.model, documents,
+                                   bits=wrapper.quantize_config.bits,
+                                   group_size=wrapper.quantize_config.group_size, gsq=gsq)
+    finalize_llama_gsq_wrapper(wrapper, run)
+    return run
+
+
+def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
+                              calibration_concat_size, calibration_sort, calibration_data_min_length,
+                              calibration_concat_separator, unsupported):
+    """Experimental public GPTQ dispatch for a uniform materialized Llama model.
+
+    GSQTrainingConfig owns the staged prior and optimization recipe. Additional
+    ordinary GPTQ transforms and recovery processors are not silently applied.
+    """
+    from ..quantization.config import FORMAT, METHOD
+    from ..utils.backend import BACKEND, normalize_backend
+
+    qcfg = wrapper.quantize_config
+    if wrapper.quantized or calibration is None:
+        raise ValueError('Staged GSQ requires an unquantized model and calibration')
+    if qcfg.method != METHOD.GPTQ or qcfg.format != FORMAT.GPTQ_V2:
+        raise ValueError('Public staged GSQ currently requires GPTQ_V2 export')
+    if qcfg.bits not in (2, 3, 4) or not qcfg.sym or qcfg.desc_act or qcfg.act_group_aware:
+        raise ValueError('Public staged GSQ requires symmetric W2/W3/W4 without activation ordering')
+    if any(value is not None for value in unsupported.values()):
+        raise ValueError('Unsupported additional public quantization options for staged GSQ')
+    for name in ('dynamic', 'rotation', 'adapter', 'gptaq', 'foem', 'mock_quantization',
+                 'static_groups', 'adjacent_model', 'adaptive_clipping', 'lm_head', 'preprocessors',
+                 'smoother', 'offload_to_disk'):
+        if getattr(qcfg, name, None):
+            raise ValueError(f'Public staged GSQ does not yet support {name}')
+    if getattr(getattr(qcfg, 'adaptive_damping', None), 'enabled', False):
+        raise ValueError('Public staged GSQ does not yet support adaptive damping')
+    if qcfg.pack_dtype != torch.int32:
+        raise ValueError('Public staged GSQ currently requires int32 packed storage')
+    if normalize_backend(backend, quant_method=METHOD.GPTQ) not in (None, BACKEND.AUTO, BACKEND.GPTQ_TORCH):
+        raise ValueError('Public staged GSQ currently requires the Torch packing backend')
+    devices = {p.device for p in wrapper.model.parameters()}
+    if len(devices) != 1 or next(iter(devices)).type not in ('cpu', 'cuda'):
+        raise ValueError('Public staged GSQ requires a materialized model on one CPU/CUDA device')
+    if wrapper.model.config._attn_implementation != 'eager':
+        raise ValueError('Public staged GSQ requires eager attention')
+    if tokenizer is not None:
+        wrapper.tokenizer = tokenizer
+    prepared = wrapper.prepare_dataset(
+        calibration, calibration_dataset_concat_size=calibration_concat_size,
+        calibration_dataset_sort=calibration_sort, batch_size=1,
+        calibration_data_min_length=calibration_data_min_length,
+        calibration_concat_separator=calibration_concat_separator)
+    staged = qcfg.gsq_training
+    run = quantize_llama_gsq_prepared(wrapper, prepared, gsq=staged)
+    wrapper.quantize_config.gsq_training = staged
+    return {'gsq_training': run['blocks']}
 
 
 def save_llama_gsq_model(model, run, output, *, tokenizer, source_model):

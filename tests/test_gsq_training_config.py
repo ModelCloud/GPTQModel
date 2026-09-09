@@ -15,7 +15,7 @@ def test_staged_config_roundtrip_and_distinct_defaults():
 
 
 @pytest.mark.parametrize('values', [
-    {'enabled': 1}, {'epochs': 0}, {'qk_steps': True}, {'seed': -1},
+    {'optimizer': 'unknown'}, {'enabled': 1}, {'epochs': 0}, {'qk_steps': True}, {'seed': -1},
     {'assignment_lr': 0}, {'scale_lr': float('nan')}, {'weight_decay': -1},
     {'damp_percent': float('inf')}, {'betas': [.9, 1.]}, {'temperature': [2.]},
     {'multiplier': [100., 0.]}, {'warmup_steps': -1}, {'min_lr': 2.}, {'decay': 'unknown'},
@@ -27,9 +27,10 @@ def test_staged_config_rejects_invalid_settings(values):
         GSQTrainingConfig(**values)
 
 
+@pytest.mark.parametrize('optimizer', ['lion', 'adamw'])
 @pytest.mark.parametrize('bits', [2, 3, 4])
 @pytest.mark.parametrize('initializer', ['gptq', 'gptq_signed'])
-def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, initializer, tmp_path, monkeypatch):
+def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, initializer, optimizer, tmp_path, monkeypatch):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
     from gptqmodel.quantization import gsq_training
@@ -60,9 +61,20 @@ def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, init
     for name, (weight, _) in seeds.items():
         torch.testing.assert_close(baseline.get_submodule(name).weight, weight, rtol=0, atol=0)
     monkeypatch.setattr(gsq_training, 'fit_llama_stages', fitter)
-    settings = GSQTrainingConfig(enabled=True, epochs=2, qk_steps=2, initializer=initializer)
+    constructed = []
+    owner, attribute = (torch.optim, 'AdamW') if optimizer == 'adamw' else (gsq_training, 'GSQLion')
+    constructor = getattr(owner, attribute)
+
+    def record_optimizer(*args, **kwargs):
+        result = constructor(*args, **kwargs)
+        constructed.append(result)
+        return result
+
+    monkeypatch.setattr(owner, attribute, record_optimizer)
+    settings = GSQTrainingConfig(enabled=True, epochs=2, qk_steps=2, initializer=initializer, optimizer=optimizer)
     exported, info = gsq_training.quantize_llama_gsq_block(
         layer, batches, bits=bits, group_size=32, gsq=json.loads(json.dumps(settings.to_dict())))
+    assert len(constructed) == 4  # Q, K, attention, and MLP must all honor the selection.
     assert info['gsq_training'] == settings.to_dict()
     assert info['stages']['mlp']['initializer_timing'] == 'after_attention'
     assert len(info['stages']['attention']['history']) == 2

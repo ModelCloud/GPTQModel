@@ -169,7 +169,7 @@ class GSQScalarTrainingModule(torch.nn.Module):
             self.register_buffer(name, prepared[name])
 
     def forward(self, *, uniform, temperature, multiplier):
-        masked = self.logits.masked_fill(~self.valid, -1e9)
+        masked = self.logits.masked_fill(~self.valid, -torch.inf)
         candidates = self.candidates
         if self.initial is not None:
             candidates = torch.arange(-2, 3, device=candidates.device, dtype=candidates.dtype)[:, None, None]
@@ -180,7 +180,7 @@ class GSQScalarTrainingModule(torch.nn.Module):
 
     @torch.no_grad()
     def hard_weight(self):
-        selected = self.logits.masked_fill(~self.valid, -1e9).argmax(0, keepdim=True)
+        selected = self.logits.masked_fill(~self.valid, -torch.inf).argmax(0, keepdim=True)
         assignments = self.candidates.gather(0, selected).squeeze(0)
         return assignments * self.scales[:, self.group_index].to(assignments.dtype)
 
@@ -296,7 +296,7 @@ def stage_learning_rate(step, total_steps, *, base_lr, warmup_steps=0, min_lr=0.
 def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              assignment_lr=2e-4, scale_lr=1e-4, weight_decay=1., betas=(.9, .95),
                              temperature=(2., .5), multiplier=(10., 50.), warmup_steps=0,
-                             min_lr=0., decay='linear'):
+                             min_lr=0., decay='linear', optimizer='lion'):
     """Train one stage and export final hard weights, without a surrogate guard.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
@@ -312,7 +312,10 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     for quantizer in quantizers.values():
         groups.extend(quantizer.optimizer_groups(assignment_lr=assignment_lr, scale_lr=scale_lr,
                                                 weight_decay=weight_decay))
-    optimizer = GSQLion(groups, betas=betas)
+    if optimizer not in ('lion', 'adamw'):
+        raise ValueError('GSQ optimizer must be lion or adamw')
+    optimizer = (GSQLion(groups, betas=betas) if optimizer == 'lion' else
+                 torch.optim.AdamW(groups, betas=betas, eps=1e-8, foreach=False, fused=False))
     initial_lrs = [group['lr'] for group in optimizer.param_groups]
     device = next(iter(quantizers.values())).logits.device
     sampling_rng = torch.Generator(device=device).manual_seed(seed)
@@ -345,7 +348,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
 
 def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, seed=7,
                      qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, initializer='gptq',
-                     batch_size=1, microbatch_size=1, **training):
+                     batch_size=1, microbatch_size=1, affine_initializers=False, **training):
     """Fit a Llama block in author stage order from supplied scalar initializers.
 
     Batches are (hidden_states, attention_kwargs) pairs without padding. Caller
@@ -356,6 +359,8 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
 
     if initializer not in ('gptq', 'gptq_signed'):
         raise ValueError('Unknown staged GPTQ initializer')
+    if affine_initializers and reinitialize_mlp:
+        raise ValueError('Affine staged fitting must retain supplied MLP initialization, not replace it with GPTQ')
     for value in (batch_size, microbatch_size):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise ValueError('GSQ batch sizes must be positive integers')
@@ -374,10 +379,19 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     records = {}
 
     def quantizer(name):
-        weight, scales = initializers[name]
+        if affine_initializers:
+            codes, scales, zeros = initializers[name]
+            weight = codes.to(scales.dtype)
+        else:
+            weight, scales = initializers[name]
         count = 4 if bits == 2 else 5
         rng = torch.Generator(device=weight.device).manual_seed(seed)
         noise = torch.randn((count, *weight.shape), dtype=weight.dtype, device=weight.device, generator=rng)
+        if affine_initializers:
+            from .gsq_training_affine import GSQAffineTrainingModule
+
+            return GSQAffineTrainingModule(codes, scales, zeros, group_size, bits=bits, noise=noise,
+                                           logits_dtype=torch.float32 if name in names[:2] else weight.dtype)
         return GSQScalarTrainingModule(weight, scales, group_size, bits=bits, noise=noise,
                                        logits_dtype=torch.float32 if name in names[:2] else weight.dtype)
 
@@ -390,6 +404,9 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
                                              teacher_weights=teacher, output_mask=mask)
         result = fit_reconstruction_stage(quantizers, stage_batches, objective,
                                           epochs=epochs, seed=seed, **training)
+        if affine_initializers:
+            result['zeros'] = {name: quant.zeros.detach().clone() for name, quant in quantizers.items()}
+            result['codes'] = {name: quant.hard_codes().detach().clone() for name, quant in quantizers.items()}
         with torch.no_grad():
             for name in selected:
                 fitted.get_submodule(name).weight.copy_(result['weights'][name+'.weight'])
@@ -402,9 +419,12 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         with torch.no_grad():
             normalized = [fitted.input_layernorm(hidden) for hidden, _ in batches]
         qk_options = {key: value for key, value in training.items()
-                      if key in ('assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier')}
+                      if key in ('assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier', 'optimizer')}
         result = fit_qk_projection(quant, projection.weight, normalized, steps=qk_steps,
                                    damp_percent=qk_damp_percent, seed=seed, **qk_options)
+        if affine_initializers:
+            result['zeros'] = {'weight': quant.zeros.detach().clone()}
+            result['codes'] = {'weight': quant.hard_codes().detach().clone()}
         result['objective'] = 'prepared_qk_quadratic_sum'
         result['damp_percent'] = qk_damp_percent
         with torch.no_grad():
@@ -517,7 +537,7 @@ def prepare_qk_calibration_factor(inputs, *, damp_percent=.01):
 
 def fit_qk_projection(quantizer, teacher, inputs, *, steps=2000, damp_percent=.01, seed=7,
                       assignment_lr=1e-4, scale_lr=5e-5, betas=(.9, .95), weight_decay=1.,
-                      temperature=(2., .05), multiplier=(100., 500.)):
+                      temperature=(2., .05), multiplier=(100., 500.), optimizer='lion'):
     """Dedicated constant-LR Q/K training, using the prepared quadratic sum."""
     factor, dead = prepare_qk_calibration_factor(inputs, damp_percent=damp_percent)
     target = teacher.detach().float().clone()
@@ -528,7 +548,7 @@ def fit_qk_projection(quantizer, teacher, inputs, *, steps=2000, damp_percent=.0
     return fit_reconstruction_stage({'weight': quantizer}, [[(None, 1)]], objective, epochs=steps, seed=seed,
                                     assignment_lr=assignment_lr, scale_lr=scale_lr, betas=betas,
                                     weight_decay=weight_decay, temperature=temperature, multiplier=multiplier,
-                                    decay='constant')
+                                    decay='constant', optimizer=optimizer)
 
 
 def pack_llama_staged_block(fitted, records, *, bits, group_size):

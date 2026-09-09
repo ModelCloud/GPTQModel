@@ -1,11 +1,69 @@
+> AdamW W4 retest complete: 128 calibration documents, seed 7, group128, ten attention/MLP epochs, 2,000 Q/K updates. Platinum: 403/1209 (33.33%, one invalid) versus matched GPTQ 460/1209 (38.05%, zero invalid). Paired delta -4.71 points, CI95 [-7.36, -2.15]. The reused dense reference remains 593/1209 (49.05%). Exact prompts/targets/token IDs match. All 32 held-out reloads are exact; all five held-out logit metrics regress clearly. The optimizer/epoch change did not recover accuracy.
+
 > W4 retest: both full models completed with exact public reload on all 32 held-out documents. GSQ regresses KL (0.278840 → 0.384085), MSE (0.892304 → 1.145021), and Top-1/5/10 agreement (77.509/74.965/75.104% → 73.504/70.950/71.313%). All five paired 95% bootstrap intervals are unfavorable and exclude zero. Full Platinum completed: dense 593/1209 (49.05%), W4 GPTQ 460/1209 (38.05%), W4 GSQ 417/1209 (34.49%). Paired GSQ delta -3.56 points, 95% interval [-6.37, -0.74]. Exact prompts/targets/token IDs match. This is a clear task regression. Both arms use 128 documents, five epochs, seed 7 and matched signed initialization.
 
 # Staged scalar GSQ: implementation and validation status
 
 This branch contains an experimental Llama staged trainer, not a completed paper
-reproduction or a promoted default. It is not yet wired into public GPTQ/AWQ
-quantization configuration. The existing independent-projection GSQ fitter remains
-separate and optional.
+reproduction or a promoted default. Public GPTQ now has an experimental
+`gsq_training` path for uniform, materialized eager Llama models with Torch
+packing. Public AWQ has an initial W4 GEMM staged path; real-model AWQ validation
+and additional formats remain unfinished. The existing
+independent-projection `gsq` fitter remains separate and optional.
+
+AWQ uses `AWQConfig(gsq_training=GSQTrainingConfig(enabled=True, initializer='awq', ...))`.
+It retains AWQ scaling/clipping and affine zero points, captures the teacher after
+scaling and before clipping, then fits Q/K, attention, and MLP objectives using
+the AWQ initializer. It does not run the GPTQ prior. The initial path requires
+uniform W4 GEMM, group size 32/64/128, all seven Llama projections, eager attention,
+and no fallback, tensor-parallel padding, or AdjacentExact combination. Learned
+weights/scales/zeros replace packing metadata together; histories are retained
+in configuration metadata. Tiny CPU FP16 public quantize/save/reload reproduces
+logits exactly. This is lifecycle correctness evidence, not real-model quality
+evidence or full author-procedure parity. AWQ's MLP initializer is retained from
+before attention fitting. GSQ remains disabled by default.
+
+The staged opt-in uses `GPTQConfig(gsq_training=GSQTrainingConfig(enabled=True, ...))`.
+The training configuration also accepts `optimizer='adamw'`; the default remains
+`'lion'`. This selection applies to Q, K, attention, and MLP stages. AdamW uses
+the configured learning rates, betas and assignment weight decay, with zero
+scale weight decay, epsilon `1e-8`, and non-fused/non-foreach updates. Selecting
+AdamW is an explicit experiment, not the paper's Lion procedure. The requested
+W4 AdamW retest uses 128 calibration documents, seed 7, group size 128, ten
+attention/MLP epochs and 2,000 Q/K updates; completed results are summarized above. Changing optimizer
+and epoch count together does not isolate their individual effects.
+It requires `format=FORMAT.GPTQ_V2`, `sym=True`, `desc_act=False`,
+`act_group_aware=False`, `offload_to_disk=False`, and int32 packed storage.
+The model must already be materialized on one CPU/CUDA device with eager attention.
+Use `backend=BACKEND.TORCH` in `quantize()`. Calibration uses the normal public
+preparation path; choose `calibration_sort=None` to preserve supplied row order.
+`GSQTrainingConfig` owns staged initializer, damping and optimization settings;
+the requested outer configuration is retained as provenance. Unsupported extra
+processors/transforms reject explicitly rather than being silently skipped.
+
+Example configuration for the tested recipe (not an accuracy recommendation):
+
+```python
+from gptqmodel.quantization import FORMAT, GPTQConfig, GSQTrainingConfig
+
+config = GPTQConfig(
+    bits=4, group_size=128, format=FORMAT.GPTQ_V2,
+    sym=True, desc_act=False, act_group_aware=False, offload_to_disk=False,
+    gsq_training=GSQTrainingConfig(
+        enabled=True, initializer="gptq_signed", seed=7,
+        epochs=5, batch_size=64, microbatch_size=16,
+    ),
+)
+```
+
+Omitting `gsq_training`, or setting `enabled=False`, retains ordinary GPTQ dispatch.
+That disabled public path is not the dedicated signed-prior experiment control.
+Enabling both projection `gsq` and staged `gsq_training` rejects. Tiny CPU public
+quantize/save/reload is verified with exact logits and config/provenance retention;
+the real 128-row W4 public-lifecycle run completed: all 482 checkpoint tensors and
+all 32 held-out logit tensors exactly match the dedicated Lion run; all 32
+documents also reload exactly. Evidence: `artifacts/gsq-staged/full-model-w4-nm128-signed-public-v1/checkpoint-parity.json`. The completed quality
+results below used the dedicated trainer and remain negative evidence.
 
 The current user-selected full-model experiment uses **128 calibration documents
 and five attention/MLP epochs**, seed 7, W2/group128, signed GPTQ initialization,

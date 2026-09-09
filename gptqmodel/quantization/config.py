@@ -5185,6 +5185,7 @@ class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
 
 @dataclass
 class GPTQConfig(PreProcessorConfig):
+    gsq_training: Optional[Any] = field(default=None)
     gsq: Optional["GSQConfig"] = field(default=None)
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
@@ -5276,6 +5277,18 @@ class GPTQConfig(PreProcessorConfig):
         adaptive_damping_user_value = self.adaptive_damping
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq_training is not None:
+            from .gsq_training_config import GSQTrainingConfig
+
+            if isinstance(self.gsq_training, dict):
+                self.gsq_training = GSQTrainingConfig(**self.gsq_training)
+            if not isinstance(self.gsq_training, GSQTrainingConfig):
+                raise TypeError("GPTQConfig: gsq_training must be GSQTrainingConfig, a dictionary or None")
+            if self.gsq_training.enabled and self.gsq_training.initializer == 'awq':
+                raise ValueError('GPTQConfig: staged GSQ requires a GPTQ initializer')
+            if self.gsq_training.enabled and self.gsq is not None and self.gsq.enabled:
+                raise ValueError("GPTQConfig: choose staged gsq_training or projection gsq, not both")
+
         if self.gsq is not None and self.gsq.enabled and self.mock_quantization:
             raise ValueError("GPTQConfig: gsq is incompatible with mock quantization")
 
@@ -5583,10 +5596,12 @@ class GPTQConfig(PreProcessorConfig):
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
         out["gsq"] = None if self.gsq is None else asdict(self.gsq)
+        out["gsq_training"] = None if self.gsq_training is None else self.gsq_training.to_dict()
 
 
 @dataclass
 class AWQConfig(PreProcessorConfig):
+    gsq_training: Optional[Any] = field(default=None)
     gsq: Optional["GSQConfig"] = field(default=None)
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
@@ -5642,6 +5657,23 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq_training is not None:
+            from .gsq_training_config import GSQTrainingConfig
+
+            if isinstance(self.gsq_training, dict):
+                self.gsq_training = GSQTrainingConfig(**({'initializer': 'awq'} | self.gsq_training))
+            if not isinstance(self.gsq_training, GSQTrainingConfig):
+                raise TypeError('AWQConfig: gsq_training must be GSQTrainingConfig, a dictionary or None')
+            if self.gsq_training.enabled:
+                if self.gsq_training.initializer != 'awq':
+                    raise ValueError('AWQConfig: staged GSQ must retain the AWQ initializer')
+                if self.gsq is not None and self.gsq.enabled:
+                    raise ValueError('AWQConfig: choose staged gsq_training or projection gsq, not both')
+                if self.bits != 4 or self.format != FORMAT.GEMM or self.group_size not in (32, 64, 128):
+                    raise ValueError('AWQConfig: staged GSQ currently requires W4 GEMM with group size 32/64/128')
+                if self.dynamic or self.adjacent_model is not None:
+                    raise ValueError('AWQConfig: staged GSQ requires uniform scope without AdjacentExact')
+
         if self.gsq is not None and self.gsq.enabled:
             if self.format not in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
                 raise ValueError("AWQConfig: enabled gsq requires GEMM, GEMV, GEMV_FAST or LLM_AWQ packing")
@@ -5666,6 +5698,7 @@ class AWQConfig(PreProcessorConfig):
         super().__post_init__()
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["gsq_training"] = None if self.gsq_training is None else self.gsq_training.to_dict()
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format

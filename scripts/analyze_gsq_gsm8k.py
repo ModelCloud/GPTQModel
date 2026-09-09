@@ -11,10 +11,22 @@ import numpy as np
 from scripts.validate_qvq_gsq_layers import digest, write_json
 
 
+def validate_evaluation_settings(settings, reference, *, reuse_dense=False):
+    """Permit an explicitly reused dense revision, retaining every other check."""
+    actual, expected = dict(settings), dict(reference)
+    if reuse_dense:
+        actual.pop('qvq_commit')
+        expected.pop('qvq_commit')
+    if actual != expected:
+        raise ValueError('Evaluation configuration or source identity differs between arms')
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--calibration-inputs', type=Path, required=True)
+    parser.add_argument('--reuse-dense-reference', action='store_true',
+                        help='Allow only the reused dense QVQ revision to differ; preserve all other checks')
     args = parser.parse_args()
     calibration = json.loads(args.calibration_inputs.read_text())
     calibration_count = len(calibration['train'])
@@ -28,6 +40,7 @@ def main():
     prompt_ids = None
     reference_settings = None
     quantization_recipe = None
+    training_configs = {}
     for arm in arms:
         path = args.root/(arm+'-full')
         run = json.loads((path/'run.json').read_text())
@@ -36,6 +49,9 @@ def main():
             raise ValueError('Incomplete or changed evaluation')
         if arm != 'dense':
             quantization = json.loads((Path(run['model']).parent/'report.json').read_text())
+            training_configs[arm] = quantization['gsq_training']
+            if bool(training_configs[arm]['enabled']) != (arm == 'staged'):
+                raise ValueError('GSQ enabled state does not match the evaluation arm')
             recipe = {key: quantization[key] for key in ('bits', 'group_size', 'source_model')}
             if quantization_recipe is None:
                 quantization_recipe = recipe
@@ -49,8 +65,11 @@ def main():
         settings['task_metadata'] = raw['tests'][0]['metadata']
         if reference_settings is None:
             reference_settings = settings
-        elif settings != reference_settings:
-            raise ValueError('Evaluation configuration or source identity differs between arms')
+        else:
+            validate_evaluation_settings(settings, reference_settings,
+                                         reuse_dense=args.reuse_dense_reference and arm == 'baseline')
+        if arm == 'baseline':
+            reference_settings = settings  # Quantized arms must still share the exact revision.
         rows = raw['tests'][0]['samples']
         if len(rows) != 1209 or [row['index'] for row in rows] != list(range(1209)):
             raise ValueError('Requires complete native-order Platinum test')
@@ -68,11 +87,14 @@ def main():
         runs[arm] = dict(correct=int(scores[arm].sum()), total=len(rows), accuracy=float(scores[arm].mean()),
                          invalid=sum(r['extracted']['numeric-extract'] == '[invalid]' for r in rows),
                          run_sha256=digest(path/'run.json'), raw_sha256=digest(path/'raw.json'),
+                         qvq_commit=run['qvq_commit'], evaluation_source_sha256=run['source_sha256'],
                          seconds=run['seconds'], model=run['model'])
     delta = scores['staged']-scores['baseline']
     rng = np.random.default_rng(7)
     draws = np.array([delta[rng.integers(len(delta), size=len(delta))].mean() for _ in range(10000)])
     result = dict(arms=runs, quantization_recipe=quantization_recipe,
+                  reused_dense_reference=args.reuse_dense_reference,
+                  training_configs=training_configs,
                   paired_staged_minus_baseline=float(delta.mean()),
                   calibration_samples=calibration_count, calibration_inputs_sha256=calibration_sha,
                   paired_bootstrap_ci95=np.quantile(draws, [.025, .975]).tolist(),
@@ -92,7 +114,9 @@ def main():
         lines.append(f'| {arm} | {r["correct"]}/{r["total"]} | {r["accuracy"]:.4%} | {r["invalid"]} |')
     lines += ['', f'The W{quantization_recipe["bits"]}/group{quantization_recipe["group_size"]} control uses '
               'the staged-path GPTQ initializer with GSQ disabled.',
-              f'The treatment adds staged Lion training and learned scales. Both use {calibration_count} calibration',
+              f'The treatment adds staged {training_configs["staged"].get("optimizer", "lion")} training '
+              f'and learned scales ({training_configs["staged"]["epochs"]} attention/MLP epochs, '
+              f'{training_configs["staged"]["qk_steps"]} Q/K updates). Both use {calibration_count} calibration',
               'documents and are experimental; this is not the package-default GPTQ recipe or full paper reproduction.',
               '', '```json', json.dumps(result, indent=2), '```', '']
     (args.root/'comparison.md').write_text('\n'.join(lines))

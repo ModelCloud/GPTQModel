@@ -9,6 +9,25 @@ and Appendices B, C, G. Author implementation freshly fetched at
 https://github.com/IST-DASLab/GSQ. Local reference checkout:
 `/tmp/gsq-author-reproduction` (reference only, not a runtime dependency).
 
+### W4 NM128 training-history diagnostic
+
+The completed five-epoch, batch-64 W4 run recorded 2,000 updates for each
+Q/K projection but only ten updates for each attention and MLP stage
+(128 documents / 64 documents per batch × five epochs). This is an observed
+training-budget imbalance, not an established explanation for the Platinum
+regression. All 32 Q/K histories finish above their observed minimum stochastic
+loss. Neither that fact nor the lower final-versus-initial logged losses proves
+that an earlier checkpoint would have better hard-weight or held-out accuracy:
+sampling temperature and multiplier change, and attention/MLP batches shuffle.
+
+The source-bound 64-stage audit is
+`artifacts/gsq-staged/full-model-w4-nm128-signed-comparison-v1/training-history-audit.json`.
+The existing records lack matched initializer-versus-final hard-weight objectives,
+per-stage held-out outputs, and relaxed-versus-hard comparisons. These measurements
+are needed before attributing the regression to overfitting, accumulated layer
+error, hard assignment, or insufficient attention/MLP optimization. Do not present
+decreasing logged training losses as proof of improvement over the GPTQ baseline.
+
 Implementation acceptance requirements:
 
 - Separate explicit training mode; existing GSQ-inspired behavior and disabled
@@ -265,9 +284,9 @@ Evidence: `artifacts/gsq-staged/full-model-w2-nm128-signed-comparison-v1` and
 `artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/protocol.json`.
 
 
-### Public dispatch boundary audit
+### Historical public dispatch boundary audit
 
-Source inspection confirms `GPTQConfig.gsq` and `AWQConfig.gsq` normalize only
+At the original audit, `GPTQConfig.gsq` and `AWQConfig.gsq` normalized only
 `GSQConfig`, the independent-projection adapter configuration. The staged
 `GSQTrainingConfig` is consumed by `quantize_llama_gsq_model`; it is not consumed
 by `BaseQModel.quantize`. The full-model experiments therefore prove the dedicated
@@ -282,3 +301,38 @@ models; passing arbitrary dynamic scopes through it would be an unsupported shor
 AWQ compatibility requires preserving its transformed weights and activation replay,
 not silently substituting the GPTQ signed prior. These are outstanding implementation
 and lifecycle tests, not restrictions proving other methods scientifically incompatible.
+
+An affine staged parameterization is now available in `gsq_training_affine.py`.
+It accepts existing integer codes, positive initial scales, and fixed per-group
+integer zero points, using `(code - zero) * scale` throughout the relaxation.
+W2 full-grid and W3/W4 local-shift candidates retain the initializer's legal code
+bounds. Synthetic correctness checks cover boundary zero points, hard codes,
+forward values, and assignment/scale gradients against a direct softmax formula.
+This is not yet AWQ lifecycle support or real-model quality evidence. Integration
+must capture the teacher after AWQ scaling and before clipping, retain the AWQ
+initializer rather than rerun GPTQ, replay complete attention/block objectives,
+and validate learned scales against each actual AWQ packing format. Scales remain
+unconstrained during training; a positive initializer alone does not prove that
+the learned checkpoint satisfies a positive-scale deployment requirement.
+
+The shared Llama stage fitter now accepts explicit affine initializers. It runs
+the same Q/K quadratic, V/O attention, and MLP block objectives while retaining
+per-group zero points and hard codes in the returned stage records. This mode
+requires `reinitialize_mlp=False`: silently running the GPTQ prior after attention
+would replace the supplied AWQ initializer. A synthetic full-block correctness
+test forbids any GPTQ initializer call, checks all seven hard affine weights and
+zero points, and verifies that the supplied teacher remains unchanged. Separate
+W4 AWQ GEMM tests force changed codes and scales through packing, disk state
+serialization, and reload for FP16/BF16 scale storage. Native AWQ transform/capture,
+processor installation/replay and real-model quality validation remain outstanding.
+
+The subsequent public integration adds separate `gsq_training` configuration for
+GPTQ and AWQ. AWQ explicitly requires its own initializer (`initializer='awq'`),
+retains transforms/clipping, captures the scaled pre-clip teacher, and replaces
+weights/scales/zeros together after staged fitting. Initial support is uniform
+W4 GEMM with complete eager Llama blocks. CPU FP16 public quantize/save/reload
+passes exact logits on a tiny two-layer correctness fixture; this is not
+real-model AWQ recovery evidence. FP16 testing also exposed the signed fitter's
+`-1e9` invalid-candidate mask overflow; negative infinity now masks invalid
+candidates without a finite value outside FP16 range. Real-model AWQ quality,
+additional packing formats and full paper-procedure parity remain unverified.

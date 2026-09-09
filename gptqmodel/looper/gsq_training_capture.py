@@ -82,6 +82,29 @@ def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack
                                         gsq=gsq, pack=pack)
 
 
+def fit_llama_awq_gsq_capture(layer, cache, initializers, *, group_size, epochs, seed=7,
+                              device=None, scale_dtype=torch.float16, **training):
+    """Fit/pack supplied AWQ initializers using the transformed pre-clip teacher.
+
+    The caller must copy the layer after AWQ scaling and before clipping, retain
+    the corresponding full block cache, and supply (codes, scales, zeros) for all
+    seven projections. Installing/replaying the packed block remains caller-owned.
+    """
+    from ..quantization.gsq_training import fit_llama_stages
+    from ..quantization.gsq_training_affine import pack_llama_affine_stages
+
+    with torch.inference_mode(False), torch.enable_grad():
+        prepared, batches = prepare_llama_gsq_capture(layer, cache, device=device)
+        destination = next(prepared.parameters()).device
+        values = {name: tuple(value.detach().to(destination).clone() for value in tensors)
+                  for name, tensors in initializers.items()}
+        fitted, records = fit_llama_stages(
+            prepared, values, batches, bits=4, group_size=group_size, epochs=epochs, seed=seed,
+            affine_initializers=True, reinitialize_mlp=False, **training)
+        packed = pack_llama_affine_stages(fitted, records, group_size=group_size, scale_dtype=scale_dtype)
+    return packed, dict(initializer='provided_awq', stages=records)
+
+
 def capture_llama_gsq_inputs(model, documents, *, layer_index=0):
     """Capture actual Llama decoder calls, including masks and rotary state.
 

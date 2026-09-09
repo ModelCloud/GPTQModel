@@ -1261,6 +1261,24 @@ class BaseQModel(nn.Module):
 
         if os.environ.get("GPTQMODEL_RESUME") == "1":
             raise ValueError("GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory")
+        staged_gsq = getattr(self.quantize_config, "gsq_training", None)
+        if staged_gsq is not None and staged_gsq.enabled and self.quantize_config.method == METHOD.GPTQ:
+            from ..looper.gsq_training_model import quantize_llama_gsq_public
+
+            return quantize_llama_gsq_public(
+                self, calibration=calibration, tokenizer=tokenizer, backend=backend,
+                calibration_concat_size=calibration_concat_size, calibration_sort=calibration_sort,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+                unsupported=dict(adapter=adapter, adapter_calibration_dataset=adapter_calibration_dataset,
+                                 validation_calibration=validation_calibration, yaqa_calibration=yaqa_calibration,
+                                 module_replay_search_calibration=module_replay_search_calibration,
+                                 module_replay_confirmation_calibration=module_replay_confirmation_calibration,
+                                 embed_quant_config=embed_quant_config, layer_scope=layer_scope,
+                                 rank8_capture=rank8_capture, rank8_teacher_materializer=rank8_teacher_materializer,
+                                 checkpoint=checkpoint),
+            )
+
         if checkpoint is not None:
             from ..looper.checkpoint_store import CheckpointConfig
             from ..looper.gptq_checkpoint import validate_checkpoint_support

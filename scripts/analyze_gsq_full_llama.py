@@ -10,7 +10,7 @@ from scripts.validate_qvq_gsq_layers import digest, write_json
 
 
 def validate_matched_recipe(baseline, staged):
-    """Match recipes, allowing an unused baseline epoch setting to differ."""
+    """Match recipes, allowing unused baseline epoch/optimizer settings to differ."""
     for key in ('source_model', 'bits', 'group_size', 'train_precision', 'export_precision',
                 'calibration_samples', 'calibration_tokens', 'weighting'):
         if key not in baseline or baseline[key] != staged.get(key):
@@ -27,9 +27,12 @@ def validate_matched_recipe(baseline, staged):
         # The disabled arm never enters stage training. Reusing its checkpoint
         # for the user's epoch change does not change its quantized weights.
         config.pop('epochs', None)
+        optimizer = config.pop('optimizer', 'lion')
+        if optimizer not in ('lion', 'adamw'):
+            raise ValueError('Unknown staged optimizer in comparison')
         configs.append(config)
     if configs[0] != configs[1]:
-        raise ValueError('GSQ recipes differ beyond enable flag and unused baseline epochs')
+        raise ValueError('GSQ recipes differ beyond enable flag and unused baseline epochs/optimizer')
 
 
 def main():
