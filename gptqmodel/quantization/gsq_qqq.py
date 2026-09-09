@@ -137,7 +137,8 @@ def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment
         cross = cross_moment.detach().float()
         correction = teacher @ cross
         asymmetric_error_term(torch.zeros_like(teacher), teacher, cross)
-        denominator = (teacher @ factor).square().sum().clamp_min(torch.finfo(torch.float32).tiny)
+        energy = (teacher @ factor).square().sum()
+        denominator = torch.where(energy > torch.finfo(torch.float32).eps, energy, torch.ones_like(energy))
 
         def loss(weight):
             error = weight - teacher

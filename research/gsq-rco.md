@@ -257,3 +257,34 @@ PYTHONPATH=. /root/venv-py3.14t/bin/python -m scripts.validate_qvq_gsq \
 ```
 
 The output path must be new; existing evidence is never overwritten.
+
+## Review follow-up: restricted search and correctness (2026-09-09)
+
+Review through `26edfa3` correctly distinguishes this implementation from the
+paper: QVQ searches a frozen pool of whole-tile payloads, with fixed scales,
+Adam and a geometric temperature schedule. Each mutation is a single baseline
+bit flip; more optimization steps do not accumulate multiple flips within a
+tile. At W2.5, the default pool draws 32 mutations from 640 positions and may
+contain duplicates. These restrictions must accompany recovery claims.
+
+The scalar and QQQ objectives now use unnormalized loss when projected teacher
+energy is at most FP32 epsilon, instead of dividing by FP32 tiny. The asymmetric
+linear term is retained, including when the teacher lies in a metric nullspace.
+QVQ rejects enabled scale learning in both `quantize_qvq_linear` and
+`refine_trellis_fisher`, matching its public configuration restriction.
+Focused CPU checks report 130 passed (5.51 seconds): scalar, QVQ configuration
+and QQQ contract suites. This includes zero/tiny teacher targets and a
+zero-projected-energy asymmetric case that must improve rather than early-return.
+
+Required follow-up validation remains open:
+
+- Zero-weight RTN/GPTQ through their complete quantizer hooks, beyond the shared
+  scalar fitter's reconstruction and Hessian regression fixtures.
+- Force a non-baseline QVQ tile choice through quantization, packing and reload.
+- Compare GSQ with deterministic search over exactly the same candidate pool on
+  matched real-model calibration and disjoint held-out data.
+- Evaluate an evolving/multi-bit candidate search separately; current unchanged
+  lifecycle payloads establish baseline retention, not effective recovery.
+
+This is a GSQ-inspired experiment, not a reproduction of the paper's joint-scale,
+Lion, scheduled-logit and staged reconstruction optimization method.

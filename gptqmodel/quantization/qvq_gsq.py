@@ -217,6 +217,8 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
     config = normalize_gsq_config(config)
     if config is None or not config.enabled:
         raise ValueError("refine_trellis_fisher requires enabled GSQConfig")
+    if config.learn_scales:
+        raise ValueError("QVQ GSQ does not support scale learning")
     required = config.candidates * target.numel() * 4
     if required > config.max_candidate_bytes:
         raise ValueError(f"GSQ decoded candidates need {required} bytes, exceeding max_candidate_bytes="

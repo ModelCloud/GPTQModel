@@ -7264,6 +7264,8 @@ def quantize_qvq_linear(
     gsq = normalize_gsq_config(gsq)
     gsq_enabled = gsq is not None and gsq.enabled
     if gsq_enabled:
+        if gsq.learn_scales:
+            raise ValueError("QVQ GSQ does not support scale learning")
         nonbank_gsq = (not v2b2_p32 and not v2b4_p64 and not dual_v2 and bank_count == 1
                        and vector_size == 2 and trellis_window == 16 and 4 <= normalize_qvq_rate(bits) <= 8)
         if not (v2b2_p32 or nonbank_gsq) or rounding != "yaqa" or output_hessian is None:

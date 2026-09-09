@@ -59,3 +59,16 @@ def test_gsq_unsupported_combinations(kwargs):
 def test_gsq_rejects_bare_boolean():
     with pytest.raises(TypeError, match="gsq"):
         QVQConfig(gsq=True)
+
+
+def test_low_level_qvq_rejects_scale_learning():
+    import torch
+    from gptqmodel.quantization.qvq import quantize_qvq_linear
+    from gptqmodel.quantization.qvq_gsq import refine_trellis_fisher
+
+    config = GSQConfig(enabled=True, learn_scales=True)
+    with pytest.raises(ValueError, match="scale learning"):
+        quantize_qvq_linear(torch.eye(16), torch.eye(16), bits=2.5, gsq=config)
+    with pytest.raises(ValueError, match="scale learning"):
+        refine_trellis_fisher(None, target=torch.eye(16), input_hessian=torch.eye(16),
+                              output_hessian=torch.eye(16), config=config, bits=2.5)

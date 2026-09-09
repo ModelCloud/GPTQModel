@@ -245,8 +245,7 @@ def test_scalar_diagonal_metric_matches_dense():
 @pytest.mark.parametrize("invalid", [
     "bits", "weight_shape", "scale_shape", "group_shape", "group_bounds", "nan_weight",
     "zero_scale", "fractional_zero", "both_metrics", "hessian_shape", "negative_diagonal",
-    "empty_inputs", "candidate_budget", "storage_underflow", "packing", "baseline_overflow",
-    "relaxed_overflow", "hard_overflow", "device", "gradient_overflow",
+    "empty_inputs", "candidate_budget", "storage_underflow", "packing", "hard_overflow", "device",
 ])
 def test_scalar_rejects_invalid_or_nonfinite_fit(invalid):
     weight, target = torch.zeros(2, 4), torch.ones(2, 4)
@@ -283,14 +282,6 @@ def test_scalar_rejects_invalid_or_nonfinite_fit(invalid):
         scales.fill_(1e-20)
     elif invalid == "packing":
         kw["packing"] = "unverified"
-    elif invalid == "baseline_overflow":
-        weight.fill_(1)
-        target.fill_(1e-30)
-    elif invalid == "relaxed_overflow":
-        target.fill_(1e-30)
-        scales.fill_(16)
-    elif invalid == "gradient_overflow":
-        target.fill_(1e-30)
     elif invalid == "device":
         target = target.to("meta")
     elif invalid == "hard_overflow":
@@ -300,8 +291,50 @@ def test_scalar_rejects_invalid_or_nonfinite_fit(invalid):
         target.fill_(0.2)
         kw.update(scale_dtype=torch.float32,
                   config=GSQConfig(enabled=True, steps=1, learn_scales=True, learning_rate=80))
-    message = {"storage_underflow": "checkpoint dtype", "baseline_overflow": "baseline objective",
-               "relaxed_overflow": "relaxed objective", "gradient_overflow": "gradient",
+    message = {"storage_underflow": "checkpoint dtype",
                "hard_overflow": "hard objective", "device": "share a device"}.get(invalid)
     with pytest.raises(ValueError, match=message):
         refine_affine_scalar(weight, scales, zeros, groups, target=target, **kw)
+
+
+@pytest.mark.parametrize("with_hessian", [False, True])
+@pytest.mark.parametrize("learn_scales", [False, True])
+def test_zero_teacher_keeps_exact_baseline(with_hessian, learn_scales):
+    weight = torch.zeros(32, 64)
+    scales = torch.ones(32, 1)
+    zeros = torch.full_like(scales, 8)
+    groups = torch.zeros(64, dtype=torch.int32)
+    result = refine_affine_scalar(
+        weight, scales, zeros, groups, target=weight, bits=4,
+        hessian=torch.eye(64) if with_hessian else None,
+        config=GSQConfig(enabled=True, steps=3, learn_scales=learn_scales))
+    assert result.before == result.after == 0
+    assert torch.equal(result.weight, weight)
+    assert torch.equal(result.scales, scales)
+    assert torch.isfinite(torch.tensor(result.history)).all()
+
+
+def test_zero_projected_energy_preserves_asymmetric_term():
+    # Teacher lies in the nullspace of H, but W @ D is nonzero. Therefore a
+    # zero symmetric baseline score must not short-circuit asymmetric fitting.
+    weight = torch.tensor([[0.0, 1.0]])
+    result = refine_affine_scalar(
+        weight, torch.ones(1, 1), torch.full((1, 1), 8.0), torch.zeros(2, dtype=torch.int32),
+        target=weight, bits=4, hessian=torch.diag(torch.tensor([1.0, 0.0])),
+        cross_moment=torch.tensor([[0.0, 0.0], [2.0, 0.0]]),
+        config=GSQConfig(enabled=True, steps=30, learning_rate=0.5))
+    assert len(result.history) == 31
+    assert result.after < result.before
+    error = result.weight - weight
+    expected = error[0, 0].square() - 4 * error[0, 0]
+    assert result.after == pytest.approx(float(expected))
+
+
+@pytest.mark.parametrize("baseline,scale", [(1.0, 1.0), (0.0, 16.0), (0.0, 1.0)])
+def test_tiny_teacher_uses_finite_unnormalized_fit(baseline, scale):
+    result = refine_affine_scalar(
+        torch.full((2, 4), baseline), torch.full((2, 1), scale), torch.ones(2, 1),
+        torch.zeros(4, dtype=torch.int32), target=torch.full((2, 4), 1e-30), bits=4,
+        config=GSQConfig(enabled=True, steps=3))
+    assert torch.isfinite(torch.tensor(result.history)).all()
+    assert result.after <= result.before

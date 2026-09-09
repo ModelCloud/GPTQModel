@@ -160,7 +160,10 @@ def refine_affine_scalar(
             return matrix if factor is None else matrix @ factor
 
         teacher_output = project(teacher)
-        denominator = teacher_output.square().sum().clamp_min(torch.finfo(torch.float32).tiny)
+        energy = teacher_output.square().sum()
+        # Near-zero teacher energy is not a useful normalization scale. Use
+        # the unnormalized quadratic, retaining any asymmetric linear term.
+        denominator = torch.where(energy > torch.finfo(torch.float32).eps, energy, torch.ones_like(energy))
         correction = None
         if cross_moment is not None:
             if hessian is None and inputs is None:
