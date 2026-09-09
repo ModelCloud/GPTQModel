@@ -70,7 +70,7 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | AWQ GEMV/GEMV_FAST/LLM-AWQ | Format-specific scalar adapters, CPU packed-objective and native GPU fixture checks pass; real-model scale-search and propagation validation pending |
 | AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
-| GPTAQ | Original-column H/cross-moment lifecycle hook implemented; explicit native/current objective tests with activation ordering on/off; real-model export and propagation pending |
+| GPTAQ | Real F6/seed7 block-1 QKV paired inputs, config/packed reload, Torch GPU and F6 propagation pass; both GSQ arms retain baseline; complete-model exports and other rates/backends pending |
 | FOEM | Preserve first-order target; enabled GSQ remains rejected pending its dedicated adapter |
 | QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
 | ParoQuant | Fit in the learned rotation basis, preserve exported transforms and quantizer metadata |
@@ -343,3 +343,48 @@ and `scripts/audit_gptaq_gsq_regressions.py`. The three additional bypass cases
 ran in the separate 17-case focused check after that broader run started.
 These checks do not establish real-model export, GPU parity or propagated
 quality for GPTAQ GSQ; those remain open.
+
+### Real GPTAQ block-1 verification
+
+The subsequent `gptaq-block1-w4-seed7` run uses full block-1 Q/K/V, where the
+preceding F6 quantized layer produces actual upstream input error. Dense-native
+and canonical-F6 inputs are captured for identical documents and token positions.
+Their unweighted relative squared difference is 0.008006822 on the 3,767 training
+tokens and 0.009709677 on the 6,367 locked held-out tokens. The latter captures
+are used only for validation. Original seed-7 source weighting applies equally
+to both sides of the training pair.
+
+The experiment uses GPTAQ alpha 0.5, W4/group128/symmetric GPTQ v2 storage,
+activation ordering on, and GSQ seed 7 / 100 steps / candidate budget 33. Every
+packed objective is checked against the explicit activation-pair quadratic,
+including its omitted constant. Config and packed state round-trip exactly.
+Both fixed-scale and learned-scale GSQ retain every baseline tensor. All three
+arms have 3,293,184 QKV tensor bytes, identical per-document metrics, final KLD
+0.107260829, logit MSE 0.445125877, Top-1 85.597613%, Top-5 83.072090%, and Top-10
+82.622899%. Paired delta intervals are zero because the outputs are identical.
+There is no GSQ quality improvement in this run.
+
+Nine actual reloaded Torch GPU projection checks on real held-out inputs pass
+independently; worst mean/max absolute drift is 0.000294336 / 0.004081726 against
+the FP32 canonical operator, below 0.002 / 0.046875. The leased physical GPU 0 is
+the same SM80 device documented above. Final-model evaluation uses canonical
+FP32 F6 operators with only block-1 QKV replaced; this is not a full GPTAQ model
+export or a full native-kernel model run. Other rates/backends and complete-model
+exports remain pending.
+
+Evidence: [run report](../../artifacts/gsq-scalar/gptaq-block1-w4-seed7/report.json)
+and [payload/input-pair audit](../../artifacts/gsq-scalar/gptaq-block1-w4-seed7/payload-audit.json).
+Exact paired activations, native teacher logits, weights, configs and executed
+source remain locally under the run directory. The shared
+`scripts/gsq_f6_reference.py` extracts the prior runner's canonical F6 installation
+unchanged so capture and evaluation use the same operator definitions.
+
+```bash
+python -m scripts.validate_gsq_scalar_layers --prepare --method gptaq --layer 1 \
+  --output artifacts/gsq-scalar/gptaq-block1-w4-seed7
+python -m gpu_allocator.cli run -n 1 --style uuid -- \
+  python -m scripts.validate_gsq_scalar_layers --method gptaq --layer 1 \
+  --output artifacts/gsq-scalar/gptaq-block1-w4-seed7
+python -m scripts.analyze_gsq_scalar_results artifacts/gsq-scalar/gptaq-block1-w4-seed7 \
+  --output artifacts/gsq-scalar/gptaq-block1-w4-seed7/payload-audit.json
+```

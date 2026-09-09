@@ -13,6 +13,7 @@ import time
 import types
 from pathlib import Path
 
+from scripts.gsq_f6_reference import install_f6
 from scripts.validate_qvq_gsq_layers import ROOT, SNAPSHOT, TARGETS, digest, prepare as prepare_inputs, write_json
 
 
@@ -25,6 +26,7 @@ def prepare(args):
     prepare_inputs(args)
     provenance = json.loads((args.output / "provenance.json").read_text())
     sources = [Path(__file__), ROOT / "scripts/validate_qvq_gsq_layers.py",
+               ROOT / "scripts/gsq_f6_reference.py", ROOT / "gptqmodel/quantization/gptaq.py",
                ROOT / "gptqmodel/quantization/config.py", ROOT / "gptqmodel/quantization/gsq_scalar.py",
                ROOT / "gptqmodel/quantization/gptq.py", ROOT / "gptqmodel/quantization/rtn.py",
                ROOT / "gptqmodel/nn_modules/qlinear/__init__.py", ROOT / "gptqmodel/nn_modules/qlinear/torch.py"]
@@ -41,6 +43,7 @@ def prepare(args):
     provenance.update({
         "experiment": "scalar-qkv-lifecycle", "method": args.method, "bits": args.bits,
         "group_size": args.group_size, "arms": ARMS,
+        "layer": args.layer, "gptaq_alpha": args.gptaq_alpha,
         "scope": "full QKV projections; GPTQ v2 packing; Torch GPU layer checks; F6 canonical full-model propagation",
         "source_code": {str(p): digest(p) for p in sources},
         "inputs_sha256": digest(args.output / "inputs.json"),
@@ -57,8 +60,10 @@ def prepare(args):
 
 
 def execute(args):
+    targets = [n.replace("layers.0.", f"layers.{args.layer}.") for n in TARGETS]
     provenance = json.loads((args.output / "provenance.json").read_text())
     expected = {"method": args.method, "bits": args.bits, "group_size": args.group_size,
+                "layer": args.layer, "gptaq_alpha": args.gptaq_alpha,
                 "steps": args.steps, "candidate_count": args.candidates,
                 "dense": str(args.dense), "snapshot": str(args.snapshot)}
     if args.method == "awq":
@@ -91,7 +96,6 @@ def execute(args):
         time.sleep(1)
 
     import torch
-    from safetensors import safe_open
     from transformers import AutoModelForCausalLM
 
     from gptqmodel import BACKEND
@@ -103,8 +107,7 @@ def execute(args):
     from gptqmodel.quantization.awq.quantize.scale import apply_clip
     from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
     from gptqmodel.quantization.gptq import GPTQ
-    from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
-    from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
+    from gptqmodel.quantization.gptaq import GPTAQ
     from gptqmodel.quantization.rtn import RTN
     from scripts.p32_twenty.scorecard import logits_metrics
 
@@ -121,11 +124,11 @@ def execute(args):
     model = AutoModelForCausalLM.from_pretrained(
         args.dense, dtype=torch.float32, device_map={"": "cuda:0"},
         attn_implementation="eager", local_files_only=True).eval().requires_grad_(False)
-    weights = {name: model.get_submodule(name).weight.detach().clone() for name in TARGETS}
-    captures = {name: {"train": [], "heldout": []} for name in TARGETS}
+    weights = {name: model.get_submodule(name).weight.detach().clone() for name in targets}
+    captures = {name: {"train": [], "heldout": []} for name in targets}
     split = "train"
     hooks = []
-    for name in TARGETS:
+    for name in targets:
         def capture(module, values, name=name):
             captures[name][split].append(values[0].detach().reshape(-1, values[0].shape[-1]).clone())
         hooks.append(model.get_submodule(name).register_forward_pre_hook(capture))
@@ -145,30 +148,56 @@ def execute(args):
     for hook in hooks:
         hook.remove()
 
+    propagated = None
+    if args.method == "gptaq":
+        report.update(install_f6(model, args.snapshot / "qvq-p32"))
+        propagated = {n: {"train": [], "heldout": []} for n in targets}
+        hooks = []
+        for name in targets:
+            def capture_propagated(module, values, name=name):
+                propagated[name][split].append(values[0].detach().reshape(-1, values[0].shape[-1]).clone())
+            hooks.append(model.get_submodule(name).register_forward_pre_hook(capture_propagated))
+        with torch.inference_mode():
+            for split in ("train", "heldout"):
+                for i, row in enumerate(data[split]):
+                    model.model(torch.tensor([row["input_ids"]], device="cuda"), use_cache=False)
+                    print("PROPAGATED", split, i+1, flush=True)
+        for hook in hooks:
+            hook.remove()
+
     decoded_arms = {arm: {} for arm in ARMS}
     awq = torch.load(args.awq_calibration / "calibration.pt", weights_only=True) if args.method == "awq" else None
-    for name in TARGETS:
+    for name in targets:
         dense = weights[name]
         out_features, in_features = dense.shape
         x = torch.cat([value * provenance["train_source_weights"][row["source_name"]]**0.5
                        for value, row in zip(captures[name]["train"], data["train"], strict=True)])
         fitting_weight = dense.half()
+        native_x = x
+        if propagated is not None:
+            x = torch.cat([v * provenance["train_source_weights"][row["source_name"]]**0.5
+                           for v, row in zip(propagated[name]["train"], data["train"], strict=True)])
         if awq is not None:
             relative = name.removeprefix("model.layers.0.")
             fitting_weight = awq["scaled_block"][relative + ".weight"].cuda()
             x = torch.cat(awq["features"]["train"], dim=1)[0].cuda() / awq["scale"].cuda()
         torch.save({"weight": dense.cpu(), "train": [v.cpu() for v in captures[name]["train"]],
-                    "heldout": [v.cpu() for v in captures[name]["heldout"]]}, args.output / f"{name}.inputs.pt")
+                    "heldout": [v.cpu() for v in captures[name]["heldout"]],
+                    "propagated": None if propagated is None else
+                    {s: [v.cpu() for v in values] for s, values in propagated[name].items()}},
+                   args.output / f"{name}.inputs.pt")
         report["layers"][name] = {"shape": list(dense.shape), "arms": {}}
         for arm in ARMS:
             report["state"] = f"quantizing {name}/{arm}"
             write_json(args.output / "report.json", report)
             gsq = None if arm == "baseline" else GSQConfig(
                 enabled=True, steps=args.steps, candidates=args.candidates, seed=7, learn_scales=arm == "gsq_scales")
-            cls, cfg_cls = (GPTQ, GPTQConfig) if args.method == "gptq" else (RTN, RTNConfig)
+            cls, cfg_cls = (GPTQ, GPTQConfig) if args.method in ("gptq", "gptaq") else (RTN, RTNConfig)
             common = dict(bits=args.bits, group_size=args.group_size, format=FORMAT.GPTQ_V2, gsq=gsq)
-            if args.method == "gptq":
+            if args.method in ("gptq", "gptaq"):
                 common.update(desc_act=True, act_group_aware=False, hessian={"length_aware": False})
+            if args.method == "gptaq":
+                common["gptaq"] = {"alpha": args.gptaq_alpha}
             cfg = cfg_cls(**common)
             if awq is not None:
                 cfg = AWQConfig(bits=4, group_size=128, sym=False, format=FORMAT.GEMM, gsq=gsq)
@@ -198,8 +227,13 @@ def execute(args):
                 duration = time.perf_counter()-started
                 task.gsq_diagnostics = named.state.get("gsq_diagnostics")
             else:
-                task = cls(layer, qcfg=restored_cfg)
-                if args.method == "gptq":
+                if args.method == "gptaq":
+                    named = NamedModule(layer, name=name.rsplit(".", 1)[-1], full_name=name, layer_index=args.layer)
+                    named.state["native_inp"] = [native_x.clone()]
+                    task = GPTAQ(named, qcfg=restored_cfg)
+                else:
+                    task = cls(layer, qcfg=restored_cfg)
+                if args.method in ("gptq", "gptaq"):
                     task.quantizer.configure(perchannel=True)
                     task.add_batch(x, None)
                 wq, scales, zeros, groups, duration, *_ = task.quantize()
@@ -235,6 +269,8 @@ def execute(args):
             decoded_arms[arm][name] = canonical
             restored = restored.cuda().eval()
             sample = captures[name]["heldout"][0][:16].half()
+            if propagated is not None:
+                sample = propagated[name]["heldout"][0][:16].half()
             if awq is not None:
                 sample = awq["runtime_scaled_features"]["heldout"][0][0, :16].cuda()
             with torch.inference_mode():
@@ -249,13 +285,20 @@ def execute(args):
             for row_index, inputs in enumerate(captures[name]["heldout"]):
                 target = inputs @ dense.T
                 deployed_inputs = inputs if awq is None else awq["runtime_scaled_features"]["heldout"][row_index][0].cuda().float()
+                if propagated is not None:
+                    deployed_inputs = propagated[name]["heldout"][row_index]
                 error = deployed_inputs @ canonical.T - target
                 local_rows.append({"tokens": len(inputs), "mse": error.square().mean().item(),
                                    "nmse": (error.square().sum()/target.square().sum()).item()})
             packed_objective_target = fitting_weight.float()
-            metric_inputs = x.float() if args.method in ("gptq", "awq") else torch.eye(in_features, device="cuda")
+            metric_inputs = x.float() if args.method in ("gptq", "gptaq", "awq") else torch.eye(in_features, device="cuda")
             packed_loss = float(((canonical-packed_objective_target) @ metric_inputs.T).square().sum() /
                                 (packed_objective_target @ metric_inputs.T).square().sum())
+            if propagated is not None:
+                error = (canonical-packed_objective_target) @ x.T
+                residual = args.gptaq_alpha * packed_objective_target @ (native_x-x).T
+                packed_loss = float((error.square().sum()-2*(error*residual).sum()) /
+                                    (packed_objective_target @ x.T).square().sum())
             diagnostics = getattr(task, "gsq_diagnostics", None)
             objective_match = diagnostics is None or abs(packed_loss-diagnostics["after"]) <= max(1e-8, packed_loss*1e-4)
             record = {"quantize_seconds": duration, "gsq": diagnostics, "packed_objective": packed_loss,
@@ -270,50 +313,12 @@ def execute(args):
             del task, layer, packed, restored, wq, scales, zeros, groups, linear
         del x
 
-    snapshot = args.snapshot / "qvq-p32"
-    index = json.loads((snapshot / "model.safetensors.index.json").read_text())["weight_map"]
-    cfg = json.loads((snapshot / "quantize_config.json").read_text())
-
-    def read(name):
-        with safe_open(str(snapshot / index[name]), framework="pt") as handle:
-            return handle.get_tensor(name).cuda()
-
-    class CanonicalQVQ(torch.nn.Module):
-        def __init__(self, inner, su, sv):
-            super().__init__()
-            self.register_buffer("inner", inner.float())
-            self.register_buffer("su", su.float())
-            self.register_buffer("sv", sv.float())
-
-        def forward(self, inputs):
-            return matmul_hadU(matmul_hadU(inputs.float()*self.su) @ self.inner)*self.sv
-
-    with torch.no_grad():
-        for name, param in model.named_parameters():
-            if name in index:
-                param.copy_(read(name))
-    if cfg.get("activation") or cfg.get("incoherence") != "rht":
-        raise ValueError("Unsupported F6 transform")
-    for name in sorted(index):
-        if not name.endswith(".trellis"):
-            continue
-        prefix = name[:-8]
-        trellis, su, sv = [read(prefix + "." + suffix) for suffix in ("trellis", "SU", "SV")]
-        p32 = prefix + ".bank_alt_id" in index
-        bank = read(prefix + ".bank_ids") if prefix + ".bank_ids" in index else None
-        alt = read(prefix + ".bank_alt_id") if p32 else None
-        inner = reconstruct_qvq_inner_weight(
-            trellis, bits=trellis.shape[-1]/8, in_features=su.numel(), out_features=sv.numel(),
-            bank_ids=bank, bank_alt_id=alt, codebook_version=cfg["codebook"], v2b2_p32=p32)
-        parent, leaf = prefix.rsplit(".", 1)
-        setattr(model.get_submodule(parent), leaf, CanonicalQVQ(inner, su, sv))
-    report["snapshot_quantized_modules"] = sum(name.endswith(".trellis") for name in index)
-    report["snapshot_p32_modules"] = sum(name.endswith(".bank_alt_id") for name in index)
+    report.update(install_f6(model, args.snapshot / "qvq-p32"))
     if awq is not None:
         model.model.layers[0].input_layernorm.weight.data.copy_(awq["scaled_block"]["input_layernorm.weight"])
 
     for arm in ARMS:
-        for name in TARGETS:
+        for name in targets:
             weight = decoded_arms[arm][name]
             linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False, device="cuda", dtype=torch.float32)
             linear.weight.data.copy_(weight)
@@ -356,7 +361,9 @@ def execute(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true")
-    parser.add_argument("--method", choices=("gptq", "rtn", "awq"), required=True)
+    parser.add_argument("--method", choices=("gptq", "gptaq", "rtn", "awq"), required=True)
+    parser.add_argument("--layer", type=int, default=0)
+    parser.add_argument("--gptaq-alpha", type=float, default=0.5)
     parser.add_argument("--awq-calibration", type=Path)
     parser.add_argument("--bits", type=int, choices=(2, 3, 4, 8), default=4)
     parser.add_argument("--group-size", type=int, default=128)
@@ -369,6 +376,8 @@ def main():
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--candidates", type=int, default=33)
     args = parser.parse_args()
+    if args.layer < 0 or (args.method == "awq" and args.layer != 0):
+        parser.error("require nonnegative layer; prepared AWQ fixture is block 0 only")
     if args.method == "awq" and (args.awq_calibration is None or args.bits != 4 or args.group_size != 128):
         parser.error("AWQ experiment requires --awq-calibration, W4 and group size 128")
     if args.train_rows < 2 or args.train_rows % 2 or args.eval_rows < 2 or args.tokens < 2:

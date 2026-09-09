@@ -22,10 +22,24 @@ def analyze(directory):
     result = {"report_sha256": digest(path), "method": report["provenance"]["method"],
               "bits": report["provenance"]["bits"], "layers": {}, "model": report["model"],
               "paired_intervals": report["paired_intervals"], "tensor_bytes": {a: 0 for a in arms}}
+    result["paired_input_shift"] = {}
     bits = result["bits"]
     if bits not in (2, 4, 8):
         raise ValueError("Logical-code difference audit currently supports non-straddling 2/4/8-bit words")
     for name, layer in report["layers"].items():
+        if result["method"] == "gptaq":
+            inputs = torch.load(directory / f"{name}.inputs.pt", weights_only=True, map_location="cpu")
+            result["paired_input_shift"][name] = {}
+            for split in ("train", "heldout"):
+                native = torch.cat(inputs[split]).float()
+                propagated = torch.cat(inputs["propagated"][split]).float()
+                if native.shape != propagated.shape or not torch.isfinite(propagated).all():
+                    raise ValueError("Invalid paired activations")
+                result["paired_input_shift"][name][split] = {
+                    "tokens": len(native), "relative_squared_error":
+                        float((native-propagated).square().sum()/native.square().sum()),
+                }
+            del inputs, native, propagated
         baseline = torch.load(directory / f"{name}.baseline.pt", map_location="cpu", weights_only=True)
         result["layers"][name] = {}
         for arm in arms:
@@ -51,8 +65,10 @@ def analyze(directory):
                 "tensor_bytes": tensor_bytes, "changed_codes": changed_codes,
                 "changed_scales": int((state["scales"] != baseline["scales"]).count_nonzero()),
                 "all_tensors_equal_baseline": all(torch.equal(v, baseline[k]) for k, v in state.items()),
-                "objective_reduction_percent": None if diagnostics is None else
+                "objective_reduction_percent": None if diagnostics is None or diagnostics["before"] == 0 or
+                    diagnostics["objective"] == "asymmetric_quadratic_without_constant" else
                     100*(1-diagnostics["after"]/diagnostics["before"]),
+                "objective_delta": None if diagnostics is None else diagnostics["after"]-diagnostics["before"],
                 "runtime_parity": record["runtime_parity"],
             }
     if len(set(result["tensor_bytes"].values())) != 1:
