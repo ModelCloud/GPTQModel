@@ -1,69 +1,0 @@
-
-INFO  LogBar: headless/CI mode; progress animations disabled.                   
-INFO  GPUAllocatorClient initialized: base_url=http://127.0.0.1:17351 session_id=pid-2963441
-INFO  POST /allocate: count=1 timeout=None exclusive=True reason=None           
-INFO  Allocated lease 444238c50ace429f847dbcfdeefe83ba with 1 GPU(s) for session pid-2963441
-IDLE GPU-737e2423-874a-23a4-1126-dfbe3e77c294, 0, 0
-IDLE GPU-737e2423-874a-23a4-1126-dfbe3e77c294, 0, 0
-IDLE GPU-737e2423-874a-23a4-1126-dfbe3e77c294, 0, 0
-
-INFO  LogBar: headless/CI mode; progress animations disabled.                   
-WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
-INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
-INFO  
-
-┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
-│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
-└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
-GPT-QModel   : 7.4.0+ultra+548d883e7
-Transformers : 5.15.0
-Torch        : 2.15.0.dev20260817+cu130
-Triton       : 3.8.0+gitdf3f91dd
-/root/polly-work/qvq-gsq/scripts/check_gsq_author_parity.py:56: UserWarning: Converting a tensor with requires_grad=True to a scalar may lead to unexpected behavior.
-Consider using tensor.detach() first. (Triggered internally at /__w/pytorch/pytorch/torch/csrc/autograd/generated/python_variable_methods.cpp:820.)
-  row[name] = float((a.float()-b.float()).abs().max())
-[
-  {
-    "bits": 2,
-    "dtype": "torch.float32",
-    "forward": 0.0,
-    "logit_gradient": 1.4901161193847656e-07,
-    "scale_gradient": 0.0
-  },
-  {
-    "bits": 2,
-    "dtype": "torch.bfloat16",
-    "forward": 0.0,
-    "logit_gradient": 0.009765625,
-    "scale_gradient": 0.0
-  },
-  {
-    "bits": 3,
-    "dtype": "torch.float32",
-    "forward": 0.0,
-    "logit_gradient": 2.682209014892578e-07,
-    "scale_gradient": 0.0
-  },
-  {
-    "bits": 3,
-    "dtype": "torch.bfloat16",
-    "forward": 0.0,
-    "logit_gradient": 0.013671875,
-    "scale_gradient": 0.0
-  },
-  {
-    "bits": 4,
-    "dtype": "torch.float32",
-    "forward": 0.0,
-    "logit_gradient": 5.755573511123657e-07,
-    "scale_gradient": 0.0
-  },
-  {
-    "bits": 4,
-    "dtype": "torch.bfloat16",
-    "forward": 0.0,
-    "logit_gradient": 0.03125,
-    "scale_gradient": 0.0
-  }
-]
-INFO  POST /release: lease_id=444238c50ace429f847dbcfdeefe83ba                  

@@ -1,22 +1,0 @@
-
-INFO  LogBar: headless/CI mode; progress animations disabled.                   
-WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
-INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
-INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.           
-W0909 09:23:21.579000 2948703 torch/utils/cpp_extension.py:183] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
-INFO  
-
-┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
-│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
-└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
-GPT-QModel   : 7.4.0+ultra+548d883e7
-Transformers : 5.15.0
-Torch        : 2.15.0.dev20260817+cu130
-Triton       : 3.8.0+gitdf3f91dd
-self_attn.q_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 5.74332630065566e-11}
-self_attn.k_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 9.510213450081295e-11}
-self_attn.v_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 3.3472541145079804e-12}
-self_attn.o_proj {'assignment_mismatches': 0, 'negative_scales': 1, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 5.32153401205937e-12}
-mlp.gate_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 1.3957812336484743e-11}
-mlp.up_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 1.1449856687772986e-11}
-mlp.down_proj {'assignment_mismatches': 0, 'negative_scales': 0, 'zero_stored_scales': 0, 'scale_storage_dtype': 'torch.float16', 'decoded_weight_mse': 1.1856749956851154e-11}
