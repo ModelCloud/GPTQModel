@@ -8,6 +8,7 @@ No production quantization dispatch uses this helper.
 
 import math
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 
@@ -38,6 +39,7 @@ def refine_p32_candidates(
     temperature_start: float = 1.0,
     temperature_end: float = 0.1,
     seed: int = 0,
+    progress: Callable[[int, float], None] | None = None,
 ) -> P32GSQResult:
     """Fit tile choices using calibration-only activation reconstruction loss.
 
@@ -109,5 +111,7 @@ def refine_p32_candidates(
                 history.append(hard_loss)
                 if hard_loss < best:
                     best, best_choices = hard_loss, choices.clone()
+                if progress is not None:
+                    progress(step + 1, best)
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
     return P32GSQResult(words, best_choices, before, best, history)

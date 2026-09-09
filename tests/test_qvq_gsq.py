@@ -7,8 +7,10 @@ from gptqmodel.quantization.qvq import (
     decode_p32_window_tiles,
     repack_p32_planar_to_window,
     repack_p32_window_to_planar,
+    rht_preprocess_weight,
 )
 from gptqmodel.quantization.qvq_gsq import refine_p32_candidates
+from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
 
 
 @pytest.mark.parametrize("bits", [1, 1.5, 2, 2.5, 3, 3.5])
@@ -48,3 +50,20 @@ def test_reject_nonfinite_and_noop():
     kwargs["target"][0, 0] = float("nan")
     with pytest.raises(ValueError, match="finite"):
         refine_p32_candidates(candidates, **kwargs)
+
+
+def test_full_layer_inner_objective_matches_deployed_output():
+    """The real-layer fitter may use inner NMSE only with constant |SV|."""
+    gen = torch.Generator().manual_seed(7)
+    weight = torch.randn(32, 64, generator=gen)
+    inputs = torch.randn(40, 64, generator=gen)
+    su = torch.where(torch.arange(64) % 2 == 0, 1.0, -1.0)
+    sv = torch.where(torch.arange(32) % 2 == 0, 0.125, -0.125)
+    target = rht_preprocess_weight(weight, su.reciprocal(), sv.reciprocal())
+    transformed = matmul_hadU(inputs * su)
+    teacher = inputs @ weight.T
+    torch.testing.assert_close(matmul_hadU(transformed @ target) * sv, teacher, atol=1e-5, rtol=1e-5)
+    candidate = target + torch.randn(target.shape, generator=gen) * 0.1
+    inner_nmse = (transformed @ (candidate - target)).square().sum() / (transformed @ target).square().sum()
+    deployed_nmse = (matmul_hadU(transformed @ candidate) * sv - teacher).square().sum() / teacher.square().sum()
+    torch.testing.assert_close(inner_nmse, deployed_nmse)

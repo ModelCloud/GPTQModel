@@ -44,7 +44,36 @@ serialized costs, respect backend-supported rates, and enforce feasibility after
 hard assignment; an expected soft budget is insufficient. Keep this independent
 of GSQ until each arm has a measured control.
 
+### Proposed lifecycle insertion
+
+The intended lifecycle is: prepare the existing calibration/Hessian inputs;
+apply F6's RHT and rate-specific YAQA initialization; finalize the selected
+baseline scales and banks; optionally refine valid P32 assignments using the
+calibration objective; harden and validate the proposal; pack and save through
+the existing format; verify reload and independent propagated quality.
+
+In source terms, `QVQProcessor` calls `quantize_qvq_linear`. The latter selects
+`quantized_inner`, `states`, `selected_bank_ids`, `selected_bank_alt_id`, and
+SU/SV before its `pack_trellis` phase. A future integration must update this
+entire consistent state together before final packing, after any stage that
+would overwrite its selected scales or assignments. A window-only experimental
+proposal must be converted back through the existing planar/state APIs; replacing
+only a dense reconstructed weight would not change the saved checkpoint.
+
+The experiment currently runs after loading an already quantized snapshot.
+It tests the refinement idea with the same deployed representation, not a new
+end-to-end quantization lifecycle. Its rollout must remain opt-in until full
+module/model evidence and generic load/inference checks pass. Calibration-only
+hard-loss rollback is a local fitting guard, not a production quality gate.
+Any recovery factors or runtime caches bound to changed weights must be rebuilt.
+
 ## Initial validation
+
+The later [complete F6/S7 QKV verification](../docs/experiments/gsq-p32-f6-seed7-full-qkv.md)
+uses the original calibration corpus, complete real projections, and full-model
+KLD/MSE/Top-N propagation. It supersedes the slice as decision evidence: the
+full-model KLD improvement is only about 0.177%, with noise-consistent GSQ-inspired
+Top-N changes. Neither method is promoted.
 
 `scripts/validate_qvq_gsq.py` uses the published local F6 snapshot and dense
 Llama 3.2 1B weights. It captures first-layer q_proj inputs directly from real

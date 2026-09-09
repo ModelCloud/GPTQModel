@@ -13,6 +13,10 @@ instructions below are archival, not branch starting points.
   planar/window round-trip, reload and nonfinite rejection.
 - [x] Start real Llama 3.2 1B W2 P32 validation on disjoint refinement documents,
   including a matched hard-search control; see the research note for scope.
+- [x] Verify complete F6/S7 block-0 Q/K/V projections using the original
+  calibration corpus and locked full-model KLD/MSE/Top-1/5/10 evaluation:
+  [results](experiments/gsq-p32-f6-seed7-full-qkv.md). Small KLD benefit only;
+  no default promotion.
 - [ ] Extend candidate coverage and learn existing representable scales; compare
   assignment-only, scale-only, combined and deterministic-search arms.
 - [ ] Validate full modules and propagated final-logit KL / Top-1/5/10 on larger
