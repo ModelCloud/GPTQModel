@@ -127,8 +127,8 @@ def scalar_training_candidates(weight, scales, group_size, *, bits, std=.01, str
     rows, columns = weight.shape
     groups = torch.arange(columns, device=weight.device) // group_size
     if (scales.shape != (rows, (columns+group_size-1)//group_size) or scales.device != weight.device
-            or not torch.isfinite(scales).all() or (scales <= 0).any()):
-        raise ValueError('GSQ initializer requires matching positive finite scales')
+            or not torch.isfinite(scales).all() or (scales == 0).any()):
+        raise ValueError('GSQ initializer requires matching nonzero finite scales')
     initial = weight / scales[:, groups]
     if bits == 2:
         levels = torch.arange(-2, 2, dtype=weight.dtype, device=weight.device)[:, None, None]
@@ -189,7 +189,8 @@ class GSQScalarTrainingModule(torch.nn.Module):
                 {'params': [self.scales], 'lr': scale_lr, 'weight_decay': 0.}]
 
 
-def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_weights=None, output_select=None):
+def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_weights=None, output_select=None,
+                              output_mask=None):
     """Evaluate an actual stage with differentiable weight substitutions.
 
     The caller chooses the stage module/output (linear, attention-to-MLP, or
@@ -212,6 +213,14 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
     student = student if output_select is None else output_select(student)
     if not isinstance(student, torch.Tensor) or not isinstance(teacher, torch.Tensor):
         raise ValueError('GSQ stage requires tensor outputs or an output selector')
+    if output_mask is not None:
+        if (not isinstance(output_mask, torch.Tensor) or output_mask.dtype != torch.bool
+                or output_mask.shape != student.shape[:-1] or output_mask.device != student.device
+                or not output_mask.any()):
+            raise ValueError('GSQ output mask must select valid tokens with an aligned boolean tensor')
+        # Select before subtraction: excluded padding cannot affect the loss
+        # denominator or introduce nonfinite arithmetic into reconstruction.
+        student, teacher = student[output_mask], teacher[output_mask]
     return torch.nn.functional.mse_loss(student, teacher)
 
 
@@ -296,6 +305,9 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     """
     if not quantizers or not batches or isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
         raise ValueError('GSQ stage fitting requires quantizers, batches and positive epochs')
+    import time
+
+    started = time.perf_counter()
     groups = []
     for quantizer in quantizers.values():
         groups.extend(quantizer.optimizer_groups(assignment_lr=assignment_lr, scale_lr=scale_lr,
@@ -322,13 +334,18 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 logging.getLogger(__name__).info("GSQ stage update %d/%d loss=%g", step+1, total_steps, loss)
             history.append(dict(epoch=epoch, step=step, batch=index, loss=loss, temperature=tau,
                                 multiplier=kappa, learning_rates=[group['lr'] for group in optimizer.param_groups]))
-    return dict(weights={name: quantizer.hard_weight().detach().clone() for name, quantizer in quantizers.items()},
-                scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
-                history=history)
+    result = dict(weights={name: quantizer.hard_weight().detach().clone() for name, quantizer in quantizers.items()},
+                  scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
+                  history=history)
+    if device.type == 'cuda':
+        torch.cuda.synchronize(device)
+    result['elapsed_seconds'] = time.perf_counter()-started
+    return result
 
 
 def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, seed=7,
-                     qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, **training):
+                     qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, initializer='gptq',
+                     batch_size=1, microbatch_size=1, **training):
     """Fit a Llama block in author stage order from supplied scalar initializers.
 
     Batches are (hidden_states, attention_kwargs) pairs without padding. Caller
@@ -337,6 +354,15 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     """
     import copy
 
+    if initializer not in ('gptq', 'gptq_signed'):
+        raise ValueError('Unknown staged GPTQ initializer')
+    for value in (batch_size, microbatch_size):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError('GSQ batch sizes must be positive integers')
+    if microbatch_size > batch_size:
+        raise ValueError('GSQ microbatch size exceeds optimizer batch size')
+    if (batch_size != 1 or microbatch_size != 1) and layer.self_attn.config._attn_implementation != 'eager':
+        raise ValueError('Batched staged GSQ currently requires eager Llama attention')
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
@@ -359,9 +385,9 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         quantizers = {name+'.weight': quantizer(name) for name in selected}
 
         def objective(batch, weights):
-            inputs, kwargs = batch
+            inputs, kwargs, mask = batch
             return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
-                                             teacher_weights=teacher)
+                                             teacher_weights=teacher, output_mask=mask)
         result = fit_reconstruction_stage(quantizers, stage_batches, objective,
                                           epochs=epochs, seed=seed, **training)
         with torch.no_grad():
@@ -384,12 +410,18 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         with torch.no_grad():
             projection.weight.copy_(result['weights']['weight'])
         records[name] = result
-    staged_batches = [[((hidden, kwargs), hidden.numel())] for hidden, kwargs in batches]
+    if batch_size == microbatch_size == 1:
+        staged_batches = [[((hidden, kwargs, None), hidden.numel())] for hidden, kwargs in batches]
+    else:
+        from .gsq_batching import llama_stage_batches
+
+        staged_batches = llama_stage_batches(batches, batch_size=batch_size, microbatch_size=microbatch_size)
     run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches, teacher_attention)
     mlp_metadata = None
     if reinitialize_mlp:
         refreshed, mlp_metadata = initialize_llama_gptq(fitted, batches, bits=bits, group_size=group_size,
-                                                       damp_percent=qk_damp_percent, projections=names[4:])
+                                                       damp_percent=qk_damp_percent, projections=names[4:],
+                                                       initializer=initializer)
         initializers.update(refreshed)
     run('mlp', fitted, names[4:], staged_batches, teacher_attention)
     records['mlp']['initializer_timing'] = 'after_attention' if reinitialize_mlp else 'before_attention'
@@ -397,7 +429,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     return fitted, records
 
 
-def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, projections=None):
+def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, projections=None, initializer='gptq'):
     """Capture real projection inputs and prepare symmetric GPTQ stage seeds.
 
     This initializer uses this repository's GPTQ, not the author's fork. Its
@@ -410,6 +442,8 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
 
     if bits not in (2, 3, 4) or not batches:
         raise ValueError('Staged Llama GPTQ requires W2/W3/W4 and calibration batches')
+    if initializer not in ('gptq', 'gptq_signed'):
+        raise ValueError('Unknown staged GPTQ initializer')
     working = copy.deepcopy(layer).eval()
     tasks, handles = {}, []
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
@@ -421,9 +455,14 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
     try:
         for name in names:
             module = working.get_submodule(name)
+            prior = dict(mse=2.4, scale_search='mse') if initializer == 'gptq_signed' else {}
             config = GPTQConfig(bits=bits, group_size=group_size, sym=True, desc_act=False,
-                                damp_percent=damp_percent, gsq=None, act_group_aware=False)
+                                damp_percent=damp_percent, gsq=None, act_group_aware=False, **prior)
             task = GPTQ(module, config)
+            if initializer == 'gptq_signed':
+                from .gsq_initialization import SignedGSQQuantizer
+
+                task.quantizer = SignedGSQQuantizer(config)
             task.quantizer.configure(perchannel=True)
             tasks[name] = task
 
@@ -549,7 +588,7 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
     if not isinstance(pack, bool):
         raise TypeError('pack must be boolean')
     initializers, metadata = initialize_llama_gptq(layer, batches, bits=bits, group_size=group_size,
-                                                  damp_percent=gsq.damp_percent)
+                                                  damp_percent=gsq.damp_percent, initializer=gsq.initializer)
     if gsq.enabled:
         fitted, records = fit_llama_stages(layer, initializers, batches, bits=bits, group_size=group_size,
                                            **gsq.training_kwargs())

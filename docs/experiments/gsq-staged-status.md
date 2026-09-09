@@ -1,9 +1,71 @@
+> W4 retest: both full models completed with exact public reload on all 32 held-out documents. GSQ regresses KL (0.278840 → 0.384085), MSE (0.892304 → 1.145021), and Top-1/5/10 agreement (77.509/74.965/75.104% → 73.504/70.950/71.313%). All five paired 95% bootstrap intervals are unfavorable and exclude zero. Full Platinum completed: dense 593/1209 (49.05%), W4 GPTQ 460/1209 (38.05%), W4 GSQ 417/1209 (34.49%). Paired GSQ delta -3.56 points, 95% interval [-6.37, -0.74]. Exact prompts/targets/token IDs match. This is a clear task regression. Both arms use 128 documents, five epochs, seed 7 and matched signed initialization.
+
 # Staged scalar GSQ: implementation and validation status
 
 This branch contains an experimental Llama staged trainer, not a completed paper
 reproduction or a promoted default. It is not yet wired into public GPTQ/AWQ
 quantization configuration. The existing independent-projection GSQ fitter remains
 separate and optional.
+
+The current user-selected full-model experiment uses **128 calibration documents
+and five attention/MLP epochs**, seed 7, W2/group128, signed GPTQ initialization,
+batch 64 and microbatch 16. Q/K retain 2,000 updates per projection. Both complete
+16-layer models have finished quantization and pass exact public save/reload logits
+on all 32 held-out documents. The 128 documents contain 47,005 tokens and pass
+question-disjointness checks against D300 and all 1,209 Platinum questions.
+
+| Held-out final-logit metric | GPTQ prior only | Staged GSQ | Paired classification |
+|---|---:|---:|---|
+| KL to dense teacher | 4.464245 | 5.923538 | Clear negative |
+| MSE | 7.857785 | 10.020153 | Clear negative |
+| Top-1 agreement | 22.8208% | 16.3185% | Clear negative |
+| Top-5 agreement | 23.3328% | 15.5081% | Clear negative |
+| Top-10 agreement | 24.2061% | 15.8929% | Clear negative |
+
+All five 95% paired document-bootstrap intervals exclude zero in the unfavorable
+direction (10,000 draws, seed 7, token-weighted means). This is a failed recovery
+experiment. The baseline is the staged-path signed initializer, not the package's
+default true-sequential GPTQ recipe. FP32 training and token-weighted variable-length
+microbatches remain differences from a complete author-procedure reproduction.
+
+The five-epoch full run took 879.96 seconds. Synchronized stage wall times sum to
+573.68 seconds: Q 216.05, K 74.46, attention 59.47, MLP 223.71. The remaining time
+includes initialization, capture, export and evaluation; it has not been attributed
+by a kernel profiler. These are run timings, not a matched speedup measurement.
+
+Full Platinum evaluation completed with exact three-arm rendered prompts, targets
+and input token IDs verified:
+
+| Arm | Correct / 1,209 | Accuracy | Invalid numeric answers |
+|---|---:|---:|---:|
+| Dense FP16 | 593 | 49.0488% | 0 |
+| Signed GPTQ prior only | 0 | 0.0000% | 1,170 |
+| Staged GSQ, five epochs | 20 | 1.6543% | 482 |
+
+The paired task gain is +1.6543 percentage points (95% bootstrap interval
++0.9926 to +2.3987 points, 10,000 draws, seed 7). This is a clear positive task
+effect relative to a collapsed baseline, alongside clear negative held-out logit
+metrics. Absolute task quality remains severely degraded versus dense; this does
+not justify promotion or a general recovery claim. The strict audit also verifies
+matching evaluator source/settings, all 1,209 ordered examples, and calibration
+hash binding for both quantized models. Quantization logs, raw predictions and
+evaluation logs are preserved.
+
+Current artifacts are under `artifacts/gsq-staged/`:
+`nm128-seed7-v1`, `full-model-w2-nm128-signed-{baseline,staged,comparison}-v1`,
+and `gsm8k-platinum-nm128-signed-v1`.
+
+Historical calibration: the earlier 16-document runs below are failed preliminary
+experiments. The subsequent 512-document singleton run was superseded and stopped
+at user request; its logs and completed baseline remain preserved. Neither is the
+current requested 128-document/five-epoch comparison.
+
+The opt-in `GSQTrainingConfig(initializer='gptq_signed')` adds the author's signed,
+exponent-2.4 group-scale prior to repository GPTQ and late MLP initialization.
+CPU W2/W3/W4 integer assignments match the author on a real 32x256 projection slice
+using all 512 NM documents, with maximum weight differences at most 7.2e-7.
+The current full models exercise signed initialization on GPU and public reload;
+independent author-versus-adapter CUDA prior parity remains unverified.
 
 The staged path implements Q/K prepared quadratic fitting (2,000 updates), V/O
 attention-plus-residual reconstruction, and gate/up/down full-block reconstruction.
@@ -46,7 +108,8 @@ Broader disjoint confirmation remains necessary before promotion.
 Remaining gaps include author GPTQ initializer parity, full staged trajectory
 parity, exact paper calibration/batching/precision settings, W4 ambiguity in the
 author Q/K constructor, public lifecycle integration, other scalar-format adapters,
-and complete portable model export. See `research/gsq-paper-reproduction.md`.
+and broader native model exports. Complete portable TorchLinear model export is
+now implemented and checked below. See `research/gsq-paper-reproduction.md`.
 
 Related changes: calibrated FP8 rejects tensorwise scales until native activation
 replay matches deployment. MXFP4 has optional fixed-scale GSQ packing and CPU
@@ -114,3 +177,48 @@ produces the identical serialized payload SHA256 as deterministic v5, including
 all weights/scales and training histories. This binds the same payload to the
 completed packed propagation evaluation. This is a verified HF-forward/InputCache
 bridge, not completed full-model ModuleLooper dispatch or checkpoint integration.
+
+## Sequential model runtime and uniform export
+
+`quantize_llama_gsq_model` applies the staged block path to every Llama decoder
+by default. Each packed block is installed before the next block's actual model
+prefix is replayed for capture. Stored FP16 scale rounding therefore participates
+in downstream inputs. The input model must be materialized on one device and in
+eval mode. A later failure retains completed blocks and a failed run record.
+
+```python
+from gptqmodel.looper.gsq_training_model import (
+    quantize_llama_gsq_model, save_llama_gsq_model,
+)
+
+run = quantize_llama_gsq_model(
+    model, documents, bits=2, group_size=128,
+    gsq=GSQTrainingConfig(enabled=True),
+)
+save_llama_gsq_model(
+    model, run, output_directory,
+    tokenizer=tokenizer, source_model=dense_checkpoint_directory,
+)
+```
+
+The exporter requires a completed all-layer run and uses the existing public
+GPTQ-v2 writer. It explicitly converts floating runtime weights to FP16 and
+rebuilds canonical nonpersistent RoPE state, matching a fresh load. Blindly
+casting RoPE's FP32 inverse frequencies to FP16 changes the live runtime but is
+not serialized, creating a reload discrepancy. The tiny-model public-loader
+regression now checks longer-sequence exact FP16/eager logits. CPU construction
+of the RoPE frequencies is necessary to match the loader exactly: GPU construction
+can differ by one FP32 ULP. Both full-model audits reproduce all 32 reloaded
+document logits exactly with CPU-constructed RoPE, and reproduce the old live
+logits exactly after rounding that buffer to FP16. This dedicated runtime API
+is not yet the shared `GPTQModel.quantize()` dispatcher.
+
+The complete 16-layer W2 experiment has mixed results. Against its matched
+no-GSQ initializer, final-logit KL worsened from 9.384694 to 10.028224, while
+MSE improved from 10.825406 to 9.930587 and Top-1 agreement rose from 7.7431%
+to 12.4706%. The paired 95% interval for KL degradation is [0.424002, 0.869079].
+Both models have poor absolute agreement; the favorable selected-block result
+does not establish complete-model recovery. The control uses the staged-path
+GPTQ initializer with GSQ disabled, not the package-default true-sequential
+GPTQ recipe. Calibration is only 16 unweighted documents. GSM8K Platinum
+evaluation is being run separately on the reloaded checkpoints and dense model.

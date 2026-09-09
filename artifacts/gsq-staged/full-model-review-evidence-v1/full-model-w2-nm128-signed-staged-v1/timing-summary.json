@@ -1,0 +1,11 @@
+{
+  "training_stage_seconds": {
+    "self_attn.q_proj": 216.0473598614335,
+    "self_attn.k_proj": 74.4585267342627,
+    "attention": 59.469917399808764,
+    "mlp": 223.70615375693887
+  },
+  "recorded_training_seconds": 573.6819577524439,
+  "whole_run_seconds": 879.957613,
+  "scope": "Synchronized wall time per stage; whole run includes initialization, capture, export and evaluation; not a warmed kernel benchmark"
+}

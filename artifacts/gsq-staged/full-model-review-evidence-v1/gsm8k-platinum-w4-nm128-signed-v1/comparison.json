@@ -1,0 +1,52 @@
+{
+  "arms": {
+    "dense": {
+      "correct": 593,
+      "total": 1209,
+      "accuracy": 0.4904880066170389,
+      "invalid": 0,
+      "run_sha256": "6850f45259b3cada0a81d2a4caafee69304e97f10bfab6c6c69350e0925189ee",
+      "raw_sha256": "0985579f54044682fa8b6fb6237f261b979316ea6d07f7ffd860373528e05a2a",
+      "seconds": 185.9880379885435,
+      "model": "/monster/data/model/Llama-3.2-1B-Instruct"
+    },
+    "baseline": {
+      "correct": 460,
+      "total": 1209,
+      "accuracy": 0.380479735318445,
+      "invalid": 0,
+      "run_sha256": "77107279ba73cbc9daa70deff073b9b1b417463100b1aba0f057a021a4583b3a",
+      "raw_sha256": "a49cba24a69ad975c50a75631c358705fb0a31e79c28aec490e69d966a0fe2a1",
+      "seconds": 217.72509702760726,
+      "model": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/model"
+    },
+    "staged": {
+      "correct": 417,
+      "total": 1209,
+      "accuracy": 0.34491315136476425,
+      "invalid": 0,
+      "run_sha256": "48b044d0f09bcadbc311b5cf06bbc3ebcba0a9f978f561e56d7330ba366f888c",
+      "raw_sha256": "e9580828d2624082a2d7d06aaa34a987d9d3aa111b397bc897da54b648784242",
+      "seconds": 201.68555933330208,
+      "model": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/model"
+    }
+  },
+  "quantization_recipe": {
+    "bits": 4,
+    "group_size": 128,
+    "source_model": "/monster/data/model/Llama-3.2-1B-Instruct"
+  },
+  "paired_staged_minus_baseline": -0.03556658395368073,
+  "calibration_samples": 128,
+  "calibration_inputs_sha256": "893d981d8398efe64e111a22a6996f3e23f073b6460f124fc061097c8bb19dda",
+  "paired_bootstrap_ci95": [
+    -0.06368899917287014,
+    -0.007444168734491315
+  ],
+  "bootstrap_seed": 7,
+  "bootstrap_draws": 10000,
+  "baseline_only_correct": 166,
+  "staged_only_correct": 123,
+  "exact_prompts_targets_and_input_ids": true,
+  "prompt_ids_sha256": "3a66bc49447c3e335051f131323f18a0444202de2cd828d4fb842fda4abd73cb"
+}

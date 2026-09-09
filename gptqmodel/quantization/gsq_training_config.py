@@ -8,13 +8,20 @@ import math
 class GSQTrainingConfig:
     """Opt-in staged training settings; not a claim of full paper reproduction.
 
-    Calibration capture, batching and precision remain caller-owned. These
-    defaults follow the pinned author's main optimizer/schedule configuration.
+    Calibration capture and precision remain caller-owned. Optimizer/schedule
+    defaults follow the pinned author configuration. Initializer and singleton
+    batching defaults preserve the earlier experimental API; select
+    ``initializer='gptq_signed', batch_size=64, microbatch_size=16`` explicitly
+    to exercise those author-style components. Variable-length token weighting,
+    precision and the complete lifecycle still require separate validation.
     """
 
     enabled: bool = False
+    initializer: str = 'gptq'
     seed: int = 7
     epochs: int = 10
+    batch_size: int = 1
+    microbatch_size: int = 1
     qk_steps: int = 2000
     damp_percent: float = .01
     assignment_lr: float = 1e-4
@@ -30,10 +37,15 @@ class GSQTrainingConfig:
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
             raise TypeError('GSQTrainingConfig: enabled must be boolean')
-        for name, minimum in (('seed', 0), ('epochs', 1), ('qk_steps', 1), ('warmup_steps', 0)):
+        if self.initializer not in ('gptq', 'gptq_signed'):
+            raise ValueError('GSQTrainingConfig: initializer must be gptq or gptq_signed')
+        for name, minimum in (('seed', 0), ('epochs', 1), ('qk_steps', 1), ('warmup_steps', 0),
+                              ('batch_size', 1), ('microbatch_size', 1)):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f'GSQTrainingConfig: {name} must be an integer >= {minimum}')
+        if self.microbatch_size > self.batch_size:
+            raise ValueError('GSQTrainingConfig: microbatch_size exceeds batch_size')
         for name in ('damp_percent', 'assignment_lr', 'scale_lr', 'weight_decay', 'min_lr'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):

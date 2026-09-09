@@ -1,0 +1,392 @@
+{
+  "full-model-w2-nm128-signed-baseline-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/report.json",
+    "source_sha256": "1b349a8f7deb354938ef71d7b78ff6ba1b87ddc8cab969a7d4abb69e2ff5ed3b",
+    "stored_sha256": "1b349a8f7deb354938ef71d7b78ff6ba1b87ddc8cab969a7d4abb69e2ff5ed3b",
+    "bytes": 19018
+  },
+  "full-model-w2-nm128-signed-baseline-v1/model_run.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/model_run.md",
+    "source_sha256": "932bb992a4ce7bb9fccc05a100a0d39942c8c2574d5263d283465af4c084a028",
+    "stored_sha256": "932bb992a4ce7bb9fccc05a100a0d39942c8c2574d5263d283465af4c084a028",
+    "bytes": 19582
+  },
+  "full-model-w2-nm128-signed-baseline-v1/training.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/training.json",
+    "source_sha256": "e7715313d439295359b2c34c313a6d55170a71eabd29366147d92bee059ca7fe",
+    "stored_sha256": "e7715313d439295359b2c34c313a6d55170a71eabd29366147d92bee059ca7fe",
+    "bytes": 22372
+  },
+  "full-model-w2-nm128-signed-baseline-v1/summary.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/summary.json",
+    "source_sha256": "7c5497134ad8a573d7eb51dce5ab0cedacb9e54d7de36014cc28b1f1ce73a2d7",
+    "stored_sha256": "7c5497134ad8a573d7eb51dce5ab0cedacb9e54d7de36014cc28b1f1ce73a2d7",
+    "bytes": 224
+  },
+  "full-model-w2-nm128-signed-baseline-v1/quantization.log": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-baseline-v1/quantization.log",
+    "source_sha256": "e4d415df811d0881f0edde798fb897f1256b8eaa4005365ec018fe6b8622beff",
+    "stored_sha256": "e4d415df811d0881f0edde798fb897f1256b8eaa4005365ec018fe6b8622beff",
+    "bytes": 55087
+  },
+  "full-model-w2-nm128-signed-staged-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/report.json",
+    "source_sha256": "15c4102124fda7e5ca2691097ee141f8152dad86b548d701604f0ca447260c1e",
+    "stored_sha256": "15c4102124fda7e5ca2691097ee141f8152dad86b548d701604f0ca447260c1e",
+    "bytes": 19046
+  },
+  "full-model-w2-nm128-signed-staged-v1/model_run.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/model_run.md",
+    "source_sha256": "4a08c635618a974b54a6e4789e9d90f5f2a4f6a6fe675924edefe15e8110654b",
+    "stored_sha256": "4a08c635618a974b54a6e4789e9d90f5f2a4f6a6fe675924edefe15e8110654b",
+    "bytes": 19895
+  },
+  "full-model-w2-nm128-signed-staged-v1/training.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/training.json",
+    "source_sha256": "1e9e3cf300619b438f7d7833ed9f315f8bfdf8693aa733c0818c67ca14f11f66",
+    "stored_sha256": "1bccc37aa313ff7b51137db65447ac9a975acbb00f83cc56b0df6a918a6d71d9",
+    "bytes": 1819679
+  },
+  "full-model-w2-nm128-signed-staged-v1/timing-summary.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/timing-summary.json",
+    "source_sha256": "45817455c458cc09ba2601fe436f29e51886ac19d267683368b2e2e562b62578",
+    "stored_sha256": "45817455c458cc09ba2601fe436f29e51886ac19d267683368b2e2e562b62578",
+    "bytes": 420
+  },
+  "full-model-w2-nm128-signed-staged-v1/quantization.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/quantization.log",
+    "source_sha256": "9a5ee2d7b0c1e694e88093b9071fed1f97f01737f3171143dd6cc7f58c54e456",
+    "stored_sha256": "bea39dcd973a1f06d502eb44ed9340b19434b053cae31f31ca59f4f953dc7a1c",
+    "bytes": 13724
+  },
+  "full-model-w2-nm128-signed-comparison-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-comparison-v1/report.json",
+    "source_sha256": "87d41b84c13a7ed05717c1d2842fe15a6a500153eae34c982bfb7f7053bc3768",
+    "stored_sha256": "87d41b84c13a7ed05717c1d2842fe15a6a500153eae34c982bfb7f7053bc3768",
+    "bytes": 28608
+  },
+  "full-model-w2-nm128-signed-comparison-v1/bootstrap.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-comparison-v1/bootstrap.json",
+    "source_sha256": "86d853953c3074a2026ff2d2fe52238f63dff8fbf1948c5fd412be05076c5da4",
+    "stored_sha256": "86d853953c3074a2026ff2d2fe52238f63dff8fbf1948c5fd412be05076c5da4",
+    "bytes": 1287
+  },
+  "full-model-w4-nm128-signed-baseline-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/report.json",
+    "source_sha256": "4f4fb9ecd6bb3537cc1a70e689d2980fdb3a77d3049995592048939d75d49b11",
+    "stored_sha256": "4f4fb9ecd6bb3537cc1a70e689d2980fdb3a77d3049995592048939d75d49b11",
+    "bytes": 19120
+  },
+  "full-model-w4-nm128-signed-baseline-v1/model_run.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/model_run.md",
+    "source_sha256": "8a56220526f6119c1143a9a77dec64252aa9865dbf589b611a6beba6b019a7da",
+    "stored_sha256": "8a56220526f6119c1143a9a77dec64252aa9865dbf589b611a6beba6b019a7da",
+    "bytes": 21099
+  },
+  "full-model-w4-nm128-signed-baseline-v1/training.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/training.json",
+    "source_sha256": "5c8d8cc516cb5e73dcc7814860e2c4bc00ae0265b53a3a3235d019f28538dad9",
+    "stored_sha256": "5c8d8cc516cb5e73dcc7814860e2c4bc00ae0265b53a3a3235d019f28538dad9",
+    "bytes": 22386
+  },
+  "full-model-w4-nm128-signed-baseline-v1/summary.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/summary.json",
+    "source_sha256": "d244896ac112366c1fe4b2651940c716ef8fc2678f3d0a7972e8fe74c96bd0f7",
+    "stored_sha256": "d244896ac112366c1fe4b2651940c716ef8fc2678f3d0a7972e8fe74c96bd0f7",
+    "bytes": 223
+  },
+  "full-model-w4-nm128-signed-baseline-v1/quantization.log": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/quantization.log",
+    "source_sha256": "95867d8ad21c9d0ffcc3968119bd6be99ed6a8ad34a0a5c7a60f525bd2217466",
+    "stored_sha256": "95867d8ad21c9d0ffcc3968119bd6be99ed6a8ad34a0a5c7a60f525bd2217466",
+    "bytes": 55054
+  },
+  "full-model-w4-nm128-signed-staged-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/report.json",
+    "source_sha256": "f27e01cc2353f573e51509ab96597672e5e2ee01b09ac6bf56d0aa1ae58a64be",
+    "stored_sha256": "f27e01cc2353f573e51509ab96597672e5e2ee01b09ac6bf56d0aa1ae58a64be",
+    "bytes": 19074
+  },
+  "full-model-w4-nm128-signed-staged-v1/model_run.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/model_run.md",
+    "source_sha256": "4e3f15b95198291468c9c1b59f708d997931c986340988d7a227ccb0bad75e35",
+    "stored_sha256": "4e3f15b95198291468c9c1b59f708d997931c986340988d7a227ccb0bad75e35",
+    "bytes": 20919
+  },
+  "full-model-w4-nm128-signed-staged-v1/training.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/training.json",
+    "source_sha256": "a296fb60233d9d87f137f3ee052f86b3afe5174a8afec472d3d1deb3f5f1dbc7",
+    "stored_sha256": "ce210862104ebea2c3157d950985910fd6dc99df89880f2a9f41059020face62",
+    "bytes": 1915633
+  },
+  "full-model-w4-nm128-signed-staged-v1/summary.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/summary.json",
+    "source_sha256": "57cd371f1dd4c8cb3f41935670afff123bbc1990d119131fc4013301ad247b6b",
+    "stored_sha256": "57cd371f1dd4c8cb3f41935670afff123bbc1990d119131fc4013301ad247b6b",
+    "bytes": 223
+  },
+  "full-model-w4-nm128-signed-staged-v1/quantization.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/quantization.log",
+    "source_sha256": "b0ab36f42d98c1ce76115d6724b32db4f4ce4649dd774569eee02b68d0e04945",
+    "stored_sha256": "8d1b2d056a45e991c849d6d2779e4da830a688a5b58528a2f7d40f4ca0e4360a",
+    "bytes": 14019
+  },
+  "full-model-w4-nm128-signed-comparison-v1/report.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-comparison-v1/report.json",
+    "source_sha256": "1ae409248a98a7a9fd3c9576ceb461882a68498a60a997d5c5c398bc4c7d1ec2",
+    "stored_sha256": "1ae409248a98a7a9fd3c9576ceb461882a68498a60a997d5c5c398bc4c7d1ec2",
+    "bytes": 28641
+  },
+  "full-model-w4-nm128-signed-comparison-v1/bootstrap.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-comparison-v1/bootstrap.json",
+    "source_sha256": "bd6471124fd7f9e8e6bb1cabd89c33ad01ca67866e76a6d98a5054c34e30cb9b",
+    "stored_sha256": "bd6471124fd7f9e8e6bb1cabd89c33ad01ca67866e76a6d98a5054c34e30cb9b",
+    "bytes": 1289
+  },
+  "gsm8k-platinum-nm128-signed-v1/protocol.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/protocol.json",
+    "source_sha256": "a3a2130e5d5a8d4a8137d9d0e9cffec8d61a4d551c363e34dabcdbb1aecc8371",
+    "stored_sha256": "a3a2130e5d5a8d4a8137d9d0e9cffec8d61a4d551c363e34dabcdbb1aecc8371",
+    "bytes": 3453
+  },
+  "gsm8k-platinum-nm128-signed-v1/calibration-provenance.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/calibration-provenance.json",
+    "source_sha256": "9c01b66ac65c74bc4de96117bc2df1ed91d6e30ccd0333d46f0ce4333f8f107e",
+    "stored_sha256": "9c01b66ac65c74bc4de96117bc2df1ed91d6e30ccd0333d46f0ce4333f8f107e",
+    "bytes": 2538
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-reference-reuse.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-reference-reuse.md",
+    "source_sha256": "699878ce0906379dee1935661f09fa6ea034f8847470a10e3b0ff988f79f4301",
+    "stored_sha256": "699878ce0906379dee1935661f09fa6ea034f8847470a10e3b0ff988f79f4301",
+    "bytes": 268
+  },
+  "gsm8k-platinum-nm128-signed-v1/prompt-input-ids.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/prompt-input-ids.json.gz",
+    "source_sha256": "019f46aabe5a6cfe568b289963382394977a0730a26a7acdca977f2f17155047",
+    "stored_sha256": "019f46aabe5a6cfe568b289963382394977a0730a26a7acdca977f2f17155047",
+    "bytes": 166584
+  },
+  "gsm8k-platinum-nm128-signed-v1/comparison.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/comparison.json",
+    "source_sha256": "26fcbe6507de3f4966b4d7bd7785e127aa2f47077ec75be585c7de11cc636a9d",
+    "stored_sha256": "26fcbe6507de3f4966b4d7bd7785e127aa2f47077ec75be585c7de11cc636a9d",
+    "bytes": 1810
+  },
+  "gsm8k-platinum-nm128-signed-v1/comparison.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/comparison.md",
+    "source_sha256": "9576adc630e96d2610feb2b27fd34ed68a6928cb6b4b72c880e7af53cd13c411",
+    "stored_sha256": "9576adc630e96d2610feb2b27fd34ed68a6928cb6b4b72c880e7af53cd13c411",
+    "bytes": 2509
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/run.json",
+    "source_sha256": "6850f45259b3cada0a81d2a4caafee69304e97f10bfab6c6c69350e0925189ee",
+    "stored_sha256": "6850f45259b3cada0a81d2a4caafee69304e97f10bfab6c6c69350e0925189ee",
+    "bytes": 3223
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/evaluation.md",
+    "source_sha256": "a98907bdd8be394f9b735da3eb1c418adf3adc455be98a4e6a55e3a5f0febfc2",
+    "stored_sha256": "a98907bdd8be394f9b735da3eb1c418adf3adc455be98a4e6a55e3a5f0febfc2",
+    "bytes": 4102
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/raw.json",
+    "source_sha256": "0985579f54044682fa8b6fb6237f261b979316ea6d07f7ffd860373528e05a2a",
+    "stored_sha256": "8194caf0a3edfdc6bf88ad37e5370a815d3346c92b7614e8e66835a6c9d35417",
+    "bytes": 313766
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/evaluation.log",
+    "source_sha256": "3070a3c74b090899228f77f171fb8bd9697668e60caa08c1bb7ebfcb8dd2d928",
+    "stored_sha256": "a22e83c3428fa1dac0175da2ec8ac8414108982571af2f4abcfa40d3e5448b43",
+    "bytes": 9343
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/log-provenance.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/log-provenance.json",
+    "source_sha256": "d4e1a98b0d8d05a8ceeefd1493c5567697b49b28032d354e22dc37a76e42d88f",
+    "stored_sha256": "d4e1a98b0d8d05a8ceeefd1493c5567697b49b28032d354e22dc37a76e42d88f",
+    "bytes": 785
+  },
+  "gsm8k-platinum-nm128-signed-v1/dense-full/timestamps.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/dense-full/timestamps.json",
+    "source_sha256": "4e15fd5d3f7aa6126b12ac86c38a1d52bd54993441ac709d6d4d5cff087c6a39",
+    "stored_sha256": "4e15fd5d3f7aa6126b12ac86c38a1d52bd54993441ac709d6d4d5cff087c6a39",
+    "bytes": 214
+  },
+  "gsm8k-platinum-nm128-signed-v1/baseline-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/baseline-full/run.json",
+    "source_sha256": "b07853cb9d87511c0d31fe1e9dbf341ca7fe449a50ab0e2dbbf9c8e2a69a53eb",
+    "stored_sha256": "b07853cb9d87511c0d31fe1e9dbf341ca7fe449a50ab0e2dbbf9c8e2a69a53eb",
+    "bytes": 4310
+  },
+  "gsm8k-platinum-nm128-signed-v1/baseline-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/baseline-full/evaluation.md",
+    "source_sha256": "7794375521feb81a48767f617b0df1e3a0111052357a8f244d2d783b8c09ab2b",
+    "stored_sha256": "7794375521feb81a48767f617b0df1e3a0111052357a8f244d2d783b8c09ab2b",
+    "bytes": 1822
+  },
+  "gsm8k-platinum-nm128-signed-v1/baseline-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/baseline-full/raw.json",
+    "source_sha256": "5f3a03b37c203bd719b1b73266bc8854e711886d6fcb367eb47758d24ec2c554",
+    "stored_sha256": "3b280ff2bb7a787bf95217bd228ea33000b91dd6b8f2ce8bfea32f7df9228cc0",
+    "bytes": 224291
+  },
+  "gsm8k-platinum-nm128-signed-v1/baseline-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/baseline-full/evaluation.log",
+    "source_sha256": "db935fb23636cdbda3e4fd3674556501abea87016df79edf2cd3596fe535f297",
+    "stored_sha256": "f139c1d1c5e554dfeb1750a94e6939ce44044ad2c8e75ef872c9ef34f176a88c",
+    "bytes": 9558
+  },
+  "gsm8k-platinum-nm128-signed-v1/staged-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/staged-full/run.json",
+    "source_sha256": "fae1b3eb85a00db515f03208fc344858713b49c187199c1bdbc1573bea9e71a4",
+    "stored_sha256": "fae1b3eb85a00db515f03208fc344858713b49c187199c1bdbc1573bea9e71a4",
+    "bytes": 4341
+  },
+  "gsm8k-platinum-nm128-signed-v1/staged-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/staged-full/evaluation.md",
+    "source_sha256": "edfd187d5458b1e429f6754302edbdb84ab4c7b1d2f84c77b0e0966c9abce5cf",
+    "stored_sha256": "edfd187d5458b1e429f6754302edbdb84ab4c7b1d2f84c77b0e0966c9abce5cf",
+    "bytes": 1623
+  },
+  "gsm8k-platinum-nm128-signed-v1/staged-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/staged-full/raw.json",
+    "source_sha256": "0990825e411f998914d0e8267ef7e38b220ab2173a1a8d9dfdea1508eee299ad",
+    "stored_sha256": "eeb53c263b2acb975587c4174fd5aa2d02e3e8005da77ba49f2ea3aee658be62",
+    "bytes": 271977
+  },
+  "gsm8k-platinum-nm128-signed-v1/staged-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/staged-full/evaluation.log",
+    "source_sha256": "fc1bb85e79b128d4b1c8cbd174191f1eed79e93eaddfd3735e26fa8fa9529fe8",
+    "stored_sha256": "76fd4964afea6c1acdd520082f7b519367a624610ca686ad3500a96daac8f4b6",
+    "bytes": 9569
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/protocol.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/protocol.json",
+    "source_sha256": "5886bd863c44b1ec7ae9bdf9e04e8f925fcee8d95070d91a751d280750dfbe42",
+    "stored_sha256": "5886bd863c44b1ec7ae9bdf9e04e8f925fcee8d95070d91a751d280750dfbe42",
+    "bytes": 3487
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/calibration-provenance.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/calibration-provenance.json",
+    "source_sha256": "9c01b66ac65c74bc4de96117bc2df1ed91d6e30ccd0333d46f0ce4333f8f107e",
+    "stored_sha256": "9c01b66ac65c74bc4de96117bc2df1ed91d6e30ccd0333d46f0ce4333f8f107e",
+    "bytes": 2538
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-reference-reuse.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-reference-reuse.md",
+    "source_sha256": "ff556b8501a55d970bbc6ca12b2c3124881a899149600713f8782e508bb58b46",
+    "stored_sha256": "ff556b8501a55d970bbc6ca12b2c3124881a899149600713f8782e508bb58b46",
+    "bytes": 373
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/quantization-input-audit.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/quantization-input-audit.json",
+    "source_sha256": "e4380caadcfbe8fe125207843a6e7e656aa2a7e255c849c08a0fc725621570a6",
+    "stored_sha256": "e4380caadcfbe8fe125207843a6e7e656aa2a7e255c849c08a0fc725621570a6",
+    "bytes": 3186
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/prompt-input-ids.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/prompt-input-ids.json.gz",
+    "source_sha256": "b9fb08c92ce2308b952c4773a80bbecf899a8482ef6756a57c3b5506919f5d61",
+    "stored_sha256": "b9fb08c92ce2308b952c4773a80bbecf899a8482ef6756a57c3b5506919f5d61",
+    "bytes": 166584
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/comparison.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/comparison.json",
+    "source_sha256": "da3980d09bba31b9f524900334d5c777fa2d0e6716b0c8b94a5afe4a70fc72a6",
+    "stored_sha256": "da3980d09bba31b9f524900334d5c777fa2d0e6716b0c8b94a5afe4a70fc72a6",
+    "bytes": 1959
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/comparison.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/comparison.md",
+    "source_sha256": "04fecb4cd1cd86203799f5e63f1a8b687d29ade64ad3b896265292eb4775809c",
+    "stored_sha256": "04fecb4cd1cd86203799f5e63f1a8b687d29ade64ad3b896265292eb4775809c",
+    "bytes": 2658
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/run.json",
+    "source_sha256": "6850f45259b3cada0a81d2a4caafee69304e97f10bfab6c6c69350e0925189ee",
+    "stored_sha256": "6850f45259b3cada0a81d2a4caafee69304e97f10bfab6c6c69350e0925189ee",
+    "bytes": 3223
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/evaluation.md",
+    "source_sha256": "a98907bdd8be394f9b735da3eb1c418adf3adc455be98a4e6a55e3a5f0febfc2",
+    "stored_sha256": "a98907bdd8be394f9b735da3eb1c418adf3adc455be98a4e6a55e3a5f0febfc2",
+    "bytes": 4102
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/raw.json",
+    "source_sha256": "0985579f54044682fa8b6fb6237f261b979316ea6d07f7ffd860373528e05a2a",
+    "stored_sha256": "8194caf0a3edfdc6bf88ad37e5370a815d3346c92b7614e8e66835a6c9d35417",
+    "bytes": 313766
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/evaluation.log",
+    "source_sha256": "3070a3c74b090899228f77f171fb8bd9697668e60caa08c1bb7ebfcb8dd2d928",
+    "stored_sha256": "a22e83c3428fa1dac0175da2ec8ac8414108982571af2f4abcfa40d3e5448b43",
+    "bytes": 9343
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/log-provenance.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/log-provenance.json",
+    "source_sha256": "d4e1a98b0d8d05a8ceeefd1493c5567697b49b28032d354e22dc37a76e42d88f",
+    "stored_sha256": "d4e1a98b0d8d05a8ceeefd1493c5567697b49b28032d354e22dc37a76e42d88f",
+    "bytes": 785
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/dense-full/timestamps.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/dense-full/timestamps.json",
+    "source_sha256": "4e15fd5d3f7aa6126b12ac86c38a1d52bd54993441ac709d6d4d5cff087c6a39",
+    "stored_sha256": "4e15fd5d3f7aa6126b12ac86c38a1d52bd54993441ac709d6d4d5cff087c6a39",
+    "bytes": 214
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/baseline-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full/run.json",
+    "source_sha256": "77107279ba73cbc9daa70deff073b9b1b417463100b1aba0f057a021a4583b3a",
+    "stored_sha256": "77107279ba73cbc9daa70deff073b9b1b417463100b1aba0f057a021a4583b3a",
+    "bytes": 4327
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/baseline-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full/evaluation.md",
+    "source_sha256": "8ea0b4ea13925b763d9ec334c7f77a3c73d019e7db4a4f9d7bdaf12a49603360",
+    "stored_sha256": "8ea0b4ea13925b763d9ec334c7f77a3c73d019e7db4a4f9d7bdaf12a49603360",
+    "bytes": 1550
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/baseline-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full/raw.json",
+    "source_sha256": "a49cba24a69ad975c50a75631c358705fb0a31e79c28aec490e69d966a0fe2a1",
+    "stored_sha256": "6d184f12ed96b39e5208e65ce2d14cd5b84bdd44822e45191ea0ded6671bfa0d",
+    "bytes": 320005
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/baseline-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full/evaluation.log",
+    "source_sha256": "6bd9b1ef466c8fdfe4a8c216accf6492770f58d4a8175a652de5dad16f4dbb4c",
+    "stored_sha256": "bb4eb7a25322a02554a4c5d2b6c1fb0bbea07f354fc595e11e8bc527bb9c596a",
+    "bytes": 9707
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/staged-full/run.json": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/staged-full/run.json",
+    "source_sha256": "48b044d0f09bcadbc311b5cf06bbc3ebcba0a9f978f561e56d7330ba366f888c",
+    "stored_sha256": "48b044d0f09bcadbc311b5cf06bbc3ebcba0a9f978f561e56d7330ba366f888c",
+    "bytes": 4343
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/staged-full/evaluation.md": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/staged-full/evaluation.md",
+    "source_sha256": "75e16a14d98be4366a3215dbce9d193e9a93db2f7139f10a43f88e9fa7129013",
+    "stored_sha256": "75e16a14d98be4366a3215dbce9d193e9a93db2f7139f10a43f88e9fa7129013",
+    "bytes": 1654
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/staged-full/raw.json.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/staged-full/raw.json",
+    "source_sha256": "e9580828d2624082a2d7d06aaa34a987d9d3aa111b397bc897da54b648784242",
+    "stored_sha256": "bcd51994455551cbbcd65574420aba16f3e8ad395b53d4fae830b78804481120",
+    "bytes": 313424
+  },
+  "gsm8k-platinum-w4-nm128-signed-v1/staged-full/evaluation.log.gz": {
+    "source": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/staged-full/evaluation.log",
+    "source_sha256": "0be699e9db98bcc5c81d93c6778119061d6c57efafe6cccbe1c97e3c6629f8c4",
+    "stored_sha256": "a319e8dc91e5aefd178b39346d55447ef5a9e1ee0fd645f0c69f651138a1dad5",
+    "bytes": 9700
+  }
+}

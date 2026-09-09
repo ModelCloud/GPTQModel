@@ -121,3 +121,164 @@ the private block before computing attention/block gradients. It rejects online
 Hadamard wrappers rather than dropping their transforms. A real HF-forward
 InputCache experiment matches the complete deterministic W2 payload byte for
 byte; full shared-looper dispatch and checkpoint integration remain open.
+
+## Initializer scale orientation remains a reproduction gap
+
+The pinned author's `src/prior/quant.py` range search evaluates **both positive
+and negative group scales**, using a weight-error exponent of 2.4. With the
+asymmetric signed integer endpoints (for example -2 through 1 at W2), changing
+scale sign changes which side receives the extra endpoint. The current staged
+adapter instead inherits this repository's activation-weighted scale search
+with exponent 2.0 and requires positive initializer scales. Jointly learned
+scales can subsequently become negative, but that does not reproduce the prior.
+
+An independent CPU check on real Llama block-0 Q-projection weights (256 rows,
+all 2,048 columns, group128) confirmed that merely setting repository MSE search
+to exponent 2.4 does not match the author: W2/W3/W4 scale mismatches numbered
+2,581/2,272/2,239 out of 4,096 groups. This is a range-search arithmetic audit,
+not a model-quality comparison. Raw results are in
+`artifacts/gsq-staged/initializer-scale-parity-v1/report.json`.
+
+The 512-document experiments deliberately retain the same repository initializer
+in both arms; they must not be described as author-initializer parity. A clean
+reproduction needs the signed-scale prior, nonzero signed initializer support,
+and matched full GPTQ trajectories, in addition to the remaining batching and
+precision requirements. Do not change a running experiment's implementation or
+rebind its source snapshots after discovering this difference.
+
+`gsq_initialization.signed_scalar_range_search` now implements that signed
+range-search primitive separately. Its CPU audit matches every scale and
+reconstructed weight exactly against the pinned author on all 4,096 real groups
+at each of W2/W3/W4. The author selects negative scales in 2,080/2,036/2,027 groups,
+respectively. See `artifacts/gsq-staged/initializer-scale-parity-signed-v3`.
+Contract tests cover signed endpoints, exact zero teachers and rejected inputs.
+The optional `GSQTrainingConfig(initializer='gptq_signed')` now uses this prior
+inside repository GPTQ and in late MLP initialization. Staged training accepts
+finite nonzero signed initializer scales. The ordinary default remains `gptq`.
+The training `enabled` flag is independent: disabling training with the signed
+initializer selected constructs the matched signed-GPTQ control.
+
+On a real block-0 Q-projection slice (32 outputs, 256 inputs), with actual
+embedding/RMSNorm inputs from all 512 NM documents, CPU W2/W3/W4 integer
+assignments match the author exactly. Maximum weight differences are
+7.15e-7/1.34e-7/4.47e-8; the whole prior is not bitwise identical. See
+`artifacts/gsq-staged/signed-gptq-prior-nm512-v2`. A 69-test CPU suite passed;
+the subsequently expanded five-test model suite verifies signed-prior public
+checkpoint export/reload and preserved configuration. These include synthetic
+lifecycle fixtures, not complete-model quality evidence. CUDA prior validation
+is queued. Full-model validation of the signed prior, paper batching/precision
+and remaining lifecycle integration are still required. The running NM512
+experiments use their previously recorded repository initializer.
+
+### NM512 batching audit (2026-09-09)
+
+The live NM512 run uses 512 one-document optimizer batches per epoch for
+attention and MLP, hence 5,120 updates per stage over ten epochs. Increasing
+calibration from 16 to 512 did not reproduce the author batching schedule.
+At pinned author commit `03fc16484c369e3127225615d5e03e8d3a6043e3`,
+`src/config.py` defaults to global batch 64 and device microbatch 16;
+`src/trainer.py:253` resamples quantized weights inside each microbatch and
+accumulates four equally weighted microbatch losses for a full single-device
+batch. With 512 examples and ten epochs, that recipe would make 80 optimizer
+updates per attention/MLP stage, rather than 5,120. Q/K's separate 2,000-step
+fit is not included in that comparison.
+
+The current `train_stage_update` already resamples each microbatch, but
+`fit_llama_stages` constructs singleton batches. Wiring only gradient
+accumulation over 64 singleton documents would still draw 64 quantized weights
+per update instead of the author's four. Reproduction therefore needs actual
+16-document forward microbatches and an explicit treatment of variable-length
+NM inputs, padding and reconstructed-element weighting. The live NM512 data
+are native documents of 59–1,490 tokens, not fixed-length concatenated windows.
+These are implementation requirements, not measured accuracy effects; the
+running experiment retains its recorded recipe.
+
+The staged API now exposes `GSQTrainingConfig(batch_size=64,
+microbatch_size=16)` and the full-model validation CLI exposes matching flags.
+Defaults remain one document per update/forward. The new eager-Llama path
+right-pads captured documents, preserves valid-token additive attention masks
+and rotary tensors, and excludes padding from reconstruction MSE. Each actual
+forward microbatch samples fresh quantized weights; valid reconstructed-element
+counts weight accumulated losses, including partial batches. For equal-length
+full batches this agrees with equal microbatch weighting; for variable-length
+NM documents it is an explicitly token-weighted extension of the author setup.
+
+CPU checks exercised variable-length decoder output equivalence with explicit
+and absent eager masks, partial optimizer batches, staged fitting, and packing.
+`staged-batching-tests-v2.log` records 27 passing configuration/lifecycle tests;
+`staged-batching-tests-v3.log` records three passing final mask/batching cases.
+These overlapping suites are correctness evidence, not model-quality evidence.
+GPU batching, full-model memory behavior, and matched task scores remain pending.
+The existing NM512 run loaded the earlier singleton recipe and is unaffected.
+
+### Precision audit follow-up (2026-09-09)
+
+At the pinned author revision, `src/config.py` defaults both model dtype and
+assignment-logit dtype to BF16. `src/models/base.py:444` applies its configured
+`MSELoss` directly to teacher/student outputs, without an explicit FP32 cast
+in that function; actual operator execution remains dependent on the runtime
+and any enclosing precision context. `src/trainer.py:40` permits an explicit
+FP32 assignment-logit override. This is not evidence that the author's complete
+training executes in FP32.
+
+The active NM512 full-model run and queued signed/batched block run explicitly
+load FP32 model weights and execute FP32 reconstruction. Their records must
+retain that scope. Initializer and batching corrections alone therefore do not
+establish reproduction of the author's default BF16 trajectory. A matched
+precision experiment remains necessary; do not relabel these existing runs.
+
+
+### Completed NM128 five-epoch evidence and W4 retest (2026-09-09)
+
+The preceding live/queued NM512 descriptions are historical. The user stopped
+the unfinished NM512 singleton run and selected 128 documents and five epochs.
+Both full W2/group128 signed-prior arms subsequently completed on the real GPU,
+with batch64/micro16, FP32 training and FP16 export. All 32 held-out document
+logits match exactly through public checkpoint reload. This verifies the exercised
+GPU batching and full-model export path, not author-procedure parity.
+
+The locked 128 documents contain 47,005 tokens. Full Platinum evaluation uses
+all 1,209 questions, eight-shot CoT, greedy 256-token generation, seed 7 and
+FP16 eager Torch. The strict analyzer verified exact prompts, targets and token
+IDs across dense, baseline and GSQ arms, plus source/settings and calibration
+bindings. Dense scored 593/1,209; signed GPTQ scored 0/1,209; staged GSQ scored
+20/1,209. The paired task gain is 1.6543 percentage points (95% bootstrap interval
+0.9926 to 2.3987). Invalid numeric answers fell from 1,170 to 482. Absolute
+quantized accuracy remains severely degraded. Held-out final-logit KL, MSE and
+Top-1/5/10 all regress with GSQ, with paired intervals excluding zero. This mixed
+metric evidence does not support a recovery/default-promotion claim.
+
+The full five-epoch GSQ run took 879.96 seconds. Synchronized wall time for all
+training stages totaled 573.68 seconds (Q 216.05, K 74.46, attention 59.47,
+MLP 223.71). These measurements do not establish a matched speedup or identify
+kernel bottlenecks. Q/K retain 2,000 updates per projection; attention and MLP
+each use ten optimizer updates per block (two global batches times five epochs).
+
+The user requested a W4 GPTQ retest after seeing the W2 failure. Matched W4
+baseline and GSQ jobs now retain the same 128 documents, signed initialization,
+five epochs, seed, grouping and precision. Their results are pending. The public
+BaseQModel.quantize staged dispatch, additional compatible methods and full
+paper precision/RNG/calibration parity remain unfinished requirements.
+
+Evidence: `artifacts/gsq-staged/full-model-w2-nm128-signed-comparison-v1` and
+`artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1`; W4 protocol:
+`artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/protocol.json`.
+
+
+### Public dispatch boundary audit
+
+Source inspection confirms `GPTQConfig.gsq` and `AWQConfig.gsq` normalize only
+`GSQConfig`, the independent-projection adapter configuration. The staged
+`GSQTrainingConfig` is consumed by `quantize_llama_gsq_model`; it is not consumed
+by `BaseQModel.quantize`. The full-model experiments therefore prove the dedicated
+trainer and public checkpoint loader, not public staged quantization dispatch.
+
+Integration must preserve the existing optional adapter's configuration semantics,
+make staged versus projection fitting explicit, and serialize the effective staged
+recipe. It must also route normal calibration preparation, materialized placement,
+layer scope, backend selection and packing through validated lifecycle boundaries.
+The present dedicated exporter only supports complete uniform Llama W2/W3/W4
+models; passing arbitrary dynamic scopes through it would be an unsupported shortcut.
+AWQ compatibility requires preserving its transformed weights and activation replay,
+not silently substituting the GPTQ signed prior. These are outstanding implementation
+and lifecycle tests, not restrictions proving other methods scientifically incompatible.

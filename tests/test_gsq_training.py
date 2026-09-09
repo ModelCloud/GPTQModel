@@ -4,6 +4,27 @@ import torch
 from gptqmodel.quantization.gsq_training import relaxed_scalar_weights, sampling_schedule
 
 
+def test_masked_reconstruction_matches_unpadded_loss_and_gradient():
+    from gptqmodel.quantization.gsq_training import reconstruction_stage_loss
+
+    generator = torch.Generator().manual_seed(7)
+    module = torch.nn.Linear(4, 3, bias=False).double()
+    inputs = torch.randn(2, 5, 4, generator=generator, dtype=torch.float64)
+    mask = torch.tensor([[True, True, False, False, False], [True, True, True, True, True]])
+    inputs[~mask] = 1000
+    weight = (module.weight.detach()+.1).requires_grad_()
+    loss = reconstruction_stage_loss(module, (inputs,), {}, student_weights={'weight': weight}, output_mask=mask)
+    expected = torch.nn.functional.mse_loss(torch.nn.functional.linear(inputs[mask], weight),
+                                           module(inputs[mask]).detach())
+    torch.testing.assert_close(loss, expected, rtol=1e-12, atol=1e-12)
+    actual_gradient, = torch.autograd.grad(loss, weight)
+    expected_gradient, = torch.autograd.grad(expected, weight)
+    torch.testing.assert_close(actual_gradient, expected_gradient, rtol=1e-12, atol=1e-12)
+    for invalid in (torch.zeros_like(mask), mask.float(), mask[:, :-1]):
+        with pytest.raises(ValueError, match='output mask'):
+            reconstruction_stage_loss(module, (inputs,), {}, student_weights={'weight': weight}, output_mask=invalid)
+
+
 def test_author_schedule_endpoints_and_single_update():
     assert sampling_schedule(0, 5) == (2., 10.)
     assert sampling_schedule(2, 5) == (1.25, 30.)

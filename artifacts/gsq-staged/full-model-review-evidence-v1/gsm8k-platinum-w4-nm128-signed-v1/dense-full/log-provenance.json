@@ -1,0 +1,8 @@
+{
+  "log_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dense-full/evaluation.log",
+  "log_bytes": 104991,
+  "log_sha256": "3070a3c74b090899228f77f171fb8bd9697668e60caa08c1bb7ebfcb8dd2d928",
+  "cwd": "/root/polly-work/qvq-gsq",
+  "zml": "N/A (not used)",
+  "cli": "PYTHONPATH=.:/root/polly-work/Evalution CUDA_DEVICE_ORDER=PCI_BUS_ID CUBLAS_WORKSPACE_CONFIG=:4096:8 GPTQ_CACHE_DEQUANTIZED_WEIGHTS=1 OMP_NUM_THREADS=4 MAX_JOBS=4 /root/venv-py3.14t/bin/python -m gpu_allocator.cli run -n 1 --style uuid -- /root/venv-py3.14t/bin/python scripts/evaluate_gsq_gsm8k.py --model /monster/data/model/Llama-3.2-1B-Instruct --output artifacts/gsq-staged/gsm8k-platinum-v1/dense-full --dataset artifacts/gsq-staged/gsm8k-platinum-v1/dataset --arm dense --batch-size 32"
+}

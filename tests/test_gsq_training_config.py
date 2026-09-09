@@ -19,6 +19,8 @@ def test_staged_config_roundtrip_and_distinct_defaults():
     {'assignment_lr': 0}, {'scale_lr': float('nan')}, {'weight_decay': -1},
     {'damp_percent': float('inf')}, {'betas': [.9, 1.]}, {'temperature': [2.]},
     {'multiplier': [100., 0.]}, {'warmup_steps': -1}, {'min_lr': 2.}, {'decay': 'unknown'},
+    {'initializer': 'unknown'}, {'batch_size': 0}, {'microbatch_size': True},
+    {'batch_size': 2, 'microbatch_size': 3},
 ])
 def test_staged_config_rejects_invalid_settings(values):
     with pytest.raises((ValueError, TypeError)):
@@ -26,7 +28,8 @@ def test_staged_config_rejects_invalid_settings(values):
 
 
 @pytest.mark.parametrize('bits', [2, 3, 4])
-def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, tmp_path, monkeypatch):
+@pytest.mark.parametrize('initializer', ['gptq', 'gptq_signed'])
+def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, initializer, tmp_path, monkeypatch):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
     from gptqmodel.quantization import gsq_training
@@ -41,18 +44,23 @@ def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, tmp_
     kwargs = dict(position_embeddings=LlamaRotaryEmbedding(config)(hidden, torch.arange(16)[None]),
                   attention_mask=torch.full((16, 16), -torch.inf).triu(1)[None, None], use_cache=False)
     batches = [(hidden, kwargs)]
-    seeds, _ = gsq_training.initialize_llama_gptq(layer, batches, bits=bits, group_size=32, damp_percent=.01)
+    seeds, _ = gsq_training.initialize_llama_gptq(layer, batches, bits=bits, group_size=32,
+                                                 damp_percent=.01, initializer=initializer)
+    if initializer == 'gptq_signed':
+        assert any((scales < 0).any() for _, scales in seeds.values())
     fitter = gsq_training.fit_llama_stages
 
     def forbidden(*args, **kwargs):
         raise AssertionError('Disabled configuration must not train')
     monkeypatch.setattr(gsq_training, 'fit_llama_stages', forbidden)
-    baseline, info = gsq_training.quantize_llama_gsq_block(layer, batches, bits=bits, group_size=32, pack=False)
+    baseline, info = gsq_training.quantize_llama_gsq_block(
+        layer, batches, bits=bits, group_size=32, pack=False,
+        gsq=GSQTrainingConfig(initializer=initializer) if initializer != 'gptq' else None)
     assert not info['gsq_training']['enabled']
     for name, (weight, _) in seeds.items():
         torch.testing.assert_close(baseline.get_submodule(name).weight, weight, rtol=0, atol=0)
     monkeypatch.setattr(gsq_training, 'fit_llama_stages', fitter)
-    settings = GSQTrainingConfig(enabled=True, epochs=2, qk_steps=2)
+    settings = GSQTrainingConfig(enabled=True, epochs=2, qk_steps=2, initializer=initializer)
     exported, info = gsq_training.quantize_llama_gsq_block(
         layer, batches, bits=bits, group_size=32, gsq=json.loads(json.dumps(settings.to_dict())))
     assert info['gsq_training'] == settings.to_dict()

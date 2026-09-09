@@ -1,0 +1,56 @@
+{
+  "state": "matched_inputs_and_recipe_verified_candidate_running",
+  "bits": 4,
+  "calibration_samples": 128,
+  "gsq_training_except_enabled": {
+    "initializer": "gptq_signed",
+    "seed": 7,
+    "epochs": 5,
+    "batch_size": 64,
+    "microbatch_size": 16,
+    "qk_steps": 2000,
+    "damp_percent": 0.01,
+    "assignment_lr": 0.0001,
+    "scale_lr": 5e-05,
+    "weight_decay": 1.0,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "temperature": [
+      2.0,
+      0.05
+    ],
+    "multiplier": [
+      100.0,
+      500.0
+    ],
+    "warmup_steps": 0,
+    "min_lr": 0.1,
+    "decay": "cosine"
+  },
+  "shared_source_hashes": {
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_full_llama.py": "8e8d5dd336777eb124cdf1eaccf4c83f234ad4ddb6afad698f321eb4964ae548",
+    "/root/polly-work/qvq-gsq/gptqmodel/looper/gsq_training_model.py": "83de5f493aec6e7d3a3304f68f3fe0f94f086ab7d8286ffb2c1a843c5dbf0836",
+    "/root/polly-work/qvq-gsq/gptqmodel/looper/gsq_training_capture.py": "2827ca33ac06fffa6ecf5b1ed31a3eb41fbee2d7479fe7d7d3ed375ae0934a53",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_training.py": "8398cb70bea7a3e0c72c705c92d10b58ca0ac6e5ae891ee226a9bc1c2c19be01",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_training_config.py": "a4aaff10d7644698b7e6cf254618fe268b7f818a96f95f3ae1d9ea5716a1adea",
+    "/root/polly-work/qvq-gsq/scripts/p32_twenty/scorecard.py": "9b1ee07dab08216454375b2d2d683b99825743ec500c4468cb886b79edf3020f",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_initialization.py": "5704da92d82222eba9f96cf8f64800c50d78fbeac5550dbc862c0a225fd485c6",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gptq.py": "55cd501f15349781a33b6ef272f115ad8be4583e63f7eab6c7a0ecea6f6626a6",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_batching.py": "85c2b847a346459dc925be7051ea26dc75018caf81428ae912666123453643e2",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/quantizer.py": "d7428a392eb261f159655878e16b1fc57411396bd2976a5f4b8338ee8524dfcb",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/config.py": "a3bf792ebdd5e29c31663aea33809f7a5965581923cad5a854788a42e00cff9c",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-staged/nm128-seed7-v1/inputs.json": "893d981d8398efe64e111a22a6996f3e23f073b6460f124fc061097c8bb19dda",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-staged/nm128-seed7-v1/provenance.json": "9c01b66ac65c74bc4de96117bc2df1ed91d6e30ccd0333d46f0ce4333f8f107e",
+    "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+    "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb"
+  },
+  "qvq_commit": "5cc76af5c715f6089663d00e5cc5cefb61445afd",
+  "zml": "not used",
+  "reports": {
+    "baseline": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/report.json",
+    "staged": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-staged-v1/report.json"
+  },
+  "limitations": "Candidate is still running. This verifies input configuration and source identity, not final quality or successful export."
+}

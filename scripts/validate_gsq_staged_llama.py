@@ -19,6 +19,8 @@ def execute(args):
     source = args.inputs.resolve()
     provenance = json.loads((source/'provenance.json').read_text())
     documents = json.loads((source/'inputs.json').read_text())
+    if len(documents['train']) < 128:
+        raise ValueError('Real-model staged validation requires at least 128 calibration documents')
     started = datetime.now(timezone.utc).isoformat()
     if set(tuple(row['input_ids']) for row in documents['train']) & set(
             tuple(row['input_ids']) for row in documents['heldout']):
@@ -26,15 +28,21 @@ def execute(args):
     uuid = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if not uuid.startswith('GPU-') or ',' in uuid or not os.environ.get('GPU_ALLOCATOR_LEASE_ID'):
         raise ValueError('Requires an exclusive single GPU allocator lease')
-    for _ in range(3):
+    idle = 0
+    for _ in range(60):
         inventory = subprocess.check_output(['nvidia-smi', '--id='+uuid,
             '--query-gpu=index,pci.bus_id,uuid,name,memory.used,utilization.gpu',
             '--format=csv,noheader,nounits'], text=True).strip()
         fields = [field.strip() for field in inventory.split(',')]
-        if fields[2] != uuid or int(fields[4]) > 8 or int(fields[5]):
-            raise RuntimeError('GPU is not idle: '+inventory)
-        print('IDLE', inventory, flush=True)
+        processes = subprocess.check_output(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid',
+                                             '--format=csv,noheader'], text=True)
+        idle = idle+1 if fields[2] == uuid and int(fields[4]) <= 8 and int(fields[5]) == 0 and uuid not in processes else 0
+        print('IDLE', inventory, idle, flush=True)
+        if idle == 3:
+            break
         time.sleep(1)
+    else:
+        raise RuntimeError('GPU idle preflight timeout')
     import torch
     from transformers import AutoModelForCausalLM
     from gptqmodel.quantization import GSQTrainingConfig
@@ -47,16 +55,24 @@ def execute(args):
     torch.set_float32_matmul_precision('highest')
     files = [Path(__file__).resolve(), Path('gptqmodel/quantization/gsq_training.py').resolve(),
              Path('gptqmodel/quantization/gsq_training_config.py').resolve(),
+             Path('gptqmodel/quantization/gsq_initialization.py').resolve(),
+             Path('gptqmodel/quantization/gsq_batching.py').resolve(),
+             Path('gptqmodel/quantization/gptq.py').resolve(),
+             Path('gptqmodel/quantization/quantizer.py').resolve(),
              Path('gptqmodel/looper/gsq_training_capture.py').resolve(),
              source/'inputs.json', source/'provenance.json',
              Path(provenance['dense'])/'model.safetensors', Path(provenance['dense'])/'config.json']
     report = dict(state='loading', commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   source_hashes={str(path): digest(path) for path in files}, inventory=inventory,
                   torch=str(torch.__version__), cuda=torch.version.cuda, seed=7, bits=args.bits, epochs=args.epochs,
-                  qk_steps=args.qk_steps, group_size=128, attention='eager', cache=False, graphs=False, precision='float32',
+                  qk_steps=args.qk_steps, group_size=128, attention='eager', cache=False, graphs=False,
+                  precision=args.train_precision,
                   source_model=provenance['dense'], scope='block0, local reconstruction; no paper-reproduction claim')
     training_config = GSQTrainingConfig(enabled=True, epochs=args.epochs, qk_steps=args.qk_steps,
-                                         damp_percent=args.damp_percent)
+                                         damp_percent=args.damp_percent, initializer=args.initializer,
+                                         batch_size=args.batch_size, microbatch_size=args.microbatch_size)
+    report['calibration_samples'] = len(documents['train'])
+    report['calibration_tokens'] = sum(len(row['input_ids']) for row in documents['train'])
     report['gsq_training'] = training_config.to_dict()
     report['capture'] = 'shared_inference' if args.shared_capture else 'manual_embedding'
     report['deterministic_algorithms'] = torch.are_deterministic_algorithms_enabled()
@@ -78,7 +94,7 @@ def execute(args):
     (output/'model_run.md').write_text('# Staged GSQ block experiment\n\n'
         'Status: running. Selected-layer experimental artifact; not a portable full model.\n\n'
         'Effective configuration and provenance:\n```json\n'+json.dumps(report, indent=2)+'\n```\n')
-    model = AutoModelForCausalLM.from_pretrained(provenance['dense'], dtype=torch.float32,
+    model = AutoModelForCausalLM.from_pretrained(provenance['dense'], dtype=getattr(torch, args.train_precision),
                 attn_implementation='eager', local_files_only=True).eval()
     layer = model.model.layers[0].to('cuda')
     embedding = model.model.embed_tokens.to('cuda')
@@ -125,9 +141,14 @@ def execute(args):
         rows = []
         for hidden, kwargs in batches['heldout']:
             teacher = layer(hidden, **kwargs)
+            if not torch.isfinite(teacher).all():
+                raise ValueError('Nonfinite held-out teacher output')
             row = {'elements': teacher.numel()}
             for name, candidate in (('baseline', baseline), ('staged', fitted)):
-                error = candidate(hidden, **kwargs).double()-teacher.double()
+                prediction = candidate(hidden, **kwargs)
+                if not torch.isfinite(prediction).all():
+                    raise ValueError(f'Nonfinite held-out {name} output')
+                error = prediction.double()-teacher.double()
                 row[name+'_sse'] = error.square().sum().item()
             rows.append(row)
     report.update(state='complete', heldout=rows, payload_sha256=digest(output/'stages.pt'),
@@ -146,4 +167,19 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--qk-steps', type=int, default=2000)
     parser.add_argument('--damp-percent', type=float, default=.01)
-    execute(parser.parse_args())
+    parser.add_argument('--initializer', choices=('gptq', 'gptq_signed'), default='gptq')
+    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--microbatch-size', type=int, default=1)
+    parser.add_argument('--train-precision', choices=('float32', 'bfloat16'), default='float32')
+    args = parser.parse_args()
+    output_existed = args.output.exists()
+    try:
+        execute(args)
+    except Exception as error:
+        report_path = args.output/'report.json'
+        if not output_existed and report_path.exists():
+            report = json.loads(report_path.read_text())
+            report.update(state='failed', error_type=type(error).__name__, error=str(error),
+                          finished_utc=datetime.now(timezone.utc).isoformat())
+            write_json(report_path, report)
+        raise

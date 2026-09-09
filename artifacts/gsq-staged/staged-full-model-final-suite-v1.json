@@ -1,0 +1,11 @@
+{
+  "state": "passed",
+  "passed": 77,
+  "warnings": 2,
+  "seconds": 11.08,
+  "scope": "CPU initialization, training configuration, staged math, capture, full-model writer/loader and batching",
+  "log": "artifacts/gsq-staged/logs/staged-full-model-final-suite-v1.log",
+  "log_sha256": "7cfab1c1f5f165d8c36e7026abc269a91c59f3411a41387c62dc508c00071872",
+  "ruff": "21 scoped Python files passed",
+  "gpu_quality": "Separate completed W2/W4 full-model and Platinum experiments; no quality promotion"
+}
