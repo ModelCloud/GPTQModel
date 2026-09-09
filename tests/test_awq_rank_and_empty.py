@@ -8,8 +8,6 @@ import gptqmodel.nn_modules.qlinear.gemm_awq_triton as gemm_awq_triton
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.nn_modules.qlinear import empty_linear_output, input_rows
-from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
-from gptqmodel.nn_modules.qlinear.gemm_awq_triton import AwqGEMMTritonLinear
 from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
@@ -153,8 +151,8 @@ def test_empty_linear_output_keeps_autograd_connection():
 @pytest.mark.parametrize(
     "linear_cls",
     [
-        AwqGEMMLinear,
-        AwqGEMMTritonLinear,
+        gemm_awq.AwqGEMMLinear,
+        gemm_awq_triton.AwqGEMMTritonLinear,
         MarlinLinear,
         AwqMarlinLinear,
         ExllamaV2Linear,
