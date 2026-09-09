@@ -185,3 +185,13 @@ Two of those skips are the paired grouped native cases separately executed
 on SM80 (two passes, eight eager/replay drift checks). Archive hashes and the
 executed test source were verified before publication. The public noisy-input
 guard still requires real-model grouped validation before removal.
+
+Real Llama layer-0 selected-QKV grouped pilots now complete both optimizer
+paths using exact dense embedding inputs, 12/4 calibration documents, 32
+held-out documents, W4/group128/krot8, seed7, and two rotation/two finetuning
+epochs. Fixed GSQ changes Q/K/V and lowers local objectives but increases
+held-out decoder-output MSE by 1.0053% (compute_block) and 0.9172% (layer).
+Learned-scale GSQ retains baseline payloads exactly in both. All 576 native
+projection checks pass. This is not a full-model KL/Top-K measurement, and
+layer-0 clean/noisy inputs coincide; later-layer paired validation remains
+pending. See [real grouped report](../docs/experiments/gsq-paro-real-group.md).

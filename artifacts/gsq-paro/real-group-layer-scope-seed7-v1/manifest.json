@@ -1,0 +1,17 @@
+{
+  "report.json": "20a82a5221d550f2ac497814b513f42b664748fd52644d9e2f905bbbf9988573",
+  "baseline.config.json": "b049dee510c28869c6784f30f605d763a428f9f8ade8159cd25b2830f20b5a95",
+  "self_attn.q_proj.baseline.pt": "b90432c45de0d11f5f15ddee6c4fb6d389173992fb8eafb16223c6596b87a1a5",
+  "self_attn.k_proj.baseline.pt": "60003b5d21d1188ed7401f6353c223f4bb94e2770168e4cd49ad2e8b255ede9f",
+  "self_attn.v_proj.baseline.pt": "a2651a28d9f906e56f39dac611805427b002c205b830217a7c7cf0ed89f9d979",
+  "gsq_fixed.config.json": "04cb439465c9c075de45079e9d271c1c1cb07cd38a83a28420de5ee091c9577b",
+  "self_attn.q_proj.gsq_fixed.pt": "82b3651e857f978890b1036acff92b8a20df8a0f73082b4c057848e4d78c222f",
+  "self_attn.k_proj.gsq_fixed.pt": "021b7c4e7545d3e65e39ab37306196c620c513b805d860fcb142bb5f7e343d5e",
+  "self_attn.v_proj.gsq_fixed.pt": "dbaf4d0c03c0ffe913e79d07068a2047f9133ca615d9daa282bfc1567dfb5f45",
+  "gsq_scales.config.json": "acac223964a7a321e80b0316e5c39116a2cebbfbe39769b3e80ba49f78d9e9d7",
+  "self_attn.q_proj.gsq_scales.pt": "4f5d16be230b7b73834bf59804741c76bbd83db3b2388a08ffc8f6b7d043c476",
+  "self_attn.k_proj.gsq_scales.pt": "1fa489968f9d1343614adc234275f45491678c60c3ecba60a8c9ce6696ebe7b3",
+  "self_attn.v_proj.gsq_scales.pt": "257bd45c0cebdb3bdb4a2171f30d096bf651fb8e7833411ef805ad434b31f8b2",
+  "native.log.gz": "be0c3b8facff270d85db4a161528b0236943adf91644f8c8ebf4713ca2f17f06",
+  "executed-runner.py.gz": "9c2a8519058ccc11df65fb534a39c78ff1f40a5df07ed42699ade8417f6cb10f"
+}
