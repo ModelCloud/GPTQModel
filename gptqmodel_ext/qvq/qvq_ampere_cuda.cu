@@ -4758,7 +4758,7 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
           size_m, size_k, total_n_tiles);
     } else if (use_flash_next_gate_up_wide && size_m == 8) {
       p32_window_ampere_grouped_wmma_kernel<
-          TransitionBits, false, 8, 640, true, false, 2560, false, false,
+          TransitionBits, false, 8, 640, true, true, 2560, false, false,
           true, true, 4, 40><<<grid, kThreads, 0, stream>>>(
           input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
           partial_output_ptr, output_ptr, static_cast<int>(segment_count),
