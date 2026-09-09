@@ -121,3 +121,20 @@ INT8-decoded weights used for scoring. Actual QQQ packing preserves all 16
 selected codes for grouped and channelwise layouts with FP16/BF16/FP32
 producer weights in the added tests. The CPU suite reports **32 passed**
 (4.32 seconds). Quantizer/collector binding and real-model checks remain open.
+
+QQQ's quantizer now collects paired moments only for modules selected by
+`gsq`, runs its original initializer, and optionally refines the resulting
+packed code assignments. It returns the exact original weight when no hard
+candidate improves; accepted assignments pass through the verified transport
+helper. Statistics are released after use and by `free`. The existing inherited
+`QQQConfig.gsq` field remains disabled by default. Enabled use currently requires
+an unpadded Linear module and fixed scales; unsupported requests fail explicitly.
+
+The original initializer had an unconditional CUDA synchronization; it now
+synchronizes only CUDA weights, on their actual device. This allows the actual
+quantizer to run in the CPU contract tests without mocking numerical operations.
+The expanded suite reports **36 passed** (3.64 seconds), including GSQ on/off,
+grouped/channelwise initialization, packing and Torch forward. These use
+synthetic inputs strictly for lifecycle correctness. Real Llama calibration,
+held-out evaluation, GPU parity, broader ordering/fallback cases and full-model
+save/load/generate are still required before a QQQ quality/support claim.

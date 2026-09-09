@@ -171,3 +171,32 @@ def test_code_transport_survives_actual_packer(dtype, group_size):
                             in_features=256, out_features=64, bias=False)
     packed.pack(linear, scales, torch.full((64,), 0.25))
     assert torch.equal(packed._unpack_weight_codes().T, codes)
+
+
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_real_qqq_quantizer_hook_and_packing(group_size, enabled):
+    from gptqmodel.quantization.config import GSQConfig, QQQConfig
+    from gptqmodel.quantization.qqq import QQQ
+
+    rng = torch.Generator().manual_seed(7)
+    layer = torch.nn.Linear(256, 64, bias=False, dtype=torch.float16)
+    layer.weight.data.copy_(torch.randn(64, 256, generator=rng) * 0.03)
+    config = QQQConfig(bits=4, group_size=group_size, desc_act=False,
+                       gsq=GSQConfig(enabled=enabled, steps=2))
+    quantizer = QQQ(layer, config)
+    quantizer.quantizer.configure(4, perchannel=True, sym=True, mse=False, groupsize=group_size)
+    inputs = torch.randn(320, 256, generator=rng).half()
+    quantizer.add_batch(inputs[:160], None)
+    quantizer.add_batch(inputs[160:], None)
+    assert bool(quantizer._gsq_moments) == enabled
+    result = quantizer.quantize()
+    if enabled:
+        assert quantizer.gsq_diagnostics['after'] <= quantizer.gsq_diagnostics['before']
+    assert not quantizer._gsq_moments
+    layer.weight.data.copy_(result[0])
+    packed = QQQTorchLinear(bits=4, group_size=group_size, sym=True, desc_act=False,
+                            in_features=256, out_features=64, bias=False)
+    packed.pack(layer, result[1], result[7])
+    assert torch.isfinite(packed(inputs[:2])).all()
+    quantizer.free()
