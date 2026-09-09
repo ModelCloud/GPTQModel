@@ -72,7 +72,7 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
 | GPTAQ | Real F6/seed7 block-1 QKV paired inputs, config/packed reload, Torch GPU and F6 propagation pass; both GSQ arms retain baseline; complete-model exports and other rates/backends pending |
 | FOEM | Original beta-based initializer followed by optional reconstruction fitting; real block-1 alpha0/beta0.2 QKV, reload/Torch GPU and F6 propagation pass; other coefficients/backends and complete-model exports pending |
-| QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
+| QQQ | Grouped packed/reloaded candidate grid verified by three CPU cases; second INT8 weight rounding requires a distinct decoder and paired quantized-activation statistics; adapter and real-model validation pending ([audit](../../research/qqq.md#gsq-adapter-audit-2026-09-09)) |
 | ParoQuant | Fit in the learned rotation basis, preserve exported transforms and quantizer metadata |
 | EXL3 | Backend-owned trellis payloads require their own candidate/decoder and lifecycle binding |
 | FP8 | Nonuniform floating code grid and overflow/scale semantics require a distinct adapter |
