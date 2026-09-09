@@ -81,6 +81,12 @@ unpublished experiment output, not as the canonical model snapshot.
   or an explicit user request, the concrete goal or test it supports, the model/format/rate/seed scope, and the date.
   Do not write a generic explanation such as “saved for backup”; future agents must be able to tell why this full model
   was worth retaining and which comparison or deployment question it answers.
+- Write `model_run.md` at the stored artifact root by following
+  [quantized-model-provenance](../quantized-model-provenance/SKILL.md). It must contain the absolute stored path,
+  `run_id`, `arm_id`, the full CLI, complete effective quantization configuration, every calibration/evaluation
+  dataset path and revision, the full relevant QVQ and ZML commit SHAs, environment/hardware, output hashes, and
+  links to all evaluation records. Store the complete quantization stdout/stderr log with the artifact and record
+  its path and hash. A snapshot without this record and log is incomplete, even if all model shards are present.
 - Record the calibration dataset split, row selection, row count, model/tokenizer binding when available, source size,
   and SHA-256. If a run used more than one calibration source, record each one separately.
 
@@ -121,6 +127,18 @@ provenance. Do not mark an artifact as a complete snapshot with an unverified or
 
 For repeated runs, prefer a deterministic experiment identifier plus a content hash or timestamp suffix. If a snapshot
 already exists, compare its manifest before reusing it; do not silently replace a model or its calibration dataset.
+
+## Post-quant evaluation records
+
+Every post-quant evaluation associated with a snapshot must have a unique
+Markdown record and raw per-sample result beside the artifact. The record must
+contain the run/arm IDs, absolute model/result paths, full copy-pasteable CLI,
+effective configuration, exact dataset paths/revisions and prompt settings,
+full QVQ/ZML SHAs, dependency versions, all metrics and counts, timings, raw
+result hash, and the complete evaluation stdout/stderr log with path and hash.
+Keep failed and partial logs. Use the
+[quantized-model-provenance](../quantized-model-provenance/SKILL.md) template;
+do not treat a score-only JSON or console excerpt as complete evidence.
 
 ## Completion report
 
