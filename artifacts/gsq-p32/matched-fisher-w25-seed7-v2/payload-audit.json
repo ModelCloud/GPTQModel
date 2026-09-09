@@ -1,0 +1,104 @@
+{
+  "model.layers.0.self_attn.q_proj": {
+    "gsq_changed_tiles": 0,
+    "greedy_changed_tiles": 26,
+    "words_bytes": 1310720,
+    "native_reload": {
+      "base": {
+        "mean_abs": 0.00113777257502079,
+        "max_abs": 0.025087356567382812,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "gsq": {
+        "mean_abs": 0.00113777257502079,
+        "max_abs": 0.025087356567382812,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "greedy": {
+        "mean_abs": 0.0011416147463023663,
+        "max_abs": 0.023097991943359375,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      }
+    }
+  },
+  "model.layers.0.self_attn.k_proj": {
+    "gsq_changed_tiles": 0,
+    "greedy_changed_tiles": 16,
+    "words_bytes": 327680,
+    "native_reload": {
+      "base": {
+        "mean_abs": 0.0011087770108133554,
+        "max_abs": 0.014146804809570312,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "gsq": {
+        "mean_abs": 0.0011087770108133554,
+        "max_abs": 0.014146804809570312,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "greedy": {
+        "mean_abs": 0.001102382899262011,
+        "max_abs": 0.012660026550292969,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      }
+    }
+  },
+  "model.layers.0.self_attn.v_proj": {
+    "gsq_changed_tiles": 0,
+    "greedy_changed_tiles": 9,
+    "words_bytes": 327680,
+    "native_reload": {
+      "base": {
+        "mean_abs": 7.447195093845949e-05,
+        "max_abs": 0.0005201101303100586,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "gsq": {
+        "mean_abs": 7.447195093845949e-05,
+        "max_abs": 0.0005201101303100586,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      },
+      "greedy": {
+        "mean_abs": 7.394363638013601e-05,
+        "max_abs": 0.0005077719688415527,
+        "tokens": 16,
+        "finite": true,
+        "mean_limit": 0.002,
+        "max_limit": 0.046875,
+        "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+      }
+    }
+  }
+}

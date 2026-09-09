@@ -348,3 +348,10 @@ the discrepancy. The comparator now uses GSQ's operation order; no tolerance
 was loosened. All 37 CPU tests pass after this correction (3.74 seconds).
 The incomplete original run remains at `artifacts/gsq-p32/matched-fisher-w25-seed7`;
 it is not a model-quality result. A fresh run is required with corrected hashes.
+
+The [matched real W2.5 Fisher comparison](../docs/experiments/gsq-matched-fisher-w25.md)
+is complete. GSQ retains all QKV baseline tiles; deterministic changes 51 tiles
+and reduces calibration objectives, with small held-out KL/MSE improvements
+but a clear Top-1 regression. All nine selected-layer native reload checks pass.
+This closes the requested matched comparison for this W2.5 configuration only;
+it supports neither default promotion nor a general recovery claim.
