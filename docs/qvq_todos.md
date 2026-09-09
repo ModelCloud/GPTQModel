@@ -1,5 +1,30 @@
 # QVQ PGC16 handoff and TODOs
 
+## GSQ / RCO research — 2026-09-09
+
+Start new work from freshly fetched remote `origin/main`; historical branch/PR
+instructions below are archival, not branch starting points.
+
+- [x] Add primary references and distinguish scalar GSQ, budget allocation via
+  RCO, and the proposed P32 adaptation: [research note](../research/gsq-rco.md).
+- [x] Implement an experimental Gumbel-Softmax relaxation over valid circular
+  P32 tile candidates, fixed banks/scales, with hard calibration rollback.
+- [x] Check W1–W3.5 hard export, unchanged payload size, deterministic seed,
+  planar/window round-trip, reload and nonfinite rejection.
+- [x] Start real Llama 3.2 1B W2 P32 validation on disjoint refinement documents,
+  including a matched hard-search control; see the research note for scope.
+- [ ] Extend candidate coverage and learn existing representable scales; compare
+  assignment-only, scale-only, combined and deterministic-search arms.
+- [ ] Validate full modules and propagated final-logit KL / Top-1/5/10 on larger
+  independent document splits and multiple seeds before promoting anything.
+- [ ] Integrate a proven variant into the canonical lifecycle with complete
+  model save/reload/inference and backend checks. No production default changed.
+- [ ] RCO: enumerate supported per-module P32 rates and exact costs including
+  selectors, SU/SV, padding and metadata; implement tangent projection,
+  retraction and discrete budget feasibility as a separate experiment.
+- [ ] Compare RCO against uniform-rate and deterministic budget allocation at
+  matched total serialized bytes; measure propagated quality and task scores.
+
 Status as of 2026-08-16: production QVQ accepts fixed `pgc16-v1` only. Learned `pgc16-v2` is retired after repeated
 tests showed local/proxy error reductions without dependable held-out final-KLD improvement. The v2 evidence and
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is
