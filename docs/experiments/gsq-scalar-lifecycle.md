@@ -232,3 +232,40 @@ and `scripts/validate_gsq_scalar_compatibility.py` for reproduction.
 
 Real AWQ scale-search, scaled-normalization propagation and complete-model
 export validation remain open, along with the remaining adapters in the inventory.
+
+### Real AWQ calibration preparation
+
+`scripts/prepare_gsq_awq_calibration.py` now runs the actual AWQ QKV group scale
+search on Llama 3.2 1B block 0, using the audited F6/seed7 selection: 16 training
+documents and 3,767 valid tokens. It uses W4 asymmetric groups of 128, FP16
+weights/activations, the default 20-ratio search, and uniform token weighting.
+The YAQA source weights are not applied to this AWQ calibration. Held-out
+documents are captured separately and never enter scale selection.
+
+Documents use separate causal blocks and reset rotary positions. Joined versus
+separate-document attention has mean absolute drift 0.000008168 and maximum
+0.000366211. After folding the selected scales into RMSNorm and QKV, a fresh
+embedding/RMSNorm/attention forward has mean drift 0.000010817 and maximum
+0.000488281 versus the original attention. Both checks pass the existing
+0.002 / 0.046875 gates independently on physical GPU 0 (the leased SM80 above).
+Cached-feature division and fresh scaled RMSNorm differ slightly; both are
+preserved so subsequent fitting and deployment checks use their correct domains.
+
+Scale search restores every original block tensor before applying its winner.
+Selected channel scales range from 0.167236 to 5.980469; the AWQ attention search
+loss is 0.000001504815. This is calibration preparation, not a GSQ improvement or
+a full AWQ model validation. The full original/scaled block, calibration and
+held-out features, exact tokens, dense hashes and executed source are preserved
+locally under `artifacts/gsq-scalar/awq-calibration-seed7-v2/`; its compact
+[report](../../artifacts/gsq-scalar/awq-calibration-seed7-v2/report.json) is tracked.
+The next step is matched baseline/fixed-scale/learned-scale GSQ with actual
+clipping and packing, followed by F6 full-model propagation with the scaled
+RMSNorm retained. Complete-model export and remaining method adapters stay open.
+
+```bash
+CUDA_DEVICE_ORDER=PCI_BUS_ID OMP_NUM_THREADS=4 MAX_JOBS=4 \
+python -m gpu_allocator.cli run -n 1 --style uuid -- \
+python -m scripts.prepare_gsq_awq_calibration \
+  --source artifacts/gsq-scalar/gptq-w4-seed7-v2 \
+  --output artifacts/gsq-scalar/awq-calibration-seed7-v2
+```
