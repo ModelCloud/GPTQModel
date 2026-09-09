@@ -236,3 +236,71 @@ def test_paro_processor_applies_improved_export_and_updates_replay_losses():
     assert updated.val_loss == pytest.approx(expected)
     assert module.state['gsq_diagnostics']['initializer_val_loss'] == 4.
     assert module.state['gsq_diagnostics']['after'] < module.state['gsq_diagnostics']['before']
+
+
+@pytest.mark.parametrize('tokens', [1, 17])
+@pytest.mark.parametrize('learn_scales', [False, True])
+@pytest.mark.parametrize('krot', [1, 8])
+def test_paro_gsq_native_reload_and_graph(tokens, learn_scales, krot, tmp_path):
+    import os
+    from types import SimpleNamespace
+    if not os.environ.get('GPU_ALLOCATOR_LEASE_ID'):
+        pytest.skip('requires an exclusive GPU lease')
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+    from gptqmodel.quantization.gsq_paro import refine_paro_export
+    from gptqmodel.quantization.paroquant.optimization import _apply_inverse_rotation
+
+    rng = torch.Generator().manual_seed(7)
+    width = 128
+    pairs = torch.arange(width).view(1, -1).repeat(krot, 1).short()
+    theta = torch.full((krot, width//2), .2).half()
+    channel = (torch.rand(width, generator=rng) + .5).half()
+    target = torch.full((width, width), .03125)
+    teacher = _apply_inverse_rotation(target, pairs, theta.float(), group_size=width,
+                                     fused_rotation=False) * channel.float()
+    result = SimpleNamespace(pack_weight=torch.zeros_like(target).half(), pseudo_weight=torch.zeros_like(target),
+                             q_scales=torch.full((width, 1), .03125).half(), q_zeros=torch.full((width, 1), 8.),
+                             pairs=pairs, theta=theta, channel_scales=channel)
+    fitted = refine_paro_export(result, teacher=teacher, inputs=torch.randn(128, width, generator=rng),
+                               group_size=width, config={'enabled': True, 'steps': 80, 'learning_rate': .2,
+                                                        'learn_scales': learn_scales})
+    assert fitted['after'] < fitted['before']
+    kwargs = dict(bits=4, group_size=width, sym=True, desc_act=False, in_features=width,
+                  out_features=width, bias=False, register_buffers=True, krot=krot)
+    packed = ParoLinear(**kwargs)
+    linear = torch.nn.Linear(width, width, bias=False, dtype=torch.float16)
+    linear.weight.data.copy_(fitted['pack_weight'])
+    packed.pack(linear, fitted['q_scales'], fitted['q_zeros'])
+    packed.pairs.copy_(pairs)
+    packed.theta.copy_(theta)
+    packed.channel_scales.copy_(channel.reshape_as(packed.channel_scales))
+    path = tmp_path / 'paro.pt'
+    torch.save(packed.state_dict(), path)
+    restored = ParoLinear(**kwargs)
+    restored.load_state_dict(torch.load(path, weights_only=True), strict=True)
+    assert all(torch.equal(v, restored.state_dict()[k]) for k, v in packed.state_dict().items())
+    restored = restored.cuda().eval()
+    restored.post_init()
+    x = torch.randn(tokens, width, generator=rng).half().cuda()
+    reference_weight = fitted['pseudo_weight'].cuda().float()
+
+    def check(actual, inputs):
+        delta = (actual.float() - inputs.float() @ reference_weight.T).abs()
+        assert torch.isfinite(actual).all()
+        assert delta.mean() <= .002
+        assert delta.max() <= .046875
+        print('PARO_GSQ_NATIVE', tokens, learn_scales, krot, float(delta.mean()), float(delta.max()), flush=True)
+
+    for _ in range(3):
+        output = restored(x)
+    check(output, x)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = restored(x)
+    for _ in range(3):
+        x.copy_(torch.randn(tokens, width, generator=rng).half())
+        graph.replay()
+        torch.cuda.synchronize()
+        check(captured, x)
+        torch.testing.assert_close(captured, restored(x), rtol=0, atol=0)

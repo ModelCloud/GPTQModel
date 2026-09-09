@@ -74,8 +74,25 @@ ParoQuant config/processor selection has 81 passes, 3 skips and 3 failures; all
 three failures also reproduce at the preceding unchanged commit and involve
 grouped-processor fixtures. This is not a green whole-ParoQuant suite.
 
+Those fixtures were subsequently updated to supply the module-tree role flags
+used by the current processor: Q/K/V roles drive compute-block grouping and
+the routed-expert role selects clone fallback. The combined focused CPU run
+then passed 112 tests with 7 skips; the final expanded test matrix passes 112
+with 11 skips (including the eight separately executed GPU cases). The earlier
+failure logs remain archived.
+
+Native SM80 checks now pass eight forced-improvement export/reload cases:
+fixed/learned GSQ scales, M=1/17, K=N=128, W4/group128, and krot=1/8.
+All preserve packed state under strict reload into ParoLinear, pass eager
+output gates against the reconstructed original-domain reference, and pass
+three changed-input CUDA Graph replays per case. Captured and eager outputs
+match exactly. These controlled tensors establish runtime correctness, not
+real-model recovery. The [native log and checks](../artifacts/gsq-paro/native-lifecycle/)
+bind the executed tests and measured drift. This is one SM80 device and these
+shapes only; no other architecture or broad performance claim follows.
+
 Remaining work: grouped-scope calibration/result binding (enabled GSQ currently
-rejects `layer` and `compute_block` scopes explicitly), native ParoQuant
+rejects `layer` and `compute_block` scopes explicitly), broader native ParoQuant
 packing/reload/rotation validation, and real calibrated layers. The new public
 control is experimental and disabled by default. These pending scopes remain
 part of the broader compatibility goal; they are not deemed mathematically
