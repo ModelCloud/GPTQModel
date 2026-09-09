@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from typing import Optional, Tuple
+
 import torch
 from torch import nn
 
@@ -23,14 +25,20 @@ class AwqGEMVLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMV: 40}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # Both native AWQ GEMV implementations support only these normalized group
+    # sizes. Keep -1 for kernel selection, then normalize it in validate() when
+    # the layer's in_features value is available.
+    SUPPORTS_GROUP_SIZE = [-1, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    # The M>8 path uses GEMMV2, whose tile is N=64. Keep the class-wide
+    # contract at 64 so shape-dependent dispatch cannot select an unsupported
+    # native launch.
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
     SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
@@ -41,6 +49,46 @@ class AwqGEMVLinear(AWQuantLinear):
 
     # for transformers/optimum tests compat
     QUANT_TYPE = "awq_gemv"
+
+    @classmethod
+    def validate(
+        cls,
+        bits: int,
+        group_size: int = -1,
+        desc_act: bool = False,
+        sym: bool = True,
+        in_features: int = None,
+        out_features: int = None,
+        pack_dtype: torch.dtype = None,
+        dtype: Optional[torch.dtype] = None,
+        dynamic: Optional[dict] = None,
+        device: Optional[DEVICE] = None,
+        trainable: Optional[bool] = None,
+        adapter: Optional[Adapter] = None,
+    ) -> Tuple[bool, Optional[Exception]]:
+        """Validate the native group-size contract after resolving -1."""
+        effective_group_size = in_features if group_size == -1 and in_features is not None else group_size
+        native_group_sizes = [size for size in cls.SUPPORTS_GROUP_SIZE if size != -1]
+        if effective_group_size != -1 and effective_group_size not in native_group_sizes:
+            return False, NotImplementedError(
+                f"{cls.__name__} native GEMV supports normalized group_size "
+                f"{native_group_sizes}: actual group_size={effective_group_size}"
+            )
+        # Base validation cannot infer that -1 means the full input width.
+        return super().validate(
+            bits=bits,
+            group_size=effective_group_size,
+            desc_act=desc_act,
+            sym=sym,
+            in_features=in_features,
+            out_features=out_features,
+            pack_dtype=pack_dtype,
+            dtype=dtype,
+            dynamic=dynamic,
+            device=device,
+            trainable=trainable,
+            adapter=adapter,
+        )
 
     def __init__(
         self,
@@ -118,7 +166,14 @@ class AwqGEMVLinear(AWQuantLinear):
 
     def forward(self, x: torch.Tensor):
         out_shape = x.shape[:-1] + (self.out_features,)
+        if self.input_rows(x) == 0:
+            # Avoid a native launch with M=0 while retaining the input rank.
+            return self.empty_linear_output(x)
         inputs = x.reshape(-1, x.shape[-1])
+        if not inputs.is_contiguous():
+            # The CUDA entry point uses vectorized loads and requires a dense
+            # 2D activation matrix.
+            inputs = inputs.contiguous()
 
         input_dtype = inputs.dtype
         if input_dtype != torch.float16:
