@@ -326,3 +326,15 @@ full-objective implementation at W2.5 P32 and W4/W8 planar with dense random
 output factors. The QVQ CPU suite reports 36 passed (3.97 seconds). The comparator
 still needs experiment integration and measured real-model comparisons; these
 synthetic algebra fixtures do not establish recovery quality or GPU speed.
+
+The real-layer experiment now accepts `--compare-deterministic` together with
+`--gsq-lifecycle`. A research-only scoped hook observes the exact prepared
+GSQ boundary, saves its candidates/teacher/Fisher inputs as a shared artifact,
+and checks agreement of baseline objectives. It runs three deterministic
+sweeps, retains the GSQ result as the quantizer's normal return, and adds the
+deterministic payload to the existing held-out layer and model-propagation
+arms. The artifact SHA256 and deterministic history are recorded in the report.
+No production selector or default changes. The expanded CPU fitter suite reports
+37 passed (3.88 seconds), including saved pool/teacher identity and hook cleanup.
+The actual matched real-model run is still pending; do not cite this wiring
+as empirical GSQ recovery evidence or equal-compute benchmarking.

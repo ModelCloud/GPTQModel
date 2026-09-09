@@ -258,3 +258,29 @@ def test_deterministic_fisher_search_matches_full_recomputation(bits, layout):
     assert torch.equal(result.words, candidates[choices, torch.arange(4)])
     assert result.calibration_after < result.calibration_before
     assert result.calibration_after == pytest.approx(float(loss(current) / (x @ target @ right).square().sum()), rel=1e-5)
+
+
+def test_matched_experiment_records_exact_pool_and_restores_hook(tmp_path):
+    import gptqmodel.quantization.qvq_gsq as fitter
+    from gptqmodel.quantization import GSQConfig
+    from scripts.validate_qvq_gsq_layers import digest, quantize_with_matched_search
+
+    original = fitter.refine_trellis_fisher
+    baseline = torch.arange(32, dtype=torch.int32).reshape(1, 32)
+    config = GSQConfig(enabled=True, steps=3, candidates=3, seed=7)
+    candidates = fitter.baseline_bitflip_candidates(baseline, count=3, seed=7)
+    target = fitter.TrellisCandidateAdapter("qvq_planar", 4).inner(candidates[1], 16, 16)
+    def quantize():
+        return fitter.refine_trellis_fisher(
+            baseline, target=target, input_hessian=torch.eye(16), output_hessian=torch.eye(16),
+            config=config, bits=4, layout="qvq_planar", bank_ids=None, bank_alt_id=None,
+            codebook_version=fitter.PGC16_CODEBOOK_VERSION)
+    path, comparison = tmp_path / "shared.pt", {}
+    result = quantize_with_matched_search(quantize, comparison, path)
+    assert fitter.refine_trellis_fisher is original
+    saved = torch.load(path, weights_only=True)
+    assert torch.equal(saved["candidates"], candidates)
+    assert torch.equal(saved["target"], target)
+    assert comparison["shared_artifact_sha256"] == digest(path)
+    assert comparison["before"] == pytest.approx(result.calibration_before)
+    assert comparison["after"] <= comparison["before"]

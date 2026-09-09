@@ -23,6 +23,47 @@ SNAPSHOT = Path(
 TARGETS = [f"model.layers.0.self_attn.{kind}_proj" for kind in ("q", "k", "v")]
 
 
+def quantize_with_matched_search(quantize, comparison, artifact, *args, **kwargs):
+    """Research-only interception of the exact prepared-Fisher GSQ boundary."""
+    from unittest.mock import patch
+
+    import torch
+    import gptqmodel.quantization.qvq_gsq as fitter
+
+    original = fitter.refine_trellis_fisher
+
+    def compare(baseline, **prepared):
+        config = prepared["config"]
+        candidates = fitter.baseline_bitflip_candidates(baseline, count=config.candidates, seed=config.seed)
+        shared = {key: value.detach().cpu() if isinstance(value, torch.Tensor) else value
+                  for key, value in prepared.items() if key != "config"}
+        shared["candidates"] = candidates.cpu()
+        shared["seed"] = config.seed
+        torch.save(shared, artifact)
+        comparison["shared_artifact_sha256"] = digest(artifact)
+        stochastic = original(baseline, **prepared)
+        print("MATCHED_GREEDY_START", artifact, flush=True)
+        deterministic = fitter.deterministic_trellis_candidates(
+            candidates, target=prepared["target"],
+            inputs=torch.linalg.cholesky(prepared["input_hessian"].float()).T.contiguous(),
+            right_factor=torch.linalg.cholesky(prepared["output_hessian"].float()),
+            bits=prepared["bits"], layout=prepared["layout"], bank_ids=prepared["bank_ids"],
+            bank_alt_id=prepared["bank_alt_id"], codebook_version=prepared["codebook_version"])
+        if abs(stochastic.calibration_before - deterministic.calibration_before) > 1e-5 * max(
+                abs(stochastic.calibration_before), 1e-12):
+            raise ValueError("Matched search baseline objective differs")
+        comparison.update(words=deterministic.words, before=deterministic.calibration_before,
+                          after=deterministic.calibration_after, history=deterministic.history)
+        print("MATCHED_GREEDY_DONE", deterministic.calibration_after, flush=True)
+        return stochastic
+
+    with patch.object(fitter, "refine_trellis_fisher", compare):
+        result = quantize(*args, **kwargs)
+    if "words" not in comparison:
+        raise ValueError("Matched search did not observe the GSQ quantization boundary")
+    return result
+
+
 def digest(path):
     with Path(path).open("rb") as handle:
         return hashlib.file_digest(handle, "sha256").hexdigest()
@@ -228,6 +269,7 @@ def execute(args):
         hook.remove()
     requantized = {}
     requantized_gsq = {}
+    matched_search = {}
     if args.target_bits is not None:
         sources = provenance["train_source_weights"]
         batches = [{"input_ids": torch.tensor([row["input_ids"]]),
@@ -266,7 +308,13 @@ def execute(args):
                 print("TARGET_GSQ_LIFECYCLE", name, flush=True)
                 report["state"] = "YAQA + GSQ quantizing " + name
                 write_json(args.output / "report.json", report)
-                requantized_gsq[name] = quantize_qvq_linear(
+                quantize_gsq = quantize_qvq_linear
+                if args.compare_deterministic:
+                    from functools import partial
+                    matched_search[name] = {}
+                    quantize_gsq = partial(quantize_with_matched_search, quantize_qvq_linear,
+                                           matched_search[name], args.output / (name + ".matched-search.pt"))
+                requantized_gsq[name] = quantize_gsq(
                     dense_weights[name], inputs_h[name], output_hessian=outputs_h[name],
                     bits=args.target_bits, seed=7, input_sign_seed=7,
                     rounding="yaqa", damp_percent=0.02, v2b2_p32=args.target_bits <= 3.5,
@@ -409,7 +457,8 @@ def execute(args):
             enabled=args.gsq, steps=args.steps, seed=7, progress=progress)
         return result, greedy_fit(candidates, x, target, kw)
 
-    fit_arms = ("base", "gsq") if args.gsq_lifecycle else ("base", "gsq", "greedy")
+    fit_arms = (("base", "gsq") if args.gsq_lifecycle and not args.compare_deterministic
+                else ("base", "gsq", "greedy"))
     for name in TARGETS:
         state = saved[name]
         kw, base = state["kw"], state["base"]
@@ -433,6 +482,10 @@ def execute(args):
             state["gsq"] = (repack_p32_planar_to_window(result.trellis, bits=kw["bits"])
                             if kw["bits"] <= 3.5 else result.trellis.clone())
             before, after = result.gsq_diagnostics["before"], result.gsq_diagnostics["after"]
+            if args.compare_deterministic:
+                state["greedy"] = matched_search[name]["words"]
+                report.setdefault("matched_search", {})[name] = {
+                    key: value for key, value in matched_search[name].items() if key != "words"}
         else:
             result = fit_candidates(base, args, kw, target, x, name)
             state["gsq"] = result[0].window_words
@@ -524,11 +577,15 @@ def main():
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
+    parser.add_argument("--compare-deterministic", action="store_true",
+                        help="Compare prepared-Fisher GSQ against three-sweep hard search on the identical pool")
     parser.add_argument("--gsq-lifecycle", action="store_true",
                         help="Test QVQConfig.gsq with the prepared YAQA Fisher objective")
     parser.add_argument("--target-bits", type=float, choices=(2.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8),
                         help="Fresh YAQA QKV baseline at the requested rate; all other F6 projections remain unchanged")
     args = parser.parse_args()
+    if args.compare_deterministic and not args.gsq_lifecycle:
+        parser.error("--compare-deterministic requires --gsq-lifecycle")
     if args.gsq_lifecycle and (args.gsq or args.target_bits is None):
         parser.error("--gsq-lifecycle requires --target-bits and excludes activation-MSE --gsq")
     if args.target_bits is not None and args.target_bits >= 4 and not args.gsq_lifecycle:
