@@ -23,7 +23,7 @@ import inspect
 import math
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
@@ -104,6 +104,7 @@ class _ParoQuantLayerState:
     layer_inputs: Optional[List[List[torch.Tensor]]] = None
     layer_input_kwargs: Optional[List[Dict[str, torch.Tensor]]] = None
     layer_outputs: Optional[List[List[torch.Tensor]]] = None
+    gsq_clean_inputs: Optional[Dict[str, Any]] = None
     grouped_dataset: Optional[Any] = None
     grouped_dataset_by_device: Optional[Dict[str, Any]] = None
     replay_batches: Optional[Any] = None
@@ -458,6 +459,13 @@ class ParoQuantProcessor(LoopProcessor):
             entry.setdefault("input_batch_indices", []).append(batch_index)
             entry.setdefault("inputs", []).append(feature)
             entry.setdefault("batch_indices", []).append(self.current_batch_index())
+            if getattr(getattr(self.qcfg, "gsq", None), "enabled", False) and self._train_on_noisy_inputs_enabled():
+                if isinstance(batch_index, bool) or not isinstance(batch_index, int) or batch_index < 0:
+                    raise ValueError("Paired GSQ noisy capture requires an explicit nonnegative batch index")
+                counts = entry.setdefault("gsq_noisy_counts", {})
+                invocation = counts.get(batch_index, 0)
+                counts[batch_index] = invocation + 1
+                entry.setdefault("gsq_noisy_inputs", []).append((batch_index, invocation, feature.clone()))
 
     def _ensure_task_bucket(self, module_name: str, layer_index: int) -> None:
         """Reset repeated relative module names when quantization advances to a new layer."""
@@ -575,6 +583,27 @@ class ParoQuantProcessor(LoopProcessor):
             self._concat_feature_tensors(validation_tensors),
         )
 
+    def _prepare_gsq_paired_features(self, state, name, entry):
+        from ..quantization.gsq_scalar import gsq_enabled_for
+        from ..quantization.paroquant.gsq_capture import align_module_inputs
+
+        full_name = state.modules[name].full_name
+        if not self._train_on_noisy_inputs_enabled() or not gsq_enabled_for(self.qcfg.gsq, full_name):
+            return
+        clean = (getattr(state, "gsq_clean_inputs", None) or {}).get(name)
+        noisy = entry.get("gsq_noisy_inputs")
+        if clean is None or noisy is None:
+            raise RuntimeError(f"Missing paired GSQ module captures for `{full_name}`")
+        clean = [(batch, invocation, x.unsqueeze(0) if x.ndim == 2 else x) for batch, invocation, x in clean]
+        aligned = align_module_inputs(clean, noisy)
+        indices = [key[0] for key, _, _ in aligned]
+        clean_train, clean_validation = self._module_feature_streams(
+            [x for _, x, _ in aligned], indices, full_name)
+        noisy_train, noisy_validation = self._module_feature_streams(
+            [x for _, _, x in aligned], indices, full_name)
+        entry.update(train_inputs=noisy_train, validation_inputs=noisy_validation,
+                     gsq_teacher_train_inputs=clean_train, gsq_teacher_validation_inputs=clean_validation)
+
     def _layer_input_features(self, state: _ParoQuantLayerState) -> Dict[str, torch.Tensor]:
         """Materialize concatenated calibration features for all modules in a layer."""
         features: Dict[str, torch.Tensor] = {}
@@ -601,6 +630,7 @@ class ParoQuantProcessor(LoopProcessor):
             entry["batch_indices"] = [None]
             entry["train_inputs"] = train_inputs
             entry["validation_inputs"] = validation_inputs
+            self._prepare_gsq_paired_features(state, name, entry)
             entry.pop("input_batch_indices", None)
         return features
 
@@ -756,7 +786,8 @@ class ParoQuantProcessor(LoopProcessor):
         self._apply_optimization_result(module, result, original_weight)
         return result.train_loss, result.val_loss
 
-    def _refine_gsq_export(self, module, result, original_weight, inputs, validation_inputs):
+    def _refine_gsq_export(self, module, result, original_weight, inputs, validation_inputs,
+                           *, teacher_inputs=None, teacher_validation_inputs=None):
         from ..quantization.gsq_scalar import gsq_enabled_for
 
         config = getattr(self.qcfg, "gsq", None)
@@ -778,6 +809,19 @@ class ParoQuantProcessor(LoopProcessor):
         else:
             fit_inputs = _sample_activation_rows(inputs, train_limit)
             check_inputs = _sample_activation_rows(validation_inputs, val_limit)
+        fit_teacher = check_teacher = None
+        if teacher_inputs is not None:
+            if teacher_inputs.shape != inputs.shape:
+                raise ValueError("Paired ParoQuant GSQ training shapes differ")
+            if validation_inputs is None:
+                teacher_rows = _sample_activation_rows(teacher_inputs, train_limit + val_limit)
+                fit_teacher = teacher_rows[:len(fit_inputs)]
+                check_teacher = teacher_rows[-val_count:]
+            else:
+                if teacher_validation_inputs is None or teacher_validation_inputs.shape != validation_inputs.shape:
+                    raise ValueError("Paired ParoQuant GSQ validation shapes differ")
+                fit_teacher = _sample_activation_rows(teacher_inputs, train_limit)
+                check_teacher = _sample_activation_rows(teacher_validation_inputs, val_limit)
         if fit_inputs.numel() == 0:
             module.state["gsq_diagnostics"] = {"status": "skipped", "reason": "no_disjoint_training_rows"}
             return result
@@ -785,29 +829,33 @@ class ParoQuantProcessor(LoopProcessor):
         if bits != 4:
             raise ValueError("ParoQuant GSQ requires the W4 runtime packing format")
         dtype = original_weight.dtype if original_weight.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        paired_kwargs = {} if fit_teacher is None else {"teacher_inputs": fit_teacher.to(original_weight.device)}
         fitted = refine_paro_export(result, teacher=original_weight, inputs=fit_inputs.to(original_weight.device),
-                                   group_size=group_size, config=config, storage_dtype=dtype)
+                                   group_size=group_size, config=config, storage_dtype=dtype, **paired_kwargs)
         diagnostics = {key: fitted[key] for key in ("before", "after", "history")}
         diagnostics.update(initializer_train_loss=result.train_loss, initializer_val_loss=result.val_loss,
                            train_rows=len(fit_inputs), validation_rows=len(check_inputs),
                            objective="normalized_transformed_reconstruction")
+        if fit_teacher is not None:
+            diagnostics["objective"] = "asymmetric_transformed_quadratic_without_constant"
         module.state["gsq_diagnostics"] = diagnostics
         if fitted["after"] >= fitted["before"]:
             return result
         pseudo = fitted["pseudo_weight"].to(device=original_weight.device, dtype=original_weight.dtype)
 
-        def replay_loss(values):
+        def replay_loss(values, clean_values):
             if values.numel() == 0:
                 return 0.0
             x = values.to(device=original_weight.device, dtype=torch.float32)
+            y = x if clean_values is None else clean_values.to(device=original_weight.device, dtype=torch.float32)
             with torch.no_grad():
                 return torch.nn.functional.smooth_l1_loss(x @ pseudo.float().T,
-                                                         x @ original_weight.float().T).item()
+                                                         y @ original_weight.float().T).item()
 
         # Validation is reporting-only here; it never selects the GSQ checkpoint.
         return replace(result, pack_weight=fitted["pack_weight"], pseudo_weight=pseudo,
                        q_scales=fitted["q_scales"], q_zeros=fitted["q_zeros"],
-                       train_loss=replay_loss(fit_inputs), val_loss=replay_loss(check_inputs))
+                       train_loss=replay_loss(fit_inputs, fit_teacher), val_loss=replay_loss(check_inputs, check_teacher))
 
     def _refine_group_gsq_export(self, module, result, original_weight, group_val_loss):
         """Apply local GSQ after the group initializer without relabeling group loss."""
@@ -815,8 +863,6 @@ class ParoQuantProcessor(LoopProcessor):
 
         if not gsq_enabled_for(getattr(self.qcfg, "gsq", None), module.full_name):
             return result
-        if self._train_on_noisy_inputs_enabled():
-            raise ValueError("ParoQuant grouped GSQ needs paired clean/noisy module calibration")
         entry = self.tasks.get(module.name) or {}
         inputs = entry.get("train_inputs", torch.empty(0))
         validation = entry.get("validation_inputs")
@@ -827,7 +873,14 @@ class ParoQuantProcessor(LoopProcessor):
                 )
         if validation is not None and validation.numel() == 0:
             validation = None
-        refined = self._refine_gsq_export(module, result, original_weight, inputs, validation)
+        paired_kwargs = {}
+        if self._train_on_noisy_inputs_enabled():
+            teacher_inputs = entry.get("gsq_teacher_train_inputs")
+            if teacher_inputs is None:
+                raise RuntimeError("ParoQuant grouped GSQ requires aligned clean module activations")
+            paired_kwargs = {"teacher_inputs": teacher_inputs,
+                             "teacher_validation_inputs": entry.get("gsq_teacher_validation_inputs")}
+        refined = self._refine_gsq_export(module, result, original_weight, inputs, validation, **paired_kwargs)
         diagnostics = module.state["gsq_diagnostics"]
         diagnostics.update(initializer_scope=self._opt_scope_mode(), initializer_group_val_loss=group_val_loss,
                            refinement_scope="module", group_loss_recomputed=False)
@@ -2816,6 +2869,9 @@ class ParoQuantProcessor(LoopProcessor):
                 if entry is not None and entry.get("layer_index") == layer_index:
                     entry["inputs"] = []
                     entry.pop("input_batch_indices", None)
+                    for key in ("gsq_noisy_inputs", "gsq_noisy_counts", "gsq_teacher_train_inputs",
+                                "gsq_teacher_validation_inputs"):
+                        entry.pop(key, None)
         state.modules.clear()
         state.pending_modules.clear()
         state.processed_subsets.clear()
@@ -2825,6 +2881,7 @@ class ParoQuantProcessor(LoopProcessor):
         state.pristine_layer_module = None
         state.prepared_group_source_module = None
         state.prepared_group_source_module_by_device = None
+        state.gsq_clean_inputs = None
         state.grouped_dataset = None
         state.grouped_dataset_by_device = None
         state.replay_batches = None
@@ -2925,6 +2982,25 @@ class ParoQuantProcessor(LoopProcessor):
             if subset_total is not None and state.subset_total is None:
                 state.subset_total = subset_total
 
+    @contextmanager
+    def pristine_quant_input_capture(self, *, layer_index: int):
+        """Collect clean module inputs during the existing pristine group replay."""
+        config = getattr(self.qcfg, "gsq", None)
+        if not getattr(config, "enabled", False) or not self._train_on_noisy_inputs_enabled():
+            yield
+            return
+        from ..quantization.paroquant.gsq_capture import capture_module_inputs
+
+        layer = getattr(self, "_gsq_pristine_replay_layers", {}).pop(layer_index, None)
+        if layer is None:
+            raise RuntimeError("Paired ParoQuant GSQ requires the pristine replay layer")
+        modules = {name: module for name, module in layer.named_modules() if isinstance(module, torch.nn.Linear)}
+        with capture_module_inputs(modules, self.current_batch_index) as captures:
+            yield
+        state = self._get_layer_state(layer_index)
+        with state.lock:
+            state.gsq_clean_inputs = captures
+
     def receive_pristine_layer_module(
         self,
         *,
@@ -2932,6 +3008,10 @@ class ParoQuantProcessor(LoopProcessor):
         layer_module: torch.nn.Module,
     ) -> None:
         """Preserve an untouched float layer snapshot for grouped optimization clones."""
+        if getattr(getattr(self.qcfg, "gsq", None), "enabled", False) and self._train_on_noisy_inputs_enabled():
+            if not hasattr(self, "_gsq_pristine_replay_layers"):
+                self._gsq_pristine_replay_layers = {}
+            self._gsq_pristine_replay_layers[layer_index] = layer_module
         if self._opt_scope_mode() == "layer":
             return
         state = self._get_layer_state(layer_index)

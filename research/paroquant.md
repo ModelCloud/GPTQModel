@@ -152,3 +152,19 @@ through AWQ packing pass on controlled fixtures. Identical clean/noisy inputs
 retain exactly the unpaired tensor outputs and history. These checks are
 correctness evidence only. Processor collection of aligned clean/noisy module
 activations is not yet bound, so the public noisy-input guard remains active.
+
+Paired processor infrastructure now captures clean activations through the
+shared pristine replay context and noisy activations through the normal module
+hook. Records carry batch/invocation IDs; duplicates, missing calls and shape
+mismatches fail alignment. Capture is transactional, copies input storage,
+preserves existing hooks, and protects its bookkeeping during parallel replay.
+Paired streams use matching sequence and row selections before the asymmetric
+fitter; improved replay losses compare noisy outputs against clean targets.
+Temporary clean/noisy buffers are cleared after layer quantization.
+
+Controlled integration tests run pristine capture through noisy hook capture,
+alignment, actual GSQ fitting and export application for both grouped scopes.
+They replace the group initializer with a fixture, so they do not establish
+real grouped optimization or model-quality recovery. Focused CPU validation:
+142 passed, 11 skipped, 44 deselected. The configuration guard remains active
+pending actual grouped replay/native/model verification.
