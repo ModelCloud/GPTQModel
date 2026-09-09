@@ -29,7 +29,7 @@ def test_ouro_model_type_selects_definition(monkeypatch):
     )
 
     assert auto.check_and_get_model_definition(
-        "/monster/data/model/Ouro-1.4B", trust_remote_code=True
+        "ByteDance/Ouro-1.4B", trust_remote_code=True
     ) is OuroQModel
 
 
@@ -97,7 +97,7 @@ def test_ouro_before_model_load_patches_legacy_rotary_class(monkeypatch):
         lambda config: sentinel,
     )
 
-    OuroQModel.before_model_load(OuroQModel, "/monster/data/model/Ouro-1.4B", False)
+    OuroQModel.before_model_load(OuroQModel, "ByteDance/Ouro-1.4B", False)
 
     assert FakeOuroRotaryEmbedding().compute_default_rope_parameters(object()) == sentinel
 
@@ -120,7 +120,7 @@ def test_ouro_before_model_load_adapts_legacy_mask_keyword_locally(monkeypatch):
         lambda class_ref, model_local_path: FakeOuroRotaryEmbedding,
     )
 
-    OuroQModel.before_model_load(OuroQModel, "/monster/data/model/Ouro-1.4B", False)
+    OuroQModel.before_model_load(OuroQModel, "ByteDance/Ouro-1.4B", False)
 
     for mask_name in ("create_causal_mask", "create_sliding_window_causal_mask"):
         mask = getattr(remote_module, mask_name)
