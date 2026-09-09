@@ -299,10 +299,12 @@ def deterministic_trellis_candidates(candidates, *, target, inputs, right_factor
         candidates.shape[0], candidates.shape[1], 16, 16)
     current = adapter.inner(candidates[0], k, n, bank_ids, bank_alt_id)
     choices = torch.zeros(candidates.shape[1], device=candidates.device, dtype=torch.long)
-    normalizer = (x @ teacher @ right).square().mean().clamp_min(torch.finfo(torch.float32).tiny)
+    teacher_output = x @ teacher @ right
+    normalizer = teacher_output.square().mean().clamp_min(torch.finfo(torch.float32).tiny)
 
     def score(weight):
-        return float((x @ (weight - teacher) @ right).square().mean() / normalizer)
+        # Match GSQ operation order, including FP32 matmul cancellation.
+        return float(((x @ weight @ right) - teacher_output).square().mean() / normalizer)
 
     before = score(current)
     if not math.isfinite(before):

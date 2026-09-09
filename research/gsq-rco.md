@@ -338,3 +338,13 @@ No production selector or default changes. The expanded CPU fitter suite reports
 37 passed (3.88 seconds), including saved pool/teacher identity and hook cleanup.
 The actual matched real-model run is still pending; do not cite this wiring
 as empirical GSQ recovery evidence or equal-compute benchmarking.
+
+The first matched real W2.5 run stopped at the strict Q-projection baseline
+agreement check. The comparator evaluated `X (W-T) R`, whereas GSQ evaluated
+`(X W) R - (X T) R`. On saved real prepared inputs these yielded
+1.633157989999745e-05 and 1.633183092053514e-05 respectively, a relative
+1.537001815110042e-05 difference. A fresh leased-GPU arithmetic audit confirmed
+the discrepancy. The comparator now uses GSQ's operation order; no tolerance
+was loosened. All 37 CPU tests pass after this correction (3.74 seconds).
+The incomplete original run remains at `artifacts/gsq-p32/matched-fisher-w25-seed7`;
+it is not a model-quality result. A fresh run is required with corrected hashes.
