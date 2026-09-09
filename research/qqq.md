@@ -67,3 +67,17 @@ best-hard-payload guard. Channelwise signed-nibble behavior needs its own
 endpoint audit. Do not enable QQQ GSQ merely by adding its format to the
 affine adapter allowlist. Native inference and real disjoint Llama/F6 data
 remain required before claiming compatible QQQ lifecycle support.
+
+The initial candidate decoder is now implemented in
+`gptqmodel/quantization/gsq_qqq.py::qqq_candidate_values`. It handles both
+unsigned grouped and signed channelwise stored nibbles, including source-dtype
+channel-scale division and FP16 grouped-ratio storage. It validates finite
+positive scales and legal integer nibbles. Candidate-axis output permits GSQ
+to mix decoded values rather than applying a nondifferentiable INT8 rounding
+to the expected nibble. Scale learning is not implemented by this helper.
+
+The expanded CPU suite reports **18 passed** (3.39 seconds): actual grouped
+and channelwise packing/strict state reload, invalid codes/scales, and an
+analytic gradient check for the mixture of decoded candidate values. The
+optimizer, calibration collection and public QQQ GSQ configuration are still
+pending; this decoder alone does not enable QQQ GSQ.
