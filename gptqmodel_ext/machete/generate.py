@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import argparse
 import itertools
 import math
 import os
-import shutil
+import sys
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import dataclass, fields
@@ -13,7 +14,6 @@ from pathlib import Path
 
 import jinja2
 
-import sys
 
 _ROOT = Path(__file__).resolve().parents[2]
 _CUTLASS_EXT_DIR = _ROOT / "gptqmodel_ext" / "cutlass_extensions"
@@ -50,7 +50,7 @@ else:
         f"`{_CUTLASS_PYTHON_DIR}`. Set GPTQMODEL_CUTLASS_DIR to a valid CUTLASS checkout."
     )
 
-from vllm_cutlass_library_extension import (
+from vllm_cutlass_library_extension import (  # noqa: E402
     DataType,
     EpilogueScheduleTag,
     EpilogueScheduleType,
@@ -66,12 +66,13 @@ from vllm_cutlass_library_extension import (
     VLLMKernelScheduleTag,
 )
 
+
 #
 #   Generator templating
 #
 
 DISPATCH_TEMPLATE = """
-#include "../machete_mm_launcher.cuh"
+#include "machete_mm_launcher.cuh"
 
 namespace machete {
 
@@ -85,7 +86,7 @@ torch::Tensor mm_dispatch_{{type_sig}}(MMArgs args) {
   [[maybe_unused]] auto M = args.A.size(0);
   [[maybe_unused]] auto N = args.B.size(1);
   [[maybe_unused]] auto K = args.A.size(1);
-    
+
   if (!args.maybe_schedule) {
     {%- for cond, s in impl_config.heuristic %}
     {%if cond is not none%}if ({{cond}})
@@ -143,7 +144,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
       return mm_dispatch_{{type_sig}}(args);
   }
   {%- endfor %}
-  
+
   TORCH_CHECK_NOT_IMPLEMENTED(
     false, "machete_mm(..) is not implemented for "
     "a_type=", args.A.scalar_type(),
@@ -168,7 +169,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
 std::vector<std::string> supported_schedules_dispatch(
     SupportedSchedulesArgs args) {
     auto out_type = args.maybe_out_type.value_or(args.a_type);
-    
+
     {% for impl_config in impl_configs %}
     {% set t = impl_config.types -%}
     {% set schs = impl_config.schedules -%}
@@ -189,7 +190,7 @@ std::vector<std::string> supported_schedules_dispatch(
         };
     }
     {%- endfor %}
-    
+
     return {};
 };
 
@@ -197,10 +198,10 @@ std::vector<std::string> supported_schedules_dispatch(
 """
 
 IMPL_TEMPLATE = """
-#include "../machete_mm_launcher.cuh"
+#include "machete_mm_launcher.cuh"
 
 namespace machete {
-    
+
 {% for sch in unique_schedules(impl_configs) %}
 {% set sch_sig = gen_sch_sig(sch) -%}
 struct sch_{{sch_sig}} {
@@ -215,7 +216,7 @@ struct sch_{{sch_sig}} {
   using EpilogueTileType = cutlass::epilogue::collective::EpilogueTileAuto;
 };
 {% endfor %}
-    
+
 {% for impl_config in impl_configs %}
 {% set t = impl_config.types -%}
 {% set schs = impl_config.schedules -%}
@@ -236,7 +237,7 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
 
 {% for sch in schs %}
 {% set sch_sig = gen_sch_sig(sch) -%}
-torch::Tensor 
+torch::Tensor
 impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
   return run_impl<Kernel_{{type_sig}}<sch_{{sch_sig}}>>(args);
 }
@@ -247,7 +248,7 @@ impl_{{type_sig}}_sch_{{sch_sig}}(MMArgs args) {
 """
 
 PREPACK_TEMPLATE = """
-#include "../machete_prepack_launcher.cuh"
+#include "machete_prepack_launcher.cuh"
 
 namespace machete {
 
@@ -256,7 +257,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
   {%- for t in types %}
   {% set b_type = unsigned_type_with_bitwidth(t.b_num_bits) %}
   if (args.a_type == {{TorchTypeTag[t.a]}}
-      && args.b_type.size_bits() == {{t.b_num_bits}} 
+      && args.b_type.size_bits() == {{t.b_num_bits}}
       && convert_type == {{TorchTypeTag[t.convert]}}) {
     return prepack_impl<
       PrepackedLayoutBTemplate<
@@ -266,15 +267,15 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
         {{DataTypeTag[t.accumulator]}}, // Accumulator
         cutlass::layout::ColumnMajor,
         cutlass::gemm::KernelTmaWarpSpecializedCooperative>
-    >(args.B); 
+    >(args.B);
   }
   {%- endfor %}
-  
-  TORCH_CHECK_NOT_IMPLEMENTED(false, 
+
+  TORCH_CHECK_NOT_IMPLEMENTED(false,
     "prepack_B_dispatch(..) is not implemented for "
     "atype = ", args.a_type,
     ", b_type = ", args.b_type.str(),
-    ", with_group_scales_type= ", args.maybe_group_scales_type ? 
+    ", with_group_scales_type= ", args.maybe_group_scales_type ?
         toString(*args.maybe_group_scales_type) : "None");
 }
 
@@ -534,16 +535,28 @@ def create_sources(impl_configs: list[ImplConfig], num_impl_files=8):
     return sources
 
 
-def generate():
+def _default_output_dir() -> Path:
+    configured = os.environ.get("GPTQMODEL_CACHE_DIR")
+    if configured:
+        cache_root = Path(configured).expanduser()
+    else:
+        xdg_cache_home = os.environ.get("XDG_CACHE_HOME")
+        cache_root = (
+            Path(xdg_cache_home).expanduser() / "gptqmodel"
+            if xdg_cache_home
+            else Path.home() / ".cache" / "gptqmodel"
+        )
+    return cache_root / "machete" / "generated" / "manual"
+
+
+def generate(output_dir: str | os.PathLike[str] | None = None):
     # See csrc/quantization/machete/Readme.md, the Codegeneration for more info
     # about how this works
-    SCRIPT_DIR = os.path.dirname(__file__)
-
-    sch_common_params = dict(
-        kernel_schedule=TmaMI,
-        epilogue_schedule=TmaCoop,
-        tile_scheduler=TileSchedulerType.StreamK,
-    )
+    sch_common_params = {
+        "kernel_schedule": TmaMI,
+        "epilogue_schedule": TmaCoop,
+        "tile_scheduler": TileSchedulerType.StreamK,
+    }
 
     # Stored as "condition": ((tile_shape_mn), (cluster_shape_mnk))
     default_tile_heuristic_config = {
@@ -590,7 +603,7 @@ def generate():
 
     impl_configs = []
 
-    GPTQ_kernel_type_configs = list(
+    GPTQ_kernel_type_configs = [
         TypeConfig(
             a=a,
             b=b,
@@ -603,7 +616,7 @@ def generate():
         )
         for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
         for a in (DataType.f16, DataType.bf16)
-    )
+    ]
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
@@ -614,7 +627,7 @@ def generate():
         )
     ]
 
-    AWQ_kernel_type_configs = list(
+    AWQ_kernel_type_configs = [
         TypeConfig(
             a=a,
             b=b,
@@ -627,7 +640,7 @@ def generate():
         )
         for b in (DataType.u4, DataType.u8)
         for a in (DataType.f16, DataType.bf16)
-    )
+    ]
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
@@ -712,22 +725,28 @@ def generate():
     #                  itertools.repeat(qqq_heuristic))
     # ]
 
-    output_dir = os.path.join(SCRIPT_DIR, "generated")
-
-    # Delete the "generated" directory if it exists
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir)
-
-    # Create the "generated" directory
-    os.makedirs(output_dir)
+    if output_dir is None:
+        output_path = _default_output_dir()
+    else:
+        output_path = Path(output_dir).expanduser()
+    if output_path.exists():
+        if not output_path.is_dir():
+            raise RuntimeError(f"Machete output path is not a directory: `{output_path}`.")
+        if any(output_path.iterdir()):
+            raise RuntimeError(f"Machete output directory must be empty: `{output_path}`.")
+    else:
+        output_path.mkdir(parents=True)
 
     # Render each group of configurations into separate files
     for filename, code in create_sources(impl_configs):
-        filepath = os.path.join(output_dir, f"{filename}.cu")
-        with open(filepath, "w") as output_file:
+        filepath = output_path / f"{filename}.cu"
+        with filepath.open("w", encoding="utf-8") as output_file:
             output_file.write(code)
         print(f"Rendered template to {filepath}")
 
 
 if __name__ == "__main__":
-    generate()
+    parser = argparse.ArgumentParser(description="Generate Machete CUDA source files.")
+    parser.add_argument("--output-dir", type=Path, default=None)
+    args = parser.parse_args()
+    generate(args.output_dir)

@@ -21,6 +21,8 @@
 
 ## Latest News
 
+* 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models.
+* 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
 * 09/03/2026 7.4.0-dev `main`: ✨ Added GLM-5 Next MoE quantization support.
 * 08/19/2026 7.4.0 `main`: ✨ Added `mage_vl`, `muse_glimmer`, `olmo3` and `smollm3` model support
 * 08/18/2026 7.4.0 `main`: ✨ Added Cohere `North Micro Vision` (`cohere_compass`) model support
@@ -507,7 +509,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
 | InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HunYuanOCR / HY-V3              | ✅ | LocateAnything | ✅ | North Micro Vision              | ✅ |  Mage-VL                      | ✅ |
-| Muse Glimmer        | ✅ |   SmolLM3                         | ✅ |    |  |               |  |                        |  |
+| Muse Glimmer        | ✅ |   SmolLM3                         | ✅ | Ouro | ✅ | Spark-X2.5 | ✅ | K2-Horizon             | ✅ |
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 
@@ -605,6 +607,35 @@ export GPTQMODEL_FP32_ACCUM=1
 
 # optional speed-first mode for some kernels
 export GPTQMODEL_FP32_ACCUM=0
+```
+
+### JIT kernel cache and multi-process quantization ⚙️
+
+JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
+
+Machete's pinned CUTLASS checkout and generated CUDA sources are kept in the
+versioned user cache (`~/.cache/gptqmodel`, or `GPTQMODEL_CACHE_DIR`; when set,
+`XDG_CACHE_HOME/gptqmodel` is used). Set `GPTQMODEL_CUTLASS_DIR` to use an
+already-installed, read-only CUTLASS 4.7.1 checkout. `GPTQMODEL_OFFLINE=1`
+disables downloads and requires that checkout or a verified cache hit already
+exist. For environments where compilation is not allowed, point
+`GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY` at a compatible Machete shared library;
+an invalid or missing explicit library is reported as an error and does not
+fall back to JIT. The generated source cache can be populated ahead of time by
+prewarming the extension:
+
+```shell
+python -c "from gptqmodel import extension; extension.load('machete')"
+```
+
+```shell
+# optional: relocate the kernel cache (e.g. one cache per process)
+export GPTQMODEL_TORCH_EXTENSIONS_DIR=/path/to/cache
+
+# optional: max seconds to wait for another process's in-flight build before
+# falling back to non-JIT paths. Default: 600 or 5x the kernel's compile
+# baseline, whichever is larger.
+export GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT=600
 ```
 
 Notes:

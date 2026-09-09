@@ -65,12 +65,13 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
-from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .execution_state import DeviceAssignmentState
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -472,9 +473,17 @@ class ModuleLooper(DeviceAssignmentState):
 
         def __enter__(self):
             """Set up MoE lifecycle hooks if applicable."""
-            if self.module_looper._should_use_moe_lifecycle(self.module, self.processor):
+            if self.module_looper._should_use_moe_lifecycle(
+                self.module,
+                self.processor,
+                current_subset=self.current_subset,
+            ):
                 hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
-                self.moe_block = hooks.get_moe_block(self.module, self.module_looper.gptq_model.__class__)
+                self.moe_block = hooks.get_moe_block_for_subset(
+                    self.module,
+                    self.module_looper.gptq_model.__class__,
+                    current_subset=self.current_subset,
+                )
 
                 if self.moe_block is not None:
                     # Save original forward method
@@ -850,7 +859,12 @@ class ModuleLooper(DeviceAssignmentState):
             return True
         return False
 
-    def _should_use_moe_lifecycle(self, module: nn.Module, processor: LoopProcessor) -> bool:
+    def _should_use_moe_lifecycle(
+        self,
+        module: nn.Module,
+        processor: LoopProcessor,
+        current_subset: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """
         Check if MoE lifecycle hooks should be used for this module.
 
@@ -875,7 +889,11 @@ class ModuleLooper(DeviceAssignmentState):
             return False
 
         # Check if this module contains an MoE block
-        moe_block = hooks.get_moe_block(module, self.gptq_model.__class__)
+        moe_block = hooks.get_moe_block_for_subset(
+            module,
+            self.gptq_model.__class__,
+            current_subset=current_subset,
+        )
         if moe_block is None:
             log.warn(
                 f"pass_whole_dataset_to_each_expert is enabled but no MoE block found in module "

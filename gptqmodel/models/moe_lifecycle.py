@@ -17,13 +17,13 @@ import torch
 import torch.nn as nn
 
 from ..nn_modules.hooked_linear import StopForward
-from .moe_input_replay import RoutedMoEInputReplayAttachment
-from .moe_capture_streams import RoutedMoECaptureStreamAttachment
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.python import has_gil_disabled
 from ..utils.torch import torch_sync
+from .moe_capture_streams import RoutedMoECaptureStreamAttachment
+from .moe_input_replay import RoutedMoEInputReplayAttachment
 
 
 log = setup_logger()
@@ -101,7 +101,6 @@ class MoELifecycleHooks:
         Args:
             layer_module: The layer module (e.g., DecoderLayer)
             model_class: The model class (to access module_tree)
-
         Returns:
             The MoE block module, or None if not found
 
@@ -120,6 +119,20 @@ class MoELifecycleHooks:
         moe_block = getattr(layer_module, moe_module_name[0], None)
 
         return moe_block
+
+    def get_moe_block_for_subset(
+        self,
+        layer_module: nn.Module,
+        model_class: type,
+        current_subset: Optional[Dict[str, Any]] = None,
+    ) -> Optional[nn.Module]:
+        """Resolve the MoE root for a quantization subset.
+
+        The default delegates to the original two-argument hook so existing
+        model-specific ``get_moe_block`` overrides remain compatible. Models
+        with multiple expert families can override this method.
+        """
+        return self.get_moe_block(layer_module, model_class)
 
     def get_experts_module(self, moe_block: nn.Module, model_class: type) -> Optional[nn.Module]:
         """

@@ -566,6 +566,11 @@ class MarlinLinear(GPTQQuantLinear):
         return torch.cat(chunks, dim=0)
 
     def forward(self, x: torch.Tensor):
+        # TODO FIXME: parent should never call us if there is no data to process
+        # check: https://github.com/ModelCloud/GPTQModel/issues/1361
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
+
         if x.shape[-1] != self.in_features:
             raise ValueError(
                 f"{self.__class__.__name__} expected input width {self.in_features}, got {x.shape[-1]}."
@@ -652,11 +657,6 @@ class MarlinLinear(GPTQQuantLinear):
                         f"{exc}"
                     )
                     self.lora_cooperative_state = None
-
-        # TODO FIXME: parent should never call us if there is no data to process
-        # check: https://github.com/ModelCloud/GPTQModel/issues/1361
-        if x.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
 
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:

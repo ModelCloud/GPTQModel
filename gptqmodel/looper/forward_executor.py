@@ -7,10 +7,9 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
-
-import time
 
 import torch
 
@@ -26,6 +25,7 @@ from ..utils.looper_helpers import (
 )
 from ..utils.model import move_to, nested_move_to
 from ..utils.torch import torch_sync
+
 
 if TYPE_CHECKING:  # pragma: no cover - imports for typing only
     from logbar.progress import ProgressBar
@@ -86,7 +86,11 @@ class ForwardExecutor:
             return nullcontext()
 
         should_use_lifecycle = getattr(self.looper, "_should_use_moe_lifecycle", None)
-        if callable(should_use_lifecycle) and not should_use_lifecycle(module, processor):
+        if callable(should_use_lifecycle) and not should_use_lifecycle(
+            module,
+            processor,
+            current_subset=current_subset,
+        ):
             return nullcontext()
 
         return self.looper.MoELifecycleContext(

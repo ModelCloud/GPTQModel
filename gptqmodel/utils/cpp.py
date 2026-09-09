@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
@@ -935,6 +936,7 @@ class TorchOpsJitExtension:
         binary_names: Optional[Sequence[str]] = None,
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
+        prebuilt_library_env: Optional[str] = None,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -954,10 +956,12 @@ class TorchOpsJitExtension:
         self.binary_names = tuple(binary_names or (name,))
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
+        self.prebuilt_library_env = prebuilt_library_env
         self.compile_baseline_seconds = get_jit_compile_baseline_seconds(name)
         self._load_attempted = False
         self._load_result = False
         self._last_error = ""
+        self._loaded_prebuilt_library: Optional[Path] = None
         self._namespace_cache: Optional[object] = None
         self._op_cache: dict[str, object] = {}
         self._source_abi_detection_cache: dict[
@@ -1372,6 +1376,70 @@ class TorchOpsJitExtension:
                         candidates.append(match)
         return candidates
 
+    def _configured_prebuilt_library(self) -> Optional[Path]:
+        if not self.prebuilt_library_env:
+            return None
+        configured = os.getenv(self.prebuilt_library_env)
+        if not configured:
+            return None
+        return Path(configured).expanduser().resolve(strict=False)
+
+    def _load_configured_prebuilt_library(self, library_path: Path) -> bool:
+        """Load an explicitly configured library without evaluating JIT callbacks."""
+
+        if (
+            self._loaded_prebuilt_library == library_path
+            and self._load_result
+            and library_path.is_file()
+        ):
+            return True
+        if not library_path.is_file():
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` does not exist. "
+                f"Unset `{self.prebuilt_library_env}` to enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        if self._ops_available() and self._loaded_prebuilt_library != library_path:
+            loaded_detail = (
+                f" from `{self._loaded_prebuilt_library}`"
+                if self._loaded_prebuilt_library is not None
+                else ""
+            )
+            self._last_error = (
+                f"{self.display_name}: required torch.ops are already registered{loaded_detail}; cannot verify "
+                f"that configured prebuilt library `{library_path}` provides them. PyTorch cannot unload operator "
+                "registrations in-process, so start a new process before selecting a different prebuilt library."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        try:
+            torch.ops.load_library(str(library_path))
+        except Exception as exc:
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` is incompatible: {exc}. "
+                f"Unset `{self.prebuilt_library_env}` to enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        if not self._refresh_runtime_cache():
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` loaded but did not register "
+                f"required torch.ops ({', '.join(self.required_ops)}). Unset `{self.prebuilt_library_env}` to "
+                "enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        self._load_attempted = True
+        self._load_result = True
+        self._loaded_prebuilt_library = library_path
+        self._last_error = ""
+        return True
+
     def _try_load_prebuilt_library(self, build_root: Path) -> bool:
         for library_path in self._candidate_binary_paths(build_root):
             if not library_path.is_file():
@@ -1391,8 +1459,13 @@ class TorchOpsJitExtension:
             self._load_attempted = False
             self._load_result = False
             self._last_error = ""
+            # torch.ops registrations cannot be unloaded. Keep the artifact
+            # identity so a later environment-path switch cannot claim the
+            # existing namespace as registrations from a different library.
             self._namespace_cache = None
             self._op_cache = {}
+            if self._configured_prebuilt_library() is not None:
+                return
             build_root = self.base_build_root()
             if build_root.exists():
                 lock_timeout_seconds = self._build_lock_timeout_seconds()
@@ -1441,6 +1514,18 @@ class TorchOpsJitExtension:
     def load(self) -> bool:
         """Load the extension while serializing cache mutation across processes."""
 
+        stable_abi_error = self._stable_abi_runtime_error()
+        if stable_abi_error:
+            self._load_attempted = True
+            self._load_result = False
+            self._last_error = stable_abi_error
+            return False
+
+        configured_prebuilt = self._configured_prebuilt_library()
+        if configured_prebuilt is not None:
+            with self._lock:
+                return self._load_configured_prebuilt_library(configured_prebuilt)
+
         lock_timeout_seconds = self._build_lock_timeout_seconds()
         with _cross_process_build_lock(
             self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
@@ -1460,13 +1545,6 @@ class TorchOpsJitExtension:
 
     def _load_unlocked(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
-
-        stable_abi_error = self._stable_abi_runtime_error()
-        if stable_abi_error:
-            self._load_attempted = True
-            self._load_result = False
-            self._last_error = stable_abi_error
-            return False
 
         if self._load_attempted and self._load_result and not self.force_rebuild_enabled():
             return True
