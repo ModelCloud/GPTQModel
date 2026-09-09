@@ -11,6 +11,9 @@ from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 
 
 def audit(root):
+    bits = json.loads((root/'report.json').read_text())['bits']
+    if bits not in (2, 3, 4):
+        raise ValueError('Packing audit requires W2, W3 or W4')
     payload = torch.load(root/'stages.pt', map_location='cpu', weights_only=True)
     records = {}
     for stage, result in payload['stages'].items():
@@ -23,19 +26,19 @@ def audit(root):
             linear.weight = torch.nn.Parameter(weight, requires_grad=False)
 
             def container():
-                return TorchLinear(bits=4, group_size=128, sym=True, desc_act=False,
+                return TorchLinear(bits=bits, group_size=128, sym=True, desc_act=False,
                                    in_features=columns, out_features=rows, bias=False, backend=BACKEND.TORCH)
             packed = container()
-            packed.pack_original(linear, scales, torch.full_like(scales, 8), groups)
+            packed.pack_original(linear, scales, torch.full_like(scales, 2**(bits-1)), groups)
             restored = container()
             restored.load_state_dict(packed.state_dict(), strict=True)
             codes, zeros = restored._unpack_continuous_codes()
-            expected_codes = (weight/scales[:, groups]).round()+8
+            expected_codes = (weight/scales[:, groups]).round()+2**(bits-1)
             mismatch = int((codes.T != expected_codes).sum())
             if mismatch:
                 raise AssertionError(f'{name}: {mismatch} assignment mismatches')
             decoded = (restored.scales.float()[groups]*(codes.float()-zeros.float()[groups])).T
-            expected = (expected_codes-8)*restored.scales.float().T[:, groups]
+            expected = (expected_codes-2**(bits-1))*restored.scales.float().T[:, groups]
             torch.testing.assert_close(decoded, expected, rtol=0, atol=0)
             records[name] = dict(assignment_mismatches=mismatch, negative_scales=int((scales < 0).sum()),
                                  zero_stored_scales=int((restored.scales == 0).sum()),

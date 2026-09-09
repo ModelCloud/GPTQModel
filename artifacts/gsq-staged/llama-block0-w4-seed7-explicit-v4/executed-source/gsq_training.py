@@ -182,7 +182,7 @@ class GSQScalarTrainingModule(torch.nn.Module):
     def hard_weight(self):
         selected = self.logits.masked_fill(~self.valid, -1e9).argmax(0, keepdim=True)
         assignments = self.candidates.gather(0, selected).squeeze(0)
-        return assignments * self.scales[:, self.group_index].to(assignments.dtype)
+        return assignments * self.scales[:, self.group_index]
 
     def optimizer_groups(self, *, assignment_lr, scale_lr, weight_decay):
         return [{'params': [self.logits], 'lr': assignment_lr, 'weight_decay': weight_decay},
@@ -328,7 +328,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
 
 
 def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, seed=7,
-                     qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, **training):
+                     qk_steps=2000, qk_damp_percent=.01, **training):
     """Fit a Llama block in author stage order from supplied scalar initializers.
 
     Batches are (hidden_states, attention_kwargs) pairs without padding. Caller
@@ -341,7 +341,6 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
         raise ValueError('Llama GSQ requires all seven projection initializers and nonempty batches')
-    initializers = dict(initializers)
     fitted = copy.deepcopy(layer).eval()
     teacher_attention = {name: value.detach().clone() for name, value in layer.named_parameters()
                          if name.startswith('self_attn.')}
@@ -386,18 +385,11 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         records[name] = result
     staged_batches = [[((hidden, kwargs), hidden.numel())] for hidden, kwargs in batches]
     run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches, teacher_attention)
-    mlp_metadata = None
-    if reinitialize_mlp:
-        refreshed, mlp_metadata = initialize_llama_gptq(fitted, batches, bits=bits, group_size=group_size,
-                                                       damp_percent=qk_damp_percent, projections=names[4:])
-        initializers.update(refreshed)
     run('mlp', fitted, names[4:], staged_batches, teacher_attention)
-    records['mlp']['initializer_timing'] = 'after_attention' if reinitialize_mlp else 'before_attention'
-    records['mlp']['initializer_metadata'] = mlp_metadata
     return fitted, records
 
 
-def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, projections=None):
+def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1):
     """Capture real projection inputs and prepare symmetric GPTQ stage seeds.
 
     This initializer uses this repository's GPTQ, not the author's fork. Its
@@ -414,10 +406,6 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
     tasks, handles = {}, []
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    if projections is not None:
-        if not projections or not set(projections).issubset(names):
-            raise ValueError('Unsupported Llama GPTQ projection subset')
-        names = tuple(projections)
     try:
         for name in names:
             module = working.get_submodule(name)
@@ -490,35 +478,3 @@ def fit_qk_projection(quantizer, teacher, inputs, *, steps=2000, damp_percent=.0
                                     assignment_lr=assignment_lr, scale_lr=scale_lr, betas=betas,
                                     weight_decay=weight_decay, temperature=temperature, multiplier=multiplier,
                                     decay='constant')
-
-
-def pack_llama_staged_block(fitted, records, *, bits, group_size):
-    """Export a fitted Llama block to portable Torch GPTQ modules on CPU.
-
-    This is a block export helper, not a complete checkpoint writer. Scale
-    storage rounding is the existing TorchLinear contract and must be included
-    in downstream replay/evaluation.
-    """
-    import copy
-
-    from ..nn_modules.qlinear.torch import TorchLinear
-    from ..utils.backend import BACKEND
-
-    exported = copy.deepcopy(fitted).cpu()
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    for name in names:
-        stage = name if name in records else ('attention' if name.startswith('self_attn.') else 'mlp')
-        key = 'weight' if stage == name else name+'.weight'
-        scales = records[stage]['scales'][key].detach().cpu()
-        if not torch.isfinite(scales).all() or (scales == 0).any():
-            raise ValueError('Staged GPTQ export requires finite nonzero learned scales')
-        linear = exported.get_submodule(name)
-        groups = torch.arange(linear.in_features, dtype=torch.int32)//group_size
-        packed = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
-                             in_features=linear.in_features, out_features=linear.out_features,
-                             bias=linear.bias is not None, backend=BACKEND.TORCH)
-        packed.pack_original(linear, scales, torch.full_like(scales, 2**(bits-1)), groups)
-        parent, leaf = name.rsplit('.', 1)
-        setattr(exported.get_submodule(parent), leaf, packed)
-    return exported

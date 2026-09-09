@@ -1,0 +1,270 @@
+{
+  "state": "complete",
+  "commit": "bebfd81fcf384363e4b15b72e35656c9f35af083",
+  "source_hashes": {
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py": "68fe5fde57ed979964292b360f07f7ea12abf45bba808f48ffb1eab784148078",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_training.py": "244c8a86bd923117f4817177769e11e9f46bbf4bf45088bb2f1a7412d181b289",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/inputs.json": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8",
+    "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+    "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb"
+  },
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "seed": 7,
+  "bits": 2,
+  "epochs": 10,
+  "qk_steps": 2000,
+  "group_size": 128,
+  "attention": "eager",
+  "cache": false,
+  "graphs": false,
+  "precision": "float32",
+  "source_model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "scope": "block0, local reconstruction; no paper-reproduction claim",
+  "training": {
+    "assignment_lr": 0.0001,
+    "scale_lr": 5e-05,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "weight_decay": 1.0,
+    "temperature": [
+      2.0,
+      0.05
+    ],
+    "multiplier": [
+      100.0,
+      500.0
+    ],
+    "warmup_steps": 0,
+    "min_lr": 0.1,
+    "decay": "cosine"
+  },
+  "qk_learning_rate_decay": "constant",
+  "mlp_initializer_timing": "after_attention",
+  "qk_damp_percent": 0.01,
+  "initializer_damp_percent": 0.01,
+  "started_utc": "2026-09-09T09:41:44.724064+00:00",
+  "argv": [
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py",
+    "--inputs",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2",
+    "--output",
+    "artifacts/gsq-staged/llama-block0-w2-seed7-late-mlp-v2",
+    "--bits",
+    "2",
+    "--epochs",
+    "10",
+    "--qk-steps",
+    "2000",
+    "--damp-percent",
+    ".01"
+  ],
+  "run_id": "llama-block0-w2-seed7-late-mlp-v2",
+  "weighting": "unweighted documents; not YAQA 1.25/N-mode reproduction",
+  "gpu_properties": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "initializer": {
+    "self_attn.q_proj": {
+      "loss": 0.00401970509163796,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "self_attn.k_proj": {
+      "loss": 0.0018991010082093987,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "self_attn.v_proj": {
+      "loss": 3.86399491130119e-05,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "self_attn.o_proj": {
+      "loss": 3.6901146379174117e-06,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "mlp.gate_proj": {
+      "loss": 0.0027891715515314945,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "mlp.up_proj": {
+      "loss": 0.002140536307022747,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    },
+    "mlp.down_proj": {
+      "loss": 1.383828355742602e-05,
+      "damp": 0.009999999776482582,
+      "samples": 3767
+    }
+  },
+  "heldout": [
+    {
+      "elements": 374784,
+      "baseline_sse": 201.6371654609233,
+      "staged_sse": 94.1213375693398
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 268.9656104950283,
+      "staged_sse": 161.93047655774433
+    },
+    {
+      "elements": 413696,
+      "baseline_sse": 227.72612558742986,
+      "staged_sse": 122.21666065798203
+    },
+    {
+      "elements": 245760,
+      "baseline_sse": 131.6985245766103,
+      "staged_sse": 55.1031857944519
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 242.06756688642616,
+      "staged_sse": 139.0178621978817
+    },
+    {
+      "elements": 514048,
+      "baseline_sse": 220.2638772081244,
+      "staged_sse": 131.08813736640315
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 455.99980527269423,
+      "staged_sse": 185.4562280532479
+    },
+    {
+      "elements": 393216,
+      "baseline_sse": 288.4139035893474,
+      "staged_sse": 134.29562403365225
+    },
+    {
+      "elements": 350208,
+      "baseline_sse": 196.8114816080141,
+      "staged_sse": 102.4645450090707
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 260.40308395409835,
+      "staged_sse": 148.0849051761756
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 297.45335008164886,
+      "staged_sse": 177.54970061879695
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 316.35818175730174,
+      "staged_sse": 184.91661000484086
+    },
+    {
+      "elements": 303104,
+      "baseline_sse": 203.7402491956413,
+      "staged_sse": 101.52866550690929
+    },
+    {
+      "elements": 466944,
+      "baseline_sse": 260.9742349871046,
+      "staged_sse": 157.55359713434393
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 371.5390567478093,
+      "staged_sse": 191.07978615856535
+    },
+    {
+      "elements": 264192,
+      "baseline_sse": 260.63275234655543,
+      "staged_sse": 100.97565267298023
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 293.7800773574379,
+      "staged_sse": 193.9413981842758
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 355.4588717678584,
+      "staged_sse": 205.01017583178827
+    },
+    {
+      "elements": 329728,
+      "baseline_sse": 156.16950701264187,
+      "staged_sse": 68.00496963392565
+    },
+    {
+      "elements": 196608,
+      "baseline_sse": 117.20278782792509,
+      "staged_sse": 32.585275607470535
+    },
+    {
+      "elements": 237568,
+      "baseline_sse": 226.29763189677567,
+      "staged_sse": 120.73458932112497
+    },
+    {
+      "elements": 176128,
+      "baseline_sse": 129.53716168830977,
+      "staged_sse": 49.616153123230646
+    },
+    {
+      "elements": 165888,
+      "baseline_sse": 157.7736371044227,
+      "staged_sse": 70.1122656199695
+    },
+    {
+      "elements": 116736,
+      "baseline_sse": 105.91642189892536,
+      "staged_sse": 30.29704055321039
+    },
+    {
+      "elements": 102400,
+      "baseline_sse": 121.64191519832195,
+      "staged_sse": 28.461780312641846
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 302.3763424370926,
+      "staged_sse": 180.18744580817113
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 329.1768007961418,
+      "staged_sse": 178.46404259608858
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 283.2336425345176,
+      "staged_sse": 162.28928759375447
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 308.57872302501283,
+      "staged_sse": 187.0935225182156
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 401.41850279470316,
+      "staged_sse": 275.544129781944
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 255.73066680351832,
+      "staged_sse": 154.0758914275846
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 313.7571965741589,
+      "staged_sse": 207.8178623430435
+    }
+  ],
+  "payload_sha256": "983941becc6d3189e847b291112087860c18bf15a772bd954f8d652e2d53db34",
+  "finished_utc": "2026-09-09T09:42:23.500425+00:00"
+}

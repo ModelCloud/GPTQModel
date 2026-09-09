@@ -77,3 +77,13 @@ Pinned Q/K source calls `GumbelQuantizerInt` for both W3 and W4 without forwardi
 `bits`; that constructor defaults to W3. Do not silently reproduce this apparent
 W4 source inconsistency as the paper specification. Resolve paper-vs-code behavior
 and record an explicit interpretation before claiming W4 parity.
+
+## Late MLP initializer ordering
+
+Pinned author `main.py` lines 269–286 trains attention before calling the MLP
+initializer. The initial staged experiments instead initialized all projections
+against the original attention. The driver now refreshes MLP-only GPTQ inputs and
+seeds after attention fitting; records carry `initializer_timing` and initializer
+metadata. Earlier saved artifacts remain evidence for the earlier ordering and
+must not be relabeled as having this correction. The real W2 run with a 43.62%
+local-MSE improvement also predates this correction.

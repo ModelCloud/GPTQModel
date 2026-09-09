@@ -56,7 +56,6 @@ def execute(args):
                     min_lr=.1, decay='cosine')
     report['training'] = training
     report['qk_learning_rate_decay'] = 'constant'
-    report['mlp_initializer_timing'] = 'after_attention'
     report['qk_damp_percent'] = args.damp_percent
     report['initializer_damp_percent'] = args.damp_percent
     report.update(started_utc=started, argv=sys.argv, run_id=output.name,

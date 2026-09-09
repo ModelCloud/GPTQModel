@@ -241,14 +241,15 @@ def test_llama_staged_driver_executes_all_projections_without_mutating_teacher()
     kwargs = dict(position_embeddings=LlamaRotaryEmbedding(config)(hidden, torch.arange(3)[None]),
                   attention_mask=torch.full((3, 3), -torch.inf).triu(1)[None, None], use_cache=False)
     fitted, records = fit_llama_stages(layer, initializers, [(hidden, kwargs)], bits=2, group_size=8,
-                                      epochs=2, qk_steps=2, decay='constant')
+                                      epochs=2, qk_steps=2, reinitialize_mlp=False, decay='constant')
     assert set(records) == {'self_attn.q_proj', 'self_attn.k_proj', 'attention', 'mlp'}
     assert all(len(result['history']) == 2 for result in records.values())
     assert torch.isfinite(fitted(hidden, **kwargs)).all()
     assert all(torch.equal(value, original[name]) for name, value in layer.named_parameters())
 
 
-def test_actual_gptq_initializer_captures_llama_inputs_and_preserves_teacher():
+@pytest.mark.parametrize('bits', [2, 3, 4])
+def test_actual_gptq_initializer_captures_llama_inputs_and_preserves_teacher(bits):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
     from gptqmodel.quantization.gsq_training import initialize_llama_gptq
@@ -261,7 +262,7 @@ def test_actual_gptq_initializer_captures_llama_inputs_and_preserves_teacher():
     hidden = torch.randn(2, 16, 32)
     kwargs = dict(position_embeddings=LlamaRotaryEmbedding(config)(hidden, torch.arange(16)[None]),
                   attention_mask=torch.full((16, 16), -torch.inf).triu(1)[None, None], use_cache=False)
-    seeds, metadata = initialize_llama_gptq(layer, [(hidden, kwargs)], bits=4, group_size=32)
+    seeds, metadata = initialize_llama_gptq(layer, [(hidden, kwargs)], bits=bits, group_size=32)
     assert len(seeds) == len(metadata) == 7
     for name, (weight, scales) in seeds.items():
         assert weight.shape == layer.get_submodule(name).weight.shape
@@ -286,6 +287,12 @@ def test_gptq_staged_training_packing_and_disk_reload(tmp_path):
     batches = [(hidden, kwargs)]
     seeds, _ = initialize_llama_gptq(layer, batches, bits=4, group_size=32)
     fitted, records = fit_llama_stages(layer, seeds, batches, bits=4, group_size=32, epochs=2, qk_steps=2, decay='constant')
+    assert records['mlp']['initializer_timing'] == 'after_attention'
+    from gptqmodel.quantization.gsq_training import pack_llama_staged_block
+    exported = pack_llama_staged_block(fitted, records, bits=4, group_size=32)
+    assert all(isinstance(exported.get_submodule(name), TorchLinear) for name in seeds)
+    assert torch.isfinite(exported(hidden, **kwargs)).all()
+
     for name in seeds:
         if name in records:
             scales = records[name]['scales']['weight']
@@ -349,3 +356,16 @@ def test_qk_factor_matches_author_sequence_normalization_and_damping():
     gram += torch.eye(4)*(.1*gram.diagonal().mean())
     torch.testing.assert_close(factor @ factor.T, gram)
     assert dead.tolist() == [False, False, False, True]
+
+
+def test_hard_export_rounds_scales_before_bf16_multiplication():
+    from gptqmodel.quantization.gsq_training import GSQScalarTrainingModule
+
+    weight = torch.tensor([[-4., -3., 2., 3.]], dtype=torch.bfloat16)
+    module = GSQScalarTrainingModule(weight, torch.ones(1, 2, dtype=torch.bfloat16), 2,
+                                    bits=3, noise=torch.zeros(5, 1, 4, dtype=torch.bfloat16))
+    with torch.no_grad():
+        module.scales.copy_(torch.tensor([[.123456, .876543]]))
+    expected = weight*module.scales[:, module.group_index].bfloat16()
+    assert module.hard_weight().dtype == torch.bfloat16
+    torch.testing.assert_close(module.hard_weight(), expected, rtol=0, atol=0)

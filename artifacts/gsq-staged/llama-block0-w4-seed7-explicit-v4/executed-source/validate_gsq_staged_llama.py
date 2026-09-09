@@ -56,9 +56,8 @@ def execute(args):
                     min_lr=.1, decay='cosine')
     report['training'] = training
     report['qk_learning_rate_decay'] = 'constant'
-    report['mlp_initializer_timing'] = 'after_attention'
-    report['qk_damp_percent'] = args.damp_percent
-    report['initializer_damp_percent'] = args.damp_percent
+    report['qk_damp_percent'] = .01
+    report['initializer_damp_percent'] = .1
     report.update(started_utc=started, argv=sys.argv, run_id=output.name,
                   weighting='unweighted documents; not YAQA 1.25/N-mode reproduction',
                   gpu_properties=str(torch.cuda.get_device_properties(0)))
@@ -91,13 +90,12 @@ def execute(args):
                 batches[split].append((hidden, kwargs))
     report['state'] = 'initializing'
     write_json(output/'report.json', report)
-    seeds, metadata = initialize_llama_gptq(layer, batches['train'], bits=args.bits, group_size=128,
-                                               damp_percent=args.damp_percent)
+    seeds, metadata = initialize_llama_gptq(layer, batches['train'], bits=args.bits, group_size=128)
     report['initializer'] = metadata
     report['state'] = 'training'
     write_json(output/'report.json', report)
     fitted, stages = fit_llama_stages(layer, seeds, batches['train'], bits=args.bits, group_size=128,
-                                     epochs=args.epochs, seed=7, qk_steps=args.qk_steps, qk_damp_percent=args.damp_percent, **training)
+                                     epochs=args.epochs, seed=7, qk_steps=args.qk_steps, **training)
     torch.save({'initializers': seeds, 'stages': stages, 'state_dict': fitted.cpu().state_dict()}, output/'stages.pt')
     fitted.to('cuda')
     import copy
@@ -126,5 +124,4 @@ if __name__ == '__main__':
     parser.add_argument('--bits', type=int, choices=(2, 3, 4), default=4)
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--qk-steps', type=int, default=2000)
-    parser.add_argument('--damp-percent', type=float, default=.01)
     execute(parser.parse_args())

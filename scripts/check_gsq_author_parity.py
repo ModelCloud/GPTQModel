@@ -78,6 +78,7 @@ def main():
                     author_optimizer.step()
                 row['trajectory_logit_max_error'] = float((local.logits-author.quant_logits).abs().max())
                 row['trajectory_scale_max_error'] = float((local.scales-author.scales).abs().max())
+            row['hard_weight_max_error'] = float((local.hard_weight().float()-author.get_hard_weights()[0].float()).abs().max())
             results.append(row)
     args.output.write_text(json.dumps(results, indent=2)+'\n')
     print(json.dumps(results, indent=2))

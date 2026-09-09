@@ -490,35 +490,3 @@ def fit_qk_projection(quantizer, teacher, inputs, *, steps=2000, damp_percent=.0
                                     assignment_lr=assignment_lr, scale_lr=scale_lr, betas=betas,
                                     weight_decay=weight_decay, temperature=temperature, multiplier=multiplier,
                                     decay='constant')
-
-
-def pack_llama_staged_block(fitted, records, *, bits, group_size):
-    """Export a fitted Llama block to portable Torch GPTQ modules on CPU.
-
-    This is a block export helper, not a complete checkpoint writer. Scale
-    storage rounding is the existing TorchLinear contract and must be included
-    in downstream replay/evaluation.
-    """
-    import copy
-
-    from ..nn_modules.qlinear.torch import TorchLinear
-    from ..utils.backend import BACKEND
-
-    exported = copy.deepcopy(fitted).cpu()
-    names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
-             'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    for name in names:
-        stage = name if name in records else ('attention' if name.startswith('self_attn.') else 'mlp')
-        key = 'weight' if stage == name else name+'.weight'
-        scales = records[stage]['scales'][key].detach().cpu()
-        if not torch.isfinite(scales).all() or (scales == 0).any():
-            raise ValueError('Staged GPTQ export requires finite nonzero learned scales')
-        linear = exported.get_submodule(name)
-        groups = torch.arange(linear.in_features, dtype=torch.int32)//group_size
-        packed = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
-                             in_features=linear.in_features, out_features=linear.out_features,
-                             bias=linear.bias is not None, backend=BACKEND.TORCH)
-        packed.pack_original(linear, scales, torch.full_like(scales, 2**(bits-1)), groups)
-        parent, leaf = name.rsplit('.', 1)
-        setattr(exported.get_submodule(parent), leaf, packed)
-    return exported
