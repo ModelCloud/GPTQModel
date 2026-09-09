@@ -66,7 +66,7 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 |---|---|
 | QVQ P32 and ordinary W4–W8 | Published draft PR has all-rate GPU checks and real F6/seed7 W2.5/W4/W8 measurements; no gain in those lifecycle runs |
 | GPTQ | Real F6/seed7 W4 QKV, config/packed reload and Torch GPU layer checks pass; other rates/backends and complete-model exports pending |
-| AWQ GEMM | Preclip teacher hook and actual CPU packer checks implemented; full scale-search lifecycle, real-model and native backend validation pending |
+| AWQ GEMM | Real F6/seed7 QKV scale search, clipping, GSQ, packing/reload and Torch GPU checks pass; fixed GSQ has mixed small propagated effects, scale learning retains baseline; other backends and complete-model exports pending |
 | AWQ GEMV/GEMV_FAST/LLM-AWQ | Format-specific scalar adapters, CPU packed-objective and native GPU fixture checks pass; real-model scale-search and propagation validation pending |
 | AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
@@ -269,3 +269,48 @@ python -m scripts.prepare_gsq_awq_calibration \
   --source artifacts/gsq-scalar/gptq-w4-seed7-v2 \
   --output artifacts/gsq-scalar/awq-calibration-seed7-v2
 ```
+
+### Real AWQ GEMM GSQ comparison
+
+The subsequent `awq-w4-seed7-v2` run completes all three full block-0 QKV arms
+using that scale-search fixture. Actual AWQ clipping is applied to V; Q/K retain
+AWQ's clipping exclusions. GSQ receives the scaled preclip FP16 teacher and
+uniform scaled calibration activations, with seed 7, 100 steps and candidate
+budget 33 (all 16 W4 codes). Hard checkpoints are scored after actual AWQ inverse
+arithmetic and stored scales. Each arm saves/reloads its config and GEMM payload.
+The original F6's other projections remain unchanged; its FP32 canonical model
+retains the AWQ-scaled block-0 RMSNorm for 32 locked documents / 6,367 tokens.
+This is not a full AWQ model export or full native-kernel model run.
+
+| Arm | Final KLD | Logit MSE | Top-1 | Top-5 | Top-10 |
+|---|---:|---:|---:|---:|---:|
+| Baseline | 0.117415165 | 0.452552406 | 85.738967% | 82.425004% | 82.479975% |
+| Fixed-scale GSQ | 0.117606072 | 0.453133418 | 85.738967% | 82.484687% | 82.384168% |
+| Learned-scale GSQ | 0.117415165 | 0.452552406 | 85.738967% | 82.425004% | 82.479975% |
+
+Fixed-scale GSQ changes 326 V codes and no Q/K codes. V calibration NMSE falls
+from 0.007332732 to 0.007268057, but final KLD rises 0.162592% and MSE rises
+0.128386%. Paired document-bootstrap 95% intervals for their mean deltas are
+[0.000147024, 0.000261665] and [0.000405335, 0.000863578]: small clear negatives
+on this locked sample. Top-1 is noise-consistent (interval includes zero), Top-5
+is a small clear positive, and Top-10 a small clear negative. These are mixed
+effects, not an overall recovery claim. Learned-scale GSQ retains every baseline
+tensor and every per-document metric exactly. Defaults remain disabled.
+
+All nine reloaded AWQ Torch GPU cases pass on 16 real held-out activation rows
+per projection. Worst mean/max drift against the matching FP32 operator is
+0.000242425 / 0.006502151, within 0.002 / 0.046875 independently. All arms have
+3,268,608 QKV tensor bytes and identical zero points; fixed GSQ also preserves
+all scales. Independent nibble/order decoding matches the real Q baseline.
+The first attempt stopped before GSQ at strict reload because the experiment
+omitted AWQ buffer registration; its log is preserved locally. The corrected
+run uses `register_buffers=True` and completed under a new exclusive lease.
+
+Evidence: [raw report](../../artifacts/gsq-scalar/awq-w4-seed7-v2/report.json),
+[payload audit](../../artifacts/gsq-scalar/awq-w4-seed7-v2/payload-audit.json).
+Exact tokens, teacher logits, payloads, calibration fixture and executed source
+remain in the local experiment directories. Reproduce with
+`scripts.validate_gsq_scalar_layers --method awq --awq-calibration
+artifacts/gsq-scalar/awq-calibration-seed7-v2`, first with `--prepare` and a fresh
+`--output`, then under the GPU allocator. Audit with
+`scripts.analyze_gsq_awq_results RUN --output NEW_JSON`.
