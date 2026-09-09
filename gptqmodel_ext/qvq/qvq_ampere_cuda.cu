@@ -1803,7 +1803,8 @@ template <
     int StaticSplitCount,
     int StaticN,
     bool FullRows,
-    bool WideNTiles>
+    bool WideNTiles,
+    bool UpperRowsOnly = false>
 __device__ __forceinline__ void
 p32_window_ampere_grouped_flash_next_qkv_segment(
     const half* __restrict__ input,
@@ -1834,7 +1835,7 @@ p32_window_ampere_grouped_flash_next_qkv_segment(
       FullRows ? 0 : Rows,
       StaticN,
       true,
-      false,
+      UpperRowsOnly,
       2560,
       true,
       false,
@@ -1868,7 +1869,8 @@ template <
     int StageKTiles,
     int StaticSplitCount,
     bool FullRows,
-    bool WideNTiles>
+    bool WideNTiles,
+    bool UpperRowsOnly = false>
 __global__ __launch_bounds__(kThreads)
 void p32_window_ampere_grouped_flash_next_qkv_static_kernel(
     const half* __restrict__ input,
@@ -1920,15 +1922,17 @@ void p32_window_ampere_grouped_flash_next_qkv_static_kernel(
   if (segment == 0) {
     p32_window_ampere_grouped_flash_next_qkv_segment<
         TransitionBits, Rows, StageKTiles, StaticSplitCount, 12288, FullRows,
-        WideNTiles>(input, trellis, levels, bank_ids, params, partial_output,
-                    output, Rows, n_block, split, segment, payload_n_tile_offset,
-                    output_n_offset, partial_segment_offset);
+        WideNTiles, UpperRowsOnly>(
+        input, trellis, levels, bank_ids, params, partial_output, output, Rows,
+        n_block, split, segment, payload_n_tile_offset, output_n_offset,
+        partial_segment_offset);
   } else {
     p32_window_ampere_grouped_flash_next_qkv_segment<
         TransitionBits, Rows, StageKTiles, StaticSplitCount, 512, FullRows,
-        WideNTiles>(input, trellis, levels, bank_ids, params, partial_output,
-                    output, Rows, n_block, split, segment, payload_n_tile_offset,
-                    output_n_offset, partial_segment_offset);
+        WideNTiles, UpperRowsOnly>(
+        input, trellis, levels, bank_ids, params, partial_output, output, Rows,
+        n_block, split, segment, payload_n_tile_offset, output_n_offset,
+        partial_segment_offset);
   }
 }
 
@@ -4515,6 +4519,19 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   const bool use_flash_next_qkv_scalar_shape =
       use_flash_next_qkv_shape && use_flash_next_qkv_wmma_shape &&
       (size_m == 1 || size_m == 2 || size_m == 4);
+  const bool use_flash_next_qkv_wide_m8 =
+      use_flash_next_qkv_static_shape && size_m == 8;
+  if (use_flash_next_qkv_wide_m8) {
+    // M=8 only needs the upper half of the m16 fragment. Reuse that A
+    // fragment across two N16 tiles so the grouped QKV wave has the same
+    // occupancy-friendly geometry as direct Q.
+    active_wmma_blocks = 0;
+    for (int segment = 0; segment < segment_count; ++segment) {
+      active_wmma_blocks +=
+          ((params.n_tiles[segment] + 2 * kTilesPerBlock - 1) /
+           (2 * kTilesPerBlock)) * params.split_count[segment];
+    }
+  }
   const bool use_flash_next_gate_up_shape =
       TransitionBits == 6 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
@@ -4701,13 +4718,13 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     } else if (use_flash_next_qkv_static_shape && size_m == 8) {
       if (use_flash_next_qkv_wmma_split4_shape) {
         p32_window_ampere_grouped_flash_next_qkv_static_kernel<
-            TransitionBits, 8, 5, 4, false, false>
+            TransitionBits, 8, 5, 4, false, true, true>
             <<<grid, kThreads, 0, stream>>>(
                 input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
                 partial_output_ptr, output_ptr);
       } else {
         p32_window_ampere_grouped_flash_next_qkv_static_kernel<
-            TransitionBits, 8, 5, 16, false, false>
+            TransitionBits, 8, 5, 16, false, true, true>
             <<<grid, kThreads, 0, stream>>>(
                 input_ptr, trellis_ptr, levels_ptr, bank_ids_ptr, params,
                 partial_output_ptr, output_ptr);
