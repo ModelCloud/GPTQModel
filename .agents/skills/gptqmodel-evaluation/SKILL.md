@@ -45,6 +45,13 @@ unexpectedly low benchmark scores.
 5. **Report.**
    - Include exact benchmark config, task list, batch size, prompt template, and scores.
    - Separate model-quality issues (wrong answers) from inference-implementation issues (wrong outputs/shape errors).
+   - For every invocation, store a unique Markdown record and the complete raw per-sample result. Include the
+     `run_id`, `arm_id`, absolute model/result paths, full copy-pasteable CLI, effective config, exact dataset
+     path/revision and row order, tokenizer/prompt/scoring settings, full 40-character QVQ and ZML commit SHAs,
+     dependency versions, all task metrics/counts/timings, and the raw-result SHA-256.
+   - Tee complete stdout and stderr to a durable evaluation log and record its absolute path, byte size, and
+     SHA-256. Preserve logs for failed or partial evaluations. Follow
+     [$quantized-model-provenance](../quantized-model-provenance/SKILL.md).
 
 ## Anti-patterns
 
