@@ -81,3 +81,18 @@ and channelwise packing/strict state reload, invalid codes/scales, and an
 analytic gradient check for the mixture of decoded candidate values. The
 optimizer, calibration collection and public QQQ GSQ configuration are still
 pending; this decoder alone does not enable QQQ GSQ.
+
+`qqq_calibration_moments` now implements the proposed paired statistics as
+unnormalized sums, returning the token count so callers can normalize both
+moments identically. It reproduces runtime FP16 casting, FP16 maximum/division,
+INT8 rounding, and FP32 reconstructed activations. Zero rows contribute zero;
+nonzero token-scale underflow and FP16 input overflow fail explicitly rather
+than using undefined float-to-integer conversions as calibration evidence.
+
+The CPU contract suite now reports **22 passed** (3.53 seconds). Additional
+checks compare activation values through the actual runtime `dynamic_quant`,
+verify the asymmetric quadratic against explicit reconstruction-loss
+differences, and check additive batch statistics for FP16/BF16/FP32 source
+inputs. These are algebra/runtime-contract fixtures, not real-model quality
+measurements. The helper is not yet connected to `QQQ.add_batch`; default
+quantization behavior remains unchanged.

@@ -87,3 +87,43 @@ def test_candidate_mixture_has_gradient_over_decoded_values():
     mixture.sum().backward()
     expected = (values - values.mean(-1, keepdim=True)) / 3
     torch.testing.assert_close(logits.grad, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_calibration_moments_match_runtime_and_explicit_loss(dtype):
+    from gptqmodel.quantization.gsq_qqq import qqq_calibration_moments
+    from gptqmodel.quantization.gsq_scalar import asymmetric_error_term
+
+    rng = torch.Generator().manual_seed(7)
+    inputs = torch.randn(19, 128, generator=rng).to(dtype)
+    native = inputs.float() + torch.randn(19, 128, generator=rng) * 0.03
+    hessian, cross, count = qqq_calibration_moments(inputs, teacher_inputs=native)
+    codes, scale = QQQTorchLinear.dynamic_quant(None, inputs.half())
+    deployed = codes.float() * scale
+    assert count == 19
+    assert torch.equal(hessian, deployed.T @ deployed)
+    assert torch.equal(cross, (native - deployed).T @ deployed)
+    weight = torch.randn(4, 128, generator=rng).double()
+    error = torch.randn(4, 128, generator=rng).double() * 0.1
+    exact = ((weight + error) @ deployed.double().T - weight @ native.double().T).square().sum()
+    constant = (weight @ (deployed.double() - native.double()).T).square().sum()
+    quadratic = (error @ hessian.double() * error).sum()
+    quadratic += asymmetric_error_term(error, weight, cross.double())
+    torch.testing.assert_close(quadratic, exact - constant, atol=1e-4, rtol=1e-5)
+    h1, d1, n1 = qqq_calibration_moments(inputs[:7], teacher_inputs=native[:7])
+    h2, d2, n2 = qqq_calibration_moments(inputs[7:], teacher_inputs=native[7:])
+    torch.testing.assert_close(h1 + h2, hessian)
+    torch.testing.assert_close(d1 + d2, cross)
+    assert n1 + n2 == count
+
+
+def test_calibration_zero_rows_and_runtime_underflow():
+    from gptqmodel.quantization.gsq_qqq import qqq_calibration_moments
+
+    hessian, cross, count = qqq_calibration_moments(torch.zeros(3, 128))
+    assert count == 3
+    assert torch.count_nonzero(hessian) == torch.count_nonzero(cross) == 0
+    with pytest.raises(ValueError, match="underflows"):
+        qqq_calibration_moments(torch.full((1, 128), 2**-24))
+    with pytest.raises(ValueError, match="overflow"):
+        qqq_calibration_moments(torch.full((1, 128), 1e10))

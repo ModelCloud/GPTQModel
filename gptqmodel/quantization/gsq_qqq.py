@@ -58,3 +58,37 @@ def qqq_candidate_values(codes, scales, *, group_size, in_features, channel_scal
         ratio = ratio.unsqueeze(-1)
         channel = channel.unsqueeze(-1)
     return ((values - 8) * ratio).round().clamp(-128, 127) * channel
+
+
+def qqq_calibration_moments(inputs, *, teacher_inputs=None):
+    """Return unnormalized (Hq, D, tokens) for deployed-input reconstruction.
+
+    Inputs are [tokens,in] in the same smoothing basis as the weights. Runtime
+    casts to FP16 before computing token maxima and dividing by 127; retain
+    that precision order. D = (Xteacher-Xq).T @ Xq permits asymmetric fitting
+    without an inverse. This objective excludes final output casts/roundoff.
+    Add returned moments across batches and normalize both by the same count.
+    """
+    if inputs.ndim != 2 or min(inputs.shape) <= 0 or not inputs.is_floating_point():
+        raise ValueError("QQQ calibration inputs must be nonempty floating [tokens,in]")
+    teacher = inputs if teacher_inputs is None else teacher_inputs
+    if teacher.shape != inputs.shape or teacher.device != inputs.device or not teacher.is_floating_point():
+        raise ValueError("QQQ teacher inputs must match input shape and device")
+    if not torch.isfinite(inputs).all() or not torch.isfinite(teacher).all():
+        raise ValueError("QQQ calibration inputs must be finite")
+    with torch.no_grad():
+        runtime = inputs.half()
+        if not torch.isfinite(runtime).all():
+            raise ValueError("QQQ calibration inputs overflow runtime FP16")
+        maximum = runtime.abs().amax(-1, keepdim=True)
+        scale = (maximum / 127.0).float()
+        if ((maximum > 0) & (scale == 0)).any():
+            raise ValueError("QQQ runtime token scale underflows for nonzero inputs")
+        # Zero rows contribute exactly zero to both moments. Avoid NaN-to-int
+        # conversion, whose behavior is not a portable numerical contract.
+        divisor = torch.where(scale > 0, scale, torch.ones_like(scale))
+        codes = (runtime / divisor).round().clamp(-128, 127).to(torch.int8)
+        deployed = codes.float() * scale
+        hessian = deployed.T @ deployed
+        cross = (teacher.float() - deployed).T @ deployed
+        return hessian, cross, inputs.shape[0]
