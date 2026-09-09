@@ -1,6 +1,7 @@
 import io
 import threading
 
+import pytest
 import torch
 
 from gptqmodel.looper.named_module import NamedModule
@@ -10,12 +11,13 @@ from gptqmodel.quantization import QVQConfig
 from test_qvq_lifecycle import _prepared_calibration, _YaqaQModel
 
 
-def test_gsq_processor_collect_fit_install_reload_cpu():
+@pytest.mark.parametrize("bits", [2.5, 4, 8])
+def test_gsq_processor_collect_fit_install_reload_cpu(bits):
     """Actual full toy-model Fisher backward, quantizer and public backend."""
     torch.manual_seed(7)
     rows = [{"input_ids": torch.tensor([[1, 2, 3], [4, 5, 6]]),
              "attention_mask": torch.ones(2, 3, dtype=torch.long)}]
-    cfg = QVQConfig(bits=2.5, format="qvq_v2b2_p32", device="cpu", offload_to_disk=False,
+    cfg = QVQConfig(bits=bits, format="qvq_v2b2_p32" if bits <= 3.5 else "qvq", device="cpu", offload_to_disk=False,
                     yaqa={"minimum_sequences": 2}, gsq={"enabled": True, "steps": 4, "candidates": 3})
     qmodel = _YaqaQModel(cfg)
     processor = QVQProcessor(tokenizer=None, qcfg=cfg, calibration=rows, yaqa_calibration=rows,
@@ -39,8 +41,9 @@ def test_gsq_processor_collect_fit_install_reload_cpu():
     buffer = io.BytesIO()
     torch.save(live.state_dict(), buffer)
     buffer.seek(0)
-    reloaded = QVQLinear(bits=2.5, in_features=16, out_features=16, dtype=torch.float32,
-                         tensors=torch.load(buffer, weights_only=True), bank_count=2, v2b2_p32=True).eval()
+    reloaded = QVQLinear(bits=bits, in_features=16, out_features=16, dtype=torch.float32,
+                         tensors=torch.load(buffer, weights_only=True),
+                         bank_count=2 if bits <= 3.5 else 1, v2b2_p32=bits <= 3.5).eval()
     torch.testing.assert_close(reloaded(source), live(source), atol=0, rtol=0)
     logits = qmodel.model(rows[0]["input_ids"], rows[0]["attention_mask"]).logits
     assert torch.isfinite(logits).all()

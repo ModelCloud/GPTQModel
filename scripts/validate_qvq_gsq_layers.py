@@ -144,11 +144,20 @@ def execute(args):
         repack_p32_window_to_planar,
         rht_preprocess_weight,
     )
-    from gptqmodel.quantization.qvq_gsq import refine_p32_candidates
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, refine_p32_candidates
     from gptqmodel.quantization import GSQConfig, QVQConfig
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
     from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from scripts.p32_twenty.scorecard import logits_metrics
+
+    def reconstruct_selected_inner(words, **kw):
+        if kw["bits"] <= 3.5:
+            return reconstruct_p32_window_inner_weight(words, **kw)
+        return reconstruct_qvq_inner_weight(words, **kw)
+
+    def candidate_adapter(bits):
+        return TrellisCandidateAdapter("p32_window" if bits <= 3.5 else "qvq_planar", bits, cfg["codebook"])
 
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -230,12 +239,12 @@ def execute(args):
             device=torch.device("cuda:0"), seed=7, minimum_sequences=len(batches),
             first_decoder_layer=model.model.layers[0],
             checkpoint_modules=tuple(model.model.layers),
-            progress_callback=lambda p: print("W25_FISHER", json.dumps(p), flush=True))
+            progress_callback=lambda p: print("TARGET_FISHER", json.dumps(p), flush=True))
         report["requantization"] = {"target_bits": args.target_bits, "fisher_stats": stats,
                                      "minimum_sequences": len(batches), "rounding": "yaqa",
                                      "regularization": 0.02, "family_mode": "reselect"}
         for name in TARGETS:
-            print("W25_QUANTIZE", name, flush=True)
+            print("TARGET_QUANTIZE", name, flush=True)
             report["state"] = "YAQA quantizing " + name
             write_json(args.output / "report.json", report)
             torch.save({"input_hessian": inputs_h[name].cpu(), "output_hessian": outputs_h[name].cpu()},
@@ -243,30 +252,32 @@ def execute(args):
             requantized[name] = quantize_qvq_linear(
                 dense_weights[name], inputs_h[name], output_hessian=outputs_h[name],
                 bits=args.target_bits, seed=7, input_sign_seed=7,
-                rounding="yaqa", damp_percent=0.02, v2b2_p32=True, bank_count=2,
+                rounding="yaqa", damp_percent=0.02, v2b2_p32=args.target_bits <= 3.5,
+                bank_count=2 if args.target_bits <= 3.5 else 1,
                 codebook_version=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
                 yaqa_v2b2_family_mode=cfg["yaqa"]["v2b2_family_mode"],
                 yaqa_sample_strategy=cfg["yaqa"]["sample_strategy"])
             if args.gsq_lifecycle:
-                qcfg = QVQConfig(bits=args.target_bits, format="qvq_v2b2_p32", offload_to_disk=False,
+                qcfg = QVQConfig(bits=args.target_bits, format="qvq_v2b2_p32" if args.target_bits <= 3.5 else "qvq", offload_to_disk=False,
                                   codebook=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
-                                  yaqa={**cfg["yaqa"], "minimum_sequences": len(batches)},
+                                  yaqa={**cfg["yaqa"], "minimum_sequences": len(batches), "regularization": 0.02},
                                   gsq=GSQConfig(enabled=True, steps=args.steps, candidates=args.candidates, seed=7))
                 write_json(args.output / "gsq_target_quantize_config.json", qcfg.to_dict())
-                print("W25_GSQ_LIFECYCLE", name, flush=True)
+                print("TARGET_GSQ_LIFECYCLE", name, flush=True)
                 report["state"] = "YAQA + GSQ quantizing " + name
                 write_json(args.output / "report.json", report)
                 requantized_gsq[name] = quantize_qvq_linear(
                     dense_weights[name], inputs_h[name], output_hessian=outputs_h[name],
                     bits=args.target_bits, seed=7, input_sign_seed=7,
-                    rounding="yaqa", damp_percent=0.02, v2b2_p32=True, bank_count=2,
+                    rounding="yaqa", damp_percent=0.02, v2b2_p32=args.target_bits <= 3.5,
+                bank_count=2 if args.target_bits <= 3.5 else 1,
                     codebook_version=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
                     yaqa_v2b2_family_mode=cfg["yaqa"]["v2b2_family_mode"],
                     yaqa_sample_strategy=cfg["yaqa"]["sample_strategy"], gsq=qcfg.gsq)
-                print("W25_GSQ_RESULT", name, requantized_gsq[name].gsq_diagnostics, flush=True)
+                print("TARGET_GSQ_RESULT", name, requantized_gsq[name].gsq_diagnostics, flush=True)
                 report.setdefault("gsq_diagnostics", {})[name] = requantized_gsq[name].gsq_diagnostics
                 write_json(args.output / "report.json", report)
-            print("W25_QUANTIZED", name, flush=True)
+            print("TARGET_QUANTIZED", name, flush=True)
         del inputs_h, outputs_h
     # Snapshot-owned endpoints/norms must be copied, not silently left as the source model's.
     with torch.no_grad():
@@ -303,7 +314,7 @@ def execute(args):
             if not p32:
                 raise ValueError("Expected target P32 projection")
             window = repack_p32_planar_to_window(trellis, bits=bits)
-            if not torch.equal(reconstruct_p32_window_inner_weight(window, **kw), inner):
+            if not torch.equal(reconstruct_selected_inner(window, **kw), inner):
                 raise ValueError("Baseline planar/window decode differs")
             saved[prefix] = {"base": window, "kw": kw, "su": su, "sv": sv}
         parent, leaf = prefix.rsplit(".", 1)
@@ -368,17 +379,18 @@ def execute(args):
     evaluate("f6_seed7")
     baseline_label = "f6_seed7"
     if args.target_bits is not None:
-        baseline_label = "w2_5_yaqa"
+        baseline_label = f"w{args.target_bits:g}_yaqa".replace(".", "_")
         for name, result in requantized.items():
             if not result.serialization_allowed:
-                raise ValueError("W2.5 result is not serializable")
+                raise ValueError("Target result is not serializable")
             state = saved[name]
             state["kw"].update(bits=args.target_bits, bank_ids=result.bank_ids, bank_alt_id=result.bank_alt_id)
-            state["base"] = repack_p32_planar_to_window(result.trellis, bits=args.target_bits)
+            state["base"] = (repack_p32_planar_to_window(result.trellis, bits=args.target_bits)
+                             if args.target_bits <= 3.5 else result.trellis.clone())
             state["su"], state["sv"] = result.SU, result.SV
-            inner = reconstruct_p32_window_inner_weight(state["base"], **state["kw"])
+            inner = reconstruct_selected_inner(state["base"], **state["kw"])
             if not torch.equal(inner, result.inner_weight):
-                raise ValueError("W2.5 quantize/decode mismatch")
+                raise ValueError("Target quantize/decode mismatch")
             module = model.get_submodule(name)
             module.inner, module.su, module.sv = inner, result.SU.float(), result.SV.float()
         report["comparison_baseline"] = baseline_label
@@ -417,9 +429,13 @@ def execute(args):
         if args.gsq_lifecycle:
             result = requantized_gsq[name]
             for attr in ("SU", "SV", "bank_ids", "bank_alt_id"):
-                if not torch.equal(getattr(result, attr), getattr(requantized[name], attr)):
+                value, baseline_value = getattr(result, attr), getattr(requantized[name], attr)
+                if (value is None) != (baseline_value is None) or (
+                    value is not None and not torch.equal(value, baseline_value)
+                ):
                     raise ValueError("Lifecycle GSQ changed fixed transform/bank metadata")
-            state["gsq"] = repack_p32_planar_to_window(result.trellis, bits=kw["bits"])
+            state["gsq"] = (repack_p32_planar_to_window(result.trellis, bits=kw["bits"])
+                            if kw["bits"] <= 3.5 else result.trellis.clone())
             before, after = result.gsq_diagnostics["before"], result.gsq_diagnostics["after"]
         else:
             result = fit_candidates(base, args, kw, target, x, name)
@@ -433,16 +449,15 @@ def execute(args):
                  "payload_bytes": base.numel() * base.element_size(), "heldout": {}}
         for arm in fit_arms:
             words = state[arm]
-            if not torch.equal(words, repack_p32_planar_to_window(
-                repack_p32_window_to_planar(words, bits=kw["bits"]), bits=kw["bits"]
-            )):
-                raise ValueError("Candidate window roundtrip failed")
-            restored = reconstruct_p32_window_inner_weight(words, **kw)
+            adapter = candidate_adapter(kw["bits"])
+            if not torch.equal(words, adapter.pack(adapter.unpack(words))):
+                raise ValueError("Candidate adapter roundtrip failed")
+            restored = reconstruct_selected_inner(words, **kw)
             operator = CanonicalLinear(restored, su, sv)
             layer["heldout"][arm] = [local_metrics(operator(a), a @ dense_weights[name].T)
                                         for a in captures[name]["heldout"]]
         export = {key: state[key].cpu() for key in (*fit_arms, "su", "sv")}
-        export.update(bank_ids=kw["bank_ids"].cpu(), bank_alt_id=kw["bank_alt_id"].cpu())
+        export.update({key: kw[key].cpu() for key in ("bank_ids", "bank_alt_id") if kw[key] is not None})
         path = args.output / (name + ".pt")
         torch.save(export, path)
         restored = torch.load(path, weights_only=True)
@@ -450,6 +465,27 @@ def execute(args):
             if not torch.equal(restored[arm].cuda(), state[arm]):
                 raise ValueError("Payload reload differs")
             state[arm] = restored[arm].cuda()
+            if args.gsq_lifecycle:
+                planar = (repack_p32_window_to_planar(state[arm], bits=kw["bits"])
+                          if kw["bits"] <= 3.5 else state[arm])
+                tensors = {"trellis": planar, "SU": su, "SV": sv}
+                tensors.update({key: kw[key] for key in ("bank_ids", "bank_alt_id") if kw[key] is not None})
+                native = QVQLinear(bits=kw["bits"], in_features=su.numel(), out_features=sv.numel(),
+                                   tensors=tensors, v2b2_p32=kw["bits"] <= 3.5,
+                                   bank_count=2 if kw["bits"] <= 3.5 else 1).eval()
+                sample = captures[name]["heldout"][0][:16].half()
+                with torch.inference_mode():
+                    actual = native(sample).float()
+                    reference = CanonicalLinear(reconstruct_selected_inner(state[arm], **kw), su, sv)(sample.float())
+                delta = (actual - reference).abs()
+                if not torch.isfinite(actual).all() or delta.mean() > 2e-3 or delta.max() > 0.046875:
+                    raise ValueError(f"Native reloaded {name}/{arm} failed localized parity: "
+                                     f"mean={delta.mean().item()}, max={delta.max().item()}")
+                layer.setdefault("native_reload_parity", {})[arm] = {
+                    "mean_abs": delta.mean().item(), "max_abs": delta.max().item(), "tokens": len(sample),
+                    "finite": True, "mean_limit": 2e-3, "max_limit": 0.046875,
+                    "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"}
+                del native
         layer["export_sha256"] = digest(path)
         layer["roundtrip_and_reload_exact"] = True
         report["layers"][name] = layer
@@ -459,7 +495,7 @@ def execute(args):
     for arm in fit_arms[1:]:
         for name in TARGETS:
             module = model.get_submodule(name)
-            module.inner = reconstruct_p32_window_inner_weight(saved[name][arm], **saved[name]["kw"])
+            module.inner = reconstruct_selected_inner(saved[name][arm], **saved[name]["kw"])
         evaluate(arm)
     report["paired_intervals"] = {}
     for arm in fit_arms[1:]:
@@ -494,11 +530,13 @@ def main():
     parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
     parser.add_argument("--gsq-lifecycle", action="store_true",
                         help="Test QVQConfig.gsq with the prepared YAQA Fisher objective")
-    parser.add_argument("--target-bits", type=float, choices=(2.5,),
-                        help="Fresh YAQA W2.5 QKV baseline; all other F6 projections remain unchanged")
+    parser.add_argument("--target-bits", type=float, choices=(2.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8),
+                        help="Fresh YAQA QKV baseline at the requested rate; all other F6 projections remain unchanged")
     args = parser.parse_args()
     if args.gsq_lifecycle and (args.gsq or args.target_bits is None):
         parser.error("--gsq-lifecycle requires --target-bits and excludes activation-MSE --gsq")
+    if args.target_bits is not None and args.target_bits >= 4 and not args.gsq_lifecycle:
+        parser.error("Non-banked targets require --gsq-lifecycle")
     if args.train_rows < 2 or args.train_rows % 2 or args.eval_rows < 2 or args.tokens < 2:
         parser.error("Use positive even train rows, >=2 eval rows and >=2 tokens")
     if args.candidates < 2 or args.steps < 1:

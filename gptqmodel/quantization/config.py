@@ -6482,10 +6482,10 @@ def _normalize_module_granular_replay_config(
 
 @dataclass
 class GSQConfig:
-    """Opt-in P32 candidate refinement under the prepared YAQA Fisher metric.
+    """Opt-in trellis candidate refinement under the prepared YAQA Fisher metric.
 
     This is a fixed-scale, whole-tile GSQ adaptation, not scalar GSQ. ``modules``
-    contains full-name regular expressions; None selects all P32 projections.
+    contains full-name regular expressions; None selects all supported projections.
     ``max_candidate_bytes`` bounds the decoded candidate bank, not total VRAM.
     """
 
@@ -6944,8 +6944,12 @@ class QVQConfig(BaseQuantizeConfig):
 
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled:
-            if self.format != FORMAT.QVQ_V2B2_P32 or self.rounding != "yaqa":
-                raise ValueError("QVQConfig: enabled gsq requires P32 with YAQA rounding")
+            gsq_format_supported = self.format == FORMAT.QVQ_V2B2_P32 or (
+                self.format == FORMAT.QVQ and self.bank_count == 1 and self.vector_size == 2
+                and self.trellis_window == 16 and 4 <= self.bits <= 8)
+            if not gsq_format_supported or self.rounding != "yaqa":
+                raise ValueError("QVQConfig: enabled gsq requires YAQA with P32 W1-W3.5 "
+                                 "or non-banked V2/L16 qvq W4-W8")
             if (self.output_alignment is not None or self.module_granular_replay is not None
                     or self.smooth_swiglu is not None or self.activation is not None
                     or self.module_scale_search or self.output_channel_scale_optimization

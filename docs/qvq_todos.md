@@ -31,7 +31,8 @@ instructions below are archival, not branch starting points.
   YAQA Fisher objective before packing; test config, processor and backend
   reload: [lifecycle results](experiments/gsq-qvq-lifecycle.md). Real W2.5 QKV
   retains its baseline; no quality gain or default promotion.
-- [ ] Extend the format-aware candidate adapter to non-banked W4–W8 QVQ.
+- [x] Extend the format-aware candidate adapter to non-banked V2/L16 W4–W8
+  QVQ (including half-bit rates), preserving planar packing and selector absence.
 - [ ] Validate complete-model quantize/save/reload and further independent
   quality before recommending GSQ; selected-module evidence is not full coverage.
 - [ ] RCO: enumerate supported per-module P32 rates and exact costs including

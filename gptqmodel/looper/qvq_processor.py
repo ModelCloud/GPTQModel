@@ -129,14 +129,16 @@ def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optio
             qcfg_clone.yaqa.regularization = dynamic_overrides["yaqa_regularization"]
             qcfg_clone.yaqa.__post_init__()
     if qcfg_clone.gsq is not None:
-        # F6 includes ordinary W4 projections. Scope this P32-only stage before
-        # validating each dynamic clone; never reinterpret their payloads.
-        if qcfg_clone.format != FORMAT.QVQ_V2B2_P32 or (
+        # Select the adapter from the effective dynamic format/rate. Ordinary
+        # F6 W4 projections use planar trellis candidates, not P32 windows.
+        supported = qcfg_clone.format == FORMAT.QVQ_V2B2_P32 or (
+            qcfg_clone.format == FORMAT.QVQ and qcfg_clone.bank_count == 1 and 4 <= qcfg_clone.bits <= 8)
+        if not supported or (
             qcfg_clone.gsq.modules is not None
             and not any(re.search(pattern, module_full_name) for pattern in qcfg_clone.gsq.modules)
         ):
             if qcfg_clone.gsq.enabled:
-                log.info("QVQ GSQ: skipping %s (outside selected P32 module scope)", module_full_name)
+                log.info("QVQ GSQ: skipping %s (outside selected format/module scope)", module_full_name)
             qcfg_clone.gsq = None
     qcfg_clone.__post_init__()
     return qcfg_clone

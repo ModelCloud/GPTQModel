@@ -7264,8 +7264,10 @@ def quantize_qvq_linear(
     gsq = normalize_gsq_config(gsq)
     gsq_enabled = gsq is not None and gsq.enabled
     if gsq_enabled:
-        if not v2b2_p32 or rounding != "yaqa" or output_hessian is None:
-            raise ValueError("GSQ requires P32 YAQA with an output Hessian")
+        nonbank_gsq = (not v2b2_p32 and not v2b4_p64 and not dual_v2 and bank_count == 1
+                       and vector_size == 2 and trellis_window == 16 and 4 <= normalize_qvq_rate(bits) <= 8)
+        if not (v2b2_p32 or nonbank_gsq) or rounding != "yaqa" or output_hessian is None:
+            raise ValueError("GSQ requires P32 YAQA or non-banked V2/L16 W4-W8 YAQA with an output Hessian")
         if (experimental_codebook is not None or module_scale_search or output_channel_scale_optimization
                 or yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized
                 or propagated_inputs is not None or propagated_target_output is not None
@@ -8717,28 +8719,30 @@ def quantize_qvq_linear(
 
     gsq_diagnostics = None
     if gsq_enabled:
-        from .qvq_gsq import refine_p32_fisher
+        from .qvq_gsq import TrellisCandidateAdapter, refine_trellis_fisher
 
         with _qvq_phase(telemetry, "gsq_refinement", device):
-            baseline_window = repack_p32_planar_to_window(pack_trellis_states(states, bits=bits), bits=bits)
-            packed_banks = pack_qvq_binary_bank_ids(selected_bank_ids)
-            refined = refine_p32_fisher(
-                baseline_window, target=transformed_weight / selected_encoding_scale,
+            adapter = TrellisCandidateAdapter("p32_window" if v2b2_p32 else "qvq_planar", bits, codebook_version)
+            baseline_words = adapter.pack(states)
+            packed_banks = None if selected_bank_ids is None else pack_qvq_binary_bank_ids(selected_bank_ids)
+            refined = refine_trellis_fisher(
+                baseline_words, target=transformed_weight / selected_encoding_scale,
                 input_hessian=transformed_H, output_hessian=transformed_output_hessian,
                 config=gsq, bits=bits, bank_ids=packed_banks, bank_alt_id=selected_bank_alt_id,
-                codebook_version=codebook_version)
-            states = unpack_p32_window_states(refined.window_words, bits=bits)
-            quantized_inner = reconstruct_p32_window_inner_weight(
-                refined.window_words, bits=bits, in_features=in_features, out_features=out_features,
-                bank_ids=packed_banks, bank_alt_id=selected_bank_alt_id, codebook_version=codebook_version)
+                codebook_version=codebook_version, layout=adapter.layout)
+            states = adapter.unpack(refined.words)
+            if not torch.equal(adapter.pack(states), refined.words):
+                raise RuntimeError("GSQ candidate does not round-trip through its format adapter")
+            quantized_inner = adapter.inner(refined.words, in_features, out_features, packed_banks, selected_bank_alt_id)
             reconstructed_weight = rht_reconstruct_weight(quantized_inner, SU, SV)
             proxy_loss = _qvq_proxy_loss_unchecked(weight, reconstructed_weight, source_H)
-            changed_tiles = int((refined.window_words != baseline_window).any(-1).sum())
+            changed_tiles = int((refined.words != baseline_words).any(-1).sum())
             gsq_diagnostics = {
                 "objective": "normalized_prepared_yaqa_fisher",
                 "before": refined.calibration_before, "after": refined.calibration_after,
                 "changed_tiles": changed_tiles, "steps": gsq.steps, "candidates": gsq.candidates,
                 "seed": gsq.seed,
+                "layout": adapter.layout,
             }
             if telemetry is not None:
                 telemetry.count("gsq_steps", gsq.steps)

@@ -1,4 +1,4 @@
-"""Experimental GSQ-inspired selection of valid P32 circular tile paths.
+"""Experimental GSQ-inspired selection of format-aware circular tile paths.
 
 This is a bounded candidate relaxation, not scalar GSQ: scales, banks and
 codebooks stay fixed. Each categorical choice owns an entire circular tile,
@@ -12,17 +12,67 @@ from typing import Callable
 
 import torch
 
-from .qvq import decode_p32_window_tiles
+from .qvq import (
+    decode_p32_window_tiles,
+    decode_trellis_tiles,
+    pack_trellis_states,
+    repack_p32_planar_to_window,
+    unpack_p32_window_states,
+    unpack_trellis_states,
+)
 from .qvq_codecs import PGC16_CODEBOOK_VERSION
+from .qvq_rates import normalize_qvq_rate
 
 
 @dataclass
-class P32GSQResult:
-    window_words: torch.Tensor
+class GSQResult:
+    words: torch.Tensor
     choices: torch.Tensor
     calibration_before: float | None
     calibration_after: float | None
     history: list[float]
+
+    @property
+    def window_words(self):
+        """Compatibility spelling for callers of the P32-only wrapper."""
+        return self.words
+
+
+@dataclass(frozen=True)
+class TrellisCandidateAdapter:
+    """Legal tile histories in their actual format, never a dense-only edit."""
+
+    layout: str
+    bits: float
+    codebook_version: str = PGC16_CODEBOOK_VERSION
+
+    def __post_init__(self):
+        rate = normalize_qvq_rate(self.bits)
+        if not ((self.layout == "p32_window" and rate <= 3.5)
+                or (self.layout == "qvq_planar" and 4 <= rate <= 8)):
+            raise ValueError("GSQ adapter requires P32 W1-W3.5 or non-banked V2/L16 planar W4-W8")
+
+    def pack(self, states):
+        planar = pack_trellis_states(states, bits=self.bits)
+        return repack_p32_planar_to_window(planar, bits=self.bits) if self.layout == "p32_window" else planar
+
+    def unpack(self, words):
+        return (unpack_p32_window_states(words, bits=self.bits) if self.layout == "p32_window"
+                else unpack_trellis_states(words, bits=self.bits))
+
+    def decode(self, words, bank_ids=None, bank_alt_id=None):
+        if self.layout == "p32_window":
+            if bank_ids is None or bank_alt_id is None:
+                raise ValueError("GSQ P32 adapter requires selectors and an alternative bank")
+            return decode_p32_window_tiles(words, bits=self.bits, bank_ids=bank_ids, bank_alt_id=bank_alt_id,
+                                           codebook_version=self.codebook_version)
+        if bank_ids is not None or bank_alt_id is not None:
+            raise ValueError("GSQ non-banked adapter cannot accept bank metadata")
+        return decode_trellis_tiles(words, bits=self.bits, codebook_version=self.codebook_version).float()
+
+    def inner(self, words, k, n, bank_ids=None, bank_alt_id=None):
+        tiles = self.decode(words, bank_ids, bank_alt_id)
+        return tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n).contiguous()
 
 
 def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -35,16 +85,17 @@ def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temper
     return ((logits + gumbel) / temperature).softmax(-1)
 
 
-def refine_p32_candidates(
+def refine_trellis_candidates(
     candidates: torch.Tensor,
     *,
     bits: float,
-    bank_ids: torch.Tensor,
-    bank_alt_id: torch.Tensor,
+    bank_ids: torch.Tensor | None = None,
+    bank_alt_id: torch.Tensor | None = None,
     target: torch.Tensor,
     inputs: torch.Tensor,
     right_factor: torch.Tensor | None = None,
     enabled: bool = False,
+    layout: str = "p32_window",
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     steps: int = 100,
     learning_rate: float = 0.1,
@@ -52,7 +103,7 @@ def refine_p32_candidates(
     temperature_end: float = 0.1,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
-) -> P32GSQResult:
+) -> GSQResult:
     """Fit tile choices using calibration-only activation reconstruction loss.
 
     candidates: [choices, K/16*N/16, words], choice zero is the baseline.
@@ -72,7 +123,7 @@ def refine_p32_candidates(
     if candidates.ndim != 3 or candidates.dtype != torch.int32 or candidates.shape[0] < 2:
         raise ValueError("candidates must be int32 [choices>=2, tiles, words]")
     if not enabled:
-        return P32GSQResult(
+        return GSQResult(
             candidates[0].detach().clone().contiguous(),
             torch.zeros(candidates.shape[1], device=candidates.device, dtype=torch.int64),
             None, None, [],
@@ -84,7 +135,8 @@ def refine_p32_candidates(
         raise ValueError("candidate tile count does not match target")
     if inputs.ndim != 2 or inputs.shape[0] == 0 or inputs.shape[1] != k:
         raise ValueError("inputs must be nonempty [tokens, K]")
-    tensors = (target, inputs, bank_ids, bank_alt_id)
+    adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
+    tensors = [t for t in (target, inputs, bank_ids, bank_alt_id) if t is not None]
     if any(t.device != candidates.device for t in tensors):
         raise ValueError("all tensors must share a device")
     if not all(t.is_floating_point() and torch.isfinite(t).all() for t in (target, inputs)):
@@ -99,9 +151,7 @@ def refine_p32_candidates(
     if any(not math.isfinite(v) or v <= 0 for v in (learning_rate, temperature_start, temperature_end)):
         raise ValueError("learning rate and temperatures must be finite and positive")
     decoded = torch.stack([
-        decode_p32_window_tiles(
-            c, bits=bits, bank_ids=bank_ids, bank_alt_id=bank_alt_id, codebook_version=codebook_version
-        ) for c in candidates
+        adapter.decode(c, bank_ids, bank_alt_id) for c in candidates
     ]).detach().transpose(0, 1).contiguous()  # [tile, choice, 256]
     x = inputs.detach().float()
     teacher = x @ target.detach().float()
@@ -150,14 +200,15 @@ def refine_p32_candidates(
                 if progress is not None:
                     progress(step + 1, best)
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
-    return P32GSQResult(words, best_choices, before, best, history)
+    return GSQResult(words, best_choices, before, best, history)
 
 
-def refine_p32_fisher(baseline, *, target, input_hessian, output_hessian, config,
-                      bits, bank_ids, bank_alt_id, codebook_version=PGC16_CODEBOOK_VERSION):
+def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, config,
+                          bits, bank_ids=None, bank_alt_id=None, codebook_version=PGC16_CODEBOOK_VERSION,
+                          layout="p32_window"):
     """Build legal candidates and fit the existing damped YAQA quadratic.
 
-    Hessians and target must already share the normalized P32 inner basis.
+    Hessians and target must already share the normalized trellis inner basis.
     Cholesky uses the prepared metric as-is: no hidden extra regularization.
     The config's memory limit describes decoded candidates, not peak memory.
     """
@@ -165,7 +216,7 @@ def refine_p32_fisher(baseline, *, target, input_hessian, output_hessian, config
 
     config = normalize_gsq_config(config)
     if config is None or not config.enabled:
-        raise ValueError("refine_p32_fisher requires enabled GSQConfig")
+        raise ValueError("refine_trellis_fisher requires enabled GSQConfig")
     required = config.candidates * target.numel() * 4
     if required > config.max_candidate_bytes:
         raise ValueError(f"GSQ decoded candidates need {required} bytes, exceeding max_candidate_bytes="
@@ -183,8 +234,19 @@ def refine_p32_fisher(baseline, *, target, input_hessian, output_hessian, config
             bit = torch.randint(baseline.shape[1] * 32, (len(baseline),),
                                 device=baseline.device, generator=generator)
             candidates[candidate, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
-        return refine_p32_candidates(
-            candidates, bits=bits, bank_ids=bank_ids.detach().clone(), bank_alt_id=bank_alt_id.detach().clone(),
+        return refine_trellis_candidates(
+            candidates, bits=bits, bank_ids=None if bank_ids is None else bank_ids.detach().clone(),
+            bank_alt_id=None if bank_alt_id is None else bank_alt_id.detach().clone(), layout=layout,
             target=target, inputs=left, right_factor=right, enabled=True, codebook_version=codebook_version,
             steps=config.steps, seed=config.seed, learning_rate=config.learning_rate,
             temperature_start=config.temperature_start, temperature_end=config.temperature_end)
+
+
+def refine_p32_candidates(candidates, **kwargs) -> GSQResult:
+    """Backward-compatible P32 window entry point; never selects another layout."""
+    return refine_trellis_candidates(candidates, layout="p32_window", **kwargs)
+
+
+def refine_p32_fisher(baseline, **kwargs) -> GSQResult:
+    """Backward-compatible P32 Fisher entry point."""
+    return refine_trellis_fisher(baseline, layout="p32_window", **kwargs)

@@ -1,4 +1,4 @@
-# GSQ and RCO: P32 research entry
+# GSQ and RCO: QVQ research entry
 
 ## Primary sources
 
@@ -14,7 +14,12 @@ manifold-aware steps and a discrete feasibility stage. These are distinct
 algorithms; the linked model combines them. Its published results are not QVQ
 measurements. No author code was copied into the experiment below.
 
-## Proposed QVQ adaptation and implementation status
+## QVQ adaptation and implementation status
+
+Current public integration: [optional GSQ lifecycle](../docs/experiments/gsq-qvq-lifecycle.md),
+covering P32 W1–W3.5 and ordinary non-banked V2/L16 W4–W8, including half-bit
+rates. The default is disabled. The initial P32 research and historical evidence
+below explain the design and remain distinct from the Fisher-objective lifecycle.
 
 Base: freshly fetched ModelCloud/QvQ `origin/main`
 `a292a880432afce133e58219549f8d7483a3bf41`.

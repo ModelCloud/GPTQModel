@@ -18,14 +18,21 @@ def test_gsq_default_and_json_roundtrip():
     assert QuantizeConfig.from_quant_config(old).gsq is None
 
 
-def test_gsq_dynamic_scope_preserves_f6_non_p32_modules():
+def test_gsq_dynamic_scope_includes_f6_nonbank_w4_modules():
     cfg = QVQConfig(format="qvq_v2b2_p32", gsq={"enabled": True, "modules": [r"self_attn\."]},
                     dynamic={r".*o_proj$": {"bits": 4, "format": "qvq"}})
     assert clone_qvq_config_for_module(cfg, "model.layers.0.self_attn.q_proj").gsq.enabled
     ordinary = clone_qvq_config_for_module(cfg, "model.layers.0.self_attn.o_proj")
-    assert ordinary.bits == 4 and ordinary.gsq is None
+    assert ordinary.bits == 4 and ordinary.gsq.enabled
+    assert ordinary.bank_count == 1
     assert clone_qvq_config_for_module(cfg, "model.layers.0.mlp.gate_proj").gsq is None
     assert cfg.gsq.enabled
+
+
+@pytest.mark.parametrize("bits", [4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8])
+def test_nonbank_gsq_config_roundtrip(bits):
+    cfg = QVQConfig(bits=bits, format="qvq", gsq={"enabled": True}, offload_to_disk=False)
+    assert QuantizeConfig.from_quant_config(cfg.to_dict()).gsq == cfg.gsq
 
 
 @pytest.mark.parametrize("kwargs", [

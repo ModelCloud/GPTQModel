@@ -161,3 +161,38 @@ def test_reject_invalid_right_factor():
         refine_p32_candidates(torch.zeros(2, 1, 20, dtype=torch.int32), enabled=True, bits=2.5,
                               bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([1]),
                               target=torch.eye(16), inputs=torch.eye(16), right_factor=torch.ones(15, 15))
+
+
+@pytest.mark.parametrize("bits", [4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8])
+def test_nonbank_planar_adapter_fit_and_roundtrip(bits):
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, refine_trellis_candidates
+
+    gen = torch.Generator().manual_seed(7)
+    candidates = torch.randint(-(2**31), 2**31-1, (3, 1, int(bits*8)), dtype=torch.int32, generator=gen)
+    adapter = TrellisCandidateAdapter("qvq_planar", bits)
+    target = adapter.inner(candidates[1], 16, 16)
+    result = refine_trellis_candidates(candidates, layout="qvq_planar", bits=bits, target=target,
+                                       inputs=torch.eye(16), enabled=True, steps=40, seed=7)
+    assert result.calibration_after == 0
+    assert torch.equal(result.words, candidates[1])
+    assert torch.equal(adapter.pack(adapter.unpack(result.words)), result.words)
+    assert result.words.numel() == candidates[0].numel()
+    # The exact PGC16 reference is independent of the adapter's packing path.
+    from gptqmodel.quantization.qvq import reconstruct_qvq_inner_weight
+    torch.testing.assert_close(adapter.inner(result.words, 16, 16), reconstruct_qvq_inner_weight(
+        result.words, bits=bits, in_features=16, out_features=16), atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("layout,bits", [("p32_window", 4), ("qvq_planar", 3.5), ("unknown", 4)])
+def test_adapter_rejects_wrong_format(layout, bits):
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter
+    with pytest.raises(ValueError, match="adapter requires"):
+        TrellisCandidateAdapter(layout, bits)
+
+
+def test_adapter_rejects_mismatched_bank_metadata():
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter
+    with pytest.raises(ValueError, match="requires selectors"):
+        TrellisCandidateAdapter("p32_window", 2.5).decode(torch.zeros(1, 20, dtype=torch.int32))
+    with pytest.raises(ValueError, match="cannot accept bank"):
+        TrellisCandidateAdapter("qvq_planar", 4).decode(torch.zeros(1, 32, dtype=torch.int32), torch.ones(1))
