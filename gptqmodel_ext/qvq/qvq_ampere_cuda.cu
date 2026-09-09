@@ -3293,22 +3293,24 @@ at::Tensor p32_window_ampere_impl(
         size_n,
         static_cast<int>(split_count),
         static_cast<int>(bank_alt_id));
-  // Flash-Next O (K=12288, N=2560) has a measured W3 split-12 wide plan.
-  // Keep non-12 explicit plans on the generic path so external tuners retain
+  // Flash-Next O (K=12288, N=2560) has a measured W3 split-12 one-tile plan
+  // for M8. The upper-row accumulator is register-sensitive enough that the
+  // extra CTAs are cheaper than carrying two N16 tiles per warp. Keep
+  // non-12 explicit plans on the generic path so external tuners retain
   // complete authority over split_count.
   } else if (
       size_m == 8 && size_k == 12288 && size_n == 2560 &&
       TransitionBits == 6 &&
       split_count == 12) {
-    const dim3 wide_grid(
-        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
-                              (2 * kTilesPerBlock)),
+    const dim3 narrow_grid(
+        static_cast<unsigned>((n_tiles + kTilesPerBlock - 1) /
+                              kTilesPerBlock),
         1,
         static_cast<unsigned>(split_count));
     p32_window_ampere_kernel<
-        TransitionBits, false, 8, 2560, true, true, 12288, true, false, true,
+        TransitionBits, false, 8, 2560, true, true, 12288, true, false, false,
         false, 3, 12>
-        <<<wide_grid, kThreads, 0, stream>>>(
+        <<<narrow_grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
@@ -3692,15 +3694,17 @@ at::Tensor p32_window_ampere_impl(
       size_m == kRows && size_k == 12288 && size_n == 2560 &&
       TransitionBits == 6 &&
       split_count == 12) {
-    const dim3 wide_grid(
-        static_cast<unsigned>((n_tiles + 2 * kTilesPerBlock - 1) /
-                              (2 * kTilesPerBlock)),
+    // M16 also benefits from the lower-register one-tile geometry on this
+    // long-K down projection.
+    const dim3 narrow_grid(
+        static_cast<unsigned>((n_tiles + kTilesPerBlock - 1) /
+                              kTilesPerBlock),
         1,
         static_cast<unsigned>(split_count));
     p32_window_ampere_kernel<
-        TransitionBits, true, 0, 2560, true, false, 12288, true, false, true,
+        TransitionBits, true, 0, 2560, true, false, 12288, true, false, false,
         false, 3, 12>
-        <<<wide_grid, kThreads, 0, stream>>>(
+        <<<narrow_grid, kThreads, 0, stream>>>(
         reinterpret_cast<const half*>(input.data_ptr<at::Half>()),
         reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>()),
         reinterpret_cast<const half*>(levels.data_ptr<at::Half>()),
