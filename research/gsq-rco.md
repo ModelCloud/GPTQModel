@@ -278,8 +278,10 @@ zero-projected-energy asymmetric case that must improve rather than early-return
 
 Required follow-up validation remains open:
 
-- Zero-weight RTN/GPTQ through their complete quantizer hooks, beyond the shared
-  scalar fitter's reconstruction and Hessian regression fixtures.
+- Completed: zero-weight RTN/GPTQ through their quantizer hooks, config round
+  trip, packing, strict packed-state reload and Torch forward. Four CPU cases
+  pass (3.31 seconds), covering fixed and learned scales; decoded weights and
+  outputs remain exactly zero. These are regression fixtures, not quality evidence.
 - Force a non-baseline QVQ tile choice through quantization, packing and reload.
 - Compare GSQ with deterministic search over exactly the same candidate pool on
   matched real-model calibration and disjoint held-out data.

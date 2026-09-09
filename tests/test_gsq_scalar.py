@@ -338,3 +338,44 @@ def test_tiny_teacher_uses_finite_unnormalized_fit(baseline, scale):
         config=GSQConfig(enabled=True, steps=3))
     assert torch.isfinite(torch.tensor(result.history)).all()
     assert result.after <= result.before
+
+
+@pytest.mark.parametrize("method", ["gptq", "rtn"])
+@pytest.mark.parametrize("learn_scales", [False, True])
+def test_zero_weight_quantizer_packing_reload(method, learn_scales):
+    from gptqmodel import BACKEND
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.quantization import GPTQConfig, QuantizeConfig, RTNConfig
+    from gptqmodel.quantization.gptq import GPTQ
+    from gptqmodel.quantization.rtn import RTN
+
+    layer = torch.nn.Linear(64, 32, bias=False, dtype=torch.float16)
+    layer.weight.data.zero_()
+    config_cls, quantizer_cls = (GPTQConfig, GPTQ) if method == "gptq" else (RTNConfig, RTN)
+    config = config_cls(bits=4, group_size=32, desc_act=False,
+                        gsq=GSQConfig(enabled=True, steps=4, learn_scales=learn_scales))
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+    quantizer = quantizer_cls(layer, restored)
+    inputs = torch.randn(128, 64, generator=torch.Generator().manual_seed(7))
+    if method == "gptq":
+        quantizer.quantizer.configure(perchannel=True)
+        quantizer.add_batch(inputs, None)
+    weight, scales, zeros, groups, *_ = quantizer.quantize()
+    assert quantizer.gsq_diagnostics["before"] == quantizer.gsq_diagnostics["after"] == 0
+    assert torch.equal(weight, torch.zeros_like(weight))
+    layer.weight.data.copy_(weight)
+
+    def container():
+        return TorchLinear(bits=4, group_size=32, sym=config.sym, desc_act=False,
+                           in_features=64, out_features=32, bias=False, backend=BACKEND.TORCH)
+
+    packed = container()
+    packed.pack_original(layer, scales, zeros, groups)
+    reloaded = container()
+    reloaded.load_state_dict(packed.state_dict(), strict=True)
+    codes, packed_zeros = reloaded._unpack_continuous_codes()
+    decoded = reloaded.scales.float()[reloaded.g_idx] * (codes.float() - packed_zeros.float()[reloaded.g_idx])
+    assert torch.count_nonzero(decoded) == 0
+    output = reloaded(inputs.half())
+    assert torch.isfinite(output).all()
+    assert torch.count_nonzero(output) == 0
