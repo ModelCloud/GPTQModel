@@ -20,8 +20,8 @@ from gptqmodel.utils.model import (
 )
 
 
-MOVA_MODEL_PATH = Path("/monster/data/model/K2-Horizon-MoVA-36B-A4B")
-DENSE_MODEL_PATH = Path("/monster/data/model/K2-Horizon-0.9B")
+MOVA_MODEL_PATH = Path("IFM/K2-Horizon-MoVA-36B-A4B")
+DENSE_MODEL_PATH = Path("IFM/K2-Horizon-0.9B")
 
 
 def _quantize_config():
