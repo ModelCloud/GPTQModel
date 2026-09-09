@@ -1,0 +1,79 @@
+{
+  "self_attn.q_proj": {
+    "updates": 32,
+    "first_loss": 0.008106592111289501,
+    "last_loss": 0.004505553282797337,
+    "projections": {
+      "self_attn.q_proj": {
+        "changed_assignments": 132663,
+        "weights": 4194304,
+        "scale_mean_relative_change": 0.019858485087752342,
+        "scale_min": 0.002475581131875515,
+        "scale_max": 0.08558566868305206
+      }
+    }
+  },
+  "self_attn.k_proj": {
+    "updates": 32,
+    "first_loss": 0.013108241371810436,
+    "last_loss": 0.008605493232607841,
+    "projections": {
+      "self_attn.k_proj": {
+        "changed_assignments": 32955,
+        "weights": 1048576,
+        "scale_mean_relative_change": 0.018661247566342354,
+        "scale_min": 0.0021078127902001143,
+        "scale_max": 0.08677622675895691
+      }
+    }
+  },
+  "attention": {
+    "updates": 32,
+    "first_loss": 9.819213119044434e-06,
+    "last_loss": 1.0392645890533458e-05,
+    "projections": {
+      "self_attn.v_proj": {
+        "changed_assignments": 34720,
+        "weights": 1048576,
+        "scale_mean_relative_change": 0.08453057706356049,
+        "scale_min": 0.0006431850488297641,
+        "scale_max": 0.007887640967965126
+      },
+      "self_attn.o_proj": {
+        "changed_assignments": 137550,
+        "weights": 4194304,
+        "scale_mean_relative_change": 0.06756753474473953,
+        "scale_min": -7.83326686359942e-06,
+        "scale_max": 0.04008049517869949
+      }
+    }
+  },
+  "mlp": {
+    "updates": 32,
+    "first_loss": 0.00017311859119217843,
+    "last_loss": 8.08084150776267e-05,
+    "projections": {
+      "mlp.gate_proj": {
+        "changed_assignments": 557558,
+        "weights": 16777216,
+        "scale_mean_relative_change": 0.05350928008556366,
+        "scale_min": 0.0025707953609526157,
+        "scale_max": 0.07337257266044617
+      },
+      "mlp.up_proj": {
+        "changed_assignments": 564805,
+        "weights": 16777216,
+        "scale_mean_relative_change": 0.05560651421546936,
+        "scale_min": 0.0024540647864341736,
+        "scale_max": 0.03761196509003639
+      },
+      "mlp.down_proj": {
+        "changed_assignments": 567729,
+        "weights": 16777216,
+        "scale_mean_relative_change": 0.05015581101179123,
+        "scale_min": 0.0005569049390032887,
+        "scale_max": 0.0890079140663147
+      }
+    }
+  }
+}

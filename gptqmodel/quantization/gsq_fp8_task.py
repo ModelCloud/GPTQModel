@@ -20,6 +20,8 @@ class FP8GSQTask:
         if config.gsq is None or not config.gsq.enabled:
             raise ValueError('FP8 calibrated GSQ task requires enabled GSQ')
         config._validate_gsq()
+        if config.weight_scale_method == "tensor":
+            raise ValueError("FP8 calibrated GSQ task requires native activation replay for tensor scales")
         if weight.ndim != 2 or not weight.is_floating_point() or not torch.isfinite(weight).all():
             raise ValueError('FP8 GSQ task requires finite floating [out,in] teacher weights')
         import copy

@@ -1,0 +1,51 @@
+{
+  "self_attn.q_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 5.74332630065566e-11
+  },
+  "self_attn.k_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 9.510213450081295e-11
+  },
+  "self_attn.v_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 3.3472541145079804e-12
+  },
+  "self_attn.o_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 1,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 5.32153401205937e-12
+  },
+  "mlp.gate_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 1.3957812336484743e-11
+  },
+  "mlp.up_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 1.1449856687772986e-11
+  },
+  "mlp.down_proj": {
+    "assignment_mismatches": 0,
+    "negative_scales": 0,
+    "zero_stored_scales": 0,
+    "scale_storage_dtype": "torch.float16",
+    "decoded_weight_mse": 1.1856749956851154e-11
+  }
+}

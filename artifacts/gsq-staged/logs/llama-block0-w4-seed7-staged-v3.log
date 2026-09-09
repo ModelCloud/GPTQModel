@@ -1,0 +1,86 @@
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+INFO  GPUAllocatorClient initialized: base_url=http://127.0.0.1:17351 session_id=pid-2954607
+INFO  POST /allocate: count=1 timeout=None exclusive=True reason=None           
+INFO  Allocated lease b1100125688a4d91a1f5dc233538d891 with 1 GPU(s) for session pid-2954607
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+INFO  
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+548d883e7
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]Loading weights:   1%|          | 1/146 [00:00<00:22,  6.38it/s]Loading weights:  83%|████████▎ | 121/146 [00:00<00:00, 550.96it/s]Loading weights: 100%|██████████| 146/146 [00:00<00:00, 522.04it/s]
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_owr6w2t1`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_xzr5l71m`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_uaypzdzl`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_rm057_vd`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_wpciksft`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_nl69qzp4`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO  QuantizeConfig: offload_to_disk_path auto set to temporary dir `/tmp/gptqmodel_hstwncz2`
+WARN  GPTQ module 'hf_optimum' uses LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT without materialized bucket_boundaries/bucket_weights; disabling length-aware normalization.
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1/2000 loss=1759.89
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 100/2000 loss=654.966
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 200/2000 loss=366.799
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 300/2000 loss=246.458
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 400/2000 loss=201.861
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 500/2000 loss=185.527
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 600/2000 loss=178.666
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 700/2000 loss=175.319
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 800/2000 loss=172.407
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 900/2000 loss=171.048
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1000/2000 loss=170.483
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1100/2000 loss=171.243
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1200/2000 loss=171.093
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1300/2000 loss=170.35
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1400/2000 loss=170.534
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1500/2000 loss=170.852
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1600/2000 loss=170.648
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1700/2000 loss=170.336
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1800/2000 loss=170.601
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1900/2000 loss=170.548
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 2000/2000 loss=170.476
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1/2000 loss=825.914
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 100/2000 loss=311.179
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 200/2000 loss=173.173
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 300/2000 loss=110.017
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 400/2000 loss=92.3504
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 500/2000 loss=83.7379
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 600/2000 loss=79.9888
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 700/2000 loss=79.1365
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 800/2000 loss=77.9408
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 900/2000 loss=76.9752
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1000/2000 loss=77.398
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1100/2000 loss=76.318
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1200/2000 loss=76.8588
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1300/2000 loss=76.3999
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1400/2000 loss=76.7538
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1500/2000 loss=76.6566
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1600/2000 loss=76.571
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1700/2000 loss=76.4666
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1800/2000 loss=76.3835
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1900/2000 loss=76.2391
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 2000/2000 loss=76.2269
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1/160 loss=3.27055e-06
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 100/160 loss=1.2528e-06
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 160/160 loss=9.27275e-07
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 1/160 loss=4.70084e-05
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 100/160 loss=7.13433e-06
+INFO:gptqmodel.quantization.gsq_training:GSQ stage update 160/160 loss=4.30913e-06
+{"state": "complete", "commit": "548d883e7aac1fb1858ad0daff061a1c774f365e", "source_hashes": {"/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py": "81817edae9f932d0589616d123149ecc899dbabfa158987ed219af71d9302167", "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_training.py": "5a79f0e530705131072b8c8e3b4233bb290789b196be87ce28b958b3afa6c7f5", "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/inputs.json": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1", "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8", "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f", "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb"}, "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0", "torch": "2.15.0.dev20260817+cu130", "cuda": "13.0", "seed": 7, "bits": 4, "epochs": 10, "qk_steps": 2000, "group_size": 128, "attention": "eager", "cache": false, "graphs": false, "precision": "float32", "source_model": "/monster/data/model/Llama-3.2-1B-Instruct", "scope": "block0, local reconstruction; no paper-reproduction claim", "training": {"assignment_lr": 0.0001, "scale_lr": 5e-05, "betas": [0.9, 0.95], "weight_decay": 1.0, "temperature": [2.0, 0.05], "multiplier": [100.0, 500.0], "warmup_steps": 0, "min_lr": 0.1, "decay": "cosine"}, "qk_learning_rate_decay": "constant", "qk_damp_percent": 0.01, "initializer_damp_percent": 0.1, "started_utc": "2026-09-09T09:26:13.529841+00:00", "argv": ["/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py", "--inputs", "artifacts/gsq-scalar/gptq-w4-seed7-v2", "--output", "artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3", "--bits", "4", "--epochs", "10", "--qk-steps", "2000"], "run_id": "llama-block0-w4-seed7-staged-v3", "weighting": "unweighted documents; not YAQA 1.25/N-mode reproduction", "gpu_properties": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)", "initializer": {"self_attn.q_proj": {"loss": 0.00031633430239943507, "damp": 0.10000000149011612, "samples": 3767}, "self_attn.k_proj": {"loss": 0.00015190336284632387, "damp": 0.10000000149011612, "samples": 3767}, "self_attn.v_proj": {"loss": 4.724508192452506e-06, "damp": 0.10000000149011612, "samples": 3767}, "self_attn.o_proj": {"loss": 4.052339474746489e-07, "damp": 0.10000000149011612, "samples": 3767}, "mlp.gate_proj": {"loss": 0.00024042670341331698, "damp": 0.10000000149011612, "samples": 3767}, "mlp.up_proj": {"loss": 0.00018654877227467252, "damp": 0.10000000149011612, "samples": 3767}, "mlp.down_proj": {"loss": 2.6922102870218373e-06, "damp": 0.10000000149011612, "samples": 3767}}, "heldout": [{"elements": 374784, "baseline_sse": 5.598115849717133, "staged_sse": 6.366548855818826}, {"elements": 524288, "baseline_sse": 9.600127091852404, "staged_sse": 11.535723357631266}, {"elements": 413696, "baseline_sse": 7.37979242168872, "staged_sse": 8.697856733845029}, {"elements": 245760, "baseline_sse": 3.6212935517798623, "staged_sse": 3.8245785158910484}, {"elements": 524288, "baseline_sse": 8.232950440870988, "staged_sse": 9.742353288357512}, {"elements": 514048, "baseline_sse": 7.701203633140372, "staged_sse": 9.139514169983011}, {"elements": 524288, "baseline_sse": 10.398193271964598, "staged_sse": 12.326186477365688}, {"elements": 393216, "baseline_sse": 8.16028804935539, "staged_sse": 9.547079744004742}, {"elements": 350208, "baseline_sse": 6.12718561914317, "staged_sse": 7.113059075692623}, {"elements": 524288, "baseline_sse": 8.772552879017677, "staged_sse": 10.55567907756308}, {"elements": 524288, "baseline_sse": 10.17343848279516, "staged_sse": 12.38999472465073}, {"elements": 524288, "baseline_sse": 10.650552595158956, "staged_sse": 12.889926062084717}, {"elements": 303104, "baseline_sse": 6.104766889815329, "staged_sse": 7.070452071309235}, {"elements": 466944, "baseline_sse": 8.974996898750467, "staged_sse": 10.973810948064651}, {"elements": 524288, "baseline_sse": 10.548831543425196, "staged_sse": 12.916233703705199}, {"elements": 264192, "baseline_sse": 6.028954835801644, "staged_sse": 7.008161548323577}, {"elements": 524288, "baseline_sse": 10.969181887137742, "staged_sse": 13.343397851800406}, {"elements": 524288, "baseline_sse": 11.35965466493133, "staged_sse": 13.875146022364206}, {"elements": 329728, "baseline_sse": 4.399363822826501, "staged_sse": 4.838321977279241}, {"elements": 196608, "baseline_sse": 2.466687485482919, "staged_sse": 2.3938550575324644}, {"elements": 237568, "baseline_sse": 7.239983865950856, "staged_sse": 8.442128706008987}, {"elements": 176128, "baseline_sse": 3.4237508128164755, "staged_sse": 3.5887298509843646}, {"elements": 165888, "baseline_sse": 4.300958247854185, "staged_sse": 4.8828729981738395}, {"elements": 116736, "baseline_sse": 2.2796981087839674, "staged_sse": 2.2277309793896265}, {"elements": 102400, "baseline_sse": 2.03528933672812, "staged_sse": 1.9351710311815038}, {"elements": 524288, "baseline_sse": 10.53074948676996, "staged_sse": 12.625183125814008}, {"elements": 524288, "baseline_sse": 10.373623364419611, "staged_sse": 12.511365603526453}, {"elements": 524288, "baseline_sse": 9.300681377435922, "staged_sse": 11.258985308473969}, {"elements": 524288, "baseline_sse": 10.285297698229659, "staged_sse": 12.583269735701688}, {"elements": 524288, "baseline_sse": 15.675897643930108, "staged_sse": 19.453692904936347}, {"elements": 524288, "baseline_sse": 8.80118443765646, "staged_sse": 10.6484346284557}, {"elements": 524288, "baseline_sse": 12.302412041900105, "staged_sse": 14.997164564255634}], "payload_sha256": "0060acbf80d6f1d0d974da0b5232bcce7eb610539a25b1e42e9fd1c36d3a8174", "finished_utc": "2026-09-09T09:26:57.017427+00:00"}
+INFO  POST /release: lease_id=b1100125688a4d91a1f5dc233538d891                  

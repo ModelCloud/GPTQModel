@@ -279,3 +279,14 @@ def test_fp8_rejects_invalid_hessian(case):
     with pytest.raises(ValueError):
         refine_fp8_weight(torch.ones(4, 8).to(torch.float8_e4m3fn), torch.ones(4),
                           target=torch.ones(4, 8), hessian=h, inputs=inputs, config={'enabled': True})
+
+
+def test_calibrated_fp8_rejects_tensor_activation_replay_mismatch():
+    from gptqmodel.quantization.config import FP8Config
+
+    with pytest.raises(ValueError, match='native activation replay'):
+        FP8Config(gsq={'enabled': True}, gsq_calibration=True, weight_scale_method='tensor')
+    with pytest.raises(ValueError, match='native activation replay'):
+        FP8Config(gsq={'enabled': True}, gsq_calibration=True,
+                  dynamic={r'+:q_proj$': {'weight_scale_method': 'tensor', 'gsq': {'enabled': False}}})
+    assert FP8Config(gsq={'enabled': True}, weight_scale_method='tensor').weight_scale_method == 'tensor'

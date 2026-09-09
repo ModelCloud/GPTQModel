@@ -1,0 +1,12 @@
+{
+  "baseline_mse": 1.9465117556922764e-05,
+  "staged_mse": 5.6991410334775954e-05,
+  "relative_change_percent": 192.7873934905005,
+  "heldout_documents": 32,
+  "elements": 13039616,
+  "log": {
+    "path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/logs/llama-block0-w4-seed7-v1.log",
+    "bytes": 9695,
+    "sha256": "1281324283d8f5367baa87c508171f5e7fb4683d0bdfa6351b879c871b43f68d"
+  }
+}

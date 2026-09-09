@@ -131,6 +131,22 @@ class Mxfp4CpuLinear(WeightOnlyQuantLinear):
     def _weight_to_matrix(self, linear: nn.Module) -> torch.Tensor:
         return _weight_to_matrix(linear)
 
+    def replace_payload(self, qweight: torch.Tensor, scales: torch.Tensor) -> None:
+        """Install canonical bytes and invalidate derived VNNI packing."""
+        if (qweight.dtype != torch.uint8 or qweight.shape != (self.out_features, self.in_features // 2)
+                or qweight.device.type != "cpu"):
+            raise ValueError("MXFP4 payload must be CPU uint8 [out,in/2]")
+        if (scales.dtype != torch.uint8 or scales.shape != (self.out_features, self.in_features // 32)
+                or scales.device.type != "cpu" or (scales == 255).any()):
+            raise ValueError("MXFP4 scales must be finite CPU E8M0 [out,in/32]")
+        # Clone before changing state: callers retain no mutable alias into the payload.
+        new_weight, new_scales = qweight.detach().clone(), scales.detach().clone()
+        self.register_buffer("qweight", new_weight)
+        self.register_buffer("scales", new_scales)
+        for name in ("qpack", "spack"):
+            if name in self._buffers:
+                delattr(self, name)
+
     def _maybe_prepack_vnni(self) -> None:
         if not self.use_vnni:
             return
@@ -196,21 +212,33 @@ class Mxfp4CpuLinear(WeightOnlyQuantLinear):
         g_idx: torch.Tensor = None,
         *,
         smooth=None,
+        gsq=None,
+        gsq_inputs=None,
+        gsq_hessian=None,
     ):
         del scales, zeros, g_idx, smooth
 
         weight = self._weight_to_matrix(linear).to(device=CPU, dtype=torch.float32)
         qweight, scales_u8 = quantize_mxfp4(weight)
 
-        if "qweight" in self._buffers:
-            self.qweight = qweight
-        else:
-            self.register_buffer("qweight", qweight)
+        from ...quantization.config import normalize_gsq_config
+        from ...quantization.gsq_mxfp4 import refine_mxfp4_weight
 
-        if "scales" in self._buffers:
-            self.scales = scales_u8
-        else:
-            self.register_buffer("scales", scales_u8)
+        gsq_config = normalize_gsq_config(gsq)
+        diagnostics = None
+        if gsq_config is not None and gsq_config.enabled:
+            result = refine_mxfp4_weight(
+                qweight, scales_u8, target=weight, config=gsq_config,
+                inputs=gsq_inputs, hessian=gsq_hessian,
+            )
+            qweight, scales_u8 = result["weight"], result["scales"]
+            diagnostics = {key: result[key] for key in ("before", "after", "history")}
+            diagnostics["objective"] = (
+                "activation_reconstruction" if gsq_inputs is not None or gsq_hessian is not None else "weight_mse"
+            )
+
+        self.replace_payload(qweight, scales_u8)
+        self.gsq_diagnostics = diagnostics
 
         if linear.bias is not None:
             bias = linear.bias.detach().to(device=CPU, dtype=torch.float32)

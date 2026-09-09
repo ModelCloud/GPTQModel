@@ -163,9 +163,11 @@ def load_mxfp4_cpu_kernel() -> object:
     if not src.exists():
         raise FileNotFoundError(src)
 
+    from .cpp import _jit_cxx_standard
+
     extra_cflags = [
         "-O3",
-        "-std=c++17",
+        f"-std={_jit_cxx_standard()}",
         "-fopenmp",
     ]
     extra_cflags += os.environ.get("GPTQMODEL_MXFP4_EXTRA_CFLAGS", "").split()

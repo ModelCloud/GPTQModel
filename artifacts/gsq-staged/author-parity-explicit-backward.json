@@ -1,0 +1,44 @@
+[
+  {
+    "bits": 2,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 2,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 3,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 3,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 4,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 4,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.0,
+    "scale_gradient": 0.0
+  }
+]

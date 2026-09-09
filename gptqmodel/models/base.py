@@ -1310,6 +1310,8 @@ class BaseQModel(nn.Module):
                 preferred_backend = BACKEND.AUTO
             elif self.quantize_config.method == METHOD.FP8:
                 preferred_backend = BACKEND.FP8_TORCH
+            elif self.quantize_config.method == METHOD.MXFP4:
+                preferred_backend = BACKEND.MXFP4_CPU
             elif self.quantize_config.method == METHOD.BITSANDBYTES:
                 preferred_backend = BACKEND.BITSANDBYTES
             else:

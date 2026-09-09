@@ -5985,6 +5985,7 @@ class FP8Config(PreProcessorConfig):
             self.weight_scale_method,
             weight_block_size=block_size,
         )
+        self._validate_gsq()
         self.weight_block_size = list(block_size) if block_size is not None else None
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(self.weight_scale_semantics)
 
@@ -6028,6 +6029,8 @@ class FP8Config(PreProcessorConfig):
                 layer_dict.get("weight_scale_method"),
                 weight_block_size=block_size,
             )
+        if self.gsq_calibration and layer_dict.get("weight_scale_method") == "tensor":
+            raise ValueError("FP8Config: calibrated GSQ tensor scales require native activation replay; use row or block")
         if "weight_scale_semantics" in layer_dict:
             layer_dict["weight_scale_semantics"] = _normalize_fp8_scale_semantics(
                 layer_dict["weight_scale_semantics"]
@@ -6038,6 +6041,8 @@ class FP8Config(PreProcessorConfig):
     def _validate_gsq(self):
         if not isinstance(self.gsq_calibration, bool):
             raise TypeError("FP8Config: gsq_calibration must be boolean")
+        if self.gsq_calibration and self.weight_scale_method == "tensor":
+            raise ValueError("FP8Config: calibrated GSQ tensor scales require native activation replay; use row or block")
         if self.gsq is not None and self.gsq.enabled:
             if self.gsq.learn_scales:
                 raise ValueError("FP8Config: GSQ scale learning is not implemented")
@@ -7275,6 +7280,9 @@ def clone_weight_only_config_for_module(
                     qcfg_clone.weight_scale_semantics,
                 )
             )
+        elif isinstance(qcfg_clone, MXFP4Config):
+            qcfg_clone.gsq = normalize_gsq_config(qcfg.dynamic_get(module_full_name, "gsq", qcfg_clone.gsq))
+            qcfg_clone._validate_gsq()
         elif isinstance(qcfg_clone, BitsAndBytesConfig):
             qcfg_clone.bits = _normalize_quant_bits(
                 qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits),
@@ -7336,6 +7344,7 @@ clone_rtn_config_for_module = clone_weight_only_config_for_module
 
 @dataclass
 class MXFP4Config(PreProcessorConfig):
+    gsq: Optional[GSQConfig] = field(default=None)
     bits: int = field(default=4, metadata={"choices": [4]})
     method: METHOD = field(default=METHOD.MXFP4)
     format: FORMAT = field(default=FORMAT.MXFP4)
@@ -7366,6 +7375,9 @@ class MXFP4Config(PreProcessorConfig):
             raise ValueError("MXFP4Config: `bits` must be `4`.")
         if self.method != METHOD.MXFP4:
             raise ValueError("MXFP4Config: `method` must be `mxfp4`.")
+
+        self.gsq = normalize_gsq_config(self.gsq)
+        self._validate_gsq()
 
         self.group_size = -1
         self.desc_act = False
@@ -7410,10 +7422,15 @@ class MXFP4Config(PreProcessorConfig):
             layer_dict[FORMAT_FIELD_CODE] = _normalize_format(raw_format)
         layer_dict.pop("fmt", None)
 
+    def _validate_gsq(self):
+        if self.gsq is not None and self.gsq.enabled and self.gsq.learn_scales:
+            raise ValueError("MXFP4Config: GSQ scale learning is not implemented")
+
     def quant_linear_init_kwargs(self) -> Dict[str, Any]:
         return {}
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["gsq"] = None if self.gsq is None else asdict(self.gsq)
         out[FORMAT_FIELD_CODE] = self.format.value
 
     def uses_weight_only_lifecycle(self) -> bool:

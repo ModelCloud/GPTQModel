@@ -6,7 +6,7 @@ from gptqmodel.quantization.config import FP8Config
 from gptqmodel.quantization.gsq_fp8_task import FP8GSQTask
 
 
-@pytest.mark.parametrize('method', ['row', 'tensor', 'block'])
+@pytest.mark.parametrize('method', ['row', 'block'])
 def test_capture_fit_export_and_release(method):
     rng = torch.Generator().manual_seed(7)
     teacher = torch.randn(4, 8, generator=rng)
@@ -75,3 +75,9 @@ def test_calibrated_task_uses_same_smoothed_initializer_as_packer(monkeypatch):
 
     monkeypatch.setattr(implementation, 'refine_fp8_weight', verify)
     task.quantize()
+
+
+def test_calibrated_task_rejects_tensor_even_without_lifecycle_flag():
+    config = FP8Config(gsq={'enabled': True}, weight_scale_method='tensor')
+    with pytest.raises(ValueError, match='native activation replay'):
+        FP8GSQTask(torch.ones(4, 8), config)

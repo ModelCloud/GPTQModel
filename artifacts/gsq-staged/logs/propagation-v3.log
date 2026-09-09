@@ -1,0 +1,119 @@
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+INFO  GPUAllocatorClient initialized: base_url=http://127.0.0.1:17351 session_id=pid-2958700
+INFO  POST /allocate: count=1 timeout=None exclusive=True reason=None           
+INFO  Allocated lease be289303906546f48c4319c2deeba807 with 1 GPU(s) for session pid-2958700
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+Loading weights:   0%|          | 0/146 [00:00<?, ?it/s]Loading weights:   1%|          | 1/146 [00:00<00:53,  2.70it/s]Loading weights:  39%|███▉      | 57/146 [00:00<00:00, 153.61it/s]Loading weights:  60%|██████    | 88/146 [00:00<00:00, 178.23it/s]Loading weights:  79%|███████▉  | 115/146 [00:00<00:00, 192.95it/s]Loading weights:  97%|█████████▋| 141/146 [00:00<00:00, 201.78it/s]Loading weights: 100%|██████████| 146/146 [00:00<00:00, 170.91it/s]
+
+INFO  LogBar: headless/CI mode; progress animations disabled.                   
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+INFO  
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+548d883e7
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+MODEL f6 1/32 {"kl_teacher_candidate": 0.08518580292793689, "mse": 0.3242458701133728, "top1_agreement": 0.8524590163934426, "top5_agreement": 0.8459016393442623, "top10_agreement": 0.8519125683060109}
+MODEL f6 2/32 {"kl_teacher_candidate": 0.0778296870729468, "mse": 0.3238387141792541, "top1_agreement": 0.8542141230068337, "top5_agreement": 0.8555808656036447, "top10_agreement": 0.8533029612756264}
+MODEL f6 3/32 {"kl_teacher_candidate": 0.09645442835728762, "mse": 0.373532063968468, "top1_agreement": 0.858034321372855, "top5_agreement": 0.8471138845553822, "top10_agreement": 0.8449297971918878}
+MODEL f6 4/32 {"kl_teacher_candidate": 0.09795074808568505, "mse": 0.376105380982513, "top1_agreement": 0.8567674113009198, "top5_agreement": 0.8478318002628121, "top10_agreement": 0.8448094612352168}
+MODEL f6 5/32 {"kl_teacher_candidate": 0.09305887271337492, "mse": 0.3631651444303837, "top1_agreement": 0.8672566371681416, "top5_agreement": 0.8471976401179941, "top10_agreement": 0.8488692232055065}
+MODEL f6 6/32 {"kl_teacher_candidate": 0.09028654576561873, "mse": 0.36105724482882284, "top1_agreement": 0.8698738170347003, "top5_agreement": 0.8458990536277604, "top10_agreement": 0.8487381703470032}
+MODEL f6 7/32 {"kl_teacher_candidate": 0.08692911202649632, "mse": 0.35495593807515824, "top1_agreement": 0.8713910761154856, "top5_agreement": 0.8447506561679791, "top10_agreement": 0.8491469816272966}
+MODEL f6 8/32 {"kl_teacher_candidate": 0.08884807370282624, "mse": 0.3609585646704916, "top1_agreement": 0.8677156177156177, "top5_agreement": 0.8445221445221446, "top10_agreement": 0.8474941724941725}
+MODEL f6 9/32 {"kl_teacher_candidate": 0.09255740431034842, "mse": 0.3661518579572992, "top1_agreement": 0.8664546899841018, "top5_agreement": 0.8440911499735029, "top10_agreement": 0.8480657127715951}
+MODEL f6 10/32 {"kl_teacher_candidate": 0.09157476939503052, "mse": 0.3640703910208171, "top1_agreement": 0.8693420438637424, "top5_agreement": 0.8452636490900607, "top10_agreement": 0.8486234251049931}
+MODEL f6 11/32 {"kl_teacher_candidate": 0.09884163340550998, "mse": 0.3990293860982089, "top1_agreement": 0.8628595248020008, "top5_agreement": 0.8416840350145894, "top10_agreement": 0.8431012922050856}
+MODEL f6 12/32 {"kl_teacher_candidate": 0.09742819429785793, "mse": 0.3968645794467962, "top1_agreement": 0.864406779661017, "top5_agreement": 0.8424858757062148, "top10_agreement": 0.8422222222222222}
+MODEL f6 13/32 {"kl_teacher_candidate": 0.098290436089806, "mse": 0.3950880087574507, "top1_agreement": 0.8605066000713522, "top5_agreement": 0.8416696396717803, "top10_agreement": 0.8412058508740635}
+MODEL f6 14/32 {"kl_teacher_candidate": 0.09693541257144302, "mse": 0.39470843040129017, "top1_agreement": 0.8640712636093698, "top5_agreement": 0.8431540745628505, "top10_agreement": 0.8408116133289344}
+MODEL f6 15/32 {"kl_teacher_candidate": 0.09780083677150321, "mse": 0.3943513292725194, "top1_agreement": 0.8606632187404929, "top5_agreement": 0.8425920292059629, "top10_agreement": 0.8404015819896562}
+MODEL f6 16/32 {"kl_teacher_candidate": 0.09790603815480281, "mse": 0.39833284220909065, "top1_agreement": 0.8612412177985949, "top5_agreement": 0.8418618266978923, "top10_agreement": 0.8396077283372365}
+MODEL f6 17/32 {"kl_teacher_candidate": 0.09880888181657556, "mse": 0.39701332000118716, "top1_agreement": 0.8611111111111112, "top5_agreement": 0.840359477124183, "top10_agreement": 0.839025054466231}
+MODEL f6 18/32 {"kl_teacher_candidate": 0.09673614907271368, "mse": 0.39797082950803025, "top1_agreement": 0.8643075356415478, "top5_agreement": 0.839663951120163, "top10_agreement": 0.8389765784114053}
+MODEL f6 19/32 {"kl_teacher_candidate": 0.09583944540701592, "mse": 0.39612165020537804, "top1_agreement": 0.8645145512350207, "top5_agreement": 0.8399608706285157, "top10_agreement": 0.8398630471998044}
+MODEL f6 20/32 {"kl_teacher_candidate": 0.09534553894181629, "mse": 0.3961634512372057, "top1_agreement": 0.8649940262843488, "top5_agreement": 0.8410035842293908, "top10_agreement": 0.8404540023894863}
+MODEL f6 21/32 {"kl_teacher_candidate": 0.09921096476887484, "mse": 0.4034037509163544, "top1_agreement": 0.8644501278772379, "top5_agreement": 0.8393861892583121, "top10_agreement": 0.8378516624040921}
+MODEL f6 22/32 {"kl_teacher_candidate": 0.1006062269849429, "mse": 0.4057507670996318, "top1_agreement": 0.8630043309778892, "top5_agreement": 0.8385684978345112, "top10_agreement": 0.8368816959197629}
+MODEL f6 23/32 {"kl_teacher_candidate": 0.10234103901963405, "mse": 0.40806966821930724, "top1_agreement": 0.8625783348254252, "top5_agreement": 0.8375559534467324, "top10_agreement": 0.8359221128021487}
+MODEL f6 24/32 {"kl_teacher_candidate": 0.10279712867329796, "mse": 0.4089774235243297, "top1_agreement": 0.8625414364640884, "top5_agreement": 0.837171270718232, "top10_agreement": 0.83553591160221}
+MODEL f6 25/32 {"kl_teacher_candidate": 0.1035961063882487, "mse": 0.4107830413117435, "top1_agreement": 0.8625136612021858, "top5_agreement": 0.8370710382513662, "top10_agreement": 0.8348852459016394}
+MODEL f6 26/32 {"kl_teacher_candidate": 0.10507946944583735, "mse": 0.4168865606851939, "top1_agreement": 0.8606913682467398, "top5_agreement": 0.8363071827778928, "top10_agreement": 0.833802525357069}
+MODEL f6 27/32 {"kl_teacher_candidate": 0.10465150247366146, "mse": 0.4146525192605224, "top1_agreement": 0.859249066247297, "top5_agreement": 0.8360526833103991, "top10_agreement": 0.8338509927265579}
+MODEL f6 28/32 {"kl_teacher_candidate": 0.10615803206682502, "mse": 0.4237980031964932, "top1_agreement": 0.8581321355043983, "top5_agreement": 0.835822571588995, "top10_agreement": 0.8341568407261839}
+MODEL f6 29/32 {"kl_teacher_candidate": 0.10639509968953183, "mse": 0.4253567403066284, "top1_agreement": 0.8549741025183069, "top5_agreement": 0.8351848544382925, "top10_agreement": 0.8339882121807466}
+MODEL f6 30/32 {"kl_teacher_candidate": 0.10873005746559743, "mse": 0.44105592874967575, "top1_agreement": 0.8563620836891546, "top5_agreement": 0.831801878736123, "top10_agreement": 0.8301280956447482}
+MODEL f6 31/32 {"kl_teacher_candidate": 0.10716094550306178, "mse": 0.4379248467458873, "top1_agreement": 0.8587792505318278, "top5_agreement": 0.8318114874815905, "top10_agreement": 0.8300278186876126}
+MODEL f6 32/32 {"kl_teacher_candidate": 0.10812678005162772, "mse": 0.4404727655610803, "top1_agreement": 0.8548767080257578, "top5_agreement": 0.8303125490812, "top10_agreement": 0.829260248154547}
+MODEL baseline 1/32 {"kl_teacher_candidate": 0.08836364179204102, "mse": 0.3296767771244049, "top1_agreement": 0.8469945355191257, "top5_agreement": 0.8371584699453553, "top10_agreement": 0.8557377049180329}
+MODEL baseline 2/32 {"kl_teacher_candidate": 0.08140622262083082, "mse": 0.3234894424337461, "top1_agreement": 0.8610478359908884, "top5_agreement": 0.8460136674259682, "top10_agreement": 0.8523917995444192}
+MODEL baseline 3/32 {"kl_teacher_candidate": 0.09251600330093758, "mse": 0.34880364057426333, "top1_agreement": 0.858034321372855, "top5_agreement": 0.8424336973478939, "top10_agreement": 0.8458658346333854}
+MODEL baseline 4/32 {"kl_teacher_candidate": 0.09524837117137958, "mse": 0.35556568786913084, "top1_agreement": 0.859395532194481, "top5_agreement": 0.8420499342969777, "top10_agreement": 0.8448094612352169}
+MODEL baseline 5/32 {"kl_teacher_candidate": 0.09036658528756666, "mse": 0.34875488389675363, "top1_agreement": 0.8692232055063913, "top5_agreement": 0.8430678466076698, "top10_agreement": 0.8479842674532941}
+MODEL baseline 6/32 {"kl_teacher_candidate": 0.08770688082668197, "mse": 0.35144919608293645, "top1_agreement": 0.8698738170347003, "top5_agreement": 0.8430599369085173, "top10_agreement": 0.8485804416403786}
+MODEL baseline 7/32 {"kl_teacher_candidate": 0.0856241802696092, "mse": 0.3477202987107705, "top1_agreement": 0.8733595800524935, "top5_agreement": 0.8429133858267718, "top10_agreement": 0.8483595800524935}
+MODEL baseline 8/32 {"kl_teacher_candidate": 0.08766882757072988, "mse": 0.3555407644985439, "top1_agreement": 0.8706293706293706, "top5_agreement": 0.8421911421911423, "top10_agreement": 0.8471445221445222}
+MODEL baseline 9/32 {"kl_teacher_candidate": 0.09129727372417241, "mse": 0.3617612864046294, "top1_agreement": 0.8691043985161632, "top5_agreement": 0.8419713831478538, "top10_agreement": 0.8474827768945417}
+MODEL baseline 10/32 {"kl_teacher_candidate": 0.09040501767182407, "mse": 0.3634530308226587, "top1_agreement": 0.8726084927671488, "top5_agreement": 0.8425571628558097, "top10_agreement": 0.8474568362109194}
+MODEL baseline 11/32 {"kl_teacher_candidate": 0.0982570082878287, "mse": 0.40761306670716824, "top1_agreement": 0.8653605669028762, "top5_agreement": 0.8388495206335974, "top10_agreement": 0.8408920383493123}
+MODEL baseline 12/32 {"kl_teacher_candidate": 0.09709453272241392, "mse": 0.4062703049676791, "top1_agreement": 0.8662900188323918, "top5_agreement": 0.8387193973634652, "top10_agreement": 0.8396986817325801}
+MODEL baseline 13/32 {"kl_teacher_candidate": 0.09789077592843587, "mse": 0.404222619446354, "top1_agreement": 0.8637174455940064, "top5_agreement": 0.8383160899036747, "top10_agreement": 0.8387442026400286}
+MODEL baseline 14/32 {"kl_teacher_candidate": 0.09669649446692312, "mse": 0.40379288578261563, "top1_agreement": 0.8670405806664467, "top5_agreement": 0.838997030682943, "top10_agreement": 0.8385681293302542}
+MODEL baseline 15/32 {"kl_teacher_candidate": 0.09777078675612709, "mse": 0.4044670927821955, "top1_agreement": 0.8618801338606632, "top5_agreement": 0.8384545177973837, "top10_agreement": 0.8378764831153028}
+MODEL baseline 16/32 {"kl_teacher_candidate": 0.0982058436986618, "mse": 0.4089359256419281, "top1_agreement": 0.8629976580796253, "top5_agreement": 0.8375878220140516, "top10_agreement": 0.836943793911007}
+MODEL baseline 17/32 {"kl_teacher_candidate": 0.09959705906899555, "mse": 0.4075508649361549, "top1_agreement": 0.8622004357298475, "top5_agreement": 0.8357298474945535, "top10_agreement": 0.835702614379085}
+MODEL baseline 18/32 {"kl_teacher_candidate": 0.0978070835165663, "mse": 0.4103906782772658, "top1_agreement": 0.8653258655804481, "top5_agreement": 0.835081466395112, "top10_agreement": 0.8354124236252546}
+MODEL baseline 19/32 {"kl_teacher_candidate": 0.09703860251655973, "mse": 0.40865813136304846, "top1_agreement": 0.8652482269503546, "top5_agreement": 0.835509904622157, "top10_agreement": 0.8362924920518465}
+MODEL baseline 20/32 {"kl_teacher_candidate": 0.096561039947902, "mse": 0.40901834031871853, "top1_agreement": 0.8661887694145759, "top5_agreement": 0.83636798088411, "top10_agreement": 0.8369175627240143}
+MODEL baseline 21/32 {"kl_teacher_candidate": 0.10036518645190463, "mse": 0.41725354896149397, "top1_agreement": 0.8658451522901651, "top5_agreement": 0.834550104626831, "top10_agreement": 0.8342245989304813}
+MODEL baseline 22/32 {"kl_teacher_candidate": 0.10196222936623796, "mse": 0.41928892488057884, "top1_agreement": 0.8652837930248461, "top5_agreement": 0.8339639844996581, "top10_agreement": 0.8333257351265102}
+MODEL baseline 23/32 {"kl_teacher_candidate": 0.10365386072161265, "mse": 0.42156731271274195, "top1_agreement": 0.8654879140555058, "top5_agreement": 0.8331692032229187, "top10_agreement": 0.8323858549686661}
+MODEL baseline 24/32 {"kl_teacher_candidate": 0.10437480301448582, "mse": 0.4226230736727214, "top1_agreement": 0.8660773480662983, "top5_agreement": 0.8327513812154697, "top10_agreement": 0.8319337016574586}
+MODEL baseline 25/32 {"kl_teacher_candidate": 0.10535167522058034, "mse": 0.4244111325050312, "top1_agreement": 0.8653551912568306, "top5_agreement": 0.8324371584699454, "top10_agreement": 0.8312786885245902}
+MODEL baseline 26/32 {"kl_teacher_candidate": 0.10652626752526521, "mse": 0.43048366864160387, "top1_agreement": 0.8629683295383979, "top5_agreement": 0.8319188573794246, "top10_agreement": 0.8308838749741254}
+MODEL baseline 27/32 {"kl_teacher_candidate": 0.10601109431421449, "mse": 0.42728140765659367, "top1_agreement": 0.8618045999606841, "top5_agreement": 0.8319245134656968, "top10_agreement": 0.8310202476901908}
+MODEL baseline 28/32 {"kl_teacher_candidate": 0.10787181509579999, "mse": 0.4401626515741007, "top1_agreement": 0.8596294216732173, "top5_agreement": 0.8312932809283174, "top10_agreement": 0.8309189593861127}
+MODEL baseline 29/32 {"kl_teacher_candidate": 0.1081757047966352, "mse": 0.44121335265593437, "top1_agreement": 0.8564029290944811, "top5_agreement": 0.8305054474013217, "top10_agreement": 0.8308269333809609}
+MODEL baseline 30/32 {"kl_teacher_candidate": 0.10979966351487747, "mse": 0.45562523665538107, "top1_agreement": 0.8587532023911187, "top5_agreement": 0.8267463706233988, "top10_agreement": 0.827070879590094}
+MODEL baseline 31/32 {"kl_teacher_candidate": 0.10832338918794017, "mse": 0.4519976149641576, "top1_agreement": 0.8600883652430045, "top5_agreement": 0.8264768450335461, "top10_agreement": 0.8267877597774504}
+MODEL baseline 32/32 {"kl_teacher_candidate": 0.10943075774670989, "mse": 0.4553463149523836, "top1_agreement": 0.8566043662635464, "top5_agreement": 0.8243442751688393, "top10_agreement": 0.825930579550809}
+MODEL staged 1/32 {"kl_teacher_candidate": 0.0887901647067459, "mse": 0.3329738676548004, "top1_agreement": 0.8688524590163934, "top5_agreement": 0.8426229508196722, "top10_agreement": 0.8540983606557377}
+MODEL staged 2/32 {"kl_teacher_candidate": 0.0834182344572849, "mse": 0.3309421720564501, "top1_agreement": 0.8656036446469249, "top5_agreement": 0.8473804100227791, "top10_agreement": 0.850113895216401}
+MODEL staged 3/32 {"kl_teacher_candidate": 0.09581508186942762, "mse": 0.35295068441240723, "top1_agreement": 0.8627145085803433, "top5_agreement": 0.8421216848673948, "top10_agreement": 0.8433697347893916}
+MODEL staged 4/32 {"kl_teacher_candidate": 0.09835125409014399, "mse": 0.3592907557271313, "top1_agreement": 0.8646517739816032, "top5_agreement": 0.8412614980289094, "top10_agreement": 0.8432325886990802}
+MODEL staged 5/32 {"kl_teacher_candidate": 0.09370068907824258, "mse": 0.3540715654632452, "top1_agreement": 0.8731563421828908, "top5_agreement": 0.8414945919370699, "top10_agreement": 0.8446411012782694}
+MODEL staged 6/32 {"kl_teacher_candidate": 0.0907367068214945, "mse": 0.3563542074585563, "top1_agreement": 0.8746056782334385, "top5_agreement": 0.8411671924290222, "top10_agreement": 0.8455047318611989}
+MODEL staged 7/32 {"kl_teacher_candidate": 0.08868365470583213, "mse": 0.3529636873973636, "top1_agreement": 0.8753280839895013, "top5_agreement": 0.8414698162729659, "top10_agreement": 0.8456692913385828}
+MODEL staged 8/32 {"kl_teacher_candidate": 0.0908049163483011, "mse": 0.3614472171643397, "top1_agreement": 0.872960372960373, "top5_agreement": 0.8405594405594407, "top10_agreement": 0.8444055944055944}
+MODEL staged 9/32 {"kl_teacher_candidate": 0.09478267346401285, "mse": 0.3682769475377421, "top1_agreement": 0.8712241653418124, "top5_agreement": 0.8398516163222046, "top10_agreement": 0.8446210916799153}
+MODEL staged 10/32 {"kl_teacher_candidate": 0.09355461903584371, "mse": 0.3705860025071675, "top1_agreement": 0.8758749416705554, "top5_agreement": 0.8405039664022399, "top10_agreement": 0.8448903406439572}
+MODEL staged 11/32 {"kl_teacher_candidate": 0.10231367878484277, "mse": 0.4139836751555045, "top1_agreement": 0.8674447686536056, "top5_agreement": 0.8365985827428095, "top10_agreement": 0.8382242601083786}
+MODEL staged 12/32 {"kl_teacher_candidate": 0.10143196513087716, "mse": 0.4133633117666801, "top1_agreement": 0.8677966101694915, "top5_agreement": 0.8366101694915256, "top10_agreement": 0.8372504708097929}
+MODEL staged 13/32 {"kl_teacher_candidate": 0.10218554272373168, "mse": 0.4113232316479188, "top1_agreement": 0.8647877274348912, "top5_agreement": 0.8363895825900821, "top10_agreement": 0.8363182304673565}
+MODEL staged 14/32 {"kl_teacher_candidate": 0.10085432224848301, "mse": 0.4107297650464334, "top1_agreement": 0.8670405806664467, "top5_agreement": 0.8371494556252063, "top10_agreement": 0.836027713625866}
+MODEL staged 15/32 {"kl_teacher_candidate": 0.10175818717263006, "mse": 0.41054513701414824, "top1_agreement": 0.8609674475205354, "top5_agreement": 0.8372376026772133, "top10_agreement": 0.8353513842409492}
+MODEL staged 16/32 {"kl_teacher_candidate": 0.10239806024895964, "mse": 0.4170379376069444, "top1_agreement": 0.8621194379391101, "top5_agreement": 0.8361241217798596, "top10_agreement": 0.8341042154566746}
+MODEL staged 17/32 {"kl_teacher_candidate": 0.10349924879039579, "mse": 0.4153750597099593, "top1_agreement": 0.8627450980392157, "top5_agreement": 0.8345315904139434, "top10_agreement": 0.8330337690631808}
+MODEL staged 18/32 {"kl_teacher_candidate": 0.10172735723945689, "mse": 0.4183880078422319, "top1_agreement": 0.8660896130346232, "top5_agreement": 0.834419551934827, "top10_agreement": 0.8325610997963341}
+MODEL staged 19/32 {"kl_teacher_candidate": 0.10088096608278613, "mse": 0.41655724580377146, "top1_agreement": 0.8662264612374664, "top5_agreement": 0.8349718757642456, "top10_agreement": 0.8334311567620445}
+MODEL staged 20/32 {"kl_teacher_candidate": 0.10035315009934745, "mse": 0.4166659826018904, "top1_agreement": 0.8673835125448028, "top5_agreement": 0.8356989247311828, "top10_agreement": 0.8342174432497014}
+MODEL staged 21/32 {"kl_teacher_candidate": 0.10425097735358597, "mse": 0.42485456518227765, "top1_agreement": 0.8674726807719135, "top5_agreement": 0.8334805859102534, "top10_agreement": 0.8314810509183911}
+MODEL staged 22/32 {"kl_teacher_candidate": 0.10582701434364719, "mse": 0.4268825227262655, "top1_agreement": 0.8666514702530203, "top5_agreement": 0.8329610211989971, "top10_agreement": 0.8305903806701619}
+MODEL staged 23/32 {"kl_teacher_candidate": 0.10752862766152725, "mse": 0.42937002154258924, "top1_agreement": 0.8666069829901522, "top5_agreement": 0.8323187108325873, "top10_agreement": 0.8297000895255149}
+MODEL staged 24/32 {"kl_teacher_candidate": 0.10827072518545565, "mse": 0.4303782700043357, "top1_agreement": 0.867182320441989, "top5_agreement": 0.831779005524862, "top10_agreement": 0.8292817679558011}
+MODEL staged 25/32 {"kl_teacher_candidate": 0.109240980471842, "mse": 0.4320844915916359, "top1_agreement": 0.8668852459016393, "top5_agreement": 0.8316065573770492, "top10_agreement": 0.828568306010929}
+MODEL staged 26/32 {"kl_teacher_candidate": 0.11059634204114853, "mse": 0.43863779296541383, "top1_agreement": 0.8652452908300559, "top5_agreement": 0.8310080728627615, "top10_agreement": 0.8281929207203478}
+MODEL staged 27/32 {"kl_teacher_candidate": 0.110073857442078, "mse": 0.4352711992763409, "top1_agreement": 0.8635738156084136, "top5_agreement": 0.831256143109888, "top10_agreement": 0.8281698447021821}
+MODEL staged 28/32 {"kl_teacher_candidate": 0.11193795362075737, "mse": 0.44778645941096923, "top1_agreement": 0.8611267078420363, "top5_agreement": 0.8307317986150103, "top10_agreement": 0.8280928317424667}
+MODEL staged 29/32 {"kl_teacher_candidate": 0.11218840144782186, "mse": 0.4486623636354909, "top1_agreement": 0.8578317556706555, "top5_agreement": 0.8303268440792999, "top10_agreement": 0.8280764422218254}
+MODEL staged 30/32 {"kl_teacher_candidate": 0.11329813867927369, "mse": 0.4635344619225682, "top1_agreement": 0.8606319385140905, "top5_agreement": 0.8271904355251921, "top10_agreement": 0.8245943637916311}
+MODEL staged 31/32 {"kl_teacher_candidate": 0.11173458847021984, "mse": 0.4599047046483314, "top1_agreement": 0.8618883979708722, "top5_agreement": 0.8271314023891344, "top10_agreement": 0.824529536900671}
+MODEL staged 32/32 {"kl_teacher_candidate": 0.11259299282794878, "mse": 0.4637125464367196, "top1_agreement": 0.8578608449819382, "top5_agreement": 0.8251923983037537, "top10_agreement": 0.8238416836814827}
+INFO  POST /release: lease_id=be289303906546f48c4319c2deeba807                  

@@ -42,6 +42,8 @@ class FP8GSQProcessor(WeightOnlyProcessor):
         config = clone_weight_only_config_for_module(self.qcfg, module.full_name)
         if config is None:
             return
+        if config.weight_scale_method == "tensor":
+            raise ValueError("FP8 calibrated GSQ processor requires native activation replay for tensor scales")
         task = FP8GSQTask(module.weight, config) if gsq_enabled_for(config.gsq, module.full_name) else None
         self.tasks[module.name] = task
 

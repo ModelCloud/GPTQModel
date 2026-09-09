@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 
 
-def analyze(path):
+def analyze(path, arms=('gsq_weight', 'gsq_calibrated')):
     report = json.loads(path.read_text())
     if report['state'] != 'complete':
         raise ValueError('Requires all arms completed')
@@ -17,7 +17,7 @@ def analyze(path):
     weights = np.array([row['tokens'] for row in baseline])
     result = {'method': 'paired document bootstrap; token-weighted means', 'seed': 7,
               'draws': 10000, 'arms': {}}
-    for arm in ('gsq_weight', 'gsq_calibrated'):
+    for arm in arms:
         rows = report['arms'][arm]['rows']
         if len(rows) != len(baseline) or any(a['tokens'] != b['tokens'] for a, b in zip(rows, baseline)):
             raise ValueError('Mismatched paired documents')
@@ -39,5 +39,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('report', type=Path)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--arms', nargs='+', default=['gsq_weight', 'gsq_calibrated'])
     args = parser.parse_args()
-    args.output.write_text(json.dumps(analyze(args.report), indent=2)+'\n')
+    args.output.write_text(json.dumps(analyze(args.report, arms=args.arms), indent=2)+'\n')

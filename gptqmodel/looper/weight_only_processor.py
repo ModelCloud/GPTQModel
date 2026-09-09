@@ -78,7 +78,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def _uses_direct_pack(qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.MXFP4}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         """Backfills the logged loss field after late dequant-error measurement."""
@@ -214,6 +214,8 @@ class WeightOnlyProcessor(LoopProcessor):
         layers = {module.full_name: original_layer}
 
         if self._uses_direct_pack(active_qcfg):
+            from ..quantization.gsq_scalar import gsq_enabled_for
+
             pack_start = time.perf_counter() if timer is not None else None
             with log_time_block("pack", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
@@ -227,7 +229,10 @@ class WeightOnlyProcessor(LoopProcessor):
                         quant_linear_cls=model.qlinear_kernel,
                         lock=None,
                         quantize_config=active_qcfg,
-                        pack_kwargs={"smooth": active_qcfg.smooth},
+                        pack_kwargs={"smooth": active_qcfg.smooth, **(
+                            {"gsq": active_qcfg.gsq if gsq_enabled_for(active_qcfg.gsq, module.full_name) else None}
+                            if active_qcfg.method == METHOD.MXFP4 else {}
+                        )},
                         validate=False,
                     )
             if timer is not None and pack_start is not None:
@@ -236,6 +241,15 @@ class WeightOnlyProcessor(LoopProcessor):
                     time.perf_counter() - pack_start,
                     source=f"{module_label} [{packer_label or 'module.pack_original'}]",
                 )
+
+            if active_qcfg.method == METHOD.MXFP4 and qmodule.gsq_diagnostics is not None:
+                module.state["gsq_diagnostics"] = qmodule.gsq_diagnostics
+                with self.lock:
+                    for entry in reversed(self.log):
+                        if (entry.get(PROCESS_LOG_LAYER) == module.layer_index
+                                and entry.get(PROCESS_LOG_MODULE) == module.name):
+                            entry["gsq"] = qmodule.gsq_diagnostics
+                            break
 
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
             if active_qcfg.method == METHOD.FP8 and "fp8_reference_weight" in module.state:
@@ -326,6 +340,8 @@ class WeightOnlyProcessor(LoopProcessor):
 
         if self.qcfg.method == METHOD.GGUF:
             return "weight_only_gguf"
+        if self.qcfg.method == METHOD.MXFP4:
+            return "weight_only_mxfp4"
         if self.qcfg.method == METHOD.FP8:
             return "weight_only_fp8"
         if self.qcfg.method == METHOD.BITSANDBYTES:

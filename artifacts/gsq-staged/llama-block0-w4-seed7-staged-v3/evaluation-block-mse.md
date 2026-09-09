@@ -1,0 +1,295 @@
+# Staged GSQ dedicated Q/K run
+
+Status: completed execution; held-out block reconstruction regression.
+
+Artifact: /root/polly-work/qvq-gsq/artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3
+
+Selected-layer state; not portable full-model export. ZML N/A. Real Llama 3.2 1B, unweighted documents, FP32 eager/cache-free; not F6/N production comparison.
+
+CLI from /root/polly-work/qvq-gsq: `PYTHONPATH=. CUDA_DEVICE_ORDER=PCI_BUS_ID OMP_NUM_THREADS=4 MAX_JOBS=4 /root/venv-py3.14t/bin/python -m gpu_allocator.cli run -n 1 --style uuid -- /root/venv-py3.14t/bin/python -m scripts.validate_gsq_staged_llama --inputs artifacts/gsq-scalar/gptq-w4-seed7-v2 --output artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3 --bits 4 --epochs 10 --qk-steps 2000`
+
+```json
+{
+  "baseline_mse": 1.9465117556922764e-05,
+  "staged_mse": 2.31373844674697e-05,
+  "relative_change_percent": 18.865886115549777,
+  "heldout_documents": 32,
+  "elements": 13039616,
+  "log_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/logs/llama-block0-w4-seed7-staged-v3.log",
+  "log_bytes": 14013,
+  "log_sha256": "9a713e9e353b6807e4ae7b89c3dbe39c655e70d09e3c44caa4837c3deb00a7de"
+}
+```
+
+Full effective configuration, source hashes, runtime, timestamps, and per-document results:
+```json
+{
+  "state": "complete",
+  "commit": "548d883e7aac1fb1858ad0daff061a1c774f365e",
+  "source_hashes": {
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py": "81817edae9f932d0589616d123149ecc899dbabfa158987ed219af71d9302167",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_training.py": "5a79f0e530705131072b8c8e3b4233bb290789b196be87ce28b958b3afa6c7f5",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/inputs.json": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8",
+    "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+    "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb"
+  },
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "seed": 7,
+  "bits": 4,
+  "epochs": 10,
+  "qk_steps": 2000,
+  "group_size": 128,
+  "attention": "eager",
+  "cache": false,
+  "graphs": false,
+  "precision": "float32",
+  "source_model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "scope": "block0, local reconstruction; no paper-reproduction claim",
+  "training": {
+    "assignment_lr": 0.0001,
+    "scale_lr": 5e-05,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "weight_decay": 1.0,
+    "temperature": [
+      2.0,
+      0.05
+    ],
+    "multiplier": [
+      100.0,
+      500.0
+    ],
+    "warmup_steps": 0,
+    "min_lr": 0.1,
+    "decay": "cosine"
+  },
+  "qk_learning_rate_decay": "constant",
+  "qk_damp_percent": 0.01,
+  "initializer_damp_percent": 0.1,
+  "started_utc": "2026-09-09T09:26:13.529841+00:00",
+  "argv": [
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_llama.py",
+    "--inputs",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2",
+    "--output",
+    "artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3",
+    "--bits",
+    "4",
+    "--epochs",
+    "10",
+    "--qk-steps",
+    "2000"
+  ],
+  "run_id": "llama-block0-w4-seed7-staged-v3",
+  "weighting": "unweighted documents; not YAQA 1.25/N-mode reproduction",
+  "gpu_properties": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "initializer": {
+    "self_attn.q_proj": {
+      "loss": 0.00031633430239943507,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "self_attn.k_proj": {
+      "loss": 0.00015190336284632387,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "self_attn.v_proj": {
+      "loss": 4.724508192452506e-06,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "self_attn.o_proj": {
+      "loss": 4.052339474746489e-07,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "mlp.gate_proj": {
+      "loss": 0.00024042670341331698,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "mlp.up_proj": {
+      "loss": 0.00018654877227467252,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    },
+    "mlp.down_proj": {
+      "loss": 2.6922102870218373e-06,
+      "damp": 0.10000000149011612,
+      "samples": 3767
+    }
+  },
+  "heldout": [
+    {
+      "elements": 374784,
+      "baseline_sse": 5.598115849717133,
+      "staged_sse": 6.366548855818826
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 9.600127091852404,
+      "staged_sse": 11.535723357631266
+    },
+    {
+      "elements": 413696,
+      "baseline_sse": 7.37979242168872,
+      "staged_sse": 8.697856733845029
+    },
+    {
+      "elements": 245760,
+      "baseline_sse": 3.6212935517798623,
+      "staged_sse": 3.8245785158910484
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 8.232950440870988,
+      "staged_sse": 9.742353288357512
+    },
+    {
+      "elements": 514048,
+      "baseline_sse": 7.701203633140372,
+      "staged_sse": 9.139514169983011
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.398193271964598,
+      "staged_sse": 12.326186477365688
+    },
+    {
+      "elements": 393216,
+      "baseline_sse": 8.16028804935539,
+      "staged_sse": 9.547079744004742
+    },
+    {
+      "elements": 350208,
+      "baseline_sse": 6.12718561914317,
+      "staged_sse": 7.113059075692623
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 8.772552879017677,
+      "staged_sse": 10.55567907756308
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.17343848279516,
+      "staged_sse": 12.38999472465073
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.650552595158956,
+      "staged_sse": 12.889926062084717
+    },
+    {
+      "elements": 303104,
+      "baseline_sse": 6.104766889815329,
+      "staged_sse": 7.070452071309235
+    },
+    {
+      "elements": 466944,
+      "baseline_sse": 8.974996898750467,
+      "staged_sse": 10.973810948064651
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.548831543425196,
+      "staged_sse": 12.916233703705199
+    },
+    {
+      "elements": 264192,
+      "baseline_sse": 6.028954835801644,
+      "staged_sse": 7.008161548323577
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.969181887137742,
+      "staged_sse": 13.343397851800406
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 11.35965466493133,
+      "staged_sse": 13.875146022364206
+    },
+    {
+      "elements": 329728,
+      "baseline_sse": 4.399363822826501,
+      "staged_sse": 4.838321977279241
+    },
+    {
+      "elements": 196608,
+      "baseline_sse": 2.466687485482919,
+      "staged_sse": 2.3938550575324644
+    },
+    {
+      "elements": 237568,
+      "baseline_sse": 7.239983865950856,
+      "staged_sse": 8.442128706008987
+    },
+    {
+      "elements": 176128,
+      "baseline_sse": 3.4237508128164755,
+      "staged_sse": 3.5887298509843646
+    },
+    {
+      "elements": 165888,
+      "baseline_sse": 4.300958247854185,
+      "staged_sse": 4.8828729981738395
+    },
+    {
+      "elements": 116736,
+      "baseline_sse": 2.2796981087839674,
+      "staged_sse": 2.2277309793896265
+    },
+    {
+      "elements": 102400,
+      "baseline_sse": 2.03528933672812,
+      "staged_sse": 1.9351710311815038
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.53074948676996,
+      "staged_sse": 12.625183125814008
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.373623364419611,
+      "staged_sse": 12.511365603526453
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 9.300681377435922,
+      "staged_sse": 11.258985308473969
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 10.285297698229659,
+      "staged_sse": 12.583269735701688
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 15.675897643930108,
+      "staged_sse": 19.453692904936347
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 8.80118443765646,
+      "staged_sse": 10.6484346284557
+    },
+    {
+      "elements": 524288,
+      "baseline_sse": 12.302412041900105,
+      "staged_sse": 14.997164564255634
+    }
+  ],
+  "payload_sha256": "0060acbf80d6f1d0d974da0b5232bcce7eb610539a25b1e42e9fd1c36d3a8174",
+  "finished_utc": "2026-09-09T09:26:57.017427+00:00"
+}
+```
+
+This changes multiple training factors versus v2; it cannot attribute the result to any one factor. No paper-reproduction or full-model quality claim. Real packed reload remains pending for this run.
