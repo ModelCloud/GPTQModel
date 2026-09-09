@@ -338,6 +338,8 @@ class AwqMarlinLinear(AWQuantLinear):
         return buf
 
     def forward(self, x: torch.Tensor):
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
         assert hasattr(self, "workspace"), (
             "module.post_init() must be called before module.forward(). "
             "Use marlin_post_init() on the whole model."
