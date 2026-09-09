@@ -67,10 +67,13 @@ def test_asymmetric_hard_checkpoint_matches_native_output_target():
 
 
 @pytest.mark.parametrize("desc_act", [False, True])
-def test_gptaq_gsq_original_column_objective(desc_act):
+@pytest.mark.parametrize("method,alpha,beta", [("gptaq", .5, 0), ("foem", 0, .2),
+                                               ("foem", .5, .2), ("foem", .5, 0)])
+def test_gptaq_gsq_original_column_objective(desc_act, method, alpha, beta):
     from gptqmodel.looper.named_module import NamedModule
     from gptqmodel.quantization import GPTQConfig, QuantizeConfig
     from gptqmodel.quantization.gptaq import GPTAQ
+    from gptqmodel.quantization.foem import FOEM
     from gptqmodel.quantization.gsq_scalar import affine_codes
 
     rng = torch.Generator().manual_seed(7)
@@ -81,29 +84,35 @@ def test_gptaq_gsq_original_column_objective(desc_act):
     native = x + torch.randn(1, 64, 32, generator=rng)*.2
     named = NamedModule(layer, name="proj", full_name="model.proj", layer_index=0)
     named.state["native_inp"] = [native.clone()]
+    method_config = {"alpha": alpha} if method == "gptaq" else {"alpha": alpha, "beta": beta}
     cfg = GPTQConfig(bits=4, group_size=16, desc_act=desc_act, act_group_aware=False,
-                     gptaq={"alpha": .5}, gsq=GSQConfig(enabled=True, steps=10))
+                     **{method: method_config}, gsq=GSQConfig(enabled=True, steps=10))
     cfg = QuantizeConfig.from_quant_config(cfg.to_dict())
-    task = GPTAQ(named, cfg)
+    task = (GPTAQ if method == "gptaq" else FOEM)(named, cfg)
     task.quantizer.configure(perchannel=True)
     task.add_batch(x.clone(), None)
     weight, scales, zeros, groups, *_ = task.quantize()
     code = affine_codes(weight, scales, zeros, groups, 4, packing="gptq")
     decoded = scales.half().float()[:, groups]*(code-zeros[:, groups])
-    residual = (native-x)[0] @ teacher.T * .5
+    residual = (native-x)[0] @ teacher.T * alpha
     error = x[0] @ decoded.T - (x[0] @ teacher.T + residual)
     expected = (error.square().sum()-residual.square().sum())/(x[0] @ teacher.T).square().sum()
-    assert task.gsq_diagnostics["objective"] == "asymmetric_quadratic_without_constant"
+    expected_objective = "asymmetric_quadratic_without_constant" if alpha else "calibration_hessian"
+    assert task.gsq_diagnostics["objective"] == expected_objective
+    if method == "foem":
+        assert task.gsq_diagnostics["initializer_beta"] == beta
     assert task.gsq_diagnostics["after"] == pytest.approx(expected.item(), abs=1e-7, rel=1e-4)
     assert task.gsq_diagnostics["after"] <= task.gsq_diagnostics["before"]
 
 
 @pytest.mark.parametrize("control", [None, GSQConfig(enabled=False),
                                     GSQConfig(enabled=True, modules=("unmatched",))])
-def test_gptaq_disabled_matches_original_quantizer(control, monkeypatch):
+@pytest.mark.parametrize("method", ["gptaq", "foem"])
+def test_gptaq_disabled_matches_original_quantizer(control, monkeypatch, method):
     from gptqmodel.looper.named_module import NamedModule
     from gptqmodel.quantization import GPTQConfig
     from gptqmodel.quantization.gptaq import GPTAQ
+    from gptqmodel.quantization.foem import FOEM
 
     monkeypatch.setattr("gptqmodel.quantization.gptq.refine_affine_scalar",
                         lambda *a, **kw: pytest.fail("disabled GSQ reached fitting"))
@@ -116,7 +125,8 @@ def test_gptaq_disabled_matches_original_quantizer(control, monkeypatch):
         layer.weight.data.copy_(weight)
         named = NamedModule(layer, name="proj", full_name="model.proj", layer_index=0)
         named.state["native_inp"] = [native.clone()]
-        task = GPTAQ(named, GPTQConfig(bits=4, group_size=16, gptaq={"alpha": .5}, gsq=control))
+        cls = GPTAQ if method == "gptaq" else FOEM
+        task = cls(named, GPTQConfig(bits=4, group_size=16, **{method: {"alpha": .5}}, gsq=control))
         task.quantizer.configure(perchannel=True)
         task.add_batch(x.clone(), None)
         return task

@@ -34,8 +34,13 @@ against explicit native/current activations. Real F6/seed7 block-1 QKV validatio
 now passes packed reload, Torch GPU gates and canonical model propagation with
 actual paired upstream inputs; both GSQ variants retain baseline exactly. See
 the scalar lifecycle report for scope and raw evidence. Complete-model exports
-remain pending. FOEM's public GSQ combination remains rejected.
-FOEM's beta-dependent latent-weight update is not assumed to be this same target.
+remain pending. FOEM now also preserves its beta-dependent latent-weight updates
+as the initializer, followed by GSQ reconstruction fitting (with the cross term
+when alpha is nonzero). Beta is not invented as a separate final fitting target.
+The real alpha0/beta0.2 block-1 run passes the measured reload/Torch GPU/F6
+propagation checks and retains baseline exactly; other coefficients and
+complete-model exports remain pending. FOEM-only config serialization now
+preserves its coefficients, fixing their previous omission when GPTAQ was absent.
 
 The broader [scalar lifecycle work and compatibility inventory](../docs/experiments/gsq-scalar-lifecycle.md)
 tracks GPTQ, AWQ, RTN and remaining method adapters separately from QVQ results.

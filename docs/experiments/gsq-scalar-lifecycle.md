@@ -71,7 +71,7 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
 | GPTAQ | Real F6/seed7 block-1 QKV paired inputs, config/packed reload, Torch GPU and F6 propagation pass; both GSQ arms retain baseline; complete-model exports and other rates/backends pending |
-| FOEM | Preserve first-order target; enabled GSQ remains rejected pending its dedicated adapter |
+| FOEM | Original beta-based initializer followed by optional reconstruction fitting; real block-1 alpha0/beta0.2 QKV, reload/Torch GPU and F6 propagation pass; other coefficients/backends and complete-model exports pending |
 | QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
 | ParoQuant | Fit in the learned rotation basis, preserve exported transforms and quantizer metadata |
 | EXL3 | Backend-owned trellis payloads require their own candidate/decoder and lifecycle binding |
@@ -388,3 +388,42 @@ python -m gpu_allocator.cli run -n 1 --style uuid -- \
 python -m scripts.analyze_gsq_scalar_results artifacts/gsq-scalar/gptaq-block1-w4-seed7 \
   --output artifacts/gsq-scalar/gptaq-block1-w4-seed7/payload-audit.json
 ```
+
+### FOEM initialization and optional GSQ
+
+FOEM now retains its existing beta-dependent quantizer updates as the initializer,
+then uses the scalar GSQ wrapper. Beta is not a trainable quantization scale or
+a second final reconstruction target. At alpha=0, GSQ fits the original teacher
+against propagated calibration inputs using FOEM's directly accumulated H.
+At nonzero alpha it also uses the original-column native/current cross moment.
+Both are copied before the initializer consumes them. Diagnostics retain the
+initializer name and beta. The disabled path matches the original FOEM quantizer.
+
+Integration exposed and fixed a pre-existing config issue: `_update_meta_payload`
+omitted FOEM coefficients whenever `gptaq` was absent. FOEM-only configs now save
+and restore alpha, beta and device independently of GPTAQ. Nine dedicated JSON
+round-trip cases cover GSQ absent, disabled and enabled. Another 231 focused
+scalar/asymmetric/config cases pass with 32 skips, including alpha 0/.5, beta
+0/.2 and activation ordering on/off. These are correctness tests, not quality
+evidence for every coefficient choice.
+
+The real `foem-block1-w4-seed7` run uses the same full block-1 QKV, source audit,
+16 training / 32 locked documents, F6 propagated inputs and protocol as GPTAQ
+above, with default FOEM beta 0.2 and alpha 0. W4/group128/symmetric GPTQ v2,
+activation ordering on, GSQ seed7/100 steps/33-candidate budget. Both GSQ arms
+retain all baseline tensors and per-document metrics exactly: KLD 0.109141164,
+logit MSE 0.440341529, Top-1 85.220669%, Top-5 83.059526%, Top-10 82.640176%.
+All arms use 3,293,184 QKV tensor bytes. There is no GSQ gain in this run.
+
+All nine packed/reloaded Torch GPU projection checks pass on the same leased
+physical GPU 0 / SM80: worst mean/max drift is 0.000294089 / 0.004364967 versus
+the matching FP32 operator, within the independent 0.002 / 0.046875 limits.
+The explicit activation objective matches the exported payload. Final-model
+propagation uses canonical F6 FP32 operators with only block-1 QKV replaced;
+complete FOEM-model export and full native-model execution remain unverified.
+Real nonzero-alpha FOEM and other coefficients/backends remain outside this run.
+
+Evidence: [report](../../artifacts/gsq-scalar/foem-block1-w4-seed7/report.json),
+[payload audit](../../artifacts/gsq-scalar/foem-block1-w4-seed7/payload-audit.json).
+Use the preceding preparation/run/audit commands with `--method foem --layer 1
+--asymmetric-alpha 0 --foem-beta 0.2` and a fresh output directory.

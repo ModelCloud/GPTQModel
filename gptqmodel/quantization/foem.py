@@ -126,7 +126,7 @@ class FOEM(GPTQ):
             self.dXXT += (native_inp - inp).matmul(inp.t())
 
     @torch.inference_mode()
-    def quantize(
+    def _quantize_impl(
             self,
             blocksize=128,
     ):

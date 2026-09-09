@@ -5276,10 +5276,8 @@ class GPTQConfig(PreProcessorConfig):
         adaptive_damping_user_value = self.adaptive_damping
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and (
-            self.foem is not None or self.mock_quantization
-        ):
-            raise ValueError("GPTQConfig: gsq needs a dedicated objective adapter for FOEM or mock quantization")
+        if self.gsq is not None and self.gsq.enabled and self.mock_quantization:
+            raise ValueError("GPTQConfig: gsq is incompatible with mock quantization")
 
         # Preserve the user's explicit choice so quantization-time safeguards can
         # distinguish "defaulted to True" from "explicitly requested True".
@@ -5547,19 +5545,21 @@ class GPTQConfig(PreProcessorConfig):
 
         if self.gptaq is None:
             meta_payload["gptaq"] = None
-        elif self.foem is None:
+        else:
             device = self.gptaq.device
             meta_payload["gptaq"] = {
                 "alpha": self.gptaq.alpha,
                 "device": device if isinstance(device, str) else str(device),
             }
-        else:
+        if self.foem is not None:
             device = self.foem.device
             meta_payload["foem"] = {
                 "alpha": self.foem.alpha,
                 "beta": self.foem.beta,
                 "device": device if isinstance(device, str) else str(device),
             }
+        else:
+            meta_payload.pop("foem", None)
 
         meta_payload["mse"] = self.mse
         meta_payload["scale_search"] = self.scale_search.value if self.scale_search is not None else None

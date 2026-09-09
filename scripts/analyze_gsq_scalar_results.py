@@ -27,7 +27,7 @@ def analyze(directory):
     if bits not in (2, 4, 8):
         raise ValueError("Logical-code difference audit currently supports non-straddling 2/4/8-bit words")
     for name, layer in report["layers"].items():
-        if result["method"] == "gptaq":
+        if result["method"] in ("gptaq", "foem"):
             inputs = torch.load(directory / f"{name}.inputs.pt", weights_only=True, map_location="cpu")
             result["paired_input_shift"][name] = {}
             for split in ("train", "heldout"):

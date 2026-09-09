@@ -2478,18 +2478,25 @@ class GPTQ:
         target = self.clone_module()
         # Preserve the original-column calibration metric before GPTQ consumes,
         # permutes, damps or releases it. Embeddings keep a diagonal metric.
-        hessian = self.finalize_hessian(target_device=target.device)
+        # FOEM accumulates H directly, unlike GPTQ/GPTAQ's partial buffers.
+        if self.qcfg.foem is not None:
+            hessian = getattr(self, "H", None)
+            if hessian is None:
+                raise ValueError("FOEM GSQ requires unconsumed calibration statistics")
+        else:
+            hessian = self.finalize_hessian(target_device=target.device)
         if isinstance(self.module, nn.Embedding):
             hessian = self._H_diag
         hessian = None if hessian is None else hessian.detach().clone()
         cross_moment = None
         cross_alpha = 1.0
-        if self.qcfg.gptaq is not None:
+        asymmetric_config = self.qcfg.foem if self.qcfg.foem is not None else self.qcfg.gptaq
+        if asymmetric_config is not None and asymmetric_config.alpha != 0:
             cross = getattr(self, "dXXT", None)
             if hessian is None or cross is None or getattr(self, "_hessian_rebuild_invalid", False):
-                raise ValueError("GPTAQ GSQ requires unconsumed paired calibration statistics")
+                raise ValueError("asymmetric GSQ requires unconsumed paired calibration statistics")
             cross_moment = cross.detach().clone()
-            cross_alpha = self.qcfg.gptaq.alpha
+            cross_alpha = asymmetric_config.alpha
         self._gsq_active = True
         try:
             result = self._quantize_impl(blocksize=blocksize)
@@ -2519,6 +2526,9 @@ class GPTQ:
         if cross_moment is not None:
             self.gsq_diagnostics["objective"] = "asymmetric_quadratic_without_constant"
             self.gsq_diagnostics["alpha"] = cross_alpha
+        if self.qcfg.foem is not None:
+            self.gsq_diagnostics["initializer"] = "foem"
+            self.gsq_diagnostics["initializer_beta"] = self.qcfg.foem.beta
         return (refined.reshape(weight.shape).contiguous(), fitted.scales.to(scales.device),
                 fitted.zeros.to(zeros.device), fitted.g_idx.to(groups.device),
                 time.time()-start, avg_loss, damp, samples)

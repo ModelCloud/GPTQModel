@@ -27,6 +27,7 @@ def prepare(args):
     provenance = json.loads((args.output / "provenance.json").read_text())
     sources = [Path(__file__), ROOT / "scripts/validate_qvq_gsq_layers.py",
                ROOT / "scripts/gsq_f6_reference.py", ROOT / "gptqmodel/quantization/gptaq.py",
+               ROOT / "gptqmodel/quantization/foem.py",
                ROOT / "gptqmodel/quantization/config.py", ROOT / "gptqmodel/quantization/gsq_scalar.py",
                ROOT / "gptqmodel/quantization/gptq.py", ROOT / "gptqmodel/quantization/rtn.py",
                ROOT / "gptqmodel/nn_modules/qlinear/__init__.py", ROOT / "gptqmodel/nn_modules/qlinear/torch.py"]
@@ -44,6 +45,7 @@ def prepare(args):
         "experiment": "scalar-qkv-lifecycle", "method": args.method, "bits": args.bits,
         "group_size": args.group_size, "arms": ARMS,
         "layer": args.layer, "gptaq_alpha": args.gptaq_alpha,
+        "foem_beta": args.foem_beta,
         "scope": "full QKV projections; GPTQ v2 packing; Torch GPU layer checks; F6 canonical full-model propagation",
         "source_code": {str(p): digest(p) for p in sources},
         "inputs_sha256": digest(args.output / "inputs.json"),
@@ -64,6 +66,7 @@ def execute(args):
     provenance = json.loads((args.output / "provenance.json").read_text())
     expected = {"method": args.method, "bits": args.bits, "group_size": args.group_size,
                 "layer": args.layer, "gptaq_alpha": args.gptaq_alpha,
+                "foem_beta": args.foem_beta,
                 "steps": args.steps, "candidate_count": args.candidates,
                 "dense": str(args.dense), "snapshot": str(args.snapshot)}
     if args.method == "awq":
@@ -108,6 +111,7 @@ def execute(args):
     from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
     from gptqmodel.quantization.gptq import GPTQ
     from gptqmodel.quantization.gptaq import GPTAQ
+    from gptqmodel.quantization.foem import FOEM
     from gptqmodel.quantization.rtn import RTN
     from scripts.p32_twenty.scorecard import logits_metrics
 
@@ -149,7 +153,7 @@ def execute(args):
         hook.remove()
 
     propagated = None
-    if args.method == "gptaq":
+    if args.method in ("gptaq", "foem"):
         report.update(install_f6(model, args.snapshot / "qvq-p32"))
         propagated = {n: {"train": [], "heldout": []} for n in targets}
         hooks = []
@@ -192,12 +196,14 @@ def execute(args):
             write_json(args.output / "report.json", report)
             gsq = None if arm == "baseline" else GSQConfig(
                 enabled=True, steps=args.steps, candidates=args.candidates, seed=7, learn_scales=arm == "gsq_scales")
-            cls, cfg_cls = (GPTQ, GPTQConfig) if args.method in ("gptq", "gptaq") else (RTN, RTNConfig)
+            cls, cfg_cls = (GPTQ, GPTQConfig) if args.method in ("gptq", "gptaq", "foem") else (RTN, RTNConfig)
             common = dict(bits=args.bits, group_size=args.group_size, format=FORMAT.GPTQ_V2, gsq=gsq)
-            if args.method in ("gptq", "gptaq"):
+            if args.method in ("gptq", "gptaq", "foem"):
                 common.update(desc_act=True, act_group_aware=False, hessian={"length_aware": False})
             if args.method == "gptaq":
                 common["gptaq"] = {"alpha": args.gptaq_alpha}
+            elif args.method == "foem":
+                common["foem"] = {"alpha": args.gptaq_alpha, "beta": args.foem_beta}
             cfg = cfg_cls(**common)
             if awq is not None:
                 cfg = AWQConfig(bits=4, group_size=128, sym=False, format=FORMAT.GEMM, gsq=gsq)
@@ -227,13 +233,13 @@ def execute(args):
                 duration = time.perf_counter()-started
                 task.gsq_diagnostics = named.state.get("gsq_diagnostics")
             else:
-                if args.method == "gptaq":
+                if args.method in ("gptaq", "foem"):
                     named = NamedModule(layer, name=name.rsplit(".", 1)[-1], full_name=name, layer_index=args.layer)
                     named.state["native_inp"] = [native_x.clone()]
-                    task = GPTAQ(named, qcfg=restored_cfg)
+                    task = (GPTAQ if args.method == "gptaq" else FOEM)(named, qcfg=restored_cfg)
                 else:
                     task = cls(layer, qcfg=restored_cfg)
-                if args.method in ("gptq", "gptaq"):
+                if args.method in ("gptq", "gptaq", "foem"):
                     task.quantizer.configure(perchannel=True)
                     task.add_batch(x, None)
                 wq, scales, zeros, groups, duration, *_ = task.quantize()
@@ -291,7 +297,7 @@ def execute(args):
                 local_rows.append({"tokens": len(inputs), "mse": error.square().mean().item(),
                                    "nmse": (error.square().sum()/target.square().sum()).item()})
             packed_objective_target = fitting_weight.float()
-            metric_inputs = x.float() if args.method in ("gptq", "gptaq", "awq") else torch.eye(in_features, device="cuda")
+            metric_inputs = x.float() if args.method in ("gptq", "gptaq", "foem", "awq") else torch.eye(in_features, device="cuda")
             packed_loss = float(((canonical-packed_objective_target) @ metric_inputs.T).square().sum() /
                                 (packed_objective_target @ metric_inputs.T).square().sum())
             if propagated is not None:
@@ -361,9 +367,10 @@ def execute(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true")
-    parser.add_argument("--method", choices=("gptq", "gptaq", "rtn", "awq"), required=True)
+    parser.add_argument("--method", choices=("gptq", "gptaq", "foem", "rtn", "awq"), required=True)
     parser.add_argument("--layer", type=int, default=0)
-    parser.add_argument("--gptaq-alpha", type=float, default=0.5)
+    parser.add_argument("--gptaq-alpha", "--asymmetric-alpha", type=float, default=0.5)
+    parser.add_argument("--foem-beta", type=float, default=0.2)
     parser.add_argument("--awq-calibration", type=Path)
     parser.add_argument("--bits", type=int, choices=(2, 3, 4, 8), default=4)
     parser.add_argument("--group-size", type=int, default=128)
