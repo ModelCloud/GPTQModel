@@ -84,6 +84,11 @@ QVQ extensions. Research notes do not override the accuracy gates above.
   bitsandbytes: use `$gptqmodel-quantization`.
 - Any model-affecting QvQ experiment or quantized-model publication: use `$qvq-model-artifact-snapshot` so complete
   model outputs and the exact calibration inputs/derived artifacts are saved under `/monster/data/model/qvq`.
+- Every quantization, conversion, export, or post-quantization evaluation: also use
+  [$quantized-model-provenance](.agents/skills/quantized-model-provenance/SKILL.md). Every stored quantized model
+  must contain a complete `model_run.md`, durable quantization stdout/stderr logs, and every post-quant test must
+  contain a unique Markdown record, raw result, and durable evaluation stdout/stderr log. Records must include the
+  run/arm IDs, full CLI, effective config, dataset paths/revisions, full QVQ/ZML commit SHAs, and hashes.
 - CPU-side tensor packing (`pack_block_cpu`, `pack_awq_cpu`, `pack_qqq_cpu`), AVX-512/AVX2 dispatch, dtype conversion,
   and thread-parallel packing: use `$gptqmodel-cpu-packing`.
 - Pre/during/post quantization error analysis, risky module/weight/channel/embedding/LM-head discovery, severe quality
