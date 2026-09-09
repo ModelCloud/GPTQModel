@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import statistics
 import unittest
 
 import torch
@@ -11,7 +12,11 @@ import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.utils.swordfish import prewarm_swordfish_extension
+from gptqmodel.utils.swordfish import (
+    prewarm_swordfish_extension,
+    swordfish_runtime_available,
+    swordfish_runtime_error,
+)
 
 
 def _skip_reason() -> str | None:
@@ -68,7 +73,7 @@ def _pack_torch_reference(bits, group_size, in_features, out_features, weight, s
     return torch_linear
 
 
-def _copy_to_swordfish(torch_linear: TorchLinear) -> SwordfishLinear:
+def _copy_to_swordfish(torch_linear: TorchLinear, dtype: torch.dtype) -> SwordfishLinear:
     sf = SwordfishLinear(
         bits=torch_linear.bits,
         group_size=torch_linear.requested_group_size,
@@ -77,9 +82,10 @@ def _copy_to_swordfish(torch_linear: TorchLinear) -> SwordfishLinear:
         in_features=torch_linear.in_features,
         out_features=torch_linear.out_features,
         bias=False,
+        dtype=dtype,
     )
     sf.qweight = nn.Parameter(torch_linear.qweight.data.detach().clone().contiguous(), requires_grad=False)
-    sf.scales = nn.Parameter(torch_linear.scales.data.detach().clone().to(torch.bfloat16).contiguous(), requires_grad=False)
+    sf.scales = nn.Parameter(torch_linear.scales.data.detach().clone().to(dtype).contiguous(), requires_grad=False)
     if torch_linear.g_idx is not None and torch_linear.g_idx.numel() > 0:
         sf.g_idx = nn.Parameter(torch_linear.g_idx.data.detach().clone().contiguous(), requires_grad=False)
     sf.post_init()
@@ -90,20 +96,32 @@ def _copy_to_swordfish(torch_linear: TorchLinear) -> SwordfishLinear:
 class TestSwordfishSpeed(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        prewarm_swordfish_extension()
+        try:
+            prewarm_swordfish_extension()
+        except Exception as exc:
+            raise unittest.SkipTest(
+                f"Swordfish runtime unavailable: {swordfish_runtime_error() or exc}"
+            ) from exc
+        if not swordfish_runtime_available():
+            raise unittest.SkipTest(
+                f"Swordfish runtime unavailable: {swordfish_runtime_error()}"
+            )
 
-    def _measure(self, fn, x, warmup=5, iters=20):
+    def _measure(self, fn, x, warmup=5, iters=20, blocks=5):
         for _ in range(warmup):
             fn(x)
         torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            fn(x)
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) / iters
+        block_times = []
+        for _ in range(blocks):
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            for _ in range(iters):
+                fn(x)
+            end.record()
+            end.synchronize()
+            block_times.append(start.elapsed_time(end) / iters)
+        return statistics.median(block_times)
 
     def test_swordfish_speed_vs_machete(self):
         in_features = 4096
@@ -117,15 +135,45 @@ class TestSwordfishSpeed(unittest.TestCase):
         weight = torch.randn((out_features, in_features), dtype=dtype, device="cpu") * 0.5
         q, scales, zeros = _quantize_sym(weight, bits, group_size)
         torch_linear = _pack_torch_reference(bits, group_size, in_features, out_features, q, scales, zeros, device)
-        sf = _copy_to_swordfish(torch_linear)
+        sf = _copy_to_swordfish(torch_linear, dtype)
 
-        # Dense FP16 baseline from the same quantized checkpoint.
+        # Dense baseline in the same activation dtype and from the same checkpoint.
         with torch.no_grad():
             dense_weight = torch_linear.dequantize_weight().to(device=device, dtype=dtype)
 
         baseline = {}
         machete = {}
         swordfish = {}
+
+        # Build the optional comparator once so allocator churn does not skew
+        # the small-M timing samples.
+        mach = None
+        try:
+            from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+            from gptqmodel.utils.machete import machete_runtime_available
+
+            if machete_runtime_available():
+                mach = MacheteLinear(
+                    bits=bits,
+                    group_size=group_size,
+                    desc_act=False,
+                    sym=True,
+                    in_features=in_features,
+                    out_features=out_features,
+                    bias=False,
+                )
+                mach.qweight = nn.Parameter(
+                    torch_linear.qweight.data.detach().clone().contiguous(),
+                    requires_grad=False,
+                )
+                mach.scales = nn.Parameter(
+                    torch_linear.scales.data.detach().clone().to(dtype).contiguous(),
+                    requires_grad=False,
+                )
+                mach.post_init()
+                mach = mach.to(device)
+        except Exception:
+            mach = None
 
         m_values = [1, 8, 16, 32, 64, 128, 256]
         for m in m_values:
@@ -144,44 +192,35 @@ class TestSwordfishSpeed(unittest.TestCase):
             baseline[m] = flops / (baseline_ms * 1e-3) / 1e12
             swordfish[m] = flops / (sf_ms * 1e-3) / 1e12
 
-            # Compare with Machete when the runtime reports support.
-            try:
-                from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
-                from gptqmodel.utils.machete import machete_runtime_available
-
-                if machete_runtime_available():
-                    mach = MacheteLinear(
-                        bits=bits,
-                        group_size=group_size,
-                        desc_act=False,
-                        sym=True,
-                        in_features=in_features,
-                        out_features=out_features,
-                        bias=False,
-                    )
-                    mach.qweight = nn.Parameter(torch_linear.qweight.data.detach().clone().contiguous(), requires_grad=False)
-                    mach.scales = nn.Parameter(torch_linear.scales.data.detach().clone().to(torch.bfloat16).contiguous(), requires_grad=False)
-                    mach.post_init()
-                    mach = mach.to(device)
-
-                    def mach_fn(x):
-                        return mach(x)
-
-                    mach_ms = self._measure(mach_fn, x)
-                    machete[m] = flops / (mach_ms * 1e-3) / 1e12
-            except Exception:
-                pass
+            if mach is not None:
+                mach_ms = self._measure(mach, x)
+                machete[m] = flops / (mach_ms * 1e-3) / 1e12
 
         print(f"\nSwordfish speed benchmark (in={in_features}, out={out_features}, bits={bits}, group={group_size})")
         print(f"{'M':>5} {'Swordfish TFLOPS':>18} {'Dense TFLOPS':>15} {'Machete TFLOPS':>18}")
         for m in m_values:
             print(f"{m:>5} {swordfish[m]:>18.3f} {baseline[m]:>15.3f} {machete.get(m, float('nan')):>18.3f}")
 
-        # Swordfish should not be dramatically slower than the dense baseline
-        # for the small-batch decode window where it is designed to win.
-        if 1 in swordfish and 1 in baseline:
-            self.assertGreater(swordfish[1], baseline[1] * 0.25,
-                               "Swordfish bs=1 throughput should be within 4x of dense GEMM")
+        ratios = {m: swordfish[m] / baseline[m] for m in m_values}
+        print("Swordfish/dense ratios: " + ", ".join(f"M={m}: {ratio:.3f}" for m, ratio in ratios.items()))
+        failures = [
+            f"M={m} ratio={ratios[m]:.3f} "
+            f"(Swordfish={swordfish[m]:.3f} TFLOPS, dense={baseline[m]:.3f} TFLOPS)"
+            for m in (1, 8, 16)
+            if ratios[m] < 0.8
+        ]
+        self.assertFalse(
+            failures,
+            "Swordfish must reach at least 0.8x dense throughput at decode sizes: "
+            + "; ".join(failures),
+        )
+        median_ratio = statistics.median(ratios[m] for m in (1, 8, 16))
+        self.assertGreaterEqual(
+            median_ratio,
+            1.0,
+            "Swordfish median decode throughput ratio must be >= 1.0; "
+            f"median={median_ratio:.3f}, ratios={ratios}",
+        )
 
         if os.environ.get("GPTQMODEL_SWORDFISH_WRITE_SPEED_JSON"):
             import json
@@ -193,6 +232,8 @@ class TestSwordfishSpeed(unittest.TestCase):
                 "swordfish": swordfish,
                 "dense": baseline,
                 "machete": machete,
+                "swordfish_over_dense": ratios,
+                "decode_median_ratio": median_ratio,
             }
             with open("/tmp/swordfish_speed.json", "w") as f:
                 json.dump(out, f, indent=2)

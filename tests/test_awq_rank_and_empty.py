@@ -102,7 +102,7 @@ def test_awq_gemm_autograd_supports_arbitrary_rank(monkeypatch, backend, shape):
 
 
 @pytest.mark.parametrize("backend", ["jit", "triton"])
-@pytest.mark.parametrize("shape", [(3, 0, 8), (0, 3, 8)])
+@pytest.mark.parametrize("shape", [(0, 8), (3, 0, 8), (0, 3, 8), (2, 3, 0, 8)])
 def test_awq_gemm_empty_input_skips_forward_and_backward_backends(
     monkeypatch, backend, shape
 ):
@@ -119,19 +119,39 @@ def test_awq_gemm_empty_input_skips_forward_and_backward_backends(
     assert calls == {"dequant": 0, "gemm": 0}
 
 
-@pytest.mark.parametrize("backend, rows", [("jit", 1025), ("triton", 129)])
-def test_awq_gemm_heuristic_uses_logical_rows_for_2d_input(monkeypatch, backend, rows):
+@pytest.mark.parametrize(
+    "backend, threshold, shape",
+    [
+        ("jit", 1024, (1023, 8)),
+        ("jit", 1024, (1024, 8)),
+        ("jit", 1024, (1025, 8)),
+        ("jit", 1024, (32, 32, 8)),
+        ("triton", 128, (127, 8)),
+        ("triton", 128, (128, 8)),
+        ("triton", 128, (129, 8)),
+        ("triton", 128, (8, 16, 8)),
+    ],
+)
+def test_awq_gemm_heuristic_uses_logical_rows_at_threshold(
+    monkeypatch, backend, threshold, shape
+):
     calls = {"dequant": 0, "gemm": 0}
     fn = _patch_backend(monkeypatch, backend, calls)
     qweight, scales, qzeros = _fake_quant_tensors()
-    x = torch.ones((rows, 8), dtype=torch.float16)
+    x = torch.ones(shape, dtype=torch.float16)
+    rows = x.numel() // x.shape[-1]
 
     out = fn.apply(x, qweight, qzeros, scales, 4, 8, None, 8)
-    assert out.shape == (rows, 8)
-    assert calls == {"dequant": 1, "gemm": 0}
+    assert out.shape == shape[:-1] + (8,)
+    assert calls == {
+        "dequant": int(rows > threshold),
+        "gemm": int(rows <= threshold),
+    }
 
 
-@pytest.mark.parametrize("shape", [(3, 0, 8), (0, 3, 8), (2, 3, 4, 8)])
+@pytest.mark.parametrize(
+    "shape", [(0, 8), (3, 0, 8), (0, 3, 8), (2, 3, 0, 8), (2, 3, 4, 8)]
+)
 def test_linear_shape_helpers_preserve_rank_dtype_and_device(shape):
     x = torch.empty(shape, dtype=torch.bfloat16)
     assert input_rows(x) == x.numel() // x.shape[-1]
@@ -141,8 +161,9 @@ def test_linear_shape_helpers_preserve_rank_dtype_and_device(shape):
     assert out.device == x.device
 
 
-def test_empty_linear_output_keeps_autograd_connection():
-    x = torch.empty((2, 0, 8), dtype=torch.float32, requires_grad=True)
+@pytest.mark.parametrize("shape", [(0, 8), (2, 0, 8), (2, 3, 0, 8)])
+def test_empty_linear_output_keeps_autograd_connection(shape):
+    x = torch.empty(shape, dtype=torch.float32, requires_grad=True)
     out = empty_linear_output(x, 11)
     out.sum().backward()
     assert x.grad is not None
