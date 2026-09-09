@@ -175,14 +175,16 @@ def test_code_transport_survives_actual_packer(dtype, group_size):
 
 @pytest.mark.parametrize("group_size", [-1, 128])
 @pytest.mark.parametrize("enabled", [False, True])
-def test_real_qqq_quantizer_hook_and_packing(group_size, enabled):
+@pytest.mark.parametrize("desc_act", [False, True])
+@pytest.mark.parametrize("static_groups", [False, True])
+def test_real_qqq_quantizer_hook_and_packing(group_size, enabled, desc_act, static_groups):
     from gptqmodel.quantization.config import GSQConfig, QQQConfig
     from gptqmodel.quantization.qqq import QQQ
 
     rng = torch.Generator().manual_seed(7)
     layer = torch.nn.Linear(256, 64, bias=False, dtype=torch.float16)
     layer.weight.data.copy_(torch.randn(64, 256, generator=rng) * 0.03)
-    config = QQQConfig(bits=4, group_size=group_size, desc_act=False,
+    config = QQQConfig(bits=4, group_size=group_size, desc_act=desc_act, static_groups=static_groups,
                        gsq=GSQConfig(enabled=enabled, steps=2))
     quantizer = QQQ(layer, config)
     quantizer.quantizer.configure(4, perchannel=True, sym=True, mse=False, groupsize=group_size)
@@ -190,6 +192,7 @@ def test_real_qqq_quantizer_hook_and_packing(group_size, enabled):
     quantizer.add_batch(inputs[:160], None)
     quantizer.add_batch(inputs[160:], None)
     assert bool(quantizer._gsq_moments) == enabled
+    teacher = layer.weight.detach().float().clone()
     result = quantizer.quantize()
     if enabled:
         assert quantizer.gsq_diagnostics['after'] <= quantizer.gsq_diagnostics['before']
@@ -199,6 +202,17 @@ def test_real_qqq_quantizer_hook_and_packing(group_size, enabled):
                             in_features=256, out_features=64, bias=False)
     packed.pack(layer, result[1], result[7])
     assert torch.isfinite(packed(inputs[:2])).all()
+    if enabled:
+        integer_weight, channel = packed._dequantize_weight_for_torch()
+        deployed_weight = (integer_weight * channel).T
+        input_codes, input_scale = packed.dynamic_quant(inputs)
+        deployed_inputs = input_codes.float() * input_scale
+        teacher_output = inputs.float() @ teacher.T
+        loss = (deployed_inputs @ deployed_weight.T - teacher_output).square().sum()
+        constant = ((deployed_inputs - inputs.float()) @ teacher.T).square().sum()
+        denominator = (deployed_inputs @ teacher.T).square().sum()
+        expected = float((loss - constant) / denominator)
+        assert quantizer.gsq_diagnostics["after"] == pytest.approx(expected, rel=2e-5, abs=1e-7)
     quantizer.free()
 
 

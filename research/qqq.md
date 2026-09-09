@@ -151,3 +151,12 @@ weight/scale/zero/group/extra-scale parity against the original initializer
 for GSQ None, disabled and unmatched filters, group sizes -1/128, and both
 activation-order settings. Config reload and global RNG preservation are
 included. This is lifecycle evidence; real-model QQQ evaluation remains open.
+
+Enabled-path ordering validation now covers all combinations of group size
+-1/128, activation ordering on/off, static groups on/off and GSQ on/off.
+For enabled GSQ, the test independently decodes the actual packed weight,
+quantizes inputs with the runtime routine, and computes deployed reconstruction
+loss minus the candidate-independent asymmetric constant. That score agrees
+with the quantizer diagnostic (relative 2e-5, absolute 1e-7). The expanded CPU
+suite reports 54 passed (4.58 seconds). This verifies score-to-packer binding
+across those ordering settings, not real-model recovery or GPU parity.
