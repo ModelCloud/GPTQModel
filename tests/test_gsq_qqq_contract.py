@@ -155,3 +155,19 @@ def test_qqq_optimizer_guard_and_determinism(group_size, candidates):
                                    in_features=256, channel_scales=channel)
     expected = (decoded - target).square().sum() / target.square().sum()
     assert first[2] == pytest.approx(float(expected))
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("group_size", [-1, 128])
+def test_code_transport_survives_actual_packer(dtype, group_size):
+    from gptqmodel.quantization.gsq_qqq import qqq_codes_to_packer_weight
+
+    codes = torch.arange(16).repeat(16).reshape(1, 256).expand(64, -1)
+    scales = torch.full((64, 1 if group_size == -1 else 2), 0.03125, dtype=torch.float16)
+    weight = qqq_codes_to_packer_weight(codes, scales, group_size=group_size, dtype=dtype)
+    linear = torch.nn.Linear(256, 64, bias=False, dtype=dtype)
+    linear.weight.data.copy_(weight)
+    packed = QQQTorchLinear(bits=4, group_size=group_size, sym=True, desc_act=False,
+                            in_features=256, out_features=64, bias=False)
+    packed.pack(linear, scales, torch.full((64,), 0.25))
+    assert torch.equal(packed._unpack_weight_codes().T, codes)

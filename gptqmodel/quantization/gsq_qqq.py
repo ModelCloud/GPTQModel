@@ -189,3 +189,44 @@ def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment
                 if score < best:
                     best, selected_codes = score, hard.clone().to(codes.dtype)
         return selected_codes, before, best, history
+
+
+def qqq_codes_to_packer_weight(codes, scales, *, group_size, dtype):
+    """Build a producer weight that the existing QQQ packer encodes exactly.
+
+    This is a transport value, not the deployed INT8-decoded weight. Refuse
+    casts that change an assignment; callers must never score one set of codes
+    and silently export another.
+    """
+    if dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise ValueError("QQQ producer weight dtype must be FP16, BF16 or FP32")
+    if codes.ndim != 2:
+        raise ValueError("QQQ producer codes must be [out,in]")
+    width = codes.shape[1]
+    resolved = width if group_size == -1 else group_size
+    if width <= 0 or resolved <= 0 or width % resolved:
+        raise ValueError("QQQ group size must divide input width")
+    if scales.shape != (codes.shape[0], width // resolved) or scales.device != codes.device:
+        raise ValueError("QQQ producer scales must match code shape and device")
+    if not scales.is_floating_point() or not torch.isfinite(scales).all() or (scales <= 0).any():
+        raise ValueError("QQQ producer scales must be finite positive floating values")
+    if not torch.isfinite(codes).all() or (codes < 0).any() or (codes > 15).any():
+        raise ValueError("QQQ producer codes must be valid nibbles")
+    if codes.is_floating_point() and (codes != codes.round()).any():
+        raise ValueError("QQQ producer codes must be integer nibbles")
+    groups = torch.arange(width, device=codes.device) // resolved
+    raw = scales[:, groups]
+    if resolved == width:
+        logical = torch.where(codes >= 8, codes - 16, codes).float()
+    else:
+        logical = codes.float() - 8
+    weight = (logical * raw).to(dtype)
+    if not torch.isfinite(weight).all():
+        raise ValueError("QQQ producer reconstruction overflows its dtype")
+    rounded = (weight / raw).round()
+    if not torch.isfinite(rounded).all():
+        raise ValueError("QQQ producer inverse contains non-finite codes")
+    recovered = (rounded + 8).clamp(0, 15) if resolved != width else rounded.clamp(-15, 15).remainder(16)
+    if not torch.equal(recovered, codes):
+        raise ValueError("QQQ producer dtype cannot preserve the selected codes")
+    return weight

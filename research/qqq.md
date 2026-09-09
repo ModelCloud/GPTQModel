@@ -112,3 +112,12 @@ producer/packer lifecycle is the next requirement. The CPU suite reports
 **26 passed** (3.64 seconds), including grouped/channelwise local/full grids,
 determinism, preservation of the global RNG, and independent hard-score
 recalculation. These fixtures do not establish real-model improvement.
+
+`qqq_codes_to_packer_weight` now reconstructs transport weights using the raw
+producer scales and verifies the existing packer's inverse arithmetic after
+casting to the requested producer dtype. It refuses non-finite or changed
+assignments. These transport weights must not be confused with the effective
+INT8-decoded weights used for scoring. Actual QQQ packing preserves all 16
+selected codes for grouped and channelwise layouts with FP16/BF16/FP32
+producer weights in the added tests. The CPU suite reports **32 passed**
+(4.32 seconds). Quantizer/collector binding and real-model checks remain open.
