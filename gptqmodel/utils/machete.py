@@ -227,6 +227,7 @@ def _download_cutlass_archive(url: str, destination: Path) -> None:
         try:
             partial.unlink()
         except FileNotFoundError:
+            # Expected if the temp file was never created or already moved/removed.
             pass
 
 
