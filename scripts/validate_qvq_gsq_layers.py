@@ -100,12 +100,15 @@ def prepare(args):
         "seed": 7, "train_rows": len(train), "eval_rows": len(heldout), "token_cap": args.tokens,
         "targets": TARGETS, "candidate_count": args.candidates, "steps": args.steps,
         "gsq_enabled": args.gsq,
+        "gsq_lifecycle": args.gsq_lifecycle,
         "target_bits": args.target_bits,
         "train_tokens": sum(len(r["input_ids"]) for r in train),
         "heldout_tokens": sum(len(r["input_ids"]) for r in heldout),
         "train_source_weights": dict(cfg["yaqa"]["source_weights"]),
         "source_code": {str(p): digest(p) for p in
-                        (Path(__file__), ROOT / "gptqmodel/quantization/qvq_gsq.py")},
+                        (Path(__file__), ROOT / "gptqmodel/quantization/qvq_gsq.py",
+                         ROOT / "gptqmodel/quantization/qvq.py", ROOT / "gptqmodel/quantization/config.py",
+                         ROOT / "gptqmodel/looper/qvq_processor.py")},
         "scope": "full QKV projections; full-model propagation; FP32 canonical reference backend",
     })
     print("PREPARED", args.output, flush=True)
@@ -142,6 +145,7 @@ def execute(args):
         rht_preprocess_weight,
     )
     from gptqmodel.quantization.qvq_gsq import refine_p32_candidates
+    from gptqmodel.quantization import GSQConfig, QVQConfig
     from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
     from gptqmodel.quantization.rotation.hadamard_utils import matmul_hadU
     from scripts.p32_twenty.scorecard import logits_metrics
@@ -154,13 +158,15 @@ def execute(args):
     provenance = json.loads((args.output / "provenance.json").read_text())
     if str(args.snapshot) != provenance["snapshot"] or str(args.dense) != provenance["dense"]:
         raise ValueError("Execution model paths differ from prepared contract")
-    for path, sha in (provenance["file_hashes"] | provenance["source_hashes"]).items():
+    for path, sha in (provenance["file_hashes"] | provenance["source_hashes"] | provenance["source_code"]).items():
         if digest(path) != sha:
             raise ValueError(f"Prepared input changed before execution: {path}")
     if provenance["candidate_count"] != args.candidates or provenance["steps"] != args.steps:
         raise ValueError("Execution parameters differ from prepared contract")
     if provenance.get("gsq_enabled") is not args.gsq:
         raise ValueError("Execution GSQ control differs from prepared contract; prepare a new run")
+    if provenance.get("gsq_lifecycle", False) != args.gsq_lifecycle:
+        raise ValueError("Execution GSQ lifecycle differs from prepared contract")
     if provenance.get("target_bits") != args.target_bits:
         raise ValueError("Execution rate differs from prepared contract")
     cfg = json.loads((args.output / "quantize_config.json").read_text())
@@ -212,6 +218,7 @@ def execute(args):
     for hook in hooks:
         hook.remove()
     requantized = {}
+    requantized_gsq = {}
     if args.target_bits is not None:
         sources = provenance["train_source_weights"]
         batches = [{"input_ids": torch.tensor([row["input_ids"]]),
@@ -229,6 +236,8 @@ def execute(args):
                                      "regularization": 0.02, "family_mode": "reselect"}
         for name in TARGETS:
             print("W25_QUANTIZE", name, flush=True)
+            report["state"] = "YAQA quantizing " + name
+            write_json(args.output / "report.json", report)
             torch.save({"input_hessian": inputs_h[name].cpu(), "output_hessian": outputs_h[name].cpu()},
                        args.output / (name + ".fisher.pt"))
             requantized[name] = quantize_qvq_linear(
@@ -238,6 +247,25 @@ def execute(args):
                 codebook_version=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
                 yaqa_v2b2_family_mode=cfg["yaqa"]["v2b2_family_mode"],
                 yaqa_sample_strategy=cfg["yaqa"]["sample_strategy"])
+            if args.gsq_lifecycle:
+                qcfg = QVQConfig(bits=args.target_bits, format="qvq_v2b2_p32", offload_to_disk=False,
+                                  codebook=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
+                                  yaqa={**cfg["yaqa"], "minimum_sequences": len(batches)},
+                                  gsq=GSQConfig(enabled=True, steps=args.steps, candidates=args.candidates, seed=7))
+                write_json(args.output / "gsq_target_quantize_config.json", qcfg.to_dict())
+                print("W25_GSQ_LIFECYCLE", name, flush=True)
+                report["state"] = "YAQA + GSQ quantizing " + name
+                write_json(args.output / "report.json", report)
+                requantized_gsq[name] = quantize_qvq_linear(
+                    dense_weights[name], inputs_h[name], output_hessian=outputs_h[name],
+                    bits=args.target_bits, seed=7, input_sign_seed=7,
+                    rounding="yaqa", damp_percent=0.02, v2b2_p32=True, bank_count=2,
+                    codebook_version=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
+                    yaqa_v2b2_family_mode=cfg["yaqa"]["v2b2_family_mode"],
+                    yaqa_sample_strategy=cfg["yaqa"]["sample_strategy"], gsq=qcfg.gsq)
+                print("W25_GSQ_RESULT", name, requantized_gsq[name].gsq_diagnostics, flush=True)
+                report.setdefault("gsq_diagnostics", {})[name] = requantized_gsq[name].gsq_diagnostics
+                write_json(args.output / "report.json", report)
             print("W25_QUANTIZED", name, flush=True)
         del inputs_h, outputs_h
     # Snapshot-owned endpoints/norms must be copied, not silently left as the source model's.
@@ -355,18 +383,7 @@ def execute(args):
             module.inner, module.su, module.sv = inner, result.SU.float(), result.SV.float()
         report["comparison_baseline"] = baseline_label
         evaluate(baseline_label)
-    for name in TARGETS:
-        state = saved[name]
-        kw, base = state["kw"], state["base"]
-        su, sv = state["su"].float(), state["sv"].float()
-        # With constant |SV|, orthogonality makes inner and full-output NMSE
-        # identical. Reject anything else rather than silently changing loss.
-        if not torch.allclose(sv.abs(), sv.abs()[0].expand_as(sv), rtol=1e-6, atol=0):
-            raise ValueError("Nonuniform output scales require a full-output training objective")
-        target = rht_preprocess_weight(dense_weights[name], su.reciprocal(), sv.reciprocal())
-        sources = provenance["train_source_weights"]
-        x = torch.cat([matmul_hadU(a * su) * sources[row["source_name"]] ** 0.5
-                       for a, row in zip(captures[name]["train"], data["train"], strict=True)]).detach()
+    def fit_candidates(base, args, kw, target, x, name):
         candidates = base.unsqueeze(0).repeat(args.candidates, 1, 1)
         gen = torch.Generator(device="cuda").manual_seed(7)
         tiles = torch.arange(len(base), device="cuda")
@@ -382,12 +399,39 @@ def execute(args):
             candidates, bits=kw["bits"], bank_ids=kw["bank_ids"], bank_alt_id=kw["bank_alt_id"],
             codebook_version=kw["codebook_version"], target=target, inputs=x,
             enabled=args.gsq, steps=args.steps, seed=7, progress=progress)
-        state["gsq"] = result.window_words
-        state["greedy"] = greedy_fit(candidates, x, target, kw)
+        return result, greedy_fit(candidates, x, target, kw)
+
+    fit_arms = ("base", "gsq") if args.gsq_lifecycle else ("base", "gsq", "greedy")
+    for name in TARGETS:
+        state = saved[name]
+        kw, base = state["kw"], state["base"]
+        su, sv = state["su"].float(), state["sv"].float()
+        # With constant |SV|, orthogonality makes inner and full-output NMSE
+        # identical. Reject anything else rather than silently changing loss.
+        if not torch.allclose(sv.abs(), sv.abs()[0].expand_as(sv), rtol=1e-6, atol=0):
+            raise ValueError("Nonuniform output scales require a full-output training objective")
+        target = rht_preprocess_weight(dense_weights[name], su.reciprocal(), sv.reciprocal())
+        sources = provenance["train_source_weights"]
+        x = torch.cat([matmul_hadU(a * su) * sources[row["source_name"]] ** 0.5
+                       for a, row in zip(captures[name]["train"], data["train"], strict=True)]).detach()
+        if args.gsq_lifecycle:
+            result = requantized_gsq[name]
+            for attr in ("SU", "SV", "bank_ids", "bank_alt_id"):
+                if not torch.equal(getattr(result, attr), getattr(requantized[name], attr)):
+                    raise ValueError("Lifecycle GSQ changed fixed transform/bank metadata")
+            state["gsq"] = repack_p32_planar_to_window(result.trellis, bits=kw["bits"])
+            before, after = result.gsq_diagnostics["before"], result.gsq_diagnostics["after"]
+        else:
+            result = fit_candidates(base, args, kw, target, x, name)
+            state["gsq"] = result[0].window_words
+            state["greedy"] = result[1]
+            before, after = result[0].calibration_before, result[0].calibration_after
         layer = {"shape_out_in": list(dense_weights[name].shape), "bits": kw["bits"],
-                 "calibration_before": result.calibration_before, "calibration_after": result.calibration_after,
+                 "calibration_before": before, "calibration_after": after,
+                 "objective": "prepared_yaqa_fisher" if args.gsq_lifecycle else "activation_nmse",
+                 "gsq_diagnostics": requantized_gsq[name].gsq_diagnostics if args.gsq_lifecycle else None,
                  "payload_bytes": base.numel() * base.element_size(), "heldout": {}}
-        for arm in ("base", "gsq", "greedy"):
+        for arm in fit_arms:
             words = state[arm]
             if not torch.equal(words, repack_p32_planar_to_window(
                 repack_p32_window_to_planar(words, bits=kw["bits"]), bits=kw["bits"]
@@ -397,12 +441,12 @@ def execute(args):
             operator = CanonicalLinear(restored, su, sv)
             layer["heldout"][arm] = [local_metrics(operator(a), a @ dense_weights[name].T)
                                         for a in captures[name]["heldout"]]
-        export = {key: state[key].cpu() for key in ("base", "gsq", "greedy", "su", "sv")}
+        export = {key: state[key].cpu() for key in (*fit_arms, "su", "sv")}
         export.update(bank_ids=kw["bank_ids"].cpu(), bank_alt_id=kw["bank_alt_id"].cpu())
         path = args.output / (name + ".pt")
         torch.save(export, path)
         restored = torch.load(path, weights_only=True)
-        for arm in ("base", "gsq", "greedy"):
+        for arm in fit_arms:
             if not torch.equal(restored[arm].cuda(), state[arm]):
                 raise ValueError("Payload reload differs")
             state[arm] = restored[arm].cuda()
@@ -411,14 +455,14 @@ def execute(args):
         report["layers"][name] = layer
         write_json(args.output / "report.json", report)
         print("LAYER_COMPLETE", name, json.dumps(layer), flush=True)
-        del candidates, x, target, result
-    for arm in ("gsq", "greedy"):
+        del x, target, result
+    for arm in fit_arms[1:]:
         for name in TARGETS:
             module = model.get_submodule(name)
             module.inner = reconstruct_p32_window_inner_weight(saved[name][arm], **saved[name]["kw"])
         evaluate(arm)
     report["paired_intervals"] = {}
-    for arm in ("gsq", "greedy"):
+    for arm in fit_arms[1:]:
         report["paired_intervals"][arm] = {}
         for key in ("kl_teacher_candidate", "mse", "nmse", "top1_agreement", "top5_agreement", "top10_agreement"):
             delta = torch.tensor([a[key] - b[key] for a, b in zip(
@@ -435,6 +479,7 @@ def execute(args):
     print("COMPLETE", json.dumps({k: v["mean"] for k, v in report["model"].items()}), flush=True)
 
 
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepare", action="store_true")
@@ -447,9 +492,13 @@ def main():
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
+    parser.add_argument("--gsq-lifecycle", action="store_true",
+                        help="Test QVQConfig.gsq with the prepared YAQA Fisher objective")
     parser.add_argument("--target-bits", type=float, choices=(2.5,),
                         help="Fresh YAQA W2.5 QKV baseline; all other F6 projections remain unchanged")
     args = parser.parse_args()
+    if args.gsq_lifecycle and (args.gsq or args.target_bits is None):
+        parser.error("--gsq-lifecycle requires --target-bits and excludes activation-MSE --gsq")
     if args.train_rows < 2 or args.train_rows % 2 or args.eval_rows < 2 or args.tokens < 2:
         parser.error("Use positive even train rows, >=2 eval rows and >=2 tokens")
     if args.candidates < 2 or args.steps < 1:

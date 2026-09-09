@@ -120,3 +120,44 @@ def test_control_requires_boolean():
         refine_p32_candidates(torch.zeros(2, 1, 20, dtype=torch.int32), bits=2.5,
                               bank_ids=torch.empty(0), bank_alt_id=torch.empty(0),
                               target=torch.empty(0), inputs=torch.empty(0), enabled="false")
+
+
+def test_fisher_loss_matches_independent_quadratic():
+    gen = torch.Generator().manual_seed(7)
+    candidates = torch.randint(-(2**31), 2**31-1, (2, 2, 20), dtype=torch.int32, generator=gen)
+    bank, alt = torch.zeros(2, dtype=torch.uint8), torch.tensor([2])
+    target = torch.randn(16, 32, generator=gen)
+    a, b = torch.randn(23, 16, generator=gen), torch.randn(41, 32, generator=gen)
+    h, g = a.T @ a + torch.eye(16), b.T @ b + torch.eye(32)
+    weight = decode_p32_window_tiles(candidates[0], bits=2.5, bank_ids=bank, bank_alt_id=alt)
+    weight = weight.reshape(1, 2, 16, 16).permute(0, 2, 1, 3).reshape(16, 32)
+    result = refine_p32_candidates(candidates, enabled=True, steps=0, bits=2.5, bank_ids=bank,
+                                   bank_alt_id=alt, target=target, inputs=torch.linalg.cholesky(h).T,
+                                   right_factor=torch.linalg.cholesky(g))
+    error = (weight-target).double()
+    denominator = torch.trace(g.double() @ target.double().T @ h.double() @ target.double())
+    expected = torch.trace(g.double() @ error.T @ h.double() @ error) / denominator
+    assert result.calibration_before == pytest.approx(expected.item(), rel=2e-6)
+
+
+def test_fisher_refinement_in_inference_mode_and_budget():
+    from gptqmodel.quantization import GSQConfig
+    from gptqmodel.quantization.qvq_gsq import refine_p32_fisher
+
+    with torch.inference_mode():
+        baseline = torch.zeros(1, 20, dtype=torch.int32)
+        kwargs = dict(target=torch.eye(16), input_hessian=torch.eye(16), output_hessian=torch.eye(16),
+                      bits=2.5, bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([2]))
+        result = refine_p32_fisher(baseline, config=GSQConfig(enabled=True, steps=2, candidates=3), **kwargs)
+        assert result.calibration_after <= result.calibration_before
+        with pytest.raises(ValueError, match="max_candidate_bytes"):
+            refine_p32_fisher(baseline, config=GSQConfig(enabled=True, max_candidate_bytes=1), **kwargs)
+        with pytest.raises(ValueError, match="enabled GSQConfig"):
+            refine_p32_fisher(baseline, config=None, **kwargs)
+
+
+def test_reject_invalid_right_factor():
+    with pytest.raises(ValueError, match="right_factor"):
+        refine_p32_candidates(torch.zeros(2, 1, 20, dtype=torch.int32), enabled=True, bits=2.5,
+                              bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([1]),
+                              target=torch.eye(16), inputs=torch.eye(16), right_factor=torch.ones(15, 15))

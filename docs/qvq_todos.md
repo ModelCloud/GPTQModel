@@ -27,8 +27,13 @@ instructions below are archival, not branch starting points.
   assignment-only, scale-only, combined and deterministic-search arms.
 - [ ] Validate full modules and propagated final-logit KL / Top-1/5/10 on larger
   independent document splits and multiple seeds before promoting anything.
-- [ ] Integrate a proven variant into the canonical lifecycle with complete
-  model save/reload/inference and backend checks. No production default changed.
+- [x] Add optional, disabled-by-default `QVQConfig.gsq` and fit the prepared
+  YAQA Fisher objective before packing; test config, processor and backend
+  reload: [lifecycle results](experiments/gsq-qvq-lifecycle.md). Real W2.5 QKV
+  retains its baseline; no quality gain or default promotion.
+- [ ] Extend the format-aware candidate adapter to non-banked W4–W8 QVQ.
+- [ ] Validate complete-model quantize/save/reload and further independent
+  quality before recommending GSQ; selected-module evidence is not full coverage.
 - [ ] RCO: enumerate supported per-module P32 rates and exact costs including
   selectors, SU/SV, padding and metadata; implement tangent projection,
   retraction and discrete budget feasibility as a separate experiment.

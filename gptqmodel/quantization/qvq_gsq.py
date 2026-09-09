@@ -3,7 +3,7 @@
 This is a bounded candidate relaxation, not scalar GSQ: scales, banks and
 codebooks stay fixed. Each categorical choice owns an entire circular tile,
 so hard export cannot break dependencies between overlapping state windows.
-No production quantization dispatch uses this helper.
+QVQ optionally uses the prepared YAQA Fisher metric before final packing.
 """
 
 import math
@@ -43,6 +43,7 @@ def refine_p32_candidates(
     bank_alt_id: torch.Tensor,
     target: torch.Tensor,
     inputs: torch.Tensor,
+    right_factor: torch.Tensor | None = None,
     enabled: bool = False,
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     steps: int = 100,
@@ -57,6 +58,9 @@ def refine_p32_candidates(
     candidates: [choices, K/16*N/16, words], choice zero is the baseline.
     target: [K, N] teacher weights in the same inner coordinate system.
     inputs: [tokens, K] calibration activations in that coordinate system.
+    right_factor: optional [N, N] factor of the output sensitivity metric.
+    With inputs=L_H.T and right_factor=L_G, the loss is normalized
+    tr(G E.T H E), where H=L_H L_H.T, G=L_G L_G.T and E=W-W_teacher.
     Callers must evaluate the hard returned payload on independent data.
     The best *hard* calibration checkpoint (including baseline) is returned.
     Disabled by default: returns an independent, byte-identical baseline with
@@ -85,6 +89,11 @@ def refine_p32_candidates(
         raise ValueError("all tensors must share a device")
     if not all(t.is_floating_point() and torch.isfinite(t).all() for t in (target, inputs)):
         raise ValueError("target and inputs must be finite floating point")
+    if right_factor is not None:
+        if (right_factor.shape != (n, n) or right_factor.device != candidates.device
+                or not right_factor.is_floating_point() or not torch.isfinite(right_factor).all()):
+            raise ValueError("right_factor must be finite floating point [N, N] on the candidate device")
+        right_factor = right_factor.detach().float()
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be a nonnegative integer")
     if any(not math.isfinite(v) or v <= 0 for v in (learning_rate, temperature_start, temperature_end)):
@@ -96,11 +105,16 @@ def refine_p32_candidates(
     ]).detach().transpose(0, 1).contiguous()  # [tile, choice, 256]
     x = inputs.detach().float()
     teacher = x @ target.detach().float()
+    if right_factor is not None:
+        teacher = teacher @ right_factor
     normalizer = teacher.square().mean().clamp_min(torch.finfo(torch.float32).tiny)
 
     def loss(tiles):
         weight = tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n)
-        return ((x @ weight - teacher).square().mean() / normalizer)
+        prediction = x @ weight
+        if right_factor is not None:
+            prediction = prediction @ right_factor
+        return ((prediction - teacher).square().mean() / normalizer)
 
     tile_ids = torch.arange(candidates.shape[1], device=candidates.device)
     best_choices = torch.zeros_like(tile_ids)
@@ -137,3 +151,40 @@ def refine_p32_candidates(
                     progress(step + 1, best)
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
     return P32GSQResult(words, best_choices, before, best, history)
+
+
+def refine_p32_fisher(baseline, *, target, input_hessian, output_hessian, config,
+                      bits, bank_ids, bank_alt_id, codebook_version=PGC16_CODEBOOK_VERSION):
+    """Build legal candidates and fit the existing damped YAQA quadratic.
+
+    Hessians and target must already share the normalized P32 inner basis.
+    Cholesky uses the prepared metric as-is: no hidden extra regularization.
+    The config's memory limit describes decoded candidates, not peak memory.
+    """
+    from .config import normalize_gsq_config
+
+    config = normalize_gsq_config(config)
+    if config is None or not config.enabled:
+        raise ValueError("refine_p32_fisher requires enabled GSQConfig")
+    required = config.candidates * target.numel() * 4
+    if required > config.max_candidate_bytes:
+        raise ValueError(f"GSQ decoded candidates need {required} bytes, exceeding max_candidate_bytes="
+                         f"{config.max_candidate_bytes}; reduce candidates or select smaller modules")
+    # Quantization may be invoked from an inference-mode lifecycle. Clone the
+    # constants outside it so autograd can save them for logit gradients.
+    with torch.inference_mode(False), torch.enable_grad():
+        target = target.detach().float().clone()
+        left = torch.linalg.cholesky(input_hessian.detach().float().clone()).T.contiguous()
+        right = torch.linalg.cholesky(output_hessian.detach().float().clone())
+        candidates = baseline.detach().clone().unsqueeze(0).repeat(config.candidates, 1, 1)
+        generator = torch.Generator(device=baseline.device).manual_seed(config.seed)
+        tiles = torch.arange(len(baseline), device=baseline.device)
+        for candidate in range(1, config.candidates):
+            bit = torch.randint(baseline.shape[1] * 32, (len(baseline),),
+                                device=baseline.device, generator=generator)
+            candidates[candidate, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+        return refine_p32_candidates(
+            candidates, bits=bits, bank_ids=bank_ids.detach().clone(), bank_alt_id=bank_alt_id.detach().clone(),
+            target=target, inputs=left, right_factor=right, enabled=True, codebook_version=codebook_version,
+            steps=config.steps, seed=config.seed, learning_rate=config.learning_rate,
+            temperature_start=config.temperature_start, temperature_end=config.temperature_end)

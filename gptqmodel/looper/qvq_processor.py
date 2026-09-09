@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
+import pcre as re
 import torch
 import torch.nn.functional as F
 import transformers
@@ -127,6 +128,16 @@ def clone_qvq_config_for_module(qcfg: QVQConfig, module_full_name: str) -> Optio
         if dynamic_overrides and "yaqa_regularization" in dynamic_overrides:
             qcfg_clone.yaqa.regularization = dynamic_overrides["yaqa_regularization"]
             qcfg_clone.yaqa.__post_init__()
+    if qcfg_clone.gsq is not None:
+        # F6 includes ordinary W4 projections. Scope this P32-only stage before
+        # validating each dynamic clone; never reinterpret their payloads.
+        if qcfg_clone.format != FORMAT.QVQ_V2B2_P32 or (
+            qcfg_clone.gsq.modules is not None
+            and not any(re.search(pattern, module_full_name) for pattern in qcfg_clone.gsq.modules)
+        ):
+            if qcfg_clone.gsq.enabled:
+                log.info("QVQ GSQ: skipping %s (outside selected P32 module scope)", module_full_name)
+            qcfg_clone.gsq = None
     qcfg_clone.__post_init__()
     return qcfg_clone
 
@@ -2753,6 +2764,7 @@ class QVQProcessor(LoopProcessor):
                 "viterbi_objective": module_qcfg.viterbi_objective,
                 "tail_biting_candidates": module_qcfg.tail_biting_candidates,
                 "rounding": module_qcfg.rounding,
+                "gsq": module_qcfg.gsq,
                 "yaqa_v2b2_family_mode": module_qcfg.yaqa.v2b2_family_mode,
                 "yaqa_sample_strategy": module_qcfg.yaqa.sample_strategy,
                 "yaqa_spectral_refinement": module_qcfg.yaqa.spectral_refinement,
@@ -2899,6 +2911,7 @@ class QVQProcessor(LoopProcessor):
                 "output_scale_optimized_channels": result.output_scale_optimized_channels,
                 "hessian_viterbi_selected": result.hessian_viterbi_selected,
                 "rounding": result.rounding,
+                "gsq": getattr(result, "gsq_diagnostics", None),
                 "yaqa_independent_sequences": self._yaqa_stats.get("independent_sequences"),
                 "yaqa_minimum_sequences": self._yaqa_stats.get("minimum_sequences"),
                 "yaqa_sequence_loss_reduction": self._yaqa_stats.get("sequence_loss_reduction"),

@@ -35,7 +35,9 @@ participate in optimization or checkpoint selection.
 The candidate tensor is `[candidate, tile, words]`; each hard output picks one
 complete tile. Banks, codebook and SU/SV remain fixed. There are no new serialized
 scales, logits, state trailers or inference kernels. Existing window decoding is
-the export authority. This helper has no production config or lifecycle dispatch.
+the export authority. The initial helper was research-only; the optional
+[QVQConfig lifecycle](../docs/experiments/gsq-qvq-lifecycle.md) now fits the prepared
+YAQA Fisher metric before packing.
 It materializes decoded candidate tiles, so it is suitable for bounded experiments,
 not yet memory-efficient full-model quantization. Joint scale learning remains TODO.
 
@@ -76,10 +78,10 @@ provenance and rejects a mismatch at execution. Without it, the `gsq` report arm
 is an explicitly disabled baseline copy; the independent deterministic control
 still runs. Historical reports predate the flag and ran fitting enabled.
 
-This is an optional **research** control, not a `QVQConfig` production option.
-YAQA remains the initializer. Production lifecycle integration and its different
-calibration-objective contract remain pending, particularly given the W2.5
-propagated regressions. The enabled probability refactor is checked for exact
+This describes the initial **research** control. The subsequent
+[QVQConfig integration](../docs/experiments/gsq-qvq-lifecycle.md) adds a separate
+optional lifecycle path with a two-sided Fisher objective.
+YAQA remains the initializer. Its real W2.5 run retains every baseline tile and demonstrates no quality gain. The enabled probability refactor is checked for exact
 FP32 equivalence to the previously measured expression.
 
 Audit validation: 14 CPU tests pass. The enabled real Llama slice reproduces
@@ -97,7 +99,7 @@ serialized costs, respect backend-supported rates, and enforce feasibility after
 hard assignment; an expected soft budget is insufficient. Keep this independent
 of GSQ until each arm has a measured control.
 
-### Proposed lifecycle insertion
+### Lifecycle insertion (initial design; now implemented optionally)
 
 The intended lifecycle is: prepare the existing calibration/Hessian inputs;
 apply F6's RHT and rate-specific YAQA initialization; finalize the selected

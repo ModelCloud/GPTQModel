@@ -39,6 +39,7 @@ from .config import (
                      GGUFConfig,
                      GPTAQConfig,
                      GPTQConfig,
+                     GSQConfig as GSQConfig,
                      HessianConfig,
                      ModuleGranularReplayConfig,
                      MXFP4Config,

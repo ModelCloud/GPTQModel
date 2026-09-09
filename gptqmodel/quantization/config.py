@@ -6481,6 +6481,57 @@ def _normalize_module_granular_replay_config(
 
 
 @dataclass
+class GSQConfig:
+    """Opt-in P32 candidate refinement under the prepared YAQA Fisher metric.
+
+    This is a fixed-scale, whole-tile GSQ adaptation, not scalar GSQ. ``modules``
+    contains full-name regular expressions; None selects all P32 projections.
+    ``max_candidate_bytes`` bounds the decoded candidate bank, not total VRAM.
+    """
+
+    enabled: bool = False
+    steps: int = 100
+    candidates: int = 33
+    seed: int = 7
+    learning_rate: float = 0.1
+    temperature_start: float = 1.0
+    temperature_end: float = 0.1
+    max_candidate_bytes: int = 1024**3
+    modules: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool):
+            raise TypeError("GSQConfig: enabled must be boolean")
+        for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"GSQConfig: {name} must be an integer >= {minimum}")
+        for name in ("learning_rate", "temperature_start", "temperature_end"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"GSQConfig: {name} must be finite and positive")
+        if self.modules is not None:
+            if not isinstance(self.modules, (tuple, list)) or not self.modules:
+                raise ValueError("GSQConfig: modules must be a nonempty list/tuple of regular expressions or None")
+            for pattern in self.modules:
+                if not isinstance(pattern, str) or not pattern:
+                    raise ValueError("GSQConfig: module patterns must be nonempty strings")
+                pcre.compile(pattern)
+            self.modules = tuple(self.modules)
+
+
+def normalize_gsq_config(value) -> Optional[GSQConfig]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return GSQConfig(**value)
+    if not isinstance(value, GSQConfig):
+        raise TypeError("gsq must be a GSQConfig, dictionary or None")
+    value.__post_init__()
+    return value
+
+
+@dataclass
 class QVQConfig(BaseQuantizeConfig):
     """QVQ trellis-code configuration.
 
@@ -6519,6 +6570,7 @@ class QVQConfig(BaseQuantizeConfig):
     # local-only baseline must request rounding="block_ldlq" explicitly.
     rounding: str = field(default="yaqa")
     yaqa: YaqaConfig = field(default_factory=YaqaConfig)
+    gsq: Optional[GSQConfig] = field(default=None)
     # Exact Viterbi survivor-pruning policy threaded to the CUDA V2 segmented
     # grid dispatch. A missing key deserializes to `auto`, which reproduces
     # the historical automatic behavior exactly.
@@ -6890,6 +6942,16 @@ class QVQConfig(BaseQuantizeConfig):
                 if self.bank_count == 1 and has_selector:
                     raise ValueError(f"QVQConfig: canonical module `{module_name}` cannot contain `bank_ids` selectors.")
 
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled:
+            if self.format != FORMAT.QVQ_V2B2_P32 or self.rounding != "yaqa":
+                raise ValueError("QVQConfig: enabled gsq requires P32 with YAQA rounding")
+            if (self.output_alignment is not None or self.module_granular_replay is not None
+                    or self.smooth_swiglu is not None or self.activation is not None
+                    or self.module_scale_search or self.output_channel_scale_optimization
+                    or self.yaqa.spectral_refinement or self.yaqa.spectral_push or self.yaqa.spectral_localized):
+                raise ValueError("QVQConfig: gsq currently requires plain YAQA without alignment, replay, "
+                                 "SwiGLU, activation quantization, scale search or spectral refinement")
         self.group_size = -1
         self.sym = True
         self.pack_dtype = torch.int32
@@ -6916,6 +6978,7 @@ class QVQConfig(BaseQuantizeConfig):
         out["tile_cols"] = self.tile_cols
         out["rounding"] = self.rounding
         out["yaqa"] = None if self.yaqa is None else asdict(self.yaqa)
+        out["gsq"] = None if self.gsq is None else asdict(self.gsq)
         out["viterbi_pruning"] = asdict(self.viterbi_pruning)
         out["incoherence"] = self.incoherence
         out["module_scale_search"] = self.module_scale_search

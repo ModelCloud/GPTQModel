@@ -431,6 +431,7 @@ class QVQLinearQuantizationResult:
     output_hadamard: bool = True
     rounding: str = "block_ldlq"
     kronecker_proxy_loss: torch.Tensor | None = None
+    gsq_diagnostics: dict[str, object] | None = None
     module_scale_search_selected: bool = False
     module_scale_multiplier: float = 1.0
     module_scale_reencoded: bool = False
@@ -7247,6 +7248,7 @@ def quantize_qvq_linear(
     # `None` resolves to `auto`, which reproduces today's automatic behavior.
     viterbi_pruning: object | None = None,
     rank8_calibration: object | None = None,
+    gsq: object | None = None,
 ) -> QVQLinearQuantizationResult:
     """Run RHT, BlockLDLQ/YAQA, PGC16 TCQ, and planar packing for a linear.
 
@@ -7256,6 +7258,24 @@ def quantize_qvq_linear(
     metadata and the runtime decoder always uses the canonical mapping.
     """
     _reject_qvq_quantization_capture("linear quantization")
+    # No candidate allocations, factors or RNG changes for the default path.
+    from .config import normalize_gsq_config
+
+    gsq = normalize_gsq_config(gsq)
+    gsq_enabled = gsq is not None and gsq.enabled
+    if gsq_enabled:
+        if not v2b2_p32 or rounding != "yaqa" or output_hessian is None:
+            raise ValueError("GSQ requires P32 YAQA with an output Hessian")
+        if (experimental_codebook is not None or module_scale_search or output_channel_scale_optimization
+                or yaqa_spectral_refinement or yaqa_spectral_push or yaqa_spectral_localized
+                or propagated_inputs is not None or propagated_target_output is not None
+                or propagated_acceptance is not None or propagated_candidate_score is not None
+                or propagated_candidate_gradient is not None or deployed_inner_target is not None
+                or not input_hadamard or not output_hadamard):
+            raise ValueError("GSQ currently requires plain YAQA with canonical RHT, fixed scales/banks "
+                             "and no spectral, propagated or deployed-target refinement")
+        if gsq.candidates * weight.numel() * 4 > gsq.max_candidate_bytes:
+            raise ValueError("GSQ decoded candidate bank exceeds max_candidate_bytes")
     rank8_original_weight = None
     if rank8_calibration is not None:
         from .qvq_rank8 import Rank8Calibration
@@ -8695,6 +8715,35 @@ def quantize_qvq_linear(
             reconstructed_weight = proposed_weight
             proxy_loss = _qvq_proxy_loss_unchecked(weight, reconstructed_weight, source_H)
 
+    gsq_diagnostics = None
+    if gsq_enabled:
+        from .qvq_gsq import refine_p32_fisher
+
+        with _qvq_phase(telemetry, "gsq_refinement", device):
+            baseline_window = repack_p32_planar_to_window(pack_trellis_states(states, bits=bits), bits=bits)
+            packed_banks = pack_qvq_binary_bank_ids(selected_bank_ids)
+            refined = refine_p32_fisher(
+                baseline_window, target=transformed_weight / selected_encoding_scale,
+                input_hessian=transformed_H, output_hessian=transformed_output_hessian,
+                config=gsq, bits=bits, bank_ids=packed_banks, bank_alt_id=selected_bank_alt_id,
+                codebook_version=codebook_version)
+            states = unpack_p32_window_states(refined.window_words, bits=bits)
+            quantized_inner = reconstruct_p32_window_inner_weight(
+                refined.window_words, bits=bits, in_features=in_features, out_features=out_features,
+                bank_ids=packed_banks, bank_alt_id=selected_bank_alt_id, codebook_version=codebook_version)
+            reconstructed_weight = rht_reconstruct_weight(quantized_inner, SU, SV)
+            proxy_loss = _qvq_proxy_loss_unchecked(weight, reconstructed_weight, source_H)
+            changed_tiles = int((refined.window_words != baseline_window).any(-1).sum())
+            gsq_diagnostics = {
+                "objective": "normalized_prepared_yaqa_fisher",
+                "before": refined.calibration_before, "after": refined.calibration_after,
+                "changed_tiles": changed_tiles, "steps": gsq.steps, "candidates": gsq.candidates,
+                "seed": gsq.seed,
+            }
+            if telemetry is not None:
+                telemetry.count("gsq_steps", gsq.steps)
+                telemetry.count("gsq_changed_tiles", changed_tiles)
+
     with _qvq_phase(telemetry, "pack_trellis", device):
         # States are already on the quantization device. Planar packing is
         # expressed entirely with device-native tensor operations and is
@@ -8801,6 +8850,7 @@ def quantize_qvq_linear(
         output_hadamard=output_hadamard,
         rounding=rounding,
         kronecker_proxy_loss=kronecker_proxy_loss,
+        gsq_diagnostics=gsq_diagnostics,
         module_scale_search_selected=module_scale_search_selected,
         module_scale_multiplier=module_scale_multiplier,
         module_scale_reencoded=module_scale_reencoded,
