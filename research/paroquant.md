@@ -203,3 +203,11 @@ The obsolete public noisy-input rejection has been removed after these
 compatibility checks, with default-off unchanged. Full-model/MoE orchestration
 and final-logit quality remain unverified; no recovery is claimed. Details:
 [paired real-model report](../docs/experiments/gsq-paro-real-paired.md).
+
+Shared-stage integration now skips pristine module capture when a layer has no
+quantization subsets, while still advancing clean outputs. Stage-level tests
+cover empty and populated paired ParoQuant layers. Broad shared-stage/QVQ/paired
+capture validation passes 109 tests with four skips. Four initial failures
+reproduced with committed stage code: two test processor fixtures lacked the
+base no-op shared-input capture methods. Adding those fixture methods restored
+the intended cleanup/reconstructed-error tests; failure logs are preserved.

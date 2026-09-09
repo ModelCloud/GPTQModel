@@ -301,3 +301,48 @@ def test_paired_group_native_reload_and_graph(scope, monkeypatch, tmp_path):
         torch.cuda.synchronize()
         check(captured)
         torch.testing.assert_close(captured, restored(x), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize('has_subsets', [False, True])
+def test_shared_pristine_stage_with_paired_gsq_and_empty_layers(monkeypatch, has_subsets):
+    import threading
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+    import gptqmodel.looper.stage_layer as stage
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True}, opt_scope='layer', opt_train_on_noisy_inputs=True)
+    processor._layer_states = {}
+    processor._layer_states_lock = threading.Lock()
+    processor._batch_tls = threading.local()
+    layer = torch.nn.Sequential(torch.nn.Linear(4, 4, bias=False))
+    clean, noisy = [[torch.ones(1, 2, 4)]], [[torch.full((1, 2, 4), 2.)]]
+    processor._clean_group_layer_inputs = clean
+
+    def replay(*args, **kwargs):
+        assert kwargs['layer_inputs'] is clean
+        output = []
+        try:
+            for index, inputs in enumerate(kwargs['layer_inputs']):
+                processor._set_current_batch_index(index)
+                output.append([kwargs['module'](inputs[0])])
+        finally:
+            processor._set_current_batch_index(None)
+        return output
+
+    monkeypatch.setattr(stage, '_replay_layer_outputs', replay)
+    stage._capture_pristine_group_context(
+        SimpleNamespace(), processor=processor, module=layer, pristine_module=None,
+        subset_plans=[SimpleNamespace()] if has_subsets else [], layer_inputs=noisy,
+        layer_input_kwargs=[{}], position_ids=[None], attention_masks=[None],
+        cur_layer_device=torch.device('cpu'), is_lm_head_module=False, shared_kv_cache_dict={},
+        layer_index=0, layer_descriptor='model.layers.0', full={}, log=None, region_timer=None)
+    assert processor._clean_group_layer_inputs is not clean
+    if has_subsets:
+        state = processor._get_layer_state(0)
+        assert state.layer_inputs is noisy
+        assert torch.equal(state.gsq_clean_inputs['0'][0][2], clean[0][0])
+    else:
+        assert not processor._layer_states
+    assert not layer[0]._forward_pre_hooks

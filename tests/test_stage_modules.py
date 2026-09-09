@@ -117,6 +117,12 @@ def test_subset_forward_failure_removes_registered_and_inline_hooks(failure_site
             return DummyProgress()
 
     class DummyProcessor:
+        def begin_shared_input_capture(self, *_args, **_kwargs):
+            return {}
+
+        def end_shared_input_capture(self, *_args, **_kwargs):
+            return None
+
         execution_config = ExecutionConfig(
             require_fwd=True,
             fwd_replay_after_process=False,
@@ -229,6 +235,12 @@ def test_qvq_execution_contract_carries_reconstructed_error_between_subsets():
             return False
 
     class ReplayProcessor:
+        def begin_shared_input_capture(self, *_args, **_kwargs):
+            return {}
+
+        def end_shared_input_capture(self, *_args, **_kwargs):
+            return None
+
         execution_config = QVQProcessor(
             tokenizer=None,
             qcfg=QVQConfig(bits=2, rounding="block_ldlq", device="cpu", offload_to_disk=False),
