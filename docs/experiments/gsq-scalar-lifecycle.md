@@ -70,7 +70,8 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | AWQ GEMV/GEMV_FAST/LLM-AWQ | Format-specific scalar adapters, CPU packed-objective and native GPU fixture checks pass; real-model scale-search and propagation validation pending |
 | AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
-| GPTAQ/FOEM | Preserve asymmetric/first-order targets rather than substitute ordinary GPTQ reconstruction; currently rejected |
+| GPTAQ | Original-column H/cross-moment lifecycle hook implemented; explicit native/current objective tests with activation ordering on/off; real-model export and propagation pending |
+| FOEM | Preserve first-order target; enabled GSQ remains rejected pending its dedicated adapter |
 | QQQ | Audit W4A8 deployed activation and multi-scale contract before reusing scalar assignments |
 | ParoQuant | Fit in the learned rotation basis, preserve exported transforms and quantizer metadata |
 | EXL3 | Backend-owned trellis payloads require their own candidate/decoder and lifecycle binding |
@@ -314,3 +315,31 @@ remain in the local experiment directories. Reproduce with
 artifacts/gsq-scalar/awq-calibration-seed7-v2`, first with `--prepare` and a fresh
 `--output`, then under the GPU allocator. Audit with
 `scripts.analyze_gsq_awq_results RUN --output NEW_JSON`.
+
+### GPTAQ asymmetric lifecycle hook
+
+`GPTQConfig(gptaq={"alpha": 0.5}, gsq=GSQConfig(enabled=True))` now routes
+GPTAQ through the optional post-quantizer GSQ wrapper. It clones original-column
+H and native-minus-current cross moments before ordering, damping or release.
+The original GPTAQ quantizer remains the initializer; GSQ uses its final group
+indices and the asymmetric quadratic described in `research/gsq-rco.md`.
+Its diagnostic name is `asymmetric_quadratic_without_constant`: negative scores
+are possible because the candidate-independent native residual is omitted.
+Missing or consumed paired statistics reject enabled refinement. FOEM remains
+unsupported until its separate first-order contract is implemented.
+
+Seventeen focused asymmetric tests pass, including activation order on/off,
+config round-trip, explicit native-output reconstruction, and byte-identical
+disabled/unmatched-module bypass against the original quantizer implementation.
+Config checks pass 145 cases with 32 skips. The broader CPU regression command
+(`tests/test_gsq_asymmetric.py tests/test_gsq_scalar.py tests/test_gptaq.py -k
+'not TestQwen'`) records 10,066 passed, 1,002 skipped, one deselected and **11
+failed** Hessian-reference cases. All 11 seeds fail identically with the pinned
+pre-change GPTAQ class at `11993f31d`; their H and cross moments match exactly
+between versions. The audit uses the unchanged shared accumulation base and
+does not invoke quantization. No tolerance was relaxed. See
+[the reproduction audit](../../artifacts/gsq-scalar/gptaq-hook/regression-audit.json)
+and `scripts/audit_gptaq_gsq_regressions.py`. The three additional bypass cases
+ran in the separate 17-case focused check after that broader run started.
+These checks do not establish real-model export, GPU parity or propagated
+quality for GPTAQ GSQ; those remain open.

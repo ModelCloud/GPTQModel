@@ -1,0 +1,72 @@
+{
+  "reference_commit": "11993f31d8b84119c5d03e5dc9c820fced2a3f1f",
+  "rows": [
+    {
+      "seed": 1114,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 2229,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 2679,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 4143,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 4627,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 6373,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 6903,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 7592,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 8027,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 9625,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    },
+    {
+      "seed": 9666,
+      "previous_failed": true,
+      "current_failed": true,
+      "hessian_and_cross_exact": true
+    }
+  ],
+  "scope": "CPU Hessian accumulation only; both classes use current shared GPTQ base; no quantization invoked"
+}

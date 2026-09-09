@@ -5277,9 +5277,9 @@ class GPTQConfig(PreProcessorConfig):
         super().__post_init__()
         self.gsq = normalize_gsq_config(self.gsq)
         if self.gsq is not None and self.gsq.enabled and (
-            self.gptaq is not None or self.foem is not None or self.mock_quantization
+            self.foem is not None or self.mock_quantization
         ):
-            raise ValueError("GPTQConfig: gsq needs a dedicated objective adapter for GPTAQ/FOEM or mock quantization")
+            raise ValueError("GPTQConfig: gsq needs a dedicated objective adapter for FOEM or mock quantization")
 
         # Preserve the user's explicit choice so quantization-time safeguards can
         # distinguish "defaulted to True" from "explicitly requested True".

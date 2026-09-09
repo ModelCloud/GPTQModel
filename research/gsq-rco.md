@@ -27,8 +27,11 @@ and can be negative; they must not be labeled absolute reconstruction NMSE.
 Independent double-precision paired-activation tests check loss differences and
 gradients, and a hard-grid fixture checks export selection against the explicit
 native target. These are algebra/correctness tests, not real-model evidence.
-GPTAQ/FOEM public config combinations remain rejected until their statistics,
-activation ordering, lifecycle hooks and real-model exports are verified.
+GPTAQ now preserves its original-column H and D before its ordinary quantizer
+consumes them, then supplies both to scalar GSQ after quantization. Public config
+round-trip and activation-order on/off checks compare the resulting objective
+against explicit native/current activations. Real-model export and propagation
+validation remain pending. FOEM's public GSQ combination remains rejected.
 FOEM's beta-dependent latent-weight update is not assumed to be this same target.
 
 The broader [scalar lifecycle work and compatibility inventory](../docs/experiments/gsq-scalar-lifecycle.md)

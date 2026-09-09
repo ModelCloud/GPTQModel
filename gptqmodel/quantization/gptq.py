@@ -2482,6 +2482,14 @@ class GPTQ:
         if isinstance(self.module, nn.Embedding):
             hessian = self._H_diag
         hessian = None if hessian is None else hessian.detach().clone()
+        cross_moment = None
+        cross_alpha = 1.0
+        if self.qcfg.gptaq is not None:
+            cross = getattr(self, "dXXT", None)
+            if hessian is None or cross is None or getattr(self, "_hessian_rebuild_invalid", False):
+                raise ValueError("GPTAQ GSQ requires unconsumed paired calibration statistics")
+            cross_moment = cross.detach().clone()
+            cross_alpha = self.qcfg.gptaq.alpha
         self._gsq_active = True
         try:
             result = self._quantize_impl(blocksize=blocksize)
@@ -2499,7 +2507,7 @@ class GPTQ:
         fitted = refine_affine_scalar(
             canonical, scales.to(weight.device), zeros.to(weight.device), groups.to(weight.device),
             target=target[:, :width].to(weight.device), bits=self.qcfg.bits, config=config,
-            hessian=hessian,
+            hessian=hessian, cross_moment=cross_moment, cross_alpha=cross_alpha,
         )
         refined = fitted.weight
         if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
@@ -2508,6 +2516,9 @@ class GPTQ:
             "objective": "calibration_hessian" if hessian is not None else "weight_mse",
             "before": fitted.before, "after": fitted.after, "learn_scales": config.learn_scales,
         }
+        if cross_moment is not None:
+            self.gsq_diagnostics["objective"] = "asymmetric_quadratic_without_constant"
+            self.gsq_diagnostics["alpha"] = cross_alpha
         return (refined.reshape(weight.shape).contiguous(), fitted.scales.to(scales.device),
                 fitted.zeros.to(zeros.device), fitted.g_idx.to(groups.device),
                 time.time()-start, avg_loss, damp, samples)
