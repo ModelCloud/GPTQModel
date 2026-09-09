@@ -138,3 +138,16 @@ grouped/channelwise initialization, packing and Torch forward. These use
 synthetic inputs strictly for lifecycle correctness. Real Llama calibration,
 held-out evaluation, GPU parity, broader ordering/fallback cases and full-model
 save/load/generate are still required before a QQQ quality/support claim.
+
+Default-off verification found a pre-existing QQQ damping round-trip defect:
+the QQQ initializer replaced the effective static damping with 0.005 but left
+the legacy serialized scalar at GPTQ's 0.05. Reloading made that stale scalar
+authoritative. QQQ now resynchronizes the scalar aliases when installing its
+own default static configuration; explicit adaptive configurations retain the
+parent behavior. Default 0.005 and explicit 0.02 round trips are tested.
+
+The CPU suite now reports 42 passed (4.07 seconds), including byte-exact
+weight/scale/zero/group/extra-scale parity against the original initializer
+for GSQ None, disabled and unmatched filters, group sizes -1/128, and both
+activation-order settings. Config reload and global RNG preservation are
+included. This is lifecycle evidence; real-model QQQ evaluation remains open.

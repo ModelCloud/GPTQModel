@@ -200,3 +200,56 @@ def test_real_qqq_quantizer_hook_and_packing(group_size, enabled):
     packed.pack(layer, result[1], result[7])
     assert torch.isfinite(packed(inputs[:2])).all()
     quantizer.free()
+
+
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_qqq_disabled_and_unmatched_match_original_initializer(group_size, desc_act):
+    from gptqmodel.quantization.config import GSQConfig, QQQConfig, QuantizeConfig
+    from gptqmodel.quantization.qqq import QQQ
+
+    rng = torch.Generator().manual_seed(17)
+    initial = torch.randn(64, 256, generator=rng).half() * 0.03
+    inputs = torch.randn(320, 256, generator=rng).half()
+    outputs = []
+    for control in (None, GSQConfig(enabled=False), GSQConfig(enabled=True, modules=("never_match",))):
+        config = QQQConfig(bits=4, group_size=group_size, desc_act=desc_act, gsq=control)
+        restored = QuantizeConfig.from_quant_config(config.to_dict())
+        assert isinstance(restored, QQQConfig)
+        assert restored.gsq == config.gsq
+        layer = torch.nn.Linear(256, 64, bias=False, dtype=torch.float16)
+        layer.weight.data.copy_(initial)
+        quantizer = QQQ(layer, restored)
+        quantizer.quantizer.configure(4, perchannel=True, sym=True, mse=False, groupsize=group_size)
+        quantizer.add_batch(inputs, None)
+        assert not quantizer._gsq_moments
+        state = torch.random.get_rng_state().clone()
+        result = quantizer.quantize()
+        assert torch.equal(state, torch.random.get_rng_state())
+        assert not hasattr(quantizer, "gsq_diagnostics")
+        outputs.append(result[:4] + (result[7],))
+        quantizer.free()
+    layer = torch.nn.Linear(256, 64, bias=False, dtype=torch.float16)
+    layer.weight.data.copy_(initial)
+    original = QQQ(layer, QQQConfig(bits=4, group_size=group_size, desc_act=desc_act))
+    original.quantizer.configure(4, perchannel=True, sym=True, mse=False, groupsize=group_size)
+    original.add_batch(inputs, None)
+    result = original._quantize_impl()
+    expected = result[:4] + (result[7],)
+    for output in outputs:
+        for actual, reference in zip(output, expected, strict=True):
+            assert actual is None if reference is None else torch.equal(actual, reference)
+    original.free()
+
+
+@pytest.mark.parametrize("damp_percent", [None, 0.02])
+def test_qqq_effective_damping_roundtrip(damp_percent):
+    from gptqmodel.quantization.config import GSQConfig, QQQConfig, QuantizeConfig
+
+    config = QQQConfig(bits=4, group_size=128, damp_percent=damp_percent,
+                       gsq=GSQConfig(enabled=True, steps=2))
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+    assert config.damp.min == (0.005 if damp_percent is None else damp_percent)
+    assert restored.damp == config.damp
+    assert restored.damp_percent == config.damp_percent == config.damp.min
+    assert restored.damp_auto_increment == config.damp_auto_increment == config.damp.step

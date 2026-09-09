@@ -5924,6 +5924,12 @@ class QQQConfig(GPTQConfig):
                 step=fixed_step,
             )
 
+            # The QQQ-specific default replaces the config after GPTQ synchronized
+            # these aliases. Serialize the actual effective values, otherwise a
+            # round trip restores GPTQ's stale 0.05 instead of QQQ's 0.005.
+            self.damp_percent = self.damp.min
+            self.damp_auto_increment = self.damp.step
+
 
 @dataclass
 class FP8Config(PreProcessorConfig):
