@@ -94,4 +94,23 @@ do not establish full-size repeatability. The validation runner exposes
 and records the actual runtime setting. Two complete W2 runs now match every recorded loss/schedule, learned scale,
 final weight and held-out reconstruction metric exactly (v5/v6 artifacts).
 Their local MSE is 0.000330969 versus baseline 0.000618326, a 46.47% reduction.
-New final-logit evaluation remains pending. No prior final-logit evidence is silently rebound to different weights.
+Its final-logit evaluation is complete: packed KL 0.664968 → 0.521725,
+MSE 2.137885 → 1.801593, Top-1 67.5986% → 70.8497%; all five paired
+intervals favor GSQ. See `artifacts/gsq-staged/propagation-w2-deterministic-v5`. No prior final-logit evidence is silently rebound to different weights.
+
+
+## Shared capture bridge
+
+`capture_llama_gsq_inputs` captures actual HF Llama decoder calls into InputCache
+while replaying the current model prefix. `quantize_llama_gsq_capture` prepares
+an autograd-capable private block and trains/exports it even when the caller
+uses inference mode. Captured masks and rotary tensors are preserved. Online Hadamard wrappers and
+missing rotary state reject explicitly; source-document capture rejects padding.
+Callers supplying an existing InputCache must provide unpadded batches. Capture
+hooks are removed on success and failure.
+
+The real W2 full-budget capture run (`llama-block0-w2-seed7-shared-capture-v7`)
+produces the identical serialized payload SHA256 as deterministic v5, including
+all weights/scales and training histories. This binds the same payload to the
+completed packed propagation evaluation. This is a verified HF-forward/InputCache
+bridge, not completed full-model ModuleLooper dispatch or checkpoint integration.

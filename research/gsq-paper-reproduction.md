@@ -110,3 +110,14 @@ matched all stage losses/schedules, learned scales, final weights and held-out
 MSE exactly. This is scoped same-runtime repeatability, not cross-hardware or
 full-author-training parity. Keep the failed strict parity assertion and ordinary
 CUDA repeats as evidence; do not silently replace their artifacts.
+
+
+## Inference capture to staged autograd
+
+The shared lifecycle wraps dense projections in HookedLinear, whose forward
+runs in inference mode. Captured hidden/rotary tensors can also be inference
+tensors. The staged bridge must copy them outside inference mode and unwrap
+the private block before computing attention/block gradients. It rejects online
+Hadamard wrappers rather than dropping their transforms. A real HF-forward
+InputCache experiment matches the complete deterministic W2 payload byte for
+byte; full shared-looper dispatch and checkpoint integration remain open.

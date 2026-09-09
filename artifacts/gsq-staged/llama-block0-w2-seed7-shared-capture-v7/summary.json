@@ -1,0 +1,9 @@
+{
+  "metrics": {
+    "baseline": 0.000618326096142135,
+    "staged": 0.000330968996554516
+  },
+  "payload_matches_deterministic_reference": true,
+  "payload_sha256": "1484808cf783e422da3df483e7f90fd16d69272a73c20bd3ad702a42547ba2a8",
+  "propagated_evaluation": "../propagation-w2-deterministic-v5/evaluation.md"
+}
