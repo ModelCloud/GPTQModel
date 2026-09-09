@@ -1,0 +1,189 @@
+{
+  "reference": "artifacts/gsq-staged/llama-block0-w2-seed7-config-v3",
+  "candidate": "artifacts/gsq-staged/llama-block0-w2-seed7-config-repeat-v4",
+  "payload_hashes": [
+    "8e55dccef81c1886fa5da86c38256bb5041d79ac44e6cd38eb510e2bc66e58d9",
+    "c36f47270c49b204a4a7ebd7b76c7b44a14c7667907e2c60679237321020c9df"
+  ],
+  "initializers": {
+    "self_attn.q_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "self_attn.k_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "self_attn.v_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "self_attn.o_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "mlp.gate_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "mlp.up_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    },
+    "mlp.down_proj": {
+      "weight": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      },
+      "scale": {
+        "exact": true,
+        "max_abs": 0.0,
+        "mse": 0.0
+      }
+    }
+  },
+  "weights": {
+    "self_attn.q_proj.weight": {
+      "exact": false,
+      "max_abs": 0.08935336023569107,
+      "mse": 1.4024850258920196e-07
+    },
+    "self_attn.k_proj.weight": {
+      "exact": false,
+      "max_abs": 0.11568637937307358,
+      "mse": 1.904344628655963e-07
+    },
+    "self_attn.v_proj.weight": {
+      "exact": false,
+      "max_abs": 0.029444154351949692,
+      "mse": 3.0128532557682774e-08
+    },
+    "self_attn.o_proj.weight": {
+      "exact": false,
+      "max_abs": 0.17872580885887146,
+      "mse": 7.57909432991255e-08
+    },
+    "mlp.gate_proj.weight": {
+      "exact": false,
+      "max_abs": 0.3965004086494446,
+      "mse": 0.00011978922702837735
+    },
+    "mlp.up_proj.weight": {
+      "exact": false,
+      "max_abs": 0.16366374492645264,
+      "mse": 8.997979603009298e-05
+    },
+    "mlp.down_proj.weight": {
+      "exact": false,
+      "max_abs": 1.1783579587936401,
+      "mse": 7.398160232696682e-05
+    },
+    "input_layernorm.weight": {
+      "exact": true,
+      "max_abs": 0.0,
+      "mse": 0.0
+    },
+    "post_attention_layernorm.weight": {
+      "exact": true,
+      "max_abs": 0.0,
+      "mse": 0.0
+    }
+  },
+  "stages": {
+    "self_attn.q_proj": {
+      "steps": 2000,
+      "first_loss_difference": 162,
+      "first_losses": [
+        7319.3876953125,
+        7319.388671875
+      ],
+      "schedule_equal": true
+    },
+    "self_attn.k_proj": {
+      "steps": 2000,
+      "first_loss_difference": 481,
+      "first_losses": [
+        1485.0277099609375,
+        1485.025390625
+      ],
+      "schedule_equal": true
+    },
+    "attention": {
+      "steps": 160,
+      "first_loss_difference": 0,
+      "first_losses": [
+        0.0001522304373793304,
+        0.00015222661022562534
+      ],
+      "schedule_equal": true
+    },
+    "mlp": {
+      "steps": 160,
+      "first_loss_difference": 0,
+      "first_losses": [
+        0.0008689737878739834,
+        0.0008734824368730187
+      ],
+      "schedule_equal": true
+    }
+  },
+  "heldout": [
+    {
+      "baseline": 0.000618326096142135,
+      "staged": 0.000333479679745
+    },
+    {
+      "baseline": 0.000618326096142135,
+      "staged": 0.0003325881021339364
+    }
+  ]
+}

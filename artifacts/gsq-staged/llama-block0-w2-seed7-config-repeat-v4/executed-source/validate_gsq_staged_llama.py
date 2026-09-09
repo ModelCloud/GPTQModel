@@ -40,7 +40,6 @@ def execute(args):
     from gptqmodel.quantization import GSQTrainingConfig
     from gptqmodel.quantization.gsq_training import quantize_llama_gsq_block
 
-    torch.use_deterministic_algorithms(args.deterministic)
     torch.manual_seed(7)
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -57,8 +56,6 @@ def execute(args):
     training_config = GSQTrainingConfig(enabled=True, epochs=args.epochs, qk_steps=args.qk_steps,
                                          damp_percent=args.damp_percent)
     report['gsq_training'] = training_config.to_dict()
-    report['deterministic_algorithms'] = torch.are_deterministic_algorithms_enabled()
-    report['cublas_workspace_config'] = os.environ.get('CUBLAS_WORKSPACE_CONFIG')
     report['qk_learning_rate_decay'] = 'constant'
     report['mlp_initializer_timing'] = 'after_attention'
     report['qk_damp_percent'] = args.damp_percent
@@ -124,7 +121,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--inputs', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--deterministic', action='store_true')
     parser.add_argument('--bits', type=int, choices=(2, 3, 4), default=4)
     parser.add_argument('--epochs', type=int, default=2)
     parser.add_argument('--qk-steps', type=int, default=2000)

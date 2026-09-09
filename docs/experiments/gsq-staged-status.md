@@ -53,3 +53,45 @@ replay matches deployment. MXFP4 has optional fixed-scale GSQ packing and CPU
 payload tests; real-model MXFP4 validation and complete public save/reload remain
 pending. Its CPU extension now selects the C++ standard required by PyTorch, and
 payload replacement invalidates cached VNNI packing.
+
+## Explicit staged block API
+
+`GSQTrainingConfig` is separate from the existing independent-refinement
+`GSQConfig`. The block entry point initializes GPTQ, optionally runs the staged
+trainer, and can export all seven projections to portable TorchLinear:
+
+```python
+from gptqmodel.quantization import GSQTrainingConfig
+from gptqmodel.quantization.gsq_training import quantize_llama_gsq_block
+
+packed_block, diagnostics = quantize_llama_gsq_block(
+    llama_decoder_layer,
+    captured_batches,  # (unpadded hidden states, attention/rotary kwargs)
+    bits=2,
+    group_size=128,
+    gsq=GSQTrainingConfig(enabled=True),
+)
+```
+
+Defaults are disabled. Omit `gsq` to retain the ordinary GPTQ initializer without
+training. `diagnostics['gsq_training']` records the effective configuration;
+`stages` contains training histories and learned scales. The caller owns real
+calibration capture, device placement, padding-free batch construction, disjoint
+evaluation and model checkpoint writing. Packed blocks return on CPU; unpacked
+blocks (`pack=False`) retain their input device. This block API is not yet the
+full `GPTQModel.quantize()` lifecycle or a complete paper reproduction. Calibration
+batching/precision are not implied by optimizer defaults.
+
+
+A fixed seed alone does not guarantee bitwise staged CUDA training. Repeating the
+same W2 configuration produced different learned weights despite identical GPTQ
+seeds and schedules. An isolated real-shape scale-gradient check observed
+`scatter_add_` repeat differences up to 1.67e-6; deterministic algorithms removed
+those differences in 20 repeats. The author implementation uses the same scatter
+reduction. This does not invalidate small matched-arithmetic fixtures, but they
+do not establish full-size repeatability. The validation runner exposes
+`--deterministic` (with `CUBLAS_WORKSPACE_CONFIG=:4096:8` set before CUDA startup)
+and records the actual runtime setting. Two complete W2 runs now match every recorded loss/schedule, learned scale,
+final weight and held-out reconstruction metric exactly (v5/v6 artifacts).
+Their local MSE is 0.000330969 versus baseline 0.000618326, a 46.47% reduction.
+New final-logit evaluation remains pending. No prior final-logit evidence is silently rebound to different weights.

@@ -87,3 +87,26 @@ seeds after attention fitting; records carry `initializer_timing` and initialize
 metadata. Earlier saved artifacts remain evidence for the earlier ordering and
 must not be relabeled as having this correction. The real W2 run with a 43.62%
 local-MSE improvement also predates this correction.
+
+## Explicit configuration and block lifecycle
+
+`GSQTrainingConfig` now identifies the staged Lion procedure independently of
+`GSQConfig`'s projection-level refinement. `quantize_llama_gsq_block` consumes
+that configuration, initializes GPTQ, performs late-MLP staged training when
+enabled, and optionally packs the resulting block. Defaults bypass GSQ training.
+The experiment driver uses the same entry point and records its effective
+configuration. Full-model public capture/replay and checkpoint integration remain
+required; this block API must not be presented as completing them.
+
+
+## CUDA repeatability control
+
+Real W2 full-size repeats exposed scale-gradient scatter-add nondeterminism even
+with seed7, identical initializers and schedules. The isolated reduction changed
+up to 25,674 elements by at most 1.67e-6 across 20 identical replays. Enabling
+PyTorch deterministic algorithms made that check exact. Two complete staged
+runs with deterministic algorithms and CUBLAS_WORKSPACE_CONFIG=:4096:8 then
+matched all stage losses/schedules, learned scales, final weights and held-out
+MSE exactly. This is scoped same-runtime repeatability, not cross-hardware or
+full-author-training parity. Keep the failed strict parity assertion and ordinary
+CUDA repeats as evidence; do not silently replace their artifacts.

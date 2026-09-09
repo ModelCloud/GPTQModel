@@ -103,3 +103,5 @@ from .swiglu import (
                      swiglu_error_diagnostics as swiglu_error_diagnostics,
                      swiglu_jacobian_salience as swiglu_jacobian_salience,
 )
+
+from .gsq_training_config import GSQTrainingConfig as GSQTrainingConfig

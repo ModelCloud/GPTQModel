@@ -1,0 +1,178 @@
+{
+  "source": "artifacts/gsq-staged/llama-block0-w2-seed7-config-v3/stages.pt",
+  "payload_sha256": "8e55dccef81c1886fa5da86c38256bb5041d79ac44e6cd38eb510e2bc66e58d9",
+  "inventory": "GPU-737e2423-874a-23a4-1126-dfbe3e77c294, 0, 0",
+  "gpu": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "source_hashes": {
+    "/root/polly-work/qvq-gsq/scripts/check_gsq_scale_reduction.py": "574fb9c3840dbb7b98918f37c6cf7727518115efa34b9bcd696786fa4ce07ba9",
+    "gptqmodel/quantization/gsq_training.py": "e4829e9b8b6490ebb0fb9d712e1a6947896cb09b21ea2aa2775b4adbe21996d4"
+  },
+  "modes": {
+    "False": [
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25415
+      },
+      {
+        "max_abs": 1.6689300537109375e-06,
+        "changed_elements": 25445
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25478
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25395
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25416
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25584
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25444
+      },
+      {
+        "max_abs": 1.3113021850585938e-06,
+        "changed_elements": 25674
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25507
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25510
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25579
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25373
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25441
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25469
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25454
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25590
+      },
+      {
+        "max_abs": 1.5497207641601562e-06,
+        "changed_elements": 25483
+      },
+      {
+        "max_abs": 1.430511474609375e-06,
+        "changed_elements": 25589
+      },
+      {
+        "max_abs": 1.1920928955078125e-06,
+        "changed_elements": 25494
+      }
+    ],
+    "True": [
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      },
+      {
+        "max_abs": 0.0,
+        "changed_elements": 0
+      }
+    ]
+  }
+}

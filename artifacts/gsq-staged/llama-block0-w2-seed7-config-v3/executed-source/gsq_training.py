@@ -561,5 +561,4 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
         records = {name: {'scales': {'weight': scales}} for name, (_, scales) in initializers.items()}
     exported = pack_llama_staged_block(fitted, records, bits=bits, group_size=group_size) if pack else fitted
     return exported, dict(gsq_training=effective, bits=bits, group_size=group_size,
-                          packed=pack, deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-                          initializers=initializers, initializer_metadata=metadata, stages=records)
+                          packed=pack, initializers=initializers, initializer_metadata=metadata, stages=records)
