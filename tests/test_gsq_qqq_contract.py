@@ -127,3 +127,31 @@ def test_calibration_zero_rows_and_runtime_underflow():
         qqq_calibration_moments(torch.full((1, 128), 2**-24))
     with pytest.raises(ValueError, match="overflow"):
         qqq_calibration_moments(torch.full((1, 128), 1e10))
+
+
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("candidates", [3, 16])
+def test_qqq_optimizer_guard_and_determinism(group_size, candidates):
+    from gptqmodel.quantization.config import GSQConfig
+    from gptqmodel.quantization.gsq_qqq import refine_qqq_codes
+
+    codes = torch.full((2, 256), 9, dtype=torch.int64)
+    scales = torch.full((2, 1 if group_size == -1 else 2), 0.125)
+    channel = None if group_size == -1 else torch.full((2,), 0.25)
+    target = torch.full((2, 256), 0.25)
+    kwargs = dict(target=target, group_size=group_size, hessian=torch.eye(256),
+                  cross_moment=torch.zeros(256, 256), channel_scales=channel,
+                  config=GSQConfig(enabled=True, steps=8, candidates=candidates))
+    rng = torch.random.get_rng_state().clone()
+    first = refine_qqq_codes(codes, scales, **kwargs)
+    second = refine_qqq_codes(codes, scales, **kwargs)
+    assert torch.equal(torch.random.get_rng_state(), rng)
+    assert torch.equal(first[0], second[0])
+    assert first[1:] == second[1:]
+    assert first[2] <= first[1]
+    assert len(first[3]) == 9
+    assert torch.equal(codes, torch.full_like(codes, 9))
+    decoded = qqq_candidate_values(first[0], scales, group_size=group_size,
+                                   in_features=256, channel_scales=channel)
+    expected = (decoded - target).square().sum() / target.square().sum()
+    assert first[2] == pytest.approx(float(expected))

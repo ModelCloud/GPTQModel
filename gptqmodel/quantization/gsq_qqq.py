@@ -92,3 +92,100 @@ def qqq_calibration_moments(inputs, *, teacher_inputs=None):
         hessian = deployed.T @ deployed
         cross = (teacher.float() - deployed).T @ deployed
         return hessian, cross, inputs.shape[0]
+
+
+def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment,
+                     channel_scales=None, config=None):
+    """Fit fixed-scale stored nibbles; return (best_codes, before, after, history).
+
+    This lower-level optimizer returns codes, not fake-quantized weights. The
+    lifecycle must preserve these assignments through its producer/packer
+    boundary before this is exposed as supported QQQ quantization.
+    """
+    from .config import normalize_gsq_config
+    from .gsq_scalar import _metric_factor, asymmetric_error_term
+
+    config = normalize_gsq_config(config)
+    if config is None or not config.enabled:
+        return codes.clone(), None, None, []
+    if config.learn_scales:
+        raise ValueError("QQQ GSQ scale learning requires a separate two-scale optimizer")
+    if codes.ndim != 2 or target.shape != codes.shape:
+        raise ValueError("QQQ GSQ codes and teacher must be matching [out,in]")
+    width = codes.shape[1]
+    if hessian.shape != (width, width) or cross_moment.shape != (width, width):
+        raise ValueError("QQQ GSQ requires matching [in,in] calibration moments")
+    if any(t.device != codes.device for t in (target, hessian, cross_moment)):
+        raise ValueError("QQQ GSQ calibration and teacher must share the codes device")
+    if not all(t.is_floating_point() and torch.isfinite(t).all() for t in (target, hessian, cross_moment)):
+        raise ValueError("QQQ GSQ teacher and calibration must be finite floating tensors")
+    count = min(config.candidates, 16)
+    if codes.numel() * count * 4 > config.max_candidate_bytes:
+        raise ValueError("QQQ GSQ decoded candidates exceed max_candidate_bytes")
+    with torch.inference_mode(False), torch.enable_grad():
+        baseline = codes.detach().clone()
+        teacher = target.detach().float().clone()
+        fixed_scales = scales.detach().clone()
+        fixed_channel = None if channel_scales is None else channel_scales.detach().clone()
+
+        def decode(candidate):
+            return qqq_candidate_values(candidate, fixed_scales, group_size=group_size,
+                                        in_features=width, channel_scales=fixed_channel)
+
+        base_weight = decode(baseline)
+        factor = _metric_factor(hessian.detach())
+        cross = cross_moment.detach().float()
+        correction = teacher @ cross
+        asymmetric_error_term(torch.zeros_like(teacher), teacher, cross)
+        denominator = (teacher @ factor).square().sum().clamp_min(torch.finfo(torch.float32).tiny)
+
+        def loss(weight):
+            error = weight - teacher
+            return ((error @ factor).square().sum() - 2 * (error * correction).sum()) / denominator
+
+        channelwise = group_size in (-1, width)
+        logical = baseline.float()
+        if channelwise:
+            logical = torch.where(logical >= 8, logical - 16, logical)
+        lo, hi = (-8, 7) if channelwise else (0, 15)
+        if count == 16:
+            candidate_logical = torch.arange(lo, hi + 1, device=codes.device).float().expand(*codes.shape, 16)
+            valid = torch.ones_like(candidate_logical, dtype=torch.bool)
+        else:
+            offsets = [0] + [(-1)**i * ((i + 1)//2) for i in range(1, count)]
+            candidate_logical = logical.unsqueeze(-1) + torch.tensor(offsets, device=codes.device)
+            valid = (candidate_logical >= lo) & (candidate_logical <= hi)
+            candidate_logical = candidate_logical.clamp(lo, hi)
+        candidates = candidate_logical.remainder(16).long()
+        values = decode(candidates).detach()
+        logits = (-0.5 * (candidate_logical - logical.unsqueeze(-1)).square()).requires_grad_()
+        optimizer = torch.optim.Adam([logits], lr=config.learning_rate)
+        rng = torch.Generator(device=codes.device).manual_seed(config.seed)
+        before = float(loss(base_weight))
+        if not torch.isfinite(torch.tensor(before)):
+            raise ValueError("non-finite QQQ GSQ baseline objective")
+        best, selected_codes, history = before, baseline, [before]
+        for step in range(config.steps):
+            tau = config.temperature_start * (config.temperature_end / config.temperature_start) ** (
+                step / max(config.steps - 1, 1))
+            uniform = torch.rand(logits.shape, device=codes.device, generator=rng).clamp(1e-6, 1 - 1e-6)
+            noise = -(-uniform.log()).log()
+            probabilities = ((logits.masked_fill(~valid, -torch.inf) + noise) / tau).softmax(-1)
+            objective = loss((probabilities * values).sum(-1))
+            if not torch.isfinite(objective):
+                raise ValueError("non-finite QQQ GSQ relaxed objective")
+            optimizer.zero_grad()
+            objective.backward()
+            if not torch.isfinite(logits.grad).all():
+                raise ValueError("non-finite QQQ GSQ gradient")
+            optimizer.step()
+            with torch.no_grad():
+                selected = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
+                hard = candidates.gather(-1, selected).squeeze(-1)
+                score = float(loss(decode(hard)))
+                if not torch.isfinite(torch.tensor(score)):
+                    raise ValueError("non-finite QQQ GSQ hard objective")
+                history.append(score)
+                if score < best:
+                    best, selected_codes = score, hard.clone().to(codes.dtype)
+        return selected_codes, before, best, history

@@ -96,3 +96,19 @@ differences, and check additive batch statistics for FP16/BF16/FP32 source
 inputs. These are algebra/runtime-contract fixtures, not real-model quality
 measurements. The helper is not yet connected to `QQQ.add_batch`; default
 quantization behavior remains unchanged.
+
+`refine_qqq_codes` now performs optional fixed-scale Gumbel-Softmax fitting
+with a private seeded generator, geometric temperature schedule, and Adam.
+It mixes the already-decoded QQQ candidate values, uses the paired quadratic
+objective, and retains the baseline unless a hard assignment improves it.
+Channelwise local candidates use signed distance across the nibble encoding
+boundary. Group ownership and both scale tables remain fixed. Scale learning
+is rejected explicitly pending an appropriate two-scale optimizer.
+
+The function returns integer assignments, avoiding an unsupported assumption
+that decoded INT8 weights can be fed back through the raw-scale W4 packer
+without changing their codes. Binding those assignments to the existing
+producer/packer lifecycle is the next requirement. The CPU suite reports
+**26 passed** (3.64 seconds), including grouped/channelwise local/full grids,
+determinism, preservation of the global RNG, and independent hard-score
+recalculation. These fixtures do not establish real-model improvement.
