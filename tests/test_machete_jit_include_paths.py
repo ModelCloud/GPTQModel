@@ -27,7 +27,8 @@ def test_machete_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(m
 
     include_paths = machete_module._machete_include_paths()
 
-    assert include_paths[:4] == [
+    assert include_paths[:5] == [
+        str(project_root / "gptqmodel_ext" / "machete"),
         str(project_root / "gptqmodel_ext"),
         str(project_root / "gptqmodel_ext" / "cutlass_extensions"),
         str(cutlass_root / "include"),
@@ -58,6 +59,7 @@ def test_machete_include_paths_skip_wheel_headers_when_local_cuda_has_required_h
     include_paths = machete_module._machete_include_paths()
 
     assert include_paths == [
+        str(project_root / "gptqmodel_ext" / "machete"),
         str(project_root / "gptqmodel_ext"),
         str(project_root / "gptqmodel_ext" / "cutlass_extensions"),
         str(cutlass_root / "include"),
