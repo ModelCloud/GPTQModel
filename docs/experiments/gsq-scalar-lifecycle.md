@@ -68,7 +68,7 @@ that scope open; a missing adapter does not establish mathematical incompatibili
 | GPTQ | Real F6/seed7 W4 QKV, config/packed reload and Torch GPU layer checks pass; other rates/backends and complete-model exports pending |
 | AWQ GEMM | Real F6/seed7 QKV scale search, clipping, GSQ, packing/reload and Torch GPU checks pass; fixed GSQ has mixed small propagated effects, scale learning retains baseline; other backends and complete-model exports pending |
 | AWQ GEMV/GEMV_FAST/LLM-AWQ | Format-specific scalar adapters, CPU packed-objective and native GPU fixture checks pass; real-model scale-search and propagation validation pending |
-| AWQ Marlin/BitBLAS | Separate packing/storage audit and adapters pending; currently rejected by enabled AWQ GSQ config |
+| AWQ Marlin/BitBLAS | Real GEMM-to-Marlin reload/repack/forward passes 18 cases; BitBLAS unavailable in the current environment; direct-format GSQ requests remain rejected pending packer/lifecycle verification |
 | RTN | Real F6/seed7 W4 QKV and Torch GPU reload checks pass with mixed quality effects; remaining formats/backends and complete-model exports pending |
 | GPTAQ | Real F6/seed7 block-1 QKV paired inputs, config/packed reload, Torch GPU and F6 propagation pass; both GSQ arms retain baseline; complete-model exports and other rates/backends pending |
 | FOEM | Original beta-based initializer followed by optional reconstruction fitting; real block-1 alpha0/beta0.2 QKV, reload/Torch GPU and F6 propagation pass; other coefficients/backends and complete-model exports pending |
@@ -427,3 +427,47 @@ Evidence: [report](../../artifacts/gsq-scalar/foem-block1-w4-seed7/report.json),
 [payload audit](../../artifacts/gsq-scalar/foem-block1-w4-seed7/payload-audit.json).
 Use the preceding preparation/run/audit commands with `--method foem --layer 1
 --asymmetric-alpha 0 --foem-beta 0.2` and a fresh output directory.
+
+### AWQ runtime/export distinction
+
+The AWQ processor's default format selector explicitly rejects MARLIN and
+BITBLAS; a model-supplied `qlinear_kernel` can bypass that selector, so the enum
+table alone does not prove or disprove a complete direct-export path. Keep direct
+export qualification separate from loading a GEMM checkpoint into another runtime.
+Marlin's `post_init` repacks GEMM words and permutes scales/zero points. BitBLAS
+has both a GEMM-repack path and a direct scalar packer; the latter reconstructs
+codes in source scale precision before storing scales in its runtime dtype.
+That distinction needs its own cast-boundary checks and must not be assumed
+identical to the GEMM packer for every source/runtime dtype pair.
+
+`scripts/validate_gsq_awq_marlin.py` checks the already-saved real AWQ GEMM
+baseline and GSQ payloads through actual Marlin reload/repacking and forward
+against their canonical FP32 operators on real held-out activations. BitBLAS
+is not installed in `/root/venv-py3.14t`; no BitBLAS execution result is claimed.
+
+The real Marlin run completes 18 cases: baseline/fixed-scale/learned-scale arms
+for full Q/K/V, with one and 16 real held-out activation rows. Every saved GEMM
+payload reloads exactly before actual Marlin repacking and native forward.
+Worst mean/max drift against its FP32 canonical operator is 0.000606514 /
+0.014185905, passing the existing 0.002 / 0.046875 gates independently. This
+includes the fixed-scale V payload's 326 changed codes. The leased physical GPU
+0 / SM80 and exact Python/CUDA source hashes are recorded in the
+[runtime report](../../artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-runtime-v2.json).
+This is runtime-conversion correctness, not direct Marlin export, a full-model
+load/generation check, a speed claim, or additional held-out quality evidence.
+
+The first attempt completed JIT compilation but stopped in `marlin_padded_nk`
+before native forward: `math.lcm` lacked its module import. Adding `import math`
+fixes the existing runtime failure; no kernel source or numerical operation was
+changed. The failed attempt/log remain local. The corrected run used a fresh
+report and lease. Reproduce with `scripts.validate_gsq_awq_marlin --run
+artifacts/gsq-scalar/awq-w4-seed7-v2 --output NEW_JSON` under the GPU allocator.
+
+The CPU command `pytest tests/test_marlin_jit.py -k 'pad or align'` records
+10 passed, three failed and 44 deselected. The padding helpers and AWQ
+post-init/forward fixtures pass. Two selector tests reference `BACKEND` without
+importing it; the GPTQ validation test expects a 200-column shape to be accepted,
+but the unchanged GPTQ Marlin validator rejects it. These are unresolved
+selector-test issues, not a green full-suite claim. No selector rule, test
+expectation or error gate was weakened. See the
+[raw CPU output](../../artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-padding-cpu.txt).
