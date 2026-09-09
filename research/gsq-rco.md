@@ -16,6 +16,21 @@ measurements. No author code was copied into the experiment below.
 
 ## QVQ adaptation and implementation status
 
+The scalar fitter now has an optional asymmetric cross-moment objective for
+the upcoming GPTAQ adapter. Let feature-by-token current inputs be X, native
+inputs be Xn, E = Wq-W and D = (Xn-X)X^T. The candidate-dependent part of
+`||Wq X - W (X + alpha*(Xn-X))||²` is
+`tr(E H E^T) - 2 alpha <E, W D>`, with H = XX^T. H and D must share the same
+sample normalization. Keeping the linear term avoids a Hessian inverse and
+works for rank-deficient calibration. Scores omit the constant native residual
+and can be negative; they must not be labeled absolute reconstruction NMSE.
+Independent double-precision paired-activation tests check loss differences and
+gradients, and a hard-grid fixture checks export selection against the explicit
+native target. These are algebra/correctness tests, not real-model evidence.
+GPTAQ/FOEM public config combinations remain rejected until their statistics,
+activation ordering, lifecycle hooks and real-model exports are verified.
+FOEM's beta-dependent latent-weight update is not assumed to be this same target.
+
 The broader [scalar lifecycle work and compatibility inventory](../docs/experiments/gsq-scalar-lifecycle.md)
 tracks GPTQ, AWQ, RTN and remaining method adapters separately from QVQ results.
 Real F6/seed7 full-QKV W4 checks now retain the GPTQ baseline for both scalar

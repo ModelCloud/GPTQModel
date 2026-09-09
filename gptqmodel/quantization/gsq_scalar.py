@@ -25,6 +25,28 @@ class ScalarGSQResult:
     history: list[float]
 
 
+def asymmetric_error_term(weight_error, teacher, cross_moment, alpha=1.0):
+    """Linear term for native-versus-propagated reconstruction (unnormalized).
+
+    With feature-by-token X, D = (X_native-X) X.T and E = Wq-W,
+    ||Wq X - W (X + alpha*(X_native-X))||² differs from
+    ||E X||² - 2*alpha*<E, W D> only by a candidate-independent constant.
+    H and D must use the same sample normalization at the caller boundary.
+    Keeping this term explicit avoids an inverse/pseudoinverse of H.
+    """
+    if weight_error.ndim != 2 or teacher.shape != weight_error.shape:
+        raise ValueError("asymmetric GSQ requires matching [out,in] errors and teachers")
+    width = teacher.shape[1]
+    if cross_moment.shape != (width, width):
+        raise ValueError("asymmetric GSQ cross moment must be [in,in]")
+    if any(t.device != teacher.device for t in (weight_error, cross_moment)):
+        raise ValueError("asymmetric GSQ tensors must share a device")
+    if not all(t.is_floating_point() and torch.isfinite(t).all()
+               for t in (weight_error, teacher, cross_moment)) or not torch.isfinite(torch.tensor(alpha)):
+        raise ValueError("asymmetric GSQ requires finite floating inputs and alpha")
+    return -2 * alpha * (weight_error * (teacher @ cross_moment)).sum()
+
+
 def gsq_enabled_for(config, module_name):
     config = normalize_gsq_config(config)
     return config is not None and config.enabled and (
@@ -68,6 +90,7 @@ def _metric_factor(hessian):
 def refine_affine_scalar(
     weight, scales, zeros, g_idx, *, target, bits, config=None,
     hessian=None, inputs=None, packing="gptq", scale_dtype=torch.float16,
+    cross_moment=None, cross_alpha=1.0,
 ):
     """Refine [out,in] weights and [out,groups] scales on their actual grid.
 
@@ -77,6 +100,9 @@ def refine_affine_scalar(
     Hard checkpoints are scored after weight casting, code reconstruction by the
     selected packer convention, and scale casting to the checkpoint dtype.
     The original baseline tensors are returned unchanged unless that score improves.
+    An optional native-minus-current cross moment adds the asymmetric linear
+    term. Scores then omit a candidate-independent constant and can be negative;
+    they are not absolute normalized reconstruction errors.
     """
     config = normalize_gsq_config(config)
     if config is None or not config.enabled:
@@ -135,10 +161,20 @@ def refine_affine_scalar(
 
         teacher_output = project(teacher)
         denominator = teacher_output.square().sum().clamp_min(torch.finfo(torch.float32).tiny)
+        correction = None
+        if cross_moment is not None:
+            if hessian is None and inputs is None:
+                raise ValueError("asymmetric GSQ requires matching calibration moments or inputs")
+            cross = cross_moment.detach().to(device=weight.device, dtype=torch.float32).clone()
+            asymmetric_error_term(torch.zeros_like(teacher), teacher, cross, cross_alpha)
+            correction = cross_alpha * (teacher @ cross)
 
         def loss(matrix):
             error = project(matrix - teacher)
-            return error.square().sum() / denominator
+            value = error.square().sum()
+            if correction is not None:
+                value = value - 2 * ((matrix-teacher) * correction).sum()
+            return value / denominator
 
         gemv = packing in ("awq_gemv", "awq_gemv_fast")
 
