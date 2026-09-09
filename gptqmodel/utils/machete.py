@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
 import os
 import shutil
@@ -12,11 +14,12 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import List, Optional
 
 import pcre
 import torch
+from filelock import FileLock
 
 from .cpp import (
     TorchOpsJitExtension,
@@ -27,6 +30,7 @@ from .cpp import (
     is_nvcc_compatible,
     resolved_cuda_arch_flags,
 )
+from .env import env_flag
 from .logger import setup_logger
 from .marlin_scalar_type import ScalarType, scalar_types
 from .rocm import IS_ROCM
@@ -39,7 +43,12 @@ _MACHETE_OPS_NAMESPACE = "gptqmodel_machete"
 
 _CUTLASS_VERSION = "4.7.1"
 _CUTLASS_RELEASE_URL = f"https://github.com/NVIDIA/cutlass/archive/refs/tags/v{_CUTLASS_VERSION}.tar.gz"
+_CUTLASS_ARCHIVE_SHA256 = "8290eb914cd5aaf4c665ee4108ba5bd65383cfee1296286a42a7ef711554d365"
 _CUTLASS_VERSION_MARKER = ".gptqmodel_cutlass_version"
+_MACHETE_COMPLETE_MARKER = ".gptqmodel_complete"
+_MACHETE_MANIFEST_NAME = ".gptqmodel_manifest.json"
+_MACHETE_GENERATION_CACHE_VERSION = 1
+_MACHETE_CACHE_LOCK_TIMEOUT_SECONDS = 600
 _CUTLASS_VERSION_DEFINE_PATTERN = pcre.compile(
     r"^\s*#define\s+CUTLASS_(MAJOR|MINOR|PATCH)\s+(\d+)\s*$",
     flags=pcre.Flag.MULTILINE,
@@ -79,8 +88,54 @@ def _repo_local_cutlass_root() -> Path:
     return _machete_project_root() / "cutlass"
 
 
+def _gptqmodel_cache_dir() -> Path:
+    """Return the user cache root used by downloaded source artifacts."""
+
+    configured = os.getenv("GPTQMODEL_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    xdg_cache_home = os.getenv("XDG_CACHE_HOME")
+    if xdg_cache_home:
+        return Path(xdg_cache_home).expanduser() / "gptqmodel"
+    return Path.home() / ".cache" / "gptqmodel"
+
+
+def _cutlass_cache_key() -> str:
+    return f"{_CUTLASS_VERSION}-{_CUTLASS_ARCHIVE_SHA256}"
+
+
+def _cutlass_cache_dir() -> Path:
+    return _gptqmodel_cache_dir() / "cutlass" / _cutlass_cache_key()
+
+
 def _cutlass_download_cache_dir() -> Path:
-    return _machete_project_root() / "build" / "_deps"
+    return _gptqmodel_cache_dir() / "downloads"
+
+
+def _cutlass_archive_path() -> Path:
+    return _cutlass_download_cache_dir() / f"cutlass-v{_cutlass_cache_key()}.tar.gz"
+
+
+def _machete_cache_lock_path(name: str) -> Path:
+    return _gptqmodel_cache_dir() / "locks" / f"{name}.lock"
+
+
+def _offline_mode() -> bool:
+    return env_flag("GPTQMODEL_OFFLINE", default=False)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _acquire_machete_cache_lock(name: str) -> FileLock:
+    lock_path = _machete_cache_lock_path(name)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(lock_path), timeout=_MACHETE_CACHE_LOCK_TIMEOUT_SECONDS)
 
 
 def _cutlass_python_bindings_present(cutlass_root: Path) -> bool:
@@ -133,133 +188,248 @@ def _cutlass_checkout_version_error(cutlass_root: Path) -> Optional[str]:
     return None
 
 
-def _repo_local_cutlass_version_matches(cutlass_root: Path) -> bool:
-    marker = _repo_local_cutlass_version_marker(cutlass_root)
-    return (
-        _cutlass_checkout_version(cutlass_root) == _CUTLASS_VERSION
-        and marker.is_file()
-        and marker.read_text(encoding="utf-8").strip() == _CUTLASS_VERSION
+def _mark_cutlass_cache(cutlass_root: Path) -> None:
+    """Mark a cache-owned checkout complete; never call this for user sources."""
+
+    _repo_local_cutlass_version_marker(cutlass_root).write_text(
+        json.dumps(
+            {
+                "version": _CUTLASS_VERSION,
+                "archive_sha256": _CUTLASS_ARCHIVE_SHA256,
+            },
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
 
-def _mark_repo_local_cutlass_version(cutlass_root: Path) -> None:
-    _repo_local_cutlass_version_marker(cutlass_root).write_text(f"{_CUTLASS_VERSION}\n", encoding="utf-8")
-
-
-def _use_repo_local_cutlass(cutlass_root: Path) -> Path:
-    if not _repo_local_cutlass_version_matches(cutlass_root):
-        _mark_repo_local_cutlass_version(cutlass_root)
-    os.environ["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
-    return cutlass_root
-
-
 def _download_cutlass_archive(url: str, destination: Path) -> None:
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    partial = destination.with_suffix(destination.suffix + ".part")
-    if partial.exists():
-        partial.unlink()
+    """Download and atomically publish the pinned CUTLASS archive."""
 
-    log.info("Machete: downloading CUTLASS v%s into `%s`.", _CUTLASS_VERSION, destination)
-    with urllib.request.urlopen(url) as response, partial.open("wb") as handle:
-        shutil.copyfileobj(response, handle)
-    partial.replace(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        if partial.exists():
+            partial.unlink()
+
+        log.info("Machete: downloading CUTLASS v%s into `%s`.", _CUTLASS_VERSION, destination)
+        with urllib.request.urlopen(url) as response, partial.open("wb") as handle:
+            shutil.copyfileobj(response, handle)
+        actual = _sha256(partial)
+        if actual != _CUTLASS_ARCHIVE_SHA256:
+            raise RuntimeError(
+                "Machete: CUTLASS archive checksum mismatch: "
+                f"expected {_CUTLASS_ARCHIVE_SHA256}, got {actual}."
+            )
+        os.replace(partial, destination)
+    finally:
+        try:
+            partial.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _extract_cutlass_archive(archive_path: Path, destination_parent: Path) -> None:
+    """Extract a tarball after rejecting traversal, links, and special files."""
+
     with tarfile.open(archive_path, "r:gz") as archive:
+        root = destination_parent.resolve()
+        members = archive.getmembers()
+        for member in members:
+            member_path = PurePosixPath(member.name)
+            if member_path.is_absolute() or ".." in member_path.parts:
+                raise RuntimeError(f"Machete: unsafe CUTLASS archive member `{member.name}`.")
+            target = (destination_parent / member.name).resolve(strict=False)
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise RuntimeError(f"Machete: unsafe CUTLASS archive member `{member.name}`.") from exc
+            if member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                raise RuntimeError(
+                    f"Machete: unsupported or unsafe CUTLASS archive member `{member.name}`."
+                )
         extract_kwargs = {"path": destination_parent}
         if sys.version_info >= (3, 12):
             extract_kwargs["filter"] = "data"
-        archive.extractall(**extract_kwargs)
+        archive.extractall(members=members, **extract_kwargs)
 
 
-def _ensure_cutlass_source() -> Path:
-    repo_local_root = _repo_local_cutlass_root().resolve()
-    configured_root = os.getenv("GPTQMODEL_CUTLASS_DIR")
-    if configured_root:
-        configured_path = Path(configured_root).expanduser().resolve()
-        if _cutlass_checkout_complete(configured_path):
-            version_error = _cutlass_checkout_version_error(configured_path)
-            if version_error is None:
-                if configured_path == repo_local_root:
-                    return _use_repo_local_cutlass(configured_path)
-                return configured_path
-            if configured_path != repo_local_root:
-                raise RuntimeError(
-                    "Machete: GPTQMODEL_CUTLASS_DIR points to an incompatible CUTLASS checkout. "
-                    f"{version_error} Unset GPTQMODEL_CUTLASS_DIR to allow auto-download, or point it at a "
-                    f"CUTLASS v{_CUTLASS_VERSION} checkout."
-                )
-            log.info(
-                "Machete: GPTQMODEL_CUTLASS_DIR points to stale repo-local CUTLASS checkout `%s`; refreshing to v%s.",
-                configured_path,
-                _CUTLASS_VERSION,
-            )
-        else:
-            log.info(
-                "Machete: GPTQMODEL_CUTLASS_DIR=`%s` is incomplete; falling back to repo-local CUTLASS checkout.",
-                configured_path,
+def _validate_cutlass_checkout(cutlass_root: Path, *, require_marker: bool = False) -> None:
+    if not _cutlass_checkout_complete(cutlass_root):
+        raise RuntimeError(
+            f"Machete: CUTLASS checkout `{cutlass_root}` is incomplete; "
+            f"GPTQModel requires CUTLASS v{_CUTLASS_VERSION}."
+        )
+    version_error = _cutlass_checkout_version_error(cutlass_root)
+    if version_error:
+        raise RuntimeError(f"Machete: {version_error}")
+    if require_marker:
+        marker = _repo_local_cutlass_version_marker(cutlass_root)
+        try:
+            marker_data = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Machete: CUTLASS cache `{cutlass_root}` is missing a valid completion marker."
+            ) from exc
+        expected = {
+            "version": _CUTLASS_VERSION,
+            "archive_sha256": _CUTLASS_ARCHIVE_SHA256,
+        }
+        if marker_data != expected:
+            raise RuntimeError(
+                f"Machete: CUTLASS cache `{cutlass_root}` has a stale or incompatible completion marker."
             )
 
-    if _cutlass_checkout_complete(repo_local_root):
-        if _cutlass_checkout_version_error(repo_local_root) is None:
-            return _use_repo_local_cutlass(repo_local_root)
-    if repo_local_root.exists():
-        current_version = _cutlass_checkout_version(repo_local_root)
-        log.info(
-            "Machete: refreshing repo-local CUTLASS checkout at `%s`%s to v%s.",
-            repo_local_root,
-            f" from v{current_version}" if current_version else "",
-            _CUTLASS_VERSION,
+
+def _cache_cutlass_checkout(archive_path: Path) -> Path:
+    archive_digest = _sha256(archive_path) if archive_path.is_file() else "missing"
+    if archive_digest != _CUTLASS_ARCHIVE_SHA256:
+        raise RuntimeError(
+            "Machete: refusing to extract an unverified CUTLASS archive: "
+            f"expected {_CUTLASS_ARCHIVE_SHA256}, got {archive_digest}."
         )
 
-    archive_path = _cutlass_download_cache_dir() / f"cutlass-v{_CUTLASS_VERSION}.tar.gz"
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
-    if not archive_path.exists():
-        _download_cutlass_archive(_CUTLASS_RELEASE_URL, archive_path)
+    checkout = _cutlass_cache_dir()
+    if checkout.is_dir():
+        try:
+            _validate_cutlass_checkout(checkout, require_marker=True)
+            return checkout.resolve()
+        except RuntimeError:
+            log.warning("Machete: ignoring incomplete CUTLASS cache `%s`.", checkout)
+    elif checkout.exists():
+        raise RuntimeError(f"Machete: CUTLASS cache path `{checkout}` is not a directory.")
 
-    parent = repo_local_root.parent
+    parent = checkout.parent
     parent.mkdir(parents=True, exist_ok=True)
-    if repo_local_root.exists():
-        shutil.rmtree(repo_local_root, ignore_errors=True)
-
-    with tempfile.TemporaryDirectory(dir=parent, prefix="cutlass-unpack-") as temp_dir:
+    with tempfile.TemporaryDirectory(dir=parent, prefix=f".{_CUTLASS_VERSION}.unpack-") as temp_dir:
         temp_root = Path(temp_dir)
         _extract_cutlass_archive(archive_path, temp_root)
         extracted_root = temp_root / f"cutlass-{_CUTLASS_VERSION}"
-        if not extracted_root.exists():
-            raise RuntimeError(f"Machete: failed to extract CUTLASS archive `{archive_path}`.")
-        extracted_root.replace(repo_local_root)
-        _mark_repo_local_cutlass_version(repo_local_root)
+        _validate_cutlass_checkout(extracted_root)
+        _mark_cutlass_cache(extracted_root)
 
-    return _use_repo_local_cutlass(repo_local_root)
+        stale = checkout.with_name(f".{checkout.name}.stale-{os.getpid()}")
+        if stale.exists():
+            shutil.rmtree(stale, ignore_errors=True)
+        if checkout.exists():
+            os.replace(checkout, stale)
+        try:
+            os.replace(extracted_root, checkout)
+        except Exception:
+            if stale.exists() and not checkout.exists():
+                os.replace(stale, checkout)
+            raise
+        if stale.exists():
+            shutil.rmtree(stale, ignore_errors=True)
+    _validate_cutlass_checkout(checkout, require_marker=True)
+    return checkout.resolve()
 
 
-def _machete_generated_dir() -> Path:
-    return _machete_source_root() / "generated"
+def _ensure_cutlass_source() -> Path:
+    """Resolve CUTLASS from a strict override, compatible repo checkout, or cache."""
+
+    configured_root = os.getenv("GPTQMODEL_CUTLASS_DIR")
+    if configured_root:
+        configured_path = Path(configured_root).expanduser().resolve()
+        try:
+            _validate_cutlass_checkout(configured_path)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                "Machete: GPTQMODEL_CUTLASS_DIR is authoritative and must point to a read-only, "
+                f"compatible CUTLASS v{_CUTLASS_VERSION} checkout: {exc}"
+            ) from exc
+        return configured_path
+
+    repo_local_root = _repo_local_cutlass_root().resolve()
+    if repo_local_root.is_dir():
+        try:
+            _validate_cutlass_checkout(repo_local_root)
+            return repo_local_root
+        except RuntimeError:
+            log.info("Machete: ignoring incompatible repo-local CUTLASS checkout `%s`.", repo_local_root)
+
+    with _acquire_machete_cache_lock(f"cutlass-{_CUTLASS_VERSION}"):
+        cached_checkout = _cutlass_cache_dir()
+        if cached_checkout.is_dir():
+            try:
+                _validate_cutlass_checkout(cached_checkout, require_marker=True)
+                return cached_checkout.resolve()
+            except RuntimeError:
+                log.warning("Machete: ignoring incomplete CUTLASS cache `%s`.", cached_checkout)
+        archive_path = _cutlass_archive_path()
+        archive_digest = _sha256(archive_path) if archive_path.is_file() else None
+        archive_valid = archive_digest == _CUTLASS_ARCHIVE_SHA256
+        if not archive_valid:
+            if _offline_mode():
+                archive_status = (
+                    f"has SHA256 {archive_digest}, expected {_CUTLASS_ARCHIVE_SHA256}"
+                    if archive_digest is not None
+                    else "is missing"
+                )
+                raise RuntimeError(
+                    "Machete: GPTQMODEL_OFFLINE=1 and no verified CUTLASS v%s source cache is available; "
+                    "archive `%s` %s. Set GPTQMODEL_CUTLASS_DIR to a compatible checkout, or run "
+                    "`python -c \"from gptqmodel import extension; extension.load('machete')\"` once "
+                    "while online to populate the cache. To skip JIT entirely, set "
+                    "GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY to a compatible shared library."
+                    % (_CUTLASS_VERSION, archive_path, archive_status)
+                )
+            _download_cutlass_archive(_CUTLASS_RELEASE_URL, archive_path)
+            if not archive_path.is_file() or _sha256(archive_path) != _CUTLASS_ARCHIVE_SHA256:
+                actual = _sha256(archive_path) if archive_path.is_file() else "missing"
+                raise RuntimeError(
+                    "Machete: downloaded CUTLASS archive checksum mismatch: "
+                    f"expected {_CUTLASS_ARCHIVE_SHA256}, got {actual}."
+                )
+        return _cache_cutlass_checkout(archive_path)
 
 
-def _machete_generation_marker() -> Path:
-    return _machete_generated_dir() / ".gptqmodel_complete"
+def _machete_generated_dir(fingerprint: Optional[str] = None) -> Path:
+    root = _gptqmodel_cache_dir() / "machete" / "generated"
+    return root if fingerprint is None else root / fingerprint
+
+
+def _machete_generation_marker(generated_dir: Optional[Path] = None) -> Path:
+    return (generated_dir or _machete_generated_dir()) / _MACHETE_COMPLETE_MARKER
+
+
+def _machete_generation_manifest(generated_dir: Optional[Path] = None) -> Path:
+    return (generated_dir or _machete_generated_dir()) / _MACHETE_MANIFEST_NAME
 
 
 def _cutlass_python_binding_inputs(cutlass_root: Path) -> list[Path]:
     python_dir = cutlass_root / "python"
-    candidates = [
-        python_dir / "cutlass_library.py",
-        python_dir / "cutlass_library" / "__init__.py",
-    ]
-    return [candidate for candidate in candidates if candidate.exists()]
+    module = python_dir / "cutlass_library.py"
+    if module.is_file():
+        return [module]
+    package = python_dir / "cutlass_library"
+    if (package / "__init__.py").is_file():
+        # A configured checkout is allowed to differ from the pinned cache, so
+        # fingerprint the complete importable generator package rather than
+        # only __init__.py. The pinned checkout remains content-addressed by the
+        # archive SHA, while this also prevents stale reuse for local edits.
+        return sorted(package.rglob("*.py"))
+    return []
 
 
 def _machete_generation_signature(cutlass_root: Path) -> str:
-    return json.dumps(
-        {
-            "cutlass_root": str(cutlass_root.resolve()),
-            "cutlass_version": _CUTLASS_VERSION,
-        },
-        sort_keys=True,
-    )
+    payload = {
+        "cache_version": _MACHETE_GENERATION_CACHE_VERSION,
+        "cutlass_version": _CUTLASS_VERSION,
+        "cutlass_archive_sha256": _CUTLASS_ARCHIVE_SHA256,
+        "jinja2_version": importlib.metadata.version("jinja2"),
+        "inputs": [],
+    }
+    for index, path in enumerate(_machete_generator_inputs(cutlass_root)):
+        resolved = path.resolve()
+        if not resolved.is_file():
+            payload["inputs"].append({"index": index, "name": path.name, "missing": True})
+            continue
+        payload["inputs"].append(
+            {"index": index, "name": path.name, "sha256": _sha256(resolved), "size": resolved.stat().st_size}
+        )
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
 
 def _machete_generator_inputs(cutlass_root: Path) -> list[Path]:
@@ -271,29 +441,50 @@ def _machete_generator_inputs(cutlass_root: Path) -> list[Path]:
     ]
 
 
-def _generated_machete_sources() -> list[Path]:
-    return sorted(_machete_generated_dir().glob("*.cu"))
+def _generated_machete_sources(generated_dir: Optional[Path] = None) -> list[Path]:
+    return sorted((generated_dir or _machete_generated_dir()).glob("*.cu"))
 
 
-def _generated_machete_sources_current(cutlass_root: Path) -> bool:
-    marker = _machete_generation_marker()
-    generated_sources = _generated_machete_sources()
-    if not marker.exists() or not generated_sources:
+def _generated_machete_sources_current(cutlass_root: Path, generated_dir: Optional[Path] = None) -> bool:
+    generated_dir = generated_dir or _machete_generated_dir()
+    marker = _machete_generation_marker(generated_dir)
+    manifest_path = _machete_generation_manifest(generated_dir)
+    generated_sources = _generated_machete_sources(generated_dir)
+    if (
+        not marker.exists()
+        or not manifest_path.exists()
+        or not generated_sources
+        or any(not path.is_file() or path.is_symlink() for path in generated_sources)
+    ):
         return False
-    if marker.read_text(encoding="utf-8").strip() != _machete_generation_signature(cutlass_root):
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("version") != _MACHETE_GENERATION_CACHE_VERSION:
+            return False
+        if marker.read_text(encoding="utf-8").strip() != manifest.get("signature"):
+            return False
+        if manifest.get("signature") != _machete_generation_signature(cutlass_root):
+            return False
+        files = manifest.get("files")
+        if not isinstance(files, dict) or set(files) != {path.name for path in generated_sources}:
+            return False
+        for path in generated_sources:
+            if _sha256(path) != files.get(path.name):
+                return False
+    except (OSError, ValueError, TypeError):
         return False
-    marker_mtime_ns = marker.stat().st_mtime_ns
-    return not any(path.stat().st_mtime_ns > marker_mtime_ns for path in _machete_generator_inputs(cutlass_root))
+    return True
 
 
-def _run_machete_generator(cutlass_root: Path) -> None:
+def _run_machete_generator(cutlass_root: Path, output_dir: Optional[Path] = None) -> None:
     generator = _machete_source_root() / "generate.py"
+    output_dir = output_dir or _machete_generated_dir()
     env = os.environ.copy()
     env["GPTQMODEL_CUTLASS_DIR"] = str(cutlass_root)
 
-    log.info("Machete: generating CUTLASS-backed kernel sources in `%s`.", _machete_generated_dir())
+    log.info("Machete: generating CUTLASS-backed kernel sources in `%s`.", output_dir)
     result = subprocess.run(
-        [sys.executable, str(generator)],
+        [sys.executable, str(generator), "--output-dir", str(output_dir)],
         cwd=str(_machete_project_root()),
         env=env,
         check=False,
@@ -311,26 +502,52 @@ def _run_machete_generator(cutlass_root: Path) -> None:
 
 def _ensure_generated_machete_sources() -> list[Path]:
     cutlass_root = _ensure_cutlass_source()
-    if _generated_machete_sources_current(cutlass_root):
-        return _generated_machete_sources()
+    fingerprint = _machete_generation_signature(cutlass_root)
+    generated_dir = _machete_generated_dir(fingerprint)
+    with _acquire_machete_cache_lock("machete-generated"):
+        if _generated_machete_sources_current(cutlass_root, generated_dir):
+            return _generated_machete_sources(generated_dir)
 
-    generated_dir = _machete_generated_dir()
-    if generated_dir.exists():
-        shutil.rmtree(generated_dir, ignore_errors=True)
+        generated_root = generated_dir.parent
+        generated_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=generated_root, prefix=f".{fingerprint}.tmp-") as temp_dir:
+            temp_output = Path(temp_dir)
+            _run_machete_generator(cutlass_root, temp_output)
+            generated_sources = _generated_machete_sources(temp_output)
+            if not generated_sources or any(path.is_symlink() or not path.is_file() for path in generated_sources):
+                raise RuntimeError("Machete: generator completed without producing any CUDA sources.")
+            unexpected = [path for path in temp_output.iterdir() if path.suffix != ".cu"]
+            if unexpected:
+                raise RuntimeError(
+                    "Machete: generator produced unexpected files: "
+                    + ", ".join(path.name for path in unexpected)
+                )
+            manifest = {
+                "version": _MACHETE_GENERATION_CACHE_VERSION,
+                "signature": fingerprint,
+                "files": {path.name: _sha256(path) for path in generated_sources},
+            }
+            _machete_generation_manifest(temp_output).write_text(
+                json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+            )
+            _machete_generation_marker(temp_output).write_text(fingerprint + "\n", encoding="utf-8")
 
-    _run_machete_generator(cutlass_root)
-
-    generated_sources = _generated_machete_sources()
-    if not generated_sources:
-        raise RuntimeError(
-            "Machete: generator completed without producing any CUDA sources."
-        )
-
-    _machete_generation_marker().write_text(
-        _machete_generation_signature(cutlass_root),
-        encoding="utf-8",
-    )
-    return generated_sources
+            stale = generated_dir.with_name(f".{generated_dir.name}.stale-{os.getpid()}")
+            if stale.exists():
+                shutil.rmtree(stale, ignore_errors=True)
+            if generated_dir.exists():
+                os.replace(generated_dir, stale)
+            try:
+                os.replace(temp_output, generated_dir)
+            except Exception:
+                if stale.exists() and not generated_dir.exists():
+                    os.replace(stale, generated_dir)
+                raise
+            if stale.exists():
+                shutil.rmtree(stale, ignore_errors=True)
+    if not _generated_machete_sources_current(cutlass_root, generated_dir):
+        raise RuntimeError(f"Machete: generated source cache `{generated_dir}` failed integrity validation.")
+    return _generated_machete_sources(generated_dir)
 
 
 def _machete_sources() -> list[str]:
@@ -343,6 +560,7 @@ def _machete_include_paths() -> list[str]:
     project_root = _machete_project_root()
     cutlass_root = _ensure_cutlass_source()
     include_paths = [
+        str(_machete_source_root().resolve()),
         str((project_root / "gptqmodel_ext").resolve()),
         str((project_root / "gptqmodel_ext" / "cutlass_extensions").resolve()),
         str((cutlass_root / "include").resolve()),
@@ -416,6 +634,7 @@ _MACHETE_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     extra_include_paths=_machete_include_paths,
     extra_ldflags=_machete_extra_ldflags,
     force_rebuild_env="GPTQMODEL_MACHETE_FORCE_REBUILD",
+    prebuilt_library_env="GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,
     python_abi_dependent=False,

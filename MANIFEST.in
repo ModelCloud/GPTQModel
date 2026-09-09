@@ -16,5 +16,6 @@ include gptqmodel_ext/floatx_cpu.cpp
 include gptqmodel_ext/marlin/generate_kernels.py
 include gptqmodel_ext/machete/generate.py
 recursive-exclude gptqmodel_ext __pycache__ *.pyc
+prune gptqmodel_ext/machete/generated
 prune tests/
 prune format/
