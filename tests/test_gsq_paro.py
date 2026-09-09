@@ -150,11 +150,16 @@ def test_paro_gsq_config_roundtrip(gsq):
 
 
 @pytest.mark.parametrize('scope', ['layer', 'compute_block'])
-def test_paro_gsq_grouped_binding_is_explicitly_pending(scope):
+def test_paro_gsq_grouped_config_roundtrip_and_noisy_guard(scope):
     from gptqmodel.quantization.config import ParoConfig
 
-    with pytest.raises(ValueError, match='grouped-scope calibration'):
-        ParoConfig(gsq={'enabled': True}, opt_scope=scope)
+    from gptqmodel.quantization.config import QuantizeConfig
+
+    cfg = ParoConfig(gsq={'enabled': True}, opt_scope=scope)
+    restored = QuantizeConfig.from_quant_config(cfg.to_dict())
+    assert restored.opt_scope == scope and restored.gsq.enabled
+    with pytest.raises(ValueError, match='paired clean/noisy'):
+        ParoConfig(gsq={'enabled': True}, opt_scope=scope, opt_train_on_noisy_inputs=True)
     assert ParoConfig(gsq={'enabled': False}, opt_scope=scope).gsq.enabled is False
 
 
@@ -356,3 +361,99 @@ def test_paro_gsq_layer_capture_routes_full_module_filter():
     assert torch.equal(q['validation_inputs'], values[1:])
     assert torch.equal(k['train_inputs'], values)
     assert torch.equal(k['validation_inputs'], values)
+
+
+@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
+def test_paro_group_gsq_preserves_initializer_loss_scope(monkeypatch, scope):
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True}, opt_scope=scope)
+    train, validation = torch.ones(3, 16), torch.full((2, 16), 9.)
+    processor.tasks = {'q': {'train_inputs': train, 'validation_inputs': validation}}
+    module = SimpleNamespace(name='q', full_name='q_proj', state={})
+    original, updated = object(), object()
+
+    def refine(module, result, weight, inputs, check_inputs):
+        assert result is original
+        assert inputs is train and check_inputs is validation
+        module.state['gsq_diagnostics'] = {'before': 2., 'after': 1.}
+        return updated
+
+    monkeypatch.setattr(processor, '_refine_gsq_export', refine)
+    assert processor._refine_group_gsq_export(module, original, None, 7.) is updated
+    stats = module.state['gsq_diagnostics']
+    assert stats['initializer_group_val_loss'] == 7.
+    assert stats['initializer_scope'] == scope
+    assert stats['refinement_scope'] == 'module'
+    assert stats['group_loss_recomputed'] is False
+
+
+@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
+def test_paro_group_lifecycle_applies_actual_gsq_export(scope, monkeypatch):
+    import threading
+    from types import SimpleNamespace
+    from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+    from gptqmodel.quantization.paroquant.optimization import ParoQuantOptimizationResult
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(group_size=16, opt_scope=scope, offload_to_disk=False,
+                                opt_train_samples=64, opt_validation_samples=16,
+                                gsq={'enabled': True, 'steps': 80, 'learning_rate': .2})
+    processor.lock = threading.Lock()
+    processor.fallback = False
+    processor.calculate_w_wq_diff = False
+    processor._has_explicit_validation_calibration = True
+    processor._train_calibration_batch_count = 1
+    processor._validation_calibration_batch_count = 1
+    linear = torch.nn.Linear(32, 8, bias=False, dtype=torch.float16)
+    linear.weight.data.fill_(.125)
+    module = NamedModule(linear, 'self_attn.q_proj', 'model.layers.0.self_attn.q_proj', 0)
+    module.state['module_tree_flags'] = frozenset({'q'})
+    rng = torch.Generator().manual_seed(7)
+    train, validation = torch.randn(1, 64, 32, generator=rng), torch.randn(1, 16, 32, generator=rng)
+    processor.tasks = {module.name: {'inputs': [train, validation], 'batch_indices': [0, 1], 'layer_index': 0}}
+    baseline = ParoQuantOptimizationResult(
+        pseudo_weight=torch.zeros(8, 32), pack_weight=torch.zeros(8, 32).half(),
+        q_scales=torch.full((8, 2), .125).half(), q_zeros=torch.full((8, 2), 8.),
+        pairs=torch.empty(0, 32, dtype=torch.int16), theta=torch.empty(0, 16),
+        channel_scales=torch.ones(32), train_loss=3., val_loss=4., used_identity=True)
+    monkeypatch.setattr(processor, '_optimize_group', lambda state, modules: ({module.name: baseline}, 4.))
+    logged = []
+    monkeypatch.setattr(processor, '_log_quant_result', lambda *args: logged.append(args))
+    state = SimpleNamespace(quantized=False, modules={module.name: module}, layer_inputs=[[train]],
+                            layer_outputs=[[train]], pending_modules=set(), processed_subsets={0}, subset_total=1)
+    processor._quantize_layer(0, state)
+    stats = module.state['gsq_diagnostics']
+    assert stats['after'] < stats['before']
+    assert stats['train_rows'] == 64 and stats['validation_rows'] == 16
+    assert stats['initializer_group_val_loss'] == 4.
+    assert torch.count_nonzero(module.state['pack_weight']) > 0
+    assert torch.count_nonzero(module.weight) > 0
+    assert logged[0][2] == 4.
+    assert state.quantized and not state.modules
+
+
+@pytest.mark.parametrize('missing', ['train', 'validation', 'validation_none'])
+def test_paro_group_gsq_does_not_replace_missing_explicit_calibration(missing):
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True}, opt_scope='layer')
+    processor._has_explicit_validation_calibration = True
+    entry = {'train_inputs': torch.ones(4, 16), 'validation_inputs': torch.ones(2, 16)}
+    if missing == 'validation_none':
+        entry['validation_inputs'] = None
+    else:
+        entry[missing + '_inputs'] = torch.empty(0)
+    processor.tasks = {'q': entry}
+    module = SimpleNamespace(name='q', full_name='q_proj', state={})
+    with pytest.raises(RuntimeError, match='explicit training and validation'):
+        processor._refine_group_gsq_export(module, object(), None, 1.)
+    assert not module.state

@@ -673,6 +673,10 @@ class ParoQuantProcessor(LoopProcessor):
             PROCESS_USED_MEMORY: self.device_memory_report(),
         }
 
+        gsq_diagnostics = module.state.get("gsq_diagnostics", {})
+        if gsq_diagnostics.get("group_loss_recomputed") is False:
+            stat["loss_scope"] = "group_initializer_before_gsq"
+
         with self.lock:
             self.durations.append(duration)
             self.avg_losses.append(val_loss)
@@ -804,6 +808,30 @@ class ParoQuantProcessor(LoopProcessor):
         return replace(result, pack_weight=fitted["pack_weight"], pseudo_weight=pseudo,
                        q_scales=fitted["q_scales"], q_zeros=fitted["q_zeros"],
                        train_loss=replay_loss(fit_inputs), val_loss=replay_loss(check_inputs))
+
+    def _refine_group_gsq_export(self, module, result, original_weight, group_val_loss):
+        """Apply local GSQ after the group initializer without relabeling group loss."""
+        from ..quantization.gsq_scalar import gsq_enabled_for
+
+        if not gsq_enabled_for(getattr(self.qcfg, "gsq", None), module.full_name):
+            return result
+        if self._train_on_noisy_inputs_enabled():
+            raise ValueError("ParoQuant grouped GSQ needs paired clean/noisy module calibration")
+        entry = self.tasks.get(module.name) or {}
+        inputs = entry.get("train_inputs", torch.empty(0))
+        validation = entry.get("validation_inputs")
+        if getattr(self, "_has_explicit_validation_calibration", False):
+            if inputs.numel() == 0 or validation is None or validation.numel() == 0:
+                raise RuntimeError(
+                    f"ParoQuant grouped GSQ requires explicit training and validation activations for `{module.full_name}`"
+                )
+        if validation is not None and validation.numel() == 0:
+            validation = None
+        refined = self._refine_gsq_export(module, result, original_weight, inputs, validation)
+        diagnostics = module.state["gsq_diagnostics"]
+        diagnostics.update(initializer_scope=self._opt_scope_mode(), initializer_group_val_loss=group_val_loss,
+                           refinement_scope="module", group_loss_recomputed=False)
+        return refined
 
     @staticmethod
     def _module_archetype(full_name: str) -> str:
@@ -2766,13 +2794,16 @@ class ParoQuantProcessor(LoopProcessor):
                 for named_module in group_modules:
                     original_weight = self._module_weight_matrix(named_module).detach().clone()
                     result = group_results[named_module.name]
+                    refine_start = time.perf_counter()
+                    result = self._refine_group_gsq_export(named_module, result, original_weight, group_val_loss)
+                    refine_duration = time.perf_counter() - refine_start
                     self._apply_optimization_result(named_module, result, original_weight)
                     if mode == "layer":
                         move_to(named_module.module, device=CPU)
                     feat = input_feat.get(named_module.name)
                     if feat is None:
                         feat = torch.empty(0)
-                    self._log_quant_result(named_module, feat, group_val_loss, duration_per_module)
+                    self._log_quant_result(named_module, feat, group_val_loss, duration_per_module + refine_duration)
 
                 if mode == "compute_block" and getattr(self.qcfg, "offload_to_disk", False):
                     flush_device = self._module_weight_matrix(group_modules[0]).device if group_modules else None

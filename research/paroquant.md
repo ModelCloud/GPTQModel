@@ -117,3 +117,26 @@ path uses its existing internal row split; disabled/unmatched controls preserve
 the previous selection. Seven regression cases include the layer-capture filter
 route. The focused processor/config/GSQ suite passes 119 tests with 11 skips
 (CPU only); this does not change the explicit 12/4-document real experiment.
+
+Grouped GSQ binding is now implemented locally for clean-input `layer` and
+`compute_block` initializers: each exported module receives the same optional
+format-aware local fitter using captured training/validation streams. Metadata
+identifies the initializer scope and group validation loss separately from
+module refinement; group loss is explicitly not recomputed, and the process log
+labels it `group_initializer_before_gsq`. Fitting time is included in module
+duration. No grouped objective recovery follows from local improvement.
+The clean-target/noisy-input mode still rejects enabled grouped GSQ pending
+paired module activation binding. Grouped native and real-model checks remain
+pending; CPU config round-trips and stream/diagnostic binding pass.
+
+Controlled grouped lifecycle checks now route the actual GSQ fitter through
+`_quantize_layer` for both scopes, force an improving export, and verify packed
+state application, separated calibration counts, initializer loss preservation
+and cleanup. Only the group initializer is replaced with a deterministic test
+fixture. These tests establish lifecycle behavior, not real-model quality.
+
+Grouped explicit calibration now fails if either requested stream is missing,
+rather than substituting an implicit split. Final focused CPU validation: 126
+passed, 11 skipped, 47 deselected; log archived in
+`artifacts/gsq-paro/processor-cpu/grouped-gsq.log.gz`. No GPU execution is claimed
+for the newly bound grouped path.

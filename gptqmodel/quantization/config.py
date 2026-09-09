@@ -5841,8 +5841,9 @@ class ParoConfig(PreProcessorConfig):
         if self.opt_scope not in {"module", "compute_block", "layer"}:
             raise ValueError("ParoConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
         self.gsq = normalize_gsq_config(self.gsq)
-        if self.gsq is not None and self.gsq.enabled and self.opt_scope != "module":
-            raise ValueError("ParoConfig: GSQ grouped-scope calibration binding is not implemented; use module scope")
+        if (self.gsq is not None and self.gsq.enabled and self.opt_scope != "module"
+                and self.opt_train_on_noisy_inputs):
+            raise ValueError("ParoConfig: grouped GSQ needs paired clean/noisy module calibration")
         if self.opt_stage_impl not in {"fast", "reference"}:
             raise ValueError("ParoConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:
