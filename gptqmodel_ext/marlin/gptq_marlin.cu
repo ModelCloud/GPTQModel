@@ -43,19 +43,23 @@
   #error "At least one Marlin compute dtype must be enabled."
 #endif
 
+#ifndef QVQ_MARLIN_STANDALONE
 #include <ATen/ATen.h>
 #include <ATen/DeviceGuard.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/types.h>
+#endif
 #include <algorithm>
 #include <mutex>
 #include <vector>
 
+#ifndef QVQ_MARLIN_STANDALONE
 torch::Tensor marlin_lora_fused_add_prepared_cuda(
     torch::Tensor x, torch::Tensor down_weight, torch::Tensor up_weight,
     torch::Tensor out, torch::Tensor workspace);
+#endif
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
 #  define MARLIN_SHARED_MEM_GUARD_BYTES 0 // 512
@@ -94,7 +98,7 @@ using MarlinFuncPtr = void (*)(MARLIN_KERNEL_PARAMS);
 template <typename scalar_t>
 using MarlinLoraFuncPtr = void (*)(MARLIN_LORA_KERNEL_PARAMS);
 
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 750 && !defined(QVQ_MARLIN_STANDALONE)
 
 __global__ void permute_cols_kernel(int4 const* __restrict__ a_int4_ptr,
                                     int const* __restrict__ perm_int_ptr,
@@ -1265,6 +1269,7 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
 }  // namespace marlin
 
+#ifndef QVQ_MARLIN_STANDALONE
 torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
@@ -1715,5 +1720,6 @@ torch::Tensor MARLIN_GEMM_PREPARED_EXPORT_NAME(
 
   TORCH_CHECK(false, "prepared GPTQ Marlin W4A16 received an unsupported dtype");
 }
+#endif  // !QVQ_MARLIN_STANDALONE
 
 #endif

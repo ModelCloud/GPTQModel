@@ -1,7 +1,11 @@
 #pragma once
 
 // For TORCH_CHECK
+#ifdef QVQ_MARLIN_STANDALONE
+#include "standalone_check.hpp"
+#else
 #include <torch/library.h>
+#endif
 
 #include <cstring>
 
