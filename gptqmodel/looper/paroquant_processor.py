@@ -24,7 +24,7 @@ import math
 import threading
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 import torch
@@ -742,8 +742,62 @@ class ParoQuantProcessor(LoopProcessor):
                 scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
             )
 
+        result = self._refine_gsq_export(module, result, original_weight, train_inputs, validation_inputs)
         self._apply_optimization_result(module, result, original_weight)
         return result.train_loss, result.val_loss
+
+    def _refine_gsq_export(self, module, result, original_weight, inputs, validation_inputs):
+        from ..quantization.gsq_scalar import gsq_enabled_for
+
+        config = getattr(self.qcfg, "gsq", None)
+        if not gsq_enabled_for(config, module.full_name):
+            return result
+        from ..quantization.gsq_paro import refine_paro_export
+        from ..quantization.paroquant.optimization import _sample_activation_rows
+
+        if inputs.numel() == 0:
+            module.state["gsq_diagnostics"] = {"status": "skipped", "reason": "no_calibration"}
+            return result
+        train_limit = max(1, self.qcfg.opt_train_samples)
+        val_limit = max(1, self.qcfg.opt_validation_samples)
+        if validation_inputs is None:
+            rows = _sample_activation_rows(inputs, train_limit + val_limit)
+            val_count = min(val_limit, max(1, len(rows) - train_limit))
+            fit_inputs = rows[:min(train_limit, len(rows) - val_count)]
+            check_inputs = rows[-val_count:]
+        else:
+            fit_inputs = _sample_activation_rows(inputs, train_limit)
+            check_inputs = _sample_activation_rows(validation_inputs, val_limit)
+        if fit_inputs.numel() == 0:
+            module.state["gsq_diagnostics"] = {"status": "skipped", "reason": "no_disjoint_training_rows"}
+            return result
+        bits, group_size, _ = self._module_quant_params(module.full_name)
+        if bits != 4:
+            raise ValueError("ParoQuant GSQ requires the W4 runtime packing format")
+        dtype = original_weight.dtype if original_weight.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        fitted = refine_paro_export(result, teacher=original_weight, inputs=fit_inputs.to(original_weight.device),
+                                   group_size=group_size, config=config, storage_dtype=dtype)
+        diagnostics = {key: fitted[key] for key in ("before", "after", "history")}
+        diagnostics.update(initializer_train_loss=result.train_loss, initializer_val_loss=result.val_loss,
+                           train_rows=len(fit_inputs), validation_rows=len(check_inputs),
+                           objective="normalized_transformed_reconstruction")
+        module.state["gsq_diagnostics"] = diagnostics
+        if fitted["after"] >= fitted["before"]:
+            return result
+        pseudo = fitted["pseudo_weight"].to(device=original_weight.device, dtype=original_weight.dtype)
+
+        def replay_loss(values):
+            if values.numel() == 0:
+                return 0.0
+            x = values.to(device=original_weight.device, dtype=torch.float32)
+            with torch.no_grad():
+                return torch.nn.functional.smooth_l1_loss(x @ pseudo.float().T,
+                                                         x @ original_weight.float().T).item()
+
+        # Validation is reporting-only here; it never selects the GSQ checkpoint.
+        return replace(result, pack_weight=fitted["pack_weight"], pseudo_weight=pseudo,
+                       q_scales=fitted["q_scales"], q_zeros=fitted["q_zeros"],
+                       train_loss=replay_loss(fit_inputs), val_loss=replay_loss(check_inputs))
 
     @staticmethod
     def _module_archetype(full_name: str) -> str:

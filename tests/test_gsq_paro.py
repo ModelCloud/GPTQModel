@@ -137,3 +137,102 @@ def test_paro_gsq_exact_baseline_retains_original_export():
         assert torch.equal(fitted[key], snapshots[key])
     for key, value in snapshots.items():
         assert torch.equal(getattr(state, key), value)
+
+
+@pytest.mark.parametrize('gsq', [None, {'enabled': False}, {'enabled': True, 'learn_scales': True}])
+def test_paro_gsq_config_roundtrip(gsq):
+    from gptqmodel.quantization.config import ParoConfig, QuantizeConfig
+
+    config = ParoConfig(gsq=gsq)
+    restored = QuantizeConfig.from_quant_config(config.to_dict())
+    assert isinstance(restored, ParoConfig)
+    assert restored.gsq == config.gsq
+
+
+@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
+def test_paro_gsq_grouped_binding_is_explicitly_pending(scope):
+    from gptqmodel.quantization.config import ParoConfig
+
+    with pytest.raises(ValueError, match='grouped-scope calibration'):
+        ParoConfig(gsq={'enabled': True}, opt_scope=scope)
+    assert ParoConfig(gsq={'enabled': False}, opt_scope=scope).gsq.enabled is False
+
+
+@pytest.mark.parametrize('explicit_validation', [False, True])
+def test_paro_processor_gsq_uses_only_training_rows(monkeypatch, explicit_validation):
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+    import gptqmodel.quantization.gsq_paro as adapter
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True}, group_size=16,
+                                opt_train_samples=4, opt_validation_samples=2)
+    module = SimpleNamespace(full_name='model.layers.0.self_attn.q_proj', state={})
+    rows = torch.arange(6).float().view(-1, 1).expand(-1, 16)
+    validation = torch.full((2, 16), 999.) if explicit_validation else None
+    result = SimpleNamespace(train_loss=3., val_loss=4.)
+    observed = []
+
+    def fit(export, **kwargs):
+        observed.append(kwargs['inputs'].clone())
+        return {'before': 1., 'after': 1., 'history': [1.]}
+
+    monkeypatch.setattr(adapter, 'refine_paro_export', fit)
+    returned = processor._refine_gsq_export(module, result, torch.ones(8, 16), rows, validation)
+    assert returned is result
+    expected = rows[[0, 2, 3, 5]] if explicit_validation else rows[:4]
+    assert torch.equal(observed[0], expected)
+    assert module.state['gsq_diagnostics']['initializer_val_loss'] == 4.
+    assert module.state['gsq_diagnostics']['validation_rows'] == 2
+
+
+def test_paro_processor_gsq_unmatched_module_bypasses_without_data():
+    from types import SimpleNamespace
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(gsq={'enabled': True, 'modules': ['v_proj$']})
+    module = SimpleNamespace(full_name='q_proj', state={})
+    result = object()
+    assert processor._refine_gsq_export(module, result, None, None, None) is result
+    assert not module.state
+
+
+def test_paro_processor_applies_improved_export_and_updates_replay_losses():
+    import threading
+    from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
+    from gptqmodel.quantization.config import ParoConfig
+    from gptqmodel.quantization.paroquant.optimization import ParoQuantOptimizationResult
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.qcfg = ParoConfig(group_size=16, opt_train_samples=64, opt_validation_samples=16,
+                                gsq={'enabled': True, 'steps': 80, 'learning_rate': .2})
+    processor.lock = threading.Lock()
+    processor.calculate_w_wq_diff = False
+    layer = torch.nn.Linear(32, 8, bias=False, dtype=torch.float16)
+    layer.weight.data.fill_(.125)
+    module = NamedModule(layer, name='q_proj', full_name='model.layers.0.self_attn.q_proj', layer_index=0)
+    original = layer.weight.detach().clone()
+    result = ParoQuantOptimizationResult(
+        pseudo_weight=torch.zeros(8, 32), pack_weight=torch.zeros(8, 32).half(),
+        q_scales=torch.full((8, 2), .125).half(), q_zeros=torch.full((8, 2), 8.),
+        pairs=torch.empty(0, 32, dtype=torch.int16), theta=torch.empty(0, 16),
+        channel_scales=torch.ones(32), train_loss=3., val_loss=4., used_identity=True)
+    rng = torch.Generator().manual_seed(7)
+    train = torch.randn(64, 32, generator=rng)
+    validation = torch.randn(16, 32, generator=rng)
+    updated = processor._refine_gsq_export(module, result, original, train, validation)
+    assert updated is not result
+    processor._apply_optimization_result(module, updated, original)
+    assert torch.equal(module.weight, updated.pseudo_weight.half())
+    assert torch.equal(module.state['pack_weight'], updated.pack_weight.half())
+    assert torch.equal(module.state['theta'], result.theta.half())
+    assert torch.equal(module.state['channel_scales'], result.channel_scales.half())
+    expected = torch.nn.functional.smooth_l1_loss(validation @ module.weight.float().T,
+                                                 validation @ original.float().T).item()
+    assert updated.val_loss == pytest.approx(expected)
+    assert module.state['gsq_diagnostics']['initializer_val_loss'] == 4.
+    assert module.state['gsq_diagnostics']['after'] < module.state['gsq_diagnostics']['before']

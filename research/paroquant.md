@@ -59,8 +59,24 @@ low-level result deliberately leaves initializer train/validation diagnostics
 separate from the GSQ before/after objective. No real-model gain or native
 ParoQuant lifecycle support is established by these fixtures.
 
-Remaining work: bind this fitter to ParoQuant processor result export,
-preserve both transformed packing weights and inverse-transformed replay weights,
-carry diagnostics, add an optional default-disabled ParoConfig control, verify
-packing/reload/native rotation execution, and run real calibrated layers.
-ParoQuant GSQ is not currently enabled or exposed by this groundwork.
+ParoConfig now accepts `gsq=None` (default) or a GSQConfig/dictionary. The
+module-scope processor applies the fitter after rotation optimization and before
+result export/replay, carries separate GSQ diagnostics, and recomputes reported
+Smooth-L1 replay losses after an improvement. Initializer losses remain in the
+diagnostics. The fitter never uses validation rows to select a checkpoint;
+implicit validation tails are excluded even when the initializer's short-input
+split overlaps. No-calibration fallback, disabled and unmatched modules retain
+the initializer result.
+
+The focused CPU suite passes 28 tests, including config round-trip, actual AWQ
+packing, row-selection isolation and processor state application. The broader
+ParoQuant config/processor selection has 81 passes, 3 skips and 3 failures; all
+three failures also reproduce at the preceding unchanged commit and involve
+grouped-processor fixtures. This is not a green whole-ParoQuant suite.
+
+Remaining work: grouped-scope calibration/result binding (enabled GSQ currently
+rejects `layer` and `compute_block` scopes explicitly), native ParoQuant
+packing/reload/rotation validation, and real calibrated layers. The new public
+control is experimental and disabled by default. These pending scopes remain
+part of the broader compatibility goal; they are not deemed mathematically
+incompatible.

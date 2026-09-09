@@ -5685,6 +5685,7 @@ class AWQConfig(PreProcessorConfig):
 
 @dataclass
 class ParoConfig(PreProcessorConfig):
+    gsq: Optional["GSQConfig"] = field(default=None)
     method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
     # Generic quantized-linear plumbing still reads this internal sentinel, but
@@ -5839,6 +5840,9 @@ class ParoConfig(PreProcessorConfig):
             raise ValueError("ParoConfig: `opt_sgd_nesterov=True` requires `opt_sgd_dampening == 0`.")
         if self.opt_scope not in {"module", "compute_block", "layer"}:
             raise ValueError("ParoConfig: `opt_scope` must be one of {'module', 'compute_block', 'layer'}.")
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled and self.opt_scope != "module":
+            raise ValueError("ParoConfig: GSQ grouped-scope calibration binding is not implemented; use module scope")
         if self.opt_stage_impl not in {"fast", "reference"}:
             raise ValueError("ParoConfig: `opt_stage_impl` must be one of {'fast', 'reference'}.")
         if self.opt_pair_impl not in {"fast", "reference"}:
@@ -5893,6 +5897,7 @@ class ParoConfig(PreProcessorConfig):
         out.pop("desc_act", None)
         out["zero_point"] = not self.sym
         out["krot"] = self.krot
+        out["gsq"] = None if self.gsq is None else asdict(self.gsq)
         out[FORMAT_FIELD_CODE] = self.format
 
 
