@@ -2414,7 +2414,7 @@ class AWQProcessor(LoopProcessor):
         assert q_zeros.device == CPU
         assert q_scales.device == CPU
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-        layers = find_modules(self.gptq_model.model)
+        layers = {module.full_name: self.gptq_model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         # replace module with quantized module
@@ -2450,11 +2450,12 @@ class AWQProcessor(LoopProcessor):
                 source=module_label,
             )
         # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(self.gptq_model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+        qmodule = self.gptq_model.model.get_submodule(module.full_name)
+        qModules = (
+            {module.full_name: qmodule}
+            if isinstance(qmodule, quant_linear_cls)
+            else {}
+        )
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
                 "pack",

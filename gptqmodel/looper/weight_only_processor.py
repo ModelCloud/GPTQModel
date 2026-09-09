@@ -35,7 +35,7 @@ from ..quantization.config import (
 )
 from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, pack_module
+from ..utils.model import create_quant_module, pack_module
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..utils.module_locks import parent_module_lock
 
@@ -167,7 +167,7 @@ class WeightOnlyProcessor(LoopProcessor):
             assert q_scales.device == CPU
             assert q_g_idx.device == CPU
 
-        layers = find_modules(model.model)
+        layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
         original_layer = layers.get(module.full_name)
@@ -196,13 +196,12 @@ class WeightOnlyProcessor(LoopProcessor):
         if timer is not None and create_start is not None:
             timer.record("submodule_finalize_create", time.perf_counter() - create_start, source=module_label)
 
-        qmodules = {
-            name: submodule
-            for name, submodule in find_modules(
-                model.model, [model.qlinear_kernel, TorchQuantEmbeddings]
-            ).items()
-            if name == module.full_name
-        }
+        qmodule = model.model.get_submodule(module.full_name)
+        qmodules = (
+            {module.full_name: qmodule}
+            if isinstance(qmodule, (model.qlinear_kernel, TorchQuantEmbeddings))
+            else {}
+        )
 
         if self._uses_direct_pack(active_qcfg):
             pack_start = time.perf_counter() if timer is not None else None

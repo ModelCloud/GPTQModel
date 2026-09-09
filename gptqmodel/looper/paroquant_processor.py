@@ -69,7 +69,6 @@ from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import (
     create_quant_module,
-    find_modules,
     get_module_by_name_prefix,
     move_to,
     nested_move_to,
@@ -2568,7 +2567,7 @@ class ParoQuantProcessor(LoopProcessor):
 
         module.weight.data = move_to(pack_weight, device=CPU)
         quant_linear_cls = self._resolve_qlinear_kernel(module.full_name)
-        layers = find_modules(model.model)
+        layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
 
         with log_time_block(
@@ -2595,11 +2594,12 @@ class ParoQuantProcessor(LoopProcessor):
                     init_kwargs=self.qcfg.quant_linear_init_kwargs(),
                 )
 
-        qmodules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [quant_linear_cls]).items()
-            if name == module.full_name
-        }
+        qmodule = model.model.get_submodule(module.full_name)
+        qmodules = (
+            {module.full_name: qmodule}
+            if isinstance(qmodule, quant_linear_cls)
+            else {}
+        )
         with log_time_block(
             "pack",
             logger=log,

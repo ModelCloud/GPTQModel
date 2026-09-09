@@ -33,7 +33,7 @@ from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
-from ..utils.model import create_quant_module, find_modules, pack_module
+from ..utils.model import create_quant_module, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import HAS_NPU
 
@@ -616,7 +616,7 @@ class GPTQProcessor(LoopProcessor):
         assert q_scales.device == CPU
         assert q_g_idx.device == CPU
 
-        layers = find_modules(model.model)
+        layers = {module.full_name: model.model.get_submodule(module.full_name)}
         module_label = getattr(module, "full_name", getattr(module, "name", ""))
         parent_key = getattr(module, "full_name", getattr(module, "name", None))
 
@@ -654,11 +654,12 @@ class GPTQProcessor(LoopProcessor):
             )
 
         # pack module
-        qModules = {
-            name: submodule
-            for name, submodule in find_modules(model.model, [model.qlinear_kernel, TorchQuantEmbeddings]).items()
-            if name == module.full_name
-        }
+        qmodule = model.model.get_submodule(module.full_name)
+        qModules = (
+            {module.full_name: qmodule}
+            if isinstance(qmodule, (model.qlinear_kernel, TorchQuantEmbeddings))
+            else {}
+        )
         pack_start = time.perf_counter() if timer is not None else None
         with log_time_block(
             "pack",
