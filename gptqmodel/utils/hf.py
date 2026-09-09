@@ -24,6 +24,7 @@ from transformers import (
     GenerationConfig,
     PreTrainedModel,
 )
+
 from ..nn_modules.qlinear.gguf import (
     PRISM_Q1_0_G128_BLOCK_SIZE,
     PRISM_Q1_0_G128_NAME,

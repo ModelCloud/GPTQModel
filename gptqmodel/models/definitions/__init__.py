@@ -99,8 +99,6 @@ from .qwen3_moe import Qwen3MoeQModel
 from .qwen3_vl import Qwen3_VLQModel
 from .qwen4_exp import Qwen4ExpQModel
 from .rw import RwgQModel
-from .solar_open import SolarOpenQModel
-from .solar_open2 import SolarOpen2QModel
 from .spark2_5 import Spark2_5QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel

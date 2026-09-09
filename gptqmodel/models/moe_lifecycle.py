@@ -17,13 +17,13 @@ import torch
 import torch.nn as nn
 
 from ..nn_modules.hooked_linear import StopForward
-from .moe_input_replay import RoutedMoEInputReplayAttachment
-from .moe_capture_streams import RoutedMoECaptureStreamAttachment
 from ..utils.device import get_device
 from ..utils.logger import setup_logger
 from ..utils.model import move_to
 from ..utils.python import has_gil_disabled
 from ..utils.torch import torch_sync
+from .moe_capture_streams import RoutedMoECaptureStreamAttachment
+from .moe_input_replay import RoutedMoEInputReplayAttachment
 
 
 log = setup_logger()

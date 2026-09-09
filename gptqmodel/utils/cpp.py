@@ -18,6 +18,7 @@ import threading
 import time
 import traceback
 
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
@@ -1513,6 +1514,18 @@ class TorchOpsJitExtension:
     def load(self) -> bool:
         """Load the extension while serializing cache mutation across processes."""
 
+        stable_abi_error = self._stable_abi_runtime_error()
+        if stable_abi_error:
+            self._load_attempted = True
+            self._load_result = False
+            self._last_error = stable_abi_error
+            return False
+
+        configured_prebuilt = self._configured_prebuilt_library()
+        if configured_prebuilt is not None:
+            with self._lock:
+                return self._load_configured_prebuilt_library(configured_prebuilt)
+
         lock_timeout_seconds = self._build_lock_timeout_seconds()
         with _cross_process_build_lock(
             self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
@@ -1532,21 +1545,6 @@ class TorchOpsJitExtension:
 
     def _load_unlocked(self) -> bool:
         """Load the extension from cache or JIT-compile it on first use."""
-
-        stable_abi_error = self._stable_abi_runtime_error()
-        if stable_abi_error:
-            self._load_attempted = True
-            self._load_result = False
-            self._last_error = stable_abi_error
-            return False
-
-        # This check intentionally precedes every build_root(), sources, and
-        # include-path callback. An explicit prebuilt artifact is authoritative:
-        # a missing or incompatible file must never silently trigger a source build.
-        configured_prebuilt = self._configured_prebuilt_library()
-        if configured_prebuilt is not None:
-            with self._lock:
-                return self._load_configured_prebuilt_library(configured_prebuilt)
 
         if self._load_attempted and self._load_result and not self.force_rebuild_enabled():
             return True
