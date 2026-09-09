@@ -138,10 +138,19 @@ def test_exclusive_blocks_shared_and_release_allows_both():
     allocator.release(shared_b.lease_id)
 
 
-def test_fifo_waiters_are_served_in_order():
+def test_fifo_waiters_are_served_in_order(monkeypatch):
     allocator = GPUAllocator(gpus=_fake_gpus(3), enable_ttl_janitor=False)
     blocker = allocator.allocate("session-blocker", count=3, timeout=0)
     results: List[object] = []
+    assignments = []
+    original_allocate = allocator._allocate_locked
+
+    def record_assignment(*args, **kwargs):
+        lease = original_allocate(*args, **kwargs)
+        assignments.append(lease.session_id)
+        return lease
+
+    monkeypatch.setattr(allocator, "_allocate_locked", record_assignment)
 
     def wait_for(count: int, timeout: float):
         try:
@@ -162,7 +171,9 @@ def test_fifo_waiters_are_served_in_order():
     t2.join(timeout=3.0)
     t1.join(timeout=3.0)
 
-    # First waiter needing 2 GPUs should be served before the 1-GPU waiter.
+    # Assignment is FIFO; notified worker threads may resume in either order.
+    assert assignments == ["session-2", "session-1"]
+    results.sort(key=lambda item: item[0], reverse=True)
     assert results[0] == (2, results[0][1])
     assert results[0][1] is not None and len(results[0][1].gpus) == 2
     assert results[1] == (1, results[1][1])
@@ -983,6 +994,35 @@ def test_allocator_manages_gpu_subset_only():
     with pytest.raises(TimeoutError):
         allocator.allocate("s2", count=1, timeout=0)
     allocator.shutdown()
+
+
+@pytest.mark.parametrize("timeout", [None, 2.0])
+def test_waiter_acquires_when_unleased_gpu_becomes_idle(timeout):
+    gpu = _fake_gpus(1)[0]
+    observed_busy = threading.Event()
+    idle = threading.Event()
+
+    def status():
+        busy = not idle.is_set()
+        if busy:
+            observed_busy.set()
+        return {gpu.pci_bus_id: (512 if busy else 0, 1024, 0)}
+
+    allocator = GPUAllocator(
+        gpus=[gpu], idle_memory_mib=100, gpu_status_checker=status,
+        gpu_status_interval=0.01, enable_ttl_janitor=False,
+    )
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            future = pool.submit(allocator.allocate, "idle-transition", 1, timeout)
+            assert observed_busy.wait(1)
+            idle.set()
+            lease = future.result(timeout=1)
+            assert lease.gpus == [gpu]
+            allocator.release(lease.lease_id)
+        finally:
+            idle.set()
+            allocator.shutdown()
 
 
 def test_allocator_skips_non_idle_gpu():
