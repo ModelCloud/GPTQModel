@@ -29,6 +29,7 @@ from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
@@ -271,11 +272,14 @@ class AWQProcessor(LoopProcessor):
     ) -> Dict[str, torch.Tensor]:
         """Snapshot scaled dense weights before AWQ clipping mutates them."""
 
-        if self.adjacent_model is None:
+        gsq = getattr(self.qcfg, "gsq", None)
+        if self.adjacent_model is None and not (gsq is not None and gsq.enabled):
             return {}
 
         references: Dict[str, torch.Tensor] = {}
         for name, named_module in named_linears.items():
+            if self.adjacent_model is None and not gsq_enabled_for(gsq, named_module.full_name):
+                continue
             linear_layer = self.resolve_quant_source_module(named_module)
             weight = getattr(linear_layer, "weight", None)
             if not isinstance(weight, torch.Tensor):
@@ -1880,8 +1884,8 @@ class AWQProcessor(LoopProcessor):
         self.apply_quant(
             named_childs,
             scales_list,
-            input_features=input_feat if self.adjacent_model is not None else None,
-            adjacent_references=adjacent_references if self.adjacent_model is not None else None,
+            input_features=input_feat if adjacent_references else None,
+            adjacent_references=adjacent_references if adjacent_references else None,
         )
 
         if fallback_named_childs:
@@ -2703,6 +2707,8 @@ class AWQProcessor(LoopProcessor):
                 original_cols = int(tp_info.get("original_columns", original_cols))
 
             weight_for_quant = linear_layer.weight.data
+            gsq = getattr(self.qcfg, "gsq", None)
+            use_gsq = gsq_enabled_for(gsq, named_module.full_name)
             if pad_cols:
                 pad = weight_for_quant.new_zeros(weight_for_quant.shape[0], pad_cols)
                 weight_for_quant = torch.cat((weight_for_quant, pad), dim=1)
@@ -2757,6 +2763,31 @@ class AWQProcessor(LoopProcessor):
                     config=self.adjacent_model,
                 )
                 self.adjacent_model.record(adjacent_stats)
+
+            if use_gsq:
+                gsq_inputs = None
+                if adjacent_context_supplied:
+                    if name not in adjacent_references or name not in input_features:
+                        raise RuntimeError(f"AWQ GSQ context is missing module `{named_module.full_name}`")
+                    teacher = adjacent_references[name].to(device=wq.device, dtype=torch.float32)
+                    gsq_inputs = input_features[name].reshape(-1, original_cols).to(wq.device)
+                    if pad_cols:
+                        teacher = torch.nn.functional.pad(teacher, (0, pad_cols))
+                        gsq_inputs = torch.nn.functional.pad(gsq_inputs, (0, pad_cols))
+                else:
+                    teacher = weight_for_quant.detach().float()
+                group_size = self.qcfg.group_size if self.qcfg.group_size > 0 else wq.shape[1]
+                groups = torch.arange(wq.shape[1], device=wq.device, dtype=torch.int32) // group_size
+                fitted = refine_affine_scalar(
+                    wq, scales, zeros, groups, target=teacher, bits=int(self.qcfg.bits), config=gsq,
+                    inputs=gsq_inputs, packing="awq_gemm",
+                    scale_dtype=scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16,
+                )
+                wq, scales, zeros = fitted.weight, fitted.scales, fitted.zeros
+                named_module.state["gsq_diagnostics"] = {
+                    "objective": "activation_mse" if gsq_inputs is not None else "weight_mse",
+                    "before": fitted.before, "after": fitted.after, "learn_scales": gsq.learn_scales,
+                }
 
             if pad_cols:
                 wq = wq[:, :original_cols]
@@ -2829,6 +2860,7 @@ class AWQProcessor(LoopProcessor):
             )
             retained_samples = self._feature_nsamples_for_log(scale_stat)
             stat = {
+                "gsq": named_module.state.get("gsq_diagnostics"),
                 PROCESS_LOG_NAME: self.name(),
                 PROCESS_LOG_LAYER: named_module.layer_index,
                 PROCESS_LOG_MODULE: named_module.name,

@@ -103,6 +103,7 @@ class WeightOnlyProcessor(LoopProcessor):
         if device is not None:
             qcfg_clone.device = device
 
+        gsq_diagnostics = None
         if self._uses_direct_pack(qcfg_clone):
             start_time = time.time()
             duration = time.time() - start_time
@@ -112,6 +113,9 @@ class WeightOnlyProcessor(LoopProcessor):
         else:
             task = RTN(module=module, qcfg=qcfg_clone)
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
+            gsq_diagnostics = getattr(task, "gsq_diagnostics", None)
+            if gsq_diagnostics is not None:
+                module.state["gsq_diagnostics"] = gsq_diagnostics
 
             module.stream_state_payload_to_cpu(
                 {
@@ -135,6 +139,7 @@ class WeightOnlyProcessor(LoopProcessor):
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
             "lifecycle": "weight_only",
+            "gsq": gsq_diagnostics,
         }
 
         with self.lock:

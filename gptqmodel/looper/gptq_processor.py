@@ -1586,6 +1586,9 @@ class GPTQProcessor(LoopProcessor):
                 )
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
+        if gsq_diagnostics is not None:
+            module.state["gsq_diagnostics"] = gsq_diagnostics
 
         # Crash early if a module loses calibration samples; this regressed
         # before when MoE down_proj modules were reported with 0 samples.
@@ -1690,6 +1693,7 @@ class GPTQProcessor(LoopProcessor):
             loss_display = f"{avg_loss:.10f}" if isinstance(avg_loss, (int, float)) else "unknown"
 
         stat = {
+            "gsq": gsq_diagnostics,
             PROCESS_LOG_NAME:  self.name(),
             PROCESS_LOG_LAYER: module.layer_index,
             PROCESS_LOG_MODULE: module.name,

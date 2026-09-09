@@ -53,6 +53,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
+from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -2465,6 +2466,54 @@ class GPTQ:
 
     @torch.inference_mode()
     def quantize(
+            self,
+            blocksize=128,
+    ):
+        config = getattr(self.qcfg, "gsq", None)
+        module_name = self._named_module.full_name if self._named_module is not None else self.name
+        if getattr(self, "_gsq_active", False) or not gsq_enabled_for(config, module_name):
+            return self._quantize_impl(blocksize=blocksize)
+
+        start = time.time()
+        target = self.clone_module()
+        # Preserve the original-column calibration metric before GPTQ consumes,
+        # permutes, damps or releases it. Embeddings keep a diagonal metric.
+        hessian = self.finalize_hessian(target_device=target.device)
+        if isinstance(self.module, nn.Embedding):
+            hessian = self._H_diag
+        hessian = None if hessian is None else hessian.detach().clone()
+        self._gsq_active = True
+        try:
+            result = self._quantize_impl(blocksize=blocksize)
+        finally:
+            self._gsq_active = False
+        weight, scales, zeros, groups, duration, avg_loss, damp, samples = result
+        canonical = weight
+        if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
+            canonical = canonical.T
+        elif isinstance(self.module, _ConvNd):
+            canonical = canonical.flatten(1)
+        width = canonical.shape[1]
+        if hessian is not None:
+            hessian = hessian[:width] if hessian.ndim == 1 else hessian[:width, :width]
+        fitted = refine_affine_scalar(
+            canonical, scales.to(weight.device), zeros.to(weight.device), groups.to(weight.device),
+            target=target[:, :width].to(weight.device), bits=self.qcfg.bits, config=config,
+            hessian=hessian,
+        )
+        refined = fitted.weight
+        if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
+            refined = refined.T
+        self.gsq_diagnostics = {
+            "objective": "calibration_hessian" if hessian is not None else "weight_mse",
+            "before": fitted.before, "after": fitted.after, "learn_scales": config.learn_scales,
+        }
+        return (refined.reshape(weight.shape).contiguous(), fitted.scales.to(scales.device),
+                fitted.zeros.to(zeros.device), fitted.g_idx.to(groups.device),
+                time.time()-start, avg_loss, damp, samples)
+
+    @torch.inference_mode()
+    def _quantize_impl(
             self,
             blocksize=128,
     ):

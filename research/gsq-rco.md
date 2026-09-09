@@ -16,6 +16,9 @@ measurements. No author code was copied into the experiment below.
 
 ## QVQ adaptation and implementation status
 
+The broader [scalar lifecycle work and compatibility inventory](../docs/experiments/gsq-scalar-lifecycle.md)
+tracks GPTQ, AWQ, RTN and remaining method adapters separately from QVQ results.
+
 Current public integration: [optional GSQ lifecycle](../docs/experiments/gsq-qvq-lifecycle.md),
 covering P32 W1–W3.5 and ordinary non-banked V2/L16 W4–W8, including half-bit
 rates. The default is disabled. The initial P32 research and historical evidence
