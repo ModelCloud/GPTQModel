@@ -282,7 +282,15 @@ Required follow-up validation remains open:
   trip, packing, strict packed-state reload and Torch forward. Four CPU cases
   pass (3.31 seconds), covering fixed and learned scales; decoded weights and
   outputs remain exactly zero. These are regression fixtures, not quality evidence.
-- Force a non-baseline QVQ tile choice through quantization, packing and reload.
+- Completed: force a non-baseline QVQ tile choice through quantization, packing
+  and reload at W2.5 P32 and ordinary W4/W8. A reachable teacher is injected
+  into the real candidate optimizer; each case must improve its fixture score,
+  change a tile, and preserve the selected decoded inner weights. Native
+  forward after strict tensor reload passes the mean 0.002/max 0.046875 gates.
+  Three GPU tests pass on physical GPU 0, PG506-230 SM80 (UUID
+  `GPU-737e2423-874a-23a4-1126-dfbe3e77c294`) after three idle samples.
+  This is injected-teacher export correctness, not measured model recovery.
+  See `artifacts/gsq-p32/forced-lifecycle-gpu.txt`.
 - Compare GSQ with deterministic search over exactly the same candidate pool on
   matched real-model calibration and disjoint held-out data.
 - Evaluate an evolving/multi-bit candidate search separately; current unchanged

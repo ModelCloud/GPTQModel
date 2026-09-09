@@ -81,3 +81,48 @@ def test_gsq_low_level_rejects_unsupported(overrides, match):
                   output_hessian=torch.eye(16, device="cuda"), gsq=GSQConfig(enabled=True)) | overrides
     with pytest.raises(ValueError, match=match):
         quantize_qvq_linear(torch.eye(16, device="cuda"), torch.eye(16, device="cuda"), **kwargs)
+
+
+@pytest.mark.parametrize("bits", [2.5, 4, 8])
+def test_forced_nonbaseline_optimizer_choice_survives_lifecycle(bits, monkeypatch):
+    """Injected reachable teacher tests export plumbing, not recovery quality."""
+    import gptqmodel.quantization.qvq_gsq as fitter
+
+    original = fitter.refine_trellis_candidates
+    selected = {}
+
+    def reachable_teacher(candidates, **kwargs):
+        adapter = fitter.TrellisCandidateAdapter(kwargs["layout"], bits, kwargs["codebook_version"])
+        k, n = kwargs["target"].shape
+        kwargs["target"] = adapter.inner(candidates[1], k, n, kwargs["bank_ids"], kwargs["bank_alt_id"])
+        result = original(candidates, **kwargs)
+        assert result.calibration_after < result.calibration_before
+        assert not torch.equal(result.words, candidates[0])
+        selected["inner"] = adapter.inner(result.words, k, n, kwargs["bank_ids"], kwargs["bank_alt_id"])
+        return result
+
+    monkeypatch.setattr(fitter, "refine_trellis_candidates", reachable_teacher)
+    rng = torch.Generator(device="cuda").manual_seed(7)
+    weight = torch.randn(16, 32, generator=rng, device="cuda") * 0.1
+    p32 = bits == 2.5
+    result = quantize_qvq_linear(
+        weight, torch.eye(32, device="cuda"), bits=bits, output_hessian=torch.eye(16, device="cuda"),
+        rounding="yaqa", v2b2_p32=p32, bank_count=2 if p32 else 1, seed=7,
+        gsq=GSQConfig(enabled=True, candidates=2, steps=100, learning_rate=1.0))
+    assert result.gsq_diagnostics["changed_tiles"] > 0
+    assert torch.equal(result.inner_weight, selected["inner"])
+    tensors = result.serialized_tensors()
+    buffer = io.BytesIO()
+    torch.save(tensors, buffer)
+    buffer.seek(0)
+    restored = torch.load(buffer, weights_only=True)
+    assert all(torch.equal(value, restored[name]) for name, value in tensors.items())
+    layer = QVQLinear(bits=bits, in_features=32, out_features=16, tensors=restored,
+                      dtype=torch.float32, out_dtype=torch.float32, v2b2_p32=p32,
+                      bank_count=2 if p32 else 1).eval()
+    x = torch.randn(48, 32, generator=rng, device="cuda")
+    actual, expected = layer(x), x @ result.weight.T
+    delta = (actual - expected).abs()
+    assert torch.isfinite(actual).all()
+    assert delta.mean() <= 2e-3
+    assert delta.max() <= 0.046875
