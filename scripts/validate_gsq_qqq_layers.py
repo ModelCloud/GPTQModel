@@ -120,7 +120,7 @@ def execute(args):
             kwargs = dict(bits=4, group_size=args.group_size, sym=True, desc_act=False,
                           in_features=in_features, out_features=out_features, bias=False)
             reference = QQQTorchLinear(**kwargs)
-            reference.pack(layer.cpu(), scales.cpu(), extra.cpu())
+            reference.pack(layer.cpu(), scales.cpu(), None if extra is None else extra.cpu())
             path = args.output / f"{name}.{arm}.pt"
             torch.save(reference.state_dict(), path)
             state = torch.load(path, weights_only=True)

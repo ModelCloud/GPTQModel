@@ -55,6 +55,48 @@ python -m gpu_allocator.cli run -n 1 --style uuid -- \
 and the executed runner/native logs are retained in that experiment directory.
 Large packed tensors remain workspace artifacts. This selected-projection run
 is not a complete model snapshot and is not published under the model snapshot
-root. Full-model KL/Top-K propagation with QQQ activation quantization,
-channelwise real-model validation, other layers and remaining compatible GSQ
-methods remain open. Defaults remain disabled and the PR remains draft.
+root. Defaults remain disabled and the PR remains draft.
+
+## Final-logit propagation with native QQQ activation quantization
+
+A separate run regenerated dense FP32 teacher logits, installed the existing
+F6 snapshot through its canonical FP32 QVQ reference operators, then evaluated
+the native QQQ Q/K/V payloads for both arms. QQQ activation quantization and
+output casting remain active. Each arm uses the same 32 held-out documents /
+6367 tokens. All 32 baseline/GSQ final-logit SHA256s match exactly.
+
+| Arm | Teacher-to-candidate KL | Logit MSE | Top-1 | Top-5 | Top-10 |
+|---|---:|---:|---:|---:|---:|
+| F6 control | 0.1081267801 | 0.4404727656 | 0.8548767080 | 0.8303125491 | 0.8292602482 |
+| F6 + baseline QQQ QKV | 0.1116840904 | 0.4584124394 | 0.8503219727 | 0.8276425318 | 0.8272655882 |
+| F6 + fixed GSQ QQQ QKV | 0.1116840904 | 0.4584124394 | 0.8503219727 | 0.8276425318 | 0.8272655882 |
+
+GSQ-versus-baseline paired document deltas are exactly zero for every metric;
+there is no recovery gain in this run. The difference from the F6 control is
+the effect of substituting QQQ W4A8 for those three projections, not a GSQ
+effect or a controlled ranking of quantization methods. Top-5/10 are set
+overlap divided by K; these agreements are not labeled task accuracy.
+
+The [propagation report](../../artifacts/gsq-qqq/propagation-seed7-v2/report.json)
+binds model inputs, payloads, source implementations, and per-document teacher
+and candidate hashes. The executed runner and GPU log are archived beside it.
+`scripts/validate_gsq_qqq_propagation.py --prepare --layers LAYER_OUTPUT --output NEW_OUTPUT`
+prepares the run; execute the same command without `--prepare` through the GPU
+allocator. This validates full-model propagation with selected native QQQ
+operators, not a complete native QQQ model export. Other layers, broader
+channelwise validation and the remaining compatible GSQ methods remain open.
+
+## Channelwise real-layer validation
+
+The same real Q/K/V inputs also pass the local lifecycle with group size -1,
+using the channelwise signed-nibble packing mode. All 192 native/reference
+checks pass; worst mean drift is 6.8918e-8 and worst maximum drift is 0.00390625.
+The independent packed objectives match diagnostics, and all baseline/GSQ
+packed tensors are exactly equal. Held-out MSE for both arms is Q=0.0036845084,
+K=0.0076688737 and V=0.0002162909. No recovery gain is established.
+
+The [channelwise report](../../artifacts/gsq-qqq/real-qkv-channelwise-seed7-v2/report.json)
+and payload audit preserve these results. The runner now accepts the absent
+extra group-scale tensor in this mode. The earlier harness failure on that
+`None` tensor is archived alongside the successful run. Channelwise full-model
+propagation and complete native exports remain unverified.
