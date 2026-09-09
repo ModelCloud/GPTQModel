@@ -54,3 +54,48 @@ def paro_gsq_basis(weight, inputs, pairs, theta, channel_scales, *, group_size, 
     if not torch.isfinite(transformed_teacher).all() or not torch.isfinite(transformed_inputs).all():
         raise ValueError("Paro GSQ transformed reconstruction problem is nonfinite")
     return transformed_teacher, transformed_inputs
+
+
+def refine_paro_export(result, *, teacher, inputs, group_size, config=None, storage_dtype=torch.float16):
+    """Fit the affine grid after rotation export; return tensors and diagnostics.
+
+    The returned dictionary deliberately excludes initializer train/validation
+    losses: callers must not relabel those as post-GSQ losses. Rotation metadata
+    remains owned by ``result``. This low-level adapter is not processor wiring.
+    """
+    from .config import normalize_gsq_config
+    from .gsq_scalar import affine_codes, refine_affine_scalar
+    from .paroquant.optimization import _apply_inverse_rotation
+
+    config = normalize_gsq_config(config)
+
+    def retained(before=None, after=None, history=None):
+        return dict(pack_weight=result.pack_weight.clone(), pseudo_weight=result.pseudo_weight.clone(),
+                    q_scales=result.q_scales.clone(), q_zeros=result.q_zeros.clone(),
+                    before=before, after=after, history=[] if history is None else history)
+
+    if config is None or not config.enabled:
+        return retained()
+    if storage_dtype not in (torch.float16, torch.bfloat16):
+        raise ValueError("Paro GSQ fitting requires FP16 or BF16 exported metadata")
+    target, features = paro_gsq_basis(teacher, inputs, result.pairs, result.theta,
+                                     result.channel_scales, group_size=group_size, storage_dtype=storage_dtype)
+    width = teacher.shape[1]
+    group = width if group_size == -1 else group_size
+    groups = torch.arange(width, device=teacher.device) // group
+    fitted = refine_affine_scalar(
+        result.pack_weight.to(storage_dtype), result.q_scales.to(storage_dtype), result.q_zeros, groups,
+        target=target, bits=4, config=config, inputs=features, packing="awq_gemm", scale_dtype=storage_dtype)
+    if fitted.after >= fitted.before:
+        return retained(fitted.before, fitted.after, fitted.history)
+    # Replay must use the actual packed grid, not merely the floating transport
+    # weights: export casts can otherwise desynchronize replay and inference.
+    codes = affine_codes(fitted.weight, fitted.scales, fitted.zeros, groups, 4,
+                         packing="awq_gemm", scale_dtype=storage_dtype)
+    packed_grid = fitted.scales.to(storage_dtype).float()[:, groups] * (codes.float() - fitted.zeros[:, groups].float())
+    angles = result.theta.to(storage_dtype).float()
+    channel = result.channel_scales.to(storage_dtype).float()
+    pseudo = _apply_inverse_rotation(packed_grid, result.pairs, angles,
+                                     group_size=group, fused_rotation=False) * channel.reshape(-1)
+    return dict(pack_weight=fitted.weight, pseudo_weight=pseudo, q_scales=fitted.scales, q_zeros=fitted.zeros,
+                before=fitted.before, after=fitted.after, history=fitted.history)

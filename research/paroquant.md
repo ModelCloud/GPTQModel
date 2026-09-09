@@ -49,7 +49,17 @@ and input nonmutation; invalid/nonrepresentable scales and overlapping pairs
 are rejected. These are algebra/corner-case checks, not model-quality evidence
 or native transform parity.
 
-Remaining work: bind the export-aware affine fitter to ParoQuant result export,
+`refine_paro_export` now fits the frozen transformed-domain affine grid with
+the AWQ export-aware scalar fitter. It supports fixed or learned group scales,
+keeps rotation metadata untouched, and reconstructs replay weights from the
+actual packed grid. Controlled improving-candidate fixtures pass through the
+real AWQ CPU packer and independently reproduce the original-domain objective.
+Disabled and exact-baseline cases preserve the original export tensors. The
+low-level result deliberately leaves initializer train/validation diagnostics
+separate from the GSQ before/after objective. No real-model gain or native
+ParoQuant lifecycle support is established by these fixtures.
+
+Remaining work: bind this fitter to ParoQuant processor result export,
 preserve both transformed packing weights and inverse-transformed replay weights,
 carry diagnostics, add an optional default-disabled ParoConfig control, verify
 packing/reload/native rotation execution, and run real calibrated layers.
