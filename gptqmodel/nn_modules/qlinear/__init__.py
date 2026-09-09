@@ -36,6 +36,33 @@ from ...utils.safe import THREADPOOLCTL
 log = setup_logger()
 
 
+def input_rows(x: t.Tensor) -> int:
+    """Return the number of logical Linear rows in an arbitrary-rank input.
+
+    Linear treats every dimension before the final feature dimension as a
+    batch dimension, so a 4D input has ``B * S * T`` matrix rows.
+    """
+
+    if x.ndim == 0:
+        raise ValueError("Linear input must have at least one dimension")
+    return math.prod(x.shape[:-1])
+
+
+def empty_linear_output(x: t.Tensor, out_features: int) -> t.Tensor:
+    """Allocate an empty Linear output while preserving rank, dtype, device."""
+
+    shape = x.shape[:-1] + (out_features,)
+    if x.requires_grad:
+        # Keep the empty path connected to the input so callers can backprop
+        # through an empty batch just like through nn.Linear (with zero grad).
+        return x.sum(dim=-1, keepdim=True).expand(shape) * 0
+    return t.empty(
+        shape,
+        dtype=x.dtype,
+        device=x.device,
+    )
+
+
 # Packed quantized weights are unpacked through shift operations in several
 # kernels. Keep those shifts behind helpers so Ascend 910B/CANN 9.1 beta can use
 # arithmetic equivalents for operators that torch-npu does not expose as native
@@ -216,6 +243,22 @@ class BaseQuantLinear(nn.Module):
 
         buffers = self.list_buffers()
         return buffers[0].device if buffers else None
+
+    def input_rows(self, x: t.Tensor) -> int:
+        return input_rows(x)
+
+    def empty_linear_output(self, x: t.Tensor) -> t.Tensor:
+        """Return an empty output for any-rank Linear input.
+
+        Applying an adapter is intentional: it preserves the same composition
+        semantics as the non-empty path while still avoiding a native M=0
+        kernel launch. Bias addition has no observable effect for zero elements.
+        """
+
+        out = empty_linear_output(x, self.out_features)
+        if self.adapter is not None:
+            out = self.adapter.apply(x=x, out=out)
+        return out
 
     def smooth_block_size(self) -> int:
         return -1

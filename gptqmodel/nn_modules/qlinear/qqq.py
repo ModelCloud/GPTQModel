@@ -413,8 +413,8 @@ class QQQLinear(GroupedQuantLinear):
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
-        if A.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
+        if self.input_rows(A) == 0:
+            return self.empty_linear_output(A)
 
         A_dtype = A.dtype
         # qqq is float16 kernel only
@@ -520,8 +520,8 @@ class QQQTorchLinear(QQQLinear):
         return weight, s_channel
 
     def forward(self, A):
-        if A.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
+        if self.input_rows(A) == 0:
+            return self.empty_linear_output(A)
 
         A_dtype = A.dtype
         if A.dtype != torch.float16:
