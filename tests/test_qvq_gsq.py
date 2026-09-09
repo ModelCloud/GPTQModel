@@ -219,3 +219,42 @@ def test_shared_pool_preserves_historical_draws(words):
     for candidate in xor:
         for tile in candidate:
             assert sum(int(word).bit_count() for word in tile) == 1
+
+
+@pytest.mark.parametrize("bits,layout", [(2.5, "p32_window"), (4, "qvq_planar"), (8, "qvq_planar")])
+def test_deterministic_fisher_search_matches_full_recomputation(bits, layout):
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, deterministic_trellis_candidates
+
+    rng = torch.Generator().manual_seed(71)
+    candidates = torch.randint(-(2**31), 2**31 - 1, (3, 4, int(bits * 8)),
+                               generator=rng, dtype=torch.int32)
+    bank = torch.zeros(4, dtype=torch.uint8) if layout == "p32_window" else None
+    alt = torch.tensor([1]) if bank is not None else None
+    adapter = TrellisCandidateAdapter(layout, bits)
+    decoded = torch.stack([adapter.inner(c, 32, 32, bank, alt) for c in candidates])
+    target = decoded[1] * 0.6 + decoded[2] * 0.4
+    x = torch.randn(40, 32, generator=rng)
+    right = torch.randn(32, 32, generator=rng)  # deliberately couples output blocks
+    result = deterministic_trellis_candidates(candidates, target=target, inputs=x, right_factor=right,
+                                              bits=bits, layout=layout, bank_ids=bank, bank_alt_id=alt, sweeps=2)
+    current = decoded[0].clone()
+    choices = torch.zeros(4, dtype=torch.long)
+    def loss(weight):
+        return (x @ (weight - target) @ right).square().sum()
+    for _ in range(2):
+        for tile in range(4):
+            ib, jb = divmod(tile, 2)
+            i, j = slice(16 * ib, 16 * (ib + 1)), slice(16 * jb, 16 * (jb + 1))
+            costs = []
+            for index in range(3):
+                trial = current.clone()
+                trial[i, j] = decoded[index, i, j]
+                costs.append(loss(trial))
+            best = int(torch.stack(costs).argmin())
+            if costs[best] < loss(current):
+                current[i, j] = decoded[best, i, j]
+                choices[tile] = best
+    assert torch.equal(result.choices, choices)
+    assert torch.equal(result.words, candidates[choices, torch.arange(4)])
+    assert result.calibration_after < result.calibration_before
+    assert result.calibration_after == pytest.approx(float(loss(current) / (x @ target @ right).square().sum()), rel=1e-5)

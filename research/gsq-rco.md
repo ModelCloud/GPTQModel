@@ -311,3 +311,18 @@ a dense output Fisher factor: those blocks are coupled by that metric. A
 prepared-Fisher deterministic comparison must evaluate updates with the same
 right factor as GSQ, as well as sharing this exact candidate pool. That extension
 and the real-model comparison remain pending.
+
+`deterministic_trellis_candidates` now provides sequential coordinate descent
+on the frozen pool using both Fisher factors. With H = X.T X, G = R R.T and
+E = Wcandidate - Wteacher, a tile update D changes unnormalized loss by
+`2 <(H E G)[tile], D> + <H_ii D G_jj, D>`. The maintained metric residual
+is updated after each tile, so dense output-block coupling is included. Full
+objective recomputation after each sweep retains the best hard payload,
+including the baseline. This is a local deterministic search, not a global
+optimum and not a matched compute-budget claim.
+
+Tests compare every final choice and score against a separate brute-force
+full-objective implementation at W2.5 P32 and W4/W8 planar with dense random
+output factors. The QVQ CPU suite reports 36 passed (3.97 seconds). The comparator
+still needs experiment integration and measured real-model comparisons; these
+synthetic algebra fixtures do not establish recovery quality or GPU speed.

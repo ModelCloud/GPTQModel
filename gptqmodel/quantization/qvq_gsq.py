@@ -266,3 +266,67 @@ def refine_p32_candidates(candidates, **kwargs) -> GSQResult:
 def refine_p32_fisher(baseline, **kwargs) -> GSQResult:
     """Backward-compatible P32 Fisher entry point."""
     return refine_trellis_fisher(baseline, layout="p32_window", **kwargs)
+
+
+@torch.no_grad()
+def deterministic_trellis_candidates(candidates, *, target, inputs, right_factor,
+                                      bits, layout, bank_ids=None, bank_alt_id=None,
+                                      codebook_version=PGC16_CODEBOOK_VERSION, sweeps=3):
+    """Sequential hard coordinate search on the same frozen GSQ candidate pool.
+
+    For a tile update D, the unnormalized Fisher loss change is
+    2 <(H E G)[tile], D> + <H_ii D G_jj, D>. Maintain H E G after
+    every accepted tile, so dense output-block coupling is retained.
+    Full objective recomputation guards each sweep against accumulated drift.
+    This is a deterministic comparator, not a globally optimal search.
+    """
+    if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 1:
+        raise ValueError("deterministic GSQ comparator requires positive integer sweeps")
+    adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
+    if target.ndim != 2 or target.shape[0] % 16 or target.shape[1] % 16:
+        raise ValueError("deterministic GSQ target must have tile-aligned [K,N] shape")
+    k, n = target.shape
+    if candidates.ndim != 3 or candidates.shape[1] != k * n // 256 or candidates.dtype != torch.int32:
+        raise ValueError("deterministic GSQ candidates must be int32 [choices,tiles,words]")
+    if inputs.ndim != 2 or inputs.shape[1] != k or right_factor.shape != (n, n):
+        raise ValueError("deterministic GSQ factors must match target dimensions")
+    if any(t.device != candidates.device or not t.is_floating_point() or not torch.isfinite(t).all()
+           for t in (target, inputs, right_factor)):
+        raise ValueError("deterministic GSQ target/factors must be finite floating tensors on the candidate device")
+    x, right, teacher = inputs.float(), right_factor.float(), target.float()
+    h, g = x.T @ x, right @ right.T
+    values = torch.stack([adapter.decode(c, bank_ids, bank_alt_id) for c in candidates]).reshape(
+        candidates.shape[0], candidates.shape[1], 16, 16)
+    current = adapter.inner(candidates[0], k, n, bank_ids, bank_alt_id)
+    choices = torch.zeros(candidates.shape[1], device=candidates.device, dtype=torch.long)
+    normalizer = (x @ teacher @ right).square().mean().clamp_min(torch.finfo(torch.float32).tiny)
+
+    def score(weight):
+        return float((x @ (weight - teacher) @ right).square().mean() / normalizer)
+
+    before = score(current)
+    if not math.isfinite(before):
+        raise ValueError("non-finite deterministic GSQ baseline objective")
+    best, best_choices, history = before, choices.clone(), [before]
+    for _ in range(sweeps):
+        metric_error = h @ (current - teacher) @ g
+        for tile in range(candidates.shape[1]):
+            ib, jb = divmod(tile, n // 16)
+            i, j = slice(ib * 16, (ib + 1) * 16), slice(jb * 16, (jb + 1) * 16)
+            delta = values[:, tile] - current[i, j]
+            cost = 2 * (delta * metric_error[i, j]).sum((1, 2))
+            cost += (torch.matmul(torch.matmul(h[i, i], delta), g[j, j]) * delta).sum((1, 2))
+            selected = int(cost.argmin())
+            if float(cost[selected]) < 0:
+                update = delta[selected]
+                current[i, j] = values[selected, tile]
+                choices[tile] = selected
+                metric_error += h[:, i] @ update @ g[j, :]
+        value = score(current)
+        if not math.isfinite(value):
+            raise ValueError("non-finite deterministic GSQ hard objective")
+        history.append(value)
+        if value < best:
+            best, best_choices = value, choices.clone()
+    tile_ids = torch.arange(candidates.shape[1], device=candidates.device)
+    return GSQResult(candidates[best_choices, tile_ids].clone(), best_choices, before, best, history)
