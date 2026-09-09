@@ -161,20 +161,28 @@ def test_capture_uses_thread_local_batch_ids_under_parallel_replay():
     assert not module._forward_pre_hooks
 
 
-@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
-def test_paired_capture_to_group_export_lifecycle(scope, monkeypatch):
+def _run_paired_group_lifecycle(scope, actual_initializer, monkeypatch, width=32, outputs=8, group=16):
     import threading
     from gptqmodel.looper.named_module import NamedModule
     from gptqmodel.looper.paroquant_processor import ParoQuantProcessor
     from gptqmodel.quantization.config import ParoConfig
     from gptqmodel.quantization.paroquant.optimization import ParoQuantOptimizationResult
+    from gptqmodel.looper.input_cache import InputCache
+    from types import SimpleNamespace
 
     processor = object.__new__(ParoQuantProcessor)
-    processor.qcfg = ParoConfig(group_size=16, opt_scope=scope, offload_to_disk=False,
+    processor.qcfg = ParoConfig(group_size=group, opt_scope=scope, offload_to_disk=False,
                                 opt_train_samples=64, opt_validation_samples=16,
                                 gsq={'enabled': True, 'steps': 80, 'learning_rate': .2})
     # Internal integration probe while the public configuration remains guarded.
     processor.qcfg.opt_train_on_noisy_inputs = True
+    processor.qcfg.opt_rotation_epochs = 1
+    processor.qcfg.opt_finetune_epochs = 1
+    processor.qcfg.opt_fused_rotation = False
+    processor.qcfg.opt_stage_cudagraph = False
+    processor.qcfg.krot = 1
+    processor.gptq_model = SimpleNamespace(support_batch_quantize=True)
+    processor._batch_tls = threading.local()
     processor.lock = threading.Lock()
     processor._layer_states_lock = threading.Lock()
     processor._layer_states = {}
@@ -186,12 +194,16 @@ def test_paired_capture_to_group_export_lifecycle(scope, monkeypatch):
     processor._validation_calibration_batch_count = 1
     batch = [0]
     processor.current_batch_index = lambda: batch[0]
-    layer = torch.nn.Sequential(torch.nn.Linear(32, 8, bias=False, dtype=torch.float16))
+    class Layer(torch.nn.Sequential):
+        def forward(self, x, attention_mask=None, position_ids=None, use_cache=False):
+            return self[0](x)
+
+    layer = Layer(torch.nn.Linear(width, outputs, bias=False, dtype=torch.float16))
     layer[0].weight.data.fill_(.125)
     module = NamedModule(layer[0], '0', 'model.layers.0.q_proj', 0)
     module.state['module_tree_flags'] = frozenset({'q'})
     rng = torch.Generator().manual_seed(7)
-    noisy = [torch.randn(1, rows, 32, generator=rng).half() for rows in (64, 16)]
+    noisy = [torch.randn(1, rows, width, generator=rng).half() for rows in (64, 16)]
     clean = [x * 1.2 for x in noisy]
     processor.receive_pristine_layer_module(layer_index=0, layer_module=layer)
     with processor.pristine_quant_input_capture(layer_index=0):
@@ -200,8 +212,11 @@ def test_paired_capture_to_group_export_lifecycle(scope, monkeypatch):
             layer(x)
     state = processor._get_layer_state(0)
     state.modules = {'0': module}
+    state.layer_module = layer
     state.layer_inputs = [[x] for x in noisy]
-    state.layer_outputs = [[layer(x)] for x in clean]
+    state.layer_outputs = [[layer(x).detach()] for x in clean]
+    processor.inputs_cache = InputCache(layer_inputs=state.layer_inputs, layer_input_kwargs=[{}, {}],
+                                         position_ids=[None, None], attention_masks=[None, None])
     processor.tasks['0'] = {'inputs': [], 'batch_indices': [], 'layer_index': 0}
     hook = layer[0].register_forward_hook(processor.pre_process_fwd_hook('0'))
     try:
@@ -211,16 +226,19 @@ def test_paired_capture_to_group_export_lifecycle(scope, monkeypatch):
     finally:
         hook.remove()
     baseline = ParoQuantOptimizationResult(
-        pseudo_weight=torch.zeros(8, 32), pack_weight=torch.zeros(8, 32).half(),
-        q_scales=torch.full((8, 2), .125).half(), q_zeros=torch.full((8, 2), 8.),
-        pairs=torch.empty(0, 32, dtype=torch.int16), theta=torch.empty(0, 16),
-        channel_scales=torch.ones(32), train_loss=3., val_loss=4., used_identity=True)
-    monkeypatch.setattr(processor, '_optimize_group', lambda state, modules: ({'0': baseline}, 4.))
+        pseudo_weight=torch.zeros(outputs, width), pack_weight=torch.zeros(outputs, width).half(),
+        q_scales=torch.full((outputs, width // group), .125).half(), q_zeros=torch.full((outputs, width // group), 8.),
+        pairs=torch.empty(0, width, dtype=torch.int16), theta=torch.empty(0, width // 2),
+        channel_scales=torch.ones(width), train_loss=3., val_loss=4., used_identity=True)
+    if not actual_initializer:
+        monkeypatch.setattr(processor, '_optimize_group', lambda state, modules: ({'0': baseline}, 4.))
     monkeypatch.setattr(processor, '_log_quant_result', lambda *args: None)
     original = module.weight.detach().float().clone()
     processor._quantize_layer(0, state)
     stats = module.state['gsq_diagnostics']
-    assert stats['after'] < stats['before']
+    assert stats['after'] <= stats['before']
+    if not actual_initializer:
+        assert stats['after'] < stats['before']
     assert stats['objective'] == 'asymmetric_transformed_quadratic_without_constant'
     actual = noisy[0].float() @ module.weight.float().T
     target = clean[0].float() @ original.T
@@ -228,3 +246,60 @@ def test_paired_capture_to_group_export_lifecycle(scope, monkeypatch):
     assert state.quantized and state.gsq_clean_inputs is None
     assert not any(key.startswith('gsq_') for key in processor.tasks['0'])
     assert not layer[0]._forward_pre_hooks and not layer[0]._forward_hooks
+
+    return module
+
+
+@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
+@pytest.mark.parametrize('actual_initializer', [False, True])
+def test_paired_capture_to_group_export_lifecycle(scope, actual_initializer, monkeypatch):
+    _run_paired_group_lifecycle(scope, actual_initializer, monkeypatch)
+
+
+@pytest.mark.parametrize('scope', ['layer', 'compute_block'])
+def test_paired_group_native_reload_and_graph(scope, monkeypatch, tmp_path):
+    import os
+    if not os.environ.get('GPU_ALLOCATOR_LEASE_ID'):
+        pytest.skip('Requires exclusive GPU allocator lease')
+    from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
+
+    module = _run_paired_group_lifecycle(scope, True, monkeypatch, width=128, outputs=128, group=128)
+    state = module.state
+    kwargs = dict(bits=4, group_size=128, sym=True, desc_act=False, in_features=128,
+                  out_features=128, bias=False, register_buffers=True, krot=1)
+    packed = ParoLinear(**kwargs)
+    transport = torch.nn.Linear(128, 128, bias=False, dtype=torch.float16)
+    transport.weight.data.copy_(state['pack_weight'])
+    packed.pack(transport, state['q_scales'], state['q_zeros'])
+    packed.pairs.copy_(state['pairs'])
+    packed.theta.copy_(state['theta'])
+    packed.channel_scales.copy_(state['channel_scales'].reshape_as(packed.channel_scales))
+    path = tmp_path / 'paired.pt'
+    torch.save(packed.state_dict(), path)
+    restored = ParoLinear(**kwargs)
+    restored.load_state_dict(torch.load(path, weights_only=True), strict=True)
+    assert all(torch.equal(value, restored.state_dict()[key]) for key, value in packed.state_dict().items())
+    restored = restored.cuda().eval()
+    restored.post_init()
+    rng = torch.Generator().manual_seed(7)
+    x = torch.randn(17, 128, generator=rng).half().cuda()
+    reference_weight = module.weight.detach().float().cuda()
+
+    def check(output):
+        delta = (output.float() - x.float() @ reference_weight.T).abs()
+        assert torch.isfinite(output).all()
+        assert delta.mean() <= .002 and delta.max() <= .046875
+        print('PAIRED_GROUP_NATIVE', scope, float(delta.mean()), float(delta.max()), flush=True)
+
+    for _ in range(3):
+        eager = restored(x)
+    check(eager)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = restored(x)
+    for _ in range(3):
+        x.copy_(torch.randn(17, 128, generator=rng).half())
+        graph.replay()
+        torch.cuda.synchronize()
+        check(captured)
+        torch.testing.assert_close(captured, restored(x), rtol=0, atol=0)

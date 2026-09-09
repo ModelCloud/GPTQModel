@@ -168,3 +168,20 @@ They replace the group initializer with a fixture, so they do not establish
 real grouped optimization or model-quality recovery. Focused CPU validation:
 142 passed, 11 skipped, 44 deselected. The configuration guard remains active
 pending actual grouped replay/native/model verification.
+
+Actual grouped optimizer CPU fixtures now pass both scopes through one rotation
+and one finetuning epoch, paired GSQ, and export application. Native SM80
+ParoLinear packing/strict reload/eager inference plus three changed-input CUDA
+graph replays pass for both scopes at W4/group128, M17/K128/N128, krot1.
+Worst mean drift is 0.0001098813 and max 0.0005612969. The initializer ran on
+CPU; inference ran on the leased PG506-230. Controlled tensors are correctness
+evidence only. Artifacts: `artifacts/gsq-paro/paired-native/`.
+An initial group16 native attempt failed because runtime requires group sizes
+multiples of 32; its log is preserved. CPU group16 success does not establish
+native compatibility. Real grouped-model validation remains pending.
+
+Post-refactor focused CPU suite: 144 passed, 13 skipped, 44 deselected.
+Two of those skips are the paired grouped native cases separately executed
+on SM80 (two passes, eight eager/replay drift checks). Archive hashes and the
+executed test source were verified before publication. The public noisy-input
+guard still requires real-model grouped validation before removal.
