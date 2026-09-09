@@ -97,3 +97,14 @@ packing/reload/rotation validation, and real calibrated layers. The new public
 control is experimental and disabled by default. These pending scopes remain
 part of the broader compatibility goal; they are not deemed mathematically
 incompatible.
+
+Real Llama 3.2 1B block-0 Q/K/V validation subsequently completed: three arms
+per projection (baseline, fixed GSQ, learned-scale GSQ), W4/group128/krot8,
+base seed7, actual module optimizer and native ParoLinear pack/save/reload.
+The saved 16 calibration documents were split 12/4 for training/initializer
+validation; all 32 held-out documents remained outside optimization. All 288
+native checks pass (worst mean 0.0003560413, max 0.008094788). Both GSQ arms
+retain baseline payloads exactly for all projections; no recovery is claimed.
+See the [real-layer report](../docs/experiments/gsq-paro-real-layers.md) and its
+manifest-bound artifacts. Grouped binding and final-model propagation remain
+pending; this result is not a complete native model export.
