@@ -21,15 +21,15 @@ namespace prefill {
 extern template void run_prefill_all<cutlass::half_t>(
     torch::stable::Tensor&, torch::stable::Tensor&, torch::stable::Tensor&,
     const void*, bool, bool, int, torch::stable::Tensor&, int, int, int,
-    cudaStream_t);
+    cudaStream_t, int, int);
 }
 #endif
 
-torch::stable::Tensor swordfish_prefill_mm(
+torch::stable::Tensor swordfish_prefill_impl(
     torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
     torch::stable::Tensor& group_scales,
     std::optional<torch::stable::Tensor> const& group_zps, int64_t num_bits,
-    int64_t group_size, int64_t size_k, int64_t size_n) {
+    int64_t group_size, int64_t size_k, int64_t size_n, int tile_n, int chunk_m) {
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
   STD_TORCH_CHECK(
       shape_ok(size_k, size_n) && size_k % 128 == 0 && size_n % 128 == 0,
@@ -95,11 +95,11 @@ torch::stable::Tensor swordfish_prefill_mm(
   if (a_st == torch::headeronly::ScalarType::Half) {
     prefill::run_prefill_all<cutlass::half_t>(a, b_packed, group_scales, zp_ptr,
                                               has_zp, w8, int(group_size), c, M,
-                                              N, K, stream);
+                                              N, K, stream, tile_n, chunk_m);
   } else {
     prefill::run_prefill_all<cutlass::bfloat16_t>(
         a, b_packed, group_scales, zp_ptr, has_zp, w8, int(group_size), c, M, N,
-        K, stream);
+        K, stream, tile_n, chunk_m);
   }
   return c;
 #else
@@ -109,8 +109,31 @@ torch::stable::Tensor swordfish_prefill_mm(
 #endif
 }
 
+torch::stable::Tensor swordfish_prefill_mm(
+    torch::stable::Tensor& a, torch::stable::Tensor& b,
+    torch::stable::Tensor& scales, std::optional<torch::stable::Tensor> const& zeros,
+    int64_t bits, int64_t group, int64_t k, int64_t n) {
+  return swordfish_prefill_impl(a, b, scales, zeros, bits, group, k, n, 0, 0);
+}
+torch::stable::Tensor swordfish_prefill_explicit(
+    torch::stable::Tensor& a, torch::stable::Tensor& b,
+    torch::stable::Tensor& scales, std::optional<torch::stable::Tensor> const& zeros,
+    int64_t bits, int64_t group, int64_t k, int64_t n, int64_t tile_n, int64_t chunk_m) {
+  STD_TORCH_CHECK((tile_n == 128 || tile_n == 256) && chunk_m >= 128 &&
+                  chunk_m <= INT_MAX / 2 && chunk_m % 128 == 0,
+                  "explicit prefill requires tile N128/256 and M chunk multiple of 128");
+  STD_TORCH_CHECK(k > 0 && k <= INT_MAX && n > 0 && n <= INT_MAX &&
+                  a.size(0) > 0 && a.size(0) <= INT_MAX / 2, "prefill dimensions out of range");
+  STD_TORCH_CHECK(a.is_contiguous() && b.is_contiguous() && scales.is_contiguous() &&
+                  (!zeros || zeros->is_contiguous()), "prefill requires contiguous tensors");
+  STD_TORCH_CHECK(a.get_device_index() == b.get_device_index() &&
+                  a.get_device_index() == scales.get_device_index() &&
+                  (!zeros || a.get_device_index() == zeros->get_device_index()), "prefill device mismatch");
+  return swordfish_prefill_impl(a, b, scales, zeros, bits, group, k, n, int(tile_n), int(chunk_m));
+}
 }  // namespace swordfish
 
 STABLE_TORCH_LIBRARY_IMPL(gptqmodel_swordfish, CUDA, m) {
   m.impl("swordfish_prefill_mm", TORCH_BOX(&swordfish::swordfish_prefill_mm));
+  m.impl("swordfish_prefill_explicit", TORCH_BOX(&swordfish::swordfish_prefill_explicit));
 }

@@ -25,6 +25,7 @@
 #include "libtorch_stable/torch_utils.h"
 #include "swordfish_decode.cuh"
 #include "swordfish_device_utils.cuh"
+#include "swordfish_decode_config.h"
 
 namespace swordfish {
 
@@ -287,11 +288,14 @@ void launch_decode(const void* a, const int32_t* b, const void* s,
 
 }  // namespace
 
-torch::stable::Tensor swordfish_mm(
+#include "swordfish_decode_explicit.cuh"
+
+torch::stable::Tensor swordfish_mm_impl(
     torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
     torch::stable::Tensor& group_scales,
     std::optional<torch::stable::Tensor> const& group_zps, int64_t num_bits,
-    int64_t group_size, int64_t size_k, int64_t size_n) {
+    int64_t group_size, int64_t size_k, int64_t size_n,
+    const DecodeConfig* tuning) {
   STD_TORCH_CHECK(num_bits == 4 || num_bits == 8,
                   "swordfish supports 4-bit and 8-bit weights");
   const bool w8 = num_bits == 8;
@@ -361,6 +365,37 @@ torch::stable::Tensor swordfish_mm(
   torch::stable::accelerator::DeviceGuard device_guard(device_index);
   const int sms = cached_device_sm_count(device_index);
   const cudaStream_t stream = get_current_cuda_stream(device_index);
+
+  if (tuning) {
+    STD_TORCH_CHECK(size_m > 0 && size_m <= INT_MAX - 64 && size_k <= INT_MAX &&
+                    size_n <= 65535 * kBlockN && group_size <= INT_MAX,
+                    "explicit decode dimensions exceed launch limits");
+    tuning->validate(w8, int(size_k), int(size_n));
+    STD_TORCH_CHECK(a.is_contiguous() && b_packed.is_contiguous() && group_scales.is_contiguous() &&
+                    (!has_zp || group_zps->is_contiguous()), "explicit decode requires contiguous tensors");
+    STD_TORCH_CHECK(b_packed.get_device_index() == device_index &&
+                    group_scales.get_device_index() == device_index &&
+                    (!has_zp || group_zps->get_device_index() == device_index), "decode device mismatch");
+    cudaDeviceProp prop{};
+    const auto status = cudaGetDeviceProperties(&prop, device_index);
+    const int sm = prop.major * 10 + prop.minor;
+    STD_TORCH_CHECK(status == cudaSuccess && (sm == 100 || sm == 103 || sm == 110),
+                    "explicit Swordfish decode requires SM100/103/110");
+    auto c = torch::stable::empty({size_m, size_n}, a_st, std::nullopt, a.device());
+    const void* ap = a.const_data_ptr();
+    const auto* bp = reinterpret_cast<const int32_t*>(b_packed.const_data_ptr());
+    const void* sp = group_scales.const_data_ptr();
+    const void* zp = has_zp ? group_zps->const_data_ptr() : nullptr;
+    void* cp = c.mutable_data_ptr();
+#define QVQ_EXPLICIT_DECODE(D) \
+    if (has_zp) decode_explicit<D, true>(*tuning,ap,bp,sp,zp,cp,size_m,size_k,size_n,group_size,stream); \
+    else if (w8) decode_explicit<D, false, true>(*tuning,ap,bp,sp,zp,cp,size_m,size_k,size_n,group_size,stream); \
+    else decode_explicit<D, false>(*tuning,ap,bp,sp,zp,cp,size_m,size_k,size_n,group_size,stream)
+    if (a_st == torch::headeronly::ScalarType::Half) { QVQ_EXPLICIT_DECODE(aphrodite::kFloat16.id()); }
+    else { QVQ_EXPLICIT_DECODE(aphrodite::kBFloat16.id()); }
+#undef QVQ_EXPLICIT_DECODE
+    return c;
+  }
 
   // Activations are expected to be in the group-sorted order produced by
   // swordfish_prepack_B (or explicitly permuted by the caller); the runtime
@@ -443,8 +478,23 @@ torch::stable::Tensor swordfish_mm(
   return c;
 }
 
+torch::stable::Tensor swordfish_mm(
+    torch::stable::Tensor& a, torch::stable::Tensor& b,
+    torch::stable::Tensor& scales, std::optional<torch::stable::Tensor> const& zeros,
+    int64_t bits, int64_t group, int64_t k, int64_t n) {
+  return swordfish_mm_impl(a, b, scales, zeros, bits, group, k, n, nullptr);
+}
+torch::stable::Tensor swordfish_decode_explicit(
+    torch::stable::Tensor& a, torch::stable::Tensor& b,
+    torch::stable::Tensor& scales, std::optional<torch::stable::Tensor> const& zeros,
+    int64_t bits, int64_t group, int64_t k, int64_t n, int64_t mode, int64_t tiles,
+    int64_t split, int64_t ctas, bool quad, int64_t threads, int64_t stages) {
+  DecodeConfig tuning{mode, tiles, split, ctas, quad, threads, stages};
+  return swordfish_mm_impl(a, b, scales, zeros, bits, group, k, n, &tuning);
+}
 }  // namespace swordfish
 
 STABLE_TORCH_LIBRARY_IMPL(gptqmodel_swordfish, CUDA, m) {
   m.impl("swordfish_mm", TORCH_BOX(&swordfish::swordfish_mm));
+  m.impl("swordfish_decode_explicit", TORCH_BOX(&swordfish::swordfish_decode_explicit));
 }

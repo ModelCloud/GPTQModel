@@ -182,7 +182,8 @@ struct PrefillCfg {
 template <class Cfg>
 void run(torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
          torch::stable::Tensor& group_scales, const void* zp_ptr,
-         torch::stable::Tensor& c, int M, int N, int K, cudaStream_t stream) {
+         torch::stable::Tensor& c, int M, int N, int K, cudaStream_t stream,
+         int explicit_chunk = 0) {
   using Gemm = typename Cfg::Gemm;
   using GemmKernel = typename Cfg::GemmKernel;
   using MmaType = typename Cfg::MmaType;
@@ -195,6 +196,7 @@ void run(torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
   constexpr int64_t kAChunkBytes = int64_t(12) << 20;
   int m_chunk = int(kAChunkBytes / (int64_t(K) * 2));
   m_chunk = std::max(256, (m_chunk / 128) * 128);
+  if (explicit_chunk) m_chunk = explicit_chunk;
 
   LayoutScale layout_S =
       ScaleConfig::tile_atom_to_shape_scale(cute::make_shape(N, K, 1));
@@ -225,6 +227,7 @@ void run(torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
          reinterpret_cast<MmaType const*>(group_scales.const_data_ptr()),
          layout_S, reinterpret_cast<MmaType const*>(zp_ptr)},
         {{1.0f, 0.0f}, c_ptr, stride_c, c_ptr, stride_d}};
+    arguments.hw_info.device_id = a.get_device_index();
 
     Gemm gemm;
     STD_TORCH_CHECK(gemm.can_implement(arguments) == cutlass::Status::kSuccess,
@@ -254,63 +257,67 @@ template <class TAct>
 void run_prefill_all(torch::stable::Tensor& a, torch::stable::Tensor& b_packed,
                      torch::stable::Tensor& group_scales, const void* zp_ptr,
                      bool has_zp, bool w8, int gran, torch::stable::Tensor& c,
-                     int M, int N, int K, cudaStream_t stream) {
+                     int M, int N, int K, cudaStream_t stream,
+                     int tile_n = 0, int chunk_m = 0) {
   // Tile-N dispatch. The 256-wide tile wins compute-bound shapes; K-heavy
   // shapes starve its K pipeline and prefer 256x128 (measured on both
   // Thor and B200 at K=14336). The 256-wide tile's input stages do not fit
   // SMEM at 8 bits, and the doubled weight stream pressures the K pipeline
   // the way K-heavy shapes do, so 8-bit always runs 256x128.
-  const bool narrow = w8 || (K >= 2 * N && K >= 8192);
+  STD_TORCH_CHECK(tile_n == 0 || tile_n == 128 || tile_n == 256, "invalid prefill tile N");
+  STD_TORCH_CHECK(!w8 || tile_n != 256, "W8 prefill has no compiled tile N=256");
+  STD_TORCH_CHECK(chunk_m == 0 || (chunk_m >= 128 && chunk_m % 128 == 0), "invalid prefill M chunk");
+  const bool narrow = tile_n ? tile_n == 128 : w8 || (K >= 2 * N && K >= 8192);
   if (w8) {
     run<PrefillCfg<128, false, 8, TAct>>(a, b_packed, group_scales, nullptr, c,
-                                         M, N, K, stream);
+                                         M, N, K, stream, chunk_m);
   } else if (gran == 32) {
     if (has_zp) {
       if (narrow) {
         run<PrefillCfg<128, true, 4, TAct, 32>>(a, b_packed, group_scales,
-                                                zp_ptr, c, M, N, K, stream);
+                                                zp_ptr, c, M, N, K, stream, chunk_m);
       } else {
         run<PrefillCfg<256, true, 4, TAct, 32>>(a, b_packed, group_scales,
-                                                zp_ptr, c, M, N, K, stream);
+                                                zp_ptr, c, M, N, K, stream, chunk_m);
       }
     } else if (narrow) {
       run<PrefillCfg<128, false, 4, TAct, 32>>(a, b_packed, group_scales,
-                                               nullptr, c, M, N, K, stream);
+                                               nullptr, c, M, N, K, stream, chunk_m);
     } else {
       run<PrefillCfg<256, false, 4, TAct, 32>>(a, b_packed, group_scales,
-                                               nullptr, c, M, N, K, stream);
+                                               nullptr, c, M, N, K, stream, chunk_m);
     }
   } else if (gran == 64) {
     if (has_zp) {
       if (narrow) {
         run<PrefillCfg<128, true, 4, TAct, 64>>(a, b_packed, group_scales,
-                                                zp_ptr, c, M, N, K, stream);
+                                                zp_ptr, c, M, N, K, stream, chunk_m);
       } else {
         run<PrefillCfg<256, true, 4, TAct, 64>>(a, b_packed, group_scales,
-                                                zp_ptr, c, M, N, K, stream);
+                                                zp_ptr, c, M, N, K, stream, chunk_m);
       }
     } else if (narrow) {
       run<PrefillCfg<128, false, 4, TAct, 64>>(a, b_packed, group_scales,
-                                               nullptr, c, M, N, K, stream);
+                                               nullptr, c, M, N, K, stream, chunk_m);
     } else {
       run<PrefillCfg<256, false, 4, TAct, 64>>(a, b_packed, group_scales,
-                                               nullptr, c, M, N, K, stream);
+                                               nullptr, c, M, N, K, stream, chunk_m);
     }
   } else {
     if (has_zp) {
       if (narrow) {
         run<PrefillCfg<128, true, 4, TAct>>(a, b_packed, group_scales, zp_ptr,
-                                            c, M, N, K, stream);
+                                            c, M, N, K, stream, chunk_m);
       } else {
         run<PrefillCfg<256, true, 4, TAct>>(a, b_packed, group_scales, zp_ptr,
-                                            c, M, N, K, stream);
+                                            c, M, N, K, stream, chunk_m);
       }
     } else if (narrow) {
       run<PrefillCfg<128, false, 4, TAct>>(a, b_packed, group_scales, nullptr,
-                                           c, M, N, K, stream);
+                                           c, M, N, K, stream, chunk_m);
     } else {
       run<PrefillCfg<256, false, 4, TAct>>(a, b_packed, group_scales, nullptr,
-                                           c, M, N, K, stream);
+                                           c, M, N, K, stream, chunk_m);
     }
   }
 }
