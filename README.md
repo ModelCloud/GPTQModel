@@ -21,7 +21,8 @@
 
 ## Latest News 🗞️🚀
 
-* 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models.
+* 09/09/2026 7.5.0-dev `main`: 🛠️ Fixed quantized-linear empty-input handling, AWQ higher-rank inputs, and AWQ/ParoQuant CUDA validation and device/stream dispatch ([#3069](https://github.com/ModelCloud/GPTQModel/pull/3069)). Removed full-model scans during per-module finalization ([#3068](https://github.com/ModelCloud/GPTQModel/pull/3068)), fixed GPTQ calibration mask indexing across GPUs ([#3067](https://github.com/ModelCloud/GPTQModel/pull/3067)), and corrected the startup banner to report the package checkout's Git commit ([#3066](https://github.com/ModelCloud/GPTQModel/pull/3066)).
+* 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models ([#3065](https://github.com/ModelCloud/GPTQModel/pull/3065)).
 * 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
 * 08/31/2026 [7.3.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.6): ✨ Added HunyuanOCR, NVIDIA LocateAnything-3B, and Qwen3.8-Flash-Next quantization support. Added tile-misaligned GPTQ/AWQ Marlin support, reduced QQQ packing memory, and improved JIT extension cache reuse.
 * 08/25/2026 [7.3.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.5): ✨ Added `lm_head` and embedding quantization lifecycle support; Unlimited-OCR, DeepSeek V3.2, Mage-VL, Muse Glimmer, OLMo 3, and SmolLM3 model support.
