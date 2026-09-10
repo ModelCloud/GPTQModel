@@ -737,6 +737,36 @@ def test_expand_selector_device_family_expands_unindexed_torch_device(monkeypatc
     )
 
 
+def test_selector_device_descriptor_has_consistent_shape():
+    assert importer._selector_device_descriptor(DEVICE.ALL) == (
+        "family",
+        "all",
+        None,
+        None,
+        None,
+    )
+    assert importer._selector_device_descriptor(torch.device("cpu")) == (
+        "torch",
+        "cpu",
+        "cpu",
+        None,
+        None,
+    )
+
+
+def test_selector_device_descriptor_uses_rocm_family_for_cuda_device(monkeypatch):
+    monkeypatch.setattr(importer, "IS_ROCM", True)
+    monkeypatch.setattr(importer, "_device_capability", lambda _device: (9, 0))
+
+    assert importer._selector_device_descriptor(torch.device("cuda:1")) == (
+        "torch",
+        "rocm",
+        "cuda",
+        1,
+        (9, 0),
+    )
+
+
 @pytest.mark.parametrize(
     ("has_cuda", "has_xpu", "has_npu", "expected"),
     [

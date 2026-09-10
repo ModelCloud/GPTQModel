@@ -138,7 +138,19 @@ def _selector_device_descriptor(device: SelectorDevice):
             _device_capability(device),
         )
     target = torch.device(device)
-    return ("torch", target.type, target.index, _device_capability(target))
+    try:
+        family = _device_family(target).value
+    except ValueError:
+        # Validation contracts may carry non-placement devices such as meta.
+        # Keep those cacheable without treating them as selector families.
+        family = target.type
+    return (
+        "torch",
+        family,
+        target.type,
+        target.index,
+        _device_capability(target),
+    )
 
 
 def _freeze_validation_value(value):
