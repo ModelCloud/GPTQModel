@@ -31,6 +31,34 @@ revisions, run ID, arm ID, hardware/runtime versions, QVQ/ZML/XLA/StableHLO
 commits, and complete results. Do not treat an artifact without this record as a
 valid comparison input.
 
+## Same-QVQ-kernel parity gate
+
+When comparing ZML with Transformers, “both use QVQ” is not enough. Record and
+verify the exact QVQ entry point, shared-library symbol, kernel family, ABI
+version, launch configuration, payload layout, bank selectors, input shape,
+input dtype, output dtype, and split/partial-reduction policy for every arm.
+Run both implementations on the same captured input and loaded payload before
+attributing a difference to XLA, StableHLO, attention, or model quality.
+Compare the raw quantized-linear output before Hadamard, normalization, or
+residual processing; a matching final token does not establish kernel parity.
+
+Treat ZML/XLA/StableHLO fusion, contraction reassociation, grouped custom calls,
+split reductions, layout rewrites, and autotune-selected SASS as potentially
+numerically different even when the source expression or public QVQ API is the
+same. Inspect generated StableHLO/HLO, custom-call attributes, PTX/SASS or an
+equivalent executed instruction record, and the accumulation parenthesization.
+Compiler-generated code is not proof of numerical correctness: it may legally
+fold, fuse, reorder, or change reduction grouping with no performance gain and
+with a negative output effect.
+
+Use one-variable interventions to separate wrapper, payload, compiler, and
+kernel effects. If ZML and Transformers use different QVQ kernels, label the
+result as a backend-contract difference and do not call it an XLA bug. If they
+use the same QVQ kernel but outputs differ, first verify the ABI and surrounding
+fusion/casts, then retain the eager path or add an explicit numerical barrier
+until the generated plan is explained. Keep the accurate path as the default
+when the optimization has no measured target-workload speed benefit.
+
 ## Optimization review
 
 For every changed result, inspect the QVQ execution plan and internal kernel
