@@ -8,6 +8,7 @@ from collections import OrderedDict
 import pytest
 import torch
 
+import gptqmodel.models._const as model_const
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -724,6 +725,56 @@ def test_expand_selector_device_family_preserves_all_visible_ordinals(monkeypatc
         torch.device("cuda:0"),
         torch.device("cuda:1"),
     )
+
+
+def test_expand_selector_device_family_expands_unindexed_torch_device(monkeypatch):
+    monkeypatch.setattr(importer.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(importer.torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+
+    assert expand_selector_device_family(torch.device("cuda")) == (
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("has_cuda", "has_xpu", "has_npu", "expected"),
+    [
+        (False, True, False, DEVICE.XPU),
+        (False, False, True, DEVICE.NPU),
+    ],
+)
+def test_public_integer_device_uses_active_accelerator(monkeypatch, has_cuda, has_xpu, has_npu, expected):
+    monkeypatch.setattr(model_const, "HAS_CUDA", has_cuda)
+    monkeypatch.setattr(model_const, "HAS_XPU", has_xpu)
+    monkeypatch.setattr(model_const, "HAS_NPU", has_npu)
+    monkeypatch.setattr(model_const, "HAS_MPS", False)
+
+    assert normalize_device_device_map(0, None) is expected
+
+    class ActiveAcceleratorKernel:
+        SUPPORTS_DEVICES = [expected]
+
+        @classmethod
+        def validate(cls, **_kwargs):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict([(BACKEND.QQQ, ActiveAcceleratorKernel)]),
+    )
+    assert select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=0,
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    ) is ActiveAcceleratorKernel
 
 
 def test_validation_cache_partitions_capability_and_index(monkeypatch):

@@ -14,7 +14,7 @@ import torch
 
 from gptqmodel.adapter.adapter import Adapter
 
-from ..models._const import DEVICE
+from ..models._const import DEVICE, normalize_device
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
 from ..quantization.config import _normalize_quant_bits, quant_bits_width
@@ -251,10 +251,17 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
     """Expand one abstract accelerator family to all visible physical devices."""
     targets = _selector_devices(device)
     assert targets is not None
-    if len(targets) != 1 or not isinstance(targets[0], DEVICE):
+    if len(targets) != 1:
         return targets[0] if len(targets) == 1 else targets
 
-    family = targets[0]
+    target = targets[0]
+    if isinstance(target, DEVICE):
+        family = target
+    elif isinstance(target, torch.device) and target.index is None and target.type in {"cuda", "xpu", "npu"}:
+        family = _device_family(target)
+    else:
+        return target
+
     if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
         return family
 
@@ -632,10 +639,15 @@ def normalize_device_device_map(
                     else tuple(selected_devices)
                 )
     else:
-        normalized = _selector_devices(device)
-        assert normalized is not None
-        _validate_selector_device_families(normalized)
-        normalized_device = normalized[0] if len(normalized) == 1 else normalized
+        if isinstance(device, int):
+            # Public loader arguments use the historical active-accelerator
+            # meaning for integers; only device-map values are CUDA ordinals.
+            normalized_device = normalize_device(device)
+        else:
+            normalized = _selector_devices(device)
+            assert normalized is not None
+            _validate_selector_device_families(normalized)
+            normalized_device = normalized[0] if len(normalized) == 1 else normalized
 
     # map fake cuda to actual rocm
     if normalized_device == DEVICE.CUDA and IS_ROCM:
@@ -810,10 +822,13 @@ def select_quant_linear(
         quant_method = METHOD(quant_method.lower())
     backend = normalize_backend(backend, quant_method=quant_method)
     if device is not None:
-        targets = _selector_devices(device)
-        assert targets is not None
-        _validate_selector_device_families(targets)
-        device = targets[0] if len(targets) == 1 else targets
+        if isinstance(device, int):
+            device = normalize_device(device)
+        else:
+            targets = _selector_devices(device)
+            assert targets is not None
+            _validate_selector_device_families(targets)
+            device = targets[0] if len(targets) == 1 else targets
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
