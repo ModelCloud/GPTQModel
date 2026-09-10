@@ -2,14 +2,13 @@
 import pytest
 import torch
 
-from gptqmodel.models._const import DEVICE
 from gptqmodel.utils.model import create_quant_module
 
 
 @pytest.mark.parametrize(
     "device", ["cuda:0", "cuda:1", torch.device("cuda:1"), "cpu", torch.device("cpu")]
 )
-def test_quant_module_validation_normalizes_indexed_devices(device):
+def test_quant_module_validation_preserves_indexed_devices(device):
     seen = []
 
     class Dummy(torch.nn.Module):
@@ -38,4 +37,4 @@ def test_quant_module_validation_normalizes_indexed_devices(device):
         lm_head_name="lm_head",
         pack_dtype=torch.int32,
     )
-    assert seen == [DEVICE.CUDA if "cuda" in str(device) else DEVICE.CPU]
+    assert seen == [torch.device(device)]

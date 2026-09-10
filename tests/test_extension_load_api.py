@@ -14,10 +14,12 @@ import gptqmodel.extension as extension_api
 import gptqmodel.utils.awq as awq_utils
 import gptqmodel.utils.cpp as cpp_utils
 import gptqmodel.utils.exllamav2 as exllamav2_utils
+import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
 import gptqmodel.utils.paroquant as paroquant_utils
 import gptqmodel.utils.qqq as qqq_utils
+import gptqmodel.utils.swordfish as swordfish_utils
 
 
 class _FakeExtension:
@@ -72,6 +74,8 @@ def _install_fake_extensions(monkeypatch):
         "marlin_fp16": _FakeExtension("Marlin fp16"),
         "marlin_bf16": _FakeExtension("Marlin bf16"),
         "paroquant": _FakeExtension("ParoQuant rotation"),
+        "hadamard": _FakeExtension("Fast Hadamard transform"),
+        "swordfish": _FakeExtension("Swordfish"),
     }
 
     monkeypatch.setattr(cpp_utils, "_pack_block_extension", lambda: fakes["pack_block_cpu"])
@@ -82,10 +86,14 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION", fakes["exllamav2_awq"])
     monkeypatch.setattr(exllamav3_ext, "_EXLLAMAV3_TORCH_OPS_EXTENSION", fakes["exllamav3"])
     monkeypatch.setattr(machete_utils, "_MACHETE_TORCH_OPS_EXTENSION", fakes["machete"])
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: True)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(paroquant_utils, "_PAROQUANT_ROTATION_EXTENSION", fakes["paroquant"])
+    monkeypatch.setattr(hadamard_utils, "_HADAMARD_TORCH_OPS_EXTENSION", fakes["hadamard"])
+    monkeypatch.setattr(hadamard_utils, "hadamard_supported", lambda: True)
+    monkeypatch.setattr(swordfish_utils, "_SWORDFISH_TORCH_OPS_EXTENSION", fakes["swordfish"])
+    monkeypatch.setattr(swordfish_utils, "_validate_swordfish_build_support", lambda: True)
 
     return fakes
 
@@ -103,25 +111,13 @@ def test_load_defaults_to_all_extensions(monkeypatch):
 
     result = extension_api.load()
 
-    assert result == {
-        "pack_block_cpu": True,
-        "floatx_cpu": True,
-        "awq": True,
-        "qqq": True,
-        "exllamav2": True,
-        "exllamav2_awq": True,
-        "exllamav3": True,
-        "machete": True,
-        "marlin_fp16": True,
-        "marlin_bf16": True,
-        "paroquant": True,
-    }
+    assert result == {name: True for name in fakes}
     assert all(fake.load_calls == 1 for fake in fakes.values())
 
 
 def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: False)
 
     result = extension_api.load()
 
@@ -131,7 +127,7 @@ def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
 
 def test_load_specific_unsupported_extension_raises_without_building(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: False)
     monkeypatch.setattr(machete_utils, "machete_runtime_error", lambda: "Machete unsupported on this device.")
 
     with pytest.raises(RuntimeError, match="Machete unsupported on this device."):

@@ -30,8 +30,12 @@ from gptqmodel.utils.importer import (
     _iter_dynamic_contracts,
     auto_select_device,
     build_kernel_support_maps,
+    clear_validation_cache,
+    expand_selector_device_family,
     iter_quant_linear_kernels,
+    normalize_device_device_map,
     select_quant_linear,
+    validate_quant_linear,
 )
 from gptqmodel.utils.rocm import IS_ROCM
 from gptqmodel.utils.torch import HAS_CUDA, HAS_MPS, HAS_XPU
@@ -647,3 +651,209 @@ def test_sharded_select_tolerates_kernel_without_shard_attrs(monkeypatch):
     )
 
     assert qlinear_cls is BareKernel
+
+
+def test_select_quant_linear_validates_each_exact_multi_gpu_target(monkeypatch):
+    calls = []
+
+    class IndexedKernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+        @classmethod
+        def validate(cls, **kwargs):
+            calls.append(kwargs["device"])
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.QQQ],
+        FORMAT.QQQ,
+        OrderedDict([(BACKEND.QQQ, IndexedKernel)]),
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=[torch.device("cuda:0"), torch.device("cuda:1")],
+        backend=BACKEND.AUTO,
+        format=FORMAT.QQQ,
+        quant_method=METHOD.QQQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is IndexedKernel
+    assert calls == [torch.device("cuda:0"), torch.device("cuda:1")]
+
+
+def test_device_map_preserves_ordinals_and_rejects_mixed_capabilities(monkeypatch):
+    monkeypatch.setattr(
+        importer.torch.cuda,
+        "get_device_capability",
+        lambda device=None: (8, 0) if torch.device(device).index == 0 else (9, 0),
+    )
+
+    with pytest.raises(ValueError, match="different GPU compute capabilities"):
+        normalize_device_device_map(None, {"first": "cuda:0", "second": "cuda:1"})
+
+    monkeypatch.setattr(importer.torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+    assert normalize_device_device_map(None, {"first": "cuda:0", "second": "cuda:1"}) == (
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+    )
+
+
+def test_auto_device_map_rejects_mixed_visible_capabilities(monkeypatch):
+    monkeypatch.setattr(importer.torch.accelerator, "current_accelerator", lambda: torch.device("cuda"))
+    monkeypatch.setattr(importer.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(
+        importer.torch.cuda,
+        "get_device_capability",
+        lambda device=None: (8, 0) if torch.device(device).index == 0 else (9, 0),
+    )
+
+    with pytest.raises(ValueError, match=r"cuda:0=8\.0, cuda:1=9\.0"):
+        normalize_device_device_map(None, "auto")
+
+
+def test_expand_selector_device_family_preserves_all_visible_ordinals(monkeypatch):
+    monkeypatch.setattr(importer.torch.cuda, "device_count", lambda: 2)
+    monkeypatch.setattr(importer.torch.cuda, "get_device_capability", lambda device=None: (8, 0))
+
+    assert expand_selector_device_family(DEVICE.CUDA) == (
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+    )
+
+
+def test_validation_cache_partitions_capability_and_index(monkeypatch):
+    clear_validation_cache()
+    capability = {0: (8, 0), 1: (8, 0)}
+    monkeypatch.setattr(
+        importer.torch.cuda,
+        "get_device_capability",
+        lambda device=None: capability[torch.device(device).index],
+    )
+    calls = []
+
+    class DeviceKernel:
+        @classmethod
+        def validate(cls, **kwargs):
+            calls.append(kwargs["device"])
+            return True, None
+
+    contract = dict(bits=4, group_size=128, trainable=False)
+    validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:0"))
+    validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:0"))
+    validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:1"))
+    capability[0] = (9, 0)
+    validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:0"))
+
+    assert calls == [
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+        torch.device("cuda:0"),
+    ]
+
+
+def test_validation_cache_is_contract_and_device_sensitive():
+    clear_validation_cache()
+    calls = []
+
+    class ContractKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+
+        @classmethod
+        def validate(cls, **kwargs):
+            calls.append(kwargs)
+            return True, None
+
+    common = dict(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        dynamic=None,
+        trainable=False,
+        adapter=None,
+    )
+    validate_quant_linear(ContractKernel, **common, device=torch.device("cpu"), in_features=128, out_features=256)
+    validate_quant_linear(ContractKernel, **common, device=torch.device("cpu"), in_features=128, out_features=256)
+
+    variants = [
+        {"device": torch.device("meta")},
+        {"in_features": 256},
+        {"out_features": 512},
+        {"bits": 3},
+        {"group_size": 64},
+        {"dtype": torch.bfloat16},
+        {"pack_dtype": torch.int16},
+        {"desc_act": True},
+        {"sym": False},
+        {"trainable": True},
+    ]
+    for variant in variants:
+        contract = dict(common, device=torch.device("cpu"), in_features=128, out_features=256)
+        contract.update(variant)
+        validate_quant_linear(ContractKernel, **contract)
+
+    assert len(calls) == 1 + len(variants)
+
+
+def test_allow_marlin_false_filters_auto_and_rejects_explicit(monkeypatch):
+    class MarlinKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+        SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+
+        @classmethod
+        def validate(cls, **_kwargs):
+            return True, None
+
+    class FallbackKernel:
+        SUPPORTS_DEVICES = [DEVICE.CPU]
+        SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
+
+        @classmethod
+        def validate(cls, **_kwargs):
+            return True, None
+
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[METHOD.GPTQ],
+        FORMAT.GPTQ,
+        OrderedDict(
+            [
+                (BACKEND.GPTQ_MARLIN, MarlinKernel),
+                (BACKEND.GPTQ_TORCH, FallbackKernel),
+            ]
+        ),
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=torch.device("cpu"),
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        allow_marlin=False,
+    )
+    assert selected is FallbackKernel
+
+    with pytest.raises(ValueError, match="allow_marlin=False"):
+        select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=torch.device("cpu"),
+            backend=BACKEND.GPTQ_MARLIN,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+            allow_marlin=False,
+        )

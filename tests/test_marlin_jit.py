@@ -561,7 +561,7 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
     generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
     template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
     mma_h = (marlin_root / "marlin_mma.h").read_text(encoding="utf-8")
-    loader_py = (Path(marlin_utils.__file__).resolve().parents[1] / "models" / "loader.py").read_text(
+    qlinear_py = (Path(marlin_utils.__file__).resolve().parents[1] / "nn_modules" / "qlinear" / "marlin.py").read_text(
         encoding="utf-8"
     )
 
@@ -573,9 +573,9 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
     assert "constexpr bool use_fp16_accum" in template_h
     assert "__CUDA_ARCH__ == 750" in mma_h
     assert "m16n8k8.row.col.f16.f16.f16.f16" in mma_h
-    assert "compute capability >= 7.5" in loader_py
-    assert "GPTQ Marlin on Turing (compute capability 7.5)" in loader_py
-    assert "dtype=torch.float16 only." in loader_py
+    assert "compute capability >= 7.5" in qlinear_py
+    assert "GPTQ Marlin on compute capability 7.5" in qlinear_py
+    assert "requires dtype=torch.float16." in qlinear_py
 
 
 def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
