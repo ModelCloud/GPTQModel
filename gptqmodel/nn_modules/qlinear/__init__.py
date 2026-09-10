@@ -325,7 +325,7 @@ class BaseQuantLinear(nn.Module):
             pack_dtype:t.dtype=None,
             dtype: Optional[t.dtype]=None,
             dynamic:Optional[dict]=None,
-            device:Optional[DEVICE]=None,
+            device:Optional[DEVICE | t.device]=None,
             trainable:Optional[bool]=None,
             adapter:Optional[Adapter]=None,
     ) -> Tuple[
@@ -380,7 +380,7 @@ class BaseQuantLinear(nn.Module):
         *,
         pack_dtype:t.dtype=None,
         dtype: Optional[t.dtype]=None,
-        device:Optional[DEVICE]=None,
+        device:Optional[DEVICE | t.device]=None,
         trainable:Optional[bool]=None,
         adapter:Optional[Adapter]=None,
     ) -> Tuple[bool, Optional[Exception]]:
@@ -464,7 +464,7 @@ class BaseQuantLinear(nn.Module):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate_shared(
             pack_dtype=pack_dtype,
             dtype=dtype,
@@ -489,10 +489,19 @@ class BaseQuantLinear(nn.Module):
         )
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
-        assert isinstance(device, DEVICE)
+    def validate_device(cls, device: DEVICE | t.device):
+        # DEVICE declarations describe support families.  Keep concrete
+        # torch.device values intact for specialized kernels, while mapping
+        # them to a family for this common declaration check.
+        if isinstance(device, t.device):
+            try:
+                family = DEVICE(device.type)
+            except ValueError:
+                family = device.type
+        else:
+            family = device
 
-        if device not in cls.SUPPORTS_DEVICES:
+        if family not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
     # use optimize so we don't override native module.compile()
@@ -640,7 +649,7 @@ class GroupedQuantLinear(BaseQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,
@@ -839,7 +848,7 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
 
     @classmethod
     def _validate(cls, bits: int=4, group_size: int=128, desc_act: bool=False, sym: bool=False, pack_dtype:t.dtype=None, dtype: Optional[t.dtype]=None, dynamic:Optional[dict]=None, in_features:int=None,
-                  out_features:int=None, device:Optional[DEVICE]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
+                  out_features:int=None, device:Optional[DEVICE | t.device]=None, trainable:Optional[bool]=None, adapter:Optional[Adapter]=None) -> Tuple[bool, Optional[Exception]]:
         ok, err = super()._validate(
             bits=bits,
             group_size=group_size,

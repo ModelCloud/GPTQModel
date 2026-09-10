@@ -87,11 +87,18 @@ def marlin_validate_runtime_device(
     return capability
 
 
-def _marlin_environment_error() -> str:
+def _marlin_build_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Marlin kernel requires CUDA."
+    return ""
+
+
+def _marlin_environment_error() -> str:
+    build_error = _marlin_build_environment_error()
+    if build_error:
+        return build_error
     try:
         major, minor = torch.cuda.get_device_capability()
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
@@ -101,7 +108,9 @@ def _marlin_environment_error() -> str:
     return ""
 
 
-marlin_import_exception = _marlin_environment_error() or None
+# Import/JIT availability must not freeze the capability of whichever device
+# happened to be current. Exact capability checks run in validate_device().
+marlin_import_exception = _marlin_build_environment_error() or None
 
 
 def _marlin_root() -> Path:
@@ -321,7 +330,7 @@ def _marlin_resolve_op(
 
 
 # Validate marlin support
-def _validate_marlin_device_support() -> bool:
+def _validate_marlin_device_support(device: Optional[torch.device] = None) -> bool:
     """
     Validates if the current device is compatible for Marlin.
     ref: https://github.com/IST-DASLab/marlin?tab=readme-ov-file#requirements
@@ -331,7 +340,12 @@ def _validate_marlin_device_support() -> bool:
     """
     if IS_ROCM or not torch.cuda.is_available():
         return False
-    major, minor = torch.cuda.get_device_capability()
+    target = torch.device(device) if device is not None else None
+    major, minor = (
+        torch.cuda.get_device_capability(target)
+        if target is not None
+        else torch.cuda.get_device_capability()
+    )
     return _marlin_capability_supported(major, minor)
 
 

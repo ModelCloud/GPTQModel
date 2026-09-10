@@ -269,6 +269,22 @@ class MarlinLinear(GPTQQuantLinear):
         out_features = args.get("out_features")
         desc_act = args.get("desc_act", False)
         group_size = args.get("group_size", -1)
+        device = args.get("device")
+        dtype = args.get("dtype")
+        if dtype == torch.bfloat16 and not IS_ROCM:
+            if isinstance(device, torch.device) and device.type == "cuda":
+                capabilities = (torch.cuda.get_device_capability(device),)
+            elif device == DEVICE.CUDA:
+                capabilities = tuple(
+                    torch.cuda.get_device_capability(index)
+                    for index in range(torch.cuda.device_count())
+                )
+            else:
+                capabilities = ()
+            if _MARLIN_SM75_CAPABILITY in capabilities:
+                return False, NotImplementedError(
+                    "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
+                )
         if in_features is None or out_features is None:
             return True, None
 
@@ -294,19 +310,24 @@ class MarlinLinear(GPTQQuantLinear):
         return True, None
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
-        if device == DEVICE.CUDA:
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
             if IS_ROCM:
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
-
-            has_supported_cuda = _marlin_all_visible_devices_supported(
-                _MARLIN_MIN_CAPABILITY
-            )
-            if not has_supported_cuda:
-                raise NotImplementedError(
-                    "Marlin kernel only supports compute capability >= 7.5."
+            if isinstance(device, DEVICE):
+                if not _marlin_all_visible_devices_supported(_MARLIN_MIN_CAPABILITY):
+                    raise NotImplementedError("Marlin kernel only supports compute capability >= 7.5.")
+                return
+            target = device if isinstance(device, torch.device) else device.to_torch_device()
+            try:
+                marlin_validate_runtime_device(
+                    target,
+                    min_capability=_MARLIN_MIN_CAPABILITY,
+                    backend_name="GPTQ Marlin",
                 )
+            except ValueError as exc:
+                raise NotImplementedError(str(exc)) from exc
 
     def post_init(self):
         device = self.qweight.device

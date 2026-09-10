@@ -58,15 +58,14 @@ from ..utils.hf import (
 )
 from ..utils.importer import (
     auto_select_device,
+    expand_selector_device_family,
     get_kernel_for_backend,
     normalize_device_device_map,
     select_quant_linear,
+    selector_device_family,
 )
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
-from ..utils.machete import _validate_machete_device_support
-from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
-from ..utils.swordfish import _validate_swordfish_device_support
 from ..utils.model import (
     apply_no_placement_to_device_map,
     auto_dtype,
@@ -114,11 +113,12 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
 
 
 def _external_runtime_device_kwargs(
-    device: DEVICE,
+    device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
 ) -> Dict[str, Union[str, int]]:
-    runtime_kwargs: Dict[str, Union[str, int]] = {"device": device.type}
-    if not requested_device_map or device not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU}:
+    device_family = selector_device_family(device) or DEVICE.CPU
+    runtime_kwargs: Dict[str, Union[str, int]] = {"device": device_family.type}
+    if not requested_device_map or device_family not in {DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU}:
         return runtime_kwargs
 
     targets = (
@@ -314,6 +314,9 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
 
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run CUDA/ROCm flash attention."""
+
+    if isinstance(device, (tuple, list)):
+        return bool(device) and _is_accelerated_attention_device(device[0])
 
     if isinstance(device, torch.device):
         return device.type in {"cuda", "hip"}
@@ -707,7 +710,11 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            dtype = auto_dtype(config=config, device=resolved_device, quant_inference=False)
+            dtype = auto_dtype(
+                config=config,
+                device=selector_device_family(resolved_device),
+                quant_inference=False,
+            )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
@@ -1017,6 +1024,11 @@ def ModelLoader(cls):
         # Keep string inputs compatible while allowing canonical method-prefixed names.
         backend = normalize_backend(backend)
         device = auto_select_device(device, backend)
+        if requested_device_map is None:
+            # The default layer-wise map below spans every visible accelerator.
+            # Expand the family now so kernel validation sees the same concrete
+            # devices (and rejects heterogeneous GPU capabilities explicitly).
+            device = expand_selector_device_family(device)
 
         model_local_path = get_model_local_path(model_id_or_path, **kwargs_without_internal)
         trust_remote_code = resolve_trust_remote_code(model_local_path, trust_remote_code=trust_remote_code)
@@ -1074,7 +1086,11 @@ def ModelLoader(cls):
 
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            dtype = auto_dtype(config=config, device=device, quant_inference=True)
+            dtype = auto_dtype(
+                config=config,
+                device=selector_device_family(device),
+                quant_inference=True,
+            )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
@@ -1121,14 +1137,14 @@ def ModelLoader(cls):
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
                 raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, or BACKEND.EXL3_TORCH.")
             if backend == BACKEND.AUTO:
-                if torch.cuda.is_available() and device in (DEVICE.CUDA, DEVICE.ROCM):
+                if torch.cuda.is_available() and selector_device_family(device) in (DEVICE.CUDA, DEVICE.ROCM):
                     backend = BACKEND.EXL3_EXLLAMA_V3
                 else:
                     backend = BACKEND.EXL3_TORCH
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
                     raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
-                if device not in (DEVICE.CUDA, DEVICE.ROCM):
+                if selector_device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM):
                     raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES):
@@ -1292,7 +1308,7 @@ def ModelLoader(cls):
                 supports_flash_attn = None
 
             args = {}
-            if supports_flash_attn and device in [DEVICE.CUDA, DEVICE.ROCM]:
+            if supports_flash_attn and selector_device_family(device) in [DEVICE.CUDA, DEVICE.ROCM]:
                 if attn_implementation is not None:
                     args[ATTN_IMPLEMENTATION] = attn_implementation
                 elif is_flash_attn_2_available():
@@ -1466,17 +1482,18 @@ def ModelLoader(cls):
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
 
-            if device == DEVICE.CUDA:
+            device_family = selector_device_family(device) or DEVICE.CPU
+            if device_family == DEVICE.CUDA:
                 if torch.cuda.is_available():
                     device_strs = [f"cuda:{i}" for i in range(num_gpus)]
                 else:
                     raise RuntimeError("CUDA is not available")
-            elif device == DEVICE.XPU:
+            elif device_family == DEVICE.XPU:
                 if hasattr(torch, "xpu") and torch.xpu.is_available():
                     device_strs = [f"xpu:{i}" for i in range(num_gpus)]
                 else:
                     raise RuntimeError("XPU is not available")
-            elif device == DEVICE.NPU:
+            elif device_family == DEVICE.NPU:
                 if HAS_NPU:
                     device_strs = [f"npu:{i}" for i in range(num_gpus)]
                 else:
@@ -1627,11 +1644,11 @@ def ModelLoader(cls):
         if explicit_device_map is None:
             layers, _ = get_layers_with_prefixes(model, extract_layers_node)
             num_gpus = 1
-            if device is DEVICE.CUDA:
+            if selector_device_family(device) is DEVICE.CUDA:
                 num_gpus = torch.cuda.device_count()
-            elif device is DEVICE.XPU:
+            elif selector_device_family(device) is DEVICE.XPU:
                 num_gpus = torch.xpu.device_count()
-            elif device is DEVICE.NPU:
+            elif selector_device_family(device) is DEVICE.NPU:
                 num_gpus = torch.npu.device_count()
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
@@ -1689,10 +1706,6 @@ def ModelLoader(cls):
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Machete is currently not supported."
                 )
-            if not _validate_machete_device_support():
-                raise ValueError(
-                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
-                )
 
         if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
                 preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
@@ -1700,25 +1713,6 @@ def ModelLoader(cls):
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
-            device_capability = torch.cuda.get_device_capability()
-            if backend == BACKEND.GPTQ_MARLIN:
-                if not _validate_marlin_device_support():
-                    raise ValueError(
-                        "Kernel: Marlin kernel requires compute capability >= 7.5 for the "
-                        f"GPTQ Marlin backend. Detected capability: `{device_capability}`."
-                    )
-                if device_capability == (7, 5) and dtype == torch.bfloat16:
-                    raise ValueError(
-                        "Kernel: GPTQ Marlin on Turing (compute capability 7.5) supports "
-                        "dtype=torch.float16 only."
-                    )
-            elif backend == BACKEND.AWQ_MARLIN:
-                if not _marlin_capability_supported(*device_capability) or device_capability[0] < 8:
-                    raise ValueError(
-                        "Kernel: AWQ Marlin requires compute capability >= 8.0. "
-                        f"Detected capability: `{device_capability}`."
-                    )
-
             # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
@@ -1730,9 +1724,6 @@ def ModelLoader(cls):
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Swordfish is currently not supported."
                 )
-            if not _validate_swordfish_device_support():
-                from ..utils.swordfish import swordfish_runtime_error
-                raise ValueError(f"Kernel: {swordfish_runtime_error()}")
             if dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Swordfish kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 

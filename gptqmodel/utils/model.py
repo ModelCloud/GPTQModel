@@ -65,7 +65,7 @@ from .ctx import ctx
 from .device import get_device
 from .hf import get_hf_config_dtype
 from .hub import hf_hub_download, model_info
-from .importer import select_quant_linear
+from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .torch import HAS_CUDA, torch_empty_cache
@@ -612,14 +612,11 @@ def create_quant_module(
     if issubclass(linear_cls, GPTQQuantLinear):
         tmp_init_kwargs.setdefault("format", format)
 
-    # when loading a quantized model, device is the target passed through the GPT-QModel load path
-    # check in_features and out_features validate
-    validation_device = device
-    if isinstance(device, torch.device):
-        validation_device = DEVICE(device.type)
-    elif isinstance(device, str):
-        validation_device = DEVICE(device.split(":", 1)[0])
-    _, err = linear_cls.validate(
+    # Keep concrete device ordinals through per-module validation.  The shared
+    # selector cache validates every target in a multi-GPU selector and lets
+    # device-sensitive kernels query the capability of that exact target.
+    _, err = validate_quant_linear(
+        linear_cls,
         bits=validate_bits,
         group_size=tmp_group_size,
         desc_act=tmp_desc_act,
@@ -628,7 +625,7 @@ def create_quant_module(
         dtype=dtype,
         in_features=in_features,
         out_features=out_features,
-        device=validation_device,
+        device=device,
         adapter=adapter, # TODO FIX ME..need to pass Eora if loaded
     )
     if err is not None:

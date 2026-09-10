@@ -6,14 +6,15 @@
 import importlib
 import os
 import pkgutil
+import threading
 from collections import OrderedDict
-from typing import Dict, List, Optional, Type, Union
+from typing import Dict, List, Optional, Sequence, Type, Union
 
 import torch
 
 from gptqmodel.adapter.adapter import Adapter
 
-from ..models._const import DEVICE, normalize_device
+from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ..quantization import FORMAT, METHOD
 from ..quantization.config import _normalize_quant_bits, quant_bits_width
@@ -32,6 +33,246 @@ ACCELERATE_OFFLOAD_TARGETS = {"disk", "meta"}
 
 message_logged = False
 log = setup_logger()
+
+
+# A selector device is deliberately kept separate from ``DEVICE``.  DEVICE is
+# the kernel declaration's *support family* (CUDA, CPU, ...), whereas a
+# torch.device carries the concrete ordinal needed for capability checks and
+# per-device module placement.
+SelectorDevice = Union[DEVICE, torch.device]
+SelectorDevices = Union[SelectorDevice, Sequence[SelectorDevice]]
+_VALIDATION_CACHE_MAXSIZE = 1024
+_VALIDATION_CACHE = OrderedDict()
+_VALIDATION_CACHE_LOCK = threading.RLock()
+
+
+def _device_family(device: SelectorDevice) -> DEVICE:
+    if isinstance(device, DEVICE):
+        return device
+    device = torch.device(device)
+    if IS_ROCM and device.type == "cuda":
+        return DEVICE.ROCM
+    try:
+        return DEVICE(device.type)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported selector device family `{device.type}`") from exc
+
+
+def _as_selector_device(value) -> SelectorDevice:
+    """Convert one public device value without discarding an ordinal."""
+    if isinstance(value, DEVICE):
+        if value == DEVICE.ALL:
+            return value
+        return value
+    if isinstance(value, torch.device):
+        return value
+    if isinstance(value, int):
+        # Accelerate uses integer device-map values as CUDA ordinals.
+        return torch.device(f"cuda:{value}")
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text == DEVICE.ROCM.value:
+            return torch.device("cuda:0")
+        try:
+            return torch.device(text)
+        except (RuntimeError, ValueError) as exc:
+            # Preserve the old DEVICE error wording for symbolic families.
+            try:
+                return DEVICE(text)
+            except ValueError:
+                raise ValueError(f"Invalid device `{value}`") from exc
+    raise ValueError(f"device must be a string, int, torch.device, or DEVICE, got {type(value)}")
+
+
+def _selector_devices(device: Optional[SelectorDevices]) -> Optional[tuple[SelectorDevice, ...]]:
+    if device is None:
+        return None
+    if isinstance(device, (str, int, torch.device, DEVICE)):
+        values = (_as_selector_device(device),)
+    else:
+        if isinstance(device, (bytes, bytearray)):
+            raise ValueError("device sequence must contain device values")
+        values = tuple(_as_selector_device(item) for item in device)
+    if not values:
+        raise ValueError("device sequence must not be empty")
+
+    # Keep first-seen ordering.  This makes multi-GPU selection deterministic
+    # while still avoiding repeated capability probes for duplicate map values.
+    result = []
+    for value in values:
+        if value not in result:
+            result.append(value)
+    return tuple(result)
+
+
+def _device_capability(device: SelectorDevice):
+    """Return one device's capability, if its runtime exposes one."""
+    if isinstance(device, DEVICE):
+        if device not in (DEVICE.CUDA, DEVICE.ROCM):
+            return None
+        target = device.to_torch_device()
+    else:
+        target = torch.device(device)
+    if target.type == "cuda":
+        try:
+            return tuple(torch.cuda.get_device_capability(target))
+        except Exception:
+            return None
+    getter = getattr(getattr(torch, target.type, None), "get_device_capability", None)
+    if getter is not None:
+        try:
+            return tuple(getter(target))
+        except Exception:
+            return None
+    return None
+
+
+def _selector_device_descriptor(device: SelectorDevice):
+    if isinstance(device, DEVICE):
+        target = device.to_torch_device() if device != DEVICE.ALL else None
+        return (
+            "family",
+            device.value,
+            None if target is None else target.type,
+            None if target is None else target.index,
+            _device_capability(device),
+        )
+    target = torch.device(device)
+    return ("torch", target.type, target.index, _device_capability(target))
+
+
+def _freeze_validation_value(value):
+    if isinstance(value, (str, int, float, bool, type(None), torch.dtype)):
+        return value
+    if isinstance(value, (torch.device, DEVICE)):
+        return _selector_device_descriptor(value)
+    if isinstance(value, dict):
+        return tuple(sorted((_freeze_validation_value(k), _freeze_validation_value(v)) for k, v in value.items()))
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = (_freeze_validation_value(item) for item in value)
+        return tuple(sorted(items, key=repr)) if isinstance(value, (set, frozenset)) else tuple(items)
+    if isinstance(value, Adapter):
+        # Adapters can carry mutable runtime state.  Never retain one in the
+        # cache value or use its mutable representation as a cache key.
+        return (type(value), id(value))
+    try:
+        hash(value)
+    except TypeError:
+        return (type(value), id(value))
+    return value
+
+
+def _validation_method_identity(cls, name: str):
+    for parent in cls.__mro__:
+        descriptor = parent.__dict__.get(name)
+        if descriptor is not None:
+            return id(descriptor)
+    return None
+
+
+def _new_validation_error(error_type, message):
+    if error_type is None:
+        return None
+    try:
+        return error_type(message)
+    except Exception:
+        return ValueError(message)
+
+
+def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
+    """Validate one kernel contract with a bounded, device-aware cache.
+
+    The cache stores only immutable status/error metadata.  In particular, an
+    exception object (which carries traceback and mutable state) is recreated
+    for every caller.
+    """
+    requested_device = kwargs.get("device")
+    if isinstance(requested_device, (str, int)):
+        kwargs = dict(kwargs)
+        kwargs["device"] = _as_selector_device(requested_device)
+        requested_device = kwargs["device"]
+    if requested_device is not None and not isinstance(requested_device, (str, int, torch.device, DEVICE)):
+        targets = _selector_devices(requested_device)
+        assert targets is not None
+        last_result = (True, None)
+        for target in targets:
+            target_kwargs = dict(kwargs)
+            target_kwargs["device"] = target
+            last_result = validate_quant_linear(cls, **target_kwargs)
+            if not last_result[0]:
+                return last_result
+        return last_result
+
+    key = (
+        cls,
+        _validation_method_identity(cls, "validate"),
+        _validation_method_identity(cls, "cached_validate_once"),
+        tuple(sorted((name, _freeze_validation_value(value)) for name, value in kwargs.items())),
+    )
+    with _VALIDATION_CACHE_LOCK:
+        cached = _VALIDATION_CACHE.get(key)
+        if cached is not None:
+            _VALIDATION_CACHE.move_to_end(key)
+            ok, error_type, error_message = cached
+            return ok, _new_validation_error(error_type, error_message)
+
+    try:
+        result = cls.validate(**kwargs)
+        ok, error = result
+    except Exception as exc:
+        ok, error = False, exc
+
+    error_type = type(error) if isinstance(error, BaseException) else (ValueError if error is not None else None)
+    error_message = str(error) if error is not None else None
+    cached = (bool(ok), error_type, error_message)
+    with _VALIDATION_CACHE_LOCK:
+        _VALIDATION_CACHE[key] = cached
+        _VALIDATION_CACHE.move_to_end(key)
+        while len(_VALIDATION_CACHE) > _VALIDATION_CACHE_MAXSIZE:
+            _VALIDATION_CACHE.popitem(last=False)
+    return bool(ok), _new_validation_error(error_type, error_message)
+
+
+def clear_validation_cache() -> None:
+    with _VALIDATION_CACHE_LOCK:
+        _VALIDATION_CACHE.clear()
+
+
+def selector_device_family(device: Optional[SelectorDevices]) -> Optional[DEVICE]:
+    """Return the support family for placement-only loader decisions."""
+    targets = _selector_devices(device)
+    if not targets:
+        return None
+    _validate_selector_device_families(targets)
+    return _device_family(targets[0])
+
+
+def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    """Expand one abstract accelerator family to all visible physical devices."""
+    targets = _selector_devices(device)
+    assert targets is not None
+    if len(targets) != 1 or not isinstance(targets[0], DEVICE):
+        return targets[0] if len(targets) == 1 else targets
+
+    family = targets[0]
+    if family not in (DEVICE.CUDA, DEVICE.ROCM, DEVICE.XPU, DEVICE.NPU):
+        return family
+
+    runtime_type = "cuda" if family == DEVICE.ROCM else family.type
+    runtime = getattr(torch, runtime_type, None)
+    count_getter = getattr(runtime, "device_count", None)
+    if count_getter is None:
+        return family
+    try:
+        count = count_getter()
+    except Exception:
+        return family
+    if count < 1:
+        return family
+
+    devices = tuple(torch.device(f"{runtime_type}:{index}") for index in range(count))
+    _validate_selector_device_families(devices)
+    return devices[0] if len(devices) == 1 else devices
 
 
 def _supports_pack_api(cls: Type[BaseQuantLinear]) -> bool:
@@ -305,46 +546,96 @@ def _is_accelerate_offload_target(value: str) -> bool:
     return value.strip().lower() in ACCELERATE_OFFLOAD_TARGETS
 
 
-def hf_normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]]) -> DEVICE:
+def _validate_selector_device_families(devices: Sequence[SelectorDevice]) -> None:
+    families = {_device_family(device) for device in devices if device != DEVICE.ALL}
+    if len(families) > 1:
+        raise ValueError(
+            "Quantized kernel selection does not support a device map spanning "
+            f"different accelerator families: {', '.join(sorted(f.value for f in families))}."
+        )
+
+    device_capabilities = [
+        (device, _device_capability(device))
+        for device in devices
+        if _device_family(device) in (DEVICE.CUDA, DEVICE.ROCM)
+    ]
+    capabilities = {capability for _, capability in device_capabilities if capability is not None}
+    if len(capabilities) > 1:
+        rendered = ", ".join(
+            f"{device}=" + ".".join(str(part) for part in capability)
+            for device, capability in device_capabilities
+            if capability is not None
+        )
+        raise ValueError(
+            "Quantized kernel selection does not support a device map spanning "
+            f"different GPU compute capabilities: {rendered}."
+        )
+
+
+def _accelerate_keyword_device(accelerator) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    if accelerator is None:
+        return DEVICE.CPU
+
+    family = _device_family(torch.device(accelerator.type))
+    return expand_selector_device_family(family)
+
+
+def hf_normalize_device_device_map(
+    device: Optional[Union[str, torch.device]],
+    device_map: Optional[Union[str, Dict]],
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
     return normalize_device_device_map(device=device, device_map=device_map, default=DEVICE.CPU)
 
 
-def normalize_device_device_map(device: Optional[Union[str, torch.device]], device_map: Optional[Union[str, Dict]], default: Optional[DEVICE] = None) -> DEVICE:
-    normalized_device = default
+def normalize_device_device_map(
+    device: Optional[Union[str, int, torch.device, DEVICE]],
+    device_map: Optional[Union[str, Dict]],
+    default: Optional[SelectorDevice] = None,
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    normalized_device: Optional[SelectorDevice] = default
     accelerator = torch.accelerator.current_accelerator()
     if device is None:
         if device_map is not None:
             if isinstance(device_map, str):
                 if _is_accelerate_device_map_keyword(device_map):
-                    return DEVICE(accelerator.type) if accelerator is not None else DEVICE.CPU
-                devices = {device_map}
+                    return _accelerate_keyword_device(accelerator)
+                devices = (device_map,)
             else:
-                devices = set(device_map.values())
-            normalized_devices = set()
-            for device in devices:
-                # Returning None means quant linear will be automatically selected.
-                if device is None:
+                # Preserve map order and concrete ordinals.  A set here would
+                # make cuda:0/cuda:1 indistinguishable from each other.
+                devices = tuple(device_map.values())
+            normalized_devices = []
+            for map_device in devices:
+                if map_device is None:
                     continue
-                if isinstance(device, str):
-                    if _is_accelerate_device_map_keyword(device) or device == "auto":
-                        return DEVICE(accelerator.type) if accelerator is not None else DEVICE.CPU
-                    if _is_accelerate_offload_target(device):
+                if isinstance(map_device, str):
+                    if _is_accelerate_device_map_keyword(map_device) or map_device == "auto":
+                        return _accelerate_keyword_device(accelerator)
+                    if _is_accelerate_offload_target(map_device):
                         continue
-                normalized_devices.add(normalize_device(device))
-            if len(normalized_devices) == 1:
-                d = normalized_devices.pop()
-                if d in DEVICE:
-                    normalized_device = d
-            elif len(normalized_devices) > 1:
-                normalized_devices.discard(DEVICE.CPU)
-                normalized_device = normalized_devices.pop()
+                candidate = _as_selector_device(map_device)
+                if candidate not in normalized_devices:
+                    normalized_devices.append(candidate)
+
+            # CPU offload entries do not determine the accelerator kernel.  If
+            # all entries are CPU, retain CPU as the target.
+            accelerator_devices = [
+                candidate for candidate in normalized_devices
+                if _device_family(candidate) != DEVICE.CPU
+            ]
+            selected_devices = accelerator_devices or normalized_devices
+            if selected_devices:
+                _validate_selector_device_families(selected_devices)
+                normalized_device = (
+                    selected_devices[0]
+                    if len(selected_devices) == 1
+                    else tuple(selected_devices)
+                )
     else:
-        if isinstance(device, str):
-            normalized_device = normalize_device(device)
-        elif isinstance(device, torch.device):
-            normalized_device = DEVICE(device.type)
-        else:
-            raise ValueError(f"device must be a string or torch.device, got {type(device)}")
+        normalized = _selector_devices(device)
+        assert normalized is not None
+        _validate_selector_device_families(normalized)
+        normalized_device = normalized[0] if len(normalized) == 1 else normalized
 
     # map fake cuda to actual rocm
     if normalized_device == DEVICE.CUDA and IS_ROCM:
@@ -352,8 +643,11 @@ def normalize_device_device_map(device: Optional[Union[str, torch.device]], devi
     return normalized_device
 
 
-def auto_select_device(device: Optional[DEVICE], backend: Optional[BACKEND]) -> DEVICE:
-    assert device is None or isinstance(device, DEVICE)
+def auto_select_device(
+    device: Optional[SelectorDevices],
+    backend: Optional[BACKEND],
+) -> SelectorDevice | tuple[SelectorDevice, ...]:
+    assert device is None or isinstance(device, (DEVICE, torch.device, str, int, tuple, list))
     assert backend is None or isinstance(backend, BACKEND)
 
     if device is None:
@@ -497,7 +791,7 @@ def select_quant_linear(
         group_size: int,
         desc_act: bool,
         sym: bool,
-        device: Optional[Union[DEVICE, str, int, torch.device]],
+        device: Optional[SelectorDevices],
         backend: BACKEND = BACKEND.AUTO,
         format: FORMAT = FORMAT.GPTQ,
         quant_method: METHOD = METHOD.GPTQ,
@@ -516,9 +810,10 @@ def select_quant_linear(
         quant_method = METHOD(quant_method.lower())
     backend = normalize_backend(backend, quant_method=quant_method)
     if device is not None:
-        device = normalize_device(device)
-        if device == DEVICE.CUDA and IS_ROCM:
-            device = DEVICE.ROCM
+        targets = _selector_devices(device)
+        assert targets is not None
+        _validate_selector_device_families(targets)
+        device = targets[0] if len(targets) == 1 else targets
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
@@ -531,6 +826,32 @@ def select_quant_linear(
     backend = BACKEND.AUTO if backend is None else backend
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
+    marlin_backends = {
+        BACKEND.GPTQ_MARLIN,
+        BACKEND.AWQ_MARLIN,
+    }
+    if not allow_marlin and backend in marlin_backends:
+        raise ValueError("Marlin kernel selection was disabled by allow_marlin=False.")
+
+    selector_targets = _selector_devices(device) if device is not None else None
+    selector_families = (
+        {_device_family(target) for target in selector_targets}
+        if selector_targets is not None
+        else set()
+    )
+
+    def validate_candidate(cls, **kwargs):
+        # A kernel selected for a multi-GPU model must be valid on every target
+        # ordinal.  Validate each exact target so device-sensitive kernels query
+        # the correct capability rather than the process's current device.
+        if selector_targets is None:
+            return validate_quant_linear(cls, **kwargs, device=None)
+        last_result = (True, None)
+        for target in selector_targets:
+            last_result = validate_quant_linear(cls, **kwargs, device=target)
+            if not last_result[0]:
+                return last_result
+        return last_result
 
     validated_qlinears = []
     # Handle the case where backend is AUTO.
@@ -550,7 +871,17 @@ def select_quant_linear(
         if multi_select:
             contracts = list(_iter_dynamic_contracts(dynamic, bits, group_size, desc_act, sym, pack_dtype, format))
         for k, cls in allow_quant_linears:
-            if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None and device not in cls.SUPPORTS_DEVICES:
+            if not allow_marlin and marlin_backends.intersection(
+                get_kernel_backends(cls) if getattr(cls, "SUPPORTS_BACKENDS", None) else ()
+            ):
+                if os.environ.get("DEBUG"):
+                    log.info(f"skip {k} because Marlin selection is disabled")
+                continue
+            if (
+                DEVICE.ALL not in cls.SUPPORTS_DEVICES
+                and selector_families
+                and not selector_families.intersection(set(cls.SUPPORTS_DEVICES))
+            ):
                 if os.environ.get("DEBUG"):
                     log.info(f"skip {k} for unsupported device `{device}`")
                 continue
@@ -566,7 +897,7 @@ def select_quant_linear(
             contract_err = None
             if multi_select:
                 for contract in contracts:
-                    validated, contract_err = cls.validate(
+                    validated, contract_err = validate_candidate(cls,
                         bits=contract["bits"],
                         group_size=contract["group_size"],
                         desc_act=contract["desc_act"],
@@ -574,14 +905,13 @@ def select_quant_linear(
                         pack_dtype=contract["pack_dtype"],
                         dtype=dtype,
                         dynamic=None,
-                        device=device,
                         trainable=trainable,
                         adapter=adapter,
                     )
                     if validated:
                         break
             else:
-                validated, contract_err = cls.validate(
+                validated, contract_err = validate_candidate(cls,
                     bits=bits,
                     group_size=group_size,
                     desc_act=desc_act,
@@ -589,7 +919,6 @@ def select_quant_linear(
                     pack_dtype=pack_dtype,
                     dtype=dtype,
                     dynamic=dynamic,
-                    device=device,
                     trainable=trainable,
                     adapter=adapter,
                 )
@@ -631,7 +960,7 @@ def select_quant_linear(
     if is_sharded and not supports_sharded_load:
         raise ValueError(f"Selected backend `{backend}` with kernel `{qlinear.__name__}` does not support sharded checkpoints.")
 
-    validate, err = qlinear.validate(
+    validate, err = validate_candidate(qlinear,
         bits=bits,
         group_size=group_size,
         desc_act=desc_act,
@@ -639,7 +968,6 @@ def select_quant_linear(
         pack_dtype=pack_dtype,
         dtype=dtype,
         dynamic=dynamic,
-        device=device,
         trainable=trainable,
     )
 
