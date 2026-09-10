@@ -15,6 +15,13 @@ If the prior PR was merged, create a new branch and PR rather than reusing it.
 
 ## Accuracy before kernel speed
 
+For any QVQ, XLA, StableHLO, fusion, reduction, dtype, rounding, autotune, or
+backend optimization that can affect output, use
+[$numerical-optimization-safety](.agents/skills/numerical-optimization-safety/SKILL.md).
+Require a matched unfused Transformer eager oracle, fixed tokenizer/padding/seed
+and sampling inputs, stage-boundary tensor comparisons, execution-plan telemetry,
+and measured target-workload speed evidence before accepting a numerical change.
+
 For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
 math transformations, precision changes, or MKNE autotune winners. First pursue accuracy-preserving algebra,
 redundant-work elimination, and data reuse. Preserve the existing exact quantization contract and the inference
