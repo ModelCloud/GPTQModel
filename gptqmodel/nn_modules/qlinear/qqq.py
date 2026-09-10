@@ -254,9 +254,12 @@ class QQQLinear(GroupedQuantLinear):
     @classmethod
     def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
+        # QQQ has an independent ROCm implementation. ROCm exposes CUDA
+        # device values through torch, so an exact cuda:N target must not
+        # be mistaken for the unsupported CUDA Marlin path.
+        if IS_ROCM:
+            return
         if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
-            if IS_ROCM:
-                raise NotImplementedError("Marlin kernel is not supported on ROCm.")
             targets = (
                 (device,)
                 if isinstance(device, torch.device)

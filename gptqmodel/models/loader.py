@@ -112,6 +112,36 @@ def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> 
     raise ValueError(f"{backend} backend only supports {supported}: actual = {format_code}")
 
 
+def _layerwise_device_count(device) -> int:
+    """Return the visible device count for layer-wise checkpoint placement."""
+    family = selector_device_family(device) or DEVICE.CPU
+    if family in (DEVICE.CUDA, DEVICE.ROCM):
+        return torch.cuda.device_count()
+    if family == DEVICE.XPU:
+        return torch.xpu.device_count()
+    if family == DEVICE.NPU:
+        return torch.npu.device_count()
+    return 1
+
+
+def _layerwise_device_strings(device, num_gpus: int) -> list[str]:
+    """Render layer-wise placement targets using the selected accelerator."""
+    family = selector_device_family(device) or DEVICE.CPU
+    if family in (DEVICE.CUDA, DEVICE.ROCM):
+        if torch.cuda.is_available():
+            return [f"cuda:{index}" for index in range(num_gpus)]
+        raise RuntimeError("CUDA is not available")
+    if family == DEVICE.XPU:
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            return [f"xpu:{index}" for index in range(num_gpus)]
+        raise RuntimeError("XPU is not available")
+    if family == DEVICE.NPU:
+        if HAS_NPU:
+            return [f"npu:{index}" for index in range(num_gpus)]
+        raise RuntimeError("NPU is not available")
+    return ["cpu"] * num_gpus
+
+
 def _external_runtime_device_kwargs(
     device,
     requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
@@ -1474,32 +1504,16 @@ def ModelLoader(cls):
             """
 
             if num_gpus is None:
-                num_gpus = torch.cuda.device_count()
+                num_gpus = _layerwise_device_count(device)
             if num_gpus < 1:
-                raise RuntimeError("No CUDA devices detected")
+                family = selector_device_family(device) or DEVICE.CPU
+                raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
 
-            device_family = selector_device_family(device) or DEVICE.CPU
-            if device_family == DEVICE.CUDA:
-                if torch.cuda.is_available():
-                    device_strs = [f"cuda:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("CUDA is not available")
-            elif device_family == DEVICE.XPU:
-                if hasattr(torch, "xpu") and torch.xpu.is_available():
-                    device_strs = [f"xpu:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("XPU is not available")
-            elif device_family == DEVICE.NPU:
-                if HAS_NPU:
-                    device_strs = [f"npu:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("NPU is not available")
-            else:
-                device_strs = ["cpu"] * num_gpus
+            device_strs = _layerwise_device_strings(device, num_gpus)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -1643,13 +1657,7 @@ def ModelLoader(cls):
         log.info(f"Loader: device = {device}")
         if explicit_device_map is None:
             layers, _ = get_layers_with_prefixes(model, extract_layers_node)
-            num_gpus = 1
-            if selector_device_family(device) is DEVICE.CUDA:
-                num_gpus = torch.cuda.device_count()
-            elif selector_device_family(device) is DEVICE.XPU:
-                num_gpus = torch.xpu.device_count()
-            elif selector_device_family(device) is DEVICE.NPU:
-                num_gpus = torch.npu.device_count()
+            num_gpus = _layerwise_device_count(device)
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
         else:
             device_map = dict(explicit_device_map)

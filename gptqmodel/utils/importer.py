@@ -58,6 +58,29 @@ def _device_family(device: SelectorDevice) -> DEVICE:
         raise ValueError(f"Unsupported selector device family `{device.type}`") from exc
 
 
+def _current_accelerator_type() -> Optional[str]:
+    """Return the runtime device type used by integer device-map ordinals."""
+    accelerator_api = getattr(torch, "accelerator", None)
+    current_accelerator = getattr(accelerator_api, "current_accelerator", None)
+    if current_accelerator is None:
+        return None
+    try:
+        accelerator = current_accelerator()
+    except Exception:
+        return None
+    if accelerator is None:
+        return None
+    accelerator_type = getattr(accelerator, "type", None)
+    if accelerator_type is None:
+        try:
+            accelerator_type = torch.device(accelerator).type
+        except (RuntimeError, ValueError):
+            return None
+    # ROCm uses CUDA's torch device namespace. _device_family maps it back to
+    # DEVICE.ROCM when the HIP runtime is active.
+    return str(accelerator_type).lower()
+
+
 def _as_selector_device(value) -> SelectorDevice:
     """Convert one public device value without discarding an ordinal."""
     if isinstance(value, DEVICE):
@@ -67,12 +90,19 @@ def _as_selector_device(value) -> SelectorDevice:
     if isinstance(value, torch.device):
         return value
     if isinstance(value, int):
-        # Accelerate uses integer device-map values as CUDA ordinals.
-        return torch.device(f"cuda:{value}")
+        # Accelerate uses integer device-map values as ordinals in the active
+        # accelerator namespace (CUDA/ROCm, XPU, or NPU), not always CUDA.
+        accelerator_type = _current_accelerator_type()
+        if accelerator_type is None:
+            raise ValueError("Integer device-map values require an active accelerator")
+        return torch.device(f"{accelerator_type}:{value}")
     if isinstance(value, str):
         text = value.strip().lower()
         if text == DEVICE.ROCM.value:
-            return torch.device("cuda:0")
+            # ROCm is represented by CUDA torch.device values at runtime, but
+            # keep the support family so non-ROCm mocks and kernel selection do
+            # not silently turn it into NVIDIA CUDA.
+            return DEVICE.ROCM
         try:
             return torch.device(text)
         except (RuntimeError, ValueError) as exc:

@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from collections import OrderedDict
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -19,6 +20,7 @@ from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
@@ -765,6 +767,47 @@ def test_selector_device_descriptor_uses_rocm_family_for_cuda_device(monkeypatch
         1,
         (9, 0),
     )
+
+
+@pytest.mark.parametrize("accelerator_type", ["cuda", "xpu"])
+def test_integer_device_map_uses_active_accelerator(monkeypatch, accelerator_type):
+    monkeypatch.setattr(
+        importer.torch.accelerator,
+        "current_accelerator",
+        lambda: torch.device(accelerator_type),
+    )
+
+    assert importer._as_selector_device(2) == torch.device(f"{accelerator_type}:2")
+    assert normalize_device_device_map(None, {"layer": 2}) == torch.device(f"{accelerator_type}:2")
+
+
+def test_integer_device_map_uses_npu_without_torch_npu(monkeypatch):
+    class FakeDevice:
+        def __init__(self, spec):
+            self.spec = spec
+
+    monkeypatch.setattr(
+        importer.torch.accelerator,
+        "current_accelerator",
+        lambda: SimpleNamespace(type="npu"),
+    )
+    monkeypatch.setattr(importer.torch, "device", FakeDevice)
+
+    assert importer._as_selector_device(2).spec == "npu:2"
+
+
+def test_rocm_string_preserves_device_family_on_non_rocm_host(monkeypatch):
+    monkeypatch.setattr(importer, "IS_ROCM", False)
+
+    assert importer._as_selector_device("rocm") is DEVICE.ROCM
+    assert normalize_device_device_map(None, {"": "rocm"}) is DEVICE.ROCM
+
+
+def test_qqq_accepts_exact_rocm_cuda_device(monkeypatch):
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.qqq.IS_ROCM", True)
+
+    QQQLinear.validate_device(torch.device("cuda:1"))
+    assert DEVICE.ROCM in QQQLinear.SUPPORTS_DEVICES
 
 
 @pytest.mark.parametrize(
