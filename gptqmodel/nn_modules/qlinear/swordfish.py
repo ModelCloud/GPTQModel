@@ -315,7 +315,8 @@ class SwordfishLinear(GPTQQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        # The native ABI requires a contiguous [M, K] activation.
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
 
         if self.input_perm.numel() > 0:
             perm = self.input_perm
@@ -690,7 +691,8 @@ class AwqSwordfishLinear(AWQuantLinear):
         if self.input_rows(x) == 0:
             return self.empty_linear_output(x)
 
-        input_2d = x.reshape(-1, x.shape[-1])
+        # Keep the native ABI independent of the caller's input strides.
+        input_2d = x.reshape(-1, x.shape[-1]).contiguous()
 
         group_scales = self.scales
         if group_scales.dtype != input_2d.dtype:

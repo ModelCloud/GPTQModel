@@ -307,24 +307,24 @@ def test_kernel_output_fallback():
         assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
 
     total_samples = sum(samples for _, samples in shapes)
+    input_dims = [dim_0 for dim_0, samples in shapes for _ in range(samples)]
+    assert len(input_dims) == total_samples
     stats = {label: _init_stats() for label, _ in variants}
     with torch.inference_mode():
-        for _ in log.pb(total_samples).title("Forward Pass on Random Input"):
-            for dim_0, samples in shapes:
-                for _ in range(samples):
-                    x = torch.randn(
-                        (dim_0, down_proj.in_features),
-                        device=device,
-                        dtype=dtype,
-                    )
-                    assert x.device.type == "cuda"
-                    baseline = down_proj(x)
-                    variant_out = {label: qlinears[label](x) for label, _ in variants}
-                    assert baseline.device.type == "cuda"
-                    for label, out in variant_out.items():
-                        assert out.device.type == "cuda"
-                        diff = torch.abs(baseline - out).float()
-                        _update_stats(stats[label], diff)
+        for dim_0 in log.pb(input_dims).title("Forward Pass on Random Input"):
+            x = torch.randn(
+                (dim_0, down_proj.in_features),
+                device=device,
+                dtype=dtype,
+            )
+            assert x.device.type == "cuda"
+            baseline = down_proj(x)
+            variant_out = {label: qlinears[label](x) for label, _ in variants}
+            assert baseline.device.type == "cuda"
+            for label, out in variant_out.items():
+                assert out.device.type == "cuda"
+                diff = torch.abs(baseline - out).float()
+                _update_stats(stats[label], diff)
 
     finalized = {}
     for label, _ in variants:
@@ -403,25 +403,25 @@ def test_kernel_output_fallback_mad_sweep():
         assert qlinear.list_buffers()[0].device.type == "cuda", f"{label} buffers not on CUDA"
 
     total_samples = sum(samples for _, samples in shapes)
+    input_dims = [dim_0 for dim_0, samples in shapes for _ in range(samples)]
+    assert len(input_dims) == total_samples
     stats = {label: _init_stats() for label, _ in variants}
     with torch.inference_mode():
-        for _ in log.pb(total_samples).title("Forward Pass on Random Input (MAD Sweep)"):
-            for dim_0, samples in shapes:
-                for _ in range(samples):
-                    x = torch.randn(
-                        (dim_0, down_proj.in_features),
-                        device=device,
-                        dtype=dtype,
-                    )
-                    assert x.device.type == "cuda"
-                    baseline = down_proj(x)
-                    variant_out = {label: qlinears[label](x) for label, _ in variants}
-                    assert baseline.device.type == "cuda"
+        for dim_0 in log.pb(input_dims).title("Forward Pass on Random Input (MAD Sweep)"):
+            x = torch.randn(
+                (dim_0, down_proj.in_features),
+                device=device,
+                dtype=dtype,
+            )
+            assert x.device.type == "cuda"
+            baseline = down_proj(x)
+            variant_out = {label: qlinears[label](x) for label, _ in variants}
+            assert baseline.device.type == "cuda"
 
-                    for label, out in variant_out.items():
-                        assert out.device.type == "cuda"
-                        diff = torch.abs(baseline - out).float()
-                        _update_stats(stats[label], diff)
+            for label, out in variant_out.items():
+                assert out.device.type == "cuda"
+                diff = torch.abs(baseline - out).float()
+                _update_stats(stats[label], diff)
 
     finalized = {}
     for label, _ in variants:
