@@ -80,6 +80,30 @@ Transformer eager oracle at the earliest useful stage boundaries: K/V cache
 update, attention output, QVQ linear output, residual, final logits, and
 selected token where available.
 
+### Human review for high-speed accuracy exceptions
+
+An accuracy-gate failure normally blocks promotion, but it must not silently
+discard a verified large speedup. Compute speed gain as
+`100 * (baseline_latency / candidate_latency - 1)` on matched measurements.
+
+- Above 25% (`>1.25x`), present a scoped exception option to the human reviewer
+  before abandoning the candidate.
+- Above 100% (`>2x`), escalate promptly after timing and gate failure are
+  verified; do not wait for the rest of an experiment wave.
+- Above 500% (`>6x`), escalate immediately as a priority review item.
+
+The review packet must state the measured scope, shapes, hardware, baseline,
+timing uncertainty, failing mean/max errors and thresholds, whether the
+baseline also fails, candidate-versus-baseline error, held-out model-quality
+evidence, missing checks, proposed exception scope, and accurate fallback.
+Kernel-only or synthetic gains must not be presented as model speedups.
+
+Escalation is not acceptance. Continue authorized profiling and investigation,
+retain the original gate decision and failure evidence, and keep the accurate
+implementation as the production default until the human reviewer explicitly
+approves a narrowly stated exception. Approval for one gate does not waive any
+other correctness, graph, fallback, or end-to-end requirement.
+
 ### Generated-code audit gate
 
 Every phase that changes generated GPU instructions must:
