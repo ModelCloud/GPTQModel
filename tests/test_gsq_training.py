@@ -235,6 +235,9 @@ def test_complete_stage_driver_schedule_export_and_determinism():
     first, second = run(), run()
     assert first['history'] == second['history']
     assert len(first['history']) == 4
+    assert first['hard_loss_before'] >= 0
+    assert first['hard_loss_after'] >= 0
+    assert first['hard_loss_delta'] == pytest.approx(first['hard_loss_after']-first['hard_loss_before'])
     assert first['history'][0]['temperature'] == 2.
     assert first['history'][-1]['temperature'] == .5
     assert first['history'][-1]['multiplier'] == 50.
@@ -307,7 +310,9 @@ def test_gptq_staged_training_packing_and_disk_reload(tmp_path):
                   attention_mask=torch.full((16, 16), -torch.inf).triu(1)[None, None], use_cache=False)
     batches = [(hidden, kwargs)]
     seeds, _ = initialize_llama_gptq(layer, batches, bits=4, group_size=32)
-    fitted, records = fit_llama_stages(layer, seeds, batches, bits=4, group_size=32, epochs=2, qk_steps=2, decay='constant')
+    fitted, records = fit_llama_stages(
+        layer, seeds, batches, bits=4, group_size=32, epochs=2, qk_steps=2, decay='constant',
+    )
     assert records['mlp']['initializer_timing'] == 'after_attention'
     from gptqmodel.quantization.gsq_training import pack_llama_staged_block
     exported = pack_llama_staged_block(fitted, records, bits=4, group_size=32)

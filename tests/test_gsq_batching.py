@@ -54,6 +54,7 @@ def test_variable_length_llama_microbatch_preserves_valid_outputs(explicit_mask)
 def test_batched_staged_fit_packs_variable_length_documents():
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
+
     from gptqmodel.quantization import GSQTrainingConfig
     from gptqmodel.quantization.gsq_training import quantize_llama_gsq_block
 
@@ -78,3 +79,34 @@ def test_batched_staged_fit_packs_variable_length_documents():
     assert record['gsq_training']['microbatch_size'] == 2
     for hidden, kwargs in documents:
         assert torch.isfinite(packed(hidden, **kwargs)).all()
+
+
+def test_lazy_sdpa_batches_move_cpu_documents_without_square_masks():
+    from transformers import LlamaConfig
+    from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
+
+    config = LlamaConfig(hidden_size=32, intermediate_size=64, num_attention_heads=4,
+                         num_key_value_heads=2, num_hidden_layers=1)
+    config._attn_implementation = 'sdpa'
+    layer = LlamaDecoderLayer(config, 0).eval()
+    rope = LlamaRotaryEmbedding(config)
+    documents = []
+    for _ in range(5):
+        hidden = torch.randn(1, 7, 32)
+        positions = torch.arange(7).unsqueeze(0)
+        documents.append((hidden, dict(position_ids=positions, position_embeddings=rope(hidden, positions),
+                                      attention_mask=None, use_cache=False)))
+    batches = llama_stage_batches(
+        documents,
+        batch_size=4,
+        microbatch_size=2,
+        device='cpu',
+        implicit_causal=True,
+        lazy=True,
+    )
+    assert len(batches) == 2
+    assert batches[0][0][0][1]['attention_mask'] is None
+    with torch.no_grad():
+        actual = layer(batches[0][0][0][0], **batches[0][0][0][1])
+        expected = torch.cat([layer(hidden, **kwargs) for hidden, kwargs in documents[:2]])
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)

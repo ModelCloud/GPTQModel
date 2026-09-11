@@ -112,6 +112,24 @@ def test_model_capture_preserves_positions_uses_current_prefix_and_cleans_hooks(
     assert not model.model.layers[1]._forward_pre_hooks
 
 
+def test_model_capture_can_offload_equal_length_default_metadata():
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.looper.gsq_training_capture import capture_llama_gsq_inputs
+
+    config = LlamaConfig(hidden_size=32, intermediate_size=64, num_attention_heads=4,
+                         num_key_value_heads=4, num_hidden_layers=1)
+    config._attn_implementation = 'sdpa'
+    model = LlamaForCausalLM(config).eval()
+    documents = [{'input_ids': [1, 2, 3]}, {'input_ids': [4, 5, 6]}]
+    cache = capture_llama_gsq_inputs(model, documents, offload_to_cpu=True)
+    assert all(inputs[0].device.type == 'cpu' for inputs in cache.layer_inputs)
+    assert cache.layer_input_kwargs[0]['position_embeddings'][0].data_ptr() == (
+        cache.layer_input_kwargs[1]['position_embeddings'][0].data_ptr())
+    with pytest.raises(ValueError, match='equal-length'):
+        capture_llama_gsq_inputs(model, documents+[{'input_ids': [7]}], offload_to_cpu=True)
+
+
 def test_affine_capture_preserves_scaled_teacher_and_inference_cache():
     from gptqmodel.looper.gsq_training_capture import fit_llama_awq_gsq_capture
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear

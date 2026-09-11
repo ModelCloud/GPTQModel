@@ -2,8 +2,8 @@
 
 import torch
 
-from .gsq_training_capture import capture_llama_gsq_inputs, quantize_llama_gsq_capture
 from ..quantization.gsq_training_config import GSQTrainingConfig
+from .gsq_training_capture import capture_llama_gsq_inputs, quantize_llama_gsq_capture
 
 
 def staged_documents_from_prepared(prepared):
@@ -35,7 +35,8 @@ def staged_documents_from_prepared(prepared):
     return documents
 
 
-def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None):
+def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None,
+                             offload_capture=False):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
@@ -53,6 +54,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         gsq = GSQTrainingConfig(**gsq)
     if not isinstance(gsq, GSQTrainingConfig):
         raise TypeError('Staged model quantization requires GSQTrainingConfig, a dictionary or None')
+    if not isinstance(offload_capture, bool):
+        raise TypeError('offload_capture must be boolean')
     effective = gsq.to_dict()
     if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
         raise ValueError('Staged model quantization supports W2/W3/W4')
@@ -80,6 +83,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 raise ValueError('Staged model quantization requires complete contiguous groups')
     run = dict(state='running', gsq_training=effective, bits=bits, group_size=group_size,
                layer_indices=indices, device=str(device), blocks=[],
+               offload_capture=offload_capture,
                deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
     if not hasattr(model, 'gsq_training_runs'):
         model.gsq_training_runs = []
@@ -90,7 +94,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
 
             logging.getLogger(__name__).info('Staged model block %d/%d', index+1, len(layers))
             run['current_layer'] = index
-            cache = capture_llama_gsq_inputs(model, documents, layer_index=index)
+            capture_options = {'offload_to_cpu': True} if offload_capture else {}
+            cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
             packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
                                                        gsq=gsq, pack=True, device=device)
             packed = packed.to(device).eval()
@@ -151,9 +156,9 @@ def finalize_llama_gsq_wrapper(wrapper, run):
     The prepared configuration describes the actual uniform packed format;
     caller-owned model path and tokenizer identities remain on the wrapper.
     """
-    from ..nn_modules.qlinear.torch import TorchLinear
-
     import copy
+
+    from ..nn_modules.qlinear.torch import TorchLinear
 
     requested = wrapper.quantize_config.to_dict()
     caller_meta = copy.deepcopy(wrapper.quantize_config.meta)

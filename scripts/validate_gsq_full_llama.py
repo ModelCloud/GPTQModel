@@ -1,14 +1,14 @@
 """Full Llama staged/GPTQ model quantization, public export/reload and logits."""
 
 import argparse
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 from scripts.validate_qvq_gsq_layers import digest, write_json
 
@@ -26,8 +26,12 @@ def main():
     parser.add_argument('--microbatch-size', type=int, default=1, help='Documents per staged forward pass')
     parser.add_argument('--train-precision', choices=('float32', 'bfloat16'), default='float32')
     parser.add_argument('--epochs', type=int, default=5, help='Attention/MLP training epochs; Q/K budget is separate')
+    parser.add_argument('--qk-steps', type=int, default=2000)
+    parser.add_argument('--seed', type=int, default=7)
     parser.add_argument('--optimizer', choices=('lion', 'adamw'), default='lion')
     parser.add_argument('--lifecycle', choices=('dedicated', 'public'), default='dedicated')
+    parser.add_argument('--attn-implementation', choices=('eager', 'sdpa'), default='eager')
+    parser.add_argument('--offload-capture', action='store_true')
     args = parser.parse_args()
     if args.lifecycle == 'public' and args.arm != 'staged':
         parser.error('Public lifecycle validation currently selects the staged arm; disabled uses ordinary GPTQ')
@@ -49,7 +53,11 @@ def main():
         fields = [v.strip() for v in inventory.split(',')]
         processes = subprocess.check_output(['nvidia-smi', '--query-compute-apps=gpu_uuid,pid',
                                              '--format=csv,noheader'], text=True)
-        idle = idle+1 if fields[2] == uuid and int(fields[4]) <= 8 and int(fields[5]) == 0 and uuid not in processes else 0
+        idle = (
+            idle+1
+            if fields[2] == uuid and int(fields[4]) <= 8 and int(fields[5]) == 0 and uuid not in processes
+            else 0
+        )
         print('IDLE', inventory, idle, flush=True)
         if idle == 3:
             break
@@ -58,21 +66,22 @@ def main():
         raise ValueError('Idle preflight timeout')
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
+
     from gptqmodel import GPTQModel
-    from gptqmodel.utils.backend import BACKEND
-    from gptqmodel.quantization import GSQTrainingConfig
     from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model, save_llama_gsq_model
+    from gptqmodel.quantization import GSQTrainingConfig
+    from gptqmodel.utils.backend import BACKEND
     from scripts.p32_twenty.scorecard import logits_metrics
 
     torch.set_num_threads(4)
-    torch.manual_seed(7)
+    torch.manual_seed(args.seed)
     torch.use_deterministic_algorithms(True)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     torch.set_float32_matmul_precision('highest')
     config = GSQTrainingConfig(enabled=args.arm == 'staged', initializer=args.initializer,
                                batch_size=args.batch_size, microbatch_size=args.microbatch_size, epochs=args.epochs,
-                               optimizer=args.optimizer)
+                               optimizer=args.optimizer, qk_steps=args.qk_steps, seed=args.seed)
     files = [Path(__file__), Path('gptqmodel/looper/gsq_training_model.py'),
              Path('gptqmodel/looper/gsq_training_capture.py'), Path('gptqmodel/quantization/gsq_training.py'),
              Path('gptqmodel/quantization/gsq_training_config.py'), Path('scripts/p32_twenty/scorecard.py'),
@@ -86,14 +95,18 @@ def main():
                   commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   argv=sys.argv, source_model=source['dense'], gsq_training=config.to_dict(),
                   bits=args.bits, group_size=128, train_precision=args.train_precision, export_precision='float16',
+                  attention_implementation=args.attn_implementation, offload_capture=args.offload_capture,
                   calibration_samples=len(documents['train']),
                   calibration_tokens=sum(len(row['input_ids']) for row in documents['train']),
                   calibration_token_cap=source['token_cap'],
-                  weighting='unweighted documents; not full paper calibration or F6/N-mode reproduction',
+                  weighting='unweighted fixed-length documents; W4 Llama 3.2 1B is not the paper rate/model',
                   started_utc=datetime.now(timezone.utc).isoformat(), inventory=inventory,
                   torch=str(torch.__version__), cuda=torch.version.cuda,
                   gpu=str(torch.cuda.get_device_properties(0)),
                   deterministic_algorithms=True, cublas_workspace_config=os.environ.get('CUBLAS_WORKSPACE_CONFIG'),
+                  cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
+                  gpu_allocator_lease_id=os.environ.get('GPU_ALLOCATOR_LEASE_ID'),
+                  gptqmodel_cuda_block=os.environ.get('GPTQMODEL_CUDA_BLOCK'),
                   source_hashes={str(p.resolve()): digest(p) for p in files})
     snapshot = args.output/'executed-source'
     snapshot.mkdir()
@@ -106,7 +119,8 @@ def main():
                                            +json.dumps(report, indent=2)+'\n```\n')
     try:
         model = AutoModelForCausalLM.from_pretrained(source['dense'], dtype=getattr(torch, args.train_precision),
-                    device_map={'': 'cuda:0'}, attn_implementation='eager', local_files_only=True).eval()
+                    device_map={'': 'cuda:0'}, attn_implementation=args.attn_implementation,
+                    local_files_only=True).eval()
         tokenizer = AutoTokenizer.from_pretrained(source['dense'], local_files_only=True)
         for name in ('teacher', 'before_reload', 'after_reload'):
             (args.output/name).mkdir()
@@ -120,7 +134,7 @@ def main():
         write_json(args.output/'report.json', report)
         if args.lifecycle == 'public':
             from gptqmodel.models.definitions.llama import LlamaQModel
-            from gptqmodel.quantization import GPTQConfig, FORMAT
+            from gptqmodel.quantization import FORMAT, GPTQConfig
 
             qcfg = GPTQConfig(bits=args.bits, group_size=128, sym=True, desc_act=False,
                               act_group_aware=False, format=FORMAT.GPTQ_V2, offload_to_disk=False,
@@ -133,7 +147,14 @@ def main():
             wrapper.save(str(args.output/'model'))
             del wrapper
         else:
-            run = quantize_llama_gsq_model(model, documents['train'], bits=args.bits, group_size=128, gsq=config)
+            run = quantize_llama_gsq_model(
+                model,
+                documents['train'],
+                bits=args.bits,
+                group_size=128,
+                gsq=config,
+                offload_capture=args.offload_capture,
+            )
             save_llama_gsq_model(model, run, args.output/'model', tokenizer=tokenizer, source_model=source['dense'])
         write_json(args.output/'training.json', run)
         with torch.inference_mode():
@@ -145,7 +166,7 @@ def main():
         del model
         torch.cuda.empty_cache()
         restored = GPTQModel.load(str(args.output/'model'), backend=BACKEND.TORCH, device='cuda:0',
-                                  dtype=torch.float16, attn_implementation='eager')
+                                  dtype=torch.float16, attn_implementation=args.attn_implementation)
         rows = []
         for i, row in enumerate(documents['heldout']):
             with torch.inference_mode():

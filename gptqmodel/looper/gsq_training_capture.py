@@ -40,15 +40,31 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
             parent, leaf = name.rsplit('.', 1)
             setattr(prepared.get_submodule(parent), leaf, linear)
 
+        batch_device = fields[0][0][0].device
+        if batch_device.type != 'cpu' or device.type == 'cpu':
+            batch_device = device
+        clones = {}
+
         def clone(value):
+            identity = id(value)
+            if identity in clones:
+                return clones[identity]
             if isinstance(value, torch.Tensor):
-                return value.detach().to(device).clone()
+                result = value.detach().to(batch_device).clone()
+                clones[identity] = result
+                return result
             if isinstance(value, tuple):
-                return tuple(clone(v) for v in value)
+                result = tuple(clone(v) for v in value)
+                clones[identity] = result
+                return result
             if isinstance(value, list):
-                return [clone(v) for v in value]
+                result = [clone(v) for v in value]
+                clones[identity] = result
+                return result
             if isinstance(value, dict):
-                return {k: clone(v) for k, v in value.items()}
+                result = {k: clone(v) for k, v in value.items()}
+                clones[identity] = result
+                return result
             return copy.deepcopy(value)
 
         batches = []
@@ -105,30 +121,60 @@ def fit_llama_awq_gsq_capture(layer, cache, initializers, *, group_size, epochs,
     return packed, dict(initializer='provided_awq', stages=records)
 
 
-def capture_llama_gsq_inputs(model, documents, *, layer_index=0):
+def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=False):
     """Capture actual Llama decoder calls, including masks and rotary state.
 
     Replays the current model prefix, so previously installed quantized blocks
     participate in downstream capture. Documents must be unpadded. The caller
     controls placement; capture stops before the selected decoder executes.
     """
-    from .input_cache import InputCache
+    import logging
+    import time
+
     from transformers.models.llama.modeling_llama import LlamaForCausalLM
+
+    from .input_cache import InputCache
 
     if not isinstance(model, LlamaForCausalLM):
         raise TypeError('Staged capture currently requires LlamaForCausalLM')
-    if isinstance(layer_index, bool) or not isinstance(layer_index, int) or not 0 <= layer_index < len(model.model.layers):
+    if (isinstance(layer_index, bool) or not isinstance(layer_index, int)
+            or not 0 <= layer_index < len(model.model.layers)):
         raise ValueError('Invalid Llama layer index')
     if not documents:
         raise ValueError('Staged capture requires nonempty calibration documents')
+    if not isinstance(offload_to_cpu, bool):
+        raise TypeError('offload_to_cpu must be boolean')
+    if offload_to_cpu:
+        lengths = {len(document.get('input_ids', ())) for document in documents}
+        if len(lengths) != 1 or any(set(document) != {'input_ids'} for document in documents):
+            raise ValueError('CPU-offloaded capture requires equal-length input_ids without explicit metadata')
     captured = []
+    shared_kwargs = None
+    progress_at = time.monotonic()+60
 
     class CaptureComplete(Exception):
         pass
 
     def capture(_module, args, kwargs):
+        nonlocal shared_kwargs
         kwargs = dict(kwargs)
         hidden = args[0] if args else kwargs.pop('hidden_states')
+        if offload_to_cpu:
+            hidden = hidden.detach().cpu()
+            if shared_kwargs is None:
+                def cpu(value):
+                    if isinstance(value, torch.Tensor):
+                        return value.detach().cpu()
+                    if isinstance(value, tuple):
+                        return tuple(cpu(item) for item in value)
+                    if isinstance(value, list):
+                        return [cpu(item) for item in value]
+                    if isinstance(value, dict):
+                        return {key: cpu(item) for key, item in value.items()}
+                    return copy.deepcopy(value)
+
+                shared_kwargs = cpu(kwargs)
+            kwargs = shared_kwargs
         captured.append(([hidden], kwargs))
         raise CaptureComplete
 
@@ -136,7 +182,7 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0):
     handle = layer.register_forward_pre_hook(capture, with_kwargs=True)
     try:
         with torch.inference_mode():
-            for document in documents:
+            for document_index, document in enumerate(documents):
                 ids = torch.as_tensor(document['input_ids'], device=model.model.embed_tokens.weight.device)
                 if ids.ndim == 1:
                     ids = ids.unsqueeze(0)
@@ -158,10 +204,20 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0):
                     pass
                 if len(captured) != count+1:
                     raise RuntimeError('Selected Llama decoder was not captured exactly once')
+                if time.monotonic() >= progress_at:
+                    logging.getLogger(__name__).info(
+                        'GSQ capture layer=%d documents=%d/%d offload=%s',
+                        layer_index,
+                        document_index+1,
+                        len(documents),
+                        offload_to_cpu,
+                    )
+                    progress_at = time.monotonic()+60
     finally:
         handle.remove()
     inputs, kwargs, positions, masks = [], [], [], []
     for hidden, values in captured:
+        values = dict(values)
         inputs.append(hidden)
         positions.append(values.pop('position_ids', None))
         masks.append(values.pop('attention_mask', None))

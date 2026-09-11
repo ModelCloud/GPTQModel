@@ -262,6 +262,35 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
     return reported
 
 
+@torch.no_grad()
+def evaluate_hard_stage(quantizers, batches, objective):
+    """Measure deterministic hard assignments over the complete stage dataset."""
+    import logging
+    import time
+
+    weights = {name: quantizer.hard_weight() for name, quantizer in quantizers.items()}
+    weighted_loss = 0.
+    elements = 0
+    progress_at = time.monotonic()+60
+    for batch_index in range(len(batches)):
+        for batch, count in batches[batch_index]:
+            loss = objective(batch, weights)
+            if loss.ndim != 0 or not torch.isfinite(loss):
+                raise ValueError('GSQ hard stage objective must be a finite scalar')
+            weighted_loss += float(loss)*count
+            elements += count
+        if time.monotonic() >= progress_at:
+            logging.getLogger(__name__).info(
+                'GSQ hard-stage evaluation batches=%d/%d',
+                batch_index+1,
+                len(batches),
+            )
+            progress_at = time.monotonic()+60
+    if not elements:
+        raise ValueError('GSQ hard stage evaluation requires output elements')
+    return weighted_loss/elements
+
+
 class LlamaGSQAttentionStage(torch.nn.Module):
     """Llama author objective: residual plus attention, before post-attention norm."""
 
@@ -308,6 +337,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     import time
 
     started = time.perf_counter()
+    hard_loss_before = evaluate_hard_stage(quantizers, batches, objective)
     groups = []
     for quantizer in quantizers.values():
         groups.extend(quantizer.optimizer_groups(assignment_lr=assignment_lr, scale_lr=scale_lr,
@@ -322,6 +352,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     shuffle_rng = torch.Generator().manual_seed(seed)
     total_steps = epochs*len(batches)
     history = []
+    progress_at = time.monotonic()+60
     for epoch in range(epochs):
         for index in torch.randperm(len(batches), generator=shuffle_rng).tolist():
             step = len(history)
@@ -331,15 +362,18 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                                                   min_lr=min_lr, decay=decay)
             loss = train_stage_update(quantizers, optimizer, batches[index], objective, generator=sampling_rng,
                                       temperature=tau, multiplier=kappa)
-            if step == 0 or (step+1) % 100 == 0 or step+1 == total_steps:
+            if step == 0 or (step+1) % 100 == 0 or step+1 == total_steps or time.monotonic() >= progress_at:
                 import logging
 
                 logging.getLogger(__name__).info("GSQ stage update %d/%d loss=%g", step+1, total_steps, loss)
+                progress_at = time.monotonic()+60
             history.append(dict(epoch=epoch, step=step, batch=index, loss=loss, temperature=tau,
                                 multiplier=kappa, learning_rates=[group['lr'] for group in optimizer.param_groups]))
     result = dict(weights={name: quantizer.hard_weight().detach().clone() for name, quantizer in quantizers.items()},
                   scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
-                  history=history)
+                  history=history, hard_loss_before=hard_loss_before)
+    result['hard_loss_after'] = evaluate_hard_stage(quantizers, batches, objective)
+    result['hard_loss_delta'] = result['hard_loss_after']-hard_loss_before
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     result['elapsed_seconds'] = time.perf_counter()-started
@@ -366,8 +400,15 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             raise ValueError('GSQ batch sizes must be positive integers')
     if microbatch_size > batch_size:
         raise ValueError('GSQ microbatch size exceeds optimizer batch size')
-    if (batch_size != 1 or microbatch_size != 1) and layer.self_attn.config._attn_implementation != 'eager':
-        raise ValueError('Batched staged GSQ currently requires eager Llama attention')
+    attention_implementation = layer.self_attn.config._attn_implementation
+    if attention_implementation not in ('eager', 'sdpa'):
+        raise ValueError('Staged GSQ requires eager or SDPA Llama attention')
+    device = next(layer.parameters()).device
+    offloaded = any(hidden.device != device for hidden, _ in batches)
+    if attention_implementation == 'sdpa':
+        lengths = {hidden.shape[1] for hidden, _ in batches}
+        if len(lengths) != 1 or any(kwargs.get('attention_mask') is not None for _, kwargs in batches):
+            raise ValueError('SDPA staged GSQ requires equal-length documents without explicit attention masks')
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
@@ -413,15 +454,29 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         records[stage_name] = result
 
     # Keep names consistent with the containing block for functional replacement.
+    factor, dead = prepare_qk_calibration_factor(
+        [hidden for hidden, _ in batches],
+        damp_percent=qk_damp_percent,
+        device=device,
+        transform=fitted.input_layernorm,
+    )
     for name in names[:2]:
         projection = fitted.get_submodule(name)
         quant = quantizer(name)
-        with torch.no_grad():
-            normalized = [fitted.input_layernorm(hidden) for hidden, _ in batches]
-        qk_options = {key: value for key, value in training.items()
-                      if key in ('assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier', 'optimizer')}
-        result = fit_qk_projection(quant, projection.weight, normalized, steps=qk_steps,
-                                   damp_percent=qk_damp_percent, seed=seed, **qk_options)
+        qk_option_names = (
+            'assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier', 'optimizer',
+        )
+        qk_options = {key: value for key, value in training.items() if key in qk_option_names}
+        result = fit_qk_projection(
+            quant,
+            projection.weight,
+            factor=factor,
+            dead=dead,
+            steps=qk_steps,
+            damp_percent=qk_damp_percent,
+            seed=seed,
+            **qk_options,
+        )
         if affine_initializers:
             result['zeros'] = {'weight': quant.zeros.detach().clone()}
             result['codes'] = {'weight': quant.hard_codes().detach().clone()}
@@ -430,12 +485,19 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         with torch.no_grad():
             projection.weight.copy_(result['weights']['weight'])
         records[name] = result
-    if batch_size == microbatch_size == 1:
+    if batch_size == microbatch_size == 1 and not offloaded:
         staged_batches = [[((hidden, kwargs, None), hidden.numel())] for hidden, kwargs in batches]
     else:
         from .gsq_batching import llama_stage_batches
 
-        staged_batches = llama_stage_batches(batches, batch_size=batch_size, microbatch_size=microbatch_size)
+        staged_batches = llama_stage_batches(
+            batches,
+            batch_size=batch_size,
+            microbatch_size=microbatch_size,
+            device=device,
+            implicit_causal=attention_implementation == 'sdpa',
+            lazy=offloaded,
+        )
     run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches, teacher_attention)
     mlp_metadata = None
     if reinitialize_mlp:
@@ -456,6 +518,8 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
     numerical parity must be assessed separately from GSQ training parity.
     """
     import copy
+    import logging
+    import time
 
     from .config import GPTQConfig
     from .gptq import GPTQ
@@ -489,9 +553,38 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
             def capture(_module, inputs, output, task=task):
                 task.add_batch(inputs[0].detach(), output.detach())
             handles.append(module.register_forward_hook(capture))
+        device = next(working.parameters()).device
+        moved_metadata = {}
+
+        def move(value):
+            identity = id(value)
+            if identity in moved_metadata:
+                return moved_metadata[identity]
+            if isinstance(value, torch.Tensor):
+                result = value.detach().to(device)
+            elif isinstance(value, tuple):
+                result = tuple(move(item) for item in value)
+            elif isinstance(value, list):
+                result = [move(item) for item in value]
+            elif isinstance(value, dict):
+                result = {key: move(item) for key, item in value.items()}
+            else:
+                result = value
+            moved_metadata[identity] = result
+            return result
+
         with torch.no_grad():
-            for hidden, kwargs in batches:
-                working(hidden, **kwargs)
+            progress_at = time.monotonic()+60
+            for batch_index, (hidden, kwargs) in enumerate(batches):
+                working(hidden.to(device, non_blocking=True), **move(kwargs))
+                if time.monotonic() >= progress_at:
+                    logging.getLogger(__name__).info(
+                        'GSQ GPTQ initialization projections=%s batches=%d/%d',
+                        ','.join(names),
+                        batch_index+1,
+                        len(batches),
+                    )
+                    progress_at = time.monotonic()+60
         for handle in handles:
             handle.remove()
         handles.clear()
@@ -513,19 +606,35 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
             task.free()
 
 
-def prepare_qk_calibration_factor(inputs, *, damp_percent=.01):
+def prepare_qk_calibration_factor(inputs, *, damp_percent=.01, device=None, transform=None):
     """Author Q/K metric: 2/sequence_count Gram, dead diagonal repair, damping."""
     if not inputs or not math.isfinite(damp_percent) or damp_percent < 0:
         raise ValueError('GSQ Q/K factor requires inputs and nonnegative damping')
+    import logging
+    import time
+
     width = inputs[0].shape[-1]
-    gram = torch.zeros(width, width, device=inputs[0].device, dtype=torch.float32)
+    device = inputs[0].device if device is None else torch.device(device)
+    gram = torch.zeros(width, width, device=device, dtype=torch.float32)
     sequences = 0
-    for batch in inputs:
+    progress_at = time.monotonic()+60
+    for input_index, batch in enumerate(inputs):
         if batch.ndim != 3 or batch.shape[-1] != width or not torch.isfinite(batch).all():
             raise ValueError('GSQ Q/K inputs require finite [batch,tokens,in] geometry')
-        flattened = batch.detach().reshape(-1, width).float()
+        batch = batch.detach().to(device, non_blocking=True)
+        if transform is not None:
+            with torch.no_grad():
+                batch = transform(batch)
+        flattened = batch.reshape(-1, width).float()
         gram.add_(flattened.T @ flattened)
         sequences += batch.shape[0]
+        if time.monotonic() >= progress_at:
+            logging.getLogger(__name__).info(
+                'GSQ Q/K calibration inputs=%d/%d',
+                input_index+1,
+                len(inputs),
+            )
+            progress_at = time.monotonic()+60
     if not sequences:
         raise ValueError('GSQ Q/K factor has no sequences')
     gram.mul_(2/sequences)
@@ -535,11 +644,13 @@ def prepare_qk_calibration_factor(inputs, *, damp_percent=.01):
     return torch.linalg.cholesky(gram), dead
 
 
-def fit_qk_projection(quantizer, teacher, inputs, *, steps=2000, damp_percent=.01, seed=7,
+def fit_qk_projection(quantizer, teacher, inputs=None, *, factor=None, dead=None, steps=2000,
+                      damp_percent=.01, seed=7,
                       assignment_lr=1e-4, scale_lr=5e-5, betas=(.9, .95), weight_decay=1.,
                       temperature=(2., .05), multiplier=(100., 500.), optimizer='lion'):
     """Dedicated constant-LR Q/K training, using the prepared quadratic sum."""
-    factor, dead = prepare_qk_calibration_factor(inputs, damp_percent=damp_percent)
+    if factor is None or dead is None:
+        factor, dead = prepare_qk_calibration_factor(inputs, damp_percent=damp_percent)
     target = teacher.detach().float().clone()
     target[:, dead] = 0
 
