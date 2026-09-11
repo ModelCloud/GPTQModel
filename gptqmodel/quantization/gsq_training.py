@@ -205,11 +205,19 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
         for name, value in replacements.items():
             if name not in parameters or value.shape != parameters[name].shape:
                 raise ValueError(f'GSQ stage replacement does not match parameter {name}')
-    teacher_state = {**parameters, **{name: value.detach() for name, value in teacher_weights.items()}}
+    def match_parameter(name, value):
+        parameter = parameters[name]
+        if value.device != parameter.device or value.dtype != parameter.dtype:
+            return value.to(device=parameter.device, dtype=parameter.dtype)
+        return value
+
+    teacher_state = {**parameters, **{name: match_parameter(name, value.detach())
+                                      for name, value in teacher_weights.items()}}
     with torch.no_grad():
         teacher = torch.func.functional_call(module, (teacher_state, buffers), args, kwargs)
         teacher = teacher if output_select is None else output_select(teacher)
-    student = torch.func.functional_call(module, ({**parameters, **student_weights}, buffers), args, kwargs)
+    student_state = {**parameters, **{name: match_parameter(name, value) for name, value in student_weights.items()}}
+    student = torch.func.functional_call(module, (student_state, buffers), args, kwargs)
     student = student if output_select is None else output_select(student)
     if not isinstance(student, torch.Tensor) or not isinstance(teacher, torch.Tensor):
         raise ValueError('GSQ stage requires tensor outputs or an output selector')
@@ -460,8 +468,10 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         records[stage_name] = result
 
     # Keep names consistent with the containing block for functional replacement.
+    qk_inputs = batches.iter_hidden_batches() if hasattr(batches, 'iter_hidden_batches') else (
+        hidden for hidden, _ in batches)
     factor, dead = prepare_qk_calibration_factor(
-        (hidden for hidden, _ in batches),
+        qk_inputs,
         damp_percent=qk_damp_percent,
         device=device,
         transform=fitted.input_layernorm,
@@ -547,7 +557,8 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
             module = working.get_submodule(name)
             prior = dict(mse=2.4, scale_search='mse') if initializer == 'gptq_signed' else {}
             config = GPTQConfig(bits=bits, group_size=group_size, sym=True, desc_act=False,
-                                damp_percent=damp_percent, gsq=None, act_group_aware=False, **prior)
+                                damp_percent=damp_percent, gsq=None, act_group_aware=False,
+                                offload_to_disk=False, **prior)
             task = GPTQ(module, config)
             if initializer == 'gptq_signed':
                 from .gsq_initialization import SignedGSQQuantizer
@@ -581,7 +592,8 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
 
         with torch.no_grad():
             progress_at = time.monotonic()+60
-            for batch_index, (hidden, kwargs) in enumerate(batches):
+            source = batches.iter_batches() if hasattr(batches, 'iter_batches') else batches
+            for batch_index, (hidden, kwargs) in enumerate(source):
                 moved_hidden = hidden.to(device, non_blocking=True)
                 output = working(moved_hidden, **move(kwargs))
                 del output, moved_hidden, hidden, kwargs

@@ -47,8 +47,18 @@ class ResourceMonitor:
                 f' peak_rss_gib={status.get("VmHWM", 0)/2**20:.3f}'
                 f' mem_available_gib={memory.get("MemAvailable", 0)/2**20:.3f}'
                 f' cached_gib={memory.get("Cached", 0)/2**20:.3f}',
-                flush=True,
+                end='',
             )
+            torch_module = sys.modules.get('torch')
+            if torch_module is not None and torch_module.cuda.is_available():
+                print(
+                    f' cuda_allocated_gib={torch_module.cuda.memory_allocated()/2**30:.3f}'
+                    f' cuda_reserved_gib={torch_module.cuda.memory_reserved()/2**30:.3f}'
+                    f' cuda_peak_allocated_gib={torch_module.cuda.max_memory_allocated()/2**30:.3f}',
+                    flush=True,
+                )
+            else:
+                print(flush=True)
 
 
 def main():
@@ -70,6 +80,7 @@ def main():
     parser.add_argument('--lifecycle', choices=('dedicated', 'public'), default='dedicated')
     parser.add_argument('--attn-implementation', choices=('eager', 'sdpa'), default='eager')
     parser.add_argument('--offload-capture', action='store_true')
+    parser.add_argument('--capture-batch-size', type=int, default=None)
     args = parser.parse_args()
     if args.lifecycle == 'public' and args.arm != 'staged':
         parser.error('Public lifecycle validation currently selects the staged arm; disabled uses ordinary GPTQ')
@@ -82,6 +93,7 @@ def main():
         raise ValueError('Calibration/evaluation overlap')
     model_config = json.loads((Path(source['dense'])/'config.json').read_text())
     hidden_bytes = args.train_samples*source['token_cap']*model_config['hidden_size']*2
+    capture_batch_size = args.capture_batch_size or (1 if args.offload_capture else args.microbatch_size)
     optimizer_batch_bytes = args.batch_size*source['token_cap']*model_config['hidden_size']*2
     total_memory = os.sysconf('SC_PAGE_SIZE')*os.sysconf('SC_PHYS_PAGES')
     available_memory = int(next(
@@ -149,6 +161,7 @@ def main():
                   bits=args.bits, group_size=128, train_precision=args.train_precision, export_precision='float16',
                   attention_implementation=args.attn_implementation, offload_capture=args.offload_capture,
                   capture_storage='disk' if args.offload_capture else 'device',
+                  capture_batch_size=capture_batch_size,
                   calibration_samples=len(documents['train']),
                   calibration_tokens=sum(len(row['input_ids']) for row in documents['train']),
                   calibration_token_cap=source['token_cap'],
@@ -161,6 +174,7 @@ def main():
                   gpu_allocator_lease_id=os.environ.get('GPU_ALLOCATOR_LEASE_ID'),
                   gptqmodel_cuda_block=os.environ.get('GPTQMODEL_CUDA_BLOCK'),
                   estimated_capture_spool_bytes=hidden_bytes if args.offload_capture else 0,
+                  estimated_gpu_capture_bytes=0 if args.offload_capture else hidden_bytes,
                   estimated_cpu_peak_bytes=estimated_cpu_peak,
                   host_total_memory_bytes=total_memory, host_available_memory_bytes=available_memory,
                   free_output_disk_bytes=free_disk,
@@ -178,6 +192,7 @@ def main():
         'RESOURCE_BUDGET'
         f' estimated_cpu_peak_gib={estimated_cpu_peak/2**30:.3f}'
         f' capture_spool_gib={(hidden_bytes if args.offload_capture else 0)/2**30:.3f}'
+        f' gpu_capture_gib={(0 if args.offload_capture else hidden_bytes)/2**30:.3f}'
         f' host_available_gib={available_memory/2**30:.3f}',
         flush=True,
     )
@@ -222,6 +237,7 @@ def main():
                 gsq=config,
                 offload_capture=args.offload_capture,
                 capture_directory=args.output/'capture-staging' if args.offload_capture else None,
+                capture_batch_size=capture_batch_size,
             )
             save_llama_gsq_model(model, run, args.output/'model', tokenizer=tokenizer, source_model=source['dense'])
         write_json(args.output/'training.json', run)

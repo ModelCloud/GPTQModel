@@ -50,6 +50,70 @@ class DiskBackedLlamaDocuments:
         return hidden, self.kwargs
 
 
+class DeviceBackedLlamaCapture:
+    """A GPU-resident decoder-input spool with per-chunk Llama metadata."""
+
+    def __init__(self, chunks):
+        self.chunks = tuple(chunks)
+        self.shape = tuple(chunks[0][0].shape[1:])
+        self.dtype = chunks[0][0].dtype
+        self.length = sum(hidden.shape[0] for hidden, _ in chunks)
+
+    def cleanup(self):
+        self.chunks = ()
+
+
+class DeviceBackedLlamaDocuments:
+    """Load one captured decoder input view from retained GPU chunks."""
+
+    offloaded = False
+
+    def __init__(self, capture):
+        self.capture = capture
+        self.fixed_sequence_length = capture.shape[0]
+        self.has_attention_mask = any(kwargs.get('attention_mask') is not None for _, kwargs in capture.chunks)
+
+    def __len__(self):
+        return self.capture.length
+
+    @staticmethod
+    def _slice(value, start, stop, batch_size):
+        if isinstance(value, torch.Tensor):
+            return value[start:stop] if value.ndim and value.shape[0] == batch_size else value
+        if isinstance(value, tuple):
+            return tuple(DeviceBackedLlamaDocuments._slice(item, start, stop, batch_size) for item in value)
+        if isinstance(value, list):
+            return [DeviceBackedLlamaDocuments._slice(item, start, stop, batch_size) for item in value]
+        if isinstance(value, dict):
+            return {key: DeviceBackedLlamaDocuments._slice(item, start, stop, batch_size)
+                    for key, item in value.items()}
+        return value
+
+    def _locate(self, index):
+        offset = index
+        for hidden, kwargs in self.capture.chunks:
+            if offset < hidden.shape[0]:
+                return hidden, kwargs, offset
+            offset -= hidden.shape[0]
+        raise IndexError(index)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[position] for position in range(*index.indices(len(self)))]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self):
+            raise IndexError(index)
+        hidden, kwargs, offset = self._locate(index)
+        return hidden[offset:offset+1], self._slice(kwargs, offset, offset+1, hidden.shape[0])
+
+    def iter_hidden_batches(self):
+        for hidden, _ in self.capture.chunks:
+            yield hidden
+
+    def iter_batches(self):
+        for hidden, kwargs in self.capture.chunks:
+            yield hidden, kwargs
+
+
 def prepare_llama_gsq_capture(layer, cache, *, device=None):
     """Copy a pristine block and its exact captured masks/rotary tensors.
 
@@ -62,9 +126,13 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
     if not isinstance(layer, LlamaDecoderLayer):
         raise TypeError('Staged capture currently requires a LlamaDecoderLayer')
     disk_backed = isinstance(cache, DiskBackedLlamaCapture)
+    device_backed = isinstance(cache, DeviceBackedLlamaCapture)
     if disk_backed:
         if not cache.paths:
             raise ValueError('Staged capture requires nonempty disk-backed inputs')
+    elif device_backed:
+        if not cache.chunks:
+            raise ValueError('Staged capture requires nonempty device-backed inputs')
     else:
         fields = (cache.layer_inputs, cache.layer_input_kwargs, cache.position_ids, cache.attention_masks)
         if not fields[0] or any(len(values) != len(fields[0]) for values in fields):
@@ -88,7 +156,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
             parent, leaf = name.rsplit('.', 1)
             setattr(prepared.get_submodule(parent), leaf, linear)
 
-        batch_device = torch.device('cpu') if disk_backed else fields[0][0][0].device
+        batch_device = torch.device('cpu') if disk_backed else (
+            device if device_backed else fields[0][0][0].device)
         if not disk_backed and (batch_device.type != 'cpu' or device.type == 'cpu'):
             batch_device = device
         clones = {}
@@ -126,6 +195,9 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
                 kwargs['position_ids'] = clone(cache.position_ids)
             kwargs['attention_mask'] = clone(cache.attention_mask)
             return prepared, DiskBackedLlamaDocuments(cache, kwargs)
+
+        if device_backed:
+            return prepared, DeviceBackedLlamaDocuments(cache)
 
         batches = []
         for inputs, kwargs, positions, mask in zip(*fields):
@@ -181,7 +253,8 @@ def fit_llama_awq_gsq_capture(layer, cache, initializers, *, group_size, epochs,
     return packed, dict(initializer='provided_awq', stages=records)
 
 
-def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=False, offload_directory=None):
+def capture_llama_gsq_inputs(
+        model, documents, *, layer_index=0, offload_to_cpu=False, offload_directory=None, capture_batch_size=1):
     """Capture actual Llama decoder calls, including masks and rotary state.
 
     Replays the current model prefix, so previously installed quantized blocks
@@ -204,13 +277,16 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
         raise ValueError('Staged capture requires nonempty calibration documents')
     if not isinstance(offload_to_cpu, bool):
         raise TypeError('offload_to_cpu must be boolean')
+    if isinstance(capture_batch_size, bool) or not isinstance(capture_batch_size, int) or capture_batch_size < 1:
+        raise ValueError('capture_batch_size must be a positive integer')
     if offload_directory is not None and not offload_to_cpu:
         raise ValueError('Disk-backed capture requires CPU offloading')
     offload_directory = None if offload_directory is None else Path(offload_directory)
-    if offload_to_cpu:
+    batched_capture = not offload_to_cpu and capture_batch_size > 1
+    if offload_to_cpu or batched_capture:
         lengths = {len(document.get('input_ids', ())) for document in documents}
         if len(lengths) != 1 or any(set(document) != {'input_ids'} for document in documents):
-            raise ValueError('CPU-offloaded capture requires equal-length input_ids without explicit metadata')
+            raise ValueError('Batched GSQ capture requires equal-length input_ids without explicit metadata')
     if offload_directory is not None:
         offload_directory.mkdir(parents=True, exist_ok=False)
     captured = []
@@ -224,6 +300,17 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
         nonlocal shared_kwargs
         kwargs = dict(kwargs)
         hidden = args[0] if args else kwargs.pop('hidden_states')
+        def detach(value):
+            if isinstance(value, torch.Tensor):
+                return value.detach()
+            if isinstance(value, tuple):
+                return tuple(detach(item) for item in value)
+            if isinstance(value, list):
+                return [detach(item) for item in value]
+            if isinstance(value, dict):
+                return {key: detach(item) for key, item in value.items()}
+            return value
+
         if offload_to_cpu:
             hidden = hidden.detach().cpu()
             if shared_kwargs is None:
@@ -240,6 +327,9 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
 
                 shared_kwargs = cpu(kwargs)
             kwargs = shared_kwargs
+        elif batched_capture:
+            hidden = hidden.detach()
+            kwargs = detach(kwargs)
         if offload_directory is None:
             captured.append(([hidden], kwargs))
         else:
@@ -253,21 +343,23 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
     handle = layer.register_forward_pre_hook(capture, with_kwargs=True)
     try:
         with torch.inference_mode():
-            for document_index, document in enumerate(documents):
-                ids = torch.as_tensor(document['input_ids'], device=model.model.embed_tokens.weight.device)
-                if ids.ndim == 1:
-                    ids = ids.unsqueeze(0)
-                if ids.ndim != 2 or ids.shape[0] != 1 or not ids.shape[1]:
-                    raise ValueError('Staged capture requires one nonempty unpadded document per call')
+            for document_index in range(0, len(documents), capture_batch_size if batched_capture else 1):
+                group = documents[document_index:document_index+(capture_batch_size if batched_capture else 1)]
+                ids = torch.as_tensor([document['input_ids'] for document in group],
+                                      device=model.model.embed_tokens.weight.device)
+                if ids.ndim != 2 or not ids.shape[0] or not ids.shape[1]:
+                    raise ValueError('Staged capture requires nonempty unpadded documents')
                 kwargs = {}
-                for name in ('attention_mask', 'position_ids'):
-                    if name in document:
-                        value = torch.as_tensor(document[name], device=ids.device)
-                        if value.ndim == 1:
-                            value = value.unsqueeze(0)
-                        if value.shape != ids.shape or (name == 'attention_mask' and not (value == 1).all()):
-                            raise ValueError('Staged capture requires aligned unpadded token metadata')
-                        kwargs[name] = value
+                if not batched_capture:
+                    document = group[0]
+                    for name in ('attention_mask', 'position_ids'):
+                        if name in document:
+                            value = torch.as_tensor(document[name], device=ids.device)
+                            if value.ndim == 1:
+                                value = value.unsqueeze(0)
+                            if value.shape != ids.shape or (name == 'attention_mask' and not (value == 1).all()):
+                                raise ValueError('Staged capture requires aligned unpadded token metadata')
+                            kwargs[name] = value
                 count = len(captured)
                 try:
                     model(input_ids=ids, use_cache=False, **kwargs)
@@ -279,7 +371,7 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
                     logging.getLogger(__name__).info(
                         'GSQ capture layer=%d documents=%d/%d offload=%s disk=%s',
                         layer_index,
-                        document_index+1,
+                        min(document_index+len(group), len(documents)),
                         len(documents),
                         offload_to_cpu,
                         offload_directory is not None,
@@ -307,6 +399,17 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
             shape,
             dtype,
         )
+    if batched_capture:
+        chunks = []
+        for hidden, values in captured:
+            values = dict(values)
+            if values.get('use_cache') or values.get('past_key_values') is not None:
+                raise ValueError('Staged capture requires cache-free calibration')
+            if values.get('position_embeddings') is None:
+                raise ValueError('Staged capture requires the actual captured rotary embeddings')
+            values['use_cache'] = False
+            chunks.append((hidden[0], values))
+        return DeviceBackedLlamaCapture(chunks)
     inputs, kwargs, positions, masks = [], [], [], []
     for hidden, values in captured:
         values = dict(values)

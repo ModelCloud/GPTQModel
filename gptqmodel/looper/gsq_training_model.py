@@ -38,7 +38,7 @@ def staged_documents_from_prepared(prepared):
 
 
 def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None,
-                             offload_capture=False, capture_directory=None):
+                             offload_capture=False, capture_directory=None, capture_batch_size=1):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
@@ -58,6 +58,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         raise TypeError('Staged model quantization requires GSQTrainingConfig, a dictionary or None')
     if not isinstance(offload_capture, bool):
         raise TypeError('offload_capture must be boolean')
+    if isinstance(capture_batch_size, bool) or not isinstance(capture_batch_size, int) or capture_batch_size < 1:
+        raise ValueError('capture_batch_size must be a positive integer')
     if capture_directory is not None and not offload_capture:
         raise ValueError('Disk-backed capture requires capture offloading')
     capture_directory = None if capture_directory is None else Path(capture_directory)
@@ -105,6 +107,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 capture_options['offload_to_cpu'] = True
             if capture_directory is not None:
                 capture_options['offload_directory'] = capture_directory/f'layer-{index:02d}'
+            if not offload_capture:
+                capture_options['capture_batch_size'] = capture_batch_size
             cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
             try:
                 packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
@@ -121,6 +125,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             run['blocks'].append(dict(layer_index=index, stages=stages,
                                        initializer_metadata=result['initializer_metadata']))
             del result, cache
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
         run['state'] = 'complete'
     except Exception as error:
         run.update(state='failed', error_type=type(error).__name__, error=str(error))
