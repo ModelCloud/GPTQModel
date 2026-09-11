@@ -1760,6 +1760,15 @@ def _resolve_offload_entry(
     else:
         shape = shape_hint
 
+    if resolved_dtype != dtype or shape != shape_hint:
+        name = f"{module_path}.{leaf}" if module_path else leaf
+        index_path = os.path.join(module_dir, "index.json")
+        raise ValueError(
+            f"Offload metadata mismatch for tensor '{name}' in '{index_path}': "
+            f"expected dtype {dtype} and shape {shape_hint}, "
+            f"found dtype {resolved_dtype} and shape {shape}."
+        )
+
     safetensors_file = entry.get("safetensors_file")
     if safetensors_file:
         path = safetensors_file
@@ -1784,7 +1793,7 @@ def _resolve_offload_entry(
         end = start + (_torch_dtype_num_bytes(resolved_dtype) * math.prod(shape or (1,)))
         return OffloadTensorRef(
             path=os.path.abspath(path),
-            dtype=resolved_dtype,
+            torch_dtype=resolved_dtype,
             shape=shape,
             format="dat",
             weight_name=None,
