@@ -1937,7 +1937,9 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
     return state_dict
 
 
-def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]:
+def _checkpoint_tensor_keys(
+    checkpoint: str | os.PathLike, *, verify_shards: bool = False,
+) -> Optional[set[str]]:
     # accelerate.load_checkpoint_in_model() does not return the checkpoint key
     # set. Read only metadata/index keys here so tie_weights() can distinguish
     # tensors that were truly absent from tensors that were loaded separately.
@@ -1949,6 +1951,16 @@ def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]
                 index = json.load(f)
             weight_map = index.get("weight_map", index)
             if isinstance(weight_map, dict):
+                if verify_shards:
+                    keys = set()
+                    for shard in set(weight_map.values()):
+                        shard_keys = _checkpoint_tensor_keys(
+                            os.path.join(os.path.dirname(checkpoint), shard),
+                        )
+                        if shard_keys is None:
+                            return None
+                        keys.update(shard_keys)
+                    return keys
                 return set(weight_map)
             return None
 
@@ -1970,12 +1982,34 @@ def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]
     if len(index_files) != 1:
         return None
 
-    with open(os.path.join(checkpoint, index_files[0]), encoding="utf-8") as f:
-        index = json.load(f)
-    weight_map = index.get("weight_map", index)
-    if isinstance(weight_map, dict):
-        return set(weight_map)
-    return None
+    return _checkpoint_tensor_keys(
+        os.path.join(checkpoint, index_files[0]), verify_shards=verify_shards,
+    )
+
+
+def validate_checkpoint_qweights(
+    model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT,
+) -> None:
+    if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        return
+
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        return
+
+    # A shared quantized module can be saved under any one of its aliases.
+    module_keys = collections.defaultdict(set)
+    for name, module in model.named_modules(remove_duplicate=False):
+        if isinstance(module, GPTQQuantLinear):
+            module_keys[id(module)].add(f"{name}.qweight" if name else "qweight")
+    missing = sorted(
+        min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
+    )
+    if missing:
+        raise ValueError(
+            f"Missing required quantized weights in checkpoint {os.fspath(checkpoint)!r}: "
+            + ", ".join(missing)
+        )
 
 
 def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
