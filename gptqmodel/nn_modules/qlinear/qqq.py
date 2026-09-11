@@ -5,7 +5,6 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -253,18 +252,20 @@ class QQQLinear(GroupedQuantLinear):
         return cls._validate(**args)
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
-        CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if device == DEVICE.CUDA:
-            if IS_ROCM:
-                raise NotImplementedError("Marlin kernel is not supported on ROCm.")
-
-            if CUDA_VISIBLE_DEVICES is None:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
-            else:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
-            if not has_cuda_v8:
+        # QQQ has an independent ROCm implementation. ROCm exposes CUDA
+        # device values through torch, so an exact cuda:N target must not
+        # be mistaken for the unsupported CUDA Marlin path.
+        if IS_ROCM:
+            return
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
+            targets = (
+                (device,)
+                if isinstance(device, torch.device)
+                else tuple(torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count()))
+            )
+            if not targets or any(torch.cuda.get_device_capability(target)[0] < 8 for target in targets):
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
 
     def post_init(self):

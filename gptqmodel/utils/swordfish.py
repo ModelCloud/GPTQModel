@@ -226,7 +226,11 @@ _SWORDFISH_SUPPORTED_CAPABILITIES: Tuple[
 ] = _swordfish_supported_compute_capabilities()
 
 
-def _swordfish_static_runtime_error() -> str:
+def _swordfish_static_runtime_error(
+    device: Optional[torch.device] = None,
+    *,
+    check_capability: bool = True,
+) -> str:
     if IS_ROCM:
         return "Swordfish kernel is not supported on ROCm."
     torch_public = torch.__version__.partition("+")[0]
@@ -247,7 +251,14 @@ def _swordfish_static_runtime_error() -> str:
         )
     if not torch.cuda.is_available():
         return "Swordfish kernel requires CUDA."
-    major, minor = torch.cuda.get_device_capability()
+    if not check_capability:
+        return ""
+    target = torch.device(device) if device is not None else None
+    major, minor = (
+        torch.cuda.get_device_capability(target)
+        if target is not None
+        else torch.cuda.get_device_capability()
+    )
     exact_caps, ptx_forward, ptx_exact = _SWORDFISH_SUPPORTED_CAPABILITIES
     if (
         (major, minor) in exact_caps
@@ -265,26 +276,44 @@ def _swordfish_static_runtime_error() -> str:
     )
 
 
-def _validate_swordfish_device_support() -> bool:
-    return _swordfish_static_runtime_error() == ""
+def _validate_swordfish_device_support(device: Optional[torch.device] = None) -> bool:
+    return _swordfish_static_runtime_error(device) == ""
 
 
-def swordfish_runtime_available() -> bool:
-    static_error = _swordfish_static_runtime_error()
-    if static_error:
+def _validate_swordfish_build_support() -> bool:
+    if _swordfish_static_runtime_error(check_capability=False):
         return False
+    return any(
+        _swordfish_static_runtime_error(torch.device(f"cuda:{index}")) == ""
+        for index in range(torch.cuda.device_count())
+    )
+
+
+def swordfish_extension_available() -> bool:
+    """Return extension availability without consulting the current GPU."""
     return _extension_api().is_available("swordfish")
 
 
-def swordfish_runtime_error() -> str:
-    static_error = _swordfish_static_runtime_error()
-    if static_error:
-        return static_error
-
+def swordfish_extension_error() -> str:
     extension_api = _extension_api()
     if extension_api.is_available("swordfish"):
         return ""
     return extension_api.error("swordfish") or "Swordfish runtime unavailable."
+
+
+def swordfish_runtime_available(device: Optional[torch.device] = None) -> bool:
+    static_error = _swordfish_static_runtime_error(device)
+    if static_error:
+        return False
+    return swordfish_extension_available()
+
+
+def swordfish_runtime_error(device: Optional[torch.device] = None) -> str:
+    static_error = _swordfish_static_runtime_error(device)
+    if static_error:
+        return static_error
+
+    return swordfish_extension_error()
 
 
 def clear_swordfish_extension_cache() -> None:
@@ -448,6 +477,8 @@ __all__ = [
     "query_swordfish_supported_group_sizes",
     "query_swordfish_supported_quant_types",
     "swordfish_dequant_dense",
+    "swordfish_extension_available",
+    "swordfish_extension_error",
     "swordfish_mm",
     "swordfish_moe_mm",
     "swordfish_prepack_B",

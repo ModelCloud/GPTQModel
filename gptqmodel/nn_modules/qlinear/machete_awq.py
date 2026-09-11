@@ -16,9 +16,10 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.machete import (
     _validate_machete_device_support,
+    machete_extension_available,
+    machete_extension_error,
     machete_mm,
     machete_prepack_B,
-    machete_runtime_available,
     machete_runtime_error,
     pack_quantized_values_into_int32,
 )
@@ -137,18 +138,26 @@ class AwqMacheteLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not machete_runtime_available():
-            return False, ImportError(machete_runtime_error())
+        if not machete_extension_available():
+            return False, ImportError(machete_extension_error())
         return True, None
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
-        if device == DEVICE.CUDA:
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
             if IS_ROCM:
                 raise NotImplementedError("Machete kernel is not supported on ROCm.")
-            if not _validate_machete_device_support():
-                raise NotImplementedError("Machete kernel requires compute capability >= 9.0.")
+            targets = (
+                (device,)
+                if isinstance(device, torch.device)
+                else tuple(torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count()))
+            )
+            if not targets:
+                raise NotImplementedError("Machete kernel requires CUDA.")
+            for target in targets:
+                if not _validate_machete_device_support(target):
+                    raise NotImplementedError(machete_runtime_error(target))
 
     def post_init(self):
         device = self.qweight.device

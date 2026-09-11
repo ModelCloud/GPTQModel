@@ -664,20 +664,33 @@ def _extension_api():
     return extension_api
 
 
-def _machete_static_runtime_error() -> str:
+def _machete_static_runtime_error(device: Optional[torch.device] = None) -> str:
     if IS_ROCM:
         return "Machete kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Machete kernel requires CUDA."
-    capability = torch.cuda.get_device_capability()
+    target = torch.device(device) if device is not None else None
+    capability = (
+        torch.cuda.get_device_capability(target)
+        if target is not None
+        else torch.cuda.get_device_capability()
+    )
     if capability != _MACHETE_REQUIRED_COMPUTE_CAPABILITY:
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        props = (
+            torch.cuda.get_device_properties(target)
+            if target is not None
+            else torch.cuda.get_device_properties(torch.cuda.current_device())
+        )
         return (
             "Machete kernel is Hopper-only (SM90); its generated CUTLASS kernels "
             f"target arch::Sm90 and have no Blackwell image. Found `{props.name}` with "
             f"compute capability {capability[0]}.{capability[1]}."
         )
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
+    props = (
+        torch.cuda.get_device_properties(target)
+        if target is not None
+        else torch.cuda.get_device_properties(torch.cuda.current_device())
+    )
     shared_memory_per_block_optin = getattr(
         props,
         "shared_memory_per_block_optin",
@@ -696,30 +709,49 @@ def clear_machete_extension_cache() -> None:
     _MACHETE_TORCH_OPS_EXTENSION.clear_cache()
 
 
-def machete_runtime_available() -> bool:
-    static_error = _machete_static_runtime_error()
-    if static_error:
-        return False
+def machete_extension_available() -> bool:
+    """Return extension availability without consulting the current GPU."""
     return _extension_api().is_available("machete")
 
 
-def machete_runtime_error() -> str:
-    static_error = _machete_static_runtime_error()
-    if static_error:
-        return static_error
-
+def machete_extension_error() -> str:
     extension_api = _extension_api()
     if extension_api.is_available("machete"):
         return ""
     return extension_api.error("machete") or "Machete runtime unavailable."
 
 
+def machete_runtime_available(device: Optional[torch.device] = None) -> bool:
+    static_error = _machete_static_runtime_error(device)
+    if static_error:
+        return False
+    return machete_extension_available()
+
+
+def machete_runtime_error(device: Optional[torch.device] = None) -> str:
+    static_error = _machete_static_runtime_error(device)
+    if static_error:
+        return static_error
+
+    return machete_extension_error()
+
+
 def prewarm_machete_extension() -> bool:
     return _extension_api().load(name="machete")["machete"]
 
 
-def _validate_machete_device_support() -> bool:
-    return _machete_static_runtime_error() == ""
+def _validate_machete_device_support(device: Optional[torch.device] = None) -> bool:
+    return _machete_static_runtime_error(device) == ""
+
+
+def _validate_machete_build_support() -> bool:
+    """Return whether any visible GPU can use the device-independent extension."""
+    if IS_ROCM or not torch.cuda.is_available():
+        return False
+    return any(
+        _machete_static_runtime_error(torch.device(f"cuda:{index}")) == ""
+        for index in range(torch.cuda.device_count())
+    )
 
 
 def query_machete_supported_quant_types(zero_points: bool) -> List[ScalarType]:
@@ -867,6 +899,8 @@ __all__ = [
     "_validate_machete_device_support",
     "check_machete_supports_shape",
     "clear_machete_extension_cache",
+    "machete_extension_available",
+    "machete_extension_error",
     "machete_mm",
     "machete_prepack_B",
     "machete_runtime_available",
