@@ -44,6 +44,7 @@ from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
+    ensure_qwen_drive_registered,
     prepare_remote_code_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
@@ -1191,6 +1192,7 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path):
 
+        ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
             model_id_or_path,
             trust_remote_code=True,
