@@ -1079,6 +1079,14 @@ class ParoQuantProcessor(LoopProcessor):
                 module_kwargs["position_ids"] = _LayerShardLoader._tensor_to_device(position_ids, target_device)
 
         module_kwargs["use_cache"] = False
+        prepare_replay_kwargs = getattr(self.gptq_model, "prepare_layer_replay_kwargs", None)
+        if prepare_replay_kwargs is not None:
+            module_kwargs = prepare_replay_kwargs(
+                layer=layer,
+                layer_input=[x],
+                additional_inputs=module_kwargs,
+                target_device=target_device,
+            )
         module_kwargs = self._normalize_group_runtime_metadata(module_kwargs)
         if prepared_cache_key is not None and prepared_cache is not None:
             prepared_cache[prepared_cache_key] = dict(module_kwargs)

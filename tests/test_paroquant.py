@@ -3017,6 +3017,143 @@ def test_paroquant_processor_group_checkpoint_normalizes_inference_inputs():
     assert layer_scale.grad is not None
 
 
+@pytest.mark.parametrize("replay_mode", ["group", "streamed_cached", "streamed_uncached"])
+@pytest.mark.parametrize("with_grad", [False, True])
+def test_paroquant_muse_glimmer_replay_matches_dense_forward_and_gradients(
+    replay_mode, with_grad
+):
+    configuration = pytest.importorskip("transformers.models.muse_glimmer.configuration_muse_glimmer")
+    modeling = pytest.importorskip("transformers.models.muse_glimmer.modeling_muse_glimmer")
+    from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
+
+    torch.manual_seed(0)
+    config = configuration.MuseGlimmerTextConfig(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+        layer_types=["sliding_attention"] * 3 + ["full_attention"],
+        layer_rope_theta=[500000.0] * 3 + [0],
+        sliding_window=2,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    config._attn_implementation = "eager"
+    model = modeling.MuseGlimmerTextModel(config).eval()
+    root = torch.nn.Module()
+    root.model = torch.nn.Module()
+    root.model.language_model = model
+    qmodel = object.__new__(MuseGlimmerQModel)
+    torch.nn.Module.__init__(qmodel)
+    qmodel.model = root
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = qmodel
+    processor.model = root
+
+    input_ids = torch.tensor([[1, 3, 4, 5, 6]])
+    position_ids = torch.arange(input_ids.shape[1]).unsqueeze(0)
+    dense_input = model.embed_tokens(input_ids).detach().requires_grad_(with_grad)
+    replay_input = dense_input.detach().clone().requires_grad_(with_grad)
+    with torch.set_grad_enabled(with_grad):
+        dense_output = model(inputs_embeds=dense_input, use_cache=False).last_hidden_state
+        hidden_states = replay_input
+        input_kwargs = {
+            "position_embeddings": model.rotary_emb(hidden_states, position_ids),
+        }
+        for layer in model.layers:
+            if replay_mode == "group":
+                hidden_states = processor._forward_group_batch(
+                    layer,
+                    batch_index=0,
+                    input_batch=[hidden_states],
+                    input_kwargs=input_kwargs,
+                    attention_mask=None,
+                    position_ids=position_ids,
+                )
+            else:
+                replay_batch = paroquant_processor_module._ParoQuantReplayBatch(
+                    inputs=[hidden_states],
+                    input_kwargs=input_kwargs,
+                    target=torch.empty(0),
+                    position_ids=position_ids,
+                    attention_mask=None,
+                    row_count=input_ids.numel(),
+                )
+                hidden_states = processor._forward_replay_batch(
+                    layer,
+                    replay_batch=replay_batch,
+                    cache_kwargs=replay_mode == "streamed_cached",
+                )
+        replay_output = model.norm(hidden_states)
+        torch.testing.assert_close(replay_output, dense_output, rtol=0, atol=0)
+
+        if with_grad:
+            parameters = tuple(model.layers.parameters())
+            loss_weights = torch.randn_like(dense_output)
+            dense_gradients = torch.autograd.grad(
+                (dense_output * loss_weights).sum(), (dense_input, *parameters)
+            )
+            replay_gradients = torch.autograd.grad(
+                (replay_output * loss_weights).sum(), (replay_input, *parameters)
+            )
+            for actual, expected in zip(replay_gradients, dense_gradients):
+                torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_paroquant_processor_replay_hook_metadata_is_normalized_and_layer_specific(cache):
+    class _ToyLayer(torch.nn.Module):
+        def __init__(self, scale):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+            self.scale = scale
+
+        def forward(self, x, scale, **_kwargs):
+            return x * self.weight * scale
+
+    calls = []
+
+    def prepare_layer_replay_kwargs(layer, layer_input, additional_inputs, target_device):
+        calls.append(layer)
+        assert layer_input[0] is x
+        assert target_device == x.device
+        assert additional_inputs["use_cache"] is False
+        with torch.inference_mode():
+            scale = torch.tensor(layer.scale, device=target_device)
+        return {**additional_inputs, "scale": scale}
+
+    processor = object.__new__(ParoQuantProcessor)
+    processor.gptq_model = SimpleNamespace(
+        prepare_layer_replay_kwargs=prepare_layer_replay_kwargs,
+    )
+    processor.model = None
+    x = torch.ones(1, 2, 4)
+    input_kwargs = {}
+    layers = [_ToyLayer(2.0), _ToyLayer(3.0)]
+    for layer in layers:
+        for _ in range(2):
+            kwargs = processor._prepare_group_forward_kwargs(
+                layer,
+                x=x,
+                input_kwargs=input_kwargs,
+                attention_mask=None,
+                position_ids=None,
+                cache=cache,
+            )
+            assert not kwargs["scale"].is_inference()
+            output = layer(x, **kwargs)
+            torch.testing.assert_close(output, x * layer.scale)
+            output.sum().backward()
+            kwargs["scale"] = None
+        torch.testing.assert_close(layer.weight.grad, torch.tensor([16 * layer.scale]))
+
+    assert calls == (layers if cache else [layers[0], layers[0], layers[1], layers[1]])
+    assert input_kwargs == {}
+
+
 def test_paroquant_processor_cached_group_position_ids_are_autograd_safe():
     """Generated position-id cache entries must stay reusable outside worker inference mode."""
 
