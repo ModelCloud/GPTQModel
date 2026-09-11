@@ -454,6 +454,7 @@ class TorchLinear(PackableQuantLinear):
         )
         weight = torch.bitwise_and(weight, self.maxq)
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
+        weight = weight[:self.in_features]
 
         zeros_tile = zeros.narrow(1, start, width)
         scales_tile = self.scales.narrow(1, start, width)
@@ -472,7 +473,8 @@ class TorchLinear(PackableQuantLinear):
             self.wf_unsqueeze_zero,
             self.dequant_dtype,
         )
-        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+        zeros = torch.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
+        zeros = zeros[:, :self.scales.shape[1]]
         self._zeros_cache = zeros
         self._zeros_cache_state = cache_state
         return zeros
@@ -675,6 +677,9 @@ class TorchLinear(PackableQuantLinear):
         # Planar 3-bit words do not match the continuous Triton decode layout.
         if self.planar:
             return False
+        # Triton assumes complete zero-point words when computing group strides.
+        if self.bits in (2, 4, 8) and self.out_features % self.pack_factor:
+            return False
         if not (self.qweight.is_contiguous() and self.qzeros.is_contiguous() and self.scales.is_contiguous()):
             return False
         # g_idx is stored as int32 tensor; ensure it resides on the same device.
@@ -714,7 +719,7 @@ class TorchLinear(PackableQuantLinear):
         weight = weight.reshape(weight.shape[0] * weight.shape[1], weight.shape[2])
 
         if num_itr == 1:
-            return self.scales[g_idx_long] * (weight - zeros[g_idx_long])
+            return self.scales[g_idx_long] * (weight[:self.in_features] - zeros[g_idx_long])
 
         num_dim = self.g_idx.shape[0] // num_itr
         out_dim = weight.shape[1] // num_itr
