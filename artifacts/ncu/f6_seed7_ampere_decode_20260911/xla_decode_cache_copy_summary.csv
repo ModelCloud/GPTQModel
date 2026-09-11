@@ -1,0 +1,16 @@
+metric,value,unit,evidence
+decode_layers,16,layers,model configuration
+cache_tensors_per_layer,2,K_and_V,ZML PagedKvCache
+compiler_kcopy_nodes,32,copies,decode thunk metadata
+profiled_large_d2d_copies_per_sample,32,copies,Nsight Systems
+bytes_per_copy,268435456,bytes,Nsight Systems
+payload_per_decode_sample,8589934592,bytes,Nsight Systems
+copy_time_per_decode_sample,7.9320825,ms,Nsight Systems
+mean_copy_duration,247.877578,us,Nsight Systems
+minimum_copy_duration,240.577,us,Nsight Systems
+maximum_copy_duration,255.968,us,Nsight Systems
+full_cache_shape,"f16[16,16384,16,8,64]",tensor,XLA buffer assignment
+layer_slice_shape,"f16[1,16384,16,8,64]",tensor,XLA HLO and buffer assignment
+layer_slice_bytes,268435456,bytes,XLA buffer assignment
+wrapped_slice_names,"wrapped_slice through wrapped_slice.31",HLO_values,XLA thunk metadata
+attention_cache_operands,"f16[16384,16,8,64] K and V",tensor,XLA Triton custom call
