@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/11/2026 7.5.0-dev `main`: ✨ Added `qwen_drive` quantization support.
 * 09/09/2026 7.5.0-dev `main`: 🛠️ Fixed quantized-linear empty-input handling, AWQ higher-rank inputs, and AWQ/ParoQuant CUDA validation and device/stream dispatch ([#3069](https://github.com/ModelCloud/GPTQModel/pull/3069)). Removed full-model scans during per-module finalization ([#3068](https://github.com/ModelCloud/GPTQModel/pull/3068)), fixed GPTQ calibration mask indexing across GPUs ([#3067](https://github.com/ModelCloud/GPTQModel/pull/3067)), and corrected the startup banner to report the package checkout's Git commit ([#3066](https://github.com/ModelCloud/GPTQModel/pull/3066)).
 * 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models ([#3065](https://github.com/ModelCloud/GPTQModel/pull/3065)).
 * 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
@@ -325,6 +326,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
 | Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
 | Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
+| Qwen-Drive 1.0 | `qwen_drive` |
 | RefinedWeb | `refinedWeb`, `refinedWebModel` |
 | Seed-OSS | `seed_oss` |
 | SmolLM3 | `smollm3` |
@@ -339,6 +341,8 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Yi | `yi` |
 | Zamba / Zamba2 | `zamba`, `zamba2` |
 <!-- model-types:end -->
+
+Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.

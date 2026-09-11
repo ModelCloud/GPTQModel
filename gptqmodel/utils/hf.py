@@ -67,6 +67,7 @@ __all__ = [
     "has_native_transformers_causallm_support",
     "get_hf_gguf_load_kwargs",
     "normalize_model_id_or_path_for_hf_gguf",
+    "ensure_qwen_drive_registered",
     "resolve_trust_remote_code",
     "set_hf_config_dtype",
     "load_hf_tokenizer",
@@ -80,6 +81,57 @@ INTERNAL_HF_GGUF_FILE_KWARG = "_gptqmodel_hf_gguf_file"
 _DENSE_MODEL_FILE_EXTENSIONS = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
 _INTERNAL_GGUF_TORCH_LOADER_ENV = "GPTQMODEL_INTERNAL_GGUF_TORCH_LOADER"
 _FALSEY_ENV_VALUES = {"", "0", "false", "off", "no"}
+
+_QWEN_DRIVE_MODEL_TYPE = "qwen_drive"
+_QWEN_DRIVE_INSTALL_HINT = (
+    "Qwen-Drive checkpoints require the official `qwen_drive` package. "
+    "Install it from `https://github.com/QwenLM/Qwen-Drive-1.0` "
+    "(or make that repository's `src` directory importable) "
+    "before loading this model."
+)
+
+
+def _local_config_model_type(model_id_or_path: Optional[str]) -> Optional[str]:
+    """Read a local model type without invoking Transformers' AutoConfig."""
+
+    if not model_id_or_path or not os.path.isdir(model_id_or_path):
+        return None
+
+    config_path = os.path.join(model_id_or_path, "config.json")
+    if not os.path.isfile(config_path):
+        return None
+
+    try:
+        with open(config_path, encoding="utf-8") as handle:
+            config = json.load(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+    model_type = config.get("model_type") if isinstance(config, dict) else None
+    return str(model_type).lower() if model_type is not None else None
+
+
+def ensure_qwen_drive_registered(model_id_or_path: Optional[str] = None) -> bool:
+    """Register the official Qwen-Drive config before any ``AutoConfig`` call.
+
+    Qwen-Drive is intentionally not bundled with GPT-QModel.  Importing its
+    package performs the official ``AutoConfig``/``AutoModel`` registrations.
+    A missing package is made actionable for a local Qwen-Drive directory
+    instead of surfacing Transformers' generic unknown ``model_type`` error.
+    Other model types are left untouched so importing GPT-QModel does not load
+    an unrelated optional planning stack.
+    """
+
+    local_model_type = _local_config_model_type(model_id_or_path)
+    if local_model_type != _QWEN_DRIVE_MODEL_TYPE:
+        return False
+
+    try:
+        import qwen_drive  # noqa: F401
+    except ImportError as exc:
+        raise ImportError(_QWEN_DRIVE_INSTALL_HINT) from exc
+
+    return True
 
 
 def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
@@ -504,6 +556,9 @@ def normalize_model_id_or_path_for_hf_gguf(
 
 @lru_cache(maxsize=None)
 def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple[bool, Optional[str], Optional[str]]:
+    # Qwen-Drive's top-level config is registered by the optional official
+    # package, so it must be imported before Transformers first sees config.json.
+    ensure_qwen_drive_registered(model_id_or_path)
     config_load_kwargs: dict[str, Any] = {}
     normalized_model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
         model_id_or_path,
@@ -536,6 +591,10 @@ def _detect_native_transformers_causallm_support(model_id_or_path: str) -> tuple
 
 
 def resolve_trust_remote_code(model_id_or_path: Optional[str], *, trust_remote_code: bool) -> bool:
+    # Keep registration ahead of the trust-remote-code probe as well as the
+    # main loader's AutoConfig call.  The probe runs very early in every public
+    # GPTQModel entry point when callers explicitly pass trust_remote_code.
+    ensure_qwen_drive_registered(model_id_or_path)
     if not trust_remote_code or not model_id_or_path:
         return trust_remote_code
 

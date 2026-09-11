@@ -187,6 +187,7 @@ from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
+from .definitions.qwen_drive import QwenDriveQModel  # noqa: E402
 from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
@@ -282,6 +283,7 @@ MODEL_MAP = {
     "mixtral": MixtralQModel,
     "qwen2": Qwen2QModel,
     "qwen3": Qwen3QModel,
+    "qwen_drive": QwenDriveQModel,
     "longllama": LlamaQModel,  # 100% llama clone
     "gemma": LlamaQModel, # 100% llama clone
     "gemma2": Gemma2QModel,
