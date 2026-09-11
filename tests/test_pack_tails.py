@@ -154,3 +154,52 @@ def test_embedding_partial_words_train_and_eval(bits: int) -> None:
         module.train(training)
         torch.testing.assert_close(module.dequantize_weight().float(), embedding.weight, rtol=0, atol=0)
         torch.testing.assert_close(module(input_ids).float(), embedding(input_ids), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "bits,pack_dtype,format,in_features,out_features,eligible",
+    [
+        (bits, torch.int32, FORMAT.GPTQ_V2, in_features, out_features, eligible)
+        for bits in (2, 4, 8)
+        for in_features, out_features, eligible in ((64, 19, False), (63, 32, True), (64, 32, True))
+    ]
+    + [
+        (3, torch.int32, FORMAT.GPTQ_V2, 64, 32, True),
+        (3, torch.int32, FORMAT.GPTQ_P, 64, 32, False),
+        (4, torch.int8, FORMAT.GPTQ_V2, 63, 19, False),
+        (8, torch.int8, FORMAT.GPTQ_V2, 63, 19, True),
+        (8, torch.int16, FORMAT.GPTQ_V2, 63, 19, False),
+    ],
+)
+def test_triton_dequant_partial_word_eligibility(
+    bits: int,
+    pack_dtype: torch.dtype,
+    format: FORMAT,
+    in_features: int,
+    out_features: int,
+    eligible: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = TorchLinear(
+        bits=bits,
+        group_size=32,
+        sym=False,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=pack_dtype,
+        format=format,
+    ).eval()
+    assert module.qzeros.shape[0] == 2
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.torch._TRITON_DEQUANT_AVAILABLE", True)
+
+    # Device metadata stand-ins exercise the real eligibility check without CUDA.
+    class CudaBuffer:
+        device = torch.device("cuda:0")
+
+        def is_contiguous(self) -> bool:
+            return True
+
+    for name in ("qweight", "qzeros", "scales", "g_idx"):
+        monkeypatch.setitem(module._buffers, name, CudaBuffer())
+    assert module._can_use_triton_dequant() is eligible

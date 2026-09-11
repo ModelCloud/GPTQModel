@@ -677,6 +677,9 @@ class TorchLinear(PackableQuantLinear):
         # Planar 3-bit words do not match the continuous Triton decode layout.
         if self.planar:
             return False
+        # Triton assumes complete zero-point words when computing group strides.
+        if self.bits in (2, 4, 8) and self.out_features % self.pack_factor:
+            return False
         if not (self.qweight.is_contiguous() and self.qzeros.is_contiguous() and self.scales.is_contiguous()):
             return False
         # g_idx is stored as int32 tensor; ensure it resides on the same device.
