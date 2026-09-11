@@ -9,9 +9,7 @@ from copy import deepcopy
 from typing import Any, Dict, Optional
 
 import torch
-import torchvision.transforms as T
 from PIL import Image
-from torchvision.transforms.functional import InterpolationMode
 from transformers import AutoModel, GenerationConfig
 
 from ...utils.calibration import batched_conversations
@@ -78,6 +76,17 @@ class InternVLChatQModel(BaseQModel):
 
     @staticmethod
     def _build_transform(input_size: int):
+        try:
+            import torchvision.transforms as T
+            from torchvision.transforms.functional import InterpolationMode
+        except ModuleNotFoundError as exc:
+            if exc.name != "torchvision":
+                raise
+            raise ImportError(
+                "InternVL image preprocessing requires torchvision. Install a "
+                "torchvision version compatible with your PyTorch installation."
+            ) from exc
+
         return T.Compose(
             [
                 T.Lambda(lambda img: img.convert("RGB") if img.mode != "RGB" else img),
