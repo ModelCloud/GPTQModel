@@ -1203,7 +1203,7 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         "--context",
         "256",
         "--batch",
-        "3",
+        "4",
         "--capacity",
         "64",
         "--decode-samples",
