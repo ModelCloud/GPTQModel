@@ -1,0 +1,207 @@
+{
+  "abi_version": 1,
+  "batch": 1,
+  "capacity": 8192,
+  "capture_idle_gate": {
+    "cuda_visible_devices": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+    "expected_uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+    "max_attempts": 30,
+    "ok": true,
+    "profiled_pid": 157456,
+    "required_consecutive_idle_samples": 3,
+    "samples": [
+      {
+        "attempt": 1,
+        "compute_apps": [
+          [
+            "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+            "157456",
+            "/root/venv-py3.14t-gil0/bin/python",
+            "88526 MiB"
+          ]
+        ],
+        "foreign_apps": [],
+        "gpu": [
+          {
+            "index": "0",
+            "memory_free": "8811 MiB",
+            "memory_total": "98304 MiB",
+            "memory_used": "88647 MiB",
+            "name": "NVIDIA PG506-230",
+            "pci_bus_id": "00000000:25:00.0",
+            "utilization_gpu": "0 %",
+            "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+          }
+        ],
+        "sample_ok": true,
+        "utilization_gpu_percent": 0
+      },
+      {
+        "attempt": 2,
+        "compute_apps": [
+          [
+            "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+            "157456",
+            "/root/venv-py3.14t-gil0/bin/python",
+            "88526 MiB"
+          ]
+        ],
+        "foreign_apps": [],
+        "gpu": [
+          {
+            "index": "0",
+            "memory_free": "8811 MiB",
+            "memory_total": "98304 MiB",
+            "memory_used": "88647 MiB",
+            "name": "NVIDIA PG506-230",
+            "pci_bus_id": "00000000:25:00.0",
+            "utilization_gpu": "0 %",
+            "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+          }
+        ],
+        "sample_ok": true,
+        "utilization_gpu_percent": 0
+      },
+      {
+        "attempt": 3,
+        "compute_apps": [
+          [
+            "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2",
+            "157456",
+            "/root/venv-py3.14t-gil0/bin/python",
+            "88526 MiB"
+          ]
+        ],
+        "foreign_apps": [],
+        "gpu": [
+          {
+            "index": "0",
+            "memory_free": "8811 MiB",
+            "memory_total": "98304 MiB",
+            "memory_used": "88647 MiB",
+            "name": "NVIDIA PG506-230",
+            "pci_bus_id": "00000000:25:00.0",
+            "utilization_gpu": "0 %",
+            "uuid": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2"
+          }
+        ],
+        "sample_ok": true,
+        "utilization_gpu_percent": 0
+      }
+    ]
+  },
+  "context": 131072,
+  "create_s": 50.98309116344899,
+  "decode": {
+    "latencies_s": [
+      0.23072097916156054
+    ],
+    "latency_s": {
+      "count": 1,
+      "max_s": 0.23072097916156054,
+      "mean_s": 0.23072097916156054,
+      "median_s": 0.23072097916156054,
+      "min_s": 0.23072097916156054,
+      "p50_s": 0.23072097916156054,
+      "p90_s": 0.23072097916156054,
+      "p95_s": 0.23072097916156054
+    },
+    "mean_tokens_per_s": 4.334239580787138,
+    "p50_tokens_per_s": 4.334239580787138,
+    "samples": 1,
+    "warmup_latencies_s": [
+      113.1113519249484,
+      0.4259588234126568,
+      0.2392505193129182
+    ],
+    "warmup_samples": 3
+  },
+  "decode_method_note": "decode writes generated tokens at position context-1 and overwrites that final KV slot on repeated samples so sequence length remains equal to the model context limit",
+  "decode_outputs": [
+    [
+      109724
+    ]
+  ],
+  "effective_prompt_tokens_per_sequence": 131072,
+  "elapsed_s": 199.58449602127075,
+  "finished_at_utc": "2026-09-11T01:50:28Z",
+  "first_generated_tokens": [
+    109724
+  ],
+  "gpu_after": {
+    "compute_apps": {
+      "cmd": [
+        "nvidia-smi",
+        "--query-compute-apps=gpu_uuid,pid,process_name,used_gpu_memory",
+        "--format=csv,noheader"
+      ],
+      "elapsed_s": 0.5014247894287109,
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2, 157456, /root/venv-py3.14t-gil0/bin/python, 798 MiB\n"
+    },
+    "gpu": {
+      "cmd": [
+        "nvidia-smi",
+        "--query-gpu=index,pci.bus_id,uuid,name,memory.total,memory.used,memory.free,utilization.gpu",
+        "--format=csv,noheader"
+      ],
+      "elapsed_s": 0.4886338710784912,
+      "returncode": 0,
+      "stderr": "",
+      "stdout": "0, 00000000:25:00.0, GPU-cb9e7784-cf50-203d-4f0d-5c622a89b1f2, NVIDIA PG506-230, 98304 MiB, 919 MiB, 96539 MiB, 100 %\n"
+    }
+  },
+  "pages_per_sequence": 8192,
+  "plan": {
+    "base_rows_per_sequence": 8192,
+    "batch": 1,
+    "capacity": 8192,
+    "context": 131072,
+    "prefill_calls": 16,
+    "prompt_tokens": 131072,
+    "rotating_extra_rows": 0
+  },
+  "plan_s": 0.1063396567478776,
+  "prefill": {
+    "calls": 16,
+    "chunk_latencies_s": [
+      0.826934015378356,
+      0.6749294651672244,
+      0.7769588883966208,
+      0.8984478497877717,
+      1.0002320343628526,
+      1.1149707837030292,
+      1.2239554477855563,
+      1.3433222956955433,
+      1.4713702918961644,
+      1.5639623943716288,
+      1.6811817502602935,
+      1.7999062221497297,
+      1.9156677089631557,
+      2.028347604908049,
+      2.140683596022427,
+      2.2515677008777857
+    ],
+    "chunk_latency_s": {
+      "count": 16,
+      "max_s": 2.2515677008777857,
+      "mean_s": 1.4195273781078868,
+      "median_s": 1.4073462937958539,
+      "min_s": 0.6749294651672244,
+      "p50_s": 1.4073462937958539,
+      "p90_s": 2.084515600465238,
+      "p95_s": 2.1684046222362667
+    },
+    "prompt_tokens": 131072,
+    "tokens_per_s": 5770.9021258596595,
+    "ttft_s": 22.71256679482758,
+    "wall_s": 22.71256679482758
+  },
+  "prompt_hashes_sha256_u32le_per_sequence": [
+    "f2a69a862c39be898ea5b562f4cf3fbb8bc4b7df5aa5388550956d36b54464ee"
+  ],
+  "started_at_utc": "2026-09-11T01:47:09Z",
+  "status": "ok",
+  "warmup_prefill_s": 3.0577035285532475
+}
