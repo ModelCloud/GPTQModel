@@ -62,6 +62,25 @@ def test_model_failure_retains_completed_blocks_and_records(monkeypatch):
     assert len(record['blocks']) == 1
 
 
+def test_model_disk_capture_is_cleaned_after_each_block(tmp_path):
+    from gptqmodel.looper import gsq_training_model as bridge
+
+    model, documents = fixture()
+    result = bridge.quantize_llama_gsq_model(
+        model,
+        documents,
+        bits=2,
+        group_size=32,
+        gsq=GSQTrainingConfig(enabled=False),
+        offload_capture=True,
+        capture_directory=tmp_path/'capture',
+    )
+    assert result['state'] == 'complete'
+    assert result['capture_storage'] == 'disk'
+    assert (tmp_path/'capture').is_dir()
+    assert not list((tmp_path/'capture').iterdir())
+
+
 def test_model_rejects_invalid_selection_before_mutation():
     from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model
 

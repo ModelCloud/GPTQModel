@@ -1,10 +1,53 @@
 """Convert shared Llama capture state into autograd-capable staged GSQ inputs."""
 
 import copy
+import shutil
+from pathlib import Path
 
 import torch
 
 from ..nn_modules.hooked_linear import HookedLinear
+
+
+class DiskBackedLlamaCapture:
+    """A bounded-memory decoder-input spool with shared Llama metadata."""
+
+    def __init__(self, directory, paths, kwargs, position_ids, attention_mask, shape, dtype):
+        self.directory = Path(directory)
+        self.paths = tuple(paths)
+        self.kwargs = kwargs
+        self.position_ids = position_ids
+        self.attention_mask = attention_mask
+        self.shape = tuple(shape)
+        self.dtype = dtype
+
+    def cleanup(self):
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+
+class DiskBackedLlamaDocuments:
+    """Load one captured decoder input at a time from a disk spool."""
+
+    offloaded = True
+
+    def __init__(self, capture, kwargs):
+        self.capture = capture
+        self.kwargs = kwargs
+        self.fixed_sequence_length = capture.shape[1]
+        self.has_attention_mask = capture.attention_mask is not None
+
+    def __len__(self):
+        return len(self.capture.paths)
+
+    def __getitem__(self, index):
+        if isinstance(index, slice):
+            return [self[position] for position in range(*index.indices(len(self)))]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(self):
+            raise IndexError(index)
+        hidden = torch.load(self.capture.paths[index], map_location='cpu', weights_only=True)
+        if hidden.shape != self.capture.shape or hidden.dtype != self.capture.dtype:
+            raise ValueError('Disk-backed GSQ capture geometry or dtype changed')
+        return hidden, self.kwargs
 
 
 def prepare_llama_gsq_capture(layer, cache, *, device=None):
@@ -18,9 +61,14 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
 
     if not isinstance(layer, LlamaDecoderLayer):
         raise TypeError('Staged capture currently requires a LlamaDecoderLayer')
-    fields = (cache.layer_inputs, cache.layer_input_kwargs, cache.position_ids, cache.attention_masks)
-    if not fields[0] or any(len(values) != len(fields[0]) for values in fields):
-        raise ValueError('Staged capture requires aligned nonempty input and metadata lists')
+    disk_backed = isinstance(cache, DiskBackedLlamaCapture)
+    if disk_backed:
+        if not cache.paths:
+            raise ValueError('Staged capture requires nonempty disk-backed inputs')
+    else:
+        fields = (cache.layer_inputs, cache.layer_input_kwargs, cache.position_ids, cache.attention_masks)
+        if not fields[0] or any(len(values) != len(fields[0]) for values in fields):
+            raise ValueError('Staged capture requires aligned nonempty input and metadata lists')
     for module in layer.modules():
         if module._forward_hooks or module._forward_pre_hooks:
             raise ValueError('Remove capture hooks before preparing the pristine GSQ training copy')
@@ -40,8 +88,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
             parent, leaf = name.rsplit('.', 1)
             setattr(prepared.get_submodule(parent), leaf, linear)
 
-        batch_device = fields[0][0][0].device
-        if batch_device.type != 'cpu' or device.type == 'cpu':
+        batch_device = torch.device('cpu') if disk_backed else fields[0][0][0].device
+        if not disk_backed and (batch_device.type != 'cpu' or device.type == 'cpu'):
             batch_device = device
         clones = {}
 
@@ -66,6 +114,18 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
                 clones[identity] = result
                 return result
             return copy.deepcopy(value)
+
+        if disk_backed:
+            kwargs = clone(cache.kwargs)
+            if kwargs.get('use_cache') or kwargs.get('past_key_values') is not None:
+                raise ValueError('Staged capture requires cache-free calibration')
+            if kwargs.get('position_embeddings') is None:
+                raise ValueError('Staged capture requires the actual captured rotary embeddings')
+            kwargs['use_cache'] = False
+            if cache.position_ids is not None:
+                kwargs['position_ids'] = clone(cache.position_ids)
+            kwargs['attention_mask'] = clone(cache.attention_mask)
+            return prepared, DiskBackedLlamaDocuments(cache, kwargs)
 
         batches = []
         for inputs, kwargs, positions, mask in zip(*fields):
@@ -121,7 +181,7 @@ def fit_llama_awq_gsq_capture(layer, cache, initializers, *, group_size, epochs,
     return packed, dict(initializer='provided_awq', stages=records)
 
 
-def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=False):
+def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=False, offload_directory=None):
     """Capture actual Llama decoder calls, including masks and rotary state.
 
     Replays the current model prefix, so previously installed quantized blocks
@@ -144,10 +204,15 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
         raise ValueError('Staged capture requires nonempty calibration documents')
     if not isinstance(offload_to_cpu, bool):
         raise TypeError('offload_to_cpu must be boolean')
+    if offload_directory is not None and not offload_to_cpu:
+        raise ValueError('Disk-backed capture requires CPU offloading')
+    offload_directory = None if offload_directory is None else Path(offload_directory)
     if offload_to_cpu:
         lengths = {len(document.get('input_ids', ())) for document in documents}
         if len(lengths) != 1 or any(set(document) != {'input_ids'} for document in documents):
             raise ValueError('CPU-offloaded capture requires equal-length input_ids without explicit metadata')
+    if offload_directory is not None:
+        offload_directory.mkdir(parents=True, exist_ok=False)
     captured = []
     shared_kwargs = None
     progress_at = time.monotonic()+60
@@ -175,7 +240,13 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
 
                 shared_kwargs = cpu(kwargs)
             kwargs = shared_kwargs
-        captured.append(([hidden], kwargs))
+        if offload_directory is None:
+            captured.append(([hidden], kwargs))
+        else:
+            path = offload_directory/f'{len(captured):05d}.pt'
+            torch.save(hidden, path)
+            captured.append(path)
+            del hidden
         raise CaptureComplete
 
     layer = model.model.layers[layer_index]
@@ -206,15 +277,36 @@ def capture_llama_gsq_inputs(model, documents, *, layer_index=0, offload_to_cpu=
                     raise RuntimeError('Selected Llama decoder was not captured exactly once')
                 if time.monotonic() >= progress_at:
                     logging.getLogger(__name__).info(
-                        'GSQ capture layer=%d documents=%d/%d offload=%s',
+                        'GSQ capture layer=%d documents=%d/%d offload=%s disk=%s',
                         layer_index,
                         document_index+1,
                         len(documents),
                         offload_to_cpu,
+                        offload_directory is not None,
                     )
                     progress_at = time.monotonic()+60
+    except BaseException:
+        if offload_directory is not None:
+            shutil.rmtree(offload_directory, ignore_errors=True)
+        raise
     finally:
         handle.remove()
+    if offload_directory is not None:
+        values = dict(shared_kwargs)
+        positions = values.pop('position_ids', None)
+        mask = values.pop('attention_mask', None)
+        sample = torch.load(captured[0], map_location='cpu', weights_only=True)
+        shape, dtype = sample.shape, sample.dtype
+        del sample
+        return DiskBackedLlamaCapture(
+            offload_directory,
+            captured,
+            values,
+            positions,
+            mask,
+            shape,
+            dtype,
+        )
     inputs, kwargs, positions, masks = [], [], [], []
     for hidden, values in captured:
         values = dict(values)

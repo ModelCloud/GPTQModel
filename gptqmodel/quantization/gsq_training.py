@@ -404,10 +404,16 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     if attention_implementation not in ('eager', 'sdpa'):
         raise ValueError('Staged GSQ requires eager or SDPA Llama attention')
     device = next(layer.parameters()).device
-    offloaded = any(hidden.device != device for hidden, _ in batches)
+    offloaded = getattr(batches, 'offloaded', None)
+    if offloaded is None:
+        offloaded = any(hidden.device != device for hidden, _ in batches)
     if attention_implementation == 'sdpa':
-        lengths = {hidden.shape[1] for hidden, _ in batches}
-        if len(lengths) != 1 or any(kwargs.get('attention_mask') is not None for _, kwargs in batches):
+        fixed_length = getattr(batches, 'fixed_sequence_length', None)
+        lengths = {fixed_length} if fixed_length is not None else {hidden.shape[1] for hidden, _ in batches}
+        has_attention_mask = getattr(batches, 'has_attention_mask', None)
+        if has_attention_mask is None:
+            has_attention_mask = any(kwargs.get('attention_mask') is not None for _, kwargs in batches)
+        if len(lengths) != 1 or has_attention_mask:
             raise ValueError('SDPA staged GSQ requires equal-length documents without explicit attention masks')
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
@@ -455,7 +461,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
 
     # Keep names consistent with the containing block for functional replacement.
     factor, dead = prepare_qk_calibration_factor(
-        [hidden for hidden, _ in batches],
+        (hidden for hidden, _ in batches),
         damp_percent=qk_damp_percent,
         device=device,
         transform=fitted.input_layernorm,
@@ -576,7 +582,9 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
         with torch.no_grad():
             progress_at = time.monotonic()+60
             for batch_index, (hidden, kwargs) in enumerate(batches):
-                working(hidden.to(device, non_blocking=True), **move(kwargs))
+                moved_hidden = hidden.to(device, non_blocking=True)
+                output = working(moved_hidden, **move(kwargs))
+                del output, moved_hidden, hidden, kwargs
                 if time.monotonic() >= progress_at:
                     logging.getLogger(__name__).info(
                         'GSQ GPTQ initialization projections=%s batches=%d/%d',
@@ -608,17 +616,27 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
 
 def prepare_qk_calibration_factor(inputs, *, damp_percent=.01, device=None, transform=None):
     """Author Q/K metric: 2/sequence_count Gram, dead diagonal repair, damping."""
-    if not inputs or not math.isfinite(damp_percent) or damp_percent < 0:
+    if not math.isfinite(damp_percent) or damp_percent < 0:
         raise ValueError('GSQ Q/K factor requires inputs and nonnegative damping')
     import logging
     import time
 
-    width = inputs[0].shape[-1]
-    device = inputs[0].device if device is None else torch.device(device)
+    iterator = iter(inputs)
+    try:
+        first = next(iterator)
+    except StopIteration as error:
+        raise ValueError('GSQ Q/K factor requires inputs and nonnegative damping') from error
+    width = first.shape[-1]
+    device = first.device if device is None else torch.device(device)
     gram = torch.zeros(width, width, device=device, dtype=torch.float32)
     sequences = 0
     progress_at = time.monotonic()+60
-    for input_index, batch in enumerate(inputs):
+    total = len(inputs) if hasattr(inputs, '__len__') else None
+    input_index = 0
+    while True:
+        batch = first if input_index == 0 else next(iterator, None)
+        if batch is None:
+            break
         if batch.ndim != 3 or batch.shape[-1] != width or not torch.isfinite(batch).all():
             raise ValueError('GSQ Q/K inputs require finite [batch,tokens,in] geometry')
         batch = batch.detach().to(device, non_blocking=True)
@@ -628,13 +646,15 @@ def prepare_qk_calibration_factor(inputs, *, damp_percent=.01, device=None, tran
         flattened = batch.reshape(-1, width).float()
         gram.add_(flattened.T @ flattened)
         sequences += batch.shape[0]
+        input_index += 1
         if time.monotonic() >= progress_at:
             logging.getLogger(__name__).info(
-                'GSQ Q/K calibration inputs=%d/%d',
-                input_index+1,
-                len(inputs),
+                'GSQ Q/K calibration inputs=%d/%s',
+                input_index,
+                total if total is not None else '?',
             )
             progress_at = time.monotonic()+60
+        del batch, flattened
     if not sequences:
         raise ValueError('GSQ Q/K factor has no sequences')
     gram.mul_(2/sequences)

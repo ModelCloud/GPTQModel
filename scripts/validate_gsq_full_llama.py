@@ -1,16 +1,54 @@
 """Full Llama staged/GPTQ model quantization, public export/reload and logits."""
 
 import argparse
+import atexit
 import json
 import os
+import resource
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.validate_qvq_gsq_layers import digest, write_json
+
+
+class ResourceMonitor:
+    def __init__(self, interval=60):
+        self.interval = interval
+        self.stop_event = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+
+    def stop(self):
+        self.stop_event.set()
+        self.thread.join()
+
+    def run(self):
+        while not self.stop_event.wait(self.interval):
+            status = {}
+            for line in Path('/proc/self/status').read_text().splitlines():
+                if line.startswith(('VmRSS:', 'VmHWM:')):
+                    key, value = line.split(':', 1)
+                    status[key] = int(value.split()[0])
+            memory = {}
+            for line in Path('/proc/meminfo').read_text().splitlines():
+                if line.startswith(('MemAvailable:', 'Cached:')):
+                    key, value = line.split(':', 1)
+                    memory[key] = int(value.split()[0])
+            print(
+                'RESOURCE'
+                f' rss_gib={status.get("VmRSS", 0)/2**20:.3f}'
+                f' peak_rss_gib={status.get("VmHWM", 0)/2**20:.3f}'
+                f' mem_available_gib={memory.get("MemAvailable", 0)/2**20:.3f}'
+                f' cached_gib={memory.get("Cached", 0)/2**20:.3f}',
+                flush=True,
+            )
 
 
 def main():
@@ -42,6 +80,20 @@ def main():
         raise ValueError('Full-model validation requires the requested calibration count, at least 128')
     if {tuple(v['input_ids']) for v in documents['train']} & {tuple(v['input_ids']) for v in documents['heldout']}:
         raise ValueError('Calibration/evaluation overlap')
+    model_config = json.loads((Path(source['dense'])/'config.json').read_text())
+    hidden_bytes = args.train_samples*source['token_cap']*model_config['hidden_size']*2
+    optimizer_batch_bytes = args.batch_size*source['token_cap']*model_config['hidden_size']*2
+    total_memory = os.sysconf('SC_PAGE_SIZE')*os.sysconf('SC_PHYS_PAGES')
+    available_memory = int(next(
+        line.split()[1] for line in Path('/proc/meminfo').read_text().splitlines()
+        if line.startswith('MemAvailable:')
+    ))*1024
+    free_disk = shutil.disk_usage(args.output.parent).free
+    estimated_cpu_peak = 2*optimizer_batch_bytes+2*1024**3
+    if estimated_cpu_peak > total_memory//4 or estimated_cpu_peak > available_memory//2:
+        raise ValueError('Estimated CPU peak exceeds the bounded-memory test budget')
+    if args.offload_capture and hidden_bytes*1.1 > free_disk:
+        raise ValueError('Disk-backed capture spool exceeds available disk')
     uuid = os.environ.get('CUDA_VISIBLE_DEVICES', '')
     if not uuid.startswith('GPU-') or ',' in uuid or not os.environ.get('GPU_ALLOCATOR_LEASE_ID'):
         raise ValueError('Requires exclusive UUID lease')
@@ -96,6 +148,7 @@ def main():
                   argv=sys.argv, source_model=source['dense'], gsq_training=config.to_dict(),
                   bits=args.bits, group_size=128, train_precision=args.train_precision, export_precision='float16',
                   attention_implementation=args.attn_implementation, offload_capture=args.offload_capture,
+                  capture_storage='disk' if args.offload_capture else 'device',
                   calibration_samples=len(documents['train']),
                   calibration_tokens=sum(len(row['input_ids']) for row in documents['train']),
                   calibration_token_cap=source['token_cap'],
@@ -107,6 +160,10 @@ def main():
                   cuda_visible_devices=os.environ.get('CUDA_VISIBLE_DEVICES'),
                   gpu_allocator_lease_id=os.environ.get('GPU_ALLOCATOR_LEASE_ID'),
                   gptqmodel_cuda_block=os.environ.get('GPTQMODEL_CUDA_BLOCK'),
+                  estimated_capture_spool_bytes=hidden_bytes if args.offload_capture else 0,
+                  estimated_cpu_peak_bytes=estimated_cpu_peak,
+                  host_total_memory_bytes=total_memory, host_available_memory_bytes=available_memory,
+                  free_output_disk_bytes=free_disk,
                   source_hashes={str(p.resolve()): digest(p) for p in files})
     snapshot = args.output/'executed-source'
     snapshot.mkdir()
@@ -117,6 +174,16 @@ def main():
     write_json(args.output/'report.json', report)
     (args.output/'model_run.md').write_text(f'# Full W{args.bits} model experiment\n\nStatus: running.\n\n```json\n'
                                            +json.dumps(report, indent=2)+'\n```\n')
+    print(
+        'RESOURCE_BUDGET'
+        f' estimated_cpu_peak_gib={estimated_cpu_peak/2**30:.3f}'
+        f' capture_spool_gib={(hidden_bytes if args.offload_capture else 0)/2**30:.3f}'
+        f' host_available_gib={available_memory/2**30:.3f}',
+        flush=True,
+    )
+    monitor = ResourceMonitor()
+    monitor.start()
+    atexit.register(monitor.stop)
     try:
         model = AutoModelForCausalLM.from_pretrained(source['dense'], dtype=getattr(torch, args.train_precision),
                     device_map={'': 'cuda:0'}, attn_implementation=args.attn_implementation,
@@ -154,6 +221,7 @@ def main():
                 group_size=128,
                 gsq=config,
                 offload_capture=args.offload_capture,
+                capture_directory=args.output/'capture-staging' if args.offload_capture else None,
             )
             save_llama_gsq_model(model, run, args.output/'model', tokenizer=tokenizer, source_model=source['dense'])
         write_json(args.output/'training.json', run)
@@ -194,9 +262,15 @@ def main():
                                     for p in (args.output/'model').rglob('*') if p.is_file()})
     except Exception as error:
         report.update(state='failed', error_type=type(error).__name__, error=str(error))
+        report['peak_rss_bytes'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024
         write_json(args.output/'report.json', report)
+        monitor.stop()
+        atexit.unregister(monitor.stop)
         raise
+    report['peak_rss_bytes'] = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024
     write_json(args.output/'report.json', report)
+    monitor.stop()
+    atexit.unregister(monitor.stop)
 
 
 if __name__ == '__main__':

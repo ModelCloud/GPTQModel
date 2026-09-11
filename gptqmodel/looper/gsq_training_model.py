@@ -1,5 +1,7 @@
 """Sequential model installation for the experimental staged Llama GSQ path."""
 
+from pathlib import Path
+
 import torch
 
 from ..quantization.gsq_training_config import GSQTrainingConfig
@@ -36,7 +38,7 @@ def staged_documents_from_prepared(prepared):
 
 
 def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None,
-                             offload_capture=False):
+                             offload_capture=False, capture_directory=None):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
@@ -56,6 +58,9 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         raise TypeError('Staged model quantization requires GSQTrainingConfig, a dictionary or None')
     if not isinstance(offload_capture, bool):
         raise TypeError('offload_capture must be boolean')
+    if capture_directory is not None and not offload_capture:
+        raise ValueError('Disk-backed capture requires capture offloading')
+    capture_directory = None if capture_directory is None else Path(capture_directory)
     effective = gsq.to_dict()
     if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
         raise ValueError('Staged model quantization supports W2/W3/W4')
@@ -84,6 +89,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     run = dict(state='running', gsq_training=effective, bits=bits, group_size=group_size,
                layer_indices=indices, device=str(device), blocks=[],
                offload_capture=offload_capture,
+               capture_storage='disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
                deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
     if not hasattr(model, 'gsq_training_runs'):
         model.gsq_training_runs = []
@@ -94,10 +100,18 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
 
             logging.getLogger(__name__).info('Staged model block %d/%d', index+1, len(layers))
             run['current_layer'] = index
-            capture_options = {'offload_to_cpu': True} if offload_capture else {}
+            capture_options = {}
+            if offload_capture:
+                capture_options['offload_to_cpu'] = True
+            if capture_directory is not None:
+                capture_options['offload_directory'] = capture_directory/f'layer-{index:02d}'
             cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
-            packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
-                                                       gsq=gsq, pack=True, device=device)
+            try:
+                packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
+                                                           gsq=gsq, pack=True, device=device)
+            finally:
+                if hasattr(cache, 'cleanup'):
+                    cache.cleanup()
             packed = packed.to(device).eval()
             # Installation precedes the next capture: its inputs therefore
             # include both the selected assignments and stored-scale rounding.

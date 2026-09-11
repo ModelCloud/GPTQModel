@@ -103,6 +103,8 @@ class LazyLlamaStageBatches:
             )
             count = sum(value.numel() for value, _ in chunk)
             microbatches.append(((hidden, kwargs, mask), count))
+            del chunk
+        del selected
         return microbatches
 
 

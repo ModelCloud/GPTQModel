@@ -112,7 +112,7 @@ def test_model_capture_preserves_positions_uses_current_prefix_and_cleans_hooks(
     assert not model.model.layers[1]._forward_pre_hooks
 
 
-def test_model_capture_can_offload_equal_length_default_metadata():
+def test_model_capture_can_offload_equal_length_default_metadata(tmp_path):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.looper.gsq_training_capture import capture_llama_gsq_inputs
@@ -128,6 +128,20 @@ def test_model_capture_can_offload_equal_length_default_metadata():
         cache.layer_input_kwargs[1]['position_embeddings'][0].data_ptr())
     with pytest.raises(ValueError, match='equal-length'):
         capture_llama_gsq_inputs(model, documents+[{'input_ids': [7]}], offload_to_cpu=True)
+    disk = capture_llama_gsq_inputs(
+        model,
+        documents,
+        offload_to_cpu=True,
+        offload_directory=tmp_path/'capture',
+    )
+    assert len(disk.paths) == len(documents)
+    assert sum(path.stat().st_size for path in disk.paths) > 0
+    prepared, batches = prepare_llama_gsq_capture(model.model.layers[0], disk)
+    hidden, kwargs = batches[1]
+    assert hidden.device.type == 'cpu' and not hidden.is_inference()
+    assert torch.isfinite(prepared(hidden, **kwargs)).all()
+    disk.cleanup()
+    assert not (tmp_path/'capture').exists()
 
 
 def test_affine_capture_preserves_scaled_teacher_and_inference_cache():
