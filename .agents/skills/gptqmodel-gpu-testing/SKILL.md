@@ -51,6 +51,26 @@ before the timed region after warmup when setup is long; if the device is no lon
 4. Monitor only processes launched by the task. Never terminate unrelated jobs to obtain an idle GPU.
 5. Preserve CPU and non-target GPU fallbacks in code changes.
 
+## Bound host and device memory
+
+Before launching a test, estimate peak CPU RAM, GPU RAM, and temporary disk use from tensor shapes, dtypes,
+retained batches, model copies, worker count, caches, and serialization buffers. Record the estimate and compare it
+with current `MemAvailable`, cgroup limits when present, free device memory, and free disk space. By default, do not
+let one test retain more than 25% of physical host RAM without explicit user approval; use streaming, chunking,
+bounded queues, or disk-backed batches instead. Offloading is not a fix when it merely moves an unbounded tensor
+set from VRAM into CPU RAM, page cache, or swap.
+
+Measure peak process RSS and system memory availability during long tests, not only GPU allocation. Stop a run
+before it creates host-wide memory pressure, swapping, OOM risk, or an unexpectedly growing cache. Report both the
+estimated and measured peaks; never hide memory pressure by omitting CPU-memory telemetry or by labeling
+reclaimable cache as free capacity without showing `MemAvailable`.
+
+Release large phase-local objects as soon as their last use completes. Use `del`, context managers, iterator
+scopes, subprocess teardown, or the language/runtime's native release mechanism; then clear framework caches where
+appropriate. For PyTorch, delete all live tensor references before calling allocator-cache helpers:
+`torch.cuda.empty_cache()` does not free live tensors and must not substitute for bounded ownership. Explicitly
+clean temporary files and disk-backed mappings after success or failure unless they are required artifacts.
+
 ## Emit live results every 60 seconds
 
 For any evaluation or benchmark longer than 60 seconds, emit a complete live table at least once per 60-second
