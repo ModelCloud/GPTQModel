@@ -167,3 +167,26 @@ def test_failure_classification_requires_oom_evidence_for_sigkill() -> None:
     assert benchmark.classify_failure(-signal.SIGKILL, "", "", {}) == "killed"
     assert benchmark.classify_failure(-signal.SIGKILL, "", "", {"oom_kill": 1}) == "oom"
     assert benchmark.classify_failure(1, "CUDA_ERROR_OUT_OF_MEMORY", "", {}) == "oom"
+
+
+def test_run_id_defaults_to_output_directory_name(tmp_path: Path) -> None:
+    output_dir = tmp_path / "phase0-run"
+
+    assert benchmark.resolve_run_id(None, str(output_dir)) == "phase0-run"
+    assert benchmark.resolve_run_id("explicit-run", str(output_dir)) == "explicit-run"
+
+
+def test_artifact_manifest_hashes_all_existing_files(tmp_path: Path) -> None:
+    result = tmp_path / "result.json"
+    result.write_text("{}\n", encoding="utf-8")
+    nested = tmp_path / "logs"
+    nested.mkdir()
+    log = nested / "run.log"
+    log.write_text("complete\n", encoding="utf-8")
+
+    manifest_path = benchmark.write_artifact_manifest(tmp_path)
+    manifest = manifest_path.read_text(encoding="utf-8")
+
+    assert f"{benchmark.sha256_file(result)}  result.json" in manifest
+    assert f"{benchmark.sha256_file(log)}  logs/run.log" in manifest
+    assert "artifact_sha256.txt" not in manifest

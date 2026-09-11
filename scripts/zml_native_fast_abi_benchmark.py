@@ -148,6 +148,21 @@ def write_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def resolve_run_id(explicit_run_id: str | None, output_dir: str) -> str:
+    return explicit_run_id or Path(output_dir).resolve().name
+
+
+def write_artifact_manifest(output_dir: Path) -> Path:
+    manifest_path = output_dir / "artifact_sha256.txt"
+    records = []
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file() or path == manifest_path:
+            continue
+        records.append(f"{sha256_file(path)}  {path.relative_to(output_dir)}")
+    manifest_path.write_text("\n".join(records) + "\n", encoding="utf-8")
+    return manifest_path
+
+
 def read_model_config(model_path: Path) -> dict[str, object]:
     with (model_path / "config.json").open("r", encoding="utf-8") as handle:
         config = json.load(handle)
@@ -1315,13 +1330,25 @@ def orchestrator_main(args: argparse.Namespace) -> int:
         "prompt_uniqueness": prompt_uniqueness,
         "timing_contract": provenance["timing_contract"],
         "comparison_to_baseline": comparison,
+        "artifact_manifest": str(output_dir / "artifact_sha256.txt"),
         "batches": batches,
         "provenance_json": str(output_dir / "provenance.json"),
         "finished_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     write_json(output_dir / "results.json", results)
     summary = write_markdown_summary(output_dir, results)
-    print(json.dumps({"results_json": str(output_dir / "results.json"), "summary_md": str(summary)}, sort_keys=True), flush=True)
+    artifact_manifest = write_artifact_manifest(output_dir)
+    print(
+        json.dumps(
+            {
+                "artifact_manifest": str(artifact_manifest),
+                "results_json": str(output_dir / "results.json"),
+                "summary_md": str(summary),
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
     return 0
 
 
@@ -1330,7 +1357,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--child", action="store_true")
     parser.add_argument("--child-kind", choices=["validation", "batch"], default="batch")
     parser.add_argument("--mode", default="benchmark")
-    parser.add_argument("--run-id", default="zml-native-fast-abi-f6-seed7-sm80-20260910T045313Z")
+    parser.add_argument("--run-id")
     parser.add_argument("--model", required=True)
     parser.add_argument("--lib", required=True)
     parser.add_argument(
@@ -1358,6 +1385,7 @@ def parse_args() -> argparse.Namespace:
         default="",
     )
     args = parser.parse_args()
+    args.run_id = resolve_run_id(args.run_id, args.output_dir)
     if args.idle_samples < 3:
         parser.error("--idle-samples must be at least 3")
     if not args.child and not args.build_command:
