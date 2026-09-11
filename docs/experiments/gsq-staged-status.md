@@ -4,6 +4,9 @@
 
 # Staged scalar GSQ: implementation and validation status
 
+The PR 212 math, paper-protocol, and control-matrix audit is recorded in
+[`gsq-pr212-audit.md`](gsq-pr212-audit.md).
+
 This branch contains an experimental Llama staged trainer, not a completed paper
 reproduction or a promoted default. Public GPTQ now has an experimental
 `gsq_training` path for uniform, materialized eager Llama models with Torch
