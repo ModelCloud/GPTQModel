@@ -21,9 +21,12 @@ Recheck upstream HEADs before adopting an API because these projects move quickl
 1. Fetch `origin/main`, integrate it without discarding user work, and record the resulting source revision.
 2. Name the last retained AMD kernel commit as the performance baseline. Do not silently substitute `main`.
 3. Record the exact model shapes, dtype, quantization rate/layout, strides, warmup, sample count, and cache state.
-4. On QVQ inference, compare identical packed tensors against the canonical FP32 computation and require both
-   mean-absolute drift `<= 2e-3` and max-absolute drift `<= 0.046875` in every case, with finite outputs.
-   Both limits are inclusive; a geometric-mean win or pooling cases cannot waive a failing case.
+4. On QVQ inference, compare identical packed tensors against the canonical FP32 computation. Repeated synchronized
+   timing must show a positive gain outside measurement noise: a gain no greater than 1% requires mean-absolute
+   drift `<= 3e-3`, while a gain greater than 1% permits mean-absolute drift `<= 4e-3`. Equal, slower, or
+   noise-indistinguishable candidates receive no drift allowance. Max-absolute drift remains `<= 0.046875` in every
+   case, with finite outputs. All applicable limits are inclusive; a geometric-mean win or pooling cases cannot
+   waive a failing case.
    Gate localized kernel outputs on identical inputs, weights, and initial state, not propagated final logits.
    Final-logit differences are diagnostics and do not determine this kernel acceptance decision.
 5. Run the complete requested M/N/K/rate sweep before promotion. Treat a targeted-shape run as exploratory evidence.

@@ -25,21 +25,30 @@ Preserve the existing [QVQ contract](../gptqmodel-cuda-kernels/SKILL.md#qvq-accu
 
 - Quantization implementation optimizations must preserve deterministic state/path selection, packed words, bank IDs,
   and metadata exactly. Floating-output tolerance cannot excuse a changed quantization decision.
-- QVQ inference requires **mean absolute output drift <= 2e-3 AND maximum absolute output drift <= 0.046875
-  in every tested case**, against the canonical reference for identical packed weights, inputs, and operator
-  semantics. Both limits are inclusive and must pass independently. Apply any additional path-specific gates.
+- QVQ inference uses a user-approved speed-weighted mean absolute output drift
+  gate against the canonical reference for identical packed weights, inputs,
+  and operator semantics. With repeated synchronized timing, compute speed gain
+  as `100 * (baseline_latency / candidate_latency - 1)`. A positive gain no
+  greater than 1% requires **mean absolute output drift <= 3e-3**; a gain
+  greater than 1% permits **mean absolute output drift <= 4e-3**. Equal,
+  slower, or noise-indistinguishable candidates receive no drift allowance.
+  Every candidate also requires **maximum absolute output drift <= 0.046875 in
+  every tested case**. All applicable limits are inclusive and must pass
+  independently. Apply any additional path-specific gates.
   For each case, compute `error = abs(candidate - reference)` in sufficient precision over all valid output elements;
-  require `error.mean() <= 2e-3` and `error.max() <= 0.046875`, with finite outputs. Declare the output boundary and
-  valid-element mask before measurement. These are absolute errors, not signed mean, percentages, relative L2,
-  or an allclose rtol. Do not pool cases or drop outliers to pass either gate.
+  require `error.mean()` to pass the applicable speed-weighted threshold above and
+  `error.max() <= 0.046875`, with finite outputs. Declare the output boundary and valid-element mask before
+  measurement. These are absolute errors, not signed mean, percentages, relative L2, or an allclose rtol.
+  Do not pool cases or drop outliers to pass either gate.
 - These gates are **local to the kernel/operator under test**: feed candidate and reference identical inputs,
   weights, and initial state, and compare their outputs at the same declared operator boundary. For a fused kernel,
   compare the complete fused operation with its equivalent reference composition on those same inputs.
   Propagated final-logit differences, KL, and top-token agreement are diagnostics, not kernel acceptance gates.
   Do not apply the local thresholds to final logits or reject a locally passing kernel solely for propagated
   final-logit drift. Separately requested model-quality evaluations retain their explicitly agreed criteria.
-- The F6 seed-7 P32 campaign (`scripts/p32_twenty`) has an explicit user-approved MAE limit of
-  **3e-3** instead of 2e-3; maximum error and finite-output requirements are unchanged.
+- The F6 seed-7 P32 campaign (`scripts/p32_twenty`) has an explicit
+  user-approved fixed MAE limit of **3e-3** instead of the speed-weighted tier;
+  maximum error and finite-output requirements are unchanged.
 - Do not autonomously widen these thresholds to make a faster candidate pass, normalize/clip away a failure, modify the oracle to
   mimic the candidate, or hide a failing shape in an average. Revising the contract is a separately scoped task;
   preserve the current baseline and defaults while presenting the evidence and proposed change.

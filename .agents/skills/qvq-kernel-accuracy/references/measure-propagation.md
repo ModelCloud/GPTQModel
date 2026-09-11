@@ -34,9 +34,10 @@ g_i       = E_i / epsilon_i
 z_0 and z_i are raw final logits on identical evaluation positions. For block sensitivity, replace logits with the
 chosen block boundary and name that boundary. Define token/mask aggregation explicitly. When denominators vanish or
 the perturbation is below measurement resolution, report undefined/below-resolution; a silent denominator clamp can
-produce a misleading g. The repository's mean-absolute `<= 2e-3` and max-absolute `<= 0.046875` gates are NOT
-epsilon_i in these formulas. They apply only to localized kernel outputs on identical inputs, weights, and initial
-state. Propagated final logits are a distinct diagnostic boundary to which these acceptance thresholds do not apply.
+produce a misleading g. The repository's speed-weighted mean-absolute gate (`<= 3e-3` for a positive gain no greater
+than 1%, `<= 4e-3` for a gain greater than 1%) and max-absolute `<= 0.046875` gate are NOT epsilon_i in these formulas.
+They apply only to localized kernel outputs on identical inputs, weights, and initial state. Propagated final logits
+are a distinct diagnostic boundary to which these acceptance thresholds do not apply.
 
 Prefer the candidate's actual error direction. Injecting Y_i + s * (Yhat_i - Y_i) can probe nearby amplitudes; remeasure
 epsilon_i after casting. Synthetic noise on real activations is diagnostic only and does not certify the actual kernel

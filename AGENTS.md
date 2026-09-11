@@ -25,17 +25,20 @@ and measured target-workload speed evidence before accepting a numerical change.
 For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
 math transformations, precision changes, or MKNE autotune winners. First pursue accuracy-preserving algebra,
 redundant-work elimination, and data reuse. Preserve the existing exact quantization contract and the inference
-**mean absolute drift <= 2e-3 AND maximum absolute drift <= 0.046875 per case** contract. Both limits are
-inclusive and must pass independently; relative L2 or averaging across cases cannot replace either gate.
+speed-weighted local mean-absolute-drift contract: a repeatedly measured gain greater than 1% allows
+**mean absolute drift <= 4e-3**, while a positive gain no greater than 1% allows
+**mean absolute drift <= 3e-3**. Equal, slower, or noise-indistinguishable candidates receive no drift allowance.
+The independent **maximum absolute drift <= 0.046875 per case** limit remains unchanged. All applicable limits are
+inclusive and must pass independently; relative L2 or averaging across cases cannot replace any gate.
 These gates apply only to localized kernel outputs against the reference on identical inputs, weights, and state.
 Propagated final-logit differences are diagnostics, not kernel acceptance gates; do not apply these limits to them.
 Real-arithmetic equivalence and FP32 output alone do not prove numerical equivalence.
 The skill distinguishes kernel correctness, measured model propagation, and separately scoped precision experiments.
 
 For the F6 seed-7 P32 experiment campaign (`scripts/p32_twenty`), the user explicitly
-raised the localized inference mean-error limit to **3e-3**. This overrides the
-2e-3 default above for that campaign; the maximum-error limit and finite-value
-requirements remain unchanged.
+approved a fixed localized inference mean-error limit of **3e-3**. This
+campaign-specific limit remains fixed rather than using the speed-weighted
+tier; the maximum-error limit and finite-value requirements remain unchanged.
 
 ## Human review of accuracy/performance exceptions
 
