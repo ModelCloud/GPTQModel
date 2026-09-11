@@ -506,13 +506,16 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     else:
         from .gsq_batching import llama_stage_batches
 
+        lazy_stage_batches = offloaded or (
+            hasattr(batches, 'iter_hidden_batches') and hasattr(batches, 'iter_batches')
+        )
         staged_batches = llama_stage_batches(
             batches,
             batch_size=batch_size,
             microbatch_size=microbatch_size,
             device=device,
             implicit_causal=attention_implementation == 'sdpa',
-            lazy=offloaded,
+            lazy=lazy_stage_batches,
         )
     run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches, teacher_attention)
     mlp_metadata = None
