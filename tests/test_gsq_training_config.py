@@ -29,7 +29,7 @@ def test_staged_config_rejects_invalid_settings(values):
 
 @pytest.mark.parametrize('optimizer', ['lion', 'adamw'])
 @pytest.mark.parametrize('bits', [2, 3, 4])
-@pytest.mark.parametrize('initializer', ['gptq', 'gptq_signed'])
+@pytest.mark.parametrize('initializer', ['gptq', 'gptq_signed', 'rtn'])
 def test_configured_block_entry_default_off_and_enabled_packed_reload(bits, initializer, optimizer, tmp_path, monkeypatch):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding

@@ -954,9 +954,16 @@ class GPTQ:
         sequence_count = max(1, sequence_count)
         per_sequence_length = rows / sequence_count
         scale_length = per_sequence_length
+        sequence_count_normalization = False
         if self.length_aware and self.length_aware_config is not None:
             cfg = self.length_aware_config
-            if cfg.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT and cfg.bucket_weights is not None:
+            if cfg.mode is LengthAwareMode.SEQUENCE_COUNT:
+                # The GSQ author implementation accumulates raw token Gram
+                # matrices and applies 2 / number_of_sequences once at
+                # materialization.  It must not divide each sequence by its
+                # token length first.
+                sequence_count_normalization = True
+            elif cfg.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT and cfg.bucket_weights is not None:
                 bucket_idx = self._lookup_length_bucket(per_sequence_length)
                 if bucket_idx is not None:
                     scale_length = per_sequence_length * cfg.bucket_weights[bucket_idx]
@@ -964,7 +971,7 @@ class GPTQ:
                 bucket_idx = self._lookup_length_bucket(per_sequence_length)
                 if bucket_idx is not None:
                     scale_length = cfg.bucket_scales[bucket_idx]
-            if cfg.min_length is not None and cfg.min_length > 0:
+            if not sequence_count_normalization and cfg.min_length is not None and cfg.min_length > 0:
                 scale_length = max(scale_length, float(cfg.min_length))
 
         # CPU fallback: route to the compiled extension which calls ATen's
@@ -978,7 +985,12 @@ class GPTQ:
             self._borrow_workspace_stage_dtype = stage_dtype
             self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-            length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
+            if sequence_count_normalization:
+                length_aware_scale = 1.0
+            elif self.length_aware:
+                length_aware_scale = 1.0 / scale_length
+            else:
+                length_aware_scale = 1.0
             if chunk_size is None:
                 return hessian_xtx_cpu(matrix, out, beta=1.0 if out is not None else 0.0, alpha=length_aware_scale)
 
@@ -1009,7 +1021,12 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-        length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
+        if sequence_count_normalization:
+            length_aware_scale = 1.0
+        elif self.length_aware:
+            length_aware_scale = 1.0 / scale_length
+        else:
+            length_aware_scale = 1.0
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
             if out is None:

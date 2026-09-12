@@ -399,7 +399,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     """
     import copy
 
-    if initializer not in ('gptq', 'gptq_signed'):
+    if initializer not in ('gptq', 'gptq_signed', 'rtn'):
         raise ValueError('Unknown staged GPTQ initializer')
     if affine_initializers and reinitialize_mlp:
         raise ValueError('Affine staged fitting must retain supplied MLP initialization, not replace it with GPTQ')
@@ -530,7 +530,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     return fitted, records
 
 
-def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, projections=None, initializer='gptq'):
+def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01, projections=None, initializer='gptq'):
     """Capture real projection inputs and prepare symmetric GPTQ stage seeds.
 
     This initializer uses this repository's GPTQ, not the author's fork. Its
@@ -540,12 +540,12 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
     import logging
     import time
 
-    from .config import GPTQConfig
+    from .config import GPTQConfig, HessianConfig, LengthAwareConfig, LengthAwareMode
     from .gptq import GPTQ
 
     if bits not in (2, 3, 4) or not batches:
         raise ValueError('Staged Llama GPTQ requires W2/W3/W4 and calibration batches')
-    if initializer not in ('gptq', 'gptq_signed'):
+    if initializer not in ('gptq', 'gptq_signed', 'rtn'):
         raise ValueError('Unknown staged GPTQ initializer')
     working = copy.deepcopy(layer).eval()
     tasks, handles = {}, []
@@ -555,13 +555,47 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, 
         if not projections or not set(projections).issubset(names):
             raise ValueError('Unsupported Llama GPTQ projection subset')
         names = tuple(projections)
+    if initializer == 'rtn':
+        from .config import RTNConfig
+        from .rtn import RTN
+
+        initializers, metadata = {}, {}
+        for name in names:
+            module = working.get_submodule(name)
+            config = RTNConfig(
+                bits=bits,
+                group_size=group_size,
+                sym=True,
+                desc_act=False,
+                offload_to_disk=False,
+            )
+            quantizer = RTN(module, config)
+            weight, scales, zeros, groups, _, loss, damp, samples = quantizer.quantize()
+            if not torch.all(zeros == 2**(bits - 1)):
+                raise ValueError('RTN initializer zero point does not match the signed GSQ grid')
+            expected = torch.arange(weight.shape[1], device=groups.device) // group_size
+            if not torch.equal(groups, expected.to(groups.dtype)):
+                raise ValueError('RTN initializer grouping does not match contiguous GSQ groups')
+            initializers[name] = (weight.detach().clone(), scales.detach().clone())
+            metadata[name] = dict(loss=loss, damp=damp, samples=samples)
+        return initializers, metadata
     try:
         for name in names:
             module = working.get_submodule(name)
             prior = dict(mse=2.4, scale_search='mse') if initializer == 'gptq_signed' else {}
             config = GPTQConfig(bits=bits, group_size=group_size, sym=True, desc_act=False,
                                 damp_percent=damp_percent, gsq=None, act_group_aware=False,
-                                offload_to_disk=False, **prior)
+                                offload_to_disk=False,
+                                # The GSQ author GPTQ uses H = 2/N_seq * X^T X.
+                                # The repository default is a bucketed length-aware
+                                # estimator that is not materialized here and falls
+                                # back to token-count normalization.
+                                hessian=HessianConfig(
+                                    length_aware=LengthAwareConfig(
+                                        mode=LengthAwareMode.SEQUENCE_COUNT
+                                    )
+                                ),
+                                **prior)
             task = GPTQ(module, config)
             if initializer == 'gptq_signed':
                 from .gsq_initialization import SignedGSQQuantizer

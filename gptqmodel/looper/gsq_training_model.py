@@ -107,7 +107,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 capture_options['offload_to_cpu'] = True
             if capture_directory is not None:
                 capture_options['offload_directory'] = capture_directory/f'layer-{index:02d}'
-            if not offload_capture:
+            if not offload_capture and capture_batch_size != 1:
                 capture_options['capture_batch_size'] = capture_batch_size
             cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
             try:

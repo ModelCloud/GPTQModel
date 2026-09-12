@@ -222,6 +222,14 @@ counts weight accumulated losses, including partial batches. For equal-length
 full batches this agrees with equal microbatch weighting; for variable-length
 NM documents it is an explicitly token-weighted extension of the author setup.
 
+The staged GPTQ initializer now selects an explicit sequence-count Hessian
+normalization matching the author path: raw token Grams are materialized as
+`H = (2 / N_sequences) * sum(X.T @ X)`. The previous repository default could
+fall back to token-count normalization when bucket boundaries were absent.
+Existing quality artifacts retain their original source snapshot and must be
+rerun to measure this correction. `GSQTrainingConfig(initializer='rtn')` also
+provides the symmetric RTN control required for the matched RTN +/- GSQ matrix.
+
 CPU checks exercised variable-length decoder output equivalence with explicit
 and absent eager masks, partial optimizer batches, staged fitting, and packing.
 `staged-batching-tests-v2.log` records 27 passing configuration/lifecycle tests;

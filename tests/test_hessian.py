@@ -901,6 +901,30 @@ def test_hessian_length_aware_normalization():
     torch.testing.assert_close(gptq_std.H.float(), expected_standard, atol=1e-4, rtol=1e-4)
 
 
+def test_hessian_sequence_count_normalization_matches_author_gptq():
+    """Author GSQ GPTQ weights raw token Grams by sequence count only."""
+
+    torch.manual_seed(10)
+    base = torch.nn.Linear(16, 8, bias=False)
+    X1 = torch.randn(1, 3, 16, dtype=torch.float32)
+    X2 = torch.randn(1, 7, 16, dtype=torch.float32)
+    expected = X1.reshape(-1, 16).T @ X1.reshape(-1, 16)
+    expected += X2.reshape(-1, 16).T @ X2.reshape(-1, 16)
+
+    cfg = QuantizeConfig(
+        hessian=HessianConfig(
+            length_aware=LengthAwareConfig(mode=LengthAwareMode.SEQUENCE_COUNT)
+        )
+    )
+    gptq = GPTQ(_clone_module(base), cfg)
+    gptq.add_batch(X1, torch.empty(0))
+    gptq.add_batch(X2, torch.empty(0))
+    gptq.materialize_global_hessian()
+
+    assert gptq.H is not None
+    torch.testing.assert_close(gptq.H.float(), expected, atol=1e-4, rtol=1e-4)
+
+
 def test_hessian_length_aware_min_length_clamp():
     """Length-aware minimum-length clamp caps per-token weight for short sequences."""
 

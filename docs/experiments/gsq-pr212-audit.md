@@ -13,6 +13,12 @@
   mismatch, not a sign error or reversed teacher/student objective.
 - A matched `GPTQ +/- GSQ` and `RTN +/- GSQ` matrix is required. The RTN arms
   distinguish GSQ's contribution from GPTQ Hessian compensation.
+- The staged GPTQ initializer had one concrete paper deviation: the repository
+  default normalized its Hessian by total calibration tokens after the
+  bucketed mode fell back to disabled, while the author GPTQ normalizes raw
+  token Grams by calibration sequence count. The staged path now selects an
+  explicit sequence-count mode; the earlier quality numbers remain pre-fix
+  results and need a rerun.
 - GSQ must remain experimental and disabled by default.
 
 ## Math audit
@@ -146,6 +152,23 @@ signed-grid definition. Literal parity with this apparent author-code omission
 would not be a justified QVQ fix, especially because the paper does not report
 a W4 Llama result.
 
+### Staged GPTQ Hessian alignment
+
+The author initializer accumulates each captured activation matrix as a raw
+token Gram and materializes
+
+`H = (2 / N_sequences) * sum(X.T @ X)`.
+
+The staged QVQ initializer previously constructed the repository default
+bucketed length-aware configuration without bucket boundaries. That configuration
+was disabled by GPTQ, leaving `H = (2 / N_tokens) * sum(X.T @ X)`. With variable
+length documents, this changes both the relative document weighting and the
+inverse-Cholesky error feedback. `LengthAwareMode.SEQUENCE_COUNT` now preserves
+the raw Gram and applies the author sequence-count normalization only to the
+staged initializer. A focused variable-length regression test covers the exact
+formula, and a small signed-W4 CPU comparison matched the author trajectory's
+scales, codes, and quantized weights.
+
 ## Required causal matrix
 
 Use one immutable dense checkpoint and one locked calibration/evaluation
@@ -161,10 +184,10 @@ reference arms. Package-default GPTQ must not replace the matched signed-GPTQ
 control because different zero-point freedom and initialization confound the
 GSQ delta.
 
-The public staged configuration currently accepts `gptq`, `gptq_signed`, and
-`awq`, but not `rtn`. A small explicit RTN initializer path is needed before the
-strict four-arm public experiment can run. This is an experiment capability
-addition, not a fix for a confirmed GSQ equation bug.
+The public staged configuration now accepts `rtn` and uses the native symmetric
+RTN quantizer for that initializer. This enables the strict four-arm experiment
+matrix without changing the default GPTQ path. RTN is an experiment control,
+not a fix for a confirmed GSQ equation bug.
 
 ## Experiment order
 

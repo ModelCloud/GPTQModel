@@ -1990,6 +1990,7 @@ class LengthAwareMode(str, Enum):
 
     DISABLED = "disabled"
     SINGLE = "single"
+    SEQUENCE_COUNT = "sequence_count"
     EQUAL_PER_BUCKET_WEIGHT = "equal_per_bucket_weight"
 
 
