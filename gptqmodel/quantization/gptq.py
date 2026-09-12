@@ -1031,7 +1031,7 @@ class GPTQ:
             mat32 = matrix.to(dtype=torch.float32)
             if out is None:
                 xtx = torch.matmul(mat32.T, mat32)
-                if self.length_aware:
+                if self.length_aware and not sequence_count_normalization:
                     xtx.div_(scale_length)
             else:
                 out.addmm_(mat32.T, mat32, beta=1.0, alpha=length_aware_scale)
