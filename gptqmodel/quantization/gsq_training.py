@@ -530,7 +530,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     return fitted, records
 
 
-def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.1, projections=None, initializer='gptq'):
+def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01, projections=None, initializer='gptq'):
     """Capture real projection inputs and prepare symmetric GPTQ stage seeds.
 
     This initializer uses this repository's GPTQ, not the author's fork. Its
