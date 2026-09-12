@@ -227,8 +227,11 @@ normalization matching the author path: raw token Grams are materialized as
 `H = (2 / N_sequences) * sum(X.T @ X)`. The previous repository default could
 fall back to token-count normalization when bucket boundaries were absent.
 Existing quality artifacts retain their original source snapshot and must be
-rerun to measure this correction. `GSQTrainingConfig(initializer='rtn')` also
-provides the symmetric RTN control required for the matched RTN +/- GSQ matrix.
+rerun to measure this correction. In the current signed GPTQ path this is a
+global Hessian rescaling that cancels under proportional damping in the ideal
+code trajectory; it is required for reference parity but is not a demonstrated
+quality fix. `GSQTrainingConfig(initializer='rtn')` also provides the symmetric
+RTN control required for the matched RTN +/- GSQ matrix.
 
 CPU checks exercised variable-length decoder output equivalence with explicit
 and absent eager masks, partial optimizer batches, staged fitting, and packing.

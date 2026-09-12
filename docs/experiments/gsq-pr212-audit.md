@@ -18,7 +18,10 @@
   bucketed mode fell back to disabled, while the author GPTQ normalizes raw
   token Grams by calibration sequence count. The staged path now selects an
   explicit sequence-count mode; the earlier quality numbers remain pre-fix
-  results and need a rerun.
+  results and need a rerun. On the current signed prior with proportional
+  damping, this is a global Hessian rescaling and a small CPU comparison left
+  the GPTQ codes and scales unchanged, so it is a parity correction rather
+  than a confirmed explanation for the quality regression.
 - GSQ must remain experimental and disabled by default.
 
 ## Math audit
@@ -162,12 +165,14 @@ token Gram and materializes
 The staged QVQ initializer previously constructed the repository default
 bucketed length-aware configuration without bucket boundaries. That configuration
 was disabled by GPTQ, leaving `H = (2 / N_tokens) * sum(X.T @ X)`. With variable
-length documents, this changes both the relative document weighting and the
-inverse-Cholesky error feedback. `LengthAwareMode.SEQUENCE_COUNT` now preserves
-the raw Gram and applies the author sequence-count normalization only to the
-staged initializer. A focused variable-length regression test covers the exact
-formula, and a small signed-W4 CPU comparison matched the author trajectory's
-scales, codes, and quantized weights.
+length documents, this changes the absolute Hessian scale. `LengthAwareMode.SEQUENCE_COUNT`
+now preserves the raw Gram and applies the author sequence-count normalization
+only to the staged initializer. Because GPTQ uses proportional damping and the
+signed prior does not use Hessian-weighted range search, the scale cancels in
+the ideal code trajectory; it can still matter to scale-sensitive objectives,
+conditioning, and finite-precision behavior. A focused variable-length
+regression test covers the exact formula, and a small signed-W4 CPU comparison
+matched the author trajectory's scales, codes, and quantized weights.
 
 ## Required causal matrix
 
