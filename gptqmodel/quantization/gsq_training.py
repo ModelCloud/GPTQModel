@@ -429,8 +429,6 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         raise ValueError('Llama GSQ requires all seven projection initializers and nonempty batches')
     initializers = dict(initializers)
     fitted = copy.deepcopy(layer).eval()
-    teacher_attention = {name: value.detach().clone() for name, value in layer.named_parameters()
-                         if name.startswith('self_attn.')}
     records = {}
 
     def quantizer(name):
@@ -517,14 +515,26 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             implicit_causal=attention_implementation == 'sdpa',
             lazy=lazy_stage_batches,
         )
-    run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches, teacher_attention)
+    # Q/K have already been fitted above.  The attention stage therefore uses
+    # fitted Q/K plus dense V/O as its teacher, matching the paper's sequential
+    # attention objective; overriding all attention weights with the original
+    # dense snapshot would train V/O against a state the final block does not
+    # use.
+    run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches)
     mlp_metadata = None
     if reinitialize_mlp:
         refreshed, mlp_metadata = initialize_llama_gptq(fitted, batches, bits=bits, group_size=group_size,
                                                        damp_percent=qk_damp_percent, projections=names[4:],
                                                        initializer=initializer)
         initializers.update(refreshed)
-    run('mlp', fitted, names[4:], staged_batches, teacher_attention)
+    # The MLP stage must preserve the already-fitted attention on both sides
+    # of its reconstruction target.  Passing ``teacher_attention`` here would
+    # silently replace the fitted Q/K/V/O weights with the dense attention,
+    # while the student still used the fitted attention, so the optimizer
+    # would train the MLP against a teacher that the final staged block could
+    # never reproduce.  This is the paper's sequential objective: fitted
+    # attention + dense MLP -> fitted attention + trainable MLP.
+    run('mlp', fitted, names[4:], staged_batches)
     records['mlp']['initializer_timing'] = 'after_attention' if reinitialize_mlp else 'before_attention'
     records['mlp']['initializer_metadata'] = mlp_metadata
     return fitted, records

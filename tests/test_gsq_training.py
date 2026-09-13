@@ -246,10 +246,24 @@ def test_complete_stage_driver_schedule_export_and_determinism():
     assert torch.isfinite(first['weights']['weight']).all()
 
 
-def test_llama_staged_driver_executes_all_projections_without_mutating_teacher():
+def test_llama_staged_driver_executes_all_projections_without_mutating_teacher(monkeypatch):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
-    from gptqmodel.quantization.gsq_training import fit_llama_stages
+    import gptqmodel.quantization.gsq_training as gsq_training
+
+    stage_teacher_overrides = []
+    mlp_teacher_overrides = []
+    original_stage_loss = gsq_training.reconstruction_stage_loss
+
+    def observe_mlp_teacher(module, args, kwargs, *, student_weights, teacher_weights=None, **options):
+        stage_teacher_overrides.append(teacher_weights)
+        if set(student_weights) == {
+                'mlp.gate_proj.weight', 'mlp.up_proj.weight', 'mlp.down_proj.weight'}:
+            mlp_teacher_overrides.append(teacher_weights)
+        return original_stage_loss(module, args, kwargs, student_weights=student_weights,
+                                   teacher_weights=teacher_weights, **options)
+
+    monkeypatch.setattr(gsq_training, 'reconstruction_stage_loss', observe_mlp_teacher)
 
     config = LlamaConfig(hidden_size=16, intermediate_size=32, num_attention_heads=2,
                          num_key_value_heads=1, num_hidden_layers=1)
@@ -264,12 +278,14 @@ def test_llama_staged_driver_executes_all_projections_without_mutating_teacher()
     hidden = torch.randn(1, 3, 16)
     kwargs = dict(position_embeddings=LlamaRotaryEmbedding(config)(hidden, torch.arange(3)[None]),
                   attention_mask=torch.full((3, 3), -torch.inf).triu(1)[None, None], use_cache=False)
-    fitted, records = fit_llama_stages(layer, initializers, [(hidden, kwargs)], bits=2, group_size=8,
+    fitted, records = gsq_training.fit_llama_stages(layer, initializers, [(hidden, kwargs)], bits=2, group_size=8,
                                       epochs=2, qk_steps=2, reinitialize_mlp=False, decay='constant')
     assert set(records) == {'self_attn.q_proj', 'self_attn.k_proj', 'attention', 'mlp'}
     assert all(len(result['history']) == 2 for result in records.values())
     assert torch.isfinite(fitted(hidden, **kwargs)).all()
     assert all(torch.equal(value, original[name]) for name, value in layer.named_parameters())
+    assert stage_teacher_overrides and all(value is None for value in stage_teacher_overrides)
+    assert mlp_teacher_overrides and all(value is None for value in mlp_teacher_overrides)
 
 
 @pytest.mark.parametrize('bits', [2, 3, 4])
