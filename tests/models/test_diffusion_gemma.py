@@ -9,7 +9,7 @@ import os
 class TestDiffusionGemma(ModelTest):
     """Exercise quantization through the real multimodal generation path."""
 
-    NATIVE_MODEL_ID = "/monster/data/model/diffusiongemma-26B-A4B-it"
+    NATIVE_MODEL_ID = "/monster/data/model/diffusiongemma-26B-A4B-it" # google/diffusiongemma-26B-A4B-it
     USE_FLASH_ATTN = False
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
     INFERENCE_PROMPT = "What is the capital city of France?"
