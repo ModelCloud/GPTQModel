@@ -316,6 +316,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | MOSS | `moss` |
 | MPT | `mpt` |
 | Muse Glimmer | `muse_glimmer` |
+| Nanbeige 4.2 | `nanbeige` |
 | Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
 | OLMo 2 / 3 | `olmo2`, `olmo3` |
 | OPT | `opt` |
