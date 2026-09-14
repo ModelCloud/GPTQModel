@@ -19,7 +19,7 @@ from ...utils.awq import (
     awq_runtime_error,
 )
 from ...utils.backend import BACKEND
-from ...utils.gemv import calculate_zeros_width
+from ...utils.gemv import awq_gemv_codes, calculate_zeros_width, dequantize_awq_gemv
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
@@ -246,7 +246,6 @@ class AwqGEMVFastLinear(AWQuantLinear):
     ):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -264,16 +263,8 @@ class AwqGEMVFastLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[:, idx // self.group_size])
-                    / qscales[:, idx // self.group_size]
-                ).to(torch.int)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.to(dtype=torch.int32)
+        groups = torch.arange(self.in_features, device=scales.device) // self.group_size
+        intweight = awq_gemv_codes(linear.weight.data, scales, zeros, groups).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(
             intweight.contiguous(), interleave=4, kstride=64
         ))
@@ -284,7 +275,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
         qzeros[:, : scales.shape[1]] = -(
                 qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
         ).to(torch.float16)
+        if not torch.isfinite(qzeros).all():
+            raise ValueError("AWQ GEMV_FAST offsets must be finite in FP16 storage")
         self.register_buffer(self.zeros_name, qzeros.transpose(1, 0).contiguous())
+
+    def dequantize_weight(self, num_itr: int = 1) -> torch.Tensor:
+        return dequantize_awq_gemv(self.qweight, self.scales, self._runtime_zeros(), group_size=self.group_size,
+                                   in_features=self.in_features, out_features=self.out_features, fast=True)
 
     def extra_repr(self) -> str:
         return (

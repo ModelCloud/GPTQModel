@@ -1,0 +1,193 @@
+{
+  "run": "artifacts/gsq-scalar/awq-w4-seed7-v2",
+  "report_sha256": "89f7c9a450b394c6796b88c9c52fe18cadb287ffb068ac8bd8eb4b4aeff4ed4e",
+  "layers": {
+    "model.layers.0.self_attn.q_proj": {
+      "baseline": {
+        "tensor_bytes": 2179072,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      },
+      "gsq_fixed": {
+        "tensor_bytes": 2179072,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      },
+      "gsq_scales": {
+        "tensor_bytes": 2179072,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      }
+    },
+    "model.layers.0.self_attn.k_proj": {
+      "baseline": {
+        "tensor_bytes": 544768,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      },
+      "gsq_fixed": {
+        "tensor_bytes": 544768,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      },
+      "gsq_scales": {
+        "tensor_bytes": 544768,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      }
+    },
+    "model.layers.0.self_attn.v_proj": {
+      "baseline": {
+        "tensor_bytes": 544768,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      },
+      "gsq_fixed": {
+        "tensor_bytes": 544768,
+        "changed_codes": 326,
+        "changed_scales": 0,
+        "exact_payload": false
+      },
+      "gsq_scales": {
+        "tensor_bytes": 544768,
+        "changed_codes": 0,
+        "changed_scales": 0,
+        "exact_payload": true
+      }
+    }
+  },
+  "effects": {
+    "gsq_fixed": {
+      "kl_teacher_candidate": {
+        "baseline": 0.11741516477218228,
+        "candidate": 0.11760607243766993,
+        "delta": 0.00019090766548765514,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0002016153302974999,
+          "bootstrap95": [
+            0.0001470236456952989,
+            0.0002616648271214217
+          ]
+        }
+      },
+      "top1_agreement": {
+        "baseline": 0.8573896654625413,
+        "candidate": 0.8573896654625413,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            -0.00048828125,
+            0.00048828125
+          ]
+        }
+      },
+      "top5_agreement": {
+        "baseline": 0.82425003926496,
+        "candidate": 0.824846866656196,
+        "delta": 0.00059682739123601,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0010030076373368502,
+          "bootstrap95": [
+            0.0004967119893990457,
+            0.0016450638649985194
+          ]
+        }
+      },
+      "top10_agreement": {
+        "baseline": 0.8247997487042563,
+        "candidate": 0.8238416836814827,
+        "delta": -0.0009580650227736243,
+        "paired_document_interval": {
+          "mean_document_delta": -0.0012019302230328321,
+          "bootstrap95": [
+            -0.0015428393380716443,
+            -0.000901422870811075
+          ]
+        }
+      },
+      "mse": {
+        "baseline": 0.45255240624808846,
+        "candidate": 0.4531334182222653,
+        "delta": 0.0005810119741768704,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0006315950304269791,
+          "bootstrap95": [
+            0.00040533512947149575,
+            0.0008635776466690004
+          ]
+        }
+      }
+    },
+    "gsq_scales": {
+      "kl_teacher_candidate": {
+        "baseline": 0.11741516477218228,
+        "candidate": 0.11741516477218228,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "top1_agreement": {
+        "baseline": 0.8573896654625413,
+        "candidate": 0.8573896654625413,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "top5_agreement": {
+        "baseline": 0.82425003926496,
+        "candidate": 0.82425003926496,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "top10_agreement": {
+        "baseline": 0.8247997487042563,
+        "candidate": 0.8247997487042563,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "mse": {
+        "baseline": 0.45255240624808846,
+        "candidate": 0.45255240624808846,
+        "delta": 0.0,
+        "paired_document_interval": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    }
+  },
+  "scope": "saved AWQ GEMM QKV and reported F6 canonical propagation"
+}

@@ -53,6 +53,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
+from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -388,6 +389,10 @@ class GPTQ:
         self.validate_module(self.module)
 
         self.qcfg = qcfg if qcfg else QuantizeConfig()  # HF compat will not pass qcfg
+        if pad_cols and (self.qcfg.gptaq is not None or self.qcfg.foem is not None):
+            full_name = self._named_module.full_name if self._named_module is not None else self.name
+            if gsq_enabled_for(getattr(self.qcfg, "gsq", None), full_name):
+                raise ValueError("GSQ with tensor-parallel padded GPTAQ/FOEM is not supported")
         hessian_cfg = getattr(self.qcfg, "hessian", None)
         self.length_aware_config = getattr(hessian_cfg, "length_aware", None)
         if not isinstance(self.length_aware_config, LengthAwareConfig):
@@ -949,9 +954,16 @@ class GPTQ:
         sequence_count = max(1, sequence_count)
         per_sequence_length = rows / sequence_count
         scale_length = per_sequence_length
+        sequence_count_normalization = False
         if self.length_aware and self.length_aware_config is not None:
             cfg = self.length_aware_config
-            if cfg.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT and cfg.bucket_weights is not None:
+            if cfg.mode is LengthAwareMode.SEQUENCE_COUNT:
+                # The GSQ author implementation accumulates raw token Gram
+                # matrices and applies 2 / number_of_sequences once at
+                # materialization.  It must not divide each sequence by its
+                # token length first.
+                sequence_count_normalization = True
+            elif cfg.mode is LengthAwareMode.EQUAL_PER_BUCKET_WEIGHT and cfg.bucket_weights is not None:
                 bucket_idx = self._lookup_length_bucket(per_sequence_length)
                 if bucket_idx is not None:
                     scale_length = per_sequence_length * cfg.bucket_weights[bucket_idx]
@@ -959,7 +971,7 @@ class GPTQ:
                 bucket_idx = self._lookup_length_bucket(per_sequence_length)
                 if bucket_idx is not None:
                     scale_length = cfg.bucket_scales[bucket_idx]
-            if cfg.min_length is not None and cfg.min_length > 0:
+            if not sequence_count_normalization and cfg.min_length is not None and cfg.min_length > 0:
                 scale_length = max(scale_length, float(cfg.min_length))
 
         # CPU fallback: route to the compiled extension which calls ATen's
@@ -973,7 +985,12 @@ class GPTQ:
             self._borrow_workspace_stage_dtype = stage_dtype
             self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-            length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
+            if sequence_count_normalization:
+                length_aware_scale = 1.0
+            elif self.length_aware:
+                length_aware_scale = 1.0 / scale_length
+            else:
+                length_aware_scale = 1.0
             if chunk_size is None:
                 return hessian_xtx_cpu(matrix, out, beta=1.0 if out is not None else 0.0, alpha=length_aware_scale)
 
@@ -1004,12 +1021,17 @@ class GPTQ:
         self._borrow_workspace_stage_dtype = stage_dtype
         self._borrow_workspace_last_chunk_rows = chunk_size if chunk_size is not None else rows
 
-        length_aware_scale = 1.0 / scale_length if self.length_aware else 1.0
+        if sequence_count_normalization:
+            length_aware_scale = 1.0
+        elif self.length_aware:
+            length_aware_scale = 1.0 / scale_length
+        else:
+            length_aware_scale = 1.0
         if chunk_size is None:
             mat32 = matrix.to(dtype=torch.float32)
             if out is None:
                 xtx = torch.matmul(mat32.T, mat32)
-                if self.length_aware:
+                if self.length_aware and not sequence_count_normalization:
                     xtx.div_(scale_length)
             else:
                 out.addmm_(mat32.T, mat32, beta=1.0, alpha=length_aware_scale)
@@ -2465,6 +2487,82 @@ class GPTQ:
 
     @torch.inference_mode()
     def quantize(
+            self,
+            blocksize=128,
+    ):
+        config = getattr(self.qcfg, "gsq", None)
+        module_name = self._named_module.full_name if self._named_module is not None else self.name
+        if getattr(self, "_gsq_active", False) or not gsq_enabled_for(config, module_name):
+            return self._quantize_impl(blocksize=blocksize)
+
+        from ..utils.fallback import should_use_fallback
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "data_independent_fallback"}
+            return self._quantize_impl(blocksize=blocksize)
+        start = time.time()
+        target = self.clone_module()
+        # Preserve the original-column calibration metric before GPTQ consumes,
+        # permutes, damps or releases it. Embeddings keep a diagonal metric.
+        # FOEM accumulates H directly, unlike GPTQ/GPTAQ's partial buffers.
+        if self.qcfg.foem is not None:
+            hessian = getattr(self, "H", None)
+            if hessian is None:
+                raise ValueError("FOEM GSQ requires unconsumed calibration statistics")
+        else:
+            hessian = self.finalize_hessian(target_device=target.device)
+        if isinstance(self.module, nn.Embedding):
+            hessian = self._H_diag
+        hessian = None if hessian is None else hessian.detach().clone()
+        cross_moment = None
+        cross_alpha = 1.0
+        asymmetric_config = self.qcfg.foem if self.qcfg.foem is not None else self.qcfg.gptaq
+        if asymmetric_config is not None and asymmetric_config.alpha != 0:
+            cross = getattr(self, "dXXT", None)
+            if hessian is None or cross is None or getattr(self, "_hessian_rebuild_invalid", False):
+                raise ValueError("asymmetric GSQ requires unconsumed paired calibration statistics")
+            cross_moment = cross.detach().clone()
+            cross_alpha = asymmetric_config.alpha
+        self._gsq_active = True
+        try:
+            result = self._quantize_impl(blocksize=blocksize)
+        finally:
+            self._gsq_active = False
+        weight, scales, zeros, groups, duration, avg_loss, damp, samples = result
+        if isinstance(avg_loss, str) and avg_loss.startswith("fallback("):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "data_independent_fallback"}
+            return result
+        canonical = weight
+        if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
+            canonical = canonical.T
+        elif isinstance(self.module, _ConvNd):
+            canonical = canonical.flatten(1)
+        width = canonical.shape[1]
+        if hessian is not None:
+            hessian = hessian[:width] if hessian.ndim == 1 else hessian[:width, :width]
+        fitted = refine_affine_scalar(
+            canonical, scales.to(weight.device), zeros.to(weight.device), groups.to(weight.device),
+            target=target[:, :width].to(weight.device), bits=self.qcfg.bits, config=config,
+            hessian=hessian, cross_moment=cross_moment, cross_alpha=cross_alpha,
+        )
+        refined = fitted.weight
+        if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
+            refined = refined.T
+        self.gsq_diagnostics = {
+            "objective": "calibration_hessian" if hessian is not None else "weight_mse",
+            "before": fitted.before, "after": fitted.after, "learn_scales": config.learn_scales,
+        }
+        if cross_moment is not None:
+            self.gsq_diagnostics["objective"] = "asymmetric_quadratic_without_constant"
+            self.gsq_diagnostics["alpha"] = cross_alpha
+        if self.qcfg.foem is not None:
+            self.gsq_diagnostics["initializer"] = "foem"
+            self.gsq_diagnostics["initializer_beta"] = self.qcfg.foem.beta
+        return (refined.reshape(weight.shape).contiguous(), fitted.scales.to(scales.device),
+                fitted.zeros.to(zeros.device), fitted.g_idx.to(groups.device),
+                time.time()-start, avg_loss, damp, samples)
+
+    @torch.inference_mode()
+    def _quantize_impl(
             self,
             blocksize=128,
     ):

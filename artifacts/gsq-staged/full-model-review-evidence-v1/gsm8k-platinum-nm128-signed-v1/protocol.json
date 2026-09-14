@@ -1,0 +1,65 @@
+{
+  "task": "gsm8k_platinum_cot",
+  "dataset": {
+    "dataset": "madrylab/gsm8k-platinum",
+    "name": "main",
+    "split": "test",
+    "rows": 1209,
+    "fingerprint": "b4f3f45576df4897",
+    "cache_files": [
+      {
+        "filename": "/root/.cache/huggingface/datasets/madrylab___gsm8k-platinum/main/0.0.0/e762492455a1cf7967de89f05b6bef72fc713b66/gsm8k-platinum-test.arrow"
+      }
+    ],
+    "dataset_revision": "e762492455a1cf7967de89f05b6bef72fc713b66",
+    "files": {
+      "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset.jsonl": "b9c1c78cdcba57c6899c8a314656d7687e682db1c0a395fe5f7bbd3ec8bbddcb",
+      "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset/test.parquet": "7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7"
+    },
+    "revision_verified_exact_rows": true
+  },
+  "arms": [
+    "dense",
+    "gptq-signed-w2-nm128",
+    "gptq-signed-staged-gsq-w2-nm128"
+  ],
+  "seed": 7,
+  "num_fewshot": 8,
+  "fewshot_as_multiturn": true,
+  "apply_chat_template": true,
+  "chat_date": "09 Sep 2026",
+  "max_new_tokens": 256,
+  "do_sample": false,
+  "temperature": 0.0,
+  "dtype": "float16",
+  "attention": "eager",
+  "batch_size": 32,
+  "backend": "torch",
+  "cache_dequantized_weights": true,
+  "zml": "N/A (not used)",
+  "evalution_commit": "08ec0c4644112e1f44ec72c51632a89bfc8c265a",
+  "evalution_dirty": "",
+  "calibration": {
+    "seed": 7,
+    "train_rows": 128,
+    "train_tokens": 47005,
+    "token_cap": 2048,
+    "selection": "random.Random(7).sample without replacement; native NM documents, no padding",
+    "weighting": "unweighted NM documents",
+    "inputs_sha256": "893d981d8398efe64e111a22a6996f3e23f073b6460f124fc061097c8bb19dda",
+    "question_disjointness": "pass against all locked D300 and all 1209 Platinum questions",
+    "source_hashes": {
+      "/monster/data/model/dataset/nm-calibration/llm.parquet": "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef",
+      "/root/polly-work/qvq-gsq/dataset/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json": "f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e",
+      "/root/polly-work/qvq-gsq/dataset/divergence300-v1/divergence300-locked.jsonl": "17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58",
+      "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset.jsonl": "b9c1c78cdcba57c6899c8a314656d7687e682db1c0a395fe5f7bbd3ec8bbddcb"
+    },
+    "inputs_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/nm128-seed7-v1/inputs.json"
+  },
+  "quantization": "W2/group128 symmetric; matched staged-path GPTQ initializer; FP32 training, FP16 export",
+  "scoring": "Evalution numeric_format_insensitive acc,num; pinned scorer source hashes",
+  "training_scope": "Matched signed GPTQ prior, W2/group128, FP32; staged GSQ uses batch64/micro16, 5 epochs, Q/K 2000 steps. Native variable-length NM documents with valid-token loss weighting; not full paper reproduction.",
+  "dense_reference": "Reused complete dense-full run: quantization calibration does not affect the dense checkpoint; identical dataset and generation settings are required by the comparison analyzer.",
+  "status": "Complete: dense 593/1209, signed GPTQ 0/1209, staged GSQ 20/1209; exact three-arm prompts, targets and token IDs verified.",
+  "epoch_override": "User explicitly requested 128 rows and 5 epochs. Baseline has GSQ disabled; its stored epoch setting is unused."
+}

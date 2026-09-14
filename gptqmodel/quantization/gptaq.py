@@ -220,7 +220,7 @@ class GPTAQ(GPTQ):
             self._final_hessian_device_hint = target_device
 
     @torch.inference_mode()
-    def quantize(
+    def _quantize_impl(
             self,
             blocksize=128,
     ):
@@ -237,7 +237,7 @@ class GPTAQ(GPTQ):
                 f"Quantization: Module `{self.name}` -> Hessian data already consumed, "
                 f"using fallback."
             )
-            return super().quantize(blocksize)
+            return super()._quantize_impl(blocksize)
 
         # `hessian_inverse` compilation remains unsafe on torch >= 2.8
         # (Inductor `tangents_token` errors on 2.13). Keep eager for modern PyTorch.

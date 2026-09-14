@@ -1,0 +1,1078 @@
+{
+  "state": "complete",
+  "provenance": {
+    "layers": "artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3",
+    "files": {
+      "artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3/report.json": "57d4c5e63d93b9667565bbc167a09dfba4b0c71bb4d4035048a89e80819137b5",
+      "artifacts/gsq-scalar/gptq-w4-seed7-v2/inputs.json": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1",
+      "artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00001-of-00017.safetensors": "d711d6cdd6eeb90bc4d2afdc90ef0a2a31c914216491681115ae77a3c1faf108",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00002-of-00017.safetensors": "a814ad8c0ae0dcd5f1bf1800c081e34ba056006eee078fd0539377918f27829b",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00003-of-00017.safetensors": "c0b0de9c4b6132d6eda35df390fec90f3205eb1a1a524a673109aea59170371e",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00004-of-00017.safetensors": "71ac42121682ae22f78a661face6f08dabfc6c149dcca01d3f4abc33cb337e17",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00005-of-00017.safetensors": "a097d2459c2723ac4b8020cddcb13d5d536708f816299f5b2b06394f1ea848d2",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00006-of-00017.safetensors": "36fa455afcd0a610bbc63f1b58c14c850077c34fbd98eb464de3fc1e981c01bf",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00007-of-00017.safetensors": "3d5fdb9c731ae3a740078e8410bc1e42200eecc6dab4c5c4320751234908986d",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00008-of-00017.safetensors": "dc9713306fd9c11c622b0aea9ade31f26f8c829654ab54d5616e583a47a5f898",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00009-of-00017.safetensors": "0dc2f1a419f6e74804ddfcb81f7a06eba9c63867c9a77db5f9e3b516f21b1fd0",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00010-of-00017.safetensors": "1a7278a992f77a2ae9e5df389a5d7c2bdbb588b341248730b2747b6531d76dfa",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00011-of-00017.safetensors": "32d65db4b2801103e373e0cf351fab2411130db4beef41ff11c66c04bb7aa585",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00012-of-00017.safetensors": "6272f1111ce49e4268593e7c6e940632a834491cb701710e16871f5c1a93bedb",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00013-of-00017.safetensors": "3f508ac92d95e7f76e3339b013f358459f0c1045f57ff850ad5a5ca9b979b959",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00014-of-00017.safetensors": "be2fc3580719c48cae52ddc8b1f204a51457498e6fd217bc9661c521e8216c83",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00015-of-00017.safetensors": "3a35d1ce091ad76370f0fcf6fe66ae394e806a8ebd22727853b4268b9c215667",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00016-of-00017.safetensors": "ce37069a179cc38ac97e4e5f862924db184df5f05ae81d4d06a2aac202b13401",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/quantize_config.json": "e4f6db43d71c91d91570a5e8e19e5d97bd67e4142cf116f1e77549aa2debefce",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model.safetensors.index.json": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697",
+      "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+      "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer_config.json": "9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e",
+      "artifacts/gsq-staged/llama-block0-w4-seed7-staged-v3/stages.pt": "0060acbf80d6f1d0d974da0b5232bcce7eb610539a25b1e42e9fd1c36d3a8174",
+      "/root/polly-work/qvq-gsq/scripts/validate_gsq_staged_propagation.py": "cfb3456ec13ea7f1c42a49654bf0b8c577e62de2067772a4ca30dde40798f417",
+      "scripts/gsq_f6_reference.py": "c27031b28fca1b2589cfc629103d64a923b60eb114b274465c382f6d1a5cebf1",
+      "scripts/p32_twenty/scorecard.py": "9b1ee07dab08216454375b2d2d683b99825743ec500c4468cb886b79edf3020f"
+    },
+    "seed": 7,
+    "repository_commit": "548d883e7aac1fb1858ad0daff061a1c774f365e",
+    "scope": "Propagate saved staged block-0 weights through canonical F6 FP32.\n\nDense block-0 normalization is restored for both arms; other blocks use F6.\nEager/cache-free diagnostic, not a production native packed comparison.\n",
+    "format": "canonical staged scalar W4 FP32",
+    "inputs": "artifacts/gsq-scalar/gptq-w4-seed7-v2"
+  },
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "arms": {
+    "f6": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.08518580292793689,
+          "top1_agreement": 0.8524590163934426,
+          "top5_agreement": 0.8459016393442623,
+          "top10_agreement": 0.8519125683060109,
+          "tokens": 183,
+          "mse": 0.3242458701133728,
+          "logits_sha256": "d2100d197d50fe21aef5d108126a475d8f3efde68c047d747b2378a5092e2bc3",
+          "teacher_sha256": "a276002d371d5a2f92a4c81afac40e339cee5fade60aeb955b696c2ca2926e48"
+        },
+        {
+          "kl_teacher_candidate": 0.07257121362973123,
+          "top1_agreement": 0.85546875,
+          "top5_agreement": 0.8625,
+          "top10_agreement": 0.8542968750000001,
+          "tokens": 256,
+          "mse": 0.3235476613044739,
+          "logits_sha256": "52d400fcbd26939911d88b083166932a8cdc8b3c1c2e5d652c25f918efbd62e3",
+          "teacher_sha256": "54e5d9e70fc81394b021ac3730d3f0a2359332fa414e8356481df27ec1dc561c"
+        },
+        {
+          "kl_teacher_candidate": 0.13693097005939464,
+          "top1_agreement": 0.8663366336633663,
+          "top5_agreement": 0.8287128712871288,
+          "top10_agreement": 0.8267326732673267,
+          "tokens": 202,
+          "mse": 0.48152899742126465,
+          "logits_sha256": "91e5fa2a4e43d13542d7e937e822816410caff81eba5f4f2a0e5aef076aef312",
+          "teacher_sha256": "77fc36e615e0770543e76c44667024ce698ea9e1aa7c104077578b3bb45e5d37"
+        },
+        {
+          "kl_teacher_candidate": 0.10594358930154131,
+          "top1_agreement": 0.85,
+          "top5_agreement": 0.8516666666666667,
+          "top10_agreement": 0.8441666666666666,
+          "tokens": 120,
+          "mse": 0.3898511826992035,
+          "logits_sha256": "5400372782965d16d0ecdf43547cf51c4c4739bebda82b5d1bff19d88a3e198f",
+          "teacher_sha256": "98fa511e791d7a535aed95823c3382f9a48ddcf5ff614e268e94b4c3d5cdefae"
+        },
+        {
+          "kl_teacher_candidate": 0.07851700881365611,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.8453125,
+          "top10_agreement": 0.8609375,
+          "tokens": 256,
+          "mse": 0.324698269367218,
+          "logits_sha256": "e134f1bffa4fbfc9143e76f4d1dc51ce6e4bf13bad1b79e9a570f6d64d00ea46",
+          "teacher_sha256": "4759b956a23a4e70b3bd9b36144399f6a967bb77df751c933a9d48ada46b14b2"
+        },
+        {
+          "kl_teacher_candidate": 0.07905365131992936,
+          "top1_agreement": 0.8804780876494024,
+          "top5_agreement": 0.8406374501992032,
+          "top10_agreement": 0.8482071713147411,
+          "tokens": 251,
+          "mse": 0.3525164723396301,
+          "logits_sha256": "f09b454402bfb43b4510fe44d1388546606a71d18661a0a2262b0a9d554495c7",
+          "teacher_sha256": "e10d0725412a2dd71bbfa587d42bcf02f8370e0866fb6309c7bbc277b9b0bbb0"
+        },
+        {
+          "kl_teacher_candidate": 0.07029932303740562,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.8390625,
+          "top10_agreement": 0.851171875,
+          "tokens": 256,
+          "mse": 0.3247354030609131,
+          "logits_sha256": "5da2274b64e8e45859da0d44ddc97abf0e9ce2375d7a818efbd91693e03fd739",
+          "teacher_sha256": "a3e0e5710e60cfa9c902d21ba88c852634c1fd405a069ddc664889180a12e216"
+        },
+        {
+          "kl_teacher_candidate": 0.10407983200869493,
+          "top1_agreement": 0.8385416666666666,
+          "top5_agreement": 0.8427083333333334,
+          "top10_agreement": 0.8343750000000001,
+          "tokens": 192,
+          "mse": 0.4086044132709503,
+          "logits_sha256": "787aaa101636a11662640179fad8a5db72556cc3db7f0dc382942b41fbd8ebbc",
+          "teacher_sha256": "9a556067cf7ef9317da4136842e310452216af027017171a20a029415b8cf15b"
+        },
+        {
+          "kl_teacher_candidate": 0.1297808623367114,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.839766081871345,
+          "top10_agreement": 0.8538011695906432,
+          "tokens": 171,
+          "mse": 0.41826701164245605,
+          "logits_sha256": "c8023464968158d3f8934e6f9506aa82fbfe9e32d8097b6ad368ef31633502c6",
+          "teacher_sha256": "2447604609de8849282c9837d3a506264ec673041120075777bf3be5796dce2a"
+        },
+        {
+          "kl_teacher_candidate": 0.08433167531219898,
+          "top1_agreement": 0.890625,
+          "top5_agreement": 0.8539062500000001,
+          "top10_agreement": 0.852734375,
+          "tokens": 256,
+          "mse": 0.3487277030944824,
+          "logits_sha256": "74fe9d68fea21312bf976600643d1380a243fabf93fdefd418ce1746d466e7ab",
+          "teacher_sha256": "c3dd6247b4a94611ed4d2068eacaa78b8e47c2c816c3f201080c60e8a9496108"
+        },
+        {
+          "kl_teacher_candidate": 0.15967323330573457,
+          "top1_agreement": 0.80859375,
+          "top5_agreement": 0.81171875,
+          "top10_agreement": 0.796875,
+          "tokens": 256,
+          "mse": 0.6916744112968445,
+          "logits_sha256": "2184abd94d025be228bd8eed8480d903f52f68642d87de1a9613f38f9f5bfcec",
+          "teacher_sha256": "2306de4fe1a934807ce55dac8e2258c8746808310b1a2ef16c055fd9cc885a1c"
+        },
+        {
+          "kl_teacher_candidate": 0.08418272391013408,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.8500000000000001,
+          "top10_agreement": 0.833984375,
+          "tokens": 256,
+          "mse": 0.3765779733657837,
+          "logits_sha256": "72c510e9dbe38b9289c479220722f012b310298f63ca31015a904f6b40cbce98",
+          "teacher_sha256": "786c11e0425302971af5291ef68fcac7778e512c37b4b2a4ba382e4298e3d16d"
+        },
+        {
+          "kl_teacher_candidate": 0.11375835472238799,
+          "top1_agreement": 0.7905405405405406,
+          "top5_agreement": 0.827027027027027,
+          "top10_agreement": 0.822972972972973,
+          "tokens": 148,
+          "mse": 0.3632177710533142,
+          "logits_sha256": "ef7475722ab9cdfa2e143db43c202f4ec9e689c3834ea5a63addf167b67c5e0b",
+          "teacher_sha256": "275cacf7924579eac7b6a7a79d53f8cb3772a2f76addca4bb90aa69b8ebd3b08"
+        },
+        {
+          "kl_teacher_candidate": 0.08027694361542799,
+          "top1_agreement": 0.9078947368421053,
+          "top5_agreement": 0.8614035087719298,
+          "top10_agreement": 0.8359649122807018,
+          "tokens": 228,
+          "mse": 0.39004194736480713,
+          "logits_sha256": "dd8e8e5e0e780afc2522c88b677365ac8da5c094a95985972c3816dde96b2e27",
+          "teacher_sha256": "5397e46f73beb08cffcd0d8096e20a7441a6fb3855fde84e1e3d14cb76bd2ad3"
+        },
+        {
+          "kl_teacher_candidate": 0.10804732407768475,
+          "top1_agreement": 0.8203125,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.835546875,
+          "tokens": 256,
+          "mse": 0.39012330770492554,
+          "logits_sha256": "a31b7307c02df0834f47d18a8d29585c7f6d4853c98dba338a692b3e9b2bccff",
+          "teacher_sha256": "86601f0b0b6666abd311e83f50bb5b3128c6464da16c0605bfd5daf1797068b8"
+        },
+        {
+          "kl_teacher_candidate": 0.10058663464244413,
+          "top1_agreement": 0.875968992248062,
+          "top5_agreement": 0.8232558139534883,
+          "top10_agreement": 0.8193798449612403,
+          "tokens": 129,
+          "mse": 0.4997842609882355,
+          "logits_sha256": "4dee2c28f0d2fcd9433e95a7e7a1c4df8d71c203da067f26c7c351faa823d52f",
+          "teacher_sha256": "73c9fa02a1d5c9699b35ca97798c92364071ee9d2a098ef437c59410fb4706b5"
+        },
+        {
+          "kl_teacher_candidate": 0.1108562019283558,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.83125,
+          "tokens": 256,
+          "mse": 0.3794059455394745,
+          "logits_sha256": "3e3b45f07eda9a676804788023861365a0f4aeefe05949912a7b05027123da31",
+          "teacher_sha256": "ac23c801e12ae61f5a95428a1ce243c159cf80ea8a4073d5aeac03490aca9452"
+        },
+        {
+          "kl_teacher_candidate": 0.06700538877794464,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.8382812500000001,
+          "tokens": 256,
+          "mse": 0.4117051064968109,
+          "logits_sha256": "cdb8d8ad477a55344acdcdea5072f8e1314496b5eae464daa25e7858ea67de65",
+          "teacher_sha256": "9260271464222c17d68055266f93a531cb27b67d0a9e9e24ead03e72a543ad84"
+        },
+        {
+          "kl_teacher_candidate": 0.07396210379918502,
+          "top1_agreement": 0.8695652173913043,
+          "top5_agreement": 0.8472049689440995,
+          "top10_agreement": 0.8614906832298138,
+          "tokens": 161,
+          "mse": 0.35100626945495605,
+          "logits_sha256": "458290bca15736b4d104553782d0e094949f20d751dff112baf2e29e67bca6c5",
+          "teacher_sha256": "233c1919521264f41ca601795000b353a1d3ccd6e18200d82790cd2d17be2bbb"
+        },
+        {
+          "kl_teacher_candidate": 0.07430821043971907,
+          "top1_agreement": 0.8854166666666666,
+          "top5_agreement": 0.8854166666666666,
+          "top10_agreement": 0.865625,
+          "tokens": 96,
+          "mse": 0.397943913936615,
+          "logits_sha256": "10bd7dcac3e7477575a99e15f8588522d0ddafab20a2581fe52ed290106b3622",
+          "teacher_sha256": "e0d13b6c30a5b62b537d73d42b33694b781313fdc03b8b41364b2d178fe2ada4"
+        },
+        {
+          "kl_teacher_candidate": 0.23866619827094476,
+          "top1_agreement": 0.8448275862068966,
+          "top5_agreement": 0.7810344827586208,
+          "top10_agreement": 0.7439655172413794,
+          "tokens": 116,
+          "mse": 0.6646162867546082,
+          "logits_sha256": "29508f43a35cd6a7f5d6e1178edf6d24f694f4a51ed670f74584db15d58cd451",
+          "teacher_sha256": "7ab2864d6a0def3e3f2f13f85c64997df70b9ff7a62af8e22ba0824f43fb8f41"
+        },
+        {
+          "kl_teacher_candidate": 0.1703855617676019,
+          "top1_agreement": 0.7906976744186046,
+          "top5_agreement": 0.797674418604651,
+          "top10_agreement": 0.7883720930232557,
+          "tokens": 86,
+          "mse": 0.523128867149353,
+          "logits_sha256": "f37a177d0bb1d447f252faf37f504e038c788606fa78af6542ad6e4d5e429ec1",
+          "teacher_sha256": "3b18a85fe624a495d8d703893b3bf2a5ecdca759d804c150366a97d12e9d3cf5"
+        },
+        {
+          "kl_teacher_candidate": 0.19629931551580815,
+          "top1_agreement": 0.8395061728395061,
+          "top5_agreement": 0.7827160493827161,
+          "top10_agreement": 0.7839506172839507,
+          "tokens": 81,
+          "mse": 0.5336624979972839,
+          "logits_sha256": "004283e5154eed2cf495900c0e10e81cd90e3b9ec5df43da08b038729c9cac9a",
+          "teacher_sha256": "0c4d614c7b5751c83837c3dbf170a75381c1d217d3956404f8acfb0c8ebec142"
+        },
+        {
+          "kl_teacher_candidate": 0.13854815626225253,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.8070175438596491,
+          "top10_agreement": 0.8052631578947369,
+          "tokens": 57,
+          "mse": 0.48013269901275635,
+          "logits_sha256": "16cb4d088f476bb7417feb04453525ab2eaffd7a748594469082169e7265eaf2",
+          "teacher_sha256": "6d4ac25ae9bb8bad19c9cf1f81792999afec3b546c4aba6290ee1c54ff688a2c"
+        },
+        {
+          "kl_teacher_candidate": 0.17590358959128977,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.828,
+          "top10_agreement": 0.7760000000000001,
+          "tokens": 50,
+          "mse": 0.5741914510726929,
+          "logits_sha256": "90317b58bc3c5f66dd16b9f4927f369f21cb984c09d81ea406d194afe3ea9e6f",
+          "teacher_sha256": "ff6ecd56d932edc982b64494d131f36db3f25fa1497470a2cca05e524637d7ba"
+        },
+        {
+          "kl_teacher_candidate": 0.13158878971329088,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8226562500000001,
+          "top10_agreement": 0.814453125,
+          "tokens": 256,
+          "mse": 0.5259631276130676,
+          "logits_sha256": "001091465c019af7dc498e8ea3de8a6828c20428b6597594d4428617463971e4",
+          "teacher_sha256": "f1ec6863b73a2d44eeea7215fd6e2542518f369ebe3acc1c60cedd777db76abc"
+        },
+        {
+          "kl_teacher_candidate": 0.09657529761982651,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.8347656250000001,
+          "tokens": 256,
+          "mse": 0.372493714094162,
+          "logits_sha256": "d7aefb5cfbfb675a2278d8e9d9ec9c191eaae7f68aec325a6111682708acb84a",
+          "teacher_sha256": "2bc87d35f494968ee4e1cbb954d6b7536a6d9c955ae7b85ae760786387acf7df"
+        },
+        {
+          "kl_teacher_candidate": 0.13609442284972725,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.8402343750000001,
+          "tokens": 256,
+          "mse": 0.6055287718772888,
+          "logits_sha256": "d918f98ce2cfb7e0d5deb000758774c036499c5d1485a98d5617370491204eb4",
+          "teacher_sha256": "c4def389fbb5b79cc96fb4d23a54ff229e461e11ba823a8b1bde3b8cb06fc00c"
+        },
+        {
+          "kl_teacher_candidate": 0.11134296026813542,
+          "top1_agreement": 0.7890625,
+          "top5_agreement": 0.821875,
+          "top10_agreement": 0.8304687500000001,
+          "tokens": 256,
+          "mse": 0.45788928866386414,
+          "logits_sha256": "093ef6be77815ef5241cbb2318a5a8c003185b27ede8e605a13bf8933c859da6",
+          "teacher_sha256": "f80b575d2b451b02e209d76fec902e7511e90d5b28c315a6e913209bf92b314f"
+        },
+        {
+          "kl_teacher_candidate": 0.1597981378882195,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.7578125,
+          "top10_agreement": 0.745703125,
+          "tokens": 256,
+          "mse": 0.7844143509864807,
+          "logits_sha256": "80424f1e39331444d3f47a46f3df8f2ffdbbc7dd74081ea1ae6ebf1e3c3f1a76",
+          "teacher_sha256": "d1409448f8b8485b5b1b604a249e6b13ec378afa5b320a2a11c95fd259254234"
+        },
+        {
+          "kl_teacher_candidate": 0.07127363870366267,
+          "top1_agreement": 0.9140625,
+          "top5_agreement": 0.83203125,
+          "top10_agreement": 0.827734375,
+          "tokens": 256,
+          "mse": 0.3663135766983032,
+          "logits_sha256": "7439826dddba6371752a75b24d75f851f9a01fb42b034a664beb020a09b96408",
+          "teacher_sha256": "5f315df7e409e6a5fc86542e0ead0fb6a200def065ee5d80647d2e7a6e8fa115"
+        },
+        {
+          "kl_teacher_candidate": 0.13118230710743423,
+          "top1_agreement": 0.76171875,
+          "top5_agreement": 0.79453125,
+          "top10_agreement": 0.8109375000000001,
+          "tokens": 256,
+          "mse": 0.5012943744659424,
+          "logits_sha256": "32bcf96d0e9d41acc27581f4fad20eda32fa0581e282b0f13b902ad5a0c3e3f1",
+          "teacher_sha256": "8571b5f526794fcf90e2133ac76430d0aa36a105f0d4844278bf9294f4b7507d"
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.10812678005162772,
+        "mse": 0.4404727655610803,
+        "top1_agreement": 0.8548767080257578,
+        "top5_agreement": 0.8303125490812,
+        "top10_agreement": 0.829260248154547
+      }
+    },
+    "baseline": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.08836364179204102,
+          "top1_agreement": 0.8469945355191257,
+          "top5_agreement": 0.8371584699453553,
+          "top10_agreement": 0.8557377049180329,
+          "tokens": 183,
+          "mse": 0.3296767771244049,
+          "logits_sha256": "e16f1b765f570ce5c89bd4e15d9b81fb57680b19eabdd897e79685d00b85bf87",
+          "teacher_sha256": "a276002d371d5a2f92a4c81afac40e339cee5fade60aeb955b696c2ca2926e48"
+        },
+        {
+          "kl_teacher_candidate": 0.07643275501016103,
+          "top1_agreement": 0.87109375,
+          "top5_agreement": 0.8523437500000001,
+          "top10_agreement": 0.8500000000000001,
+          "tokens": 256,
+          "mse": 0.31906646490097046,
+          "logits_sha256": "d6d1dc75f7ca379b684b9987ef812b480d3b0a57f52c3552006286cb05f3e977",
+          "teacher_sha256": "54e5d9e70fc81394b021ac3730d3f0a2359332fa414e8356481df27ec1dc561c"
+        },
+        {
+          "kl_teacher_candidate": 0.11666052666017951,
+          "top1_agreement": 0.8514851485148515,
+          "top5_agreement": 0.8346534653465347,
+          "top10_agreement": 0.8316831683168316,
+          "tokens": 202,
+          "mse": 0.40381816029548645,
+          "logits_sha256": "bd520c87ca69a6d29209a09a718077da2f6e8c0e3aba674ec5e34edda7afbbcf",
+          "teacher_sha256": "77fc36e615e0770543e76c44667024ce698ea9e1aa7c104077578b3bb45e5d37"
+        },
+        {
+          "kl_teacher_candidate": 0.10984376954599048,
+          "top1_agreement": 0.8666666666666667,
+          "top5_agreement": 0.8400000000000001,
+          "top10_agreement": 0.8391666666666667,
+          "tokens": 120,
+          "mse": 0.3916862905025482,
+          "logits_sha256": "af63604e5243adfaf1b6ee79d0225ab1cae63fac70c82ede4a36c9323074c678",
+          "teacher_sha256": "98fa511e791d7a535aed95823c3382f9a48ddcf5ff614e268e94b4c3d5cdefae"
+        },
+        {
+          "kl_teacher_candidate": 0.07585471396888843,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.8460937500000001,
+          "top10_agreement": 0.857421875,
+          "tokens": 256,
+          "mse": 0.3285087049007416,
+          "logits_sha256": "e3e0f96956ac403b172238bd6b4693de3af2b1b65ec99264ec37b530aa527f4c",
+          "teacher_sha256": "4759b956a23a4e70b3bd9b36144399f6a967bb77df751c933a9d48ada46b14b2"
+        },
+        {
+          "kl_teacher_candidate": 0.07693030936564722,
+          "top1_agreement": 0.8725099601593626,
+          "top5_agreement": 0.8430278884462152,
+          "top10_agreement": 0.8509960159362551,
+          "tokens": 251,
+          "mse": 0.3623659908771515,
+          "logits_sha256": "5848137c5f257fc7f17eb263ced66d9571376c6eddc4ab09175b8d13df541ec3",
+          "teacher_sha256": "e10d0725412a2dd71bbfa587d42bcf02f8370e0866fb6309c7bbc277b9b0bbb0"
+        },
+        {
+          "kl_teacher_candidate": 0.07530830407285807,
+          "top1_agreement": 0.890625,
+          "top5_agreement": 0.8421875000000001,
+          "top10_agreement": 0.847265625,
+          "tokens": 256,
+          "mse": 0.32925060391426086,
+          "logits_sha256": "b9790f3892dd30e19e1a134b7c45e4f012fe32636df0b8f5430c0d0bb54b314d",
+          "teacher_sha256": "a3e0e5710e60cfa9c902d21ba88c852634c1fd405a069ddc664889180a12e216"
+        },
+        {
+          "kl_teacher_candidate": 0.10389821552337535,
+          "top1_agreement": 0.8489583333333334,
+          "top5_agreement": 0.8364583333333334,
+          "top10_agreement": 0.8375,
+          "tokens": 192,
+          "mse": 0.41761571168899536,
+          "logits_sha256": "1e3f358af82bb5bf50567a1f6f3b9a4f821583bcc92b0bfd262cdb0e2687eb11",
+          "teacher_sha256": "9a556067cf7ef9317da4136842e310452216af027017171a20a029415b8cf15b"
+        },
+        {
+          "kl_teacher_candidate": 0.1277090491587185,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8397660818713452,
+          "top10_agreement": 0.8508771929824561,
+          "tokens": 171,
+          "mse": 0.42418476939201355,
+          "logits_sha256": "23a7bd7ad6f197ac77731efa8c2eb7b6b51bc62161826a4839df4304f0fc8033",
+          "teacher_sha256": "2447604609de8849282c9837d3a506264ec673041120075777bf3be5796dce2a"
+        },
+        {
+          "kl_teacher_candidate": 0.08382811466095962,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.846875,
+          "top10_agreement": 0.847265625,
+          "tokens": 256,
+          "mse": 0.3759230375289917,
+          "logits_sha256": "3b47d8a883dc7dbe1215159bcfa14aa60671df25511f2a3f25ec8c111948e5f6",
+          "teacher_sha256": "c3dd6247b4a94611ed4d2068eacaa78b8e47c2c816c3f201080c60e8a9496108"
+        },
+        {
+          "kl_teacher_candidate": 0.1639867578585236,
+          "top1_agreement": 0.8046875,
+          "top5_agreement": 0.8078125,
+          "top10_agreement": 0.7859375000000001,
+          "tokens": 256,
+          "mse": 0.777280867099762,
+          "logits_sha256": "1773ba62a483e4a0b15ec3311381abee45dde5773d31b529c8c82201686b9d33",
+          "teacher_sha256": "2306de4fe1a934807ce55dac8e2258c8746808310b1a2ef16c055fd9cc885a1c"
+        },
+        {
+          "kl_teacher_candidate": 0.0862008652168277,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.8375,
+          "top10_agreement": 0.8285156250000001,
+          "tokens": 256,
+          "mse": 0.3936871588230133,
+          "logits_sha256": "22c0e85e80d1f20e33095bdc787ecfa0b63d64229c82bfc1a4699e92c34ab4a6",
+          "teacher_sha256": "786c11e0425302971af5291ef68fcac7778e512c37b4b2a4ba382e4298e3d16d"
+        },
+        {
+          "kl_teacher_candidate": 0.11217473344187061,
+          "top1_agreement": 0.8175675675675675,
+          "top5_agreement": 0.831081081081081,
+          "top10_agreement": 0.8216216216216217,
+          "tokens": 148,
+          "mse": 0.3674888014793396,
+          "logits_sha256": "8ab62aad1a4e4ed702b62d1617ac70d9b9d117a4421d61bf6c68c532568d7ad6",
+          "teacher_sha256": "275cacf7924579eac7b6a7a79d53f8cb3772a2f76addca4bb90aa69b8ebd3b08"
+        },
+        {
+          "kl_teacher_candidate": 0.082014165797536,
+          "top1_agreement": 0.9078947368421053,
+          "top5_agreement": 0.8473684210526317,
+          "top10_agreement": 0.8364035087719299,
+          "tokens": 228,
+          "mse": 0.39850980043411255,
+          "logits_sha256": "96f4e689998d47e4c4d4bd52bae2956e78704fa8f549496aef387b7792894f99",
+          "teacher_sha256": "5397e46f73beb08cffcd0d8096e20a7441a6fb3855fde84e1e3d14cb76bd2ad3"
+        },
+        {
+          "kl_teacher_candidate": 0.11049023960213171,
+          "top1_agreement": 0.80078125,
+          "top5_agreement": 0.83203125,
+          "top10_agreement": 0.8296875,
+          "tokens": 256,
+          "mse": 0.41244959831237793,
+          "logits_sha256": "7671311e9fc30add1f72ce3d88491247a87e8ba06676dc3d40f60dc5aebada86",
+          "teacher_sha256": "86601f0b0b6666abd311e83f50bb5b3128c6464da16c0605bfd5daf1797068b8"
+        },
+        {
+          "kl_teacher_candidate": 0.10929136439720145,
+          "top1_agreement": 0.8914728682170543,
+          "top5_agreement": 0.8155038759689923,
+          "top10_agreement": 0.8131782945736434,
+          "tokens": 129,
+          "mse": 0.5228045582771301,
+          "logits_sha256": "b7ae23165e917d859508065129371010892532d05f81b511bcb8a14c14cb61ae",
+          "teacher_sha256": "73c9fa02a1d5c9699b35ca97798c92364071ee9d2a098ef437c59410fb4706b5"
+        },
+        {
+          "kl_teacher_candidate": 0.11816108916688653,
+          "top1_agreement": 0.8515625,
+          "top5_agreement": 0.8109375000000001,
+          "top10_agreement": 0.8191406250000001,
+          "tokens": 256,
+          "mse": 0.38906896114349365,
+          "logits_sha256": "da3a98301784a21623c04eb628d2713d9b75a5b23bc0ae05891f36a73453e2d2",
+          "teacher_sha256": "ac23c801e12ae61f5a95428a1ce243c159cf80ea8a4073d5aeac03490aca9452"
+        },
+        {
+          "kl_teacher_candidate": 0.07213212168640945,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.83125,
+          "tokens": 256,
+          "mse": 0.45112425088882446,
+          "logits_sha256": "c463448d82bc86682d76fec13b0548d970f915d27329775d76a5aa8ba5d3f239",
+          "teacher_sha256": "9260271464222c17d68055266f93a531cb27b67d0a9e9e24ead03e72a543ad84"
+        },
+        {
+          "kl_teacher_candidate": 0.0782895753859646,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8459627329192547,
+          "top10_agreement": 0.8577639751552795,
+          "tokens": 161,
+          "mse": 0.3663882911205292,
+          "logits_sha256": "42cebf5a4b9b7f6202220d1eca95a6c3b979ea2d2b21d60181d400000c4bacde",
+          "teacher_sha256": "233c1919521264f41ca601795000b353a1d3ccd6e18200d82790cd2d17be2bbb"
+        },
+        {
+          "kl_teacher_candidate": 0.0762198592891359,
+          "top1_agreement": 0.90625,
+          "top5_agreement": 0.8729166666666668,
+          "top10_agreement": 0.8635416666666668,
+          "tokens": 96,
+          "mse": 0.424360990524292,
+          "logits_sha256": "e4af9fe116013bbadfb21f7a6f89421a7378362c9fc3d24d599cc8c1b954cf94",
+          "teacher_sha256": "e0d13b6c30a5b62b537d73d42b33694b781313fdc03b8b41364b2d178fe2ada4"
+        },
+        {
+          "kl_teacher_candidate": 0.2376096098937243,
+          "top1_agreement": 0.853448275862069,
+          "top5_agreement": 0.7689655172413793,
+          "top10_agreement": 0.7370689655172413,
+          "tokens": 116,
+          "mse": 0.7143599987030029,
+          "logits_sha256": "8e26079855ee8a56a6a638bf9d3fd81945f321134bee33e826eb7003b550f5a0",
+          "teacher_sha256": "7ab2864d6a0def3e3f2f13f85c64997df70b9ff7a62af8e22ba0824f43fb8f41"
+        },
+        {
+          "kl_teacher_candidate": 0.1818329453493501,
+          "top1_agreement": 0.8372093023255814,
+          "top5_agreement": 0.8046511627906977,
+          "top10_agreement": 0.7883720930232557,
+          "tokens": 86,
+          "mse": 0.5210813879966736,
+          "logits_sha256": "0a45acf70782c445f3dfc267d2a6ff1a91967f78dde6401b17b76a91c78ee7ad",
+          "teacher_sha256": "3b18a85fe624a495d8d703893b3bf2a5ecdca759d804c150366a97d12e9d3cf5"
+        },
+        {
+          "kl_teacher_candidate": 0.19527345030221444,
+          "top1_agreement": 0.8765432098765432,
+          "top5_agreement": 0.7901234567901234,
+          "top10_agreement": 0.7814814814814814,
+          "tokens": 81,
+          "mse": 0.544965922832489,
+          "logits_sha256": "882e0f77b27df1e13d4a4d78d2487f614063621fe1d3e47868d0bfbedc200d5f",
+          "teacher_sha256": "0c4d614c7b5751c83837c3dbf170a75381c1d217d3956404f8acfb0c8ebec142"
+        },
+        {
+          "kl_teacher_candidate": 0.16088656028742188,
+          "top1_agreement": 0.9122807017543859,
+          "top5_agreement": 0.8,
+          "top10_agreement": 0.7964912280701756,
+          "tokens": 57,
+          "mse": 0.5053799152374268,
+          "logits_sha256": "75f859decc30ee20f5a410d40a21aea031277e58d455fde833f5d79ae3924a98",
+          "teacher_sha256": "6d4ac25ae9bb8bad19c9cf1f81792999afec3b546c4aba6290ee1c54ff688a2c"
+        },
+        {
+          "kl_teacher_candidate": 0.19375860987213384,
+          "top1_agreement": 0.8,
+          "top5_agreement": 0.804,
+          "top10_agreement": 0.772,
+          "tokens": 50,
+          "mse": 0.586230456829071,
+          "logits_sha256": "d448dd5abbce3a4a44cd09a9af1f6d99279cd9b1450c07ef19df5c6d8f1e6e73",
+          "teacher_sha256": "ff6ecd56d932edc982b64494d131f36db3f25fa1497470a2cca05e524637d7ba"
+        },
+        {
+          "kl_teacher_candidate": 0.12751751672031728,
+          "top1_agreement": 0.8203125,
+          "top5_agreement": 0.8226562500000001,
+          "top10_agreement": 0.823828125,
+          "tokens": 256,
+          "mse": 0.5390065312385559,
+          "logits_sha256": "39844e8a5b7e54ea7a054f669796aaefaf46d690c75ea915ce3f7d9449c26637",
+          "teacher_sha256": "f1ec6863b73a2d44eeea7215fd6e2542518f369ebe3acc1c60cedd777db76abc"
+        },
+        {
+          "kl_teacher_candidate": 0.09628921235098774,
+          "top1_agreement": 0.83984375,
+          "top5_agreement": 0.83203125,
+          "top10_agreement": 0.83359375,
+          "tokens": 256,
+          "mse": 0.36685124039649963,
+          "logits_sha256": "88aa96efcbfa071738698be480451c5991095f6a42b18ebd3063f2906f160cad",
+          "teacher_sha256": "2bc87d35f494968ee4e1cbb954d6b7536a6d9c955ae7b85ae760786387acf7df"
+        },
+        {
+          "kl_teacher_candidate": 0.14484637218925867,
+          "top1_agreement": 0.81640625,
+          "top5_agreement": 0.8187500000000001,
+          "top10_agreement": 0.8289062500000001,
+          "tokens": 256,
+          "mse": 0.6961270570755005,
+          "logits_sha256": "a69fe7f75761e9fe1922f682cab2815e02abe97537ead3358b90b02c6dc15510",
+          "teacher_sha256": "c4def389fbb5b79cc96fb4d23a54ff229e461e11ba823a8b1bde3b8cb06fc00c"
+        },
+        {
+          "kl_teacher_candidate": 0.11451821523242653,
+          "top1_agreement": 0.7890625,
+          "top5_agreement": 0.8140625,
+          "top10_agreement": 0.8289062500000001,
+          "tokens": 256,
+          "mse": 0.46314263343811035,
+          "logits_sha256": "856c00a3164a3e7570dd3517e4fa851a48673d669080bb9bfafc78bb72413d53",
+          "teacher_sha256": "f80b575d2b451b02e209d76fec902e7511e90d5b28c315a6e913209bf92b314f"
+        },
+        {
+          "kl_teacher_candidate": 0.14531741688768376,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.7445312500000001,
+          "top10_agreement": 0.7449218750000001,
+          "tokens": 256,
+          "mse": 0.770828902721405,
+          "logits_sha256": "0c68cbd8561201cec0c5a521087cc958bdc8de5931e654b53591c6569efc9271",
+          "teacher_sha256": "d1409448f8b8485b5b1b604a249e6b13ec378afa5b320a2a11c95fd259254234"
+        },
+        {
+          "kl_teacher_candidate": 0.07455938065583896,
+          "top1_agreement": 0.890625,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.8203125,
+          "tokens": 256,
+          "mse": 0.3690299391746521,
+          "logits_sha256": "d4b657ce65120e829a11d5773456b2766b0855b82080f30e5e8df0687bcdd7b2",
+          "teacher_sha256": "5f315df7e409e6a5fc86542e0ead0fb6a200def065ee5d80647d2e7a6e8fa115"
+        },
+        {
+          "kl_teacher_candidate": 0.13586485642890464,
+          "top1_agreement": 0.7734375,
+          "top5_agreement": 0.7734375,
+          "top10_agreement": 0.8054687500000001,
+          "tokens": 256,
+          "mse": 0.5352834463119507,
+          "logits_sha256": "53aa9915cdfb54f8cbf5e441782429a1c9a0bdd827c8e69f804a2d8b0fe1ab03",
+          "teacher_sha256": "8571b5f526794fcf90e2133ac76430d0aa36a105f0d4844278bf9294f4b7507d"
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.10943075774670989,
+        "mse": 0.4553463149523836,
+        "top1_agreement": 0.8566043662635464,
+        "top5_agreement": 0.8243442751688393,
+        "top10_agreement": 0.825930579550809
+      }
+    },
+    "staged": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.0887901647067459,
+          "top1_agreement": 0.8688524590163934,
+          "top5_agreement": 0.8426229508196722,
+          "top10_agreement": 0.8540983606557377,
+          "tokens": 183,
+          "mse": 0.3329738676548004,
+          "logits_sha256": "ab51d0e962ee04c469b86a9efba5e488dfdb459417fbe2575e21e7772a7a8754",
+          "teacher_sha256": "a276002d371d5a2f92a4c81afac40e339cee5fade60aeb955b696c2ca2926e48",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07957814369302178,
+          "top1_agreement": 0.86328125,
+          "top5_agreement": 0.85078125,
+          "top10_agreement": 0.847265625,
+          "tokens": 256,
+          "mse": 0.3294898271560669,
+          "logits_sha256": "7339831fdc360060f03dd973628190b624498cd2de3dd9b78fc0d366b16573eb",
+          "teacher_sha256": "54e5d9e70fc81394b021ac3730d3f0a2359332fa414e8356481df27ec1dc561c",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.12275674530472785,
+          "top1_agreement": 0.8564356435643564,
+          "top5_agreement": 0.8306930693069308,
+          "top10_agreement": 0.8287128712871288,
+          "tokens": 202,
+          "mse": 0.4007810652256012,
+          "logits_sha256": "e5c12fb0c1859eb5711173dda8c66bca6298fba513c8b426b4d5fc0585221c63",
+          "teacher_sha256": "77fc36e615e0770543e76c44667024ce698ea9e1aa7c104077578b3bb45e5d37",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11189864070247063,
+          "top1_agreement": 0.875,
+          "top5_agreement": 0.8366666666666667,
+          "top10_agreement": 0.8425,
+          "tokens": 120,
+          "mse": 0.39315730333328247,
+          "logits_sha256": "1e8aa0a88542a97d46d22d2f8475a737b399453adea49ea053d32c5e837129e3",
+          "teacher_sha256": "98fa511e791d7a535aed95823c3382f9a48ddcf5ff614e268e94b4c3d5cdefae",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07987615792958254,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.8421875000000001,
+          "top10_agreement": 0.848828125,
+          "tokens": 256,
+          "mse": 0.338556706905365,
+          "logits_sha256": "8dbecb3503b9dcf4c5a1fea5097216f8c24adf1046a8a8cf27409e555915d108",
+          "teacher_sha256": "4759b956a23a4e70b3bd9b36144399f6a967bb77df751c933a9d48ada46b14b2",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07872726476925225,
+          "top1_agreement": 0.8804780876494024,
+          "top5_agreement": 0.8398406374501992,
+          "top10_agreement": 0.8490039840637451,
+          "tokens": 251,
+          "mse": 0.3656029999256134,
+          "logits_sha256": "5afcac1542e97bb08322c13073e355f91a8b71178a3135de87ced702a4911b65",
+          "teacher_sha256": "e10d0725412a2dd71bbfa587d42bcf02f8370e0866fb6309c7bbc277b9b0bbb0",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07851463094544196,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.84296875,
+          "top10_agreement": 0.8464843750000001,
+          "tokens": 256,
+          "mse": 0.3361700177192688,
+          "logits_sha256": "5e8c8dd896f5d93e5c3997df128412453299fe8cd6d469a775db90ff09a063da",
+          "teacher_sha256": "a3e0e5710e60cfa9c902d21ba88c852634c1fd405a069ddc664889180a12e216",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.10764243063539858,
+          "top1_agreement": 0.8541666666666666,
+          "top5_agreement": 0.8333333333333334,
+          "top10_agreement": 0.8343750000000001,
+          "tokens": 192,
+          "mse": 0.4287852346897125,
+          "logits_sha256": "ae74f97b708a37c683c7d38bd9240df06513111650d7f5a212adfc12a75e2d2b",
+          "teacher_sha256": "9a556067cf7ef9317da4136842e310452216af027017171a20a029415b8cf15b",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.134699815046243,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8327485380116959,
+          "top10_agreement": 0.8467836257309942,
+          "tokens": 171,
+          "mse": 0.4368138909339905,
+          "logits_sha256": "bed16800bc11c4a05b5241972c599cd2d1da2bb3278680edd69dfe419e259092",
+          "teacher_sha256": "2447604609de8849282c9837d3a506264ec673041120075777bf3be5796dce2a",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.08450251471570636,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.8453125,
+          "top10_agreement": 0.846875,
+          "tokens": 256,
+          "mse": 0.38760626316070557,
+          "logits_sha256": "469b86d4cb030b0e68453dfb2911f1c12b93466a14aea6223bc68ffd3bb6c0a5",
+          "teacher_sha256": "c3dd6247b4a94611ed4d2068eacaa78b8e47c2c816c3f201080c60e8a9496108",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.17563658910556537,
+          "top1_agreement": 0.796875,
+          "top5_agreement": 0.80390625,
+          "top10_agreement": 0.782421875,
+          "tokens": 256,
+          "mse": 0.7772696614265442,
+          "logits_sha256": "adb718a170f341255d7a93c546d1ce6fc4cc288db26d3b608221f486d829f30b",
+          "teacher_sha256": "2306de4fe1a934807ce55dac8e2258c8746808310b1a2ef16c055fd9cc885a1c",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.09316934381891036,
+          "top1_agreement": 0.87109375,
+          "top5_agreement": 0.8367187500000001,
+          "top10_agreement": 0.828125,
+          "tokens": 256,
+          "mse": 0.40754982829093933,
+          "logits_sha256": "3a5a1b97702ca2c4bb4ecde79815f47b92b1fe5554617855c92eb7a00832871e",
+          "teacher_sha256": "786c11e0425302971af5291ef68fcac7778e512c37b4b2a4ba382e4298e3d16d",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11570411373068244,
+          "top1_agreement": 0.8108108108108109,
+          "top5_agreement": 0.8324324324324326,
+          "top10_agreement": 0.8195945945945947,
+          "tokens": 148,
+          "mse": 0.3747258484363556,
+          "logits_sha256": "9f5f385b86e250d0d4fa265d4be372f4aef98a4c92a557e974fc83d02c4d9a55",
+          "teacher_sha256": "275cacf7924579eac7b6a7a79d53f8cb3772a2f76addca4bb90aa69b8ebd3b08",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.0844884845637374,
+          "top1_agreement": 0.8947368421052632,
+          "top5_agreement": 0.8464912280701754,
+          "top10_agreement": 0.8324561403508772,
+          "tokens": 228,
+          "mse": 0.40343376994132996,
+          "logits_sha256": "7c908d9c66dfa81f54a1a025d25cc3c6d057de1e70d9bdd410a193dee627f04f",
+          "teacher_sha256": "5397e46f73beb08cffcd0d8096e20a7441a6fb3855fde84e1e3d14cb76bd2ad3",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11245980664563669,
+          "top1_agreement": 0.7890625,
+          "top5_agreement": 0.8382812500000001,
+          "top10_agreement": 0.82734375,
+          "tokens": 256,
+          "mse": 0.408359169960022,
+          "logits_sha256": "50c6725812a58f642da231acf395ccbc425f5b289b237ceaa9da9b9b0a1ec961",
+          "teacher_sha256": "86601f0b0b6666abd311e83f50bb5b3128c6464da16c0605bfd5daf1797068b8",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11870242305435001,
+          "top1_agreement": 0.8914728682170543,
+          "top5_agreement": 0.8077519379844962,
+          "top10_agreement": 0.8023255813953488,
+          "tokens": 129,
+          "mse": 0.5824785232543945,
+          "logits_sha256": "6fd398f3e2091623e19de6769265d63af8c086a3df8a03990ab574a822106462",
+          "teacher_sha256": "73c9fa02a1d5c9699b35ca97798c92364071ee9d2a098ef437c59410fb4706b5",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11819323339018446,
+          "top1_agreement": 0.87109375,
+          "top5_agreement": 0.8132812500000001,
+          "top10_agreement": 0.8187500000000001,
+          "tokens": 256,
+          "mse": 0.3931860327720642,
+          "logits_sha256": "0f9b68fa7e434d22b7672cc8ead45f638696ffb66dc140ac76c684bf95a02dee",
+          "teacher_sha256": "ac23c801e12ae61f5a95428a1ce243c159cf80ea8a4073d5aeac03490aca9452",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.076311787805677,
+          "top1_agreement": 0.9140625,
+          "top5_agreement": 0.8328125000000001,
+          "top10_agreement": 0.82578125,
+          "tokens": 256,
+          "mse": 0.4616049826145172,
+          "logits_sha256": "26a9a7ce681e03deef638712072dc9f6a2a97b5e239e13fc970d836c695779d9",
+          "teacher_sha256": "9260271464222c17d68055266f93a531cb27b67d0a9e9e24ead03e72a543ad84",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.08023112469519134,
+          "top1_agreement": 0.8695652173913043,
+          "top5_agreement": 0.8484472049689441,
+          "top10_agreement": 0.8546583850931677,
+          "tokens": 161,
+          "mse": 0.37189120054244995,
+          "logits_sha256": "5ce64072d8463cc38324b3e80f85030ae9fbec22f7c57fc4584e837773af862e",
+          "teacher_sha256": "233c1919521264f41ca601795000b353a1d3ccd6e18200d82790cd2d17be2bbb",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07787148805475635,
+          "top1_agreement": 0.9166666666666666,
+          "top5_agreement": 0.8666666666666667,
+          "top10_agreement": 0.8677083333333334,
+          "tokens": 96,
+          "mse": 0.42129749059677124,
+          "logits_sha256": "f5d0b3aebdce525d7ec90a4203ce88ac479a6c6b0cb51cd9f559b17c52502060",
+          "teacher_sha256": "e0d13b6c30a5b62b537d73d42b33694b781313fdc03b8b41364b2d178fe2ada4",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.24487517613796705,
+          "top1_agreement": 0.8706896551724138,
+          "top5_agreement": 0.753448275862069,
+          "top10_agreement": 0.7327586206896551,
+          "tokens": 116,
+          "mse": 0.7202788591384888,
+          "logits_sha256": "6ed5b963765e4ea42200955e23d1064d3389015d48b55a581cbea8d4a39c83e7",
+          "teacher_sha256": "7ab2864d6a0def3e3f2f13f85c64997df70b9ff7a62af8e22ba0824f43fb8f41",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.18464718985822093,
+          "top1_agreement": 0.8255813953488372,
+          "top5_agreement": 0.8069767441860466,
+          "top10_agreement": 0.786046511627907,
+          "tokens": 86,
+          "mse": 0.5283039808273315,
+          "logits_sha256": "7747ac7bfe47a6f0ca14c4462358654669b5de0fd78844030d7bcc745057f10b",
+          "teacher_sha256": "3b18a85fe624a495d8d703893b3bf2a5ecdca759d804c150366a97d12e9d3cf5",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.1996888452607836,
+          "top1_agreement": 0.8641975308641975,
+          "top5_agreement": 0.7975308641975308,
+          "top10_agreement": 0.7814814814814814,
+          "tokens": 81,
+          "mse": 0.5640941858291626,
+          "logits_sha256": "c221866fe5843cc38f7807e5b48e319ec405596638f50665a2314c1a1ddfe5e5",
+          "teacher_sha256": "0c4d614c7b5751c83837c3dbf170a75381c1d217d3956404f8acfb0c8ebec142",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.16644075565759767,
+          "top1_agreement": 0.9122807017543859,
+          "top5_agreement": 0.7894736842105263,
+          "top10_agreement": 0.7964912280701756,
+          "tokens": 57,
+          "mse": 0.5094107985496521,
+          "logits_sha256": "0ce97675ed66c0da8dcb52030ff43b45db924c7cdeb1ae74ecdcdff17152e719",
+          "teacher_sha256": "6d4ac25ae9bb8bad19c9cf1f81792999afec3b546c4aba6290ee1c54ff688a2c",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.1970490838898074,
+          "top1_agreement": 0.84,
+          "top5_agreement": 0.816,
+          "top10_agreement": 0.764,
+          "tokens": 50,
+          "mse": 0.5864975452423096,
+          "logits_sha256": "055fba01a37d0e5102c3b68416edcd438fd9131a8ba7b65722dafe53f6d3b4b4",
+          "teacher_sha256": "ff6ecd56d932edc982b64494d131f36db3f25fa1497470a2cca05e524637d7ba",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.13481813571137263,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.821484375,
+          "tokens": 256,
+          "mse": 0.5557524561882019,
+          "logits_sha256": "cf4be3ae3916b023ab28f476b47955fd8a61607a5ae4bd0d019605cc146a3839",
+          "teacher_sha256": "f1ec6863b73a2d44eeea7215fd6e2542518f369ebe3acc1c60cedd777db76abc",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.10021400159008689,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.827734375,
+          "tokens": 256,
+          "mse": 0.3717398941516876,
+          "logits_sha256": "95c83397d27c8c277ec5d0ab4699be28341c6e7656fc1f03e5d7a96fd2050798",
+          "teacher_sha256": "2bc87d35f494968ee4e1cbb954d6b7536a6d9c955ae7b85ae760786387acf7df",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.14897958354631197,
+          "top1_agreement": 0.8125,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.8265625000000001,
+          "tokens": 256,
+          "mse": 0.6964783668518066,
+          "logits_sha256": "6b87cbebe2131ae2151921894aa9ea27e44234b96261450518fc735054365ea3",
+          "teacher_sha256": "c4def389fbb5b79cc96fb4d23a54ff229e461e11ba823a8b1bde3b8cb06fc00c",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.11741552152596825,
+          "top1_agreement": 0.7890625,
+          "top5_agreement": 0.821875,
+          "top10_agreement": 0.827734375,
+          "tokens": 256,
+          "mse": 0.4669434428215027,
+          "logits_sha256": "90ce9ee38670a2eee0b7e025621effc60ff8503a5ad1284bcc4a669c02c3879b",
+          "teacher_sha256": "f80b575d2b451b02e209d76fec902e7511e90d5b28c315a6e913209bf92b314f",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.13756930570622203,
+          "top1_agreement": 0.921875,
+          "top5_agreement": 0.7585937500000001,
+          "top10_agreement": 0.7484375000000001,
+          "tokens": 256,
+          "mse": 0.7888035178184509,
+          "logits_sha256": "238dff7414ea55a807b1e496fb2f635cb2f850b6d396933e39ead73214058145",
+          "teacher_sha256": "d1409448f8b8485b5b1b604a249e6b13ec378afa5b320a2a11c95fd259254234",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.07597448505611762,
+          "top1_agreement": 0.890625,
+          "top5_agreement": 0.82578125,
+          "top10_agreement": 0.8230468750000001,
+          "tokens": 256,
+          "mse": 0.3768881857395172,
+          "logits_sha256": "7785d2f5366062305a77a34ad5e821187c925fbe1d8b4f88a8f0d2818d73620a",
+          "teacher_sha256": "5f315df7e409e6a5fc86542e0ead0fb6a200def065ee5d80647d2e7a6e8fa115",
+          "baseline_logits_equal": false
+        },
+        {
+          "kl_teacher_candidate": 0.13308404372670452,
+          "top1_agreement": 0.76171875,
+          "top5_agreement": 0.77890625,
+          "top10_agreement": 0.8074218750000001,
+          "tokens": 256,
+          "mse": 0.5546098947525024,
+          "logits_sha256": "ab05d34ac93aa626f2794ab8f7e1926fa22ef559db1cae7f7685127f49357ec5",
+          "teacher_sha256": "8571b5f526794fcf90e2133ac76430d0aa36a105f0d4844278bf9294f4b7507d",
+          "baseline_logits_equal": false
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.11259299282794878,
+        "mse": 0.4637125464367196,
+        "top1_agreement": 0.8578608449819382,
+        "top5_agreement": 0.8251923983037537,
+        "top10_agreement": 0.8238416836814827
+      }
+    }
+  },
+  "snapshot_quantized_modules": 112,
+  "snapshot_p32_modules": 94
+}

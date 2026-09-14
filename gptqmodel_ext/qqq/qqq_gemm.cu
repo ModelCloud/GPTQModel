@@ -201,6 +201,19 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
     *reinterpret_cast<half2*>(&t1),
     *reinterpret_cast<half2*>(&double_s), *reinterpret_cast<const half2*>(&MAGIC_NUM)
   );
+  // Saturate in the biased half domain before extracting bytes. Keep the
+  // fused multiply-add above: a separate half multiply would double-round.
+  // [1024, 1279] encodes signed INT8 [-128, 127] after the low-byte XOR.
+  static constexpr uint32_t SAT_LO = 0x64006400;
+  static constexpr uint32_t SAT_HI = 0x64ff64ff;
+  *reinterpret_cast<half2*>(&t0) = __hmin2(
+    __hmax2(*reinterpret_cast<half2*>(&t0), *reinterpret_cast<const half2*>(&SAT_LO)),
+    *reinterpret_cast<const half2*>(&SAT_HI)
+  );
+  *reinterpret_cast<half2*>(&t1) = __hmin2(
+    __hmax2(*reinterpret_cast<half2*>(&t1), *reinterpret_cast<const half2*>(&SAT_LO)),
+    *reinterpret_cast<const half2*>(&SAT_HI)
+  );
   // take out the 4 uint8 from 4 half, then convert them to 4 int8 and pack 4 int8 into 1 uint32
   FragB frag_b;
   uint32_t uint8s;

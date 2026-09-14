@@ -1,0 +1,15 @@
+{
+  "old_raw": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full/raw.json",
+  "new_raw": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-w4-nm128-adamw-e10-v1/baseline-full/raw.json",
+  "old_sha256": "a49cba24a69ad975c50a75631c358705fb0a31e79c28aec490e69d966a0fe2a1",
+  "new_sha256": "a49cba24a69ad975c50a75631c358705fb0a31e79c28aec490e69d966a0fe2a1",
+  "old_rows": 1209,
+  "new_rows": 1209,
+  "exact_fields": {
+    "prompt": true,
+    "target": true,
+    "extracted": true,
+    "scores": true,
+    "prediction": true
+  }
+}

@@ -1,0 +1,89 @@
+# GSM8K Platinum evaluation
+
+```json
+{
+  "state": "complete",
+  "run_id": "dense-full",
+  "arm": "dense",
+  "argv": [
+    "scripts/evaluate_gsq_gsm8k.py",
+    "--model",
+    "/monster/data/model/Llama-3.2-1B-Instruct",
+    "--output",
+    "artifacts/gsq-staged/gsm8k-platinum-v1/dense-full",
+    "--dataset",
+    "artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "--arm",
+    "dense",
+    "--batch-size",
+    "32"
+  ],
+  "model": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "model_args": {
+    "dtype": "float16",
+    "device": "cuda:0",
+    "attn_implementation": "eager",
+    "seed": 7
+  },
+  "suite_kwargs": {
+    "dataset_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "dataset_name": null,
+    "max_rows": null,
+    "fewshot_seed": 7,
+    "max_new_tokens": 256,
+    "stream": false
+  },
+  "batch_size": 32,
+  "task": "gsm8k_platinum_cot",
+  "apply_chat_template": true,
+  "qvq_commit": "5cc76af5c715f6089663d00e5cc5cefb61445afd",
+  "evalution_source": "/root/polly-work/Evalution/evalution/__init__.py",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 00000000:DE:00.0, 0, 0",
+  "source_sha256": "7d571319fdfd7eb72fdc9a68861b0977b7604c4d01273a9827b3a485ee2ef78d",
+  "model_hashes": {
+    ".gitattributes": "11ad7efa24975ee4b0c3c3a38ed18737f0658a5f75a0a96787b576a78a023361",
+    "tokenizer_config.json": "9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e",
+    "native_outputs.jsonl": "41f76581a7936ec0d9d5fc0b9da1836a1142845bf40943c495de5274ba4dfddc",
+    "native_outputs_v1.jsonl": "77625b2ee609ffe604eb60a583214c30fb8b4eb9f8c8fa1199702a8cd15e9c9c",
+    "README.md": "18564977261167ff9f76d8ee3a94c8d1cc59c0e143ba054f1187744086004a93",
+    "native_outputs_v2.jsonl": "41f76581a7936ec0d9d5fc0b9da1836a1142845bf40943c495de5274ba4dfddc",
+    "config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb",
+    "native_outputs_only_100v2.jsonl": "03bd33407725962e37ca0c4e90f64881613b132a62207fc989cc13c74cc9c050",
+    "native_outputs_v3.jsonl": "99717b665335d578bed71b267c4a936f303fc1f0f22427c9f9407c31eb530f26",
+    "model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+    "USE_POLICY.md": "40e2777d7faa6beaf98400654170f414d8ab29b921b5163ad4ea0a1d39894201",
+    "native_outputs_v4.jsonl": "00153dfeb1ef12f90530024a8ed5127b327bb225dd90a9caf7dba9c1619bdbcc",
+    "native_outputs_old_backup.jsonl": "b4ece285908ef948a35096d47a0e5397bae0f553d0384e94a2b75c6e7a66b2e2",
+    "tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+    "special_tokens_map.json": "6f38c73729248f6c127296386e3cdde96e254636cc58b4169d3fd32328d9a8ec",
+    "generation_config.json": "88effbb63300dbbc7390143fbbdd9d9fa50587b37e8bfd16c8c90d4970a74a36",
+    "LICENSE.txt": "0b4284c1f87029e67654c7953afa16279961632cf73dcfe33374c4c2f298fa35"
+  },
+  "dataset_hashes": {
+    "test.parquet": "7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7"
+  },
+  "seconds": 185.9880379885435,
+  "metrics": {
+    "gsm8k_platinum_cot": {
+      "acc,num": 0.4904880066170389
+    }
+  },
+  "raw_sha256": "0985579f54044682fa8b6fb6237f261b979316ea6d07f7ffd860373528e05a2a"
+}
+```
+
+
+Completed process log and exact CLI:
+
+```json
+{
+  "log_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dense-full/evaluation.log",
+  "log_bytes": 104991,
+  "log_sha256": "3070a3c74b090899228f77f171fb8bd9697668e60caa08c1bb7ebfcb8dd2d928",
+  "cwd": "/root/polly-work/qvq-gsq",
+  "zml": "N/A (not used)",
+  "cli": "PYTHONPATH=.:/root/polly-work/Evalution CUDA_DEVICE_ORDER=PCI_BUS_ID CUBLAS_WORKSPACE_CONFIG=:4096:8 GPTQ_CACHE_DEQUANTIZED_WEIGHTS=1 OMP_NUM_THREADS=4 MAX_JOBS=4 /root/venv-py3.14t/bin/python -m gpu_allocator.cli run -n 1 --style uuid -- /root/venv-py3.14t/bin/python scripts/evaluate_gsq_gsm8k.py --model /monster/data/model/Llama-3.2-1B-Instruct --output artifacts/gsq-staged/gsm8k-platinum-v1/dense-full --dataset artifacts/gsq-staged/gsm8k-platinum-v1/dataset --arm dense --batch-size 32"
+}
+```

@@ -1,0 +1,30 @@
+{
+  "native.log.gz": {
+    "source": "/tmp/gsq-paro-native-v2.log",
+    "sha256": "0d30e30e0124f76df4fabeb7f0d92fbdcc78a4d8388b03c74c83479a175b4d6c"
+  },
+  "cpu.log.gz": {
+    "source": "/tmp/gsq-paro-cpu-combined.log",
+    "sha256": "6d5fec2c42f17163afef61e21d90928f65a33d2a1baef0444b07d2c74fa394fd"
+  },
+  "runner.py.gz": {
+    "source": "/tmp/run-paro-gsq-native.py",
+    "sha256": "75d355b5a5f9ccec702ddb38a044384c44ff5f196917eb48c38d28394791f7f6"
+  },
+  "executed-tests.py.gz": {
+    "source": "tests/test_gsq_paro.py",
+    "sha256": "ddd328a8f93fce8934f7d134b22a86943e74ae5f9d168514cbe341c1ec3cca92"
+  },
+  "cpu-final.log.gz": {
+    "source": "/tmp/gsq-paro-cpu-final.log",
+    "sha256": "6532c036cab47659ea63c94ec682e819b8a79017bde3daa72b7b2af583a63f0d"
+  },
+  "rotation-build.ninja.gz": {
+    "source": "/root/.cache/gptqmodel/torch_extensions/paroquant/7ea2536d7492d3cd/build.ninja",
+    "sha256": "9ee7e3d0654292fbd0db24b64329d955ff874aee402001dca03739b080926679"
+  },
+  "initial-build-run.log.gz": {
+    "source": "/tmp/gsq-paro-native.log",
+    "sha256": "ba2a7967faa245c477069b07fb695f9603d6d976c755c49b969c76e2626f4953"
+  }
+}

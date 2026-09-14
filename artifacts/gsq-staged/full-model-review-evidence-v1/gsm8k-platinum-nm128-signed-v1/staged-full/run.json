@@ -1,0 +1,79 @@
+{
+  "state": "complete",
+  "run_id": "staged-full",
+  "arm": "gptq-signed-staged-gsq-w2-nm128",
+  "argv": [
+    "scripts/evaluate_gsq_gsm8k.py",
+    "--model",
+    "artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/model",
+    "--output",
+    "artifacts/gsq-staged/gsm8k-platinum-nm128-signed-v1/staged-full",
+    "--dataset",
+    "artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "--arm",
+    "gptq-signed-staged-gsq-w2-nm128",
+    "--batch-size",
+    "32"
+  ],
+  "model": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w2-nm128-signed-staged-v1/model",
+  "model_args": {
+    "dtype": "float16",
+    "device": "cuda:0",
+    "attn_implementation": "eager",
+    "seed": 7
+  },
+  "suite_kwargs": {
+    "dataset_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "dataset_name": null,
+    "max_rows": null,
+    "fewshot_seed": 7,
+    "max_new_tokens": 256,
+    "stream": false
+  },
+  "batch_size": 32,
+  "task": "gsm8k_platinum_cot",
+  "apply_chat_template": true,
+  "qvq_commit": "5cc76af5c715f6089663d00e5cc5cefb61445afd",
+  "evalution_source": "/root/polly-work/Evalution/evalution/__init__.py",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 00000000:DE:00.0, 0, 0",
+  "source_sha256": "7d571319fdfd7eb72fdc9a68861b0977b7604c4d01273a9827b3a485ee2ef78d",
+  "model_hashes": {
+    "config.json": "3d7dfe4e6d22557ac6eb0690c5bce904b06679a3798eea57bc35a93e44df2df6",
+    "generation_config.json": "7cfdf52ffe0e0c1c95ab0dc42aafc4117ba4c0d9804905cebb08eee36c6b7144",
+    "quantize_config.json": "e9682df70335c4f222b987cf03e08b7049997133bb1e724dccf411e5375ea116",
+    "model-00001-of-00017.safetensors": "74353e0c10e103dbfd72b7e82f55763ae5a0d8901b9e74f5916374e0c41c096c",
+    "model-00002-of-00017.safetensors": "2708c48dfaeeddf8a44a1ace8a3c21dacb3d6dca72cad5a3635e7b228a8c9ec4",
+    "model-00003-of-00017.safetensors": "1ae0bd09c25b33b334536f09185a9bab980bd36716159a939ce9d26a6e52e8d8",
+    "model-00004-of-00017.safetensors": "2ba1fb1cfb87651b58ae03a49b562168dd31962ecf3405404aee4edb3135370b",
+    "model-00005-of-00017.safetensors": "de5299fd1b2ac70f832233b6ea65ca02497bc1744fd2cf638993985fa368e1df",
+    "model-00006-of-00017.safetensors": "e85a5e9502a311a8927a210c7c26a4530df0a0ed0c35d51f53181dadccbb3b93",
+    "model-00007-of-00017.safetensors": "b57cc5058677b2b88ca38c23963fe6f48199fd97112f8f348f5ad66dd5c20594",
+    "model-00008-of-00017.safetensors": "8ea3bc8aa97ae2543c1c60e7901b0ba426f6cd827d4c0ec7d196871b753d2806",
+    "model-00009-of-00017.safetensors": "e5056939e6b627ca5862debb37338caf7292618293e74b87ffd68158c3822447",
+    "model-00010-of-00017.safetensors": "807221b708ed0c04efe6fc0cc18e778c196180d78c4e3885da517db4433d67f4",
+    "model-00011-of-00017.safetensors": "800d9086e1e5f2e9731f9045e3e3e6c4eb453eda64dbd1e1c80fd933f16dedfb",
+    "model-00012-of-00017.safetensors": "410e129f1eba5d383c7306fc04ed82968f6b290dbe4fa8d3fd06dffd44850d89",
+    "model-00013-of-00017.safetensors": "bea41ce3ebf644313727a040a0b028cf33b92c1687dc03f42550aa9fe5565e21",
+    "model-00014-of-00017.safetensors": "44796e71b7d13fd2ac5e38fe15fe189df699ee133b0fde26454d5d6786b56589",
+    "model-00015-of-00017.safetensors": "4a64fdd0b1eefe4a6d748a0452a60e9a29467725b4c837c99c6aaf6869dfcc88",
+    "model-00016-of-00017.safetensors": "255c9afdb70076bc3f8e7e02441fa6629b6bcd6a1f668abc7f109bd6ebbb355d",
+    "model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+    "model.safetensors.index.json": "157ffa8d3f3a7b21338d2370ce4e3574e7fac2a3187f7da11d32fc57e43c317a",
+    "chat_template.jinja": "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4",
+    "tokenizer_config.json": "70cf4aae347755bdd07709be21edd11f9ab14b2697371b3016a52595149cb354",
+    "tokenizer.json": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+    "gsq_training_run.json": "726a9ac1b9a844b5fc281edf2c760ced42c3e35f0456efb58250cb38c6b1dfd4"
+  },
+  "dataset_hashes": {
+    "test.parquet": "7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7"
+  },
+  "seconds": 217.27876761555672,
+  "metrics": {
+    "gsm8k_platinum_cot": {
+      "acc,num": 0.016542597187758478
+    }
+  },
+  "raw_sha256": "0990825e411f998914d0e8267ef7e38b220ab2173a1a8d9dfdea1508eee299ad"
+}

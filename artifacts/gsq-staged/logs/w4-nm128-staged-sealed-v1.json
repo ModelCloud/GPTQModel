@@ -1,0 +1,9 @@
+{
+  "state": "complete",
+  "final": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__gsq-w4-staged__gptq-v2__calib128-unweighted__seed7__20260909__commit5cc76af5c715__de50d6afd3f2",
+  "manifest_sha256": "240e5b78f8a609e8ef820dd67617bfabb5232ab8a5b786adc90309faf516397e",
+  "reload": "3/3 exact finite",
+  "platinum_correct": 417,
+  "platinum_total": 1209,
+  "quality": "experimental; no promotion"
+}

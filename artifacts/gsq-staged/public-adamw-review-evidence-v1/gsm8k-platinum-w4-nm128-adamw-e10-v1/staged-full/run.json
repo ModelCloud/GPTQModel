@@ -1,0 +1,78 @@
+{
+  "state": "complete",
+  "run_id": "staged-full",
+  "arm": "staged",
+  "argv": [
+    "scripts/evaluate_gsq_gsm8k.py",
+    "--model",
+    "artifacts/gsq-staged/full-model-w4-nm128-signed-adamw-e10-v1/model",
+    "--output",
+    "artifacts/gsq-staged/gsm8k-platinum-w4-nm128-adamw-e10-v1/staged-full",
+    "--dataset",
+    "artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "--arm",
+    "staged",
+    "--batch-size",
+    "32"
+  ],
+  "model": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-adamw-e10-v1/model",
+  "model_args": {
+    "dtype": "float16",
+    "device": "cuda:0",
+    "attn_implementation": "eager",
+    "seed": 7
+  },
+  "suite_kwargs": {
+    "dataset_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "dataset_name": null,
+    "max_rows": null,
+    "fewshot_seed": 7,
+    "max_new_tokens": 256,
+    "stream": false
+  },
+  "batch_size": 32,
+  "task": "gsm8k_platinum_cot",
+  "apply_chat_template": true,
+  "qvq_commit": "6c4f2d825b2e9a79ffc2f46f1fc4191b23548a25",
+  "evalution_source": "/root/polly-work/Evalution/evalution/__init__.py",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 00000000:DE:00.0, 0, 0",
+  "source_sha256": "7d571319fdfd7eb72fdc9a68861b0977b7604c4d01273a9827b3a485ee2ef78d",
+  "model_hashes": {
+    "config.json": "b83903aba18c5b4802f235f69ab291240b5a79063547f8dd4624b4f7d444d6c6",
+    "generation_config.json": "7cfdf52ffe0e0c1c95ab0dc42aafc4117ba4c0d9804905cebb08eee36c6b7144",
+    "quantize_config.json": "4f5e4eadf503e447622da12610148c5e23ca7a41d117fa860610ac59428f505c",
+    "model-00001-of-00017.safetensors": "8dfd9c9d73ba1d4a1f2aa320f5831abc739957118f9232ff2794d7f5c54600ea",
+    "model-00002-of-00017.safetensors": "cabd324e9a5117d037dad7a891b5b3be9cb39d6fa7c75ace6fa1a8d64d5ce7e8",
+    "model-00003-of-00017.safetensors": "8ea9b8fa928574bc1a497c2e3d0ffd7a9c6dd450d42afa276873070febf2ae41",
+    "model-00004-of-00017.safetensors": "232d8d6cbf852b5d8052070f5a86d900c90a3e5df2056441cd6bc3d9df66b076",
+    "model-00005-of-00017.safetensors": "63c7e55184463d2a7a1d03a7d1ab24226dce29d6463f7a8f3a38a434b69c3f7b",
+    "model-00006-of-00017.safetensors": "c61d1b083f5da351320c865ec8b6b78010633e6c95c96435acc18b438828ead1",
+    "model-00007-of-00017.safetensors": "c52b852bc94f1574aa7fec8b0d8233c762d4a0610fcc84dc2519aa6bf91900c0",
+    "model-00008-of-00017.safetensors": "3309151b4190c518bfece32842a9f9bdafa5ef2c16255b70d4b26437e34efcc9",
+    "model-00009-of-00017.safetensors": "777882805002298851c5fe77510e772bc0cbec8e0bfc50ae62887ef6c19520bd",
+    "model-00010-of-00017.safetensors": "978234e9ac980cc46d24500037ed8d2aabf29beac851113c3ebf7e4ce9ff52f5",
+    "model-00011-of-00017.safetensors": "7080d2593cf77587fa515d03db6805934a2ec31ab9ebb01e4ecc419c73b7b703",
+    "model-00012-of-00017.safetensors": "546b9bf4d6bc711d2a193030fb0fba0025aa03746ce944c4b5d4b040fb957c1c",
+    "model-00013-of-00017.safetensors": "6ca3228a61e7378a0e1d9ae13451649e4336400a3919ab80eab44c01c64a7572",
+    "model-00014-of-00017.safetensors": "a04bb8ffc17ff499050fe63d09ad347ecd947874138ecbc07a2a58ec04f750e4",
+    "model-00015-of-00017.safetensors": "976795d872c287b64dc1181129bd54b0aafe30fa31794b855c871600ace5e7c1",
+    "model-00016-of-00017.safetensors": "7ace740b9fb3630be17a2ab71ac2c88198cde88bf892314055a6c42f07310ec0",
+    "model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+    "model.safetensors.index.json": "7b2b487d6577403b4cba4073b4d07fd5614a3aeb79324dad9295d4ea450a2655",
+    "chat_template.jinja": "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4",
+    "tokenizer_config.json": "70cf4aae347755bdd07709be21edd11f9ab14b2697371b3016a52595149cb354",
+    "tokenizer.json": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b"
+  },
+  "dataset_hashes": {
+    "test.parquet": "7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7"
+  },
+  "seconds": 195.47891049832106,
+  "metrics": {
+    "gsm8k_platinum_cot": {
+      "acc,num": 0.3333333333333333
+    }
+  },
+  "raw_sha256": "d170ac1e55a8c3c2bafcbfe6cb32f0c1c476724e036d500eaafd5544215f0c2e"
+}

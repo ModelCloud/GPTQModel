@@ -1,0 +1,1099 @@
+{
+  "artifacts/gsq-scalar/gptaq-block1-w4-seed7": {
+    "report_sha256": "a99ab0fcb5f41aff2230373406799a2c6ba0f55b992c099ec03f58514f377168",
+    "method": "gptaq",
+    "bits": 4,
+    "layers": {
+      "model.layers.1.self_attn.q_proj": {
+        "baseline": {
+          "tensor_bytes": 2187264,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": null,
+          "runtime_parity": {
+            "mean_abs": 0.00022803657338954508,
+            "max_abs": 0.004011631011962891,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_fixed": {
+          "tensor_bytes": 2187264,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 0.00022803657338954508,
+            "max_abs": 0.004011631011962891,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_scales": {
+          "tensor_bytes": 2187264,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 0.00022803657338954508,
+            "max_abs": 0.004011631011962891,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        }
+      },
+      "model.layers.1.self_attn.k_proj": {
+        "baseline": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": null,
+          "runtime_parity": {
+            "mean_abs": 0.00029433611780405045,
+            "max_abs": 0.00408172607421875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_fixed": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 0.00029433611780405045,
+            "max_abs": 0.00408172607421875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_scales": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 0.00029433611780405045,
+            "max_abs": 0.00408172607421875,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        }
+      },
+      "model.layers.1.self_attn.v_proj": {
+        "baseline": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": null,
+          "runtime_parity": {
+            "mean_abs": 3.085279240622185e-05,
+            "max_abs": 0.00026470422744750977,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_fixed": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 3.085279240622185e-05,
+            "max_abs": 0.00026470422744750977,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        },
+        "gsq_scales": {
+          "tensor_bytes": 552960,
+          "changed_codes": 0,
+          "changed_scales": 0,
+          "all_tensors_equal_baseline": true,
+          "objective_reduction_percent": null,
+          "objective_delta": 0.0,
+          "runtime_parity": {
+            "mean_abs": 3.085279240622185e-05,
+            "max_abs": 0.00026470422744750977,
+            "finite": true,
+            "tokens": 16,
+            "mean_limit": 0.002,
+            "max_limit": 0.046875,
+            "pass": true
+          }
+        }
+      }
+    },
+    "model": {
+      "baseline": {
+        "rows": [
+          {
+            "kl_teacher_candidate": 0.08379345503835696,
+            "top1_agreement": 0.8633879781420765,
+            "top5_agreement": 0.844808743169399,
+            "top10_agreement": 0.8486338797814208,
+            "tokens": 183,
+            "mse": 0.3328154981136322
+          },
+          {
+            "kl_teacher_candidate": 0.07320199839446045,
+            "top1_agreement": 0.84765625,
+            "top5_agreement": 0.8656250000000001,
+            "top10_agreement": 0.8460937500000001,
+            "tokens": 256,
+            "mse": 0.32549169659614563
+          },
+          {
+            "kl_teacher_candidate": 0.13225208614481665,
+            "top1_agreement": 0.8712871287128713,
+            "top5_agreement": 0.8346534653465347,
+            "top10_agreement": 0.8202970297029704,
+            "tokens": 202,
+            "mse": 0.4770737886428833
+          },
+          {
+            "kl_teacher_candidate": 0.10396942469142777,
+            "top1_agreement": 0.85,
+            "top5_agreement": 0.8516666666666667,
+            "top10_agreement": 0.8391666666666667,
+            "tokens": 120,
+            "mse": 0.39753010869026184
+          },
+          {
+            "kl_teacher_candidate": 0.07806214452436228,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.8582031250000001,
+            "tokens": 256,
+            "mse": 0.3231455683708191
+          },
+          {
+            "kl_teacher_candidate": 0.07797637723524245,
+            "top1_agreement": 0.8924302788844621,
+            "top5_agreement": 0.8438247011952191,
+            "top10_agreement": 0.8438247011952191,
+            "tokens": 251,
+            "mse": 0.35510537028312683
+          },
+          {
+            "kl_teacher_candidate": 0.06991145193899329,
+            "top1_agreement": 0.8828125,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.846875,
+            "tokens": 256,
+            "mse": 0.3288134038448334
+          },
+          {
+            "kl_teacher_candidate": 0.10184839211276481,
+            "top1_agreement": 0.84375,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.8296875,
+            "tokens": 192,
+            "mse": 0.4114415943622589
+          },
+          {
+            "kl_teacher_candidate": 0.12602205789742998,
+            "top1_agreement": 0.8596491228070176,
+            "top5_agreement": 0.8374269005847954,
+            "top10_agreement": 0.849122807017544,
+            "tokens": 171,
+            "mse": 0.42207959294319153
+          },
+          {
+            "kl_teacher_candidate": 0.08410823236966539,
+            "top1_agreement": 0.890625,
+            "top5_agreement": 0.8515625,
+            "top10_agreement": 0.8484375000000001,
+            "tokens": 256,
+            "mse": 0.3537851870059967
+          },
+          {
+            "kl_teacher_candidate": 0.15818264206758126,
+            "top1_agreement": 0.8046875,
+            "top5_agreement": 0.81171875,
+            "top10_agreement": 0.794140625,
+            "tokens": 256,
+            "mse": 0.7207911014556885
+          },
+          {
+            "kl_teacher_candidate": 0.08522084292609107,
+            "top1_agreement": 0.875,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.831640625,
+            "tokens": 256,
+            "mse": 0.383175790309906
+          },
+          {
+            "kl_teacher_candidate": 0.11410065041048197,
+            "top1_agreement": 0.8108108108108109,
+            "top5_agreement": 0.8283783783783785,
+            "top10_agreement": 0.8195945945945947,
+            "tokens": 148,
+            "mse": 0.37131497263908386
+          },
+          {
+            "kl_teacher_candidate": 0.07896041317911791,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8578947368421053,
+            "top10_agreement": 0.8337719298245615,
+            "tokens": 228,
+            "mse": 0.39328935742378235
+          },
+          {
+            "kl_teacher_candidate": 0.1088453596305854,
+            "top1_agreement": 0.81640625,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.83359375,
+            "tokens": 256,
+            "mse": 0.40789106488227844
+          },
+          {
+            "kl_teacher_candidate": 0.09903365643896384,
+            "top1_agreement": 0.875968992248062,
+            "top5_agreement": 0.8263565891472869,
+            "top10_agreement": 0.8155038759689923,
+            "tokens": 129,
+            "mse": 0.5159239172935486
+          },
+          {
+            "kl_teacher_candidate": 0.11020212439545786,
+            "top1_agreement": 0.8515625,
+            "top5_agreement": 0.821875,
+            "top10_agreement": 0.82734375,
+            "tokens": 256,
+            "mse": 0.376607745885849
+          },
+          {
+            "kl_teacher_candidate": 0.06784558823946048,
+            "top1_agreement": 0.91015625,
+            "top5_agreement": 0.8296875,
+            "top10_agreement": 0.8367187500000001,
+            "tokens": 256,
+            "mse": 0.41499513387680054
+          },
+          {
+            "kl_teacher_candidate": 0.07100458254085529,
+            "top1_agreement": 0.8757763975155279,
+            "top5_agreement": 0.8559006211180125,
+            "top10_agreement": 0.8627329192546584,
+            "tokens": 161,
+            "mse": 0.35514795780181885
+          },
+          {
+            "kl_teacher_candidate": 0.071144507949249,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.8854166666666666,
+            "top10_agreement": 0.8604166666666667,
+            "tokens": 96,
+            "mse": 0.4102723300457001
+          },
+          {
+            "kl_teacher_candidate": 0.2367577518456188,
+            "top1_agreement": 0.8362068965517241,
+            "top5_agreement": 0.7810344827586208,
+            "top10_agreement": 0.742241379310345,
+            "tokens": 116,
+            "mse": 0.6784109473228455
+          },
+          {
+            "kl_teacher_candidate": 0.17230969455960723,
+            "top1_agreement": 0.7906976744186046,
+            "top5_agreement": 0.7930232558139535,
+            "top10_agreement": 0.7802325581395348,
+            "tokens": 86,
+            "mse": 0.546157956123352
+          },
+          {
+            "kl_teacher_candidate": 0.19630607400913308,
+            "top1_agreement": 0.8888888888888888,
+            "top5_agreement": 0.7851851851851853,
+            "top10_agreement": 0.7641975308641976,
+            "tokens": 81,
+            "mse": 0.5567883253097534
+          },
+          {
+            "kl_teacher_candidate": 0.14224170535433,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8175438596491228,
+            "top10_agreement": 0.7947368421052631,
+            "tokens": 57,
+            "mse": 0.49450740218162537
+          },
+          {
+            "kl_teacher_candidate": 0.17171051768155746,
+            "top1_agreement": 0.88,
+            "top5_agreement": 0.8240000000000001,
+            "top10_agreement": 0.772,
+            "tokens": 50,
+            "mse": 0.596537709236145
+          },
+          {
+            "kl_teacher_candidate": 0.13287778053402652,
+            "top1_agreement": 0.82421875,
+            "top5_agreement": 0.8226562500000001,
+            "top10_agreement": 0.8171875000000001,
+            "tokens": 256,
+            "mse": 0.5333247184753418
+          },
+          {
+            "kl_teacher_candidate": 0.0933750078565375,
+            "top1_agreement": 0.828125,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.835546875,
+            "tokens": 256,
+            "mse": 0.3644688129425049
+          },
+          {
+            "kl_teacher_candidate": 0.13662784126736338,
+            "top1_agreement": 0.8359375,
+            "top5_agreement": 0.83203125,
+            "top10_agreement": 0.840234375,
+            "tokens": 256,
+            "mse": 0.5964365005493164
+          },
+          {
+            "kl_teacher_candidate": 0.11169280459764848,
+            "top1_agreement": 0.78515625,
+            "top5_agreement": 0.82421875,
+            "top10_agreement": 0.8289062500000001,
+            "tokens": 256,
+            "mse": 0.46020665764808655
+          },
+          {
+            "kl_teacher_candidate": 0.15225296967094112,
+            "top1_agreement": 0.87890625,
+            "top5_agreement": 0.75390625,
+            "top10_agreement": 0.7453125,
+            "tokens": 256,
+            "mse": 0.7724748253822327
+          },
+          {
+            "kl_teacher_candidate": 0.07107190681477904,
+            "top1_agreement": 0.9140625,
+            "top5_agreement": 0.83359375,
+            "top10_agreement": 0.82421875,
+            "tokens": 256,
+            "mse": 0.37019023299217224
+          },
+          {
+            "kl_teacher_candidate": 0.13419341296323944,
+            "top1_agreement": 0.7578125,
+            "top5_agreement": 0.7937500000000001,
+            "top10_agreement": 0.81015625,
+            "tokens": 256,
+            "mse": 0.5037961006164551
+          }
+        ],
+        "complete": true,
+        "mean": {
+          "kl_teacher_candidate": 0.10726082910852848,
+          "top1_agreement": 0.8559761269043505,
+          "top5_agreement": 0.8307209046646774,
+          "top10_agreement": 0.826228993246427,
+          "mse": 0.44512587669638276
+        }
+      },
+      "gsq_fixed": {
+        "rows": [
+          {
+            "kl_teacher_candidate": 0.08379345503835696,
+            "top1_agreement": 0.8633879781420765,
+            "top5_agreement": 0.844808743169399,
+            "top10_agreement": 0.8486338797814208,
+            "tokens": 183,
+            "mse": 0.3328154981136322
+          },
+          {
+            "kl_teacher_candidate": 0.07320199839446045,
+            "top1_agreement": 0.84765625,
+            "top5_agreement": 0.8656250000000001,
+            "top10_agreement": 0.8460937500000001,
+            "tokens": 256,
+            "mse": 0.32549169659614563
+          },
+          {
+            "kl_teacher_candidate": 0.13225208614481665,
+            "top1_agreement": 0.8712871287128713,
+            "top5_agreement": 0.8346534653465347,
+            "top10_agreement": 0.8202970297029704,
+            "tokens": 202,
+            "mse": 0.4770737886428833
+          },
+          {
+            "kl_teacher_candidate": 0.10396942469142777,
+            "top1_agreement": 0.85,
+            "top5_agreement": 0.8516666666666667,
+            "top10_agreement": 0.8391666666666667,
+            "tokens": 120,
+            "mse": 0.39753010869026184
+          },
+          {
+            "kl_teacher_candidate": 0.07806214452436228,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.8582031250000001,
+            "tokens": 256,
+            "mse": 0.3231455683708191
+          },
+          {
+            "kl_teacher_candidate": 0.07797637723524245,
+            "top1_agreement": 0.8924302788844621,
+            "top5_agreement": 0.8438247011952191,
+            "top10_agreement": 0.8438247011952191,
+            "tokens": 251,
+            "mse": 0.35510537028312683
+          },
+          {
+            "kl_teacher_candidate": 0.06991145193899329,
+            "top1_agreement": 0.8828125,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.846875,
+            "tokens": 256,
+            "mse": 0.3288134038448334
+          },
+          {
+            "kl_teacher_candidate": 0.10184839211276481,
+            "top1_agreement": 0.84375,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.8296875,
+            "tokens": 192,
+            "mse": 0.4114415943622589
+          },
+          {
+            "kl_teacher_candidate": 0.12602205789742998,
+            "top1_agreement": 0.8596491228070176,
+            "top5_agreement": 0.8374269005847954,
+            "top10_agreement": 0.849122807017544,
+            "tokens": 171,
+            "mse": 0.42207959294319153
+          },
+          {
+            "kl_teacher_candidate": 0.08410823236966539,
+            "top1_agreement": 0.890625,
+            "top5_agreement": 0.8515625,
+            "top10_agreement": 0.8484375000000001,
+            "tokens": 256,
+            "mse": 0.3537851870059967
+          },
+          {
+            "kl_teacher_candidate": 0.15818264206758126,
+            "top1_agreement": 0.8046875,
+            "top5_agreement": 0.81171875,
+            "top10_agreement": 0.794140625,
+            "tokens": 256,
+            "mse": 0.7207911014556885
+          },
+          {
+            "kl_teacher_candidate": 0.08522084292609107,
+            "top1_agreement": 0.875,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.831640625,
+            "tokens": 256,
+            "mse": 0.383175790309906
+          },
+          {
+            "kl_teacher_candidate": 0.11410065041048197,
+            "top1_agreement": 0.8108108108108109,
+            "top5_agreement": 0.8283783783783785,
+            "top10_agreement": 0.8195945945945947,
+            "tokens": 148,
+            "mse": 0.37131497263908386
+          },
+          {
+            "kl_teacher_candidate": 0.07896041317911791,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8578947368421053,
+            "top10_agreement": 0.8337719298245615,
+            "tokens": 228,
+            "mse": 0.39328935742378235
+          },
+          {
+            "kl_teacher_candidate": 0.1088453596305854,
+            "top1_agreement": 0.81640625,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.83359375,
+            "tokens": 256,
+            "mse": 0.40789106488227844
+          },
+          {
+            "kl_teacher_candidate": 0.09903365643896384,
+            "top1_agreement": 0.875968992248062,
+            "top5_agreement": 0.8263565891472869,
+            "top10_agreement": 0.8155038759689923,
+            "tokens": 129,
+            "mse": 0.5159239172935486
+          },
+          {
+            "kl_teacher_candidate": 0.11020212439545786,
+            "top1_agreement": 0.8515625,
+            "top5_agreement": 0.821875,
+            "top10_agreement": 0.82734375,
+            "tokens": 256,
+            "mse": 0.376607745885849
+          },
+          {
+            "kl_teacher_candidate": 0.06784558823946048,
+            "top1_agreement": 0.91015625,
+            "top5_agreement": 0.8296875,
+            "top10_agreement": 0.8367187500000001,
+            "tokens": 256,
+            "mse": 0.41499513387680054
+          },
+          {
+            "kl_teacher_candidate": 0.07100458254085529,
+            "top1_agreement": 0.8757763975155279,
+            "top5_agreement": 0.8559006211180125,
+            "top10_agreement": 0.8627329192546584,
+            "tokens": 161,
+            "mse": 0.35514795780181885
+          },
+          {
+            "kl_teacher_candidate": 0.071144507949249,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.8854166666666666,
+            "top10_agreement": 0.8604166666666667,
+            "tokens": 96,
+            "mse": 0.4102723300457001
+          },
+          {
+            "kl_teacher_candidate": 0.2367577518456188,
+            "top1_agreement": 0.8362068965517241,
+            "top5_agreement": 0.7810344827586208,
+            "top10_agreement": 0.742241379310345,
+            "tokens": 116,
+            "mse": 0.6784109473228455
+          },
+          {
+            "kl_teacher_candidate": 0.17230969455960723,
+            "top1_agreement": 0.7906976744186046,
+            "top5_agreement": 0.7930232558139535,
+            "top10_agreement": 0.7802325581395348,
+            "tokens": 86,
+            "mse": 0.546157956123352
+          },
+          {
+            "kl_teacher_candidate": 0.19630607400913308,
+            "top1_agreement": 0.8888888888888888,
+            "top5_agreement": 0.7851851851851853,
+            "top10_agreement": 0.7641975308641976,
+            "tokens": 81,
+            "mse": 0.5567883253097534
+          },
+          {
+            "kl_teacher_candidate": 0.14224170535433,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8175438596491228,
+            "top10_agreement": 0.7947368421052631,
+            "tokens": 57,
+            "mse": 0.49450740218162537
+          },
+          {
+            "kl_teacher_candidate": 0.17171051768155746,
+            "top1_agreement": 0.88,
+            "top5_agreement": 0.8240000000000001,
+            "top10_agreement": 0.772,
+            "tokens": 50,
+            "mse": 0.596537709236145
+          },
+          {
+            "kl_teacher_candidate": 0.13287778053402652,
+            "top1_agreement": 0.82421875,
+            "top5_agreement": 0.8226562500000001,
+            "top10_agreement": 0.8171875000000001,
+            "tokens": 256,
+            "mse": 0.5333247184753418
+          },
+          {
+            "kl_teacher_candidate": 0.0933750078565375,
+            "top1_agreement": 0.828125,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.835546875,
+            "tokens": 256,
+            "mse": 0.3644688129425049
+          },
+          {
+            "kl_teacher_candidate": 0.13662784126736338,
+            "top1_agreement": 0.8359375,
+            "top5_agreement": 0.83203125,
+            "top10_agreement": 0.840234375,
+            "tokens": 256,
+            "mse": 0.5964365005493164
+          },
+          {
+            "kl_teacher_candidate": 0.11169280459764848,
+            "top1_agreement": 0.78515625,
+            "top5_agreement": 0.82421875,
+            "top10_agreement": 0.8289062500000001,
+            "tokens": 256,
+            "mse": 0.46020665764808655
+          },
+          {
+            "kl_teacher_candidate": 0.15225296967094112,
+            "top1_agreement": 0.87890625,
+            "top5_agreement": 0.75390625,
+            "top10_agreement": 0.7453125,
+            "tokens": 256,
+            "mse": 0.7724748253822327
+          },
+          {
+            "kl_teacher_candidate": 0.07107190681477904,
+            "top1_agreement": 0.9140625,
+            "top5_agreement": 0.83359375,
+            "top10_agreement": 0.82421875,
+            "tokens": 256,
+            "mse": 0.37019023299217224
+          },
+          {
+            "kl_teacher_candidate": 0.13419341296323944,
+            "top1_agreement": 0.7578125,
+            "top5_agreement": 0.7937500000000001,
+            "top10_agreement": 0.81015625,
+            "tokens": 256,
+            "mse": 0.5037961006164551
+          }
+        ],
+        "complete": true,
+        "mean": {
+          "kl_teacher_candidate": 0.10726082910852848,
+          "top1_agreement": 0.8559761269043505,
+          "top5_agreement": 0.8307209046646774,
+          "top10_agreement": 0.826228993246427,
+          "mse": 0.44512587669638276
+        }
+      },
+      "gsq_scales": {
+        "rows": [
+          {
+            "kl_teacher_candidate": 0.08379345503835696,
+            "top1_agreement": 0.8633879781420765,
+            "top5_agreement": 0.844808743169399,
+            "top10_agreement": 0.8486338797814208,
+            "tokens": 183,
+            "mse": 0.3328154981136322
+          },
+          {
+            "kl_teacher_candidate": 0.07320199839446045,
+            "top1_agreement": 0.84765625,
+            "top5_agreement": 0.8656250000000001,
+            "top10_agreement": 0.8460937500000001,
+            "tokens": 256,
+            "mse": 0.32549169659614563
+          },
+          {
+            "kl_teacher_candidate": 0.13225208614481665,
+            "top1_agreement": 0.8712871287128713,
+            "top5_agreement": 0.8346534653465347,
+            "top10_agreement": 0.8202970297029704,
+            "tokens": 202,
+            "mse": 0.4770737886428833
+          },
+          {
+            "kl_teacher_candidate": 0.10396942469142777,
+            "top1_agreement": 0.85,
+            "top5_agreement": 0.8516666666666667,
+            "top10_agreement": 0.8391666666666667,
+            "tokens": 120,
+            "mse": 0.39753010869026184
+          },
+          {
+            "kl_teacher_candidate": 0.07806214452436228,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.8582031250000001,
+            "tokens": 256,
+            "mse": 0.3231455683708191
+          },
+          {
+            "kl_teacher_candidate": 0.07797637723524245,
+            "top1_agreement": 0.8924302788844621,
+            "top5_agreement": 0.8438247011952191,
+            "top10_agreement": 0.8438247011952191,
+            "tokens": 251,
+            "mse": 0.35510537028312683
+          },
+          {
+            "kl_teacher_candidate": 0.06991145193899329,
+            "top1_agreement": 0.8828125,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.846875,
+            "tokens": 256,
+            "mse": 0.3288134038448334
+          },
+          {
+            "kl_teacher_candidate": 0.10184839211276481,
+            "top1_agreement": 0.84375,
+            "top5_agreement": 0.8406250000000001,
+            "top10_agreement": 0.8296875,
+            "tokens": 192,
+            "mse": 0.4114415943622589
+          },
+          {
+            "kl_teacher_candidate": 0.12602205789742998,
+            "top1_agreement": 0.8596491228070176,
+            "top5_agreement": 0.8374269005847954,
+            "top10_agreement": 0.849122807017544,
+            "tokens": 171,
+            "mse": 0.42207959294319153
+          },
+          {
+            "kl_teacher_candidate": 0.08410823236966539,
+            "top1_agreement": 0.890625,
+            "top5_agreement": 0.8515625,
+            "top10_agreement": 0.8484375000000001,
+            "tokens": 256,
+            "mse": 0.3537851870059967
+          },
+          {
+            "kl_teacher_candidate": 0.15818264206758126,
+            "top1_agreement": 0.8046875,
+            "top5_agreement": 0.81171875,
+            "top10_agreement": 0.794140625,
+            "tokens": 256,
+            "mse": 0.7207911014556885
+          },
+          {
+            "kl_teacher_candidate": 0.08522084292609107,
+            "top1_agreement": 0.875,
+            "top5_agreement": 0.84296875,
+            "top10_agreement": 0.831640625,
+            "tokens": 256,
+            "mse": 0.383175790309906
+          },
+          {
+            "kl_teacher_candidate": 0.11410065041048197,
+            "top1_agreement": 0.8108108108108109,
+            "top5_agreement": 0.8283783783783785,
+            "top10_agreement": 0.8195945945945947,
+            "tokens": 148,
+            "mse": 0.37131497263908386
+          },
+          {
+            "kl_teacher_candidate": 0.07896041317911791,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8578947368421053,
+            "top10_agreement": 0.8337719298245615,
+            "tokens": 228,
+            "mse": 0.39328935742378235
+          },
+          {
+            "kl_teacher_candidate": 0.1088453596305854,
+            "top1_agreement": 0.81640625,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.83359375,
+            "tokens": 256,
+            "mse": 0.40789106488227844
+          },
+          {
+            "kl_teacher_candidate": 0.09903365643896384,
+            "top1_agreement": 0.875968992248062,
+            "top5_agreement": 0.8263565891472869,
+            "top10_agreement": 0.8155038759689923,
+            "tokens": 129,
+            "mse": 0.5159239172935486
+          },
+          {
+            "kl_teacher_candidate": 0.11020212439545786,
+            "top1_agreement": 0.8515625,
+            "top5_agreement": 0.821875,
+            "top10_agreement": 0.82734375,
+            "tokens": 256,
+            "mse": 0.376607745885849
+          },
+          {
+            "kl_teacher_candidate": 0.06784558823946048,
+            "top1_agreement": 0.91015625,
+            "top5_agreement": 0.8296875,
+            "top10_agreement": 0.8367187500000001,
+            "tokens": 256,
+            "mse": 0.41499513387680054
+          },
+          {
+            "kl_teacher_candidate": 0.07100458254085529,
+            "top1_agreement": 0.8757763975155279,
+            "top5_agreement": 0.8559006211180125,
+            "top10_agreement": 0.8627329192546584,
+            "tokens": 161,
+            "mse": 0.35514795780181885
+          },
+          {
+            "kl_teacher_candidate": 0.071144507949249,
+            "top1_agreement": 0.90625,
+            "top5_agreement": 0.8854166666666666,
+            "top10_agreement": 0.8604166666666667,
+            "tokens": 96,
+            "mse": 0.4102723300457001
+          },
+          {
+            "kl_teacher_candidate": 0.2367577518456188,
+            "top1_agreement": 0.8362068965517241,
+            "top5_agreement": 0.7810344827586208,
+            "top10_agreement": 0.742241379310345,
+            "tokens": 116,
+            "mse": 0.6784109473228455
+          },
+          {
+            "kl_teacher_candidate": 0.17230969455960723,
+            "top1_agreement": 0.7906976744186046,
+            "top5_agreement": 0.7930232558139535,
+            "top10_agreement": 0.7802325581395348,
+            "tokens": 86,
+            "mse": 0.546157956123352
+          },
+          {
+            "kl_teacher_candidate": 0.19630607400913308,
+            "top1_agreement": 0.8888888888888888,
+            "top5_agreement": 0.7851851851851853,
+            "top10_agreement": 0.7641975308641976,
+            "tokens": 81,
+            "mse": 0.5567883253097534
+          },
+          {
+            "kl_teacher_candidate": 0.14224170535433,
+            "top1_agreement": 0.8947368421052632,
+            "top5_agreement": 0.8175438596491228,
+            "top10_agreement": 0.7947368421052631,
+            "tokens": 57,
+            "mse": 0.49450740218162537
+          },
+          {
+            "kl_teacher_candidate": 0.17171051768155746,
+            "top1_agreement": 0.88,
+            "top5_agreement": 0.8240000000000001,
+            "top10_agreement": 0.772,
+            "tokens": 50,
+            "mse": 0.596537709236145
+          },
+          {
+            "kl_teacher_candidate": 0.13287778053402652,
+            "top1_agreement": 0.82421875,
+            "top5_agreement": 0.8226562500000001,
+            "top10_agreement": 0.8171875000000001,
+            "tokens": 256,
+            "mse": 0.5333247184753418
+          },
+          {
+            "kl_teacher_candidate": 0.0933750078565375,
+            "top1_agreement": 0.828125,
+            "top5_agreement": 0.8367187500000001,
+            "top10_agreement": 0.835546875,
+            "tokens": 256,
+            "mse": 0.3644688129425049
+          },
+          {
+            "kl_teacher_candidate": 0.13662784126736338,
+            "top1_agreement": 0.8359375,
+            "top5_agreement": 0.83203125,
+            "top10_agreement": 0.840234375,
+            "tokens": 256,
+            "mse": 0.5964365005493164
+          },
+          {
+            "kl_teacher_candidate": 0.11169280459764848,
+            "top1_agreement": 0.78515625,
+            "top5_agreement": 0.82421875,
+            "top10_agreement": 0.8289062500000001,
+            "tokens": 256,
+            "mse": 0.46020665764808655
+          },
+          {
+            "kl_teacher_candidate": 0.15225296967094112,
+            "top1_agreement": 0.87890625,
+            "top5_agreement": 0.75390625,
+            "top10_agreement": 0.7453125,
+            "tokens": 256,
+            "mse": 0.7724748253822327
+          },
+          {
+            "kl_teacher_candidate": 0.07107190681477904,
+            "top1_agreement": 0.9140625,
+            "top5_agreement": 0.83359375,
+            "top10_agreement": 0.82421875,
+            "tokens": 256,
+            "mse": 0.37019023299217224
+          },
+          {
+            "kl_teacher_candidate": 0.13419341296323944,
+            "top1_agreement": 0.7578125,
+            "top5_agreement": 0.7937500000000001,
+            "top10_agreement": 0.81015625,
+            "tokens": 256,
+            "mse": 0.5037961006164551
+          }
+        ],
+        "complete": true,
+        "mean": {
+          "kl_teacher_candidate": 0.10726082910852848,
+          "top1_agreement": 0.8559761269043505,
+          "top5_agreement": 0.8307209046646774,
+          "top10_agreement": 0.826228993246427,
+          "mse": 0.44512587669638276
+        }
+      }
+    },
+    "paired_intervals": {
+      "gsq_fixed": {
+        "kl_teacher_candidate": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "mse": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top1_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top5_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top10_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "gsq_scales": {
+        "kl_teacher_candidate": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "mse": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top1_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top5_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        },
+        "top10_agreement": {
+          "mean_document_delta": 0.0,
+          "bootstrap95": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    "tensor_bytes": {
+      "baseline": 3293184,
+      "gsq_fixed": 3293184,
+      "gsq_scales": 3293184
+    },
+    "paired_input_shift": {
+      "model.layers.1.self_attn.q_proj": {
+        "train": {
+          "tokens": 3767,
+          "relative_squared_error": 0.008006822317838669
+        },
+        "heldout": {
+          "tokens": 6367,
+          "relative_squared_error": 0.00970967672765255
+        }
+      },
+      "model.layers.1.self_attn.k_proj": {
+        "train": {
+          "tokens": 3767,
+          "relative_squared_error": 0.008006822317838669
+        },
+        "heldout": {
+          "tokens": 6367,
+          "relative_squared_error": 0.00970967672765255
+        }
+      },
+      "model.layers.1.self_attn.v_proj": {
+        "train": {
+          "tokens": 3767,
+          "relative_squared_error": 0.008006822317838669
+        },
+        "heldout": {
+          "tokens": 6367,
+          "relative_squared_error": 0.00970967672765255
+        }
+      }
+    },
+    "deltas": {
+      "gsq_fixed": {
+        "kld_reduction_percent": 0.0,
+        "mse_change_percent": 0.0,
+        "top1_change_percentage_points": 0.0
+      },
+      "gsq_scales": {
+        "kld_reduction_percent": 0.0,
+        "mse_change_percent": 0.0,
+        "top1_change_percentage_points": 0.0
+      }
+    }
+  }
+}

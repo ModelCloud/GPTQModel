@@ -1,0 +1,840 @@
+{
+  "state": "complete",
+  "gsq_training": {
+    "enabled": false,
+    "initializer": "gptq_signed",
+    "seed": 7,
+    "epochs": 10,
+    "batch_size": 64,
+    "microbatch_size": 16,
+    "qk_steps": 2000,
+    "damp_percent": 0.01,
+    "assignment_lr": 0.0001,
+    "scale_lr": 5e-05,
+    "weight_decay": 1.0,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "temperature": [
+      2.0,
+      0.05
+    ],
+    "multiplier": [
+      100.0,
+      500.0
+    ],
+    "warmup_steps": 0,
+    "min_lr": 0.1,
+    "decay": "cosine"
+  },
+  "bits": 2,
+  "group_size": 128,
+  "layer_indices": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "device": "cuda:0",
+  "blocks": [
+    {
+      "layer_index": 0,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.00037376826626863167,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0001662812883733955,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 3.4536092081750633e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 4.020033237997769e-07,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.00024084327145087415,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.00018605986068558406,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 2.254662507646275e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 1,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0004936164699327614,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0002758109104175566,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 1.4053566787309082e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 1.0014664504188463e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0004150608120770064,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0003041505483905884,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 8.966362535947182e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 2,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0010464856046626522,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0005632252607456155,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 3.404476809737505e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 3.119760111993506e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0005884004367081336,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0003633235999972576,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 5.511151591636642e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 3,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0006457843015630402,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.00030224399102037226,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 3.646072612495045e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 2.821389125669374e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0008847010514797295,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.00043959035833849956,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 5.485696141332556e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 4,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0006517883615663186,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.00032169352996959264,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 3.493946545327703e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 2.9661140978532884e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.000998359065831386,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0004623317322874561,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 5.765655372716204e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 5,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0008671696750854712,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.00049805017801412,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 3.30244704847982e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 3.52544355184496e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0009345942565119402,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0005041319846396826,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 7.399849759278279e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 6,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0006374701605542088,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.000420693709056259,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 4.1576639513629074e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 5.4840001257515095e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0009385474044431361,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0005157105505003624,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 7.743677450309293e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 7,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.00075312690422416,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0004174574856148947,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 4.708699730657134e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 4.9441104974534685e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0009237284762290498,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0005589119463116041,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 9.068972556442165e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 8,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0008535462432104962,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0005537510070378774,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 4.7537621355173425e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 8.008680677378435e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0010634015004896836,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0006512169482390712,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 1.1667387623214275e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 9,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0009806911053397327,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0004278284224433197,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 5.28982428461551e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 9.793511046689693e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.001112738873981159,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0006684628614351199,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 1.3025315971200029e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 10,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0010047845238891641,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0005301931312446606,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 6.236016604510054e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 8.750766430138502e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0012603581224321216,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0007916577406835459,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 1.6287561046761436e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 11,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0009553608824859058,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0006647644594823689,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 5.853588740098554e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 6.0999143657475355e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0012836794309978243,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0008236010522744007,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 1.644896213177252e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 12,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0009682434491053146,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0005876697158448278,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 6.0468338332446556e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 6.149211673961778e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0012591677388667096,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0008509216048897308,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 2.030411016153612e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 13,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0010975000490826275,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0006435413358566825,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 9.753387819616202e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 9.041633419300213e-06,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0013349979637201992,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0009827112190369126,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 2.9691570985191692e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 14,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0011036586690463864,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.0007315252730344511,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 0.00021370754966252968,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 2.0050397643052877e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0015704171706508948,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0010859649823759608,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 4.5249781929651555e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    },
+    {
+      "layer_index": 15,
+      "stages": {
+        "self_attn.q_proj": {},
+        "self_attn.k_proj": {},
+        "self_attn.v_proj": {},
+        "self_attn.o_proj": {},
+        "mlp.gate_proj": {},
+        "mlp.up_proj": {},
+        "mlp.down_proj": {}
+      },
+      "initializer_metadata": {
+        "self_attn.q_proj": {
+          "loss": 0.0008745328807638067,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.k_proj": {
+          "loss": 0.000568721411317197,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.v_proj": {
+          "loss": 0.00022410518653138422,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "self_attn.o_proj": {
+          "loss": 5.691446353623035e-05,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.gate_proj": {
+          "loss": 0.0016135889448367362,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.up_proj": {
+          "loss": 0.0012220726179551628,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        },
+        "mlp.down_proj": {
+          "loss": 0.00021511774191944132,
+          "damp": 0.009999999776482582,
+          "samples": 47005
+        }
+      }
+    }
+  ],
+  "deterministic_algorithms": true,
+  "current_layer": 15
+}

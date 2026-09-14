@@ -1,0 +1,2039 @@
+{
+  "provenance": {
+    "snapshot": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88",
+    "dense": "/monster/data/model/Llama-3.2-1B-Instruct",
+    "historical_run_commit": "0f6cb786c071d00cbba76e7da9f29df80a8e5521",
+    "repository_commit": "caabfad78fdac7536d82e22e2f65b4bf6916a6f1",
+    "source_hashes": {
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/calibration/source/yaqa182-nm10000.parquet": "5a2429da9754040e16baf47c569c14267b92126f37caafd4fafc8d5bfb5c3f39",
+      "/root/polly-work/qvq-gsq/dataset/divergence300-v1/divergence300-locked.jsonl": "17151e98b2e34587c9af58a6736c875c82854564f45c763f027090f35b8e8f58",
+      "/root/polly-work/qvq-gsq/dataset/calibration-fisher-scaling-v2/yaqa182_nm10000.disjointness.json": "f283eca649cbf1d2dcc160c202bc131c2462d4b3485b34c0d4bb5237d85a9d4e"
+    },
+    "file_hashes": {
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00001-of-00017.safetensors": "d711d6cdd6eeb90bc4d2afdc90ef0a2a31c914216491681115ae77a3c1faf108",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00002-of-00017.safetensors": "a814ad8c0ae0dcd5f1bf1800c081e34ba056006eee078fd0539377918f27829b",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00003-of-00017.safetensors": "c0b0de9c4b6132d6eda35df390fec90f3205eb1a1a524a673109aea59170371e",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00004-of-00017.safetensors": "71ac42121682ae22f78a661face6f08dabfc6c149dcca01d3f4abc33cb337e17",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00005-of-00017.safetensors": "a097d2459c2723ac4b8020cddcb13d5d536708f816299f5b2b06394f1ea848d2",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00006-of-00017.safetensors": "36fa455afcd0a610bbc63f1b58c14c850077c34fbd98eb464de3fc1e981c01bf",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00007-of-00017.safetensors": "3d5fdb9c731ae3a740078e8410bc1e42200eecc6dab4c5c4320751234908986d",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00008-of-00017.safetensors": "dc9713306fd9c11c622b0aea9ade31f26f8c829654ab54d5616e583a47a5f898",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00009-of-00017.safetensors": "0dc2f1a419f6e74804ddfcb81f7a06eba9c63867c9a77db5f9e3b516f21b1fd0",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00010-of-00017.safetensors": "1a7278a992f77a2ae9e5df389a5d7c2bdbb588b341248730b2747b6531d76dfa",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00011-of-00017.safetensors": "32d65db4b2801103e373e0cf351fab2411130db4beef41ff11c66c04bb7aa585",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00012-of-00017.safetensors": "6272f1111ce49e4268593e7c6e940632a834491cb701710e16871f5c1a93bedb",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00013-of-00017.safetensors": "3f508ac92d95e7f76e3339b013f358459f0c1045f57ff850ad5a5ca9b979b959",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00014-of-00017.safetensors": "be2fc3580719c48cae52ddc8b1f204a51457498e6fd217bc9661c521e8216c83",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00015-of-00017.safetensors": "3a35d1ce091ad76370f0fcf6fe66ae394e806a8ebd22727853b4268b9c215667",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00016-of-00017.safetensors": "ce37069a179cc38ac97e4e5f862924db184df5f05ae81d4d06a2aac202b13401",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/quantize_config.json": "e4f6db43d71c91d91570a5e8e19e5d97bd67e4142cf116f1e77549aa2debefce",
+      "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32/model.safetensors.index.json": "6ad9b35d6dcc10bccfa9bf47ba5ed4958795beeb145050415be03e1e6e81b697",
+      "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+      "/monster/data/model/Llama-3.2-1B-Instruct/config.json": "2febf68cea25bf4611be02b7536f2488a5ba523bb1134986e3610152abe74fdb",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer.json": "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4",
+      "/monster/data/model/Llama-3.2-1B-Instruct/tokenizer_config.json": "9823dcfdc1121869029da45192238e85cf44f0b232a6d9dc20e4fe6f4242a14e"
+    },
+    "historical_disjointness_verified": true,
+    "refinement": "16 stratified original-corpus documents by default; not a repeat of all 10178 YAQA rows",
+    "seed": 7,
+    "train_rows": 16,
+    "eval_rows": 32,
+    "token_cap": 256,
+    "targets": [
+      "model.layers.0.self_attn.q_proj",
+      "model.layers.0.self_attn.k_proj",
+      "model.layers.0.self_attn.v_proj"
+    ],
+    "candidate_count": 33,
+    "steps": 100,
+    "gsq_enabled": false,
+    "gsq_lifecycle": true,
+    "target_bits": 8.0,
+    "train_tokens": 3767,
+    "heldout_tokens": 6367,
+    "train_source_weights": {
+      "yaqa": 1.25,
+      "nm": 1.0
+    },
+    "source_code": {
+      "/root/polly-work/qvq-gsq/scripts/validate_qvq_gsq_layers.py": "c502e5ee2a2695604c7952425e808b38a6a04fac548c3edb171675502b138961",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/qvq_gsq.py": "6a50b454fe66b77ec4cbe9f28d58da5a69e670588c94886657c888061ab3cc42",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/qvq.py": "2947834c58f778fd1c2ab6c69b300946e9e9ff34bc36937077d28f01c4162243",
+      "/root/polly-work/qvq-gsq/gptqmodel/quantization/config.py": "8fb3314d6b43c89e9a8a6f120acfcfb6d69c2eee2ade243540589ac353b485c1",
+      "/root/polly-work/qvq-gsq/gptqmodel/looper/qvq_processor.py": "0e8b407b698729b864807e648d932a6e3656a555fb1d808e003d7dc1e054f198"
+    },
+    "scope": "full QKV projections; full-model propagation; FP32 canonical reference backend"
+  },
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 98304, 0, 610.43.02",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "_CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)",
+  "backend": "FP32 canonical QVQ RHT/window reference; no native-kernel performance claim",
+  "layers": {
+    "model.layers.0.self_attn.q_proj": {
+      "shape_out_in": [
+        2048,
+        2048
+      ],
+      "bits": 8.0,
+      "calibration_before": 3.811726045910291e-08,
+      "calibration_after": 3.811726045910291e-08,
+      "objective": "prepared_yaqa_fisher",
+      "gsq_diagnostics": {
+        "objective": "normalized_prepared_yaqa_fisher",
+        "before": 3.811726045910291e-08,
+        "after": 3.811726045910291e-08,
+        "changed_tiles": 0,
+        "steps": 100,
+        "candidates": 33,
+        "seed": 7,
+        "layout": "qvq_planar"
+      },
+      "payload_bytes": 4194304,
+      "heldout": {
+        "base": [
+          {
+            "mse": 5.829601832374465e-06,
+            "nmse": 1.8888936746856022e-06
+          },
+          {
+            "mse": 7.181484761531465e-06,
+            "nmse": 2.316243405301892e-06
+          },
+          {
+            "mse": 6.432447662518825e-06,
+            "nmse": 2.1077673244446576e-06
+          },
+          {
+            "mse": 5.5964933380892035e-06,
+            "nmse": 1.7395263269229583e-06
+          },
+          {
+            "mse": 6.03183025305043e-06,
+            "nmse": 1.8769606881825302e-06
+          },
+          {
+            "mse": 6.351404863380594e-06,
+            "nmse": 2.041721356405077e-06
+          },
+          {
+            "mse": 7.296134754142258e-06,
+            "nmse": 2.380799936503969e-06
+          },
+          {
+            "mse": 6.809365004301071e-06,
+            "nmse": 2.321882418337317e-06
+          },
+          {
+            "mse": 6.921805834281258e-06,
+            "nmse": 2.3189459858297787e-06
+          },
+          {
+            "mse": 6.236271474335808e-06,
+            "nmse": 2.0448038809323296e-06
+          },
+          {
+            "mse": 7.92136779637076e-06,
+            "nmse": 2.7473457432726323e-06
+          },
+          {
+            "mse": 7.048754468996776e-06,
+            "nmse": 2.475268891370092e-06
+          },
+          {
+            "mse": 7.196321803348837e-06,
+            "nmse": 2.593349909889854e-06
+          },
+          {
+            "mse": 7.239829301397549e-06,
+            "nmse": 2.4994476956542915e-06
+          },
+          {
+            "mse": 7.365562851191498e-06,
+            "nmse": 2.6008352001747653e-06
+          },
+          {
+            "mse": 7.219205599540146e-06,
+            "nmse": 2.592597536222305e-06
+          },
+          {
+            "mse": 7.43962937121978e-06,
+            "nmse": 2.659232061916631e-06
+          },
+          {
+            "mse": 7.390321115963161e-06,
+            "nmse": 2.7432027958694636e-06
+          },
+          {
+            "mse": 5.661442628479563e-06,
+            "nmse": 1.8074873976802492e-06
+          },
+          {
+            "mse": 4.257770342519507e-06,
+            "nmse": 1.3911535793985106e-06
+          },
+          {
+            "mse": 8.205362973967567e-06,
+            "nmse": 3.010738660225597e-06
+          },
+          {
+            "mse": 5.667796813213499e-06,
+            "nmse": 2.099994323875737e-06
+          },
+          {
+            "mse": 7.996687600098085e-06,
+            "nmse": 3.5491525701411224e-06
+          },
+          {
+            "mse": 5.461839009512914e-06,
+            "nmse": 2.22600596879303e-06
+          },
+          {
+            "mse": 5.197884547669673e-06,
+            "nmse": 2.1309268118153384e-06
+          },
+          {
+            "mse": 7.078573617036454e-06,
+            "nmse": 2.308654163896911e-06
+          },
+          {
+            "mse": 7.3409091783105396e-06,
+            "nmse": 2.4322347225605505e-06
+          },
+          {
+            "mse": 6.724560080328956e-06,
+            "nmse": 2.127256813813393e-06
+          },
+          {
+            "mse": 7.1798558565205894e-06,
+            "nmse": 2.3256421349300925e-06
+          },
+          {
+            "mse": 8.651217285660096e-06,
+            "nmse": 3.247178104412318e-06
+          },
+          {
+            "mse": 5.453866833704524e-06,
+            "nmse": 1.5857833568321551e-06
+          },
+          {
+            "mse": 7.2451102823833935e-06,
+            "nmse": 2.459036686397458e-06
+          }
+        ],
+        "gsq": [
+          {
+            "mse": 5.829601832374465e-06,
+            "nmse": 1.8888936746856022e-06
+          },
+          {
+            "mse": 7.181484761531465e-06,
+            "nmse": 2.316243405301892e-06
+          },
+          {
+            "mse": 6.432447662518825e-06,
+            "nmse": 2.1077673244446576e-06
+          },
+          {
+            "mse": 5.5964933380892035e-06,
+            "nmse": 1.7395263269229583e-06
+          },
+          {
+            "mse": 6.03183025305043e-06,
+            "nmse": 1.8769606881825302e-06
+          },
+          {
+            "mse": 6.351404863380594e-06,
+            "nmse": 2.041721356405077e-06
+          },
+          {
+            "mse": 7.296134754142258e-06,
+            "nmse": 2.380799936503969e-06
+          },
+          {
+            "mse": 6.809365004301071e-06,
+            "nmse": 2.321882418337317e-06
+          },
+          {
+            "mse": 6.921805834281258e-06,
+            "nmse": 2.3189459858297787e-06
+          },
+          {
+            "mse": 6.236271474335808e-06,
+            "nmse": 2.0448038809323296e-06
+          },
+          {
+            "mse": 7.92136779637076e-06,
+            "nmse": 2.7473457432726323e-06
+          },
+          {
+            "mse": 7.048754468996776e-06,
+            "nmse": 2.475268891370092e-06
+          },
+          {
+            "mse": 7.196321803348837e-06,
+            "nmse": 2.593349909889854e-06
+          },
+          {
+            "mse": 7.239829301397549e-06,
+            "nmse": 2.4994476956542915e-06
+          },
+          {
+            "mse": 7.365562851191498e-06,
+            "nmse": 2.6008352001747653e-06
+          },
+          {
+            "mse": 7.219205599540146e-06,
+            "nmse": 2.592597536222305e-06
+          },
+          {
+            "mse": 7.43962937121978e-06,
+            "nmse": 2.659232061916631e-06
+          },
+          {
+            "mse": 7.390321115963161e-06,
+            "nmse": 2.7432027958694636e-06
+          },
+          {
+            "mse": 5.661442628479563e-06,
+            "nmse": 1.8074873976802492e-06
+          },
+          {
+            "mse": 4.257770342519507e-06,
+            "nmse": 1.3911535793985106e-06
+          },
+          {
+            "mse": 8.205362973967567e-06,
+            "nmse": 3.010738660225597e-06
+          },
+          {
+            "mse": 5.667796813213499e-06,
+            "nmse": 2.099994323875737e-06
+          },
+          {
+            "mse": 7.996687600098085e-06,
+            "nmse": 3.5491525701411224e-06
+          },
+          {
+            "mse": 5.461839009512914e-06,
+            "nmse": 2.22600596879303e-06
+          },
+          {
+            "mse": 5.197884547669673e-06,
+            "nmse": 2.1309268118153384e-06
+          },
+          {
+            "mse": 7.078573617036454e-06,
+            "nmse": 2.308654163896911e-06
+          },
+          {
+            "mse": 7.3409091783105396e-06,
+            "nmse": 2.4322347225605505e-06
+          },
+          {
+            "mse": 6.724560080328956e-06,
+            "nmse": 2.127256813813393e-06
+          },
+          {
+            "mse": 7.1798558565205894e-06,
+            "nmse": 2.3256421349300925e-06
+          },
+          {
+            "mse": 8.651217285660096e-06,
+            "nmse": 3.247178104412318e-06
+          },
+          {
+            "mse": 5.453866833704524e-06,
+            "nmse": 1.5857833568321551e-06
+          },
+          {
+            "mse": 7.2451102823833935e-06,
+            "nmse": 2.459036686397458e-06
+          }
+        ]
+      },
+      "native_reload_parity": {
+        "base": {
+          "mean_abs": 0.0010940226493403316,
+          "max_abs": 0.022782325744628906,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        },
+        "gsq": {
+          "mean_abs": 0.0010940226493403316,
+          "max_abs": 0.022782325744628906,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        }
+      },
+      "export_sha256": "5dd5b29e4404b045f6ee8059c09e2966a61771b288c27e71f60accba0072d251",
+      "roundtrip_and_reload_exact": true
+    },
+    "model.layers.0.self_attn.k_proj": {
+      "shape_out_in": [
+        512,
+        2048
+      ],
+      "bits": 8.0,
+      "calibration_before": 4.121182684002633e-08,
+      "calibration_after": 4.121182684002633e-08,
+      "objective": "prepared_yaqa_fisher",
+      "gsq_diagnostics": {
+        "objective": "normalized_prepared_yaqa_fisher",
+        "before": 4.121182684002633e-08,
+        "after": 4.121182684002633e-08,
+        "changed_tiles": 0,
+        "steps": 100,
+        "candidates": 33,
+        "seed": 7,
+        "layout": "qvq_planar"
+      },
+      "payload_bytes": 1048576,
+      "heldout": {
+        "base": [
+          {
+            "mse": 8.318238542415202e-06,
+            "nmse": 2.467380117154463e-06
+          },
+          {
+            "mse": 9.56708663579775e-06,
+            "nmse": 2.796492622685945e-06
+          },
+          {
+            "mse": 8.853139661368914e-06,
+            "nmse": 2.671680036250866e-06
+          },
+          {
+            "mse": 7.646879566891585e-06,
+            "nmse": 2.218205369845121e-06
+          },
+          {
+            "mse": 8.21767662273487e-06,
+            "nmse": 2.361809562405262e-06
+          },
+          {
+            "mse": 8.520180927007459e-06,
+            "nmse": 2.5112949180525287e-06
+          },
+          {
+            "mse": 9.653045708546415e-06,
+            "nmse": 2.9063949625937747e-06
+          },
+          {
+            "mse": 9.182213034364395e-06,
+            "nmse": 2.8496648784370693e-06
+          },
+          {
+            "mse": 9.027165106090251e-06,
+            "nmse": 2.742448312784394e-06
+          },
+          {
+            "mse": 8.518411050317809e-06,
+            "nmse": 2.497551160581704e-06
+          },
+          {
+            "mse": 1.0567245226411615e-05,
+            "nmse": 3.224557234863527e-06
+          },
+          {
+            "mse": 9.211458745994605e-06,
+            "nmse": 2.844576509091531e-06
+          },
+          {
+            "mse": 9.748267075337935e-06,
+            "nmse": 3.0897501813743675e-06
+          },
+          {
+            "mse": 9.50763569562696e-06,
+            "nmse": 2.826067257874119e-06
+          },
+          {
+            "mse": 9.748615411808714e-06,
+            "nmse": 2.980419597402783e-06
+          },
+          {
+            "mse": 8.828506906866096e-06,
+            "nmse": 2.8278285304704525e-06
+          },
+          {
+            "mse": 9.953066182788461e-06,
+            "nmse": 3.055681231976924e-06
+          },
+          {
+            "mse": 1.0229323379462585e-05,
+            "nmse": 3.2516707792535103e-06
+          },
+          {
+            "mse": 7.5463863140612375e-06,
+            "nmse": 2.2232708858276788e-06
+          },
+          {
+            "mse": 5.547462933463976e-06,
+            "nmse": 1.6361172948641182e-06
+          },
+          {
+            "mse": 1.0561295312072616e-05,
+            "nmse": 3.4601321595819764e-06
+          },
+          {
+            "mse": 7.889792868809309e-06,
+            "nmse": 2.602841399666424e-06
+          },
+          {
+            "mse": 1.0273801308358088e-05,
+            "nmse": 3.6506761507230122e-06
+          },
+          {
+            "mse": 6.903987014084123e-06,
+            "nmse": 2.378176215652873e-06
+          },
+          {
+            "mse": 6.018122348905308e-06,
+            "nmse": 2.09844208986839e-06
+          },
+          {
+            "mse": 9.663604032539297e-06,
+            "nmse": 2.922044207034395e-06
+          },
+          {
+            "mse": 9.869554560282268e-06,
+            "nmse": 3.023069037240743e-06
+          },
+          {
+            "mse": 8.87290843820665e-06,
+            "nmse": 2.658414054887122e-06
+          },
+          {
+            "mse": 9.659313946031034e-06,
+            "nmse": 2.8778878341871944e-06
+          },
+          {
+            "mse": 1.1616054507612716e-05,
+            "nmse": 3.5877425426668906e-06
+          },
+          {
+            "mse": 7.210211606434314e-06,
+            "nmse": 2.0997031974329804e-06
+          },
+          {
+            "mse": 9.519895684206858e-06,
+            "nmse": 2.8971233871360915e-06
+          }
+        ],
+        "gsq": [
+          {
+            "mse": 8.318238542415202e-06,
+            "nmse": 2.467380117154463e-06
+          },
+          {
+            "mse": 9.56708663579775e-06,
+            "nmse": 2.796492622685945e-06
+          },
+          {
+            "mse": 8.853139661368914e-06,
+            "nmse": 2.671680036250866e-06
+          },
+          {
+            "mse": 7.646879566891585e-06,
+            "nmse": 2.218205369845121e-06
+          },
+          {
+            "mse": 8.21767662273487e-06,
+            "nmse": 2.361809562405262e-06
+          },
+          {
+            "mse": 8.520180927007459e-06,
+            "nmse": 2.5112949180525287e-06
+          },
+          {
+            "mse": 9.653045708546415e-06,
+            "nmse": 2.9063949625937747e-06
+          },
+          {
+            "mse": 9.182213034364395e-06,
+            "nmse": 2.8496648784370693e-06
+          },
+          {
+            "mse": 9.027165106090251e-06,
+            "nmse": 2.742448312784394e-06
+          },
+          {
+            "mse": 8.518411050317809e-06,
+            "nmse": 2.497551160581704e-06
+          },
+          {
+            "mse": 1.0567245226411615e-05,
+            "nmse": 3.224557234863527e-06
+          },
+          {
+            "mse": 9.211458745994605e-06,
+            "nmse": 2.844576509091531e-06
+          },
+          {
+            "mse": 9.748267075337935e-06,
+            "nmse": 3.0897501813743675e-06
+          },
+          {
+            "mse": 9.50763569562696e-06,
+            "nmse": 2.826067257874119e-06
+          },
+          {
+            "mse": 9.748615411808714e-06,
+            "nmse": 2.980419597402783e-06
+          },
+          {
+            "mse": 8.828506906866096e-06,
+            "nmse": 2.8278285304704525e-06
+          },
+          {
+            "mse": 9.953066182788461e-06,
+            "nmse": 3.055681231976924e-06
+          },
+          {
+            "mse": 1.0229323379462585e-05,
+            "nmse": 3.2516707792535103e-06
+          },
+          {
+            "mse": 7.5463863140612375e-06,
+            "nmse": 2.2232708858276788e-06
+          },
+          {
+            "mse": 5.547462933463976e-06,
+            "nmse": 1.6361172948641182e-06
+          },
+          {
+            "mse": 1.0561295312072616e-05,
+            "nmse": 3.4601321595819764e-06
+          },
+          {
+            "mse": 7.889792868809309e-06,
+            "nmse": 2.602841399666424e-06
+          },
+          {
+            "mse": 1.0273801308358088e-05,
+            "nmse": 3.6506761507230122e-06
+          },
+          {
+            "mse": 6.903987014084123e-06,
+            "nmse": 2.378176215652873e-06
+          },
+          {
+            "mse": 6.018122348905308e-06,
+            "nmse": 2.09844208986839e-06
+          },
+          {
+            "mse": 9.663604032539297e-06,
+            "nmse": 2.922044207034395e-06
+          },
+          {
+            "mse": 9.869554560282268e-06,
+            "nmse": 3.023069037240743e-06
+          },
+          {
+            "mse": 8.87290843820665e-06,
+            "nmse": 2.658414054887122e-06
+          },
+          {
+            "mse": 9.659313946031034e-06,
+            "nmse": 2.8778878341871944e-06
+          },
+          {
+            "mse": 1.1616054507612716e-05,
+            "nmse": 3.5877425426668906e-06
+          },
+          {
+            "mse": 7.210211606434314e-06,
+            "nmse": 2.0997031974329804e-06
+          },
+          {
+            "mse": 9.519895684206858e-06,
+            "nmse": 2.8971233871360915e-06
+          }
+        ]
+      },
+      "native_reload_parity": {
+        "base": {
+          "mean_abs": 0.00102561479434371,
+          "max_abs": 0.009736061096191406,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        },
+        "gsq": {
+          "mean_abs": 0.00102561479434371,
+          "max_abs": 0.009736061096191406,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        }
+      },
+      "export_sha256": "48bb03d52a6b330746c4a3d4cb7fa7d27ad9f3bb92fa459c19e6b57daec2d6b5",
+      "roundtrip_and_reload_exact": true
+    },
+    "model.layers.0.self_attn.v_proj": {
+      "shape_out_in": [
+        512,
+        2048
+      ],
+      "bits": 8.0,
+      "calibration_before": 4.340572843375412e-07,
+      "calibration_after": 4.340572843375412e-07,
+      "objective": "prepared_yaqa_fisher",
+      "gsq_diagnostics": {
+        "objective": "normalized_prepared_yaqa_fisher",
+        "before": 4.340572843375412e-07,
+        "after": 4.340572843375412e-07,
+        "changed_tiles": 0,
+        "steps": 100,
+        "candidates": 33,
+        "seed": 7,
+        "layout": "qvq_planar"
+      },
+      "payload_bytes": 1048576,
+      "heldout": {
+        "base": [
+          {
+            "mse": 2.7950810022048245e-07,
+            "nmse": 4.052158283302571e-05
+          },
+          {
+            "mse": 3.214827870579029e-07,
+            "nmse": 4.651008346336516e-05
+          },
+          {
+            "mse": 2.910123555466271e-07,
+            "nmse": 4.288027698479239e-05
+          },
+          {
+            "mse": 2.4752631588853546e-07,
+            "nmse": 3.614929975832034e-05
+          },
+          {
+            "mse": 2.8459771783673204e-07,
+            "nmse": 4.046962414393324e-05
+          },
+          {
+            "mse": 2.8683274422292016e-07,
+            "nmse": 4.262437734305455e-05
+          },
+          {
+            "mse": 3.469680791567953e-07,
+            "nmse": 5.012040443287805e-05
+          },
+          {
+            "mse": 3.1261259891834925e-07,
+            "nmse": 4.595269409912419e-05
+          },
+          {
+            "mse": 3.115308970791375e-07,
+            "nmse": 4.5381082333059266e-05
+          },
+          {
+            "mse": 2.7365223331798916e-07,
+            "nmse": 4.155822317324609e-05
+          },
+          {
+            "mse": 3.3199094673364016e-07,
+            "nmse": 5.027227595627846e-05
+          },
+          {
+            "mse": 3.1943943668011343e-07,
+            "nmse": 4.805970851451124e-05
+          },
+          {
+            "mse": 3.2555874440731714e-07,
+            "nmse": 4.5127655514353244e-05
+          },
+          {
+            "mse": 3.0883413160154305e-07,
+            "nmse": 4.564137272277659e-05
+          },
+          {
+            "mse": 3.240891146560898e-07,
+            "nmse": 4.9559783916097384e-05
+          },
+          {
+            "mse": 3.217787707399111e-07,
+            "nmse": 5.044919996912516e-05
+          },
+          {
+            "mse": 3.331591358346486e-07,
+            "nmse": 4.8493368375531865e-05
+          },
+          {
+            "mse": 3.355877140620578e-07,
+            "nmse": 5.0704841448094986e-05
+          },
+          {
+            "mse": 2.550002875523205e-07,
+            "nmse": 3.5411332033036127e-05
+          },
+          {
+            "mse": 1.7821218989411136e-07,
+            "nmse": 2.5062035870391694e-05
+          },
+          {
+            "mse": 3.58575221071078e-07,
+            "nmse": 4.951703588507166e-05
+          },
+          {
+            "mse": 2.5349439169986e-07,
+            "nmse": 3.689241451618717e-05
+          },
+          {
+            "mse": 3.5770003137258755e-07,
+            "nmse": 5.268360721990981e-05
+          },
+          {
+            "mse": 2.5042643869710446e-07,
+            "nmse": 3.648674070548204e-05
+          },
+          {
+            "mse": 2.3108756863621238e-07,
+            "nmse": 3.409469262996814e-05
+          },
+          {
+            "mse": 3.2488702572663897e-07,
+            "nmse": 4.737199797087787e-05
+          },
+          {
+            "mse": 3.4152188277403184e-07,
+            "nmse": 4.7944448855021226e-05
+          },
+          {
+            "mse": 3.041275249415776e-07,
+            "nmse": 4.598226286815232e-05
+          },
+          {
+            "mse": 3.189459221175639e-07,
+            "nmse": 4.775884951268874e-05
+          },
+          {
+            "mse": 3.8097084598121e-07,
+            "nmse": 5.6225385047882337e-05
+          },
+          {
+            "mse": 2.449507974233711e-07,
+            "nmse": 3.8482854383554114e-05
+          },
+          {
+            "mse": 3.2126922633324284e-07,
+            "nmse": 4.980870961401305e-05
+          }
+        ],
+        "gsq": [
+          {
+            "mse": 2.7950810022048245e-07,
+            "nmse": 4.052158283302571e-05
+          },
+          {
+            "mse": 3.214827870579029e-07,
+            "nmse": 4.651008346336516e-05
+          },
+          {
+            "mse": 2.910123555466271e-07,
+            "nmse": 4.288027698479239e-05
+          },
+          {
+            "mse": 2.4752631588853546e-07,
+            "nmse": 3.614929975832034e-05
+          },
+          {
+            "mse": 2.8459771783673204e-07,
+            "nmse": 4.046962414393324e-05
+          },
+          {
+            "mse": 2.8683274422292016e-07,
+            "nmse": 4.262437734305455e-05
+          },
+          {
+            "mse": 3.469680791567953e-07,
+            "nmse": 5.012040443287805e-05
+          },
+          {
+            "mse": 3.1261259891834925e-07,
+            "nmse": 4.595269409912419e-05
+          },
+          {
+            "mse": 3.115308970791375e-07,
+            "nmse": 4.5381082333059266e-05
+          },
+          {
+            "mse": 2.7365223331798916e-07,
+            "nmse": 4.155822317324609e-05
+          },
+          {
+            "mse": 3.3199094673364016e-07,
+            "nmse": 5.027227595627846e-05
+          },
+          {
+            "mse": 3.1943943668011343e-07,
+            "nmse": 4.805970851451124e-05
+          },
+          {
+            "mse": 3.2555874440731714e-07,
+            "nmse": 4.5127655514353244e-05
+          },
+          {
+            "mse": 3.0883413160154305e-07,
+            "nmse": 4.564137272277659e-05
+          },
+          {
+            "mse": 3.240891146560898e-07,
+            "nmse": 4.9559783916097384e-05
+          },
+          {
+            "mse": 3.217787707399111e-07,
+            "nmse": 5.044919996912516e-05
+          },
+          {
+            "mse": 3.331591358346486e-07,
+            "nmse": 4.8493368375531865e-05
+          },
+          {
+            "mse": 3.355877140620578e-07,
+            "nmse": 5.0704841448094986e-05
+          },
+          {
+            "mse": 2.550002875523205e-07,
+            "nmse": 3.5411332033036127e-05
+          },
+          {
+            "mse": 1.7821218989411136e-07,
+            "nmse": 2.5062035870391694e-05
+          },
+          {
+            "mse": 3.58575221071078e-07,
+            "nmse": 4.951703588507166e-05
+          },
+          {
+            "mse": 2.5349439169986e-07,
+            "nmse": 3.689241451618717e-05
+          },
+          {
+            "mse": 3.5770003137258755e-07,
+            "nmse": 5.268360721990981e-05
+          },
+          {
+            "mse": 2.5042643869710446e-07,
+            "nmse": 3.648674070548204e-05
+          },
+          {
+            "mse": 2.3108756863621238e-07,
+            "nmse": 3.409469262996814e-05
+          },
+          {
+            "mse": 3.2488702572663897e-07,
+            "nmse": 4.737199797087787e-05
+          },
+          {
+            "mse": 3.4152188277403184e-07,
+            "nmse": 4.7944448855021226e-05
+          },
+          {
+            "mse": 3.041275249415776e-07,
+            "nmse": 4.598226286815232e-05
+          },
+          {
+            "mse": 3.189459221175639e-07,
+            "nmse": 4.775884951268874e-05
+          },
+          {
+            "mse": 3.8097084598121e-07,
+            "nmse": 5.6225385047882337e-05
+          },
+          {
+            "mse": 2.449507974233711e-07,
+            "nmse": 3.8482854383554114e-05
+          },
+          {
+            "mse": 3.2126922633324284e-07,
+            "nmse": 4.980870961401305e-05
+          }
+        ]
+      },
+      "native_reload_parity": {
+        "base": {
+          "mean_abs": 7.533551251981407e-05,
+          "max_abs": 0.0008078217506408691,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        },
+        "gsq": {
+          "mean_abs": 7.533551251981407e-05,
+          "max_abs": 0.0008078217506408691,
+          "tokens": 16,
+          "finite": true,
+          "mean_limit": 0.002,
+          "max_limit": 0.046875,
+          "reference": "same FP16 inputs with FP32 canonical QVQ arithmetic"
+        }
+      },
+      "export_sha256": "fd4397c0ece44176d5782ae24317fb434948feb5af556d8c4cecf11b09bf3b92",
+      "roundtrip_and_reload_exact": true
+    }
+  },
+  "model": {
+    "f6_seed7": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.08518580292793689,
+          "top1_agreement": 0.8524590163934426,
+          "top5_agreement": 0.8459016393442623,
+          "top10_agreement": 0.8519125683060109,
+          "mse": 0.3242458701133728,
+          "nmse": 0.04116643625328714,
+          "tokens": 183
+        },
+        {
+          "kl_teacher_candidate": 0.07257121362973123,
+          "top1_agreement": 0.85546875,
+          "top5_agreement": 0.8625,
+          "top10_agreement": 0.8542968750000001,
+          "mse": 0.3235476613044739,
+          "nmse": 0.037903582103292484,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13693097005939464,
+          "top1_agreement": 0.8663366336633663,
+          "top5_agreement": 0.8287128712871288,
+          "top10_agreement": 0.8267326732673267,
+          "mse": 0.48152899742126465,
+          "nmse": 0.0634893615469573,
+          "tokens": 202
+        },
+        {
+          "kl_teacher_candidate": 0.10594358930154131,
+          "top1_agreement": 0.85,
+          "top5_agreement": 0.8516666666666667,
+          "top10_agreement": 0.8441666666666666,
+          "mse": 0.3898511826992035,
+          "nmse": 0.049488398048664506,
+          "tokens": 120
+        },
+        {
+          "kl_teacher_candidate": 0.07851700881365611,
+          "top1_agreement": 0.8984375,
+          "top5_agreement": 0.8453125,
+          "top10_agreement": 0.8609375,
+          "mse": 0.324698269367218,
+          "nmse": 0.04311478437087415,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07905365131992936,
+          "top1_agreement": 0.8804780876494024,
+          "top5_agreement": 0.8406374501992032,
+          "top10_agreement": 0.8482071713147411,
+          "mse": 0.3525164723396301,
+          "nmse": 0.039533055216820934,
+          "tokens": 251
+        },
+        {
+          "kl_teacher_candidate": 0.07029932303740562,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.8390625,
+          "top10_agreement": 0.851171875,
+          "mse": 0.3247354030609131,
+          "nmse": 0.04079640570594182,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.10407983200869493,
+          "top1_agreement": 0.8385416666666666,
+          "top5_agreement": 0.8427083333333334,
+          "top10_agreement": 0.8343750000000001,
+          "mse": 0.4086044132709503,
+          "nmse": 0.05289253518281323,
+          "tokens": 192
+        },
+        {
+          "kl_teacher_candidate": 0.1297808623367114,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.839766081871345,
+          "top10_agreement": 0.8538011695906432,
+          "mse": 0.41826701164245605,
+          "nmse": 0.05099962626881389,
+          "tokens": 171
+        },
+        {
+          "kl_teacher_candidate": 0.08433167531219898,
+          "top1_agreement": 0.890625,
+          "top5_agreement": 0.8539062500000001,
+          "top10_agreement": 0.852734375,
+          "mse": 0.3487277030944824,
+          "nmse": 0.050697063392004305,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.15967323330573457,
+          "top1_agreement": 0.80859375,
+          "top5_agreement": 0.81171875,
+          "top10_agreement": 0.796875,
+          "mse": 0.6916744112968445,
+          "nmse": 0.09776218197135636,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.08418272391013408,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.8500000000000001,
+          "top10_agreement": 0.833984375,
+          "mse": 0.3765779733657837,
+          "nmse": 0.046509329412549004,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11375835472238799,
+          "top1_agreement": 0.7905405405405406,
+          "top5_agreement": 0.827027027027027,
+          "top10_agreement": 0.822972972972973,
+          "mse": 0.3632177710533142,
+          "nmse": 0.04650195901247384,
+          "tokens": 148
+        },
+        {
+          "kl_teacher_candidate": 0.08027694361542799,
+          "top1_agreement": 0.9078947368421053,
+          "top5_agreement": 0.8614035087719298,
+          "top10_agreement": 0.8359649122807018,
+          "mse": 0.39004194736480713,
+          "nmse": 0.05796948027498141,
+          "tokens": 228
+        },
+        {
+          "kl_teacher_candidate": 0.10804732407768475,
+          "top1_agreement": 0.8203125,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.835546875,
+          "mse": 0.39012330770492554,
+          "nmse": 0.059589548469338886,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.10058663464244413,
+          "top1_agreement": 0.875968992248062,
+          "top5_agreement": 0.8232558139534883,
+          "top10_agreement": 0.8193798449612403,
+          "mse": 0.4997842609882355,
+          "nmse": 0.0647152080839524,
+          "tokens": 129
+        },
+        {
+          "kl_teacher_candidate": 0.1108562019283558,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.83125,
+          "mse": 0.3794059455394745,
+          "nmse": 0.05294126389765508,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.06700538877794464,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.8382812500000001,
+          "mse": 0.4117051064968109,
+          "nmse": 0.054291437590811065,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07396210379918502,
+          "top1_agreement": 0.8695652173913043,
+          "top5_agreement": 0.8472049689440995,
+          "top10_agreement": 0.8614906832298138,
+          "mse": 0.35100626945495605,
+          "nmse": 0.03989313647949879,
+          "tokens": 161
+        },
+        {
+          "kl_teacher_candidate": 0.07430821043971907,
+          "top1_agreement": 0.8854166666666666,
+          "top5_agreement": 0.8854166666666666,
+          "top10_agreement": 0.865625,
+          "mse": 0.397943913936615,
+          "nmse": 0.04626514283921285,
+          "tokens": 96
+        },
+        {
+          "kl_teacher_candidate": 0.23866619827094476,
+          "top1_agreement": 0.8448275862068966,
+          "top5_agreement": 0.7810344827586208,
+          "top10_agreement": 0.7439655172413794,
+          "mse": 0.6646162867546082,
+          "nmse": 0.08718644920743793,
+          "tokens": 116
+        },
+        {
+          "kl_teacher_candidate": 0.1703855617676019,
+          "top1_agreement": 0.7906976744186046,
+          "top5_agreement": 0.797674418604651,
+          "top10_agreement": 0.7883720930232557,
+          "mse": 0.523128867149353,
+          "nmse": 0.06635659891392465,
+          "tokens": 86
+        },
+        {
+          "kl_teacher_candidate": 0.19629931551580815,
+          "top1_agreement": 0.8395061728395061,
+          "top5_agreement": 0.7827160493827161,
+          "top10_agreement": 0.7839506172839507,
+          "mse": 0.5336624979972839,
+          "nmse": 0.08663268628342385,
+          "tokens": 81
+        },
+        {
+          "kl_teacher_candidate": 0.13854815626225253,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.8070175438596491,
+          "top10_agreement": 0.8052631578947369,
+          "mse": 0.48013269901275635,
+          "nmse": 0.06901336797785346,
+          "tokens": 57
+        },
+        {
+          "kl_teacher_candidate": 0.17590358959128977,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.828,
+          "top10_agreement": 0.7760000000000001,
+          "mse": 0.5741914510726929,
+          "nmse": 0.0770160607416515,
+          "tokens": 50
+        },
+        {
+          "kl_teacher_candidate": 0.13158878971329088,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8226562500000001,
+          "top10_agreement": 0.814453125,
+          "mse": 0.5259631276130676,
+          "nmse": 0.06670922485127441,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.09657529761982651,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.8347656250000001,
+          "mse": 0.372493714094162,
+          "nmse": 0.047429196295648665,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13609442284972725,
+          "top1_agreement": 0.8359375,
+          "top5_agreement": 0.83125,
+          "top10_agreement": 0.8402343750000001,
+          "mse": 0.6055287718772888,
+          "nmse": 0.07571446445566127,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11134296026813542,
+          "top1_agreement": 0.7890625,
+          "top5_agreement": 0.821875,
+          "top10_agreement": 0.8304687500000001,
+          "mse": 0.45788928866386414,
+          "nmse": 0.06301678867788722,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.1597981378882195,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.7578125,
+          "top10_agreement": 0.745703125,
+          "mse": 0.7844143509864807,
+          "nmse": 0.1308408831637251,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07127363870366267,
+          "top1_agreement": 0.9140625,
+          "top5_agreement": 0.83203125,
+          "top10_agreement": 0.827734375,
+          "mse": 0.3663135766983032,
+          "nmse": 0.03801490944644324,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13118230710743423,
+          "top1_agreement": 0.76171875,
+          "top5_agreement": 0.79453125,
+          "top10_agreement": 0.8109375000000001,
+          "mse": 0.5012943744659424,
+          "nmse": 0.06686082322933762,
+          "tokens": 256
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.10812678005162772,
+        "top1_agreement": 0.8548767080257578,
+        "top5_agreement": 0.8303125490812,
+        "top10_agreement": 0.829260248154547,
+        "mse": 0.4404727655610803,
+        "nmse": 0.058726415831693475
+      },
+      "tokens": 6367
+    },
+    "w8_yaqa": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.08487197367737202,
+          "top1_agreement": 0.8579234972677595,
+          "top5_agreement": 0.8469945355191257,
+          "top10_agreement": 0.8513661202185793,
+          "mse": 0.32383328676223755,
+          "nmse": 0.041114054441245135,
+          "tokens": 183
+        },
+        {
+          "kl_teacher_candidate": 0.07134086154108782,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.86640625,
+          "top10_agreement": 0.855078125,
+          "mse": 0.3226771950721741,
+          "nmse": 0.03780160705525444,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.1347729784440393,
+          "top1_agreement": 0.8663366336633663,
+          "top5_agreement": 0.8336633663366337,
+          "top10_agreement": 0.8227722772277228,
+          "mse": 0.475197434425354,
+          "nmse": 0.06265454807911328,
+          "tokens": 202
+        },
+        {
+          "kl_teacher_candidate": 0.10415608655379732,
+          "top1_agreement": 0.85,
+          "top5_agreement": 0.8533333333333334,
+          "top10_agreement": 0.8408333333333334,
+          "mse": 0.3857458233833313,
+          "nmse": 0.048967256482413485,
+          "tokens": 120
+        },
+        {
+          "kl_teacher_candidate": 0.07750028609762948,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.84765625,
+          "top10_agreement": 0.860546875,
+          "mse": 0.32528039813041687,
+          "nmse": 0.043192081845080936,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.0777367760294222,
+          "top1_agreement": 0.8844621513944223,
+          "top5_agreement": 0.8406374501992032,
+          "top10_agreement": 0.849800796812749,
+          "mse": 0.3536261022090912,
+          "nmse": 0.03965749495890872,
+          "tokens": 251
+        },
+        {
+          "kl_teacher_candidate": 0.06921710764627888,
+          "top1_agreement": 0.87109375,
+          "top5_agreement": 0.8421875000000001,
+          "top10_agreement": 0.8503906250000001,
+          "mse": 0.3189225196838379,
+          "nmse": 0.04006613501067056,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.10332362049615057,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8489583333333334,
+          "top10_agreement": 0.8354166666666667,
+          "mse": 0.4082234501838684,
+          "nmse": 0.052843220728949335,
+          "tokens": 192
+        },
+        {
+          "kl_teacher_candidate": 0.1309556937713239,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8374269005847954,
+          "top10_agreement": 0.854970760233918,
+          "mse": 0.41743624210357666,
+          "nmse": 0.05089832988440148,
+          "tokens": 171
+        },
+        {
+          "kl_teacher_candidate": 0.08343903154522424,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.853125,
+          "top10_agreement": 0.853515625,
+          "mse": 0.34668272733688354,
+          "nmse": 0.05039977050503796,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.16110339487530942,
+          "top1_agreement": 0.80078125,
+          "top5_agreement": 0.80859375,
+          "top10_agreement": 0.800390625,
+          "mse": 0.6779552698135376,
+          "nmse": 0.09582310025273799,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.08530028040034902,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.84765625,
+          "top10_agreement": 0.83359375,
+          "mse": 0.37801480293273926,
+          "nmse": 0.04668678530313641,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11340969998638586,
+          "top1_agreement": 0.777027027027027,
+          "top5_agreement": 0.8283783783783785,
+          "top10_agreement": 0.8243243243243243,
+          "mse": 0.36374378204345703,
+          "nmse": 0.04656930302329357,
+          "tokens": 148
+        },
+        {
+          "kl_teacher_candidate": 0.07864746797156431,
+          "top1_agreement": 0.8991228070175439,
+          "top5_agreement": 0.8614035087719298,
+          "top10_agreement": 0.837280701754386,
+          "mse": 0.3891843855381012,
+          "nmse": 0.05784202625693625,
+          "tokens": 228
+        },
+        {
+          "kl_teacher_candidate": 0.10642539068754527,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8390625,
+          "top10_agreement": 0.83515625,
+          "mse": 0.3893700838088989,
+          "nmse": 0.05947449696902071,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.0974899158464215,
+          "top1_agreement": 0.8837209302325582,
+          "top5_agreement": 0.8201550387596899,
+          "top10_agreement": 0.8224806201550389,
+          "mse": 0.48411497473716736,
+          "nmse": 0.0626862503927682,
+          "tokens": 129
+        },
+        {
+          "kl_teacher_candidate": 0.11157241231344636,
+          "top1_agreement": 0.8671875,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.8269531250000001,
+          "mse": 0.3812718689441681,
+          "nmse": 0.0532016297262407,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.06622565331830793,
+          "top1_agreement": 0.9140625,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.8386718750000001,
+          "mse": 0.40731555223464966,
+          "nmse": 0.053712588294275915,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07353090919097542,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8496894409937888,
+          "top10_agreement": 0.8645962732919256,
+          "mse": 0.3514070510864258,
+          "nmse": 0.039938686766527925,
+          "tokens": 161
+        },
+        {
+          "kl_teacher_candidate": 0.07354889073365813,
+          "top1_agreement": 0.8854166666666666,
+          "top5_agreement": 0.8854166666666666,
+          "top10_agreement": 0.8656250000000001,
+          "mse": 0.4029484987258911,
+          "nmse": 0.04684697817333405,
+          "tokens": 96
+        },
+        {
+          "kl_teacher_candidate": 0.2345848749969902,
+          "top1_agreement": 0.8448275862068966,
+          "top5_agreement": 0.7810344827586206,
+          "top10_agreement": 0.7456896551724138,
+          "mse": 0.6609177589416504,
+          "nmse": 0.0867012647277115,
+          "tokens": 116
+        },
+        {
+          "kl_teacher_candidate": 0.17847060973742315,
+          "top1_agreement": 0.7906976744186046,
+          "top5_agreement": 0.8023255813953488,
+          "top10_agreement": 0.7895348837209303,
+          "mse": 0.5247901082038879,
+          "nmse": 0.0665673200445627,
+          "tokens": 86
+        },
+        {
+          "kl_teacher_candidate": 0.1981010386945513,
+          "top1_agreement": 0.8518518518518519,
+          "top5_agreement": 0.7753086419753087,
+          "top10_agreement": 0.782716049382716,
+          "mse": 0.5381698608398438,
+          "nmse": 0.08736439396865646,
+          "tokens": 81
+        },
+        {
+          "kl_teacher_candidate": 0.14136117400979661,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.8105263157894738,
+          "top10_agreement": 0.8035087719298245,
+          "mse": 0.48129135370254517,
+          "nmse": 0.06917991081617728,
+          "tokens": 57
+        },
+        {
+          "kl_teacher_candidate": 0.17138795719031147,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.8320000000000001,
+          "top10_agreement": 0.784,
+          "mse": 0.5712067484855652,
+          "nmse": 0.0766157238238577,
+          "tokens": 50
+        },
+        {
+          "kl_teacher_candidate": 0.1299682341363997,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8226562500000001,
+          "top10_agreement": 0.818359375,
+          "mse": 0.525804340839386,
+          "nmse": 0.06668908552584868,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.09815086652781023,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.83359375,
+          "top10_agreement": 0.83359375,
+          "mse": 0.3843488395214081,
+          "nmse": 0.0489386957844273,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13702549281032217,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.841015625,
+          "mse": 0.6075078845024109,
+          "nmse": 0.07596192990977006,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11072803855710533,
+          "top1_agreement": 0.78125,
+          "top5_agreement": 0.8250000000000001,
+          "top10_agreement": 0.828125,
+          "mse": 0.45338383316993713,
+          "nmse": 0.06239672757624646,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.157388109793714,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.759375,
+          "top10_agreement": 0.7484375000000001,
+          "mse": 0.7772870063781738,
+          "nmse": 0.12965203690920374,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07169364849881649,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.8250000000000001,
+          "mse": 0.36746788024902344,
+          "nmse": 0.03813469956001164,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13354234115788252,
+          "top1_agreement": 0.7578125,
+          "top5_agreement": 0.79296875,
+          "top10_agreement": 0.808203125,
+          "mse": 0.5020366907119751,
+          "nmse": 0.06695983067453214,
+          "tokens": 256
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.10775907983731331,
+        "top1_agreement": 0.8539343489869641,
+        "top5_agreement": 0.8315376158316319,
+        "top10_agreement": 0.829385896026386,
+        "mse": 0.43914682949021827,
+        "nmse": 0.058532110847879446
+      },
+      "tokens": 6367
+    },
+    "gsq": {
+      "rows": [
+        {
+          "kl_teacher_candidate": 0.08487197367737202,
+          "top1_agreement": 0.8579234972677595,
+          "top5_agreement": 0.8469945355191257,
+          "top10_agreement": 0.8513661202185793,
+          "mse": 0.32383328676223755,
+          "nmse": 0.041114054441245135,
+          "tokens": 183
+        },
+        {
+          "kl_teacher_candidate": 0.07134086154108782,
+          "top1_agreement": 0.859375,
+          "top5_agreement": 0.86640625,
+          "top10_agreement": 0.855078125,
+          "mse": 0.3226771950721741,
+          "nmse": 0.03780160705525444,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.1347729784440393,
+          "top1_agreement": 0.8663366336633663,
+          "top5_agreement": 0.8336633663366337,
+          "top10_agreement": 0.8227722772277228,
+          "mse": 0.475197434425354,
+          "nmse": 0.06265454807911328,
+          "tokens": 202
+        },
+        {
+          "kl_teacher_candidate": 0.10415608655379732,
+          "top1_agreement": 0.85,
+          "top5_agreement": 0.8533333333333334,
+          "top10_agreement": 0.8408333333333334,
+          "mse": 0.3857458233833313,
+          "nmse": 0.048967256482413485,
+          "tokens": 120
+        },
+        {
+          "kl_teacher_candidate": 0.07750028609762948,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.84765625,
+          "top10_agreement": 0.860546875,
+          "mse": 0.32528039813041687,
+          "nmse": 0.043192081845080936,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.0777367760294222,
+          "top1_agreement": 0.8844621513944223,
+          "top5_agreement": 0.8406374501992032,
+          "top10_agreement": 0.849800796812749,
+          "mse": 0.3536261022090912,
+          "nmse": 0.03965749495890872,
+          "tokens": 251
+        },
+        {
+          "kl_teacher_candidate": 0.06921710764627888,
+          "top1_agreement": 0.87109375,
+          "top5_agreement": 0.8421875000000001,
+          "top10_agreement": 0.8503906250000001,
+          "mse": 0.3189225196838379,
+          "nmse": 0.04006613501067056,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.10332362049615057,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8489583333333334,
+          "top10_agreement": 0.8354166666666667,
+          "mse": 0.4082234501838684,
+          "nmse": 0.052843220728949335,
+          "tokens": 192
+        },
+        {
+          "kl_teacher_candidate": 0.1309556937713239,
+          "top1_agreement": 0.8538011695906432,
+          "top5_agreement": 0.8374269005847954,
+          "top10_agreement": 0.854970760233918,
+          "mse": 0.41743624210357666,
+          "nmse": 0.05089832988440148,
+          "tokens": 171
+        },
+        {
+          "kl_teacher_candidate": 0.08343903154522424,
+          "top1_agreement": 0.88671875,
+          "top5_agreement": 0.853125,
+          "top10_agreement": 0.853515625,
+          "mse": 0.34668272733688354,
+          "nmse": 0.05039977050503796,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.16110339487530942,
+          "top1_agreement": 0.80078125,
+          "top5_agreement": 0.80859375,
+          "top10_agreement": 0.800390625,
+          "mse": 0.6779552698135376,
+          "nmse": 0.09582310025273799,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.08530028040034902,
+          "top1_agreement": 0.87890625,
+          "top5_agreement": 0.84765625,
+          "top10_agreement": 0.83359375,
+          "mse": 0.37801480293273926,
+          "nmse": 0.04668678530313641,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11340969998638586,
+          "top1_agreement": 0.777027027027027,
+          "top5_agreement": 0.8283783783783785,
+          "top10_agreement": 0.8243243243243243,
+          "mse": 0.36374378204345703,
+          "nmse": 0.04656930302329357,
+          "tokens": 148
+        },
+        {
+          "kl_teacher_candidate": 0.07864746797156431,
+          "top1_agreement": 0.8991228070175439,
+          "top5_agreement": 0.8614035087719298,
+          "top10_agreement": 0.837280701754386,
+          "mse": 0.3891843855381012,
+          "nmse": 0.05784202625693625,
+          "tokens": 228
+        },
+        {
+          "kl_teacher_candidate": 0.10642539068754527,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.8390625,
+          "top10_agreement": 0.83515625,
+          "mse": 0.3893700838088989,
+          "nmse": 0.05947449696902071,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.0974899158464215,
+          "top1_agreement": 0.8837209302325582,
+          "top5_agreement": 0.8201550387596899,
+          "top10_agreement": 0.8224806201550389,
+          "mse": 0.48411497473716736,
+          "nmse": 0.0626862503927682,
+          "tokens": 129
+        },
+        {
+          "kl_teacher_candidate": 0.11157241231344636,
+          "top1_agreement": 0.8671875,
+          "top5_agreement": 0.8203125,
+          "top10_agreement": 0.8269531250000001,
+          "mse": 0.3812718689441681,
+          "nmse": 0.0532016297262407,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.06622565331830793,
+          "top1_agreement": 0.9140625,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.8386718750000001,
+          "mse": 0.40731555223464966,
+          "nmse": 0.053712588294275915,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07353090919097542,
+          "top1_agreement": 0.8633540372670807,
+          "top5_agreement": 0.8496894409937888,
+          "top10_agreement": 0.8645962732919256,
+          "mse": 0.3514070510864258,
+          "nmse": 0.039938686766527925,
+          "tokens": 161
+        },
+        {
+          "kl_teacher_candidate": 0.07354889073365813,
+          "top1_agreement": 0.8854166666666666,
+          "top5_agreement": 0.8854166666666666,
+          "top10_agreement": 0.8656250000000001,
+          "mse": 0.4029484987258911,
+          "nmse": 0.04684697817333405,
+          "tokens": 96
+        },
+        {
+          "kl_teacher_candidate": 0.2345848749969902,
+          "top1_agreement": 0.8448275862068966,
+          "top5_agreement": 0.7810344827586206,
+          "top10_agreement": 0.7456896551724138,
+          "mse": 0.6609177589416504,
+          "nmse": 0.0867012647277115,
+          "tokens": 116
+        },
+        {
+          "kl_teacher_candidate": 0.17847060973742315,
+          "top1_agreement": 0.7906976744186046,
+          "top5_agreement": 0.8023255813953488,
+          "top10_agreement": 0.7895348837209303,
+          "mse": 0.5247901082038879,
+          "nmse": 0.0665673200445627,
+          "tokens": 86
+        },
+        {
+          "kl_teacher_candidate": 0.1981010386945513,
+          "top1_agreement": 0.8518518518518519,
+          "top5_agreement": 0.7753086419753087,
+          "top10_agreement": 0.782716049382716,
+          "mse": 0.5381698608398438,
+          "nmse": 0.08736439396865646,
+          "tokens": 81
+        },
+        {
+          "kl_teacher_candidate": 0.14136117400979661,
+          "top1_agreement": 0.8596491228070176,
+          "top5_agreement": 0.8105263157894738,
+          "top10_agreement": 0.8035087719298245,
+          "mse": 0.48129135370254517,
+          "nmse": 0.06917991081617728,
+          "tokens": 57
+        },
+        {
+          "kl_teacher_candidate": 0.17138795719031147,
+          "top1_agreement": 0.86,
+          "top5_agreement": 0.8320000000000001,
+          "top10_agreement": 0.784,
+          "mse": 0.5712067484855652,
+          "nmse": 0.0766157238238577,
+          "tokens": 50
+        },
+        {
+          "kl_teacher_candidate": 0.1299682341363997,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8226562500000001,
+          "top10_agreement": 0.818359375,
+          "mse": 0.525804340839386,
+          "nmse": 0.06668908552584868,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.09815086652781023,
+          "top1_agreement": 0.828125,
+          "top5_agreement": 0.83359375,
+          "top10_agreement": 0.83359375,
+          "mse": 0.3843488395214081,
+          "nmse": 0.0489386957844273,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13702549281032217,
+          "top1_agreement": 0.83203125,
+          "top5_agreement": 0.8296875,
+          "top10_agreement": 0.841015625,
+          "mse": 0.6075078845024109,
+          "nmse": 0.07596192990977006,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.11072803855710533,
+          "top1_agreement": 0.78125,
+          "top5_agreement": 0.8250000000000001,
+          "top10_agreement": 0.828125,
+          "mse": 0.45338383316993713,
+          "nmse": 0.06239672757624646,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.157388109793714,
+          "top1_agreement": 0.89453125,
+          "top5_agreement": 0.759375,
+          "top10_agreement": 0.7484375000000001,
+          "mse": 0.7772870063781738,
+          "nmse": 0.12965203690920374,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.07169364849881649,
+          "top1_agreement": 0.91015625,
+          "top5_agreement": 0.8359375,
+          "top10_agreement": 0.8250000000000001,
+          "mse": 0.36746788024902344,
+          "nmse": 0.03813469956001164,
+          "tokens": 256
+        },
+        {
+          "kl_teacher_candidate": 0.13354234115788252,
+          "top1_agreement": 0.7578125,
+          "top5_agreement": 0.79296875,
+          "top10_agreement": 0.808203125,
+          "mse": 0.5020366907119751,
+          "nmse": 0.06695983067453214,
+          "tokens": 256
+        }
+      ],
+      "complete": true,
+      "mean": {
+        "kl_teacher_candidate": 0.10775907983731331,
+        "top1_agreement": 0.8539343489869641,
+        "top5_agreement": 0.8315376158316319,
+        "top10_agreement": 0.829385896026386,
+        "mse": 0.43914682949021827,
+        "nmse": 0.058532110847879446
+      },
+      "tokens": 6367
+    }
+  },
+  "state": "complete",
+  "requantization": {
+    "target_bits": 8.0,
+    "fisher_stats": {
+      "method": "YAQA-v3 Sketch B real Fisher",
+      "full_model_backward": true,
+      "independent_sequences": 16,
+      "unique_sequences": 16,
+      "valid_output_samples": 3767,
+      "raw_valid_tokens": 3767,
+      "effective_weighted_sequences": 18.0,
+      "effective_weighted_tokens": 4279.0,
+      "monte_carlo_samples_per_output": 1,
+      "sequence_loss_reduction": "per_sequence_token_sum",
+      "activation_checkpointing": true,
+      "checkpointed_modules": 16,
+      "accumulator_device": "cuda",
+      "factor_transfer_overlap": false,
+      "phase_wall_seconds": {
+        "forward": 0.44326604157686234,
+        "loss": 0.2567119896411896,
+        "backward_and_sketch": 1.0036475462839007,
+        "python_gc": 0.0,
+        "mps_synchronize": 0.0,
+        "mps_empty_cache": 0.0
+      },
+      "mps_cleanup_interval": 8,
+      "mps_cleanup_count": 0,
+      "accumulator_bytes": 69206016,
+      "packed_symmetric_accumulators": false,
+      "gram_strategy": "batched",
+      "gram_projection_rank": null,
+      "gram_projection_distribution": null,
+      "gram_exact_diagonal": false,
+      "factor_approximate": false,
+      "capture_wall_seconds": 1.9742013849318027,
+      "capture_cuda_ms": 1931.53076171875,
+      "final_host_transfer_seconds": 0.036652181297540665,
+      "minimum_sequences": 16,
+      "factor_dtype": "float32",
+      "input_factor_elements": 12582912,
+      "output_factor_elements": 4718592,
+      "factor_storage_bytes": 69206016,
+      "dense_factor_storage_bytes": 69206016,
+      "factor_compression_ratio": 1.0,
+      "tf32": false,
+      "seed": 7,
+      "activation_quantization_error": null
+    },
+    "minimum_sequences": 16,
+    "rounding": "yaqa",
+    "regularization": 0.02,
+    "family_mode": "reselect"
+  },
+  "gsq_diagnostics": {
+    "model.layers.0.self_attn.q_proj": {
+      "objective": "normalized_prepared_yaqa_fisher",
+      "before": 3.811726045910291e-08,
+      "after": 3.811726045910291e-08,
+      "changed_tiles": 0,
+      "steps": 100,
+      "candidates": 33,
+      "seed": 7,
+      "layout": "qvq_planar"
+    },
+    "model.layers.0.self_attn.k_proj": {
+      "objective": "normalized_prepared_yaqa_fisher",
+      "before": 4.121182684002633e-08,
+      "after": 4.121182684002633e-08,
+      "changed_tiles": 0,
+      "steps": 100,
+      "candidates": 33,
+      "seed": 7,
+      "layout": "qvq_planar"
+    },
+    "model.layers.0.self_attn.v_proj": {
+      "objective": "normalized_prepared_yaqa_fisher",
+      "before": 4.340572843375412e-07,
+      "after": 4.340572843375412e-07,
+      "changed_tiles": 0,
+      "steps": 100,
+      "candidates": 33,
+      "seed": 7,
+      "layout": "qvq_planar"
+    }
+  },
+  "snapshot_quantized_modules": 112,
+  "snapshot_p32_modules": 94,
+  "comparison_baseline": "w8_yaqa",
+  "paired_intervals": {
+    "gsq": {
+      "kl_teacher_candidate": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      },
+      "mse": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      },
+      "nmse": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      },
+      "top1_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      },
+      "top5_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      },
+      "top10_agreement": {
+        "mean_document_delta": 0.0,
+        "bootstrap95": [
+          0.0,
+          0.0
+        ],
+        "classification": "noise-consistent"
+      }
+    }
+  }
+}

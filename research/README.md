@@ -33,6 +33,7 @@ for enum/config coverage, dispatch boundaries, and implementation status.
 | QTIP | [Trellis quantization](qtip.md) | Weight quantizer and parallel-decodable representation |
 | YAQA (requested as “VAQA”) | [Model-preserving rounding](yaqa.md) | Full-model-sensitive weight rounding |
 | QVQ V2B2-P32 | [P32 and lossless windows](p32.md) | Repository format and runtime contract |
+| GSQ / RCO | [GSQ and RCO](gsq-rco.md) | Optional QVQ/P32 candidate refinement; proposed exact-budget allocation |
 | Google DeepMind Recirculation | [Recirculation](recirculation.md) | Inference-time state intervention; PTQ benefit unproven |
 
 “VAQA” is interpreted here as **YAQA**, consistent with the repository's

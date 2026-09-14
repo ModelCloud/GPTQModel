@@ -1,0 +1,44 @@
+[
+  {
+    "bits": 2,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 1.4901161193847656e-07,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 2,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.009765625,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 3,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 2.682209014892578e-07,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 3,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.013671875,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 4,
+    "dtype": "torch.float32",
+    "forward": 0.0,
+    "logit_gradient": 5.755573511123657e-07,
+    "scale_gradient": 0.0
+  },
+  {
+    "bits": 4,
+    "dtype": "torch.bfloat16",
+    "forward": 0.0,
+    "logit_gradient": 0.03125,
+    "scale_gradient": 0.0
+  }
+]

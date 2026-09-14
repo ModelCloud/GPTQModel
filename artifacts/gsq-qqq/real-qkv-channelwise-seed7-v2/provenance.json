@@ -1,0 +1,31 @@
+{
+  "repository_commit": "08b53fa4395c4f4eb77bc7c0915604e1099c8d18",
+  "inputs": "artifacts/gsq-scalar/gptq-w4-seed7-v2",
+  "steps": 100,
+  "group_size": -1,
+  "seed": 7,
+  "bits": 4,
+  "arms": [
+    "baseline",
+    "gsq_fixed"
+  ],
+  "scope": "full block-0 QKV; native W4A8 local reconstruction; no full-model propagation",
+  "files": {
+    "/monster/data/model/Llama-3.2-1B-Instruct/model.safetensors": "1ff795ff6a07e6a68085d206fb84417da2f083f68391c2843cd2b8ac6df8538f",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2/inputs.json": "1fad35585b53bcf26beb66acb0c1fa5b5062404d889cbe02cd87c43cddedaff1",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2/model.layers.0.self_attn.q_proj.inputs.pt": "d32453979ba0b133b1c18b98fecc8c836cf06458d76f17e7b02e3e8f6e658922",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2/model.layers.0.self_attn.k_proj.inputs.pt": "387880a6824614dfb3fc1ea5af776373bbfdb95aca9527dccb51f2ae836de351",
+    "artifacts/gsq-scalar/gptq-w4-seed7-v2/model.layers.0.self_attn.v_proj.inputs.pt": "1c3233ee3db9b60053b229a54524381af5b86da3095bef4159fc344d95f681ae",
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_qqq_layers.py": "70c0dce80f9d50b968f1eaef489951fdd46a5833aa6e0c72b379fb54d2dcad4b",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/qqq.py": "72ccd7bb9836fa117bbbd26d5619b5c3b19030476cc42633f94fd6f222c6d5ce",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/gsq_qqq.py": "1aedc79b85d00652ad93b2ef23bbc06a70bbd625a1bb913f0c5c1ee861915d5e",
+    "/root/polly-work/qvq-gsq/gptqmodel/quantization/config.py": "4b02ac511c7b82fec5e83c8859c3c24cf7416081361b0c6049b12543cd49ac22",
+    "/root/polly-work/qvq-gsq/gptqmodel/nn_modules/qlinear/qqq.py": "93fc2ab18c3bafacc681e7a98790f155a64a3b05c8d213ef85ae034c608c318e",
+    "/root/polly-work/qvq-gsq/gptqmodel_ext/qqq/qqq_gemm.cu": "91ecb7f3d70c35563dfc5555cbf4bba07d083343f0df864a1a6fd057b6407664"
+  },
+  "train_source_weights": {
+    "yaqa": 1.25,
+    "nm": 1.0
+  }
+}

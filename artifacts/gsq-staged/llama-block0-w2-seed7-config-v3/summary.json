@@ -1,0 +1,9 @@
+{
+  "metrics": {
+    "baseline": 0.000618326096142135,
+    "staged": 0.000333479679745
+  },
+  "relative_change_percent": -46.06734507476734,
+  "log": "artifacts/gsq-staged/logs/llama-block0-w2-seed7-config-v3.log",
+  "log_sha256": "ff5411a9963b3e699e18133d5a834e12ee7088bce4d97c36aea5191ae3c0f0f4"
+}

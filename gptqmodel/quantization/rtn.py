@@ -13,8 +13,9 @@ import transformers
 from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
-from .config import Fallback, FallbackStrategy, RTNConfig, SmoothMSE
+from .config import FORMAT, Fallback, FallbackStrategy, RTNConfig, SmoothMSE
 from .fallback_smooth import mse_optimal_quant, smooth_block
+from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, Quantizer
 
 
@@ -182,6 +183,20 @@ class RTN:
             valid_cols = self.columns
 
         g_idx = torch.arange(valid_cols, device=quantized.device, dtype=torch.int32) // effective_group_size
+
+        module_name = self._named_module.full_name if self._named_module is not None else self.name
+        if gsq_enabled_for(self.qcfg.gsq, module_name):
+            fitted = refine_affine_scalar(
+                quantized.to(self.module.weight.dtype), scale, zero, g_idx,
+                target=weights[:, :valid_cols], bits=self.qcfg.bits, config=self.qcfg.gsq,
+                packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                         FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}.get(self.qcfg.format, "gptq"),
+            )
+            quantized, scale, zero, g_idx = fitted.weight, fitted.scales, fitted.zeros, fitted.g_idx
+            self.gsq_diagnostics = {
+                "objective": "weight_mse", "before": fitted.before, "after": fitted.after,
+                "learn_scales": self.qcfg.gsq.learn_scales,
+            }
 
         if isinstance(self.module, (nn.Embedding, transformers.Conv1D)):
             quantized = quantized.t()

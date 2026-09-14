@@ -1959,6 +1959,8 @@ def test_paroquant_processor_routes_non_module_units_through_group_optimizer():
     q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
     k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
     v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    for module, role in ((q_proj, "q"), (k_proj, "k"), (v_proj, "v")):
+        module.state["module_tree_flags"] = frozenset({role})
     processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
         q_proj.name: torch.randn(4, 8),
         k_proj.name: torch.randn(4, 8),
@@ -2027,6 +2029,8 @@ def test_paroquant_processor_compute_block_scope_flushes_cuda_cache_between_grou
     q_proj = NamedModule(layer.self_attn.q_proj, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0)
     k_proj = NamedModule(layer.self_attn.k_proj, "self_attn.k_proj", "model.layers.0.self_attn.k_proj", 0)
     v_proj = NamedModule(layer.self_attn.v_proj, "self_attn.v_proj", "model.layers.0.self_attn.v_proj", 0)
+    for module, role in ((q_proj, "q"), (k_proj, "k"), (v_proj, "v")):
+        module.state["module_tree_flags"] = frozenset({role})
     processor._layer_input_features = lambda _state: {  # type: ignore[method-assign]
         q_proj.name: torch.randn(4, 8),
         k_proj.name: torch.randn(4, 8),
@@ -2090,8 +2094,9 @@ def test_paroquant_processor_layer_scope_falls_back_to_clone_for_expert_like_gro
     )
     state = SimpleNamespace()
     group_modules = [
-        SimpleNamespace(name="self_attn.q_proj"),
-        SimpleNamespace(name="mlp.experts.0.gate_up_proj"),
+        SimpleNamespace(name="self_attn.q_proj", state={"module_tree_flags": frozenset({"q"})}),
+        SimpleNamespace(name="mlp.experts.0.gate_up_proj",
+                        state={"module_tree_flags": frozenset({"gate", "up", "routed"})}),
     ]
 
     live_calls = []

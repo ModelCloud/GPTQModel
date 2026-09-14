@@ -254,6 +254,14 @@ class QQQ:
         self.H: Optional[torch.Tensor] = None
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
+        self._gsq_moments = {}
+        from .gsq_scalar import gsq_enabled_for
+        full_name = self._named_module.full_name if self._named_module is not None else self.name
+        self._gsq_enabled = gsq_enabled_for(getattr(self.qcfg, "gsq", None), full_name)
+        if self._gsq_enabled and (not isinstance(self.layer, nn.Linear) or self._tp_pad_cols):
+            raise ValueError("QQQ GSQ currently requires an unpadded Linear module")
+        if self._gsq_enabled and self.qcfg.gsq.learn_scales:
+            raise ValueError("QQQ GSQ currently supports fixed scales only")
 
     @staticmethod
     def _validate_module(module):
@@ -450,6 +458,18 @@ class QQQ:
             inp = inp.permute([1, 0, 2])
             inp = inp.flatten(1)
 
+        if self._gsq_enabled:
+            from .gsq_qqq import qqq_calibration_moments
+            hq, cross, count = qqq_calibration_moments(inp.t())
+            with self.lock:
+                previous = self._gsq_moments.get(inp.device)
+                if previous is None:
+                    self._gsq_moments[inp.device] = (hq, cross, count)
+                else:
+                    previous[0].add_(hq)
+                    previous[1].add_(cross)
+                    self._gsq_moments[inp.device] = (previous[0], previous[1], previous[2] + count)
+
         dev = torch.device(get_device(inp))
         batch_token_size = inp.shape[1]
         inp = inp.float()
@@ -501,10 +521,41 @@ class QQQ:
         self.H = result
         self.nsamples = total_samples
         self._device_sample_counts.clear()
+        self._gsq_moments.clear()
         return self.H
 
     @torch.inference_mode()
-    def quantize(
+    def quantize(self, blocksize=128):
+        if not self._gsq_enabled:
+            return self._quantize_impl(blocksize=blocksize)
+        from .gsq_qqq import qqq_codes_to_packer_weight, refine_qqq_codes
+        if not self._gsq_moments:
+            raise ValueError("QQQ GSQ requires collected calibration moments")
+        teacher = self.layer.weight.detach().float().clone()
+        hessian = sum(part[0].to(teacher.device) for part in self._gsq_moments.values())
+        cross = sum(part[1].to(teacher.device) for part in self._gsq_moments.values())
+        result = list(self._quantize_impl(blocksize=blocksize))
+        weight, scales = result[:2]
+        group_size = self.qcfg.group_size
+        width = weight.shape[1]
+        resolved = width if group_size == -1 else group_size
+        raw = scales[:, torch.arange(width, device=scales.device) // resolved]
+        rounded = (weight / raw).round()
+        if not torch.isfinite(rounded).all():
+            raise ValueError("QQQ GSQ baseline inverse contains non-finite codes")
+        codes = ((rounded + 8).clamp(0, 15) if resolved != width
+                 else rounded.clamp(-15, 15).remainder(16)).long()
+        best, before, after, history = refine_qqq_codes(
+            codes, scales, target=teacher, group_size=group_size,
+            hessian=hessian, cross_moment=cross, channel_scales=result[7], config=self.qcfg.gsq)
+        if after < before:
+            result[0] = qqq_codes_to_packer_weight(best, scales, group_size=group_size, dtype=weight.dtype)
+        self.gsq_diagnostics = dict(before=before, after=after, history=history,
+                                    objective="asymmetric_quadratic_without_constant")
+        self._gsq_moments.clear()
+        return tuple(result)
+
+    def _quantize_impl(
             self,
             blocksize=128,
     ):
@@ -674,7 +725,8 @@ class QQQ:
                 print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
                 print(torch.sum(Losses))
 
-        torch.cuda.synchronize()
+        if W.device.type == "cuda":
+            torch.cuda.synchronize(W.device)
         print("time %.2f" % (time.time() - tick))
         print("error", torch.sum(Losses).item())
 
@@ -688,7 +740,7 @@ class QQQ:
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
-                        return self.quantize(blocksize=blocksize)
+                        return self._quantize_impl(blocksize=blocksize)
                     else:
                         raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`, please try increasing calibration data samples or enable fallback=True")
             else:
@@ -764,6 +816,7 @@ class QQQ:
         self.H = None
         self._device_hessian_partials.clear()
         self._device_sample_counts.clear()
+        self._gsq_moments.clear()
         self.Losses = None
         self.Trace = None
         if hasattr(self, "quantizer"):

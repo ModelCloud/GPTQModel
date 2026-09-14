@@ -1,0 +1,97 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/polly-work/qvq-gsq/tests
+configfile: pytest.ini
+plugins: anyio-4.14.2
+
+
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+
+INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.
+W0909 06:13:32.045000 2592247 torch/utils/cpp_extension.py:183] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+
+----------------------------- live log collection ------------------------------
+WARNING  torch.utils.cpp_extension:cpp_extension.py:183 No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+
+INFO
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+a737a06ef
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+collected 57 items
+
+tests/test_marlin_jit.py::test_gptq_marlin_gemm_dispatches_fp16_to_torch_ops PASSED
+tests/test_marlin_jit.py::test_gptq_marlin_gemm_dispatches_bf16_to_torch_ops PASSED
+tests/test_marlin_jit.py::test_gptq_marlin_gemm_passes_float_global_scale_to_torch_ops PASSED
+tests/test_marlin_jit.py::test_nvfp4_global_scale_contract_is_float_in_marlin_sources PASSED
+tests/test_marlin_jit.py::test_integrated_lora_contract_is_present_in_marlin_extensions PASSED
+tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_enable_static_global_template_stub_when_nvcc_is_compatible PASSED
+tests/test_marlin_jit.py::test_marlin_extra_cuda_cflags_skip_static_global_template_stub_when_nvcc_is_incompatible PASSED
+tests/test_marlin_jit.py::test_marlin_capability_checks_allow_sm75_but_reject_sm70 PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape0--1-expected0] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape1--1-expected1] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2]
+WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
+PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape3--1-expected3] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape4-128-expected4] PASSED
+tests/test_marlin_jit.py::test_marlin_tile_padding_helpers_preserve_values_and_shapes PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order PASSED
+tests/test_marlin_jit.py::test_marlin_checkpoint_alignment_and_runtime_padding
+INFO  Kernel: automatic packed Marlin W4A16 prefill routing is enabled; decode and unsupported shapes use ordinary Marlin, with no dense-weight cache.
+PASSED
+tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[32] PASSED
+tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[-1] PASSED
+tests/test_marlin_jit.py::test_awq_marlin_quant_linear_validation_accepts_packable_tile_tails PASSED
+tests/test_marlin_jit.py::test_awq_marlin_auto_selection_keeps_tile_padding_opt_in PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_validate_device_allows_sm75 PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_validate_device_rejects_pre_turing PASSED
+tests/test_marlin_jit.py::test_sm75_turing_contract_is_present_in_marlin_sources PASSED
+tests/test_marlin_jit.py::test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen PASSED
+tests/test_marlin_jit.py::test_mxfp8_contract_is_present_in_marlin_sources PASSED
+tests/test_marlin_jit.py::test_ensure_generated_marlin_kernels_repairs_stale_generated_sources PASSED
+tests/test_marlin_jit.py::test_gptq_marlin_repack_prefers_requested_dtype_extension PASSED
+tests/test_marlin_jit.py::test_awq_marlin_repack_raises_when_requested_jit_extension_is_unavailable PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack PASSED
+tests/test_marlin_jit.py::test_awq_marlin_quant_linear_post_init_pads_packed_tensors PASSED
+tests/test_marlin_jit.py::test_apply_awq_marlin_linear_pads_input_and_slices_output PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_forward_promotes_bias_to_input_dtype PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape0-output_shape0-1-True] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
+
+INFO  Kernel: Ampere cooperative Marlin+LoRA inference is enabled for eligible decode/small-M shapes.
+PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape1-output_shape1-2-True] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
+PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape2-output_shape2-2-True] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
+PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_uses_one_integrated_lora_dispatch[input_shape3-output_shape3-1-False] Adapter (merged weights) lazy init: lora: Lora(), module: gptqmodel.nn_modules.qlinear.marlin.MarlinLinear
+PASSED
+tests/test_marlin_jit.py::test_awq_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype PASSED
+tests/test_marlin_jit.py::test_marlin_runtime_error_appends_cuda_extra_install_hint_for_missing_headers PASSED
+tests/test_marlin_jit.py::test_marlin_runtime_error_skips_install_hint_when_cuda_wheel_headers_are_detected PASSED
+tests/test_marlin_jit.py::test_marlin_cuda_smoke_build_and_forward SKIPPED
+tests/test_marlin_jit.py::test_marlin_live_row_fp32_scratch_matches_fp16_reduction[dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_live_row_fp32_scratch_matches_fp16_reduction[dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[32-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[32-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[64-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[64-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[96-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[96-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[128-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[128-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[192-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[192-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[256-dtype0] SKIPPED
+tests/test_marlin_jit.py::test_marlin_lora_attention_mega_kernel_matches_dense_update_and_releases_locks[256-dtype1] SKIPPED
+tests/test_marlin_jit.py::test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete PASSED
+tests/test_marlin_jit.py::test_marlin_include_paths_skip_wheel_headers_when_local_cuda_has_required_headers PASSED
+
+======================= 42 passed, 15 skipped in 12.39s ========================

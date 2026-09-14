@@ -316,11 +316,13 @@ class GPUAllocator:
                         self._remove_waiter_locked(waiter)
                         raise TimeoutError(f"Timed out waiting for {count} GPU(s)")
 
-                if not waiter.condition.wait(timeout=remaining):
-                    self._remove_waiter_locked(waiter)
-                    if waiter.assigned is not None:
-                        return waiter.assigned
-                    raise TimeoutError(f"Timed out waiting for {count} GPU(s)")
+                # Unleased GPU activity can end without any lease release or
+                # expiry notification. Recheck the FIFO queue on status refresh.
+                self._assign_waiters_locked()
+                if waiter.assigned is not None:
+                    break
+                refresh = max(0.01, self._gpu_status_interval)
+                waiter.condition.wait(timeout=refresh if remaining is None else min(refresh, remaining))
 
             if waiter.assigned is not None:
                 return waiter.assigned

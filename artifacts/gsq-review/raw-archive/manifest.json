@@ -1,0 +1,22 @@
+{
+  "artifacts/gsq-p32/forced-lifecycle-gpu.txt": {
+    "original_sha256": "7572f4601be14ab64ebb89b70c5dfdbc2eb65e66804ef20d692c721ce6edda6c",
+    "original_gzip": "artifacts/gsq-review/raw-archive/7572f4601be14ab64ebb89b70c5dfdbc2eb65e66804ef20d692c721ce6edda6c.gz"
+  },
+  "artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-cpu-corrected.txt": {
+    "original_sha256": "c6791e4f87d9126ba39fad0e062fe3463f09e56ea0571e7fc4bcc055fa489ef9",
+    "original_gzip": "artifacts/gsq-review/raw-archive/c6791e4f87d9126ba39fad0e062fe3463f09e56ea0571e7fc4bcc055fa489ef9.gz"
+  },
+  "artifacts/gsq-scalar/awq-w4-seed7-v2/marlin-padding-cpu.txt": {
+    "original_sha256": "aa9d359710075646e2be1acb449d540a947f3c692f5d79bc6baf2dafd71b5422",
+    "original_gzip": "artifacts/gsq-review/raw-archive/aa9d359710075646e2be1acb449d540a947f3c692f5d79bc6baf2dafd71b5422.gz"
+  },
+  "artifacts/gsq-scalar/gemv-validation/native.log": {
+    "original_sha256": "4233564bdf9642d3315f7029bd4cdb2fcf2a975507d0d0613b647e63db01e20b",
+    "original_gzip": "artifacts/gsq-review/raw-archive/4233564bdf9642d3315f7029bd4cdb2fcf2a975507d0d0613b647e63db01e20b.gz"
+  },
+  "artifacts/gsq-scalar/gemv-validation/run_native.py": {
+    "original_sha256": "86abac7bc5b3fab4e6cdf0d36d0ea12e9642568291424cef5c6cc6c13e731760",
+    "original_gzip": "artifacts/gsq-review/raw-archive/86abac7bc5b3fab4e6cdf0d36d0ea12e9642568291424cef5c6cc6c13e731760.gz"
+  }
+}

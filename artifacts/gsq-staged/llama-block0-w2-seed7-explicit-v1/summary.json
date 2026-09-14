@@ -1,0 +1,15 @@
+{
+  "baseline_mse": 0.000618326096142135,
+  "staged_mse": 0.00034859923737329105,
+  "relative_change_percent": -43.62210497854221,
+  "paired_mse_delta_ci95": [
+    -0.00030742863429031574,
+    -0.0002416895911796883
+  ],
+  "bootstrap_draws": 10000,
+  "bootstrap_seed": 7,
+  "heldout_documents": 32,
+  "elements": 13039616,
+  "log_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/logs/llama-block0-w2-seed7-explicit-v1.log",
+  "log_sha256": "6d932318363c4c4922b3249d982c4d14230e1c07982f5ddbc850d833b34af056"
+}

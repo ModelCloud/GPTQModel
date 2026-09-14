@@ -1,0 +1,79 @@
+{
+  "state": "complete",
+  "run_id": "baseline-full",
+  "arm": "gptq-signed-w4-nm128",
+  "argv": [
+    "scripts/evaluate_gsq_gsm8k.py",
+    "--model",
+    "artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/model",
+    "--output",
+    "artifacts/gsq-staged/gsm8k-platinum-w4-nm128-signed-v1/baseline-full",
+    "--dataset",
+    "artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "--arm",
+    "gptq-signed-w4-nm128",
+    "--batch-size",
+    "32"
+  ],
+  "model": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/full-model-w4-nm128-signed-baseline-v1/model",
+  "model_args": {
+    "dtype": "float16",
+    "device": "cuda:0",
+    "attn_implementation": "eager",
+    "seed": 7
+  },
+  "suite_kwargs": {
+    "dataset_path": "/root/polly-work/qvq-gsq/artifacts/gsq-staged/gsm8k-platinum-v1/dataset",
+    "dataset_name": null,
+    "max_rows": null,
+    "fewshot_seed": 7,
+    "max_new_tokens": 256,
+    "stream": false
+  },
+  "batch_size": 32,
+  "task": "gsm8k_platinum_cot",
+  "apply_chat_template": true,
+  "qvq_commit": "5cc76af5c715f6089663d00e5cc5cefb61445afd",
+  "evalution_source": "/root/polly-work/Evalution/evalution/__init__.py",
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "gpu": "GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 00000000:DE:00.0, 0, 0",
+  "source_sha256": "7d571319fdfd7eb72fdc9a68861b0977b7604c4d01273a9827b3a485ee2ef78d",
+  "model_hashes": {
+    "config.json": "bf7ab2aa43a87e74f2b36a0078a2aead87038e0850a7058b555d28bfbb07ae2e",
+    "generation_config.json": "7cfdf52ffe0e0c1c95ab0dc42aafc4117ba4c0d9804905cebb08eee36c6b7144",
+    "quantize_config.json": "7ce70e4f5cad0cfd78c3dbd95697b44b9dd56fe6ce96260d380aafa1d56d5fbe",
+    "model-00001-of-00017.safetensors": "4b1eac4477fae279be6d4d6fdf0d35c3cdcd4a40f2df166c352cab403b88bf19",
+    "model-00002-of-00017.safetensors": "00ecc272ae7f637e1204fba82b13f91acd5b9ea13b86879cad2b868e2ebd2ed6",
+    "model-00003-of-00017.safetensors": "9990ed0f3d477590c485b82a09f3a87180913e694947bc42fbac1871747c3d72",
+    "model-00004-of-00017.safetensors": "d53393f5d6b894874a4c711f453796c45cc20277054aca06c01ba718309ed8fd",
+    "model-00005-of-00017.safetensors": "6e1833498f330595da73bc649dd3a52ef92b0a1aef1824721867f483523efa5c",
+    "model-00006-of-00017.safetensors": "5bd9a6d4187c5a5c5cb0bc7a8680824d095acd3a391b1aa7aaa8e1848580b3d9",
+    "model-00007-of-00017.safetensors": "fc92e4b19f5d05f8b61b4bd8288226c1637134f176a3081ffa50ae74edb97431",
+    "model-00008-of-00017.safetensors": "0dc19b2b3e1abe35958c3146904cc6fb7986c364a0eda47216837c94e6591f99",
+    "model-00009-of-00017.safetensors": "596be52986dd7c2cfb8f321b4e79a8afd8f545462e798151e482013237d78cc3",
+    "model-00010-of-00017.safetensors": "49f36d3eec855fa34230784641fcc5dafb9d379eae6b72a6caf47a0a9cc57650",
+    "model-00011-of-00017.safetensors": "c2453b3894bbbe949a333d4b1b7bff469214de8efa4b1317b7d2eb0c69dd9f88",
+    "model-00012-of-00017.safetensors": "9a9bdcadba46ab3db9fc6476e038fd4c6d4ed474aa1402afcb995f7fbe5d8b4d",
+    "model-00013-of-00017.safetensors": "9c9e62ec11d37f9c612433eb2502952297720a8a9d7af79814f0ff6968d56d24",
+    "model-00014-of-00017.safetensors": "dac0cfd636f5d24cd645fbe77ab78bc1468b2ab832b3c6d6d3413553afdceef6",
+    "model-00015-of-00017.safetensors": "e7f03422b1902c296082a8ec84d351c3ef9447d0e5318a4789e7613022c068d6",
+    "model-00016-of-00017.safetensors": "51330525bc894e7ae89cc2aa30d29e812db9e6accfe895aae0417a1091d6b118",
+    "model-00017-of-00017.safetensors": "b562c6945710b198b5cc84e006a0fc944e7beacb71918a3897ecbe50e291b5d5",
+    "model.safetensors.index.json": "7b2b487d6577403b4cba4073b4d07fd5614a3aeb79324dad9295d4ea450a2655",
+    "chat_template.jinja": "5816fce10444e03c2e9ee1ef8a4a1ea61ae7e69e438613f3b17b69d0426223a4",
+    "tokenizer_config.json": "70cf4aae347755bdd07709be21edd11f9ab14b2697371b3016a52595149cb354",
+    "tokenizer.json": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+    "gsq_training_run.json": "463db241b38246d7b99673833774ca19f755162805e07826531724a64121efb7"
+  },
+  "dataset_hashes": {
+    "test.parquet": "7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7"
+  },
+  "seconds": 217.72509702760726,
+  "metrics": {
+    "gsm8k_platinum_cot": {
+      "acc,num": 0.380479735318445
+    }
+  },
+  "raw_sha256": "a49cba24a69ad975c50a75631c358705fb0a31e79c28aec490e69d966a0fe2a1"
+}

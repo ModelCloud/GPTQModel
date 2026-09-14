@@ -1,5 +1,46 @@
 # QVQ PGC16 handoff and TODOs
 
+## GSQ / RCO research — 2026-09-09
+
+Start new work from freshly fetched remote `origin/main`; historical branch/PR
+instructions below are archival, not branch starting points.
+
+- [x] Add primary references and distinguish scalar GSQ, budget allocation via
+  RCO, and the proposed P32 adaptation: [research note](../research/gsq-rco.md).
+- [x] Implement an experimental Gumbel-Softmax relaxation over valid circular
+  P32 tile candidates, fixed banks/scales, with hard calibration rollback.
+- [x] Audit Gumbel sign, temperature and gradients against the paper/author code;
+  add an optional research API/CLI control disabled by default, with an exact
+  baseline bypass. Production `QVQConfig` integration remains pending.
+- [x] Check W1–W3.5 hard export, unchanged payload size, deterministic seed,
+  planar/window round-trip, reload and nonfinite rejection.
+- [x] Start real Llama 3.2 1B W2 P32 validation on disjoint refinement documents,
+  including a matched hard-search control; see the research note for scope.
+- [x] Verify complete F6/S7 block-0 Q/K/V projections using the original
+  calibration corpus and locked full-model KLD/MSE/Top-1/5/10 evaluation:
+  [results](experiments/gsq-p32-f6-seed7-full-qkv.md). Small KLD benefit only;
+  no default promotion.
+- [x] Test full Q/K/V at W2.5 against fresh real-Fisher YAQA initialization:
+  [results](experiments/gsq-p32-f6-seed7-w25-qkv.md). The GSQ-inspired arm
+  slightly worsens final KLD and Top-1; no promotion.
+- [ ] Extend candidate coverage and learn existing representable scales; compare
+  assignment-only, scale-only, combined and deterministic-search arms.
+- [ ] Validate full modules and propagated final-logit KL / Top-1/5/10 on larger
+  independent document splits and multiple seeds before promoting anything.
+- [x] Add optional, disabled-by-default `QVQConfig.gsq` and fit the prepared
+  YAQA Fisher objective before packing; test config, processor and backend
+  reload: [lifecycle results](experiments/gsq-qvq-lifecycle.md). Real W2.5 QKV
+  retains its baseline; no quality gain or default promotion.
+- [x] Extend the format-aware candidate adapter to non-banked V2/L16 W4–W8
+  QVQ (including half-bit rates), preserving planar packing and selector absence.
+- [ ] Validate complete-model quantize/save/reload and further independent
+  quality before recommending GSQ; selected-module evidence is not full coverage.
+- [ ] RCO: enumerate supported per-module P32 rates and exact costs including
+  selectors, SU/SV, padding and metadata; implement tangent projection,
+  retraction and discrete budget feasibility as a separate experiment.
+- [ ] Compare RCO against uniform-rate and deterministic budget allocation at
+  matched total serialized bytes; measure propagated quality and task scores.
+
 Status as of 2026-08-16: production QVQ accepts fixed `pgc16-v1` only. Learned `pgc16-v2` is retired after repeated
 tests showed local/proxy error reductions without dependable held-out final-KLD improvement. The v2 evidence and
 design notes below remain historical records; its implementation is isolated under `qvq_codecs/deprecated` and is

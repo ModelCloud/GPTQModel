@@ -1,0 +1,167 @@
+{
+  "reference_commit": "22d98963a2bf83cb4f3e2d3047b1a9706bb60cbd",
+  "reference_sha256": "a4e660b1c805743513248093a2d722c925d7c6bff103d73c41ace893994a2156",
+  "inputs": "artifacts/gsq-scalar/gptq-w4-seed7-v2/model.layers.0.self_attn.k_proj.inputs.pt",
+  "inputs_sha256": "387880a6824614dfb3fc1ea5af776373bbfdb95aca9527dccb51f2ae836de351",
+  "current_code": {
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_scalar_compatibility.py": "eaf83873c5aad7473799e47325d747174e45b9945bb90bee60f8457500904981",
+    "gptqmodel/quantization/gsq_scalar.py": "dbb2cb8bce057bda98c161869c6aa4111c61548072b10ec2f23e754356139c58"
+  },
+  "scope": "8x64 real block-0 K slice; first 128 real calibration rows; identity regression only, not model quality",
+  "seed": 7,
+  "steps": 100,
+  "rows": [
+    {
+      "packing": "gptq",
+      "dtype": "torch.float16",
+      "candidates": 3,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.002040489809587598
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.float16",
+      "candidates": 3,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.0019842174369841814
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.float16",
+      "candidates": 33,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.0020928015001118183
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.float16",
+      "candidates": 33,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.0027059558779001236
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.bfloat16",
+      "candidates": 3,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.001803388586267829
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.bfloat16",
+      "candidates": 3,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.0015623135259374976
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.bfloat16",
+      "candidates": 33,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.0019520589848980308
+    },
+    {
+      "packing": "gptq",
+      "dtype": "torch.bfloat16",
+      "candidates": 33,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.003069412661716342
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.float16",
+      "candidates": 3,
+      "learn_scales": false,
+      "exact": false,
+      "old_error": "non-finite scalar GSQ relaxed objective",
+      "status": "FP32 optimizer correction",
+      "before": 0.0032801413908600807,
+      "after": 0.002040489809587598
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.float16",
+      "candidates": 3,
+      "learn_scales": true,
+      "exact": false,
+      "old_error": "non-finite scalar GSQ relaxed objective",
+      "status": "FP32 optimizer correction",
+      "before": 0.0032801413908600807,
+      "after": 0.0019842174369841814
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.float16",
+      "candidates": 33,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.0020928015001118183
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.float16",
+      "candidates": 33,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032801413908600807,
+      "after": 0.0027059558779001236
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.bfloat16",
+      "candidates": 3,
+      "learn_scales": false,
+      "exact": false,
+      "old_error": null,
+      "status": "FP32 optimizer correction",
+      "before": 0.0032693466637283564,
+      "after": 0.001803388586267829
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.bfloat16",
+      "candidates": 3,
+      "learn_scales": true,
+      "exact": false,
+      "old_error": null,
+      "status": "FP32 optimizer correction",
+      "before": 0.0032693466637283564,
+      "after": 0.001564042060635984
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.bfloat16",
+      "candidates": 33,
+      "learn_scales": false,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.0019520589848980308
+    },
+    {
+      "packing": "awq_gemm",
+      "dtype": "torch.bfloat16",
+      "candidates": 33,
+      "learn_scales": true,
+      "exact": true,
+      "before": 0.0032693466637283564,
+      "after": 0.003001621225848794
+    }
+  ]
+}

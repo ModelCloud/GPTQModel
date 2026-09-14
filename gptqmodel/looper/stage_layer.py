@@ -488,7 +488,7 @@ def _capture_pristine_group_context(
     pristine_capture = getattr(processor, "pristine_quant_input_capture", None)
     pristine_capture_context = (
         pristine_capture(layer_index=layer_index)
-        if callable(pristine_capture)
+        if subset_plans and callable(pristine_capture)
         else nullcontext()
     )
     with pristine_capture_context:

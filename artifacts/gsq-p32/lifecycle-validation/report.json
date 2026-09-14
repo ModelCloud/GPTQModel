@@ -1,0 +1,60 @@
+{
+  "tests": {
+    "focused_cpu_passed": 61,
+    "gpu_lifecycle_passed": 18,
+    "neighboring_regression_passed": 71,
+    "regression_skipped": 4
+  },
+  "helper_combined_coverage_percent": 88,
+  "new_adapter_fisher_probability_loss_coverage_percent": 100,
+  "archived_real_p32_slice_reproduced_exactly": true,
+  "runs": {
+    "lifecycle-w25-seed7": {
+      "report_sha256": "864198649f9c126d4b4aca2f0b818a3878ef8e15aa5c42dbdd4773c7f64bda15",
+      "metrics": {
+        "kl_teacher_candidate": 0.11018653354755696,
+        "top1_agreement": 0.8603738024187215,
+        "top5_agreement": 0.8304067849850795,
+        "top10_agreement": 0.8278152976283966,
+        "mse": 0.4462685826220916,
+        "nmse": 0.05955356085954544
+      },
+      "changed_tiles": 0
+    },
+    "lifecycle-w4-seed7": {
+      "report_sha256": "f7ced8b8531c63c6f27222b3bd0b9d432b0b1aea3e91b9c1c4cd40e78aec9b98",
+      "metrics": {
+        "kl_teacher_candidate": 0.10824368954384608,
+        "top1_agreement": 0.8566043662635464,
+        "top5_agreement": 0.8306580807287577,
+        "top10_agreement": 0.8299670174336423,
+        "mse": 0.4402406962808717,
+        "nmse": 0.058674160108620615
+      },
+      "changed_tiles": 0,
+      "native_parity_max_mean_abs": 0.0010548413265496492,
+      "native_parity_max_abs": 0.016363143920898438
+    },
+    "lifecycle-w8-seed7": {
+      "report_sha256": "071489f99ce630fd0bb33cde114fcf9a28d0c28eb2343d5352870116f1ff2b6d",
+      "metrics": {
+        "kl_teacher_candidate": 0.10775907983731331,
+        "top1_agreement": 0.8539343489869641,
+        "top5_agreement": 0.8315376158316319,
+        "top10_agreement": 0.829385896026386,
+        "mse": 0.43914682949021827,
+        "nmse": 0.058532110847879446
+      },
+      "changed_tiles": 0,
+      "native_parity_max_mean_abs": 0.0010940226493403316,
+      "native_parity_max_abs": 0.022782325744628906
+    }
+  },
+  "source_hashes": {
+    "gptqmodel/quantization/qvq_gsq.py": "6a50b454fe66b77ec4cbe9f28d58da5a69e670588c94886657c888061ab3cc42",
+    "gptqmodel/quantization/qvq.py": "2947834c58f778fd1c2ab6c69b300946e9e9ff34bc36937077d28f01c4162243",
+    "gptqmodel/quantization/config.py": "8fb3314d6b43c89e9a8a6f120acfcfb6d69c2eee2ade243540589ac353b485c1",
+    "gptqmodel/looper/qvq_processor.py": "0e8b407b698729b864807e648d932a6e3656a555fb1d808e003d7dc1e054f198",
+    "scripts/validate_qvq_gsq_layers.py": "c502e5ee2a2695604c7952425e808b38a6a04fac548c3edb171675502b138961"
+  }
+}

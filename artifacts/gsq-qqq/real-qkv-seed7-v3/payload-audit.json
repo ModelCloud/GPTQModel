@@ -1,0 +1,14 @@
+{
+  "model.layers.0.self_attn.q_proj": {
+    "all_packed_tensors_equal": true,
+    "native_checks": 64
+  },
+  "model.layers.0.self_attn.k_proj": {
+    "all_packed_tensors_equal": true,
+    "native_checks": 64
+  },
+  "model.layers.0.self_attn.v_proj": {
+    "all_packed_tensors_equal": true,
+    "native_checks": 64
+  }
+}

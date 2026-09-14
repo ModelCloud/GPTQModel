@@ -1,0 +1,1 @@
+Dense full Platinum reference reused with identical checkpoint, locked dataset, evaluator driver, seed and generation settings. It does not depend on quantization calibration. Analyzer must verify exact prompt token IDs and source/settings equality before comparison.

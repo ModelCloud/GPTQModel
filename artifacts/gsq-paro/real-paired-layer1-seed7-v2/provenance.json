@@ -1,0 +1,91 @@
+{
+  "state": "prepared_not_quantized",
+  "dense": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "snapshot": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32",
+  "seed": 7,
+  "layer_index": 1,
+  "inventory": "0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0",
+  "installed": {
+    "snapshot_quantized_modules": 7,
+    "snapshot_p32_modules": 6
+  },
+  "documents": {
+    "train": 12,
+    "validation": 4,
+    "heldout": 32
+  },
+  "tokens": {
+    "train": 2894,
+    "validation": 873,
+    "heldout": 6367
+  },
+  "torch": "2.15.0.dev20260817+cu130",
+  "cuda": "13.0",
+  "upstream_document_mse": {
+    "train": [
+      9.688327736512292e-06,
+      2.5726734747877344e-05,
+      8.567259101255331e-06,
+      1.4393483979802113e-05,
+      1.766790956025943e-05,
+      1.2949587471666746e-05,
+      1.3063530786894262e-05,
+      1.1753010767279193e-05,
+      1.2116726793465205e-05,
+      1.3627224689116701e-05,
+      7.1186982495419215e-06,
+      7.410887974401703e-06
+    ],
+    "validation": [
+      1.635564876778517e-05,
+      8.774662092037033e-06,
+      1.3678130017069634e-05,
+      1.7380451026838273e-05
+    ],
+    "heldout": [
+      1.33118373923935e-05,
+      1.558102303533815e-05,
+      1.5750354577903636e-05,
+      1.157390943262726e-05,
+      1.3650666915054899e-05,
+      1.3417958143691067e-05,
+      1.67240432347171e-05,
+      1.710024480416905e-05,
+      1.5228592928906437e-05,
+      1.597978189238347e-05,
+      1.7417038179701194e-05,
+      1.6104113456094638e-05,
+      1.7314221622655168e-05,
+      1.7744972865330055e-05,
+      1.756577694322914e-05,
+      1.816066651372239e-05,
+      1.7571772332303226e-05,
+      1.934907413669862e-05,
+      1.0841396033356432e-05,
+      8.37972947920207e-06,
+      2.579788451839704e-05,
+      1.80765418917872e-05,
+      2.3222928575705737e-05,
+      1.5980098396539688e-05,
+      1.6131736629176885e-05,
+      1.7309581380686723e-05,
+      1.7081943951779976e-05,
+      1.571337452332955e-05,
+      1.722668093862012e-05,
+      2.4769435185589828e-05,
+      1.4352173820952885e-05,
+      1.9176670321030542e-05
+    ]
+  },
+  "artifact_sha256": "37f91100315fdec35b2a60fb60bd645c814dee669f6a902bd8dc0693b7089703",
+  "documents_sha256": "f84cfd265112af7a6d13e67e133ed421b8a9e4119484971ecb1d7f09ee9279be",
+  "files": {
+    "/root/polly-work/qvq-gsq/artifacts/gsq-scalar/gptq-w4-seed7-v2/provenance.json": "747b19ae35e95e21f06c02f34a54c55d28cecea86aaecdbe7e30c06463d458b8",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-paro/real-group-layer0-seed7-v1/provenance.json": "c140c314c659f52819eb4940a3f610b79d02fb2a9c4372e5080304ae1cfe74be",
+    "/root/polly-work/qvq-gsq/artifacts/gsq-paro/real-group-layer0-seed7-v1/layer-inputs.pt": "c273b06b592d633c10ab30c1df95e0b32f79fc8c05f36c84652a48c17632de8f",
+    "/root/polly-work/qvq-gsq/scripts/prepare_gsq_paro_paired.py": "0af0e80897b84cf67b6333e12c1c6e9528d4430efb43add205e3ad829c757034",
+    "/root/polly-work/qvq-gsq/scripts/gsq_f6_reference.py": "c27031b28fca1b2589cfc629103d64a923b60eb114b274465c382f6d1a5cebf1",
+    "/root/polly-work/qvq-gsq/scripts/validate_gsq_paro_group.py": "c4468f2ba899a10df6a8ebf3943c99dfd1b4d03e16da789ca55543a8d4b2b7f1"
+  },
+  "semantics": "dense FP32 and canonical F6 FP32 layer-0 outputs on identical dense embedding inputs"
+}

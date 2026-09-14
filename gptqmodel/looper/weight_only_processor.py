@@ -78,7 +78,7 @@ class WeightOnlyProcessor(LoopProcessor):
     def _uses_direct_pack(qcfg: RTNConfig | GGUFConfig | FP8Config | BitsAndBytesConfig) -> bool:
         """Returns whether the method packs directly from the original dense weights."""
 
-        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES}
+        return qcfg.method in {METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.MXFP4}
 
     def _update_logged_loss(self, module: NamedModule, avg_loss: str) -> None:
         """Backfills the logged loss field after late dequant-error measurement."""
@@ -103,6 +103,7 @@ class WeightOnlyProcessor(LoopProcessor):
         if device is not None:
             qcfg_clone.device = device
 
+        gsq_diagnostics = None
         if self._uses_direct_pack(qcfg_clone):
             start_time = time.time()
             duration = time.time() - start_time
@@ -112,6 +113,9 @@ class WeightOnlyProcessor(LoopProcessor):
         else:
             task = RTN(module=module, qcfg=qcfg_clone)
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
+            gsq_diagnostics = getattr(task, "gsq_diagnostics", None)
+            if gsq_diagnostics is not None:
+                module.state["gsq_diagnostics"] = gsq_diagnostics
 
             module.stream_state_payload_to_cpu(
                 {
@@ -135,6 +139,7 @@ class WeightOnlyProcessor(LoopProcessor):
             PROCESS_LOG_FWD_TIME: self.formatted_fwd_time(),
             PROCESS_USED_MEMORY: self.device_memory_report(),
             "lifecycle": "weight_only",
+            "gsq": gsq_diagnostics,
         }
 
         with self.lock:
@@ -209,6 +214,8 @@ class WeightOnlyProcessor(LoopProcessor):
         layers = {module.full_name: original_layer}
 
         if self._uses_direct_pack(active_qcfg):
+            from ..quantization.gsq_scalar import gsq_enabled_for
+
             pack_start = time.perf_counter() if timer is not None else None
             with log_time_block("pack", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
@@ -222,7 +229,10 @@ class WeightOnlyProcessor(LoopProcessor):
                         quant_linear_cls=model.qlinear_kernel,
                         lock=None,
                         quantize_config=active_qcfg,
-                        pack_kwargs={"smooth": active_qcfg.smooth},
+                        pack_kwargs={"smooth": active_qcfg.smooth, **(
+                            {"gsq": active_qcfg.gsq if gsq_enabled_for(active_qcfg.gsq, module.full_name) else None}
+                            if active_qcfg.method == METHOD.MXFP4 else {}
+                        )},
                         validate=False,
                     )
             if timer is not None and pack_start is not None:
@@ -232,7 +242,49 @@ class WeightOnlyProcessor(LoopProcessor):
                     source=f"{module_label} [{packer_label or 'module.pack_original'}]",
                 )
 
+            if active_qcfg.method == METHOD.MXFP4 and qmodule.gsq_diagnostics is not None:
+                module.state["gsq_diagnostics"] = qmodule.gsq_diagnostics
+                with self.lock:
+                    for entry in reversed(self.log):
+                        if (entry.get(PROCESS_LOG_LAYER) == module.layer_index
+                                and entry.get(PROCESS_LOG_MODULE) == module.name):
+                            entry["gsq"] = qmodule.gsq_diagnostics
+                            break
+
             reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
+            if active_qcfg.method == METHOD.FP8 and "fp8_reference_weight" in module.state:
+                reference_weight = module.state.pop("fp8_reference_weight")
+            if active_qcfg.method == METHOD.FP8:
+                from ..quantization.gsq_fp8 import refine_fp8_weight
+                from ..quantization.gsq_scalar import gsq_enabled_for
+
+                result = module.state.get("gsq_fp8_result")
+                if result is not None or gsq_enabled_for(active_qcfg.gsq, module.full_name):
+                    if result is None:
+                        result = refine_fp8_weight(
+                            qmodule.weight, qmodule.weight_scale_inv,
+                            target=reference_weight.to(qmodule.weight.device), config=active_qcfg.gsq,
+                            method=qmodule.weight_scale_method, block_size=qmodule.weight_block_size,
+                        )
+                    if (result["weight"].shape != qmodule.weight.shape
+                            or result["weight"].dtype != qmodule.weight.dtype
+                            or result["scale_inv"].shape != qmodule.weight_scale_inv.shape):
+                        raise ValueError("FP8 GSQ export does not match the destination storage geometry")
+                    with torch.inference_mode():
+                        qmodule.weight.copy_(result["weight"])
+                        qmodule.weight_scale_inv.copy_(result["scale_inv"])
+                    diagnostics = result.get("diagnostics")
+                    if diagnostics is None:
+                        diagnostics = {key: result[key] for key in ("before", "after", "history")}
+                        diagnostics["objective"] = "weight_reconstruction"
+                    module.state["gsq_diagnostics"] = diagnostics
+                    module.state.pop("gsq_fp8_result", None)
+                    with self.lock:
+                        for entry in reversed(self.log):
+                            if (entry.get(PROCESS_LOG_LAYER) == module.layer_index
+                                    and entry.get(PROCESS_LOG_MODULE) == module.name):
+                                entry["gsq"] = diagnostics
+                                break
             dequant_weight = qmodule.dequantize_weight()
             # BNB exposes native [out, in] weights; FP8/GGUF expose [in, out].
             if active_qcfg.method != METHOD.BITSANDBYTES:
@@ -288,6 +340,8 @@ class WeightOnlyProcessor(LoopProcessor):
 
         if self.qcfg.method == METHOD.GGUF:
             return "weight_only_gguf"
+        if self.qcfg.method == METHOD.MXFP4:
+            return "weight_only_mxfp4"
         if self.qcfg.method == METHOD.FP8:
             return "weight_only_fp8"
         if self.qcfg.method == METHOD.BITSANDBYTES:

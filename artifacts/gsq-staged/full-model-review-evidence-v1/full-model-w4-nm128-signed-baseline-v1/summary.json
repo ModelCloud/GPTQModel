@@ -1,0 +1,8 @@
+{
+  "kl_teacher_candidate": 0.2788397939179239,
+  "mse": 0.8923037952824068,
+  "top1_agreement": 0.7750903094078844,
+  "top5_agreement": 0.7496466153604523,
+  "top10_agreement": 0.7510444479346632,
+  "reload_exact": true
+}

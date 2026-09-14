@@ -1,0 +1,44 @@
+
+
+INFO  LogBar: headless/CI mode; progress animations disabled.
+
+INFO  GPUAllocatorClient initialized: base_url=http://127.0.0.1:17351 session_id=pid-2625641
+
+INFO  POST /allocate: count=1 timeout=None exclusive=True reason=None
+
+INFO  Allocated lease a8c08078dbbb478e8cdc7b0186e54a2b with 1 GPU(s) for session pid-2625641
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+IDLE 0, 00000000:DE:00.0, GPU-737e2423-874a-23a4-1126-dfbe3e77c294, NVIDIA PG506-230, 0, 0
+RUNTIME 2.15.0.dev20260817+cu130 13.0 _CudaDeviceProperties(name='NVIDIA PG506-230', major=8, minor=0, total_memory=97457MB, multi_processor_count=124, uuid=737e2423-874a-23a4-1126-dfbe3e77c294, pci_bus_id=222, pci_device_id=0, pci_domain_id=0, L2_cache_size=48MB)
+============================= test session starts ==============================
+platform linux -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/polly-work/qvq-gsq/tests
+configfile: pytest.ini
+plugins: anyio-4.14.2
+
+
+INFO  LogBar: headless/CI mode; progress animations disabled.
+
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+
+INFO
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+005847937
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+collected 21 items / 18 deselected / 3 selected
+
+tests/test_qvq_gsq_lifecycle.py::test_forced_nonbaseline_optimizer_choice_survives_lifecycle[2.5] PASSED
+tests/test_qvq_gsq_lifecycle.py::test_forced_nonbaseline_optimizer_choice_survives_lifecycle[4] PASSED
+tests/test_qvq_gsq_lifecycle.py::test_forced_nonbaseline_optimizer_choice_survives_lifecycle[8] PASSED
+
+======================= 3 passed, 18 deselected in 5.24s =======================
+
+INFO  POST /release: lease_id=a8c08078dbbb478e8cdc7b0186e54a2b

@@ -1,0 +1,6 @@
+{
+  "final": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__gsq-w4-staged-adamw-e10__gptq-v2__calib128-unweighted__seed7__20260909__commit6c4f2d825b2e__32c4f204d9df",
+  "manifest_sha256": "16f9acaa2e280c3911000aebea13d830e0cd35a680326773b1f23b349323c5c6",
+  "state": "complete",
+  "files": 77
+}

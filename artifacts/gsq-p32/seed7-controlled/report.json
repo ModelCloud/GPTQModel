@@ -1,0 +1,93 @@
+{
+  "scope": "first q_proj 32x32 inner-basis slice; no full-module or final-logit quality claim",
+  "method": "GSQ-inspired whole-tile categorical candidate relaxation; fixed scales and banks",
+  "base_revision": "a292a880432afce133e58219549f8d7483a3bf41",
+  "torch": "2.15.0.dev20260817+cu130",
+  "hardware": "x86_64",
+  "backend": "CPU FP32 reference",
+  "dense": "/monster/data/model/Llama-3.2-1B-Instruct",
+  "snapshot": "/monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/qvq-p32",
+  "data": "dataset/calibration_mix_128k_qwen3_0.6b/calibration.parquet",
+  "data_sha256": "be977555f3a5d16c7060419f0b29f5add536bc8d97be00052ee2acd9ce7b148d",
+  "module": "model.layers.0.self_attn.q_proj",
+  "bits": 2.0,
+  "codebook": "pgc16-v1",
+  "seed": 7,
+  "steps": 100,
+  "train_rows": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "heldout_rows": [
+    4,
+    5,
+    6,
+    7
+  ],
+  "token_hashes": [
+    "9be54889bdbbae4289235a5932d3552cfbfbbc52f975ee27347343c599564f0a",
+    "023f1bf1d2f61dbc11c9176effe604e321aa9be3c1fcb46aa54d50be41a5c75e",
+    "eae8a28c55f764c88f01a26994dcbce2f6d242c77e1514a5fcbddbd811f35771",
+    "8e5674a6c6e841fc39307d2c3419a05a57f69c92938a35d501f2649661105bb5",
+    "03831ed1a3c284f3352b13075224e81c2e7f02be48fb07ffc1be5b53bb00d5ad",
+    "38830dcf0156b1860d93943b873aa2c6a42d85c4d96cf10835749f4ca7fd1753",
+    "b3652c285a36e35e6a678bdb5b2154b5f9fe777af2264d9e07603e01d20bb65c",
+    "0646317c2aa8f6029e9431ef6d4f302adb1bc2d045ebe44c188a8c8c3d8127fc"
+  ],
+  "token_counts": [
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64,
+    64
+  ],
+  "paired_delta_bootstrap95": [
+    -0.04941244423389435,
+    -0.03896719962358475
+  ],
+  "uncertainty_scope": "four heldout documents only; conditional on this slice and candidate seed",
+  "disjointness": "refinement train/eval documents disjoint; historical quantization overlap not audited",
+  "source_hashes": {
+    "/root/polly-work/qvq-gsq/scripts/validate_qvq_gsq.py": "53634950e520898d11b23a83ea72634840fa98a7ce95ba5a25162232420686eb",
+    "gptqmodel/quantization/qvq_gsq.py": "b6613889f872f47a59259a2b2da89dfd2c8c4736f0a718d43602d4cf32c1c0bb"
+  },
+  "calibration_before": 0.4784192144870758,
+  "calibration_after": 0.43289512395858765,
+  "heldout": [
+    {
+      "before": 0.4905202090740204,
+      "after": 0.4418056607246399,
+      "greedy": 0.4340144097805023
+    },
+    {
+      "before": 0.47509175539016724,
+      "after": 0.4393736720085144,
+      "greedy": 0.4277673363685608
+    },
+    {
+      "before": 0.44845348596572876,
+      "after": 0.3985126316547394,
+      "greedy": 0.39647015929222107
+    },
+    {
+      "before": 0.46829357743263245,
+      "after": 0.4204663634300232,
+      "greedy": 0.4166887402534485
+    }
+  ],
+  "choices": [
+    21,
+    5,
+    1,
+    15
+  ],
+  "payload_bytes_before": 256,
+  "payload_bytes_after": 256,
+  "roundtrip_exact": true,
+  "reload_exact": true
+}

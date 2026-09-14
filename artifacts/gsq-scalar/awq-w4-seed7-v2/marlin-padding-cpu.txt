@@ -1,0 +1,125 @@
+============================= test session starts ==============================
+platform linux -- Python 3.14.6, pytest-9.1.1, pluggy-1.6.0
+rootdir: /root/polly-work/qvq-gsq/tests
+configfile: pytest.ini
+plugins: anyio-4.14.2
+
+
+WARN  Python GIL is enabled: Multi-gpu quant acceleration for MoE models is sub-optimal and multi-core accelerated cpu packing is also disabled. We recommend Python >= 3.13.3t with Pytorch > 2.8 for mult-gpu quantization and multi-cpu packing with env `PYTHON_GIL=0`.
+
+INFO  ENV: Auto setting PYTORCH_ALLOC_CONF='expandable_segments:True,max_split_size_mb:1024,garbage_collection_threshold:0.5' for memory saving.
+
+INFO  ENV: Auto setting CUDA_DEVICE_ORDER=PCI_BUS_ID for correctness.
+W0909 06:10:27.610000 2586953 torch/utils/cpp_extension.py:183] No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+
+----------------------------- live log collection ------------------------------
+WARNING  torch.utils.cpp_extension:cpp_extension.py:183 No CUDA runtime is found, using CUDA_HOME='/usr/local/cuda'
+
+INFO
+
+┌─────────────┐    ┌────────────────────────┐    ┌────────────┐    ┌─────────┐
+│ GPT-QModel  │ -> │ ▓▓▓▓▓▓▓▓▓▓▓▓ 16bit     │ -> │ ▒▒▒▒ 8bit  │ -> │ ░░ 4bit │
+└─────────────┘    └────────────────────────┘    └────────────┘    └─────────┘
+GPT-QModel   : 7.4.0+ultra+7f4f8c952
+Transformers : 5.15.0
+Torch        : 2.15.0.dev20260817+cu130
+Triton       : 3.8.0+gitdf3f91dd
+collected 57 items / 44 deselected / 13 selected
+
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape0--1-expected0] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape1--1-expected1] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape2-32-expected2]
+WARN  Marlin is padding a tile-misaligned weight shape. Activations and outputs for this layer are padded and sliced on each forward; performance may be degraded.
+PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape3--1-expected3] PASSED
+tests/test_marlin_jit.py::test_marlin_padded_nk_selects_minimal_thread_tile[shape4-128-expected4] PASSED
+tests/test_marlin_jit.py::test_marlin_tile_padding_helpers_preserve_values_and_shapes PASSED
+tests/test_marlin_jit.py::test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order FAILED
+tests/test_marlin_jit.py::test_marlin_auto_selection_keeps_tile_padding_opt_in FAILED
+tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[32] PASSED
+tests/test_marlin_jit.py::test_awq_marlin_tile_padding_helpers_preserve_packed_values[-1] PASSED
+tests/test_marlin_jit.py::test_awq_marlin_auto_selection_keeps_tile_padding_opt_in FAILED
+tests/test_marlin_jit.py::test_awq_marlin_quant_linear_post_init_pads_packed_tensors PASSED
+tests/test_marlin_jit.py::test_apply_awq_marlin_linear_pads_input_and_slices_output PASSED
+
+=================================== FAILURES ===================================
+___ test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order ___
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073b41220>
+
+    def test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order(monkeypatch):
+        monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+        common = {
+            "bits": 4,
+            "group_size": 32,
+            "sym": True,
+            "in_features": 288,
+            "out_features": 200,
+            "pack_dtype": torch.int32,
+            "dtype": torch.float16,
+            "dynamic": None,
+            "device": None,
+            "trainable": False,
+            "adapter": None,
+        }
+
+        ok, err = marlin_qlinear_module.MarlinLinear._validate(
+            **common, desc_act=False
+        )
+>       assert ok is True
+E       assert False is True
+
+tests/test_marlin_jit.py:342: AssertionError
+_____________ test_marlin_auto_selection_keeps_tile_padding_opt_in _____________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073b40640>
+
+    def test_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
+        monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+        kwargs = {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": True,
+            "in_features": 288,
+            "out_features": 200,
+            "bias": False,
+            "dtype": torch.float16,
+        }
+
+        with pytest.raises(NotImplementedError, match="request GPTQ_MARLIN explicitly"):
+>           marlin_qlinear_module.MarlinLinear(**kwargs, backend=BACKEND.AUTO)
+                                                                 ^^^^^^^
+E           NameError: name 'BACKEND' is not defined
+
+tests/test_marlin_jit.py:387: NameError
+___________ test_awq_marlin_auto_selection_keeps_tile_padding_opt_in ___________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7cf073c96690>
+
+    def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
+        monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+        kwargs = {
+            "bits": 4,
+            "group_size": 32,
+            "desc_act": False,
+            "sym": False,
+            "in_features": 288,
+            "out_features": 200,
+            "bias": False,
+            "dtype": torch.float16,
+        }
+
+        with pytest.raises(NotImplementedError, match="request AWQ_MARLIN explicitly"):
+            marlin_awq_qlinear_module.AwqMarlinLinear(
+>               **kwargs, backend=BACKEND.AUTO
+                                  ^^^^^^^
+            )
+E           NameError: name 'BACKEND' is not defined
+
+tests/test_marlin_jit.py:493: NameError
+=========================== short test summary info ============================
+FAILED tests/test_marlin_jit.py::test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order
+FAILED tests/test_marlin_jit.py::test_marlin_auto_selection_keeps_tile_padding_opt_in
+FAILED tests/test_marlin_jit.py::test_awq_marlin_auto_selection_keeps_tile_padding_opt_in
+================= 3 failed, 10 passed, 44 deselected in 3.28s ==================
