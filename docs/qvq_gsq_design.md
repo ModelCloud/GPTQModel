@@ -335,6 +335,62 @@ The artifacts were produced under `/tmp/qvq-pr212-llama31-8b-w3-block0-paper`
 and `/tmp/qvq-pr212-llama31-8b-w4-block0-paper`. They should be copied to a
 durable experiment archive before being used as long-term evidence.
 
+### Full-checkpoint GSM8K results: W3 recovery and W4 regression
+
+The complete reproduction record, including exact commands, paths, hashes, and
+runtime configuration, is in
+[qvq_gsq_gsm8k_reproduction.md](qvq_gsq_gsm8k_reproduction.md).
+
+The full-checkpoint task-level test used Llama-3.2-1B-Instruct, packed
+GPTQ-V2 with group size 128, the signed GPTQ initializer, five training
+epochs, 2,000 Q/K steps, and the official GSQ initializer damping of 0.01.
+The W3 and W4 arms were evaluated on the same 1,209-row GSM8K-Platinum test
+set, whose `test.parquet` SHA-256 was
+`7a2de6410ded2b7995de2c4d92c72df2e1049735ec490e804d52b451cb95aff7`.
+
+Evaluation used PyPI `Evalution==0.0.17`, the `gsm8k_platinum_cot` task, the
+same eight-shot seed (`fewshot_seed=7`), chat template, greedy decoding,
+256-token generation cap, and batch size 32. The dense reference is the same
+run for both bit widths because the dense model is bit-independent. The
+calibration documents were separate from the GSM8K test questions; the
+calibration provenance records a disjointness pass against all 1,209 test
+questions.
+
+| Arm | W3 | W4 |
+| --- | ---: | ---: |
+| Dense reference | 583/1209 = 48.22% | 583/1209 = 48.22% |
+| Packed GPTQ | 158/1209 = 13.07% | 447/1209 = 36.97% |
+| Packed GPTQ + staged GSQ | 342/1209 = 28.29% | 417/1209 = 34.49% |
+
+At W3, GSQ improved the matched GPTQ control by 15.22 percentage points
+(+184 correct answers). Paired scoring showed 239 GPTQ-wrong samples
+recovered and 55 GPTQ-correct samples lost. GSQ therefore recovered a large
+fraction of the W3 GPTQ task-accuracy loss, although it remained 19.93 points
+below dense.
+
+At W4, GSQ was 2.48 percentage points below the matched GPTQ control. Paired
+scoring showed 122 GPTQ-wrong samples recovered but 152 GPTQ-correct samples
+lost. This is a regression at W4, not evidence that GSQ is universally
+beneficial.
+
+Both W3 checkpoints were exported as packed GPTQ-V2 models and reloaded with
+exact held-out-logit checks: 32/32 rows had `reload_exact=true` and maximum
+reload absolute error 0.0 for both the GPTQ and GSQ arms. The persisted
+artifacts are under:
+
+- `/monster/data/model/qvq/gsq-pr212-full-w3-llama32-1b-20260914`
+- `/monster/data/model/qvq/gsq-pr212-evalution017-gsm8k-platinum-llama32-1b-w3-20260914`
+- `/monster/data/model/qvq/gsq-pr212-evalution017-gsm8k-platinum-llama32-1b-w4-20260914`
+
+The W3 generation used single-document capture batches because the current
+GSQ capture guard rejects variable-length documents in a batched capture. The
+W4 checkpoint predates that guard and used the earlier batched recipe. The
+task-evaluation protocol, model, test set, and evaluator were matched; this
+capture-batch difference should be controlled in a future W3/W4 ablation
+before making a production claim. The current conclusion is narrower and
+well-supported: GSQ can substantially help GPTQ below W4, while the W4
+recipe still needs further tuning or a corrected integration path.
+
 ## Validation matrix for implementation work
 
 Each new QVQ-GSQ change should run the following matched matrix:
