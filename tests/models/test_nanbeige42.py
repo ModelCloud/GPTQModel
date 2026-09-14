@@ -7,7 +7,7 @@ from model_test import ModelTest
 
 
 class TestNanbeige42(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Nanbeige4.2-3B"
+    NATIVE_MODEL_ID = "/monster/data/model/Nanbeige4.2-3B" # Nanbeige/Nanbeige4.2-3B
     TRUST_REMOTE_CODE = True
     EVAL_BATCH_SIZE = 8
     EVAL_TASKS_SLOW = {
