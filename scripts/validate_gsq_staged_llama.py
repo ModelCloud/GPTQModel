@@ -53,6 +53,9 @@ def execute(args):
     torch.set_num_threads(4)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.set_float32_matmul_precision('highest')
+    model_files = sorted(Path(provenance['dense']).glob('model*.safetensors'))
+    if not model_files:
+        raise FileNotFoundError(f'No model safetensors found under {provenance["dense"]}')
     files = [Path(__file__).resolve(), Path('gptqmodel/quantization/gsq_training.py').resolve(),
              Path('gptqmodel/quantization/gsq_training_config.py').resolve(),
              Path('gptqmodel/quantization/gsq_initialization.py').resolve(),
@@ -61,7 +64,7 @@ def execute(args):
              Path('gptqmodel/quantization/quantizer.py').resolve(),
              Path('gptqmodel/looper/gsq_training_capture.py').resolve(),
              source/'inputs.json', source/'provenance.json',
-             Path(provenance['dense'])/'model.safetensors', Path(provenance['dense'])/'config.json']
+             *model_files, Path(provenance['dense'])/'config.json']
     report = dict(state='loading', commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   source_hashes={str(path): digest(path) for path in files}, inventory=inventory,
                   torch=str(torch.__version__), cuda=torch.version.cuda, seed=7, bits=args.bits, epochs=args.epochs,

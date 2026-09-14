@@ -146,6 +146,9 @@ def main():
     config = GSQTrainingConfig(enabled=args.arm == 'staged', initializer=args.initializer,
                                batch_size=args.batch_size, microbatch_size=args.microbatch_size, epochs=args.epochs,
                                optimizer=args.optimizer, qk_steps=args.qk_steps, seed=args.seed)
+    model_files = sorted(Path(source['dense']).glob('model*.safetensors'))
+    if not model_files:
+        raise FileNotFoundError(f'No model safetensors found under {source["dense"]}')
     files = [Path(__file__), Path('gptqmodel/looper/gsq_training_model.py'),
              Path('gptqmodel/looper/gsq_training_capture.py'), Path('gptqmodel/quantization/gsq_training.py'),
              Path('gptqmodel/quantization/gsq_training_config.py'), Path('scripts/p32_twenty/scorecard.py'),
@@ -154,7 +157,7 @@ def main():
              Path('gptqmodel/utils/calibration.py'),
              Path('gptqmodel/quantization/quantizer.py'), Path('gptqmodel/quantization/config.py'),
              args.inputs/'inputs.json', args.inputs/'provenance.json',
-             Path(source['dense'])/'model.safetensors', Path(source['dense'])/'config.json']
+             *model_files, Path(source['dense'])/'config.json']
     report = dict(state='loading', arm=args.arm, run_id=args.output.name, lifecycle=args.lifecycle,
                   commit=subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
                   argv=sys.argv, source_model=source['dense'], gsq_training=config.to_dict(),
