@@ -27,7 +27,6 @@ class InklingMMQModel(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
     dynamic_expert_index = "n_routed_experts"
-    defuser_auto_detect_moe = True
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
 
     pre_lm_head_norm_module = "model.language_model.norm"

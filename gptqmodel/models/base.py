@@ -342,6 +342,10 @@ class BaseQModel(nn.Module):
     # so `defuser_module_paths` is used to explicitly locate and defuse them.
     defuser_module_paths = None
 
+    # Some encoder/decoder checkpoints tie toward the checkpoint-owned decoder.
+    # Their encoder capture path must materialize without immediately re-tying.
+    turtle_materialize_tie_weights = True
+
     # Multimodal wrappers can reuse the checkpoint rules of their text model.
     hf_conversion_model_type_alias: Optional[str] = None
 
@@ -1223,6 +1227,10 @@ class BaseQModel(nn.Module):
                 embed_quant_config=embed_quant_config,
                 checkpoint=checkpoint,
             )
+
+        # Some definitions need the complete layer stack before they can
+        # restore cross-branch aliases (for example DiffusionGemma's decoder).
+        self.after_quantize()
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
@@ -2245,6 +2253,11 @@ class BaseQModel(nn.Module):
         #return self.offload_to_disk(module=module)
         return move_to(module, device=CPU)
 
+    def after_quantize(self) -> None:
+        """Run model-specific finalization after the complete quantization loop."""
+
+        return None
+
     def _replace_live_submodule(
         self,
         current_submodule: nn.Module,
@@ -3078,6 +3091,7 @@ class BaseQModel(nn.Module):
                     target_submodule=target_submodule,
                     device=device,
                     module_path=module_path,
+                    tie_weights=self.turtle_materialize_tie_weights,
                 )
 
             if role == "forward" and named_module is not None:

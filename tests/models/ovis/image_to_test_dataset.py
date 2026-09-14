@@ -10,6 +10,7 @@ from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
 from gptqmodel.models.definitions.deepseek_ocr2 import DeepSeekOCR2QModel
 from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
+from gptqmodel.models.definitions.diffusion_gemma import DiffusionGemmaQModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.models.definitions.inkling import InklingMMQModel
@@ -235,6 +236,7 @@ def get_calib_dataset(model):
     if (
         isinstance(model, BaseQwen2VLGPTQ)
         or isinstance(model, BaseQwen3VLGPTQ)
+        or isinstance(model, DiffusionGemmaQModel)
         or isinstance(model, MiniCPMOQModel)
         or isinstance(model, MiniCPMVQModel)
         or isinstance(model, MiniCPMV4_6QModel)
