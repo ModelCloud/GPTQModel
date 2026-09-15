@@ -69,7 +69,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
-from ..utils.device_telemetry import with_quantization_device_telemetry
+from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
 from ..utils.logger import QuantizationRegionTimer, setup_logger
@@ -2691,21 +2691,32 @@ class BaseQModel(nn.Module):
         forward_mode: str,
         source_dtype: torch.dtype,
         target_dtype: torch.dtype,
+        reason: str,
+        deferred_quant_source_decode: bool,
     ) -> None:
         """Store one auto-decoder decision so tests can assert the chosen path."""
 
         if named_module.state.get("_auto_module_decoder_event_recorded"):
             return
 
-        self.auto_module_decoder_events.append(
-            {
-                "module": named_module.full_name,
-                "device": str(device),
-                "forward_mode": forward_mode,
-                "source_dtype": str(source_dtype).split(".")[-1],
-                "target_dtype": str(target_dtype).split(".")[-1],
-            }
-        )
+        event = {
+            "module": named_module.full_name,
+            "device": str(device),
+            "forward_mode": forward_mode,
+            "source_dtype": str(source_dtype).split(".")[-1],
+            "target_dtype": str(target_dtype).split(".")[-1],
+            "reason": reason,
+            "deferred_quant_source_decode": deferred_quant_source_decode,
+            "hessian_accumulation_dtype": (
+                (named_module.state.get("auto_module_decoder") or {}).get("runtime_plan") or {}
+            ).get("hessian_accumulation_dtype", "float32"),
+        }
+        self.auto_module_decoder_events.append(event)
+        emit_device_telemetry("floatx_forward_plan", **event)
+        if forward_mode == "native":
+            emit_device_telemetry("floatx_native_forward_used", **event)
+        else:
+            emit_device_telemetry("floatx_bf16_fallback_forward_used", **event)
         named_module.state["_auto_module_decoder_event_recorded"] = True
 
     def _prepare_auto_decoder_forward_module(
@@ -2715,11 +2726,16 @@ class BaseQModel(nn.Module):
         device: torch.device,
         named_module: "NamedModule",
     ) -> nn.Module:
-        """Swap one decoded shell module to an FP8 forward view when supported."""
+        """Build the first-pass floatx view and defer dense BF16 until quantization."""
 
         decoder_plan = named_module.state.get("auto_module_decoder")
         turtle_model = self.turtle_model
         if not isinstance(decoder_plan, dict) or turtle_model is None:
+            return target_submodule
+
+        # A subset may request the same module again before its quantization
+        # hand-off.  Keep the already materialized native/decode forward view.
+        if named_module.state.get("auto_module_decoder_forward_mode") in {"native", "decode"}:
             return target_submodule
 
         checkpoint_tensors = turtle_model.checkpoint_tensors_for_submodule(
@@ -2740,16 +2756,18 @@ class BaseQModel(nn.Module):
 
         target_dtype = decoder_plan.get("target_dtype", target_submodule.weight.dtype)
         forward_policy = str(decoder_plan.get("passthrough_forward_policy", "native")).strip().lower()
-        if not isinstance(named_module.state.get("quant_source_module"), nn.Module):
-            named_module.state["quant_source_module"] = self._build_decoder_quant_source_module(
-                target_submodule,
-                checkpoint_tensors=checkpoint_tensors,
-                target_dtype=target_dtype,
-            )
+        defer_quant_source_decode = (
+            decoder_plan.get("quant_source_decode_policy") == "defer_until_quantization"
+        )
+        # Keep only lightweight shell/metadata references here.  In particular,
+        # do not expand a full BF16 copy before the Hessian collection forward.
+        named_module.state.setdefault("decoder_quant_source_template", target_submodule)
+        named_module.state.setdefault("decoder_checkpoint_tensors", checkpoint_tensors)
 
         forward_mode = "decode"
+        reason = "native_execution_disabled"
         replacement = target_submodule
-        if forward_policy != "decode" and decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=False):
+        if forward_policy != "decode" and decoder_kind == "fp8" and device_supports_dtype(device, weight.dtype, require_validation=True):
             fp8_module = self._build_fp8_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -2759,7 +2777,10 @@ class BaseQModel(nn.Module):
             if fp8_module is not None:
                 replacement = self._replace_live_submodule(target_submodule, fp8_module)
                 forward_mode = "native"
-        elif forward_policy != "decode" and decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=False):
+                reason = "validated_native_fp8"
+            else:
+                reason = "native_fp8_wrapper_unavailable"
+        elif forward_policy != "decode" and decoder_kind == "fp4" and device_supports_native_fp4(device, require_validation=True):
             fp4_module = self._build_fp4_forward_module(
                 target_submodule=target_submodule,
                 checkpoint_tensors=checkpoint_tensors,
@@ -2769,12 +2790,40 @@ class BaseQModel(nn.Module):
             if fp4_module is not None:
                 replacement = self._replace_live_submodule(target_submodule, fp4_module)
                 forward_mode = "native"
+                reason = "validated_native_nvfp4"
+            else:
+                reason = "native_nvfp4_wrapper_unavailable"
+        elif forward_policy != "decode":
+            reason = f"native_{decoder_kind}_unsupported_on_{torch.device(device)}"
         if forward_mode == "decode":
+            quant_source = named_module.state.get("quant_source_module")
+            if not isinstance(quant_source, nn.Module):
+                quant_source = self._build_decoder_quant_source_module(
+                    target_submodule,
+                    checkpoint_tensors=checkpoint_tensors,
+                    target_dtype=target_dtype,
+                )
+                named_module.state["quant_source_module"] = quant_source
             decoded_forward = self._build_decoder_forward_module(
-                quant_source=named_module.state["quant_source_module"],
+                quant_source=quant_source,
                 device=device,
             )
             replacement = self._replace_live_submodule(target_submodule, decoded_forward)
+
+        if forward_mode == "native":
+            log.info(
+                "Floatx forward plan: %s on %s uses native %s for Hessian collection; BF16 decode is deferred until quantization.",
+                named_module.full_name,
+                device,
+                decoder_kind.upper(),
+            )
+        else:
+            log.warning(
+                "Floatx forward fallback: %s on %s uses decoded BF16 (%s); Hessian collection may be slower.",
+                named_module.full_name,
+                device,
+                reason,
+            )
 
         named_module.state["auto_module_decoder_forward_mode"] = forward_mode
         self._record_auto_module_decoder_event(
@@ -2783,6 +2832,8 @@ class BaseQModel(nn.Module):
             forward_mode=forward_mode,
             source_dtype=weight.dtype,
             target_dtype=target_dtype,
+            reason=reason,
+            deferred_quant_source_decode=defer_quant_source_decode and forward_mode == "native",
         )
         return replacement
 
@@ -3051,19 +3102,30 @@ class BaseQModel(nn.Module):
                         "target_dtype",
                         getattr(getattr(target_submodule, "weight", None), "dtype", torch.float16),
                     )
-                    checkpoint_tensors = None
-                    if isinstance(self.turtle_model, LazyTurtle):
+                    checkpoint_tensors = named_module.state.get("decoder_checkpoint_tensors")
+                    quant_source_template = named_module.state.get("decoder_quant_source_template")
+                    if not isinstance(quant_source_template, nn.Module):
+                        quant_source_template = target_submodule
+                    if not isinstance(checkpoint_tensors, dict) and isinstance(self.turtle_model, LazyTurtle):
                         checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
                             target_model=self.model,
-                            target_submodule=target_submodule,
+                            target_submodule=quant_source_template,
                             recurse=False,
                         )
                     quant_source = self._build_decoder_quant_source_module(
-                        target_submodule,
+                        quant_source_template,
                         checkpoint_tensors=checkpoint_tensors,
                         target_dtype=target_dtype,
                     )
                     named_module.state["quant_source_module"] = quant_source
+                    decoder_plan = named_module.state.get("auto_module_decoder") or {}
+                    emit_device_telemetry(
+                        "floatx_deferred_quant_source_decode",
+                        module=getattr(named_module, "full_name", named_module.name),
+                        device=device,
+                        target_dtype=str(target_dtype).split(".")[-1],
+                        source_format=(decoder_plan.get("runtime_plan") or {}).get("source_format", "auto"),
+                    )
 
                 module = self._replace_live_submodule(target_submodule, quant_source)
                 if get_device(module) != device:

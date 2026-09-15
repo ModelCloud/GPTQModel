@@ -47,7 +47,7 @@ from ..quantization.config import (
     BaseQuantizeConfig,
     resolve_quant_format,
 )
-from ..quantization.dtype import device_supports_dtype
+from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4
 from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
@@ -181,6 +181,64 @@ def configure_native_floatx_source_quantization(
         raise EnvironmentError(
             "Native FP8/NVFP4 source quantization requires validated BF16 linear support on the "
             f"quantization device. Device `{target_device}` does not provide it."
+        )
+
+    # GPTQ's Hessian is part of the quantization mathematics, not a property
+    # of the packed source weight.  Preserve the normal FP32 collection path
+    # even when the source forward view is FP8/NVFP4.
+    hessian = getattr(quantize_config, "hessian", None)
+    if hessian is not None and getattr(hessian, "staging_dtype", torch.float32) != torch.float32:
+        log.warning(
+            "Loader: native %s source requires FP32 Hessian collection; overriding hessian.staging_dtype=%s.",
+            source_format.upper(),
+            getattr(hessian, "staging_dtype", None),
+        )
+        hessian.staging_dtype = torch.float32
+
+    native_dtype_supported = False
+    native_dtype_name = None
+    if source_format == "fp8":
+        # NVIDIA ModelOpt FP8 checkpoints use E4M3 for weights.  The exact
+        # tensor dtype is checked again per module before the wrapper is built.
+        native_dtype = getattr(torch, "float8_e4m3fn", None)
+        native_dtype_name = "float8_e4m3fn"
+        native_dtype_supported = bool(
+            native_dtype is not None
+            and device_supports_dtype(target_device, native_dtype, require_validation=True)
+        )
+    else:
+        native_dtype_name = "float4_e2m1fn_x2"
+        native_dtype_supported = device_supports_native_fp4(
+            target_device,
+            require_validation=True,
+        )
+
+    # This is deliberately transient runtime state: it is not part of the
+    # exported W4 config.  A per-module check still guards mixed/odd shards,
+    # but the expensive capability probe happens before model construction.
+    quantize_config._native_floatx_forward_plan = {
+        "source_format": source_format,
+        "device": str(target_device),
+        "bf16_validated": True,
+        "native_dtype": native_dtype_name,
+        "native_validated": native_dtype_supported,
+        "mode": "native" if native_dtype_supported else "decode",
+        "hessian_accumulation_dtype": "float32",
+    }
+
+    if native_dtype_supported:
+        log.info(
+            "Loader: native %s Hessian forward is validated on %s; BF16 decode will be deferred until %s optimization.",
+            source_format.upper(),
+            target_device,
+            quantize_config.method.value.upper(),
+        )
+    else:
+        log.warning(
+            "Loader: native %s forward is unavailable on %s; using decoded BF16 for Hessian collection. "
+            "Quantization remains supported, but calibration may be slower.",
+            source_format.upper(),
+            target_device,
         )
 
     preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
