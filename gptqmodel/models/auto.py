@@ -64,6 +64,7 @@ from ..utils.hub import list_repo_files  # noqa: E402
 from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
+from .loader import native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
 from .definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel  # noqa: E402
 from .definitions.axk2 import AXK2QModel  # noqa: E402
@@ -584,7 +585,15 @@ class GPTQModel:
                 **_get_config_load_kwargs(kwargs),
             )
 
-        if model_cfg is not None and _is_supported_quantization_config(model_cfg):
+        if (
+            quantize_config is not None
+            and model_cfg is not None
+            and native_floatx_source_format(model_cfg, model_local_path=model_id_or_path) is not None
+        ):
+            log.info(
+                "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
+            )
+        elif model_cfg is not None and _is_supported_quantization_config(model_cfg):
             # only if the model is quantized or compatible with gptqmodel should we set is_quantized to true
             is_gptqmodel_quantized = True
         else:
@@ -663,7 +672,14 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             **_get_config_load_kwargs(model_init_kwargs),
         )
-        if _is_supported_quantization_config(config):
+        if (
+            quantize_config is not None
+            and native_floatx_source_format(config, model_local_path=model_id_or_path) is not None
+        ):
+            log.info(
+                "Loader: treating native FP8/NVFP4 checkpoint as a source model for new quantization."
+            )
+        elif _is_supported_quantization_config(config):
             log.warn("Model is already quantized, will use `from_quantized` to load quantized model.\n"
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")

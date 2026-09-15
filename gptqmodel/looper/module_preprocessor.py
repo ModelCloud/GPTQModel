@@ -66,7 +66,16 @@ class ModulePreProcessor(LoopProcessor):
                     "code": preprocessor.code,
                     "source_dtype": preprocessor.source_dtype,
                     "target_dtype": preprocessor.target_dtype,
+                    "passthrough_forward_policy": preprocessor.passthrough_forward_policy,
+                    "passthrough_save_policy": preprocessor.passthrough_save_policy,
+                    # Native is only a pre-quantization forward optimization.
+                    # The source is decoded on the quantization hand-off, never
+                    # during the W4 post-quantization replay.
+                    "quant_source_decode_policy": "defer_until_quantization",
                 }
+                runtime_plan = getattr(self.qcfg, "_native_floatx_forward_plan", None)
+                if isinstance(runtime_plan, dict):
+                    auto_module_decoder_plan["runtime_plan"] = dict(runtime_plan)
                 pipeline.append(auto_module_decoder_plan)
                 continue
             if isinstance(preprocessor, TensorParallelPadderConfig):
@@ -91,6 +100,8 @@ class ModulePreProcessor(LoopProcessor):
         else:
             module.state.pop("auto_module_decoder", None)
             module.state.pop("quant_source_module", None)
+            module.state.pop("decoder_quant_source_template", None)
+            module.state.pop("decoder_checkpoint_tensors", None)
             module.state.pop("auto_module_decoder_forward_mode", None)
             module.state.pop("_auto_module_decoder_event_recorded", None)
 

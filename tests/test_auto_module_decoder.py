@@ -12,15 +12,24 @@ from safetensors.torch import save_file
 from torch import nn
 
 import gptqmodel.models.base as base_module
+import gptqmodel.models.loader as loader_module
+import gptqmodel.quantization.dtype as dtype_module
 from gptqmodel.looper.awq_processor import AWQProcessor
+from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.quantization import AutoModuleDecoderConfig, QuantizeConfig
 from gptqmodel.quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_fp8,
 )
 from gptqmodel.quantization.gptq import GPTQ
+from gptqmodel.utils.device_telemetry import (
+    clear_device_telemetry_records,
+    device_telemetry_scope,
+    get_device_telemetry_records,
+)
 from gptqmodel.utils.structure import LazyTurtle
 
 
@@ -44,8 +53,103 @@ def _write_index(path: Path, shard_name: str, keys: list[str]) -> None:
     )
 
 
+def test_native_floatx_source_configuration_injects_decoder_and_preserves_lazy_weights(monkeypatch):
+    source_config = SimpleNamespace(
+        quantization_config={
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+        }
+    )
+    qcfg = QuantizeConfig(bits=4, offload_to_disk=False)
+
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
+
+    source_format = loader_module.configure_native_floatx_source_quantization(
+        source_config,
+        qcfg,
+        device=torch.device("cuda:0"),
+    )
+
+    assert source_format == "nvfp4"
+    assert qcfg.offload_to_disk is True
+    assert qcfg._native_floatx_forward_plan["source_format"] == "nvfp4"
+    assert qcfg._native_floatx_forward_plan["bf16_validated"] is True
+    decoder = next(item for item in qcfg.preprocessors if isinstance(item, AutoModuleDecoderConfig))
+    assert decoder.target_dtype is torch.bfloat16
+
+
+def test_native_floatx_source_configuration_fails_before_model_load_without_bf16(monkeypatch):
+    source_config = SimpleNamespace(quantization_config={"quant_algo": "FP8"})
+    qcfg = QuantizeConfig(bits=4, offload_to_disk=False)
+
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: False)
+
+    with pytest.raises(EnvironmentError, match="BF16 linear support"):
+        loader_module.configure_native_floatx_source_quantization(
+            source_config,
+            qcfg,
+            device=torch.device("cuda:0"),
+        )
+
+    assert qcfg.offload_to_disk is False
+    assert not any(isinstance(item, AutoModuleDecoderConfig) for item in qcfg.preprocessors)
+
+
+def test_native_floatx_source_configuration_preserves_fp32_hessian(monkeypatch):
+    source_config = SimpleNamespace(quantization_config={"quant_algo": "FP8"})
+    qcfg = QuantizeConfig(bits=4)
+    qcfg.hessian.staging_dtype = torch.bfloat16
+
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
+
+    loader_module.configure_native_floatx_source_quantization(
+        source_config,
+        qcfg,
+        device=torch.device("cuda:0"),
+    )
+
+    assert qcfg.hessian.staging_dtype is torch.float32
+    assert qcfg._native_floatx_forward_plan["hessian_accumulation_dtype"] == "float32"
+
+
+def test_native_floatx_source_format_reads_modelopt_sidecar(tmp_path):
+    (tmp_path / "hf_quant_config.json").write_text(
+        json.dumps({"quantization": {"quant_algo": "FP8"}}),
+        encoding="utf-8",
+    )
+
+    assert loader_module.native_floatx_source_format(
+        SimpleNamespace(quantization_config=None),
+        model_local_path=str(tmp_path),
+    ) == "fp8"
+
+
+def test_auto_module_decoder_config_exposes_validated_policies():
+    config = AutoModuleDecoderConfig(
+        passthrough_forward_policy="NATIVE",
+        passthrough_save_policy="decode",
+    )
+
+    assert config.passthrough_forward_policy == "native"
+    assert config.to_dict()["passthrough_save_policy"] == "decode"
+
+    with pytest.raises(ValueError, match="passthrough_forward_policy"):
+        AutoModuleDecoderConfig(passthrough_forward_policy="invalid")
+
+
+def test_fp4_decoder_has_torch_only_fallback(monkeypatch):
+    monkeypatch.setattr(dtype_module, "unpack_uint4", None)
+    monkeypatch.setattr(dtype_module, "f4_unpacked_to_f32", None)
+    packed = torch.tensor([[0x10, 0x98]], dtype=torch.uint8)
+
+    decoded = dequantize_f4_e2m1(packed, axis=None, target_dtype=torch.bfloat16)
+
+    expected = torch.tensor([[0.0, 0.5, 0.0, -0.5]], dtype=torch.bfloat16)
+    torch.testing.assert_close(decoded, expected)
+
+
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
-def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path, monkeypatch):
+def test_shell_materialize_forward_defers_fp8_quant_source_until_quantization(tmp_path, monkeypatch):
     source_model = _LinearWrapper(16, 8).eval()
     model_dir = tmp_path / "fp8_source"
     model_dir.mkdir()
@@ -93,32 +197,50 @@ def test_shell_materialize_forward_builds_fp8_wrapper_and_quant_source(tmp_path,
         "code": "auto_module_decoder",
         "source_dtype": "auto",
         "target_dtype": torch.bfloat16,
+        "quant_source_decode_policy": "defer_until_quantization",
     }
 
     monkeypatch.setattr(base_module, "device_supports_dtype", lambda *args, **kwargs: True)
 
-    prepared = base_module.BaseQModel.shell_module_materialize(
-        harness,
-        target_submodule=shell_model.linear,
-        device=torch.device("cpu"),
-        role="forward",
-        named_module=named,
-    )
+    clear_device_telemetry_records()
+    with device_telemetry_scope(True):
+        prepared = base_module.BaseQModel.shell_module_materialize(
+            harness,
+            target_submodule=shell_model.linear,
+            device=torch.device("cpu"),
+            role="forward",
+            named_module=named,
+        )
 
     assert isinstance(prepared, TorchFP8Linear)
     assert isinstance(shell_model.linear, TorchFP8Linear)
     assert named.state["auto_module_decoder_forward_mode"] == "native"
-    assert isinstance(named.state["quant_source_module"], nn.Linear)
-    assert named.state["quant_source_module"].weight.device.type == "cpu"
-    assert named.state["quant_source_module"].weight.dtype == torch.bfloat16
+    assert "quant_source_module" not in named.state
     expected = dequantize_fp8(
         weight_fp8,
         scale_inv=scale_inv,
         axis=None,
         target_dtype=torch.bfloat16,
     )
-    torch.testing.assert_close(named.state["quant_source_module"].weight, expected)
+    with device_telemetry_scope(True):
+        quant_source = base_module.BaseQModel.shell_module_materialize(
+            harness,
+            target_submodule=prepared,
+            device=torch.device("cpu"),
+            role="quant_source",
+            named_module=named,
+        )
+    assert isinstance(quant_source, nn.Linear)
+    assert quant_source.weight.device.type == "cpu"
+    assert quant_source.weight.dtype == torch.bfloat16
+    torch.testing.assert_close(quant_source.weight, expected)
     assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
+    assert harness.auto_module_decoder_events[0]["deferred_quant_source_decode"] is True
+    assert {record["event"] for record in get_device_telemetry_records()} == {
+        "floatx_forward_plan",
+        "floatx_native_forward_used",
+        "floatx_deferred_quant_source_decode",
+    }
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -335,13 +457,7 @@ def test_shell_materialize_forward_builds_fp8_wrapper_from_weight_scale_metadata
 
     assert isinstance(prepared, TorchFP8Linear)
     assert named.state["auto_module_decoder_forward_mode"] == "native"
-    expected = dequantize_fp8(
-        weight_fp8,
-        scale=scale,
-        axis=None,
-        target_dtype=torch.bfloat16,
-    )
-    torch.testing.assert_close(named.state["quant_source_module"].weight, expected)
+    assert "quant_source_module" not in named.state
     torch.testing.assert_close(prepared.weight_scale_inv, torch.reciprocal(scale).to(torch.float32))
     assert harness.auto_module_decoder_events[0]["forward_mode"] == "native"
 
@@ -493,8 +609,7 @@ def test_shell_materialize_forward_builds_fp4_wrapper_when_native_supported(tmp_
     )
     assert isinstance(prepared, TorchFP4Linear)
     assert named.state["auto_module_decoder_forward_mode"] == "native"
-    assert isinstance(named.state["quant_source_module"], nn.Linear)
-    torch.testing.assert_close(named.state["quant_source_module"].weight, expected, atol=1e-3, rtol=1e-3)
+    assert "quant_source_module" not in named.state
 
 
 def test_configure_modelopt_runtime_rejects_modelopt_input_activation_quantization():
@@ -517,6 +632,28 @@ def test_configure_modelopt_runtime_rejects_modelopt_input_activation_quantizati
 
     with pytest.raises(ValueError, match="activation quantization"):
         base_module.BaseQModel._configure_modelopt_runtime(harness)
+
+
+def test_configure_modelopt_runtime_allows_native_source_requantization():
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = SimpleNamespace(
+        config=SimpleNamespace(
+            quantization_config={
+                "quant_method": "modelopt",
+                "config_groups": {
+                    "group_0": {
+                        "input_activations": {"num_bits": 4, "type": "float", "dynamic": False},
+                    }
+                },
+            }
+        ),
+        state_dict=lambda: {},
+    )
+    harness.turtle_model = None
+    harness.quantize_config = SimpleNamespace(preprocessors=[AutoModuleDecoderConfig()])
+
+    base_module.BaseQModel._configure_modelopt_runtime(harness)
 
 
 def test_configure_modelopt_runtime_rejects_checkpoint_activation_scale_metadata():
@@ -564,6 +701,42 @@ def test_gptq_prefers_quant_source_module_when_present():
     task = GPTQ(named)
 
     assert task.module is quant_source
+
+
+def test_module_looper_materializes_deferred_native_source_before_gptq():
+    """The native Hessian wrapper must never become the GPTQ source module."""
+
+    forward_module = nn.Linear(8, 4, bias=False)
+    quant_source = nn.Linear(8, 4, bias=False)
+    named = NamedModule(forward_module, name="linear", full_name="linear", layer_index=0)
+    named.state.update(
+        {
+            "auto_module_decoder": {"code": "auto_module_decoder"},
+            "auto_module_decoder_forward_mode": "native",
+        }
+    )
+
+    calls = []
+
+    class _Model:
+        def shell_module_materialize(self, **kwargs):
+            calls.append(kwargs["role"])
+            kwargs["named_module"].state["quant_source_module"] = quant_source
+            return quant_source
+
+    looper = ModuleLooper.__new__(ModuleLooper)
+    looper.gptq_model = _Model()
+    looper._assign_quant_device_for_module = lambda named_module, fallback_device: fallback_device
+
+    ModuleLooper._prepare_named_module_for_quantization(
+        looper,
+        SimpleNamespace(tasks={}),
+        named,
+        torch.device("cpu"),
+    )
+
+    assert calls == ["quant_source"]
+    assert named.module is quant_source
 
 
 def test_awq_resolve_quant_source_module_prefers_dense_source():

@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import shutil
 import time
@@ -38,7 +39,15 @@ from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
-from ..quantization.config import FORMAT, METHOD, MIN_VERSION_WITH_V2, BaseQuantizeConfig, resolve_quant_format
+from ..quantization.config import (
+    FORMAT,
+    METHOD,
+    MIN_VERSION_WITH_V2,
+    AutoModuleDecoderConfig,
+    BaseQuantizeConfig,
+    resolve_quant_format,
+)
+from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4
 from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
@@ -103,6 +112,160 @@ _EXTERNAL_BACKEND_FORMATS = {
         FORMAT.MARLIN,
     },
 }
+
+
+def native_floatx_source_format(
+    config: PretrainedConfig,
+    *,
+    model_local_path: Optional[str] = None,
+) -> Optional[str]:
+    """Return the native floatx weight format declared by a source checkpoint.
+
+    NVIDIA ModelOpt checkpoints have used both ``config.json`` and the separate
+    ``hf_quant_config.json`` sidecar for this metadata.  The latter is needed
+    for older FP8 exports whose model config has no ``quantization_config``.
+    """
+
+    payloads = []
+    quantization_config = getattr(config, "quantization_config", None)
+    if isinstance(quantization_config, dict):
+        payloads.append(quantization_config)
+
+    if model_local_path:
+        sidecar_path = os.path.join(model_local_path, "hf_quant_config.json")
+        try:
+            with open(sidecar_path, "r", encoding="utf-8") as handle:
+                sidecar = json.load(handle)
+            if isinstance(sidecar, dict):
+                payloads.append(sidecar.get("quantization", sidecar))
+        except (OSError, ValueError, TypeError) as exc:
+            log.debug(
+                "Loader: native floatx sidecar `%s` is optional; continuing without it: %s",
+                sidecar_path,
+                exc,
+            )
+
+    algorithms = []
+    for payload in payloads:
+        for key in ("quant_algo", "quant_format", "format"):
+            value = payload.get(key)
+            if isinstance(value, str):
+                algorithms.append(value.lower())
+
+    # Test FP4 first because its name may otherwise be caught by generic
+    # float-format matching in future ModelOpt spellings.
+    if any("fp4" in algorithm for algorithm in algorithms):
+        return "nvfp4"
+    if any("fp8" in algorithm for algorithm in algorithms):
+        return "fp8"
+    return None
+
+
+def configure_native_floatx_source_quantization(
+    config: PretrainedConfig,
+    quantize_config: BaseQuantizeConfig,
+    *,
+    device: Union[DEVICE, torch.device, str],
+    model_local_path: Optional[str] = None,
+) -> Optional[str]:
+    """Configure a native FP8/NVFP4 source for checkpoint-backed W4A16 quantization.
+
+    The shell model remains on ``meta`` while the looper asks the lazy
+    checkpoint reader for one linear module at a time.  That module is decoded
+    into BF16 only for the duration of its GPTQ/AWQ pass, rather than expanding
+    every source weight to BF16 at model load.
+    """
+
+    source_format = native_floatx_source_format(config, model_local_path=model_local_path)
+    if source_format is None or quantize_config.method not in (METHOD.GPTQ, METHOD.AWQ):
+        return None
+
+    target_device = device.to_torch_device() if isinstance(device, DEVICE) else torch.device(device)
+    if not device_supports_dtype(target_device, torch.bfloat16, require_validation=True):
+        raise EnvironmentError(
+            "Native FP8/NVFP4 source quantization requires validated BF16 linear support on the "
+            f"quantization device. Device `{target_device}` does not provide it."
+        )
+
+    # GPTQ's Hessian is part of the quantization mathematics, not a property
+    # of the packed source weight.  Preserve the normal FP32 collection path
+    # even when the source forward view is FP8/NVFP4.
+    hessian = getattr(quantize_config, "hessian", None)
+    if hessian is not None and getattr(hessian, "staging_dtype", torch.float32) != torch.float32:
+        log.warning(
+            "Loader: native %s source requires FP32 Hessian collection; overriding hessian.staging_dtype=%s.",
+            source_format.upper(),
+            getattr(hessian, "staging_dtype", None),
+        )
+        hessian.staging_dtype = torch.float32
+
+    native_dtype_supported = False
+    native_dtype_name = None
+    if source_format == "fp8":
+        # NVIDIA ModelOpt FP8 checkpoints use E4M3 for weights.  The exact
+        # tensor dtype is checked again per module before the wrapper is built.
+        native_dtype = getattr(torch, "float8_e4m3fn", None)
+        native_dtype_name = "float8_e4m3fn"
+        native_dtype_supported = bool(
+            native_dtype is not None
+            and device_supports_dtype(target_device, native_dtype, require_validation=True)
+        )
+    else:
+        native_dtype_name = "float4_e2m1fn_x2"
+        native_dtype_supported = device_supports_native_fp4(
+            target_device,
+            require_validation=True,
+        )
+
+    # This is deliberately transient runtime state: it is not part of the
+    # exported W4 config.  A per-module check still guards mixed/odd shards,
+    # but the expensive capability probe happens before model construction.
+    quantize_config._native_floatx_forward_plan = {
+        "source_format": source_format,
+        "device": str(target_device),
+        "bf16_validated": True,
+        "native_dtype": native_dtype_name,
+        "native_validated": native_dtype_supported,
+        "mode": "native" if native_dtype_supported else "decode",
+        "hessian_accumulation_dtype": "float32",
+    }
+
+    if native_dtype_supported:
+        log.info(
+            "Loader: native %s Hessian forward is validated on %s; BF16 decode will be deferred until %s optimization.",
+            source_format.upper(),
+            target_device,
+            quantize_config.method.value.upper(),
+        )
+    else:
+        log.warning(
+            "Loader: native %s forward is unavailable on %s; using decoded BF16 for Hessian collection. "
+            "Quantization remains supported, but calibration may be slower.",
+            source_format.upper(),
+            target_device,
+        )
+
+    preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
+    if not any(isinstance(preprocessor, AutoModuleDecoderConfig) for preprocessor in preprocessors):
+        preprocessors.append(AutoModuleDecoderConfig(target_dtype=torch.bfloat16))
+        quantize_config.preprocessors = preprocessors
+
+    # Direct HF loading coerces packed floatx weights into the shell dtype and
+    # loses their scale metadata. LazyTurtle preserves the original storage and
+    # is what makes module-local decoding possible.
+    if not quantize_config.offload_to_disk:
+        log.info(
+            "Loader: enabling checkpoint-backed module decoding for native %s source weights.",
+            source_format.upper(),
+        )
+        quantize_config.offload_to_disk = True
+
+    log.info(
+        "Loader: detected native %s source; automatically enabled BF16 auto_module_decoder for %s.",
+        source_format.upper(),
+        quantize_config.method.value.upper(),
+    )
+    return source_format
 
 
 def _validate_external_backend_format(backend: BACKEND, format_code: FORMAT) -> None:
@@ -793,6 +956,21 @@ def ModelLoader(cls):
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
             set_hf_config_dtype(config, dtype)
+
+        # Do this before tokenizer/model construction so an unsupported target
+        # fails immediately rather than after a lengthy checkpoint load.
+        if isinstance(quantize_config, BaseQuantizeConfig):
+            requested_quant_device = (
+                auto_select_device(None, None)
+                if quantize_config.device is None
+                else normalize_device(quantize_config.device)
+            )
+            configure_native_floatx_source_quantization(
+                config,
+                quantize_config,
+                device=requested_quant_device,
+                model_local_path=model_local_path,
+            )
 
         tokenizer = load_hf_tokenizer(
             model_local_path,

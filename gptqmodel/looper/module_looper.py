@@ -1176,7 +1176,12 @@ class ModuleLooper(DeviceAssignmentState):
             fallback_device=fallback_device,
         )
 
-        if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module):
+        decoder_plan = named_module.state.get("auto_module_decoder")
+        needs_deferred_quant_source = (
+            isinstance(decoder_plan, dict)
+            and named_module.state.get("auto_module_decoder_forward_mode") == "native"
+        )
+        if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module) or needs_deferred_quant_source:
             prepared = self.gptq_model.shell_module_materialize(
                 target_submodule=named_module.module,
                 device=target_device,
