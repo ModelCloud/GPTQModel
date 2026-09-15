@@ -25,6 +25,7 @@ from .deepseek_v4 import DeepSeekV4QModel
 from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl import DeepSeekVLQModel
 from .deepseek_vl_v2 import DeepSeekVLV2QModel
+from .diffusion_gemma import DiffusionGemmaQModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel

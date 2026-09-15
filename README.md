@@ -270,6 +270,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
 | DeciLM | `deci` |
 | DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
+| DiffusionGemma | `diffusion_gemma` |
 | Dots1 | `dots1` |
 | Dream | `dream` |
 | ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |

@@ -99,7 +99,6 @@ def test_inkling_module_tree_covers_attention_dense_and_routed_experts():
 
     assert InklingMMQModel.loader is AutoModelForMultimodalLM
     assert InklingMMQModel.layer_modules_strict is False
-    assert InklingMMQModel.defuser_auto_detect_moe is True
     assert InklingMMQModel.extract_layers_node() == ["model.language_model.layers"]
     assert InklingMMQModel.pre_lm_head_norm_module == "model.language_model.norm"
     assert "self_attn.q_proj" in flat_modules

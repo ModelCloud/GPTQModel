@@ -85,6 +85,7 @@ from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
 from .definitions.deepseek_vl_v2 import DeepSeekVLV2QModel  # noqa: E402
+from .definitions.diffusion_gemma import DiffusionGemmaQModel  # noqa: E402
 from .definitions.dots1 import Dots1QModel  # noqa: E402
 from .definitions.dream import DreamQModel  # noqa: E402
 from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
@@ -221,6 +222,7 @@ MODEL_MAP = {
     "apertus1p5": Apertus1p5QModel,
     "apertus1p5_text": Apertus1p5TextQModel,
     "axk2": AXK2QModel,
+    "diffusion_gemma": DiffusionGemmaQModel,
     "dream": DreamQModel,
     "bloom": BloomQModel,
     "brumby": BrumbyQModel,

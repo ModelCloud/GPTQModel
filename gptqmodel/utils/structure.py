@@ -3096,8 +3096,11 @@ def alias_from_turtle_for_submodule(
     device: torch.device,
     non_blocking: bool = False,
     module_path: Optional[str] = None,
+    tie_weights: bool = True,
 ) -> torch.nn.Module:
     # Lazy turtle supports materialization from checkpoint storage into CPU or accelerator devices.
+    # A model may intentionally defer tie_weights() until both a capture branch
+    # and its checkpoint-owner branch have been materialized.
     assert device not in [None, torch.device("meta")]
     if not hasattr(turtle_model, "materialize_submodule"):
         raise TypeError(
@@ -3110,6 +3113,7 @@ def alias_from_turtle_for_submodule(
         device=device,
         non_blocking=non_blocking,
         module_path=module_path,
+        tie_weights=tie_weights,
     )
 
 

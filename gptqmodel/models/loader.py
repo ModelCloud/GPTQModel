@@ -204,6 +204,13 @@ def _convert_model_with_defuser(cls, model, cleanup_original: bool) -> bool:
                 continue
             converted = defuser.convert_model(module, cleanup_original=cleanup_original) or converted
 
+    after_conversion = getattr(cls, "after_defuser_conversion", None)
+    # Model-specific finalizers may also normalize metadata that Defuser does
+    # not own. Run them after the conversion attempt even when the installed
+    # Defuser has no matching registration and reports no structural change.
+    if callable(after_conversion):
+        after_conversion(model)
+
     return converted
 
 

@@ -2041,6 +2041,18 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
 # TODO FIXME! Pre-quantized use AutoModelForCausalLM.from_pretrained() but post-quantized use AutoModelForCausalLM.from_config()
 def autofix_hf_model_config(model: PreTrainedModel, path: str = None):
     if model.can_generate():
+        # Specialized generation implementations (for example DiffusionGemma)
+        # attach a GenerationConfig subclass with structured, model-specific
+        # fields. Reconstructing it as the generic GenerationConfig destroys
+        # those fields (notably sampler_config), and AR-only sanitization is not
+        # applicable to their generate() implementation.
+        if type(model.generation_config) is not GenerationConfig:
+            log.info(
+                "Model: Preserving specialized `generation_config` type `%s`.",
+                type(model.generation_config).__name__,
+            )
+            return
+
         # sync config first
         if path:
             log.info(f"Model: Loaded `generation_config`: {model.generation_config}")
