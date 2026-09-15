@@ -33,7 +33,14 @@ except Exception as exc:
 
 
 def _sglang_unavailable_message() -> str:
-    if SGLANG_VERSION is None and isinstance(SGLANG_IMPORT_ERROR, ModuleNotFoundError):
+    # A missing distribution raises ``ModuleNotFoundError(name="sglang")``.
+    # A missing dependency while importing an installed distribution also
+    # raises ModuleNotFoundError, but its name points at that dependency.
+    missing_sglang = isinstance(SGLANG_IMPORT_ERROR, ModuleNotFoundError) and (
+        getattr(SGLANG_IMPORT_ERROR, "name", None) == "sglang"
+        or "No module named 'sglang'" in str(SGLANG_IMPORT_ERROR)
+    )
+    if SGLANG_VERSION is None and missing_sglang:
         return "SGLang is not installed. Please install via `pip install -U 'sglang[srt]'`."
     if SGLANG_IMPORT_ERROR is not None:
         return (
@@ -45,6 +52,25 @@ def _sglang_unavailable_message() -> str:
 
 SGLANG_INSTALL_HINT = _sglang_unavailable_message()
 _ENGINE_MARKER = "_gptqmodel_uses_sglang_engine"
+_MISSING = object()
+_LEGACY_SGLANG_SAMPLING_PARAMS = frozenset(
+    {
+        "frequency_penalty",
+        "ignore_eos",
+        "json_schema",
+        "max_tokens",
+        "min_p",
+        "min_tokens",
+        "n",
+        "presence_penalty",
+        "regex",
+        "stop",
+        "stop_token_ids",
+        "temperature",
+        "top_k",
+        "top_p",
+    }
+)
 
 
 def _require_sglang() -> None:
@@ -91,7 +117,10 @@ def _normalize_sglang_engine_kwargs(kwargs: Mapping[str, Any], trust_remote_code
             normalized.setdefault("base_gpu_id", device.index)
         normalized["device"] = device.type
     elif isinstance(device, str) and ":" in device:
-        parsed_device = torch.device(device)
+        try:
+            parsed_device = torch.device(device)
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError(f"Invalid SGLang device `{device}`.") from exc
         if parsed_device.index is not None:
             normalized.setdefault("base_gpu_id", parsed_device.index)
         normalized["device"] = parsed_device.type
@@ -111,29 +140,42 @@ def _normalize_sglang_engine_kwargs(kwargs: Mapping[str, Any], trust_remote_code
 def load_model_by_sglang(
     model,
     trust_remote_code,
+    config=None,
     **kwargs,
 ):
     _require_sglang()
 
-    hf_config = AutoConfig.from_pretrained(
-        model,
-        trust_remote_code=trust_remote_code,
-    )
-    runtime_kwargs = _normalize_sglang_engine_kwargs(kwargs, trust_remote_code)
-    engine_factory = getattr(sgl, "Engine", None)
-    if engine_factory is not None:
-        runtime = engine_factory(
-            model_path=model,
-            **runtime_kwargs,
+    # from_quantized already loaded the config with its cache/revision and
+    # offline options. Direct callers still get the historical convenience.
+    hf_config = config
+    if hf_config is None:
+        hf_config = AutoConfig.from_pretrained(
+            model,
+            trust_remote_code=trust_remote_code,
         )
+    runtime_kwargs = _normalize_sglang_engine_kwargs(kwargs, trust_remote_code)
+    engine_factory = getattr(sgl, "Engine", _MISSING)
+    if engine_factory is not _MISSING:
+        try:
+            runtime = engine_factory(
+                model_path=model,
+                **runtime_kwargs,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize SGLang Engine for `{model}`: {exc}") from exc
         setattr(runtime, _ENGINE_MARKER, True)
     else:
-        runtime = sgl.Runtime(
-            model_path=model,
-            **runtime_kwargs,
-        )
+        try:
+            runtime = sgl.Runtime(
+                model_path=model,
+                **runtime_kwargs,
+            )
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize legacy SGLang Runtime for `{model}`: {exc}") from exc
         setattr(runtime, _ENGINE_MARKER, False)
-        sgl.set_default_backend(runtime)
+        set_default_backend = getattr(sgl, "set_default_backend", None)
+        if callable(set_default_backend):
+            set_default_backend(runtime)
     return runtime, hf_config
 
 
@@ -162,6 +204,15 @@ def _normalize_eos_token_ids(value: Any) -> list[int]:
     raise TypeError("`eos_token_id` must be an integer or a sequence of integers.")
 
 
+def _normalize_stop_token_ids(value: Any) -> list[int]:
+    """Normalize SGLang/Hugging Face stop IDs to a de-duplicated list."""
+    try:
+        token_ids = _normalize_eos_token_ids(value)
+    except TypeError as exc:
+        raise TypeError("`stop_token_ids` must be an integer or a sequence of integers.") from exc
+    return list(dict.fromkeys(token_ids))
+
+
 def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     if value is None:
         sampling_params = {}
@@ -170,10 +221,20 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
     else:
         raise TypeError("SGLang `sampling_params` must be a mapping.")
 
-    if kwargs.get("max_length") is not None:
+    # SGLang's Engine API uses the *_new_tokens names. Normalize aliases in
+    # user-provided sampling_params as well as top-level generate kwargs.
+    _move_alias(sampling_params, "max_tokens", "max_new_tokens")
+    _move_alias(sampling_params, "min_tokens", "min_new_tokens")
+    _move_alias(sampling_params, "num_return_sequences", "n")
+
+    if kwargs.get("max_length") is not None or sampling_params.get("max_length") is not None:
         raise ValueError("SGLang does not support argument `max_length`. Please use `max_new_tokens` instead.")
-    if kwargs.get("min_length") is not None:
+    if kwargs.get("min_length") is not None or sampling_params.get("min_length") is not None:
         raise ValueError("SGLang does not support argument `min_length`. Please use `min_new_tokens` instead.")
+    if kwargs.get("max_new_tokens") is not None and kwargs.get("max_tokens") is not None:
+        raise ValueError("Pass only one of SGLang arguments `max_new_tokens` and `max_tokens`.")
+    if kwargs.get("min_new_tokens") is not None and kwargs.get("min_tokens") is not None:
+        raise ValueError("Pass only one of SGLang arguments `min_new_tokens` and `min_tokens`.")
 
     field_map = {
         "num_return_sequences": "n",
@@ -190,7 +251,6 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
         "presence_penalty": "presence_penalty",
         "ignore_eos": "ignore_eos",
         "stop": "stop",
-        "stop_token_ids": "stop_token_ids",
         "regex": "regex",
         "json_schema": "json_schema",
         "sampling_seed": "sampling_seed",
@@ -199,12 +259,18 @@ def _build_sglang_sampling_params(value: Any, kwargs: dict[str, Any]) -> dict[st
         if kwargs.get(source) is not None:
             sampling_params[target] = kwargs[source]
 
+    stop_ids = []
+    if "stop_token_ids" in sampling_params and sampling_params["stop_token_ids"] is not None:
+        stop_ids.extend(_normalize_stop_token_ids(sampling_params["stop_token_ids"]))
+    if kwargs.get("stop_token_ids") is not None:
+        stop_ids.extend(_normalize_stop_token_ids(kwargs["stop_token_ids"]))
     if kwargs.get("eos_token_id") is not None:
-        eos_token_ids = _normalize_eos_token_ids(kwargs["eos_token_id"])
-        existing_stop_ids = sampling_params.get("stop_token_ids") or []
-        sampling_params["stop_token_ids"] = list(dict.fromkeys([*existing_stop_ids, *eos_token_ids]))
+        stop_ids.extend(_normalize_eos_token_ids(kwargs["eos_token_id"]))
+    if stop_ids:
+        sampling_params["stop_token_ids"] = list(dict.fromkeys(stop_ids))
 
-    if kwargs.get("do_sample") is False and "temperature" not in sampling_params:
+    # do_sample=False is deterministic even when an explicit temperature was supplied.
+    if kwargs.get("do_sample") is False:
         sampling_params["temperature"] = 0.0
     return sampling_params
 
@@ -243,6 +309,8 @@ def _apply_attention_mask(token_batch: list[list[int]], attention_mask: Any) -> 
         attention_mask = attention_mask.detach().cpu().tolist()
     elif isinstance(attention_mask, tuple):
         attention_mask = list(attention_mask)
+    if not isinstance(attention_mask, list):
+        raise ValueError("`attention_mask` must be a sequence with the same batch size as `input_ids`.")
     if len(token_batch) == 1 and isinstance(attention_mask, list) and attention_mask:
         if all(not isinstance(item, (list, tuple)) for item in attention_mask):
             attention_mask = [attention_mask]
@@ -257,9 +325,15 @@ def _apply_attention_mask(token_batch: list[list[int]], attention_mask: Any) -> 
             mask = list(mask)
         if not isinstance(mask, list) or len(mask) != len(token_ids):
             raise ValueError("Each `attention_mask` row must have the same length as its token prompt.")
-        filtered = [token_id for token_id, keep in zip(token_ids, mask) if bool(keep)]
-        if not filtered:
+        if any(not isinstance(keep, (bool, int)) or keep not in (0, 1, False, True) for keep in mask):
+            raise TypeError("`attention_mask` values must be boolean or 0/1 integers.")
+        kept_positions = [index for index, keep in enumerate(mask) if bool(keep)]
+        if not kept_positions:
             raise ValueError("`attention_mask` removed every token from a prompt.")
+        first, last = kept_positions[0], kept_positions[-1]
+        if any(not bool(mask[index]) for index in range(first, last + 1)):
+            raise ValueError("`attention_mask` may only remove left or right padding, not tokens inside a prompt.")
+        filtered = token_ids[first : last + 1]
         filtered_batch.append(filtered)
     return filtered_batch
 
@@ -274,10 +348,14 @@ def _normalize_sglang_inputs(prompts: Any, input_ids: Any, attention_mask: Any):
     if isinstance(value, str):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot be a string.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return value, None
     if isinstance(value, (list, tuple)) and value and all(isinstance(item, str) for item in value):
         if input_ids is not None:
             raise TypeError("`input_ids` cannot contain strings.")
+        if attention_mask is not None:
+            raise ValueError("`attention_mask` is only supported with `input_ids`, not text prompts.")
         return list(value), None
 
     token_batch, single_prompt = _coerce_token_batch(value)
@@ -289,7 +367,10 @@ def _extract_sglang_text(result: Any):
     if isinstance(result, Mapping):
         if "text" not in result:
             raise RuntimeError("SGLang generation result is missing the `text` field.")
-        return result["text"]
+        text = result["text"]
+        if not isinstance(text, str):
+            raise TypeError(f"SGLang generation result `text` must be a string, got {type(text)}.")
+        return text
     if isinstance(result, list):
         return [_extract_sglang_text(item) for item in result]
     raise TypeError(f"Unexpected SGLang generation result type: {type(result)}.")
@@ -308,29 +389,32 @@ def _legacy_sglang_sampling_params(sampling_params: Mapping[str, Any]) -> dict[s
     _move_alias(normalized, "min_new_tokens", "min_tokens")
 
     try:
-        supported = set(inspect.signature(sgl.gen).parameters)
+        signature = inspect.signature(sgl.gen)
+        parameters = signature.parameters
+        if any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+            # SGLang's decorated ``gen`` can expose only **kwargs even though
+            # its legacy frontend has a finite set of supported fields.
+            supported = set(_LEGACY_SGLANG_SAMPLING_PARAMS)
+        else:
+            supported = set(parameters)
     except (TypeError, ValueError):
-        supported = {
-            "frequency_penalty",
-            "ignore_eos",
-            "json_schema",
-            "max_tokens",
-            "min_p",
-            "min_tokens",
-            "n",
-            "presence_penalty",
-            "regex",
-            "stop",
-            "stop_token_ids",
-            "temperature",
-            "top_k",
-            "top_p",
-        }
+        supported = set(_LEGACY_SGLANG_SAMPLING_PARAMS)
     unsupported = sorted(set(normalized) - supported)
     if unsupported:
         names = ", ".join(unsupported)
         raise ValueError(f"The legacy SGLang Runtime frontend does not support sampling parameters: {names}.")
     return normalized
+
+
+def _extract_legacy_sglang_result(state: Any) -> Any:
+    # Runtime returns ProgramState, which supports item lookup but is not a Mapping.
+    try:
+        result = state["result"]
+    except (AttributeError, KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("Legacy SGLang generation state is missing the `result` field.") from exc
+    if not isinstance(result, str):
+        raise TypeError(f"Legacy SGLang generation result must be a string, got {type(result)}.")
+    return result
 
 
 @torch.inference_mode()
@@ -384,8 +468,20 @@ def sglang_generate(
 
     if token_prompts is not None:
         raise ValueError("The legacy SGLang Runtime frontend does not support `input_ids`; pass text prompts instead.")
-    state = _legacy_generate.run(
-        prompt=text_prompts,
-        **_legacy_sglang_sampling_params(sampling_params),
-    )
-    return state["result"]
+    if request_kwargs:
+        names = ", ".join(sorted(request_kwargs))
+        raise ValueError(
+            "The legacy SGLang Runtime frontend does not support request parameters: "
+            f"{names}."
+        )
+    legacy_sampling_params = _legacy_sglang_sampling_params(sampling_params)
+    if isinstance(text_prompts, list):
+        # Runtime's historical frontend accepts one prompt per state.
+        return [
+            _extract_legacy_sglang_result(
+                _legacy_generate.run(prompt=prompt, **legacy_sampling_params),
+            )
+            for prompt in text_prompts
+        ]
+    state = _legacy_generate.run(prompt=text_prompts, **legacy_sampling_params)
+    return _extract_legacy_sglang_result(state)

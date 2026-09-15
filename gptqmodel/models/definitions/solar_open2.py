@@ -4,7 +4,17 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import torch
-from transformers.masking_utils import create_causal_mask, create_recurrent_attention_mask
+from transformers.masking_utils import create_causal_mask
+
+try:
+    from transformers.masking_utils import create_recurrent_attention_mask
+except ImportError:
+
+    def create_recurrent_attention_mask(*args, **kwargs):
+        raise ImportError(
+            "Solar Open 2 requires transformers>=5.14; "
+            "create_recurrent_attention_mask is unavailable in this Transformers version."
+        )
 
 from ...utils.attn_mask import normalize_seq_mask
 from ...utils.model import move_to

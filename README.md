@@ -195,7 +195,9 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 
-`GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
+`GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+
+SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
 
 ### Quant Method / Format / Backend Matrix 📋
 
@@ -218,7 +220,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 
 ## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
-* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
+* 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
 * ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. Prism Bonsai `Q1_0_g128` remains accepted as a compatibility alias for the official 128-element `Q1_0` layout.
 * 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.

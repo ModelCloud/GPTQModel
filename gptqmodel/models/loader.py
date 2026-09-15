@@ -176,6 +176,42 @@ def _external_runtime_device_kwargs(
     return runtime_kwargs
 
 
+def _build_sglang_runtime_kwargs(
+    *,
+    kwargs: Dict[str, object],
+    device,
+    requested_device_map: Optional[Union[str, Dict[str, Union[str, int]]]],
+    resolved_dtype,
+) -> Dict[str, object]:
+    """Build SGLang kwargs from the already-resolved quantized-load options.
+
+    ``dtype`` is a from_quantized argument rather than a runtime passthrough
+    option. Put the final value into the kwargs mapping exactly once so the
+    adapter cannot retain its historical hard-coded float16 default or receive
+    duplicate dtype keywords.
+    """
+    runtime_kwargs = dict(kwargs)
+    # The loaded HF config is passed explicitly below and is not an SGLang
+    # ServerArgs field if a caller happened to include it in passthrough kwargs.
+    runtime_kwargs.pop("config", None)
+    for key, value in _external_runtime_device_kwargs(device, requested_device_map).items():
+        runtime_kwargs.setdefault(key, value)
+    runtime_kwargs["dtype"] = resolved_dtype
+    return runtime_kwargs
+
+
+def _normalize_sglang_load_dtype(dtype):
+    """Resolve an explicit SGLang dtype string before the generic auto path."""
+    if not isinstance(dtype, str) or dtype == "auto":
+        return dtype
+
+    name = dtype.removeprefix("torch.")
+    normalized = getattr(torch, name, None)
+    if not isinstance(normalized, torch.dtype):
+        raise ValueError(f"Invalid SGLang dtype string: {dtype}")
+    return normalized
+
+
 def _should_print_module_tree() -> bool:
     """Keep expensive module-tree dumps opt-in during model loading."""
 
@@ -1122,6 +1158,12 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
 
+        if backend == BACKEND.SGLANG:
+            # SGLang accepts string dtype names, but the generic loader's
+            # non-torch dtype path means "auto". Preserve explicit strings by
+            # resolving them before auto_dtype consults the model config.
+            dtype = _normalize_sglang_load_dtype(dtype)
+
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
             dtype = auto_dtype(
@@ -1236,13 +1278,16 @@ def ModelLoader(cls):
             elif backend == BACKEND.SGLANG:
                 from ..utils.sglang import load_model_by_sglang, sglang_generate
 
-                sglang_kwargs = dict(kwargs_without_internal)
-                for key, value in _external_runtime_device_kwargs(device, requested_device_map).items():
-                    sglang_kwargs.setdefault(key, value)
+                sglang_kwargs = _build_sglang_runtime_kwargs(
+                    kwargs=kwargs_without_internal,
+                    device=device,
+                    requested_device_map=requested_device_map,
+                    resolved_dtype=dtype,
+                )
                 model, hf_config = load_model_by_sglang(
                     model=model_local_path,
                     trust_remote_code=trust_remote_code,
-                    dtype=torch.float16,
+                    config=config,
                     **sglang_kwargs,
                 )
                 model.config = hf_config
