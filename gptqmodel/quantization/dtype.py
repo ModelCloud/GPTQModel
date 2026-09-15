@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -77,7 +78,14 @@ _FP8_FORMAT_CODES = {
     getattr(torch, "float8_e5m2fnuz", None): 3,
     getattr(torch, "float8_e8m0fnu", None): 4,
 }
-_TORCH_ONLY_FP4_FALLBACK_LOGGED = False
+
+@lru_cache(maxsize=1)
+def _warn_torch_only_fp4_fallback() -> None:
+    """Log the optional TorchAO fallback cost once per process."""
+    log.warn(
+        "NVFP4 decode: TorchAO is unavailable; using the Torch-only fallback. "
+        "Per-module decoding may be slower. Install torchao for the optimized path."
+    )
 
 
 def available_float8_dtype_names() -> tuple[str, ...]:
@@ -333,13 +341,7 @@ def _dequantize_f4_reference(
         unpacked = unpacked.view(*expanded_shape)
         result = f4_unpacked_to_f32(unpacked).to(target_dtype)
     else:
-        global _TORCH_ONLY_FP4_FALLBACK_LOGGED
-        if not _TORCH_ONLY_FP4_FALLBACK_LOGGED:
-            log.warn(
-                "NVFP4 decode: TorchAO is unavailable; using the Torch-only fallback. "
-                "Per-module decoding may be slower. Install torchao for the optimized path."
-            )
-            _TORCH_ONLY_FP4_FALLBACK_LOGGED = True
+        _warn_torch_only_fp4_fallback()
 
         # NVFP4 packs the first logical value in the low nibble and the
         # second in the high nibble.  E2M1 has the sixteen values below; keep

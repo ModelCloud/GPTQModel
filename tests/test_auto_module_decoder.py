@@ -12,14 +12,11 @@ from safetensors.torch import save_file
 from torch import nn
 
 import gptqmodel.models.base as base_module
+import gptqmodel.models.loader as loader_module
+import gptqmodel.quantization.dtype as dtype_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.module_looper import ModuleLooper
 from gptqmodel.looper.named_module import NamedModule
-import gptqmodel.models.loader as loader_module
-from gptqmodel.models.loader import (
-    configure_native_floatx_source_quantization,
-    native_floatx_source_format,
-)
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.quantization import AutoModuleDecoderConfig, QuantizeConfig
@@ -67,7 +64,7 @@ def test_native_floatx_source_configuration_injects_decoder_and_preserves_lazy_w
 
     monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
 
-    source_format = configure_native_floatx_source_quantization(
+    source_format = loader_module.configure_native_floatx_source_quantization(
         source_config,
         qcfg,
         device=torch.device("cuda:0"),
@@ -88,7 +85,7 @@ def test_native_floatx_source_configuration_fails_before_model_load_without_bf16
     monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: False)
 
     with pytest.raises(EnvironmentError, match="BF16 linear support"):
-        configure_native_floatx_source_quantization(
+        loader_module.configure_native_floatx_source_quantization(
             source_config,
             qcfg,
             device=torch.device("cuda:0"),
@@ -105,7 +102,7 @@ def test_native_floatx_source_configuration_preserves_fp32_hessian(monkeypatch):
 
     monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
 
-    configure_native_floatx_source_quantization(
+    loader_module.configure_native_floatx_source_quantization(
         source_config,
         qcfg,
         device=torch.device("cuda:0"),
@@ -121,7 +118,7 @@ def test_native_floatx_source_format_reads_modelopt_sidecar(tmp_path):
         encoding="utf-8",
     )
 
-    assert native_floatx_source_format(
+    assert loader_module.native_floatx_source_format(
         SimpleNamespace(quantization_config=None),
         model_local_path=str(tmp_path),
     ) == "fp8"
@@ -141,8 +138,6 @@ def test_auto_module_decoder_config_exposes_validated_policies():
 
 
 def test_fp4_decoder_has_torch_only_fallback(monkeypatch):
-    import gptqmodel.quantization.dtype as dtype_module
-
     monkeypatch.setattr(dtype_module, "unpack_uint4", None)
     monkeypatch.setattr(dtype_module, "f4_unpacked_to_f32", None)
     packed = torch.tensor([[0x10, 0x98]], dtype=torch.uint8)

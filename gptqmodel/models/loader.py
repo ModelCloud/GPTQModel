@@ -138,8 +138,12 @@ def native_floatx_source_format(
                 sidecar = json.load(handle)
             if isinstance(sidecar, dict):
                 payloads.append(sidecar.get("quantization", sidecar))
-        except (OSError, ValueError, TypeError):
-            pass
+        except (OSError, ValueError, TypeError) as exc:
+            log.debug(
+                "Loader: native floatx sidecar `%s` is optional; continuing without it: %s",
+                sidecar_path,
+                exc,
+            )
 
     algorithms = []
     for payload in payloads:
