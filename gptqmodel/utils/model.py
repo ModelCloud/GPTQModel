@@ -2544,20 +2544,36 @@ def get_state_dict_for_save(model: nn.Module, offload_root: Optional[str] = None
     return state_dict
 
 
-def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]:
+def _checkpoint_tensor_keys(
+    checkpoint: str | os.PathLike, *, verify_shards: bool = False,
+) -> Optional[set[str]]:
     # accelerate.load_checkpoint_in_model() does not return the checkpoint key
     # set. Read only metadata/index keys here so tie_weights() can distinguish
     # tensors that were truly absent from tensors that were loaded separately.
     checkpoint = os.fspath(checkpoint)
 
+    def index_keys(index_path: str) -> Optional[set[str]]:
+        with open(index_path, encoding="utf-8") as f:
+            index = json.load(f)
+        weight_map = index.get("weight_map", index)
+        if not isinstance(weight_map, dict):
+            return None
+        if not verify_shards:
+            return set(weight_map)
+        keys: set[str] = set()
+        for shard in sorted(set(weight_map.values())):
+            if not isinstance(shard, str) or not shard.endswith(".safetensors"):
+                return None
+            shard_path = os.path.join(os.path.dirname(index_path), shard)
+            if not os.path.isfile(shard_path):
+                return None
+            with safe_open(shard_path, framework="pt", device="cpu") as handler:
+                keys.update(handler.keys())
+        return keys
+
     if os.path.isfile(checkpoint):
         if checkpoint.endswith(".json"):
-            with open(checkpoint, encoding="utf-8") as f:
-                index = json.load(f)
-            weight_map = index.get("weight_map", index)
-            if isinstance(weight_map, dict):
-                return set(weight_map)
-            return None
+            return index_keys(checkpoint)
 
         if checkpoint.endswith(".safetensors"):
             with safe_open(checkpoint, framework="pt", device="cpu") as handler:
@@ -2577,12 +2593,7 @@ def _checkpoint_tensor_keys(checkpoint: str | os.PathLike) -> Optional[set[str]]
     if len(index_files) != 1:
         return None
 
-    with open(os.path.join(checkpoint, index_files[0]), encoding="utf-8") as f:
-        index = json.load(f)
-    weight_map = index.get("weight_map", index)
-    if isinstance(weight_map, dict):
-        return set(weight_map)
-    return None
+    return index_keys(os.path.join(checkpoint, index_files[0]))
 
 
 def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
@@ -2859,6 +2870,28 @@ def check_module_quantized_in_keys(keys, module_name: str) -> bool:
         and (".qweight" in key or ".qzeros" in key or ".scales" in key)
         for key in keys
     )
+
+
+def validate_checkpoint_qweights(
+    model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT,
+) -> None:
+    """Reject GPTQ checkpoints that omit a module's required packed weight."""
+
+    if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        return
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if checkpoint_keys is None:
+        return
+    module_keys = collections.defaultdict(set)
+    for name, module in model.named_modules(remove_duplicate=False):
+        if isinstance(module, GPTQQuantLinear):
+            module_keys[id(module)].add(f"{name}.qweight" if name else "qweight")
+    missing = sorted(min(keys) for keys in module_keys.values() if not keys & checkpoint_keys)
+    if missing:
+        raise ValueError(
+            f"Missing required quantized weights in checkpoint {os.fspath(checkpoint)!r}: "
+            + ", ".join(missing)
+        )
 
 
 def is_embeddings_module_quantized(

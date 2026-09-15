@@ -20,6 +20,7 @@ from .dbrx_converted import DbrxConvertedQModel
 from .decilm import DeciLMQModel
 from .deepseek_v2 import DeepSeekV2QModel
 from .deepseek_v3 import DeepSeekV3QModel
+from .deepseek_v32 import DeepSeekV32QModel
 from .deepseek_v4 import DeepSeekV4QModel
 from .deepseek_ocr2 import DeepSeekOCR2QModel
 from .deepseek_vl import DeepSeekVLQModel
@@ -54,6 +55,7 @@ from .hunyuan_vl import HunYuanVLQModel
 from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
+from .inkling import InklingMMQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .intern_s2_preview import InternS2PreviewQModel
@@ -96,12 +98,16 @@ from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
+from .qwen_drive import QwenDriveQModel
 from .qwen3_vl import Qwen3_VLQModel
 from .qwen4_exp import Qwen4ExpQModel
 from .rw import RwgQModel
+from .solar_open import SolarOpenQModel
+from .solar_open2 import SolarOpen2QModel
 from .spark2_5 import Spark2_5QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
+from .unlimited_ocr import UnlimitedOCRQModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel

@@ -60,6 +60,14 @@ def _bitblas_supports_gptq_case(dtype: torch.dtype) -> bool:
     return valid
 
 
+def _expand_input_dims(shapes: List[Tuple[int, int]]) -> List[int]:
+    return [dim_0 for dim_0, samples in shapes for _ in range(samples)]
+
+
+def test_input_shape_plan_expands_each_sample_once():
+    assert _expand_input_dims([(1, 2), (16, 3)]) == [1, 1, 16, 16, 16]
+
+
 class Data:
     def __init__(self):
         self.m = 1
@@ -152,12 +160,10 @@ class TestKernelOutput(unittest.TestCase):
             data.adapter.post_init(cls.target, device=DEVICE) # trigger adapter weight load from disk
             data.k = data.adapter.lora_A.shape[0]
 
-            for _ in log.pb(cls.random_input_sample_size).title("Generate Random Inputs"):
-                for dim_0, samples in cls.m:
-
-                    for _ in range(samples):
-                        inputs = torch.rand((dim_0, data.k), device=DEVICE, dtype=dtype)
-                        data.x.append(inputs)
+            input_dims = _expand_input_dims(cls.m)
+            for dim_0 in log.pb(input_dims).title("Generate Random Inputs"):
+                data.x.append(torch.rand((dim_0, data.k), device=DEVICE, dtype=dtype))
+            assert len(data.x) == cls.random_input_sample_size
 
             AdapterCache.reset() # allow next load to complete since we are hacking to get consume only 1 lora module
 
@@ -192,8 +198,8 @@ class TestKernelOutput(unittest.TestCase):
                     self._synchronize(DEVICE)
                     module(warmup)
                     self._synchronize(DEVICE)
-                for i in log.pb(self.random_input_sample_size).title("Forward Pass on Random Input"):
-                    sample = data.x[i]
+                assert len(data.x) == self.random_input_sample_size
+                for sample in log.pb(data.x).title("Forward Pass on Random Input"):
                     assert sample.dtype == dtype
 
                     # Direct layer calls bypass accelerate's cross-device routing,

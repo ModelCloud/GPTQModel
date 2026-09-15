@@ -729,7 +729,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
             resolved.state.setdefault("module_tree_expert_group", metadata.expert_group)
             return resolved
 
-        layer_name = self.gptq_model.lm_head if is_lm_head_module else f"{layer_path}.{module_name}"
+        layer_name = module_name if is_lm_head_module else f"{layer_path}.{module_name}"
         named = NamedModule(
             resolved,
             name=module_name,
@@ -748,8 +748,27 @@ class WeightOnlyLooper(DeviceAssignmentState):
         if self.embed_quant_mode is None:
             return []
 
+        input_name = self.gptq_model.get_input_embeddings_name()
+        input_module = self.gptq_model.get_input_embeddings()
+        output_name = self.gptq_model.get_output_embeddings_name()
+        output_module = self.gptq_model.get_output_embeddings()
+        input_weight = getattr(input_module, "weight", None)
+        output_weight = getattr(output_module, "weight", None)
+        if (
+            input_name is not None
+            and output_name is not None
+            and input_name != output_name
+            and input_weight is not None
+            and input_weight is output_weight
+        ):
+            raise NotImplementedError(
+                "Embedding quantization does not support distinct input and output modules with a shared weight "
+                "parameter. Untie the model weights before quantization."
+            )
+
         targets: List[Tuple[str, torch.nn.Module, str]] = []
         seen_names = set()
+        seen_weight_parameters = set()
 
         def _append(name: Optional[str], module: Optional[torch.nn.Module], label: str) -> None:
             if module is None or name is None:
@@ -759,21 +778,25 @@ class WeightOnlyLooper(DeviceAssignmentState):
                     f"This type({type(module)}) of {label} embeddings quantization is currently not supported. "
                     f"SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
                 )
-            if name in seen_names:
+            weight = getattr(module, "weight", None)
+            weight_parameter_id = id(weight) if weight is not None else None
+            if name in seen_names or weight_parameter_id in seen_weight_parameters:
                 return
             seen_names.add(name)
+            if weight_parameter_id is not None:
+                seen_weight_parameters.add(weight_parameter_id)
             targets.append((name, module, label))
 
         if self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             _append(
-                self.gptq_model.get_input_embeddings_name(),
-                self.gptq_model.get_input_embeddings(),
+                input_name,
+                input_module,
                 "input",
             )
         if self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
             _append(
-                self.gptq_model.get_output_embeddings_name(),
-                self.gptq_model.get_output_embeddings(),
+                output_name,
+                output_module,
                 "output",
             )
 
@@ -901,6 +924,93 @@ class WeightOnlyLooper(DeviceAssignmentState):
             module_full_name=module_full_name,
         )
 
+    def _embedding_quant_targets(self) -> List[Tuple[str, torch.nn.Module, str]]:
+        """Return requested embedding modules as name, module, and display label tuples."""
+        if self.embed_quant_mode is None:
+            return []
+
+        input_name = self.gptq_model.get_input_embeddings_name()
+        input_module = self.gptq_model.get_input_embeddings()
+        output_name = self.gptq_model.get_output_embeddings_name()
+        output_module = self.gptq_model.get_output_embeddings()
+        input_weight = getattr(input_module, "weight", None)
+        output_weight = getattr(output_module, "weight", None)
+        if (
+            input_name is not None
+            and output_name is not None
+            and input_name != output_name
+            and input_weight is not None
+            and input_weight is output_weight
+        ):
+            raise NotImplementedError(
+                "Embedding quantization does not support distinct input and output modules with a shared weight "
+                "parameter. Untie the model weights before quantization."
+            )
+
+        targets: List[Tuple[str, torch.nn.Module, str]] = []
+        seen_names = set()
+        seen_weight_parameters = set()
+
+        def append_target(name: Optional[str], module: Optional[torch.nn.Module], label: str) -> None:
+            if module is None or name is None:
+                raise ValueError(f"could not find {label} embeddings module in the model, exit...")
+            if not isinstance(module, tuple(SUPPORTS_MODULE_TYPES)):
+                raise NotImplementedError(
+                    f"This type({type(module)}) of {label} embeddings quantization is currently not supported. "
+                    f"SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
+                )
+            weight = getattr(module, "weight", None)
+            weight_parameter_id = id(weight) if weight is not None else None
+            if name in seen_names or weight_parameter_id in seen_weight_parameters:
+                return
+            seen_names.add(name)
+            if weight_parameter_id is not None:
+                seen_weight_parameters.add(weight_parameter_id)
+            targets.append((name, module, label))
+
+        if self.embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
+            append_target(
+                input_name,
+                input_module,
+                "input",
+            )
+        if self.embed_quant_mode in (QuantizeEmbed.OUTPUT, QuantizeEmbed.BOTH):
+            append_target(
+                output_name,
+                output_module,
+                "output",
+            )
+        return targets
+
+    def _configure_embedding_dynamic_defaults(self, targets: List[Tuple[str, torch.nn.Module, str]]) -> None:
+        if not targets:
+            return
+        quant_config = self.gptq_model.quantize_config
+        if quant_config.dynamic is None:
+            quant_config.dynamic = {}
+        for module_name, _module, _label in targets:
+            if quant_config.dynamic_get(module_name, default=None) is None:
+                quant_config.dynamic[module_name] = {"bits": 8, "group_size": 32}
+
+    def _quantize_embedding_targets(self, targets, *, layer_count: int, pb) -> set[str]:
+        quantized_names: set[str] = set()
+        for target_index, (module_name, module, label) in enumerate(targets):
+            if pb is not None:
+                pb.current_iter_step = target_index
+                pb.title(f"Weight-only quantizing {label} embeddings").subtitle(module_name).draw()
+            named = NamedModule(module, name=module_name, full_name=module_name, layer_index=None)
+            self._finalize_subset_modules(self._quantize_subset_modules([named]))
+            prefixes = set(getattr(self.gptq_model, "_embedding_replacement_prefixes", set()))
+            prefixes.add(module_name)
+            self.gptq_model._embedding_replacement_prefixes = prefixes
+            quantized_names.add(module_name)
+            if pb is not None:
+                pb.current_iter_step = target_index + 1
+                pb.draw()
+        if targets:
+            self.processor.layer_count = layer_count
+        return quantized_names
+
     def loop(self, **kwargs):
         """Quantize layers directly from weights without calibration forwards."""
         quant_config = self.gptq_model.quantize_config
@@ -925,18 +1035,19 @@ class WeightOnlyLooper(DeviceAssignmentState):
 
         self._configure_embedding_dynamic_defaults(embedding_targets)
         embedding_target_names = {name for name, _module, _label in embedding_targets}
-        if not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names:
+        lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
+        if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
             if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
                 tied_keys = self.gptq_model.model._tied_weights_keys
                 for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
+                    if lm_head_name in item:
                         raise NotImplementedError(
                             "quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`."
                         )
 
-            lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
+            lm_head_module = get_module(self.gptq_model.model, key=lm_head_name)
             if lm_head_module is None:
-                raise ValueError(f"could not find layer {self.gptq_model.lm_head} in the model, exit...")
+                raise ValueError(f"could not find layer {lm_head_name} in the model, exit...")
             if not isinstance(lm_head_module, tuple(SUPPORTS_MODULE_TYPES)):
                 raise NotImplementedError(
                     f"This type({type(lm_head_module)}) of lm_head quantization is currently not supported. SUPPORTS_MODULE_TYPES is {SUPPORTS_MODULE_TYPES}"
@@ -996,7 +1107,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
 
         layer_count = len(layers)
         quant_lm_head_in_loop = bool(
-            not embed_only and quant_config.lm_head and self.gptq_model.lm_head not in embedding_target_names
+            not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names
         )
         total_layers = (
             len(embedding_targets)
@@ -1074,8 +1185,8 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 # Transformer blocks and lm_head follow the same weight-only
                 # lifecycle, but lm_head is resolved from the root model.
                 if is_lm_head_module:
-                    module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
-                    subsets = [[self.gptq_model.lm_head]]
+                    module = get_module(self.gptq_model.model, key=lm_head_name)
+                    subsets = [[lm_head_name]]
                 else:
                     module = layers[layer_index]
                     subsets = layer_modules
@@ -1107,7 +1218,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 # transforms so quantization targets the final layer layout.
                 if not self._quant_with_rtn:
                     materialize_model(module)
-                full = find_modules(module, name=self.gptq_model.lm_head if is_lm_head_module else "")
+                full = find_modules(module, name=lm_head_name if is_lm_head_module else "")
                 layer_strategy_modules = None if is_lm_head_module else planning_layer_modules
                 layer_strategy_device_map = self._build_layer_strategy_device_map(
                     full=full,
