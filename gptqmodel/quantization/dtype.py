@@ -15,6 +15,10 @@ import torch
 import torch.nn.functional as F
 
 from ..utils.torch import HAS_NPU
+from ..utils.logger import setup_logger
+
+
+log = setup_logger()
 
 
 try:
@@ -73,6 +77,9 @@ _FP8_FORMAT_CODES = {
     getattr(torch, "float8_e5m2fnuz", None): 3,
     getattr(torch, "float8_e8m0fnu", None): 4,
 }
+_TORCH_ONLY_FP4_FALLBACK_LOGGED = False
+
+
 def available_float8_dtype_names() -> tuple[str, ...]:
     return _FLOAT8_DTYPE_NAMES
 
@@ -326,6 +333,14 @@ def _dequantize_f4_reference(
         unpacked = unpacked.view(*expanded_shape)
         result = f4_unpacked_to_f32(unpacked).to(target_dtype)
     else:
+        global _TORCH_ONLY_FP4_FALLBACK_LOGGED
+        if not _TORCH_ONLY_FP4_FALLBACK_LOGGED:
+            log.warn(
+                "NVFP4 decode: TorchAO is unavailable; using the Torch-only fallback. "
+                "Per-module decoding may be slower. Install torchao for the optimized path."
+            )
+            _TORCH_ONLY_FP4_FALLBACK_LOGGED = True
+
         # NVFP4 packs the first logical value in the low nibble and the
         # second in the high nibble.  E2M1 has the sixteen values below; keep
         # this fallback independent of TorchAO so native ModelOpt checkpoints
