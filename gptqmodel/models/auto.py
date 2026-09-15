@@ -80,6 +80,7 @@ from .definitions.dbrx_converted import DbrxConvertedQModel  # noqa: E402
 from .definitions.decilm import DeciLMQModel  # noqa: E402
 from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
+from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
@@ -122,6 +123,7 @@ from .definitions.hunyuan_vl import HunYuanVLQModel  # noqa: E402
 from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
+from .definitions.inkling import InklingMMQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
@@ -188,11 +190,15 @@ from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
+from .definitions.qwen_drive import QwenDriveQModel  # noqa: E402
 from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
+from .definitions.solar_open import SolarOpenQModel  # noqa: E402
+from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
 from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
+from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
 from .definitions.zamba import ZambaQModel  # noqa: E402
@@ -281,6 +287,7 @@ MODEL_MAP = {
     "mixtral": MixtralQModel,
     "qwen2": Qwen2QModel,
     "qwen3": Qwen3QModel,
+    "qwen_drive": QwenDriveQModel,
     "longllama": LlamaQModel,  # 100% llama clone
     "gemma": LlamaQModel, # 100% llama clone
     "gemma2": Gemma2QModel,
@@ -323,6 +330,7 @@ MODEL_MAP = {
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
     "deepseek_v3": DeepSeekV3QModel,
+    "deepseek_v32": DeepSeekV32QModel,
     "deepseek_v4": DeepSeekV4QModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
@@ -350,6 +358,7 @@ MODEL_MAP = {
     "ovis2_6_next": Ovis2_6_NextQModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
+    "inkling_mm_model": InklingMMQModel,
     "mimo": MimoQModel,
     "mimo_v2": MimoV2QModel,
     "falcon_h1": FalconH1QModel,
@@ -361,6 +370,8 @@ MODEL_MAP = {
     "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
     "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
+    "solar_open": SolarOpenQModel,
+    "solar_open2": SolarOpen2QModel,
     "spark2_5": Spark2_5QModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
@@ -378,6 +389,7 @@ MODEL_MAP = {
     "llada2_moe": LLaDA2MoeQModel,
     "mistral3": Mistral3GPTQ,
     "afmoe": AfMoeQModel,
+    "unlimited-ocr": UnlimitedOCRQModel,
     "voxtral": VoxtralGPTQ,
 }
 

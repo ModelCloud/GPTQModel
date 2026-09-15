@@ -6,6 +6,7 @@
 from ...utils.model import move_to
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
+from ...utils.model import move_to
 
 
 class GlmMoeDsaQModel(BaseQModel):

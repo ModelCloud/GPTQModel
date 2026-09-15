@@ -775,19 +775,77 @@ MarlinFuncPtr get_marlin_packed_prefill_kernel(int config) {
   }
 }
 
-// Conservative auto-routing for projection shapes exercised by the
-// Llama-3.2-1B GPTQ test checkpoint. A zero result means that ordinary Marlin
-// remains faster for that M/K/N combination. Explicit configs are available
-// for tuning other sm_80 models without changing this table.
-int select_marlin_packed_prefill_config(int prob_m, int prob_n, int prob_k) {
-  if (prob_k != 2048) return 0;
+struct packed_prefill_route_t {
+  int prob_k;
+  int prob_n;
+  int min_m;
+  int max_m;
+  int config;
+};
 
-  if (prob_n == 2048) {
-    return prob_m == 2048 ? 1 : 0;
+// Keep these entries in sync with marlin.py; a unit test compares both tables.
+// Offline-tuned on 124-SM sm_80 boards. New promotion requires repeated samples
+// from multiple physical GPUs: either a one-sided 95% confidence lower bound
+// of at least 1.05x or a per-GPU raw margin of at least 1.07x. Dtype has its
+// own table because FP16 and BF16 cross over at different M.
+constexpr packed_prefill_route_t packed_prefill_fp16_routes[] = {
+    {2048, 8192, 1024, 1024, 1},
+    {2048, 8192, 2048, 2048, 2},
+    {4096, 4096, 4097, 8192, 2},
+    {4096, 12288, 1025, 8192, 2},
+    {4096, 14336, 1025, 8192, 2},
+    {12288, 4096, 8000, 8192, 2},
+    {14336, 4096, 6144, 8192, 2},
+    {5120, 8192, 2049, 8192, 2},
+    {5120, 25600, 1024, 8192, 2},
+    {8192, 5120, 4096, 8192, 2},
+    {25600, 5120, 4097, 8192, 2},
+    {8192, 8192, 3072, 8192, 2},
+    {28672, 8192, 3072, 8192, 2},
+};
+
+constexpr packed_prefill_route_t packed_prefill_bf16_routes[] = {
+    {2048, 8192, 1024, 1024, 1},
+    {2048, 8192, 2048, 2048, 2},
+    {4096, 4096, 2049, 4096, 1},
+    {4096, 4096, 4097, 8192, 2},
+    {4096, 12288, 1025, 8192, 2},
+    {4096, 14336, 1025, 8192, 2},
+    {12288, 4096, 6144, 8192, 2},
+    {14336, 4096, 6144, 8192, 2},
+    {5120, 8192, 2049, 8192, 2},
+    {5120, 25600, 1024, 8192, 2},
+    {8192, 5120, 2049, 4096, 1},
+    {8192, 5120, 4097, 8192, 2},
+    {25600, 5120, 4097, 8192, 2},
+    {8192, 8192, 2049, 8192, 2},
+    {28672, 8192, 2049, 8192, 2},
+};
+
+template <typename scalar_t>
+int select_marlin_packed_prefill_config(int prob_m, int prob_n, int prob_k,
+                                        int major_capability,
+                                        int minor_capability, int sms) {
+  if (major_capability != 8 || minor_capability != 0 || sms != 124) return 0;
+
+  packed_prefill_route_t const* routes = nullptr;
+  int route_count = 0;
+  if constexpr (std::is_same<scalar_t, half>::value) {
+    routes = packed_prefill_fp16_routes;
+    route_count = static_cast<int>(sizeof(packed_prefill_fp16_routes) /
+                                   sizeof(packed_prefill_route_t));
+  } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
+    routes = packed_prefill_bf16_routes;
+    route_count = static_cast<int>(sizeof(packed_prefill_bf16_routes) /
+                                   sizeof(packed_prefill_route_t));
   }
-  if (prob_n == 8192) {
-    if (prob_m == 1024) return 1;
-    if (prob_m == 2048) return 2;
+
+  for (int i = 0; i < route_count; ++i) {
+    auto const& route = routes[i];
+    if (route.prob_k == prob_k && route.prob_n == prob_n &&
+        prob_m >= route.min_m && prob_m <= route.max_m) {
+      return route.config;
+    }
   }
   return 0;
 }
@@ -1083,7 +1141,9 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
       is_k_full && group_size == 128 && !is_zp_float && prob_m >= 16) {
     int config = packed_prefill_config;
     if (config == 0) {
-      config = select_marlin_packed_prefill_config(prob_m, prob_n, prob_k);
+      // Nonzero configs are explicit tuning overrides; zero uses the safe table.
+      config = select_marlin_packed_prefill_config<scalar_t>(
+          prob_m, prob_n, prob_k, major_capability, minor_capability, sms);
     }
 
     int thread_m_blocks = -1;

@@ -7,7 +7,11 @@ from torch import nn
 
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear import marlin as marlin_module
-from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gptqmodel.nn_modules.qlinear.marlin import (
+    MarlinLinear,
+    get_marlin_packed_prefill_route_stats,
+    reset_marlin_packed_prefill_route_stats,
+)
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.marlin import marlin_import_exception, marlin_runtime_available, marlin_runtime_error
 
@@ -87,6 +91,7 @@ def _build_padded_marlin(
     device: torch.device,
     in_features: int,
     out_features: int,
+    dtype: torch.dtype = torch.float16,
 ) -> tuple[MarlinLinear, nn.Linear]:
     generator = torch.Generator(device="cpu").manual_seed(898)
     groups = (in_features + GROUP_SIZE - 1) // GROUP_SIZE
@@ -97,7 +102,7 @@ def _build_padded_marlin(
     weight = (codes.to(torch.float32) - 8.0) * scales[:, g_idx.long()]
     bias = 0.02 * torch.randn(out_features, generator=generator)
 
-    dense = nn.Linear(in_features, out_features, bias=True, dtype=torch.float16)
+    dense = nn.Linear(in_features, out_features, bias=True, dtype=dtype)
     dense.weight.data.copy_(weight)
     dense.bias.data.copy_(bias)
 
@@ -110,7 +115,7 @@ def _build_padded_marlin(
         out_features=out_features,
         bias=True,
         pack_dtype=torch.int32,
-        dtype=torch.float16,
+        dtype=dtype,
     )
     packed.pack(dense, scales, zeros, g_idx, workers=1)
 
@@ -123,7 +128,7 @@ def _build_padded_marlin(
         out_features=out_features,
         bias=True,
         pack_dtype=torch.int32,
-        dtype=torch.float16,
+        dtype=dtype,
     )
     for name in ("qweight", "qzeros", "scales", "g_idx", "bias"):
         getattr(marlin, name).data.copy_(getattr(packed, name).data)
@@ -163,3 +168,42 @@ def test_marlin_runtime_padding_matches_dense_and_restores_shape(in_features, ou
     torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
     assert marlin.padded_in_features == ((in_features + GROUP_SIZE - 1) // GROUP_SIZE) * GROUP_SIZE
     assert marlin.padded_out_features == ((out_features + 63) // 64) * 64
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize("rows", (64, 65, 513))
+@pytest.mark.parametrize("seed", (898, 1729))
+def test_marlin_packed_prefill_kn_and_m_tails_match_dense(dtype, rows, seed):
+    if marlin_import_exception is not None:
+        pytest.skip(f"Marlin kernel unavailable: {marlin_import_exception}")
+    if not marlin_runtime_available(dtype):
+        pytest.skip(marlin_runtime_error(dtype))
+
+    device = torch.device("cuda:0")
+    marlin, dense = _build_padded_marlin(device, IN_FEATURES, OUT_FEATURES, dtype)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    inputs = torch.randn((rows, IN_FEATURES), generator=generator, device=device, dtype=dtype)
+    expected = dense(inputs)
+
+    marlin.packed_prefill_min_rows = 1
+    marlin.packed_prefill_stats = True
+    reset_marlin_packed_prefill_route_stats()
+    auto_output = marlin(inputs)
+    auto_stats = get_marlin_packed_prefill_route_stats(reset=True)
+    assert auto_stats["auto_hits"] == 0
+    assert auto_stats["by_reason"] == {"contract_miss": 1}
+
+    marlin.packed_prefill_stats = False
+    marlin.packed_prefill_config = 1
+    packed_output = marlin(inputs)
+    marlin.packed_prefill = False
+    ordinary_output = marlin(inputs)
+
+    assert packed_output.shape == expected.shape
+    assert packed_output.dtype == expected.dtype
+    assert torch.isfinite(packed_output).all()
+    torch.testing.assert_close(auto_output, ordinary_output, rtol=0, atol=0)
+    torch.testing.assert_close(packed_output, ordinary_output, rtol=0.005, atol=0.05)
+    torch.testing.assert_close(packed_output, expected, rtol=0.03, atol=0.125)

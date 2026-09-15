@@ -11,6 +11,7 @@ import textwrap
 import threading
 import time
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
 import pytest

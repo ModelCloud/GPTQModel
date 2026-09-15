@@ -48,6 +48,9 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
 
 ForwardMode = Literal["parallel", "serial"]
+# Catch every BaseException so worker result collection drains all submitted
+# futures before propagating the first error, including custom abort signals.
+_WORKER_FAILURES = (BaseException,)
 
 # Catch every BaseException so worker result collection drains all submitted
 # futures before propagating the first error, including custom abort signals.

@@ -48,11 +48,57 @@ def _marlin_capability_supported(major: int, minor: int) -> bool:
     return major > 7 or (major == 7 and minor >= 5)
 
 
-def _marlin_environment_error() -> str:
+def _marlin_all_visible_devices_supported(min_capability: Tuple[int, int]) -> bool:
+    # PyTorch resolves CUDA_VISIBLE_DEVICES, including UUID and MIG entries.
+    device_count = torch.cuda.device_count()
+    return device_count > 0 and all(
+        torch.cuda.get_device_capability(index) >= min_capability
+        for index in range(device_count)
+    )
+
+
+def marlin_validate_runtime_device(
+        device: torch.device,
+        *,
+        min_capability: Tuple[int, int],
+        backend_name: str,
+) -> Tuple[int, int]:
+    """Validate the CUDA device that owns one Marlin module's weights."""
+    device = torch.device(device)
+    if IS_ROCM:
+        raise ValueError(f"{backend_name} is not supported on ROCm.")
+    if device.type != "cuda":
+        raise ValueError(f"{backend_name} requires CUDA tensors, got `{device}`.")
+
+    try:
+        capability = torch.cuda.get_device_capability(device)
+    except Exception as exc:  # pragma: no cover - depends on the CUDA runtime
+        raise ValueError(
+            f"{backend_name} failed to query CUDA device `{device}` capability: {exc}"
+        ) from exc
+
+    if capability < min_capability:
+        minimum = ".".join(str(part) for part in min_capability)
+        detected = ".".join(str(part) for part in capability)
+        raise ValueError(
+            f"{backend_name} requires compute capability >= {minimum}, "
+            f"got {detected} on `{device}`."
+        )
+    return capability
+
+
+def _marlin_build_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Marlin kernel requires CUDA."
+    return ""
+
+
+def _marlin_environment_error() -> str:
+    build_error = _marlin_build_environment_error()
+    if build_error:
+        return build_error
     try:
         major, minor = torch.cuda.get_device_capability()
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
@@ -62,7 +108,9 @@ def _marlin_environment_error() -> str:
     return ""
 
 
-marlin_import_exception = _marlin_environment_error() or None
+# Import/JIT availability must not freeze the capability of whichever device
+# happened to be current. Exact capability checks run in validate_device().
+marlin_import_exception = _marlin_build_environment_error() or None
 
 
 def _marlin_root() -> Path:
@@ -295,7 +343,7 @@ def _marlin_resolve_op(
 
 
 # Validate marlin support
-def _validate_marlin_device_support() -> bool:
+def _validate_marlin_device_support(device: Optional[torch.device] = None) -> bool:
     """
     Validates if the current device is compatible for Marlin.
     ref: https://github.com/IST-DASLab/marlin?tab=readme-ov-file#requirements
@@ -305,7 +353,12 @@ def _validate_marlin_device_support() -> bool:
     """
     if IS_ROCM or not torch.cuda.is_available():
         return False
-    major, minor = torch.cuda.get_device_capability()
+    target = torch.device(device) if device is not None else None
+    major, minor = (
+        torch.cuda.get_device_capability(target)
+        if target is not None
+        else torch.cuda.get_device_capability()
+    )
     return _marlin_capability_supported(major, minor)
 
 
@@ -654,6 +707,46 @@ def apply_gptq_marlin_linear(
                               packed_prefill_config=packed_prefill_config)
 
     return output if input_is_2d else output.reshape(out_shape)
+
+
+def apply_gptq_marlin_linear_padded(
+        *,
+        tile_padding: Tuple[int, int],
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        wtype: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True,
+        use_atomics: bool = False,
+) -> torch.Tensor:
+    """Pad one tile-misaligned GEMM around the unchanged Marlin hot path."""
+    padded_n, padded_k = tile_padding
+    padded_input = marlin_pad_dim(input, input_size_per_partition, padded_k)
+    output = apply_gptq_marlin_linear(
+        input=padded_input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_zp=weight_zp,
+        g_idx=g_idx,
+        g_idx_sort_indices=g_idx_sort_indices,
+        workspace=workspace,
+        wtype=wtype,
+        output_size_per_partition=padded_n,
+        input_size_per_partition=padded_k,
+        is_k_full=is_k_full,
+        bias=bias,
+        use_fp32_reduce=use_fp32_reduce,
+        use_atomics=use_atomics,
+    )
+    return marlin_unpad_output(output, output_size_per_partition, padded_n)
 
 
 def apply_awq_marlin_linear(

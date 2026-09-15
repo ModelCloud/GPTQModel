@@ -107,7 +107,7 @@ def eora_process_input(
         name: str,
         sample_size: int,
         device: torch.device,
-) -> Tuple[int, torch.Tensor, float]:
+) -> tuple[int, torch.Tensor, float]:
     """Prepare the per-batch covariance contribution required for EoRA.
 
     The contribution remains on the originating device so multi-GPU execution
@@ -133,7 +133,7 @@ def eora_process_input(
     return batch, contribution, scale
 
 
-def merge_eora_segments(segments: Sequence[Tuple[torch.Tensor, float]]) -> torch.Tensor:
+def merge_eora_segments(segments: Sequence[tuple[torch.Tensor, float]]) -> torch.Tensor:
     """Combine pre-aggregated EoRA segments using their scale products.
 
     Each segment entry is a tuple ``(total, scale_product)`` where ``total`` is

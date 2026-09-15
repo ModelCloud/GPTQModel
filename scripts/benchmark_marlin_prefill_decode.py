@@ -12,20 +12,32 @@ import os
 import statistics
 from collections import Counter
 from pathlib import Path
+import sys
 from typing import Any
 
 
 os.environ.setdefault("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
 
-import torch
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-from gptqmodel import BACKEND, GPTQModel
-from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+from gpu_idle_preflight import (  # noqa: E402
+    add_gpu_idle_preflight_args,
+    bootstrap_gpu_idle_preflight,
+    recheck_gpu_exclusivity,
+)
 
 
-DEFAULT_MODEL = (
-    "/monster/data/model/Llama-3.2-1B-Instruct/"
-    "gptq_4bits_10-26_15-59-54_maxlen2048_ns128_descFalse_damp0.005"
+_GPU_IDLE_PREFLIGHT = bootstrap_gpu_idle_preflight() if __name__ == "__main__" else None
+
+import torch  # noqa: E402
+
+from gptqmodel import BACKEND, GPTQModel  # noqa: E402
+from gptqmodel.nn_modules.qlinear.marlin import (  # noqa: E402
+    MarlinLinear,
+    get_marlin_packed_prefill_route_stats,
+    reset_marlin_packed_prefill_route_stats,
 )
 
 
@@ -81,9 +93,15 @@ def _projection_inventory(
     return representatives, counts
 
 
-def _select_route(modules: list[MarlinLinear], enabled: bool) -> None:
+def _select_route(
+    modules: list[MarlinLinear],
+    enabled: bool,
+    *,
+    collect_stats: bool = False,
+) -> None:
     for module in modules:
         module.packed_prefill = enabled
+        module.packed_prefill_stats = collect_stats
 
 
 def _time_projection(
@@ -125,6 +143,8 @@ def _benchmark_layer_ab(
     iterations: int,
     samples: int,
 ) -> tuple[list[dict[str, Any]], dict[str, torch.Tensor]]:
+    if _GPU_IDLE_PREFLIGHT is not None:
+        recheck_gpu_exclusivity(_GPU_IDLE_PREFLIGHT)
     results = []
     candidate_outputs = {}
     with torch.inference_mode():
@@ -217,13 +237,17 @@ def _prefill_decode_once(
     *,
     decode_tokens: int,
     device: torch.device,
-) -> tuple[dict[str, float], list[int]]:
+    collect_route_stats: bool = False,
+) -> tuple[dict[str, Any], list[int]]:
     input_ids = inputs["input_ids"]
     attention_mask = inputs.get("attention_mask", torch.ones_like(input_ids))
     prefill_start = torch.cuda.Event(enable_timing=True)
     prefill_end = torch.cuda.Event(enable_timing=True)
     decode_start = torch.cuda.Event(enable_timing=True)
     decode_end = torch.cuda.Event(enable_timing=True)
+
+    if collect_route_stats:
+        reset_marlin_packed_prefill_route_stats()
 
     with torch.inference_mode():
         prefill_start.record()
@@ -234,6 +258,11 @@ def _prefill_decode_once(
         )
         prefill_end.record()
         prefill_end.synchronize()
+        prefill_route_stats = (
+            get_marlin_packed_prefill_route_stats(reset=True)
+            if collect_route_stats
+            else None
+        )
 
         past_key_values = outputs.past_key_values
         next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
@@ -263,6 +292,11 @@ def _prefill_decode_once(
             next_token = outputs.logits[:, -1:, :].argmax(dim=-1)
         decode_end.record()
         decode_end.synchronize()
+        decode_route_stats = (
+            get_marlin_packed_prefill_route_stats(reset=True)
+            if collect_route_stats
+            else None
+        )
 
     prefill_ms = prefill_start.elapsed_time(prefill_end)
     decode_ms = decode_start.elapsed_time(decode_end)
@@ -272,6 +306,16 @@ def _prefill_decode_once(
             "prefill_tps": input_ids.numel() * 1000.0 / prefill_ms,
             "decode_ms_per_token": decode_ms / decode_tokens,
             "decode_tps": decode_tokens * 1000.0 / decode_ms,
+            **(
+                {
+                    "route_stats": {
+                        "prefill": prefill_route_stats,
+                        "decode": decode_route_stats,
+                    }
+                }
+                if collect_route_stats
+                else {}
+            ),
         },
         generated,
     )
@@ -288,6 +332,8 @@ def _benchmark_end_to_end_ab(
     runs: int,
     device: torch.device,
 ) -> dict[str, Any]:
+    if _GPU_IDLE_PREFLIGHT is not None:
+        recheck_gpu_exclusivity(_GPU_IDLE_PREFLIGHT)
     inputs = _build_prompt(tokenizer, prompt_tokens=prompt_tokens, device=device)
     samples: dict[str, list[dict[str, float]]] = {
         "marlin": [],
@@ -346,6 +392,16 @@ def _benchmark_end_to_end_ab(
         baseline["decode_ms_per_token"] / candidate["decode_ms_per_token"]
         for baseline, candidate in zip(samples["marlin"], samples["packed_prefill"])
     ]
+    # Collect counters outside the timed A/B runs.
+    _select_route(modules, True, collect_stats=True)
+    route_probe, route_probe_token_ids = _prefill_decode_once(
+        model,
+        inputs,
+        decode_tokens=decode_tokens,
+        device=device,
+        collect_route_stats=True,
+    )
+    _select_route(modules, True)
     return {
         "prompt_tokens": prompt_tokens,
         "decode_tokens": decode_tokens,
@@ -361,6 +417,10 @@ def _benchmark_end_to_end_ab(
             for baseline, candidate in zip(samples["marlin"], samples["packed_prefill"])
         ),
         "generated_tokens_equal": (generated["marlin"] == generated["packed_prefill"]),
+        "route_stats": route_probe["route_stats"],
+        "route_probe_generated_tokens_equal": (
+            route_probe_token_ids == generated["packed_prefill"]
+        ),
     }
 
 
@@ -388,7 +448,7 @@ def _compare_tensors(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
+    parser.add_argument("--model", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--dtype", choices=("fp16", "bf16"), default="bf16")
     parser.add_argument(
@@ -414,6 +474,7 @@ def main() -> None:
     parser.add_argument("--tensor-out", type=Path)
     parser.add_argument("--reference-tensors", type=Path)
     parser.add_argument("--json-out", type=Path)
+    add_gpu_idle_preflight_args(parser)
     args = parser.parse_args()
 
     if args.packed_prefill_min_rows is not None:
@@ -454,6 +515,9 @@ def main() -> None:
         "compute_capability": f"{properties.major}.{properties.minor}",
         "multiprocessor_count": properties.multi_processor_count,
         "dtype": args.dtype,
+        "gpu_idle_preflight": (
+            _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
+        ),
         "dispatch_environment": {
             "packed_prefill": os.environ.get(
                 "GPTQMODEL_MARLIN_PACKED_PREFILL",
@@ -476,7 +540,6 @@ def main() -> None:
             f"k{k}_n{n}": count for (k, n), count in sorted(counts.items())
         },
         "packed_qweight_bytes": packed_weight_bytes,
-        "persistent_prefill_cache_bytes": 0,
         "model_allocated_bytes": (
             torch.cuda.memory_allocated(device) - allocated_before_load
         ),

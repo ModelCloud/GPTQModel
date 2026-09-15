@@ -25,6 +25,7 @@ import gptqmodel.utils.grasshopper as grasshopper_utils
 import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
+import gptqmodel.utils.mxfp4_cpu as mxfp4_cpu_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
 import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
@@ -87,6 +88,7 @@ def _install_fake_extensions(monkeypatch):
         "qvq_cpu": _FakeExtension("QVQ CPU"),
         "qvq_window_abi": _FakeExtension("P32 window native ABI"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
+        "mxfp4_cpu": _FakeExtension("mxfp4_cpu"),
         "diagnostic_metrics_cpu": _FakeExtension("diagnostic_metrics_cpu"),
         "diagnostic_metrics_cuda": _FakeExtension("diagnostic_metrics_cuda"),
         "awq": _FakeExtension("AWQ"),
@@ -133,6 +135,7 @@ def _install_fake_extensions(monkeypatch):
     monkeypatch.setattr(qvq_window_abi_utils, "_EXTENSION", fakes["qvq_window_abi"])
     monkeypatch.setattr(qvq_window_abi_utils, "native_window_abi_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
+    monkeypatch.setattr(mxfp4_cpu_utils, "_mxfp4_cpu_extension", lambda: fakes["mxfp4_cpu"])
     monkeypatch.setattr(
         diagnostic_metrics_utils,
         "_DIAGNOSTIC_METRICS_CPU_EXTENSION",
@@ -261,6 +264,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "qvq_cpu": True,
         "qvq_window_abi": True,
         "floatx_cpu": True,
+        "mxfp4_cpu": True,
         "diagnostic_metrics_cpu": True,
         "diagnostic_metrics_cuda": True,
         "awq": True,
