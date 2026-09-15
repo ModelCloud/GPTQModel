@@ -7,6 +7,8 @@ from ..base import BaseQModel
 
 
 class LlamaQModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"llama", "mistral", "gemma", "granite", "olmo2", "stablelm", "cohere", "cohere2"})
+
 
     pre_lm_head_norm_module = "model.norm"
 

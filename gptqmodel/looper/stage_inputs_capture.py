@@ -263,6 +263,11 @@ class StageInputsCapture:
 
             if module is None:
                 continue
+            if (
+                embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
+                and module_name == input_embeddings_name
+            ):
+                continue
 
             if (
                 embed_quant_mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH)
@@ -287,9 +292,9 @@ class StageInputsCapture:
             generate_hook_started = True
             for batch_index, example in enumerate(calibration_data, start=1):
                 if self.gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT:
-                    data_device = self.gptq_model.quantize_config.device
+                    forward_device = self.gptq_model.quantize_config.device
                 else:
-                    data_device = (
+                    forward_device = (
                         self.gptq_model.quantize_config.device
                         if _has_vision_inputs(example)
                         else cur_layer_device
@@ -316,7 +321,7 @@ class StageInputsCapture:
                         self.gptq_model.run_input_capture(
                             example,
                             use_cache=use_cache,
-                            data_device=data_device,
+                            data_device=forward_device,
                         )
                     capture_completed = True
                 except StopForward:

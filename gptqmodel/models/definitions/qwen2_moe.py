@@ -10,6 +10,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 class Qwen2MoeQModel(BaseQModel):
     """Qwen2 MoE definition aligned to the upstream HF forward execution order."""
 
+    shared_input_verified_model_types = frozenset({"qwen2_moe"})
+
     # allow dynamic expert index for layer_modules so we don't need to write out 64 layers here
     # config.num_experts contains the actual expert count used for index
     dynamic_expert_index = "num_experts"

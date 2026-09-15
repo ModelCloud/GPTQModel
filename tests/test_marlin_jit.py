@@ -273,6 +273,240 @@ def test_marlin_capability_checks_allow_sm75_but_reject_sm70(monkeypatch):
     assert marlin_utils._validate_marlin_device_support() is False
 
 
+@pytest.mark.parametrize(
+    "shape,group_size,expected",
+    [
+        ((64, 128), -1, (64, 128)),
+        ((128, 64), -1, (128, 64)),
+        ((200, 288), 32, (256, 320)),
+        ((256, 208), -1, (256, 256)),
+        ((200, 384), 128, (256, 384)),
+    ],
+)
+def test_marlin_padded_nk_selects_minimal_thread_tile(shape, group_size, expected):
+    size_n, size_k = shape
+
+    padded_n, padded_k = marlin_utils.marlin_padded_nk(
+        size_n, size_k, group_size
+    )
+
+    assert (padded_n, padded_k) == expected
+    assert marlin_utils.marlin_is_tile_aligned(padded_n, padded_k)
+    if group_size > 0:
+        assert padded_k % group_size == 0
+
+
+def test_marlin_tile_padding_helpers_preserve_values_and_shapes():
+    size_n, size_k, group_size = 200, 288, 32
+    padded_n, padded_k = marlin_utils.marlin_padded_nk(
+        size_n, size_k, group_size
+    )
+
+    qweight = torch.ones((size_k // 8, size_n), dtype=torch.int32)
+    padded_qweight = marlin_utils.marlin_pad_qweight(
+        qweight, size_n, size_k, padded_n, padded_k
+    )
+    assert padded_qweight.shape == (padded_k // 8, padded_n)
+    assert torch.equal(padded_qweight[: qweight.size(0), :size_n], qweight)
+    assert torch.count_nonzero(padded_qweight[:, size_n:]) == 0
+    assert torch.count_nonzero(padded_qweight[qweight.size(0) :, :]) == 0
+
+    scales = torch.ones((size_k // group_size, size_n))
+    padded_scales = marlin_utils.marlin_pad_scales(
+        scales, size_n, size_k, padded_n, padded_k, group_size
+    )
+    assert padded_scales.shape == (padded_k // group_size, padded_n)
+    assert torch.equal(padded_scales[: scales.size(0), :size_n], scales)
+    assert torch.count_nonzero(padded_scales[:, size_n:]) == 0
+
+
+def test_marlin_quant_linear_validation_limits_tile_padding_to_non_act_order(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    common = {
+        "bits": 4,
+        "group_size": 32,
+        "sym": True,
+        "in_features": 288,
+        "out_features": 200,
+        "pack_dtype": torch.int32,
+        "dtype": torch.float16,
+        "dynamic": None,
+        "device": None,
+        "trainable": False,
+        "adapter": None,
+    }
+
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(
+        **common, desc_act=False
+    )
+    assert ok is True
+    assert err is None
+
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(
+        **common, desc_act=True
+    )
+    assert ok is False
+    assert "activation-order" in str(err)
+
+    channelwise = dict(common, group_size=-1)
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(
+        **channelwise, desc_act=True
+    )
+    assert ok is True
+    assert err is None
+
+    explicit_channelwise = dict(common, group_size=common["in_features"])
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(
+        **explicit_channelwise, desc_act=True
+    )
+    assert ok is True
+    assert err is None
+
+    aligned = dict(common, in_features=64, out_features=128)
+    ok, err = marlin_qlinear_module.MarlinLinear._validate(
+        **aligned, desc_act=True
+    )
+    assert ok is True
+    assert err is None
+
+
+def test_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    kwargs = {
+        "bits": 4,
+        "group_size": 32,
+        "desc_act": False,
+        "sym": True,
+        "in_features": 288,
+        "out_features": 200,
+        "bias": False,
+        "dtype": torch.float16,
+    }
+
+    with pytest.raises(NotImplementedError, match="request GPTQ_MARLIN explicitly"):
+        marlin_qlinear_module.MarlinLinear(**kwargs, backend=BACKEND.AUTO)
+
+    explicit = marlin_qlinear_module.MarlinLinear(
+        **kwargs, backend=BACKEND.GPTQ_MARLIN
+    )
+    assert explicit.in_features == 288
+    assert explicit.out_features == 200
+
+    aligned = marlin_qlinear_module.MarlinLinear(
+        **dict(kwargs, in_features=128, out_features=64),
+        backend=BACKEND.AUTO,
+    )
+    assert aligned.in_features == 128
+    assert aligned.out_features == 64
+
+
+@pytest.mark.parametrize("group_size", [32, -1])
+def test_awq_marlin_tile_padding_helpers_preserve_packed_values(group_size):
+    size_n, size_k, bits = 200, 288, 4
+    padded_n, padded_k = marlin_utils.marlin_padded_nk(
+        size_n, size_k, group_size
+    )
+    pack_factor = 32 // bits
+    groups = size_k // group_size if group_size > 0 else 1
+    padded_groups = padded_k // group_size if group_size > 0 else 1
+
+    qweight = torch.ones((size_k, size_n // pack_factor), dtype=torch.int32)
+    padded_qweight = marlin_utils.marlin_pad_awq_qweight(
+        qweight, size_n, size_k, padded_n, padded_k, bits
+    )
+    assert padded_qweight.shape == (padded_k, padded_n // pack_factor)
+    assert torch.equal(padded_qweight[:size_k, : qweight.size(1)], qweight)
+    assert torch.count_nonzero(padded_qweight[:, qweight.size(1) :]) == 0
+    assert torch.count_nonzero(padded_qweight[size_k:, :]) == 0
+
+    qzeros = torch.ones((groups, size_n // pack_factor), dtype=torch.int32)
+    padded_qzeros = marlin_utils.marlin_pad_awq_qzeros(
+        qzeros,
+        size_n,
+        size_k,
+        padded_n,
+        padded_k,
+        group_size,
+        bits,
+    )
+    assert padded_qzeros.shape == (padded_groups, padded_n // pack_factor)
+    assert torch.equal(padded_qzeros[:groups, : qzeros.size(1)], qzeros)
+    assert torch.count_nonzero(padded_qzeros[:, qzeros.size(1) :]) == 0
+    assert torch.count_nonzero(padded_qzeros[groups:, :]) == 0
+
+
+def test_awq_marlin_quant_linear_validation_accepts_packable_tile_tails(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+    common = {
+        "bits": 4,
+        "group_size": 32,
+        "sym": False,
+        "desc_act": False,
+        "in_features": 288,
+        "out_features": 200,
+        "pack_dtype": torch.int32,
+        "dtype": torch.float16,
+        "dynamic": None,
+        "device": None,
+        "trainable": False,
+        "adapter": None,
+    }
+
+    ok, err = marlin_awq_qlinear_module.AwqMarlinLinear._validate(**common)
+    assert ok is True
+    assert err is None
+
+    ok, err = marlin_awq_qlinear_module.AwqMarlinLinear._validate(
+        **dict(common, out_features=202)
+    )
+    assert ok is False
+    assert "pack_factor=8" in str(err)
+
+    ok, err = marlin_awq_qlinear_module.AwqMarlinLinear._validate(
+        **dict(common, in_features=208, out_features=256, group_size=208)
+    )
+    assert ok is True
+    assert err is None
+
+    ok, err = marlin_awq_qlinear_module.AwqMarlinLinear._validate(
+        **dict(common, bits=8)
+    )
+    assert ok is False
+    assert "enabled only for 4-bit weights" in str(err)
+
+
+def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+    kwargs = {
+        "bits": 4,
+        "group_size": 32,
+        "desc_act": False,
+        "sym": False,
+        "in_features": 288,
+        "out_features": 200,
+        "bias": False,
+        "dtype": torch.float16,
+    }
+
+    with pytest.raises(NotImplementedError, match="request AWQ_MARLIN explicitly"):
+        marlin_awq_qlinear_module.AwqMarlinLinear(
+            **kwargs, backend=BACKEND.AUTO
+        )
+
+    explicit = marlin_awq_qlinear_module.AwqMarlinLinear(
+        **kwargs, backend=BACKEND.AWQ_MARLIN
+    )
+    assert explicit.in_features == 288
+    assert explicit.out_features == 200
+
+    aligned = marlin_awq_qlinear_module.AwqMarlinLinear(
+        **dict(kwargs, in_features=256, out_features=128),
+        backend=BACKEND.AUTO,
+    )
+    assert aligned.in_features == 256
+    assert aligned.out_features == 128
+
+
 def test_marlin_quant_linear_validate_device_allows_sm75(monkeypatch):
     monkeypatch.setattr(marlin_qlinear_module, "IS_ROCM", False)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
@@ -290,13 +524,86 @@ def test_marlin_quant_linear_validate_device_rejects_pre_turing(monkeypatch):
         marlin_qlinear_module.MarlinLinear.validate_device(marlin_qlinear_module.DEVICE.CUDA)
 
 
+def test_awq_marlin_validate_device_uses_torch_visible_ordinals(monkeypatch):
+    queried_devices = []
+
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-first,GPU-second,MIG-third")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+
+    def get_device_capability(device):
+        queried_devices.append(device)
+        return (8, 0)
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_device_capability)
+
+    marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+        marlin_awq_qlinear_module.DEVICE.CUDA
+    )
+
+    assert queried_devices == [0, 1]
+
+
+def test_awq_marlin_validate_device_rejects_no_visible_cuda_device(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
+        marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+            marlin_awq_qlinear_module.DEVICE.CUDA
+        )
+
+
+def test_awq_marlin_validate_device_rejects_pre_ampere(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "IS_ROCM", False)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
+
+    with pytest.raises(NotImplementedError, match="compute capability >= 8.0"):
+        marlin_awq_qlinear_module.AwqMarlinLinear.validate_device(
+            marlin_awq_qlinear_module.DEVICE.CUDA
+        )
+
+
+def test_marlin_runtime_device_validation_queries_explicit_device(monkeypatch):
+    queried_devices = []
+
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+
+    def get_device_capability(device):
+        queried_devices.append(device)
+        return (8, 0)
+
+    monkeypatch.setattr(torch.cuda, "get_device_capability", get_device_capability)
+
+    capability = marlin_utils.marlin_validate_runtime_device(
+        torch.device("cuda:3"),
+        min_capability=(8, 0),
+        backend_name="AWQ Marlin",
+    )
+
+    assert capability == (8, 0)
+    assert queried_devices == [torch.device("cuda:3")]
+
+
+def test_marlin_runtime_device_validation_rejects_cpu(monkeypatch):
+    monkeypatch.setattr(marlin_utils, "IS_ROCM", False)
+
+    with pytest.raises(ValueError, match="requires CUDA tensors"):
+        marlin_utils.marlin_validate_runtime_device(
+            torch.device("cpu"),
+            min_capability=(8, 0),
+            backend_name="AWQ Marlin",
+        )
+
+
 def test_sm75_turing_contract_is_present_in_marlin_sources():
     marlin_root = marlin_utils._marlin_root()
     gemm_cu = (marlin_root / "gptq_marlin.cu").read_text(encoding="utf-8")
     generator_py = (marlin_root / "generate_kernels.py").read_text(encoding="utf-8")
     template_h = (marlin_root / "marlin_template.h").read_text(encoding="utf-8")
     mma_h = (marlin_root / "marlin_mma.h").read_text(encoding="utf-8")
-    loader_py = (Path(marlin_utils.__file__).resolve().parents[1] / "models" / "loader.py").read_text(
+    qlinear_py = (Path(marlin_utils.__file__).resolve().parents[1] / "nn_modules" / "qlinear" / "marlin.py").read_text(
         encoding="utf-8"
     )
 
@@ -308,9 +615,9 @@ def test_sm75_turing_contract_is_present_in_marlin_sources():
     assert "constexpr bool use_fp16_accum" in template_h
     assert "__CUDA_ARCH__ == 750" in mma_h
     assert "m16n8k8.row.col.f16.f16.f16.f16" in mma_h
-    assert "compute capability >= 7.5" in loader_py
-    assert "GPTQ Marlin on Turing (compute capability 7.5)" in loader_py
-    assert "dtype=torch.float16 only." in loader_py
+    assert "compute capability >= 7.5" in qlinear_py
+    assert "GPTQ Marlin on compute capability 7.5" in qlinear_py
+    assert "requires dtype=torch.float16." in qlinear_py
 
 
 def test_stage2_dense_four_bit_tiles_stay_in_sync_between_selector_and_codegen():
@@ -436,6 +743,11 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
     monkeypatch.setattr(
@@ -470,6 +782,281 @@ def test_marlin_quant_linear_post_init_uses_compute_dtype_for_repack(monkeypatch
     module.post_init()
 
     assert captured == {"dtype": torch.bfloat16, "shape": tuple(module.qweight.shape)}
+    assert module._marlin_tile_padding is None
+    assert module.workspace.numel() == 1
+    assert module.g_idx_sort_indices.numel() == 0
+
+    module.to("meta")
+
+    assert module.workspace.device.type == "meta"
+    assert module.g_idx_sort_indices.device.type == "meta"
+
+
+def test_marlin_quant_linear_post_init_pads_weight_scales_and_bias(monkeypatch):
+    captured = {}
+
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.zeros(128, dtype=torch.int32, device=device),
+    )
+
+    def fake_repack(b_q_weight, perm, size_k, size_n, num_bits, dtype=None):
+        captured["qweight"] = (tuple(b_q_weight.shape), size_k, size_n, dtype)
+        pack_factor = 32 // num_bits
+        return torch.zeros(
+            (size_k // 16, size_n * 16 // pack_factor),
+            dtype=torch.int32,
+            device=b_q_weight.device,
+        )
+
+    def fake_permute_scales(scales, size_k, size_n, group_size):
+        captured["scales"] = (
+            tuple(scales.shape),
+            size_k,
+            size_n,
+            group_size,
+        )
+        return scales
+
+    monkeypatch.setattr(marlin_qlinear_module, "gptq_marlin_repack", fake_repack)
+    monkeypatch.setattr(
+        marlin_qlinear_module, "marlin_permute_scales", fake_permute_scales
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=288,
+        out_features=200,
+        bias=True,
+        dtype=torch.float16,
+    )
+    module.post_init()
+
+    assert module.in_features == 288
+    assert module.out_features == 200
+    assert module.qweight.shape == (20, 512)
+    assert module.scales.shape == (10, 256)
+    assert module.bias.shape == (256,)
+    assert module._marlin_tile_padding == (256, 320)
+    assert captured == {
+        "qweight": ((40, 256), 320, 256, torch.float16),
+        "scales": ((10, 256), 320, 256, 32),
+    }
+
+
+def test_apply_gptq_marlin_linear_pads_input_and_slices_output(monkeypatch):
+    captured = {}
+
+    def fake_gemm(a, _c, _weight, bias, _scales, _global_scale,
+                  _weight_zp, _g_idx, _sort_indices, _workspace, _wtype,
+                  **kwargs):
+        captured.update(
+            {
+                "input_shape": tuple(a.shape),
+                "bias_shape": tuple(bias.shape),
+                "size_m": kwargs["size_m"],
+                "size_n": kwargs["size_n"],
+                "size_k": kwargs["size_k"],
+            }
+        )
+        return torch.ones(
+            (kwargs["size_m"], kwargs["size_n"]), dtype=a.dtype
+        )
+
+    monkeypatch.setattr(marlin_utils, "gptq_marlin_gemm", fake_gemm)
+
+    output = marlin_utils.apply_gptq_marlin_linear_padded(
+        input=torch.randn(2, 3, 288, dtype=torch.float16),
+        weight=torch.zeros((20, 512), dtype=torch.int32),
+        weight_scale=torch.ones((10, 256), dtype=torch.float16),
+        weight_zp=torch.empty(0, dtype=torch.int32),
+        g_idx=torch.empty(0, dtype=torch.int32),
+        g_idx_sort_indices=torch.empty(0, dtype=torch.int32),
+        workspace=torch.zeros(128, dtype=torch.int32),
+        wtype=scalar_types.uint4b8,
+        output_size_per_partition=200,
+        input_size_per_partition=288,
+        is_k_full=True,
+        bias=torch.zeros(256, dtype=torch.float16),
+        tile_padding=(256, 320),
+    )
+
+    assert captured == {
+        "input_shape": (6, 320),
+        "bias_shape": (256,),
+        "size_m": 6,
+        "size_n": 256,
+        "size_k": 320,
+    }
+    assert output.shape == (2, 3, 200)
+    assert output.is_contiguous()
+
+
+def test_awq_marlin_quant_linear_post_init_pads_packed_tensors(monkeypatch):
+    captured = {}
+
+    def validate_runtime_device(device, **kwargs):
+        captured["runtime_device"] = device
+        return (8, 0)
+
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module,
+        "marlin_validate_runtime_device",
+        validate_runtime_device,
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module, "marlin_runtime_available", lambda dtype: True
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module, "marlin_runtime_error", lambda dtype: ""
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.zeros(128, dtype=torch.int32, device=device),
+    )
+    def fake_repack(qweight, size_k, size_n, num_bits, dtype=None):
+        captured["qweight"] = (
+            tuple(qweight.shape),
+            size_k,
+            size_n,
+            num_bits,
+            dtype,
+        )
+        pack_factor = 32 // num_bits
+        return torch.zeros(
+            (size_k // 16, size_n * 16 // pack_factor),
+            dtype=torch.int32,
+            device=qweight.device,
+        )
+
+    def fake_permute_scales(scales, size_k, size_n, group_size):
+        captured["scales"] = (
+            tuple(scales.shape),
+            size_k,
+            size_n,
+            group_size,
+        )
+        return scales
+
+    def fake_zero_points(qzeros, size_k, size_n, num_bits):
+        captured["qzeros"] = (
+            tuple(qzeros.shape),
+            size_k,
+            size_n,
+            num_bits,
+        )
+        return qzeros
+
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module, "awq_marlin_repack", fake_repack
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module, "marlin_permute_scales", fake_permute_scales
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module,
+        "awq_to_marlin_zero_points",
+        fake_zero_points,
+    )
+    monkeypatch.setattr(
+        marlin_awq_qlinear_module, "marlin_permute_bias", lambda bias: bias
+    )
+
+    module = marlin_awq_qlinear_module.AwqMarlinLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=False,
+        in_features=288,
+        out_features=200,
+        bias=True,
+        dtype=torch.float16,
+        register_buffers=True,
+    )
+    module.post_init()
+
+    assert module.in_features == 288
+    assert module.out_features == 200
+    assert module.qweight.shape == (20, 512)
+    assert module.scales.shape == (10, 256)
+    assert module.qzeros.shape == (10, 32)
+    assert module.bias.shape == (256,)
+    assert module._marlin_tile_padding == (256, 320)
+    assert captured == {
+        "qweight": ((320, 32), 320, 256, 4, torch.float16),
+        "scales": ((10, 256), 320, 256, 32),
+        "qzeros": ((10, 32), 10, 256, 4),
+        "runtime_device": torch.device("cpu"),
+    }
+    assert {"workspace", "g_idx", "g_idx_sort_indices"} <= module._buffers.keys()
+
+    module.to("meta")
+
+    assert module.workspace.device.type == "meta"
+    assert module.g_idx.device.type == "meta"
+    assert module.g_idx_sort_indices.device.type == "meta"
+
+
+def test_apply_awq_marlin_linear_pads_input_and_slices_output(monkeypatch):
+    captured = {}
+
+    def fake_gemm(a, _c, _weight, bias, _scales, _global_scale,
+                  _weight_zp, _g_idx, _sort_indices, _workspace, _wtype,
+                  **kwargs):
+        captured.update(
+            {
+                "input_shape": tuple(a.shape),
+                "bias_shape": tuple(bias.shape),
+                "size_m": kwargs["size_m"],
+                "size_n": kwargs["size_n"],
+                "size_k": kwargs["size_k"],
+            }
+        )
+        return torch.ones(
+            (kwargs["size_m"], kwargs["size_n"]), dtype=a.dtype
+        )
+
+    monkeypatch.setattr(marlin_utils, "gptq_marlin_gemm", fake_gemm)
+
+    output = marlin_utils.apply_awq_marlin_linear_padded(
+        input=torch.randn(2, 3, 288, dtype=torch.float16),
+        weight=torch.zeros((20, 512), dtype=torch.int32),
+        weight_scale=torch.ones((10, 256), dtype=torch.float16),
+        weight_zp=torch.zeros((10, 32), dtype=torch.int32),
+        g_idx=torch.empty(0, dtype=torch.int32),
+        g_idx_sort_indices=torch.empty(0, dtype=torch.int32),
+        workspace=torch.zeros(128, dtype=torch.int32),
+        quant_type=scalar_types.uint4,
+        output_size_per_partition=200,
+        input_size_per_partition=288,
+        bias=torch.zeros(256, dtype=torch.float16),
+        tile_padding=(256, 320),
+    )
+
+    assert captured == {
+        "input_shape": (6, 320),
+        "bias_shape": (256,),
+        "size_m": 6,
+        "size_n": 256,
+        "size_k": 320,
+    }
+    assert output.shape == (2, 3, 200)
+    assert output.is_contiguous()
 
 
 def test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypatch):
@@ -490,10 +1077,56 @@ def test_marlin_quant_linear_registers_runtime_buffers_in_compute_dtype(monkeypa
     assert module.bias.dtype == torch.bfloat16
 
 
+def test_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypatch):
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+    )
+
+    assert {"workspace", "g_idx_sort_indices"} <= module._buffers.keys()
+    assert {"workspace", "g_idx_sort_indices"} <= module._non_persistent_buffers_set
+    assert "workspace" not in module.state_dict()
+    assert "g_idx_sort_indices" not in module.state_dict()
+
+
+def test_awq_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypatch):
+    monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
+
+    module = marlin_awq_qlinear_module.AwqMarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        in_features=128,
+        out_features=64,
+        bias=False,
+        dtype=torch.float16,
+        register_buffers=True,
+    )
+
+    runtime_names = {"workspace", "g_idx", "g_idx_sort_indices"}
+    assert runtime_names <= module._buffers.keys()
+    assert runtime_names <= module._non_persistent_buffers_set
+    assert runtime_names.isdisjoint(module.state_dict())
+
+
 def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):
     captured = {}
 
     monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
     monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
     monkeypatch.setattr(

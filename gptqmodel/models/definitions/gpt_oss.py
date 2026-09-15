@@ -6,6 +6,8 @@ from ..base import BaseQModel
 
 
 class GPTOSSGPTQ(BaseQModel):
+    shared_input_verified_model_types = frozenset({"gpt_oss"})
+
     dynamic_expert_index = "num_local_experts"
 
     pre_lm_head_norm_module = "model.norm"

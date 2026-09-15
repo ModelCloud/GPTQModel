@@ -4,10 +4,12 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from collections import OrderedDict
+from types import SimpleNamespace
 
 import pytest
 import torch
 
+import gptqmodel.models._const as model_const
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
@@ -24,6 +26,7 @@ from gptqmodel.nn_modules.qlinear.pangolin import PangolinQuantLinear
 from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.nn_modules.qlinear.trilin import AwqTrilinLinear, TrilinLinear

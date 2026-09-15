@@ -34,6 +34,7 @@ def _build_lazy_turtle(
     tmp_path: Path,
     checkpoint_tensors: dict[str, torch.Tensor],
     *,
+    config=None,
     module_tree=None,
     hf_conversion_map_reversed=None,
     target_model: nn.Module | None = None,
@@ -45,7 +46,7 @@ def _build_lazy_turtle(
     _write_checkpoint_index(model_dir, shard_name, checkpoint_tensors)
     turtle = LazyTurtle.maybe_create(
         model_local_path=str(model_dir),
-        config=SimpleNamespace(_experts_implementation=None),
+        config=config or SimpleNamespace(_experts_implementation=None),
         model_init_kwargs={"device_map": {"": "cpu"}},
         module_tree=module_tree,
         hf_conversion_map_reversed=hf_conversion_map_reversed,
@@ -255,8 +256,9 @@ class MergeModulelist:
 
 
 class Concatenate:
-    def __init__(self, dim: int = 0):
+    def __init__(self, dim: int = 0, num_shards_attribute: str | None = None):
         self.dim = dim
+        self.num_shards_attribute = num_shards_attribute
 
 
 class ErnieFuseAndSplitTextVisionExperts:

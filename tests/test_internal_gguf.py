@@ -5,12 +5,44 @@ import numpy as np
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear import gguf as gguf_qlinear
 from gptqmodel.utils import internal_gguf
+
+
+def test_internal_gguf_types_match_current_upstream_assignments():
+    assert int(internal_gguf.GGMLQuantizationType.NVFP4) == 40
+    assert int(internal_gguf.GGMLQuantizationType.Q1_0) == 41
+    assert int(internal_gguf.GGMLQuantizationType.Q2_0) == 42
+    assert internal_gguf.GGMLQuantizationType.Q1_0_g128 is internal_gguf.GGMLQuantizationType.Q1_0
+
+    assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.NVFP4] == (64, 36)
+    assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.Q1_0] == (128, 18)
+    assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.Q2_0] == (64, 18)
 
 
 def _encode_gguf_string(value: str) -> bytes:
     data = value.encode("utf-8")
     return struct.pack("<Q", len(data)) + data
+
+
+def _write_minimal_gguf_tensor(tmp_path, *, tensor_type, shape, data):
+    payload = bytearray()
+    payload.extend(struct.pack("<I", internal_gguf.GGUF_MAGIC))
+    payload.extend(struct.pack("<I", internal_gguf.GGUF_VERSION))
+    payload.extend(struct.pack("<Q", 1))
+    payload.extend(struct.pack("<Q", 0))
+    payload.extend(_encode_gguf_string("weight"))
+    payload.extend(struct.pack("<I", len(shape)))
+    for dimension in shape:
+        payload.extend(struct.pack("<Q", dimension))
+    payload.extend(struct.pack("<I", int(tensor_type)))
+    payload.extend(struct.pack("<Q", 0))
+    payload.extend(b"\x00" * ((-len(payload)) % internal_gguf.GGUF_DEFAULT_ALIGNMENT))
+    payload.extend(data)
+
+    path = tmp_path / f"minimal-{tensor_type.name.lower()}.gguf"
+    path.write_bytes(payload)
+    return path
 
 
 def test_internal_gguf_dequantizes_prism_q1_0_g128_blocks():
@@ -93,25 +125,12 @@ def test_internal_gguf_dequantize_to_torch_returns_exact_prism_tensor():
 
 def test_internal_gguf_reader_reads_minimal_f32_tensor(tmp_path):
     tensor = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
-
-    payload = bytearray()
-    payload.extend(struct.pack("<I", internal_gguf.GGUF_MAGIC))
-    payload.extend(struct.pack("<I", internal_gguf.GGUF_VERSION))
-    payload.extend(struct.pack("<Q", 1))  # tensor_count
-    payload.extend(struct.pack("<Q", 0))  # kv_count
-    payload.extend(_encode_gguf_string("weight"))
-    payload.extend(struct.pack("<I", 2))  # n_dims
-    payload.extend(struct.pack("<Q", 2))
-    payload.extend(struct.pack("<Q", 2))
-    payload.extend(struct.pack("<I", int(internal_gguf.GGMLQuantizationType.F32)))
-    payload.extend(struct.pack("<Q", 0))
-
-    padding = (-len(payload)) % internal_gguf.GGUF_DEFAULT_ALIGNMENT
-    payload.extend(b"\x00" * padding)
-    payload.extend(tensor.tobytes())
-
-    path = tmp_path / "minimal.gguf"
-    path.write_bytes(payload)
+    path = _write_minimal_gguf_tensor(
+        tmp_path,
+        tensor_type=internal_gguf.GGMLQuantizationType.F32,
+        shape=(2, 2),
+        data=tensor.tobytes(),
+    )
 
     reader = internal_gguf.GGUFReader(path)
 
@@ -159,15 +178,15 @@ def test_internal_gguf_inspect_quantized_checkpoint_detects_qwen3_prism_spec():
         tensors=[
             SimpleNamespace(
                 name="blk.0.attn_q.weight",
-                tensor_type=internal_gguf.GGMLQuantizationType.Q1_0_g128,
+                tensor_type=tensor_qtype,
             ),
             SimpleNamespace(
                 name="blk.0.ffn_gate.weight",
-                tensor_type=internal_gguf.GGMLQuantizationType.Q1_0_g128,
+                tensor_type=tensor_qtype,
             ),
             SimpleNamespace(
                 name="output.weight",
-                tensor_type=internal_gguf.GGMLQuantizationType.Q1_0_g128,
+                tensor_type=tensor_qtype,
             ),
         ],
         get_field=lambda key: _Field("qwen3") if key == "general.architecture" else None,
@@ -177,8 +196,8 @@ def test_internal_gguf_inspect_quantized_checkpoint_detects_qwen3_prism_spec():
 
     assert spec is not None
     assert spec.model_type == internal_gguf.MODEL_ARCH_QWEN3
-    assert spec.bits_alias == "q1_0_g128"
-    assert spec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+    assert spec.bits_alias == bits_alias
+    assert spec.tensor_qtype == tensor_qtype
     assert spec.lm_head_quantized is True
 
 

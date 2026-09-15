@@ -87,6 +87,9 @@ def _torch_left_shift(values: t.Tensor, shifts: int | t.Tensor) -> t.Tensor:
 
 class BaseQuantLinear(nn.Module):
     SUPPORTS_BACKENDS: List[BACKEND] = None
+    # False for role-specific modules that are instantiated explicitly and
+    # must never participate in general backend discovery.
+    SUPPORTS_BACKEND_SELECTION: bool = True
     SUPPORTS_METHODS: List[METHOD] = None
     SUPPORTS_FORMATS: Dict[FORMAT, int] = None
     SUPPORTS_BITS: List[int] = None
@@ -248,6 +251,22 @@ class BaseQuantLinear(nn.Module):
         buffers = self.list_buffers()
         return buffers[0].device if buffers else None
 
+    def input_rows(self, x: t.Tensor) -> int:
+        return input_rows(x)
+
+    def empty_linear_output(self, x: t.Tensor) -> t.Tensor:
+        """Return an empty output for any-rank Linear input.
+
+        Applying an adapter is intentional: it preserves the same composition
+        semantics as the non-empty path while still avoiding a native M=0
+        kernel launch. Bias addition has no observable effect for zero elements.
+        """
+
+        out = empty_linear_output(x, self.out_features)
+        if self.adapter is not None:
+            out = self.adapter.apply(x=x, out=out)
+        return out
+
     def smooth_block_size(self) -> int:
         return -1
 
@@ -313,7 +332,7 @@ class BaseQuantLinear(nn.Module):
             pack_dtype:t.dtype=None,
             dtype: Optional[t.dtype]=None,
             dynamic:Optional[dict]=None,
-            device:Optional[DEVICE]=None,
+            device:Optional[DEVICE | t.device]=None,
             trainable:Optional[bool]=None,
             adapter:Optional[Adapter]=None,
             format: Optional[FORMAT] = None,
@@ -370,7 +389,7 @@ class BaseQuantLinear(nn.Module):
         *,
         pack_dtype:t.dtype=None,
         dtype: Optional[t.dtype]=None,
-        device:Optional[DEVICE]=None,
+        device:Optional[DEVICE | t.device]=None,
         trainable:Optional[bool]=None,
         adapter:Optional[Adapter]=None,
     ) -> Tuple[bool, Optional[Exception]]:
@@ -489,7 +508,7 @@ class BaseQuantLinear(nn.Module):
     def validate_device(cls, device: DEVICE):
         assert isinstance(device, DEVICE), f"Unknown device type: {device}"
 
-        if device not in cls.SUPPORTS_DEVICES:
+        if family not in cls.SUPPORTS_DEVICES:
             raise NotImplementedError(f"{cls} only supports `{cls.SUPPORTS_DEVICES}`: actual device = `{device}`")
 
     # use optimize so we don't override native module.compile()
@@ -1056,7 +1075,8 @@ class PackableQuantLinear(GPTQQuantLinear):
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
             ).to(self.dequant_dtype)
-            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
+            zeros = zeros[:, :self.scales.shape[1]]
 
             weight = t.bitwise_and(
                 _torch_right_shift(
@@ -1724,6 +1744,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             # TODO why did we need to clone? at packing, the original weight is no longer used by other processors?
             # W = linear.weight.data.clone()
             W = linear.weight.data
+            is_embedding = isinstance(linear, nn.Embedding)
             if isinstance(linear, _ConvNd):
                 W = W.flatten(1)
             if isinstance(linear, transformers.pytorch_utils.Conv1D):
@@ -1761,7 +1782,7 @@ class PackableQuantLinear(GPTQQuantLinear):
                                dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
                 for row in range(qweight.shape[0]):
-                    for j in range(self.pack_factor):
+                    for j in range(min(self.pack_factor, int_weight.shape[0] - row * self.pack_factor)):
                         qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 i = 0
@@ -1805,7 +1826,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             qzeros = np.zeros((zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / self.pack_dtype_bits)), dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
                 for col in range(qzeros.shape[1]):
-                    for j in range(self.pack_factor):
+                    for j in range(min(self.pack_factor, zeros.shape[1] - col * self.pack_factor)):
                         qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 i = 0

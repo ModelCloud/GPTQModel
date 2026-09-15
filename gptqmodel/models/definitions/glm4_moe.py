@@ -8,6 +8,8 @@ from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
 
 class GLM4MoEGPTQ(BaseQModel):
+    shared_input_verified_model_types = frozenset({"glm4_moe"})
+
     # GLM-4.5-Air MoE Model Structure:
     # Layer 0: Standard MLP (no MoE experts) - handled by ["mlp.down_proj"], ["mlp.gate_proj"], ["mlp.up_proj"]
     # Layers 1-46: MoE with shared_experts and individual experts (128 experts total) - handled by MoE components

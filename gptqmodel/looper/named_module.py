@@ -19,6 +19,7 @@ from ..utils.stream import stream_tensor_dict_to_cpu
 
 log = setup_logger()
 
+
 class NamedModule(torch.nn.Module):
     """Thread-safe wrapper that adds stable names and scratch state to a module."""
 

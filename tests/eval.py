@@ -39,6 +39,7 @@ _ENGINE_OPTION_KEYS = {
     "padding_side",
     "pp_size",
     "quantization",
+    "random_seed",
     "sampling_backend",
     "sampling_params",
     "seed",
@@ -542,7 +543,7 @@ def _build_evalution_runtime(
             "attn_implementation": engine_attn,
             "device": engine_device,
             "device_map": engine_device_map,
-            "seed": engine_options.get("seed"),
+            "seed": _evalution_engine_seed(engine_options),
             "batch_size": batch_size,
             "trust_remote_code": trust_remote_code,
             "padding_side": engine_padding_side,
@@ -570,7 +571,7 @@ def _build_evalution_runtime(
             attn_implementation=engine_attn,
             device=engine_device,
             device_map=engine_device_map,
-            seed=engine_options.get("seed"),
+            seed=_evalution_engine_seed(engine_options),
             batch_size=batch_size,
             trust_remote_code=trust_remote_code,
             padding_side=engine_padding_side,
@@ -747,6 +748,15 @@ def _split_evalution_model_args(model_args: Dict[str, Any]) -> tuple[dict[str, A
             load_kwargs[key] = value
     return engine_options, load_kwargs
 
+
+def _evalution_engine_seed(engine_options: Mapping[str, Any]) -> int | None:
+    """Resolve Evalution's canonical seed while accepting the legacy random_seed alias."""
+    seed = engine_options.get("seed")
+    if seed is None:
+        seed = engine_options.get("random_seed")
+    return int(seed) if seed is not None else None
+
+
 def _build_sglang_engine_kwargs(
         *,
         engine_options: Dict[str, Any],
@@ -765,7 +775,7 @@ def _build_sglang_engine_kwargs(
     return {
         "dtype": engine_dtype,
         "device": engine_options.get("device"),
-        "seed": engine_options.get("seed"),
+        "seed": _evalution_engine_seed(engine_options),
         "trust_remote_code": trust_remote_code,
         "padding_side": padding_side,
         "base_url": engine_options.get("base_url"),

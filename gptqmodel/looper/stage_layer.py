@@ -282,7 +282,16 @@ def _replay_layer_outputs(
     replay_plan: Optional[SubsetPlan] = None,
     is_embeddings_module: Optional[bool] = None,
 ) -> List[List[torch.Tensor]]:
-    """Replay one layer forward to materialize outputs for the next layer."""
+    """Replay one layer forward to materialize outputs for the next layer.
+
+    ``force_serial`` overrides data-parallel forward dispatch. Resume replay
+    passes this: running several batches through torch's dynamo-instrumented
+    eval-frame hook from multiple free-threading workers at once has been
+    observed to livelock (every worker spins inside the frame-evaluation
+    shim, 0% GPU util, no forward progress). Serial execution avoids the
+    concurrent entry entirely; the cost is bounded to the handful of already-
+    quantized layers being fast-forwarded, not the run's main quant loop.
+    """
 
     if is_embeddings_module is None:
         is_embeddings_module = is_lm_head_module
@@ -296,7 +305,7 @@ def _replay_layer_outputs(
         replay_source = f"{layer_descriptor}:untouched"
         replay_modules = None
         replay_forward_device_map: Dict[str, torch.device] = {}
-        replay_force_serial = False
+        replay_force_serial = force_serial
         replay_preserve_module_devices = False
         replay_install_device_overrides = False
     else:
@@ -503,6 +512,9 @@ def run_layer_stage(
     layer_index_offset = 1 if quant_input_embeddings else 0
 
     for layer_index in pb:
+        if layer_index < getattr(looper, "start_step", 0):
+            continue
+        boundary_futures = []
         # Iterate over every transformer layer (plus lm_head when enabled) as
         # progress-bar controlled units of work.
         layer_start = time.perf_counter()
@@ -572,6 +584,8 @@ def run_layer_stage(
                 layer_count - 1 if not is_embeddings_module else layer_title.replace("Quantizing ", ""),
                 layer_title,
             )
+        # Emit diagnostics even when live progress logs are disabled.
+        _log_cuda_memory_diagnostics(log, layer_index if not is_lm_head_module else "lm_head")
 
         if not looper.gptq_model.should_quantize_layer(
             module,
@@ -1077,6 +1091,7 @@ def run_layer_stage(
                         layer_idx,
                     )
                     finalize_futures.append((future, index, module_label, process, layer_idx))
+                    boundary_futures.append(future)
 
                 finalize_futures_snapshot = list(finalize_futures)
 
@@ -1121,7 +1136,13 @@ def run_layer_stage(
                     layer_idx_for_callback,
                     drain_label,
                 ):
-                    """Consumes finalize futures, updating progress and surfacing errors."""
+                    """Consumes finalize futures, updating progress and surfacing errors.
+
+                    Returns True only if every future completed successfully —
+                    callers must not treat the layer as a durable resume point
+                    otherwise (a failed future means some module was never
+                    packed/offloaded even though the loop-stop is deferred).
+                    """
 
                     drain_start = time.perf_counter()
                     completed_local = 0
@@ -1140,7 +1161,7 @@ def run_layer_stage(
                             except BaseException as exc:
                                 log.exception("Submodule finalize task raised an exception")
                                 looper._request_loop_stop(exc)
-                                return
+                                return False
 
                             if isinstance(result, finalize_progress_cls):
                                 module_label = result.module_label
@@ -1188,6 +1209,7 @@ def run_layer_stage(
                             submodule_finalized=True,
                             raise_in_place=False,
                         )
+                    return True
 
                 if finalize_futures_snapshot:
                     drain_sync = _should_drain_finalize_futures_synchronously(
@@ -1247,6 +1269,17 @@ def run_layer_stage(
                             "StageLayer: layer=%s complete (no finalize tasks)",
                             layer_index if not is_lm_head_module else "lm_head",
                         )
+
+        if extensions:
+            step_kind = (
+                "input_embeddings" if is_input_embeddings_module else
+                "output_embeddings" if is_output_embeddings_module else
+                "lm_head" if is_lm_head_module else "layer"
+            )
+            extensions.publish(
+                LoopStep(step_kind, model_layer_index, layer_name or step_kind),
+                boundary_futures,
+            )
 
         if durable_progress_logs:
             log.info(

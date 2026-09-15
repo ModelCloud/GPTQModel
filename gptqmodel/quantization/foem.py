@@ -16,7 +16,7 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
-from ..utils.torch import TORCH_GTE_28, torch_compile, torch_sync
+from ..utils.torch import torch_sync
 from .gptq import GPTQ
 
 

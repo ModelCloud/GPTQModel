@@ -278,7 +278,7 @@ _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
     8: "q8_0",
 }
 _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
-    "q1_0": 1.5,
+    "q1_0": 1.125,
     "q1_0_g128": 1.125,
     "q2_0": 2.125,
     "q4_0": 4.5,
@@ -1263,6 +1263,17 @@ class TensorParallelPadderConfig(BasePreProcessorConfig):
     code: ClassVar[str] = PreProcessorCode.TENSOR_PARALLEL_PADDER.value
 
 
+@dataclass(frozen=True)
+class TelemetryConfig:
+    """Diagnostic controls; never part of quantization/resume algorithm identity."""
+
+    device: bool = False
+
+    def __post_init__(self):
+        if type(self.device) is not bool:
+            raise ValueError("TelemetryConfig.device must be a boolean")
+
+
 @dataclass
 class AnalysisConfig(BasePreProcessorConfig):
     """Configure granular pre-quantization error analysis for the active quant config."""
@@ -1683,6 +1694,9 @@ class HessianConfig:
 
     def __post_init__(self):
         """Validate Hessian chunking and staging dtype settings."""
+
+        if not isinstance(self.dedup_shared_inputs, bool):
+            raise ValueError("HessianConfig: `dedup_shared_inputs` must be a bool.")
 
         if self.chunk_size is not None:
             if not isinstance(self.chunk_size, int):
@@ -3309,6 +3323,8 @@ def _normalize_bitsandbytes_kwargs(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _resolve_export_quant_method(format_value: FORMAT, fallback_method: Optional[METHOD] = None) -> METHOD:
+    if format_value == FORMAT.BITBLAS and fallback_method == METHOD.AWQ:
+        return METHOD.AWQ
     if format_value == FORMAT.MARLIN:
         if fallback_method is None:
             raise ValueError("QuantizeConfig: FORMAT.MARLIN requires an explicit quantization method family.")
@@ -4107,6 +4123,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         meta_payload = normalized.get(META_FIELD)
         meta_field_map = {
+            "telemetry": "telemetry",
             "fallback": "fallback",
             "hessian": "hessian",
             "gptaq": "gptaq",
@@ -4271,6 +4288,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             }
 
         meta_payload["offload_to_disk"] = self.offload_to_disk
+        meta_payload["telemetry"] = asdict(self.telemetry)
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode

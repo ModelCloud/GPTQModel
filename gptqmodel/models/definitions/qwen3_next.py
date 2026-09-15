@@ -16,6 +16,8 @@ class Qwen3NextGPTQ(BaseQModel):
       - Dynamic expert indexing via config.num_experts
     """
 
+    shared_input_verified_model_types = frozenset({"qwen3_next"})
+
     layer_modules_strict = False
 
     pre_lm_head_norm_module = "model.norm"

@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from accelerate import disk_offload
 from safetensors import safe_open
 from safetensors.torch import save_file
 from torch import nn
@@ -387,6 +388,121 @@ def test_offload_to_disk_writes_single_dat_file(tmp_path):
     undo_offload_to_disk(model.linear, delete_offload_folders=False)
     for name, tensor in model.linear.state_dict().items():
         torch.testing.assert_close(tensor, original_state[name])
+
+
+def _offloaded_save_model(
+    tmp_path: Path, offload_format: str, dtype: torch.dtype = torch.float32
+) -> tuple[nn.Module, Path, dict[str, torch.Tensor]]:
+    model = nn.Module()
+    model.block = nn.Module()
+    tensor = torch.arange(24, dtype=dtype).reshape(4, 6) / 8
+    model.block.weight = nn.Parameter(tensor.clone())
+    model.block.register_buffer("scale", tensor.clone())
+    original_state = _clone_state_dict(model)
+    offload_root = tmp_path / "offload_root"
+
+    if offload_format == "safetensors":
+        offload_to_disk(
+            module=model.block, model=model, disk_path=str(offload_root), force=True
+        )
+    else:
+        module_dir = offload_root / "block"
+        disk_offload(
+            model.block,
+            offload_dir=str(module_dir),
+            offload_buffers=True,
+            execution_device=torch.device("cpu"),
+        )
+        if offload_format == "dat-filename":
+            index_path = module_dir / "index.json"
+            index = json.loads(index_path.read_text())
+            for name, entry in index.items():
+                entry["filename"] = f"{name}.dat"
+            index_path.write_text(json.dumps(index))
+
+    return model, offload_root, original_state
+
+
+@pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
+@pytest.mark.parametrize("leaf", ["weight", "scale"])
+@pytest.mark.parametrize(
+    "stored_dtype, shell_dtype",
+    [(torch.float32, torch.float16), (torch.float16, torch.bfloat16)],
+)
+def test_offload_save_rejects_dtype_mismatch(
+    tmp_path: Path,
+    offload_format: str,
+    leaf: str,
+    stored_dtype: torch.dtype,
+    shell_dtype: torch.dtype,
+) -> None:
+    model, offload_root, _ = _offloaded_save_model(
+        tmp_path, offload_format, dtype=stored_dtype
+    )
+    tensor = getattr(model.block, leaf).to(shell_dtype)
+    if leaf == "weight":
+        tensor = nn.Parameter(tensor)
+    setattr(model.block, leaf, tensor)
+
+    with pytest.raises(ValueError, match="Offload metadata mismatch") as exc:
+        get_state_dict_for_save(model, offload_root=str(offload_root))
+
+    message = str(exc.value)
+    assert f"block.{leaf}" in message
+    assert str(offload_root / "block" / "index.json") in message
+    assert f"expected dtype {shell_dtype}" in message
+    assert f"found dtype {stored_dtype}" in message
+
+
+@pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
+@pytest.mark.parametrize("leaf", ["weight", "scale"])
+def test_offload_save_rejects_shape_mismatch(
+    tmp_path: Path, offload_format: str, leaf: str
+) -> None:
+    model, offload_root, _ = _offloaded_save_model(tmp_path, offload_format)
+    tensor = getattr(model.block, leaf).reshape(6, 4)
+    if leaf == "weight":
+        tensor = nn.Parameter(tensor)
+    setattr(model.block, leaf, tensor)
+
+    with pytest.raises(ValueError, match="Offload metadata mismatch") as exc:
+        get_state_dict_for_save(model, offload_root=str(offload_root))
+
+    message = str(exc.value)
+    assert f"block.{leaf}" in message
+    assert str(offload_root / "block" / "index.json") in message
+    assert "shape (6, 4)" in message
+    assert "shape (4, 6)" in message
+
+
+@pytest.mark.parametrize("offload_format", ["safetensors", "dat", "dat-filename"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_offload_save_preserves_matching_metadata(
+    tmp_path: Path, offload_format: str, dtype: torch.dtype
+) -> None:
+    model, offload_root, original_state = _offloaded_save_model(
+        tmp_path, offload_format, dtype=dtype
+    )
+    model.output = nn.Module()
+    model.output.weight = model.block.weight
+
+    state_dict = get_state_dict_for_save(model, offload_root=str(offload_root))
+    assert set(state_dict) == set(original_state)
+    assert model.output.weight is model.block.weight
+    save_dir = tmp_path / "saved"
+    save_dir.mkdir()
+    expected_files, _, _ = streaming_state_dict_to_shards(
+        state_dict,
+        save_dir=str(save_dir),
+        model_base_name="model",
+        single_file_name="model.safetensors",
+        metadata={},
+        max_shard_size=None,
+    )
+
+    with safe_open(str(save_dir / expected_files[0]), framework="pt") as handler:
+        for name, tensor in original_state.items():
+            torch.testing.assert_close(handler.get_tensor(name), tensor)
 
 
 def test_alias_all_from_turtle_restores_direct_meta_tensors_with_offloaded_children(tmp_path):

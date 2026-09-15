@@ -6,6 +6,8 @@ from ..base import BaseQModel
 
 
 class Phi3QModel(BaseQModel):
+    shared_input_verified_model_types = frozenset({"phi3"})
+
     pre_lm_head_norm_module = "model.norm"
 
     module_tree = [

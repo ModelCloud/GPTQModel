@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
 from gptqmodel.models.definitions.cohere_compass import CohereCompassQModel
@@ -202,6 +203,9 @@ def prepare_unlimited_ocr_dataset(n_sample: int = 20) -> list[dict]:
 
 
 def get_calib_dataset(model):
+    if isinstance(model, Apertus1p5QModel):
+        return prepare_dataset(format_apertus_v15_dataset, n_sample=20)
+
     if isinstance(model, OvisQModel):
         return prepare_dataset(format_ovis_dataset, n_sample=20)
 
@@ -223,6 +227,7 @@ def get_calib_dataset(model):
         or isinstance(model, InternS1QModel)
         or isinstance(model, InternS2PreviewQModel)
         or isinstance(model, InternVLChatQModel)
+        or isinstance(model, InklingMMQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
         or isinstance(model, MuseGlimmerQModel)

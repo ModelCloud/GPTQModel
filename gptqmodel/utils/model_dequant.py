@@ -91,17 +91,86 @@ def list_safetensor_files(model_path: Path) -> Tuple[list, Optional[dict]]:
 
 
 def finalize_for_save(tensor: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
-    """Cast to ``target_dtype`` when floating point and move to CPU with optimal layout."""
+    """Cast floating tensors, move to CPU, and use safetensors-compatible layout."""
 
     if torch.is_floating_point(tensor):
         tensor = tensor.to(target_dtype)
 
-    tensor_cpu = tensor.to("cpu")
-    if tensor_cpu.ndim == 4:
-        tensor_cpu = tensor_cpu.contiguous(memory_format=torch.channels_last)
-    else:
-        tensor_cpu = tensor_cpu.contiguous()
-    return tensor_cpu
+    # safetensors requires the default contiguous layout.  A 4D channels-last
+    # tensor is contiguous in PyTorch's channels-last sense, but save_file()
+    # rejects it because Tensor.is_contiguous() is false without a memory-format
+    # argument.
+    return tensor.to("cpu").contiguous()
+
+
+def _is_deepseek_v4_routed_expert_weight_key(
+    key: str,
+    *,
+    model_type: Optional[str],
+) -> bool:
+    return (
+        str(model_type or "").strip().lower() == "deepseek_v4"
+        and key.endswith(".weight")
+        and ".experts." in key
+        and ".shared_experts." not in key
+    )
+
+
+def dequantize_deepseek_v4_fp4_expert(
+    tensor: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    target_dtype: torch.dtype = torch.bfloat16,
+    row_chunk_size: int = 256,
+) -> torch.Tensor:
+    """Dequantize DeepSeek-V4 routed expert E2M1-FP4 weights.
+
+    DeepSeek-V4-Pro stores routed experts as two FP4 nibbles packed in each I8
+    element and per-row, per-32-logical-column E8M0 scales. This is distinct
+    from the torchao NVFP4 layout used by other checkpoints.
+    """
+
+    if tensor.dtype != torch.int8:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 expert weights must be int8, got {tensor.dtype}"
+        )
+    if tensor.ndim != 2 or scale.ndim != 2:
+        raise ValueError("DeepSeek-V4 FP4 expert weight and scale tensors must be 2D")
+
+    out_dim, packed_in_dim = tensor.shape
+    logical_in_dim = packed_in_dim * 2
+    if logical_in_dim % _DEEPSEEK_V4_FP4_BLOCK_SIZE != 0:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 logical input dim {logical_in_dim} must be divisible by "
+            f"{_DEEPSEEK_V4_FP4_BLOCK_SIZE}"
+        )
+    expected_scale_shape = (out_dim, logical_in_dim // _DEEPSEEK_V4_FP4_BLOCK_SIZE)
+    if tuple(scale.shape) != expected_scale_shape:
+        raise ValueError(
+            f"DeepSeek-V4 FP4 scale shape {tuple(scale.shape)} does not match expected "
+            f"{expected_scale_shape} for weight shape {tuple(tensor.shape)}"
+        )
+
+    table = torch.tensor(_DEEPSEEK_V4_FP4_TABLE, dtype=torch.float32, device=tensor.device)
+    result = torch.empty((out_dim, logical_in_dim), dtype=target_dtype, device=tensor.device)
+    row_chunk_size = max(1, int(row_chunk_size))
+
+    for start in range(0, out_dim, row_chunk_size):
+        end = min(start + row_chunk_size, out_dim)
+        packed = tensor[start:end].view(torch.uint8)
+        low = packed & 0x0F
+        high = (packed >> 4) & 0x0F
+        codes = torch.stack((low, high), dim=-1).reshape(
+            end - start,
+            logical_in_dim,
+        ).long()
+        scale_expanded = scale[start:end].to(torch.float32).repeat_interleave(
+            _DEEPSEEK_V4_FP4_BLOCK_SIZE,
+            dim=1,
+        )
+        result[start:end] = (table[codes] * scale_expanded).to(target_dtype)
+
+    return result
 
 
 def _is_deepseek_v4_routed_expert_weight_key(
@@ -1471,13 +1540,19 @@ def convert_compressed_pack_file(
     return tensors
 
 
-def copy_aux_files(model_path: Path, output_path: Path, skip: Iterable[str]) -> None:
+def copy_aux_files(
+    model_path: Path,
+    output_path: Path,
+    skip: Iterable[str],
+    *,
+    dirs_exist_ok: bool = False,
+) -> None:
     for item in model_path.iterdir():
         if item.name in skip:
             continue
         target = output_path / item.name
         if item.is_dir():
-            shutil.copytree(item, target)
+            shutil.copytree(item, target, dirs_exist_ok=dirs_exist_ok)
         else:
             shutil.copy2(item, target)
 
@@ -1488,14 +1563,14 @@ def dequantize_model(
     *,
     target_dtype: torch.dtype = torch.bfloat16,
     device: Optional[str] = None,
+    resume: bool = False,
 ) -> None:
     model_path = Path(model_path)
     output_path = Path(output_path)
 
-    if output_path.exists():
+    if output_path.exists() and not resume:
         raise FileExistsError(f"Output path {output_path} already exists")
-
-    output_path.mkdir(parents=True)
+    output_path.mkdir(parents=True, exist_ok=resume)
 
     config = load_json(model_path / "config.json")
     quant_cfg = config.get("quantization_config", {}) or {}
@@ -1562,6 +1637,19 @@ def dequantize_model(
     try:
         for idx, filename in enumerate(files):
             path = model_path / filename
+            output_file = output_path / filename
+            if resume and output_file.exists():
+                # Opening the shard validates its safetensors header before it
+                # is accepted as complete. Tensor views are memory-mapped, so
+                # collecting names and sizes does not load the shard into RAM.
+                with safe_open(output_file, framework="pt", device="cpu") as existing_reader:
+                    for name in existing_reader.keys():
+                        tensor = existing_reader.get_tensor(name)
+                        weight_map[str(name)] = filename
+                        total_size += tensor.element_size() * tensor.numel()
+                LOG.debug("Reusing completed output shard '%s'", filename)
+                pb.subtitle(f"{filename} (existing)").next().draw()
+                continue
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
             if fmt == "fp8":
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -1620,7 +1708,7 @@ def dequantize_model(
                 raise ValueError(f"Unsupported format {fmt}")
 
             if tensors:
-                save_file(tensors, str(output_path / filename))
+                save_file(tensors, str(output_file))
                 weight_map.update({str(name): filename for name in tensors})
                 total_size += sum(t.element_size() * t.numel() for t in tensors.values())
             else:
@@ -1649,4 +1737,4 @@ def dequantize_model(
     write_json(output_path / "config.json", new_config)
 
     skip_files = set(files) | {"config.json", "model.safetensors.index.json"}
-    copy_aux_files(model_path, output_path, skip_files)
+    copy_aux_files(model_path, output_path, skip_files, dirs_exist_ok=resume)

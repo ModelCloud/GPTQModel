@@ -3,31 +3,66 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Structured, env-gated device telemetry for placement debugging."""
+"""Structured device telemetry scoped to one quantization invocation."""
 
 from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Dict, List
+from contextlib import contextmanager
+from contextvars import ContextVar
+from functools import wraps
+from typing import Any
 
 import torch
 
-from .env import env_flag
 from .logger import setup_logger
-
 
 log = setup_logger()
 
-_DEVICE_TELEMETRY_ENV = "GPTQMODEL_DEVICE_TELEMETRY"
+_enabled = ContextVar("gptqmodel_device_telemetry", default=False)
 _records_lock = threading.Lock()
-_records: List[Dict[str, Any]] = []
+_records: list[dict[str, Any]] = []
 
 
 def device_telemetry_enabled() -> bool:
     """Return ``True`` when device telemetry should be emitted."""
 
-    return env_flag(_DEVICE_TELEMETRY_ENV, default="0")
+    return _enabled.get()
+
+
+@contextmanager
+def device_telemetry_scope(enabled: bool):
+    if type(enabled) is not bool:
+        raise ValueError("device_telemetry must be a boolean")
+    token = _enabled.set(enabled)
+    try:
+        yield
+    finally:
+        _enabled.reset(token)
+
+
+def with_quantization_device_telemetry(fn):
+    @wraps(fn)
+    def run(model, *args, **kwargs):
+        telemetry = getattr(getattr(model, "quantize_config", None), "telemetry", None)
+        enabled = getattr(telemetry, "device", False)
+        with device_telemetry_scope(enabled):
+            return fn(model, *args, **kwargs)
+
+    return run
+
+
+def capture_device_telemetry(fn):
+    """Propagate only this setting to queued work; reset reused workers afterward."""
+    enabled = device_telemetry_enabled()
+
+    @wraps(fn)
+    def run(*args, **kwargs):
+        with device_telemetry_scope(enabled):
+            return fn(*args, **kwargs)
+
+    return run
 
 
 def _normalize_field(value: Any) -> Any:
@@ -70,7 +105,7 @@ def clear_device_telemetry_records() -> None:
         _records.clear()
 
 
-def get_device_telemetry_records() -> List[Dict[str, Any]]:
+def get_device_telemetry_records() -> list[dict[str, Any]]:
     """Return a copy of the captured telemetry records."""
 
     with _records_lock:
@@ -78,8 +113,11 @@ def get_device_telemetry_records() -> List[Dict[str, Any]]:
 
 
 __all__ = [
+    "capture_device_telemetry",
     "clear_device_telemetry_records",
     "device_telemetry_enabled",
+    "device_telemetry_scope",
     "emit_device_telemetry",
     "get_device_telemetry_records",
+    "with_quantization_device_telemetry",
 ]

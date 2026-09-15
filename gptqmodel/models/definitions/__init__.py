@@ -41,6 +41,7 @@ from .glm import GlmQModel
 from .glmasr import GlmASRGPTQ
 from .glm_ocr import GlmOCRGPTQ
 from .glm_moe_dsa import GlmMoeDsaQModel
+from .glm5_next import Glm5NextQModel
 from .gpt2 import GPT2QModel
 from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
@@ -54,6 +55,7 @@ from .hunyuan_vl import HunYuanVLQModel
 from .hy_v3 import HYV3QModel
 from .hymba import HymbaQModel
 from .instella import InstellaQModel
+from .inkling import InklingMMQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .intern_s2_preview import InternS2PreviewQModel
@@ -81,6 +83,7 @@ from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .olmo3 import Olmo3QModel
 from .opt import OptQModel
+from .ouro import OuroQModel
 from .ovis import OvisQModel
 from .ovis2_5 import Ovis2_5QModel
 from .ovis2_6_moe import Ovis2_6_MoeQModel
@@ -94,8 +97,13 @@ from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
+from .qwen_drive import QwenDriveQModel
 from .qwen3_vl import Qwen3_VLQModel
+from .qwen4_exp import Qwen4ExpQModel
 from .rw import RwgQModel
+from .solar_open import SolarOpenQModel
+from .solar_open2 import SolarOpen2QModel
+from .spark2_5 import Spark2_5QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .unlimited_ocr import UnlimitedOCRQModel

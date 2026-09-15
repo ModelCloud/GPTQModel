@@ -105,6 +105,7 @@ from .definitions.glm4_moe_lite import Glm4MoeLiteQModel  # noqa: E402
 from .definitions.glm4v import Glm4vGPTQ  # noqa: E402
 from .definitions.glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel  # noqa: E402
 from .definitions.glm_moe_dsa import GlmMoeDsaQModel  # noqa: E402
+from .definitions.glm5_next import Glm5NextQModel  # noqa: E402
 from .definitions.glm_ocr import GlmOCRGPTQ  # noqa: E402
 from .definitions.glmasr import GlmASRGPTQ  # noqa: E402
 from .definitions.gpt2 import GPT2QModel  # noqa: E402
@@ -122,11 +123,13 @@ from .definitions.hunyuan_vl import HunYuanVLQModel  # noqa: E402
 from .definitions.hy_v3 import HYV3QModel  # noqa: E402
 from .definitions.hymba import HymbaQModel  # noqa: E402
 from .definitions.instella import InstellaQModel  # noqa: E402
+from .definitions.inkling import InklingMMQModel  # noqa: E402
 from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
 from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
+from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
 from .definitions.kimi_k3 import KimiK3QModel  # noqa: E402
@@ -166,6 +169,7 @@ from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
+from .definitions.ouro import OuroQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
 from .definitions.ovis2 import Ovis2QModel  # noqa: E402
 from .definitions.ovis2_5 import Ovis2_5QModel  # noqa: E402
@@ -186,7 +190,12 @@ from .definitions.qwen3_moe import Qwen3MoeQModel  # noqa: E402
 from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
+from .definitions.qwen_drive import QwenDriveQModel  # noqa: E402
+from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
+from .definitions.solar_open import SolarOpenQModel  # noqa: E402
+from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
+from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
@@ -241,6 +250,7 @@ MODEL_MAP = {
     "glm4_moe": GLM4MoEGPTQ,
     "glm4_moe_lite": Glm4MoeLiteQModel,
     "glm_moe_dsa": GlmMoeDsaQModel,
+    "glm5_next": Glm5NextQModel,
     "gpt_bigcode": GptBigCodeQModel,
     "codegen": CodeGenQModel,
     "cohere": LlamaQModel, # 100% llama clone
@@ -274,6 +284,7 @@ MODEL_MAP = {
     "mixtral": MixtralQModel,
     "qwen2": Qwen2QModel,
     "qwen3": Qwen3QModel,
+    "qwen_drive": QwenDriveQModel,
     "longllama": LlamaQModel,  # 100% llama clone
     "gemma": LlamaQModel, # 100% llama clone
     "gemma2": Gemma2QModel,
@@ -311,6 +322,7 @@ MODEL_MAP = {
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
+    "qwen4_exp": Qwen4ExpQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,
@@ -342,6 +354,7 @@ MODEL_MAP = {
     "ovis2_6_next": Ovis2_6_NextQModel,
     "telechat": TeleChat2QModel,
     "instella": InstellaQModel,
+    "inkling_mm_model": InklingMMQModel,
     "mimo": MimoQModel,
     "mimo_v2": MimoV2QModel,
     "falcon_h1": FalconH1QModel,
@@ -353,6 +366,9 @@ MODEL_MAP = {
     "ernie4_5_moe_vl": Ernie4_5_VLMoeQModel, # Backward Compatibility alias
     "ernie4_5_vl_moe": Ernie4_5_VLMoeQModel,
     "seed_oss": LlamaQModel, # 100% llama clone
+    "solar_open": SolarOpenQModel,
+    "solar_open2": SolarOpen2QModel,
+    "spark2_5": Spark2_5QModel,
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,

@@ -2,9 +2,9 @@
 <div align=center>
 <img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=500>
 </div>
-<h1 align="center">GPT-QModel</h1>
+<h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for NVIDIA CUDA, AMD ROCm, Huawei Ascend NPU, Intel XPU, and Intel/AMD/Apple CPUs via HF, vLLM, and SGLang.</p>
+<p align="center">LLM model quantization (compression) toolkit with hw acceleration support for NVIDIA CUDA, AMD ROCm, Huawei Ascend NPU, Intel XPU, and Intel/AMD/Apple CPUs via HF, vLLM, and SGLang. ✨</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -19,7 +19,7 @@
     </a>
 </p>
 
-## Latest News
+## Latest News 🗞️🚀
 
 * 08/26/2026 7.4.0-dev `main`: ✨ Added NVIDIA `LocateAnything-3B` quantization support.
 * 08/25/2026 7.4.0 `main`: ✨ Added Tencent `HunyuanOCR` quantization support
@@ -56,7 +56,7 @@
 <details>
 
 <summary>Archived News</summary>
-* 02/09/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
+* 02/10/2026 [5.7.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v5.7.0): ✨New `MoE.Routing` config with `Bypass` and `Override` options to allow multiple brute-force MoE routing controls for higher quality quantization of MoE experts. Combined with `FailSafeStrategy`, GPT-QModel now has three separate control settings for efficient MoE expert quantization.
 `AWQ` `qcfg.zero_point` property has been merged with a unified `sym` symmetry property; `zero_point=True` is now `sym=False`.
 Fixed `AWQ` `sym=True` packing/inference and quantization compatibility with some Qwen3 models. Exaone 4.0 support.
 
@@ -172,30 +172,30 @@ Fixed quantization of OPT and DeepSeek V2-Lite models. Fixed inference for DeepS
 * 06/20/2924 ✨ [0.9.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v0.9.0): Thanks for all the work from ModelCloud team and the open-source ML community for their contributions!
 </details>
 
-## Special Notes: 
+## Special Notes 📝
 
 PrismAI/Bonsai inference sample script. GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
 
 ```py
-• from gptqmodel import GPTQModel
+from gptqmodel import GPTQModel
 
-  model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
-  # or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
+model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
+# or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
 
-  tokens = model.generate(
-      "Who wrote Romeo and Juliet?",
-      max_new_tokens=128,
-  )[0]
+tokens = model.generate(
+    "Who wrote Romeo and Juliet?",
+    max_new_tokens=128,
+)[0]
 
-  print(model.tokenizer.decode(tokens, skip_special_tokens=True))
-  ```
+print(model.tokenizer.decode(tokens, skip_special_tokens=True))
+```
 
-## What is GPT-QModel?
+## What is GPT-QModel? 🤔
 GPT-QModel is a production-ready LLM model compression/quantization toolkit with hw-accelerated inference support for both CPU/GPU via HF Transformers, vLLM, and SGLang.
 
-GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRa, GAR and FOEM, with more quantization methods and enhancements planned. 
+GPT-QModel currently supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR and FOEM, with more quantization methods and enhancements planned.
 
-## Quantization Support
+## Quantization Support 🛠️
 
 GPT-QModel is a modular design supporting multiple quantization methods and feature extensions.
 
@@ -216,7 +216,7 @@ GPT-QModel is a modular design supporting multiple quantization methods and feat
 
 `GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. `vLLM` and `SGLang` integration currently targets `GPTQ` and `AWQ`.
 
-### Quant Method / Format / Backend Matrix
+### Quant Method / Format / Backend Matrix 📋
 
 Canonical backend names are shown below. Method-specific aliases are only accepted where explicitly implemented by that quant method.
 
@@ -295,7 +295,7 @@ Input formats: `.txt` files separated by `===========`, `.parquet` files with `t
 For an end-to-end example producing a public-dataset 128K-token mix, see
 `dataset/calibration_mix_128k_qwen3_0.6b/`.
 
-## Features
+## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models with format = `FORMAT.[GPTQ/AWQ]`
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
@@ -347,7 +347,7 @@ model.save("/path/to/Laguna-S-2.1-GPTQ-PER-LAYER")
 
 For the motivation, layout, and tuning notes see [docs/sharding.md](docs/sharding.md).
 
-## Who's Using GPT-QModel?
+## Who's Using GPT-QModel? 🌐
 
 Selected public references where teams or companies explicitly mention GPT-QModel in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
 
@@ -357,12 +357,106 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 * <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
 
 
-## Quality: GPTQ 4bit can match native BF16:
+## Quality: GPTQ 4bit can match native BF16 🏆
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
 
-## Model Support  
+## Model Support 🤖
+
+The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MAP`, including text-model and backward-compatibility aliases. Qwen 3.5 registrations require Transformers 5.2.0 or newer.
+
+<!-- model-types:start -->
+| Model family | Registered Transformers `model_type` values |
+|---|---|
+| A.X-K2 | `axk2` |
+| AfMoE / Trinity | `afmoe` |
+| Apertus 1 / 1.5 | `apertus`, `apertus1p5`, `apertus1p5_text` |
+| Baichuan | `baichuan` |
+| Bailing MoE / Hybrid (LING / RING) | `bailing_moe`, `bailing_hybrid` |
+| Bloom | `bloom` |
+| Brumby | `brumby` |
+| ChatGLM | `chatglm` |
+| CodeGen | `codegen` |
+| Cohere 1 / 2 / 2 MoE / Compass (North Mini / Micro Vision) | `cohere`, `cohere2`, `cohere2_moe`, `cohere_compass` |
+| DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
+| DeciLM | `deci` |
+| DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
+| DiffusionGemma | `diffusion_gemma` |
+| Dots1 | `dots1` |
+| Dream | `dream` |
+| ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |
+| EXAONE 3 / 4 | `exaone`, `exaone4` |
+| Falcon / Falcon H1 / Falcon Mamba | `falcon`, `falcon_h1`, `falcon_mamba` |
+| Gemma 1-4 / 3n / Unified | `gemma`, `gemma2`, `gemma3`, `gemma3_text`, `gemma3n`, `gemma3n_text`, `gemma4`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_text` |
+| GLM / GLM4 / GLM4V / GLM5 / OCR / ASR | `glm`, `glm4`, `glm4_moe`, `glm4_moe_lite`, `glm4v`, `glm4v_moe`, `glm4v_moe_text`, `glm5_next`, `glm_moe_dsa`, `glm_ocr`, `glmasr` |
+| GPT-2 | `gpt2` |
+| GPT BigCode | `gpt_bigcode` |
+| GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
+| GPT-OSS | `gpt_oss` |
+| GPT-J | `gptj` |
+| Granite / Granite MoE Hybrid | `granite`, `granitemoehybrid` |
+| GRIN-MoE | `grinmoe` |
+| HRM | `hrm_text` |
+| Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
+| HY-V3 | `hy_v3` |
+| Hymba | `hymba` |
+| Inkling | `inkling_mm_model` |
+| Instella | `instella` |
+| Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
+| InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
+| InternVL Chat | `internvl_chat` |
+| K2-Horizon (Dense / MoVA) |
+| Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
+| Klear | `klear` |
+| Laguna | `laguna` |
+| LFM2 / LFM2 MoE / LFM2-VL | `lfm2`, `lfm2_moe`, `lfm2_vl` |
+| LLaDA2 MoE | `llada2_moe` |
+| Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
+| Llama 3.2 VL | `mllama`, `mllama_text_model` |
+| FastVLM / LLaVA-Qwen2 | `llava_qwen2` |
+| LocateAnything | `locateanything` |
+| LongCat Flash | `longcat_flash` |
+| LongLLaMA | `longllama` |
+| Mage-VL | `mage_vl` |
+| Marin | `marin` |
+| MiMo / MiMo V2 | `mimo`, `mimo_v2` |
+| MiniCPM / MiniCPM3 / MiniCPM-O / MiniCPM-V | `minicpm`, `minicpm3`, `minicpmo`, `minicpmv`, `minicpmv4_6` |
+| MiniMax M2 / M3-VL | `minimax`, `minimax_m2`, `minimax_m3_vl` |
+| Mistral / Mistral3 / Ministral3 | `mistral`, `mistral3`, `ministral3` |
+| Mixtral | `mixtral` |
+| MobileLLM | `mobilellm` |
+| MOSS | `moss` |
+| MPT | `mpt` |
+| Muse Glimmer | `muse_glimmer` |
+| Nanbeige 4.2 | `nanbeige` |
+| Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
+| OLMo 2 / 3 | `olmo2`, `olmo3` |
+| OPT | `opt` |
+| Ouro | `ouro` |
+| Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
+| PanGu-α | `gpt_pangu` |
+| Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
+| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
+| Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
+| Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
+| Qwen-Drive 1.0 | `qwen_drive` |
+| RefinedWeb | `refinedWeb`, `refinedWebModel` |
+| Seed-OSS | `seed_oss` |
+| SmolLM3 | `smollm3` |
+| Solar Open / Open 2 | `solar_open`, `solar_open2` |
+| Spark 2.5 | `spark2_5` |
+| StableLM | `stablelm`, `stablelm_epoch` |
+| StarCoder2 | `starcoder2` |
+| TeleChat2 | `telechat` |
+| Unlimited-OCR | `unlimited-ocr` |
+| Voxtral | `voxtral` |
+| XVERSE | `xverse` |
+| Yi | `yi` |
+| Zamba / Zamba2 | `zamba`, `zamba2` |
+<!-- model-types:end -->
+
+Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
 
 | Model                         |   |                                 |  |            |  |                                 |  |                        |   |
 |-------------------------------|---|---------------------------------|--|------------|--|---------------------------------|--|------------------------|---|
@@ -386,7 +480,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. For ternary checkpoints, canonical 128-value-block `Q2_0` and its identical `PQ2_0` payload are supported; the incompatible `Q2_0_g64` layout is rejected. Prism model quantization is not included.
 
-## Platform and HW Support 
+## Platform and HW Support 🖥️
 
 GPT-QModel is validated on Linux, macOS, and Windows 11:
 
@@ -412,9 +506,9 @@ Healthy MPS Hessian inverse-Cholesky factorization avoids redundant host status 
 1.2–1.3x faster for 128–1024 columns with bitwise-identical factors. Set `GPTQMODEL_MPS_FAST_HESSIAN=0` for A/B diagnosis.
 
 
-## Install
+## Install 💾
 
-### PIP/UV 
+### PIP/UV 💿
 
 ```bash
 # You can install optional modules like autoround, ipex, vllm, sglang, bitblas.
@@ -425,7 +519,7 @@ uv pip install -v gptqmodel
 
 The package depends on `ninja` for first-use JIT kernel compilation.
 
-### Install from source
+### Install from source 🛠️
 
 ```bash
 # clone repo
@@ -440,7 +534,7 @@ apt install python3-dev
 pip install -v .
 ```
 
-### Inference
+### Inference 🔮
 Three-line API to use `GPT-QModel` for GPTQ model inference:
 
 ```py
@@ -456,7 +550,7 @@ To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFa
 export GPTQMODEL_USE_MODELSCOPE=True
 ```
 
-### FP32 accumulation toggle
+### FP32 accumulation toggle 🔢
 
 Some AWQ and ParoQuant CUDA/Triton kernels support an fp32 accumulation mode to reduce numerical drift during fused quantized matmul. This setting defaults to `True` because accuracy is prioritized over speed.
 
@@ -468,18 +562,47 @@ export GPTQMODEL_FP32_ACCUM=1
 export GPTQMODEL_FP32_ACCUM=0
 ```
 
+### JIT kernel cache and multi-process quantization ⚙️
+
+JIT-compiled kernels are cached at `~/.cache/gptqmodel/torch_extensions` by default. Multiple processes on one host may safely share the cache: builds are serialized with a cross-process file lock that the OS releases automatically if a process dies.
+
+Machete's pinned CUTLASS checkout and generated CUDA sources are kept in the
+versioned user cache (`~/.cache/gptqmodel`, or `GPTQMODEL_CACHE_DIR`; when set,
+`XDG_CACHE_HOME/gptqmodel` is used). Set `GPTQMODEL_CUTLASS_DIR` to use an
+already-installed, read-only CUTLASS 4.7.1 checkout. `GPTQMODEL_OFFLINE=1`
+disables downloads and requires that checkout or a verified cache hit already
+exist. For environments where compilation is not allowed, point
+`GPTQMODEL_MACHETE_PRECOMPILED_LIBRARY` at a compatible Machete shared library;
+an invalid or missing explicit library is reported as an error and does not
+fall back to JIT. The generated source cache can be populated ahead of time by
+prewarming the extension:
+
+```shell
+python -c "from gptqmodel import extension; extension.load('machete')"
+```
+
+```shell
+# optional: relocate the kernel cache (e.g. one cache per process)
+export GPTQMODEL_TORCH_EXTENSIONS_DIR=/path/to/cache
+
+# optional: max seconds to wait for another process's in-flight build before
+# falling back to non-JIT paths. Default: 600 or 5x the kernel's compile
+# baseline, whichever is larger.
+export GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT=600
+```
+
 Notes:
 * This is a runtime toggle. It does not change model weights or saved checkpoints.
 * It mainly affects some fused AWQ and ParoQuant CUDA/Triton kernels. Dense/dequantize fallback paths are mostly unaffected.
 * `1` is recommended for regression testing and quality-sensitive evaluation. `0` may be useful when chasing a small latency win and the quality tradeoff is acceptable.
 
-### OpenAI API compatible endpoint
+### OpenAI API compatible endpoint 🌐
 ```py
 # load model using above inference guide first
 model.serve(host="0.0.0.0",port="12345")
 ```
 
-### Quantization
+### Quantization 🔧
 Basic example of using `GPT-QModel` to quantize an LLM model:
 
 ```py
@@ -505,13 +628,59 @@ model.quantize(calibration_dataset, batch_size=1)
 model.save(quant_path)
 ```
 
-#### Other Quantization Formats
+#### Checkpoint and Resume Long Quantization Jobs 💾
+
+Checkpointing commits completed transformer layers so an interrupted
+quantization job can reload the original model and continue without repeating
+those layers. Use an explicit checkpoint path that survives process restarts:
+
+```py
+from gptqmodel import CheckpointConfig, CheckpointStopped, GPTQConfig, GPTQModel
+
+quant_config = GPTQConfig(
+    bits=4,
+    group_size=128,
+    offload_to_disk=True,
+)
+model = GPTQModel.load(model_id, quant_config)
+
+try:
+    model.quantize(
+        calibration_dataset,
+        batch_size=1,
+        checkpoint=CheckpointConfig(
+            path="checkpoints/Llama-3.2-1B-Instruct-gptqmodel-4bit",
+            resume="auto",
+            interval="layer:1",
+            keep_last=2,
+        ),
+    )
+except CheckpointStopped:
+    # Run the script again with the same source, calibration, config, and path.
+    raise SystemExit(75)
+
+model.save(quant_path)
+```
+
+Ctrl+C and `SIGTERM` finish the current layer, publish a safe checkpoint, and
+raise `CheckpointStopped`. A hard kill resumes from the last published layer;
+the unfinished layer is repeated. Resume validation requires the same source
+weights, calibration data, quantization settings, software versions, and device
+topology. Current checkpoint support is limited to Llama and Qwen3 MoE model
+types, requires `offload_to_disk=True`, and does not yet support dynamic
+exclusions, rotation, or embedding/`lm_head` quantization.
+
+See **[Quantization checkpointing and resume](checkpoint.md)** for resume
+policies, supported methods, safe-stop behavior, storage requirements, recovery
+procedures, and operational gotchas.
+
+#### Other Quantization Formats 📦
 
 `QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
-##### Preprocessors
+##### Preprocessors 🧹
 
 `preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.
 
@@ -570,7 +739,8 @@ model.save(quant_path)
 ##### FP8 Example: Llama 3.2 1B Instruct
 
 ```py
-from gptqmodel import BACKEND, FP8Config, GPTQModel
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import FP8Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-FP8-E4M3"
@@ -590,7 +760,8 @@ model.save(quant_path)
 
 ```py
 from datasets import load_dataset
-from gptqmodel import BACKEND, EXL3Config, GPTQModel
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import EXL3Config
 
 model_id = "meta-llama/Llama-3.2-1B-Instruct"
 quant_path = "Llama-3.2-1B-Instruct-EXL3"
@@ -612,7 +783,7 @@ model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V
 model.save(quant_path)
 ```
 
-#### MoE Quantization
+#### MoE Quantization 🧩
 
 Some MoE (mixture of experts) models have extremely uneven/biased routing (distribution of tokens) to the `experts` causing some expert modules to receive close-to-zero activated tokens, thus failing to complete calibration-based quantization (GPTQ/AWQ).
 To better quantize these heavily biased `MoE` routed modules, GPT-QModel exposes 3 controls:
@@ -626,7 +797,7 @@ There are various `FailSafeStrategy` options, along with `SmoothMethod` options,
 
 `FailSafe` can be combined with `ExpertsRoutingOverride`. There is no single best way to quantize MoE, and we recommend users to test all three methods.
 
-### Quantized Inference
+### Quantized Inference 🔍
 ```py
 # test post-quant inference
 model = GPTQModel.load(quant_path)
@@ -715,13 +886,26 @@ print(f"Result: {result}")
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
-### How to Add Support for a New Model
+### How to Add Support for a New Model 🛠️
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
 
-### Pair with Evaluation for post-quantization LLM Benchmarks
+#### Shared-input metadata (`:in=<tag>`) 🔗
 
-GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 150+ of the world's most widely used benchmark suites.
+Modules that consume the *same* activation tensor (e.g. `q_proj`/`k_proj`/`v_proj` after `input_layernorm`) produce identical GPTQ Hessians (`H = XᵀX`), so the Hessian only needs to be collected once per group. `BaseQModel.shared_input_plan(model_config, quantize_config)` derives these groups from `module_tree`:
+
+- Default: every quantizable leaf is its own singleton group. Subset digits (`:0`) describe execution/quantization order, not tensor identity, so they are never used to infer sharing.
+- Opt in with `:in=<tag>`: sibling leaves (same parent) with the same tag share an input, e.g. `"q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x"` or `"gate_proj:0:in=x", "up_proj:0:in=x"`. Tags are scoped per parent. Different tags never share (MLA: `"q_b_proj:1:in=q_a", "kv_b_proj:1:in=kv_a"` read different latents).
+- A leaf repeated across `module_tree` variants must carry identical flags; conflicts raise at plan time.
+- `:!` / `:?` leaves and `:in=` tags never change the emitted subset blocks or quantization order.
+- Runtime dedup is per subset block: the looper captures one block at a time and elects the first group member in that block as leader; the other members in the *same* block skip Hessian capture and adopt a private copy of the leader's `H`. A tag whose members sit in different blocks (e.g. `in_proj_qkv:0` / `in_proj_z:1`) is still validated by the probe but deduplicates nothing (`SharedInputGroup.dedup_followers`, `SharedInputPlan.dedup_count` reflect this).
+- Tags are inert until the definition lists the `model_type` in its own `shared_input_verified_model_types` (not inherited). Unlisted model types (including Llama-clone subclasses that inherit `module_tree`) get singleton plans and never skip capture; `tests/module_tree/test_shared_input_cpu_forward.py` enforces that every listed type has a real-forward case.
+
+Only add `:in=` tags after verifying them against a real (tiny, CPU) model with `gptqmodel.models.shared_input.probe_shared_inputs(layer, plan, forward)`; it hooks every planned module, runs `forward`, and reports groups whose inputs differ (`mismatches`), identical inputs that were not declared (`undeclared`), planned modules that do not exist (`missing_modules`) and groups that never ran (`unverified`, e.g. un-routed experts). `report.ok` is strict (`fully_verified`); use `has_errors` when un-routed experts are expected. See `tests/module_tree/test_shared_input*.py` for the covered definitions.
+
+### Pair with Evaluation for post-quantization LLM Benchmarks 📊
+
+GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 153 of the world's most widely used benchmark suites.
 We highly recommend using Evalution to measure post-quant accuracy recovery after quantization instead of relying on narrow regression-only language-model metrics.
 
 ```
@@ -746,7 +930,7 @@ run = (
 print(run.to_dict()["tests"][0]["metrics"])
 
 ```
-### Dynamic Quantization (Per Module QuantizeConfig Override)
+### Dynamic Quantization (Per Module QuantizeConfig Override) ⚙️
 
 `QuantizeConfig.dynamic` is a dynamic control that allows specific matching `modules` to be skipped for quantization (negative matching)
 or have a unique `[bits, group_size, sym, desc_act, mse, pack_dtype]` property override per matching `module` vs base `QuantizeConfig` (positive match with override). 
@@ -899,9 +1083,9 @@ model.save("/path/of/Llama-3.2-1B-Instruct-RTN")
 ```
 
 
-### Experimental Features
+### Experimental Features 🧪
 
-#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original)
+#### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 
 Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 ```py
@@ -911,14 +1095,14 @@ Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
 
-#### Using FOEM
+#### Using FOEM 🧮
 
 FOEM (First-order error matters) adds first-order error compensation for GPTQ-style quantization. Enable FOEM by setting `foem = FOEMConfig(...)`.
 ```py
 # FOEM default hyperparameters are alpha=0.0 and beta=0.2
 quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
 ```
-### Migrating from AutoGPTQ and AutoAWQ:
+### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel has fully supplanted AutoGPTQ and AutoAWQ for HF Transformers/Optimum/Peft integration. Model inference has drop-in support with zero changes. 
 
@@ -928,7 +1112,7 @@ For model quantization, there are some config changes for AutoAWQ:
 
 Models quantized by GPT-QModel are inference compatible with HF Transformers (minus `dynamic`), vLLM, and SGLang. 
 
-## Attributions:
+## Attributions 📚
 
 * GPTQ: IST-DASLab, main-author: Elias Frantar, arXiv:2210.17323
 * AWQ: main-authors: Lin, Ji and Tang, Jiaming and Tang, Haotian and Yang, Shang and Dang, Xingyu and Han, Song
@@ -936,13 +1120,15 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * EoRA: Nvidia, main-author: Shih-Yang Liu, arXiv preprint arXiv:2410.21271.
 * GAR: Intel, main-author: T Gafni, A Karnieli, Y Hanani, [Paper](https://openaccess.thecvf.com/content/CVPR2025W/eLVM/html/Gafni_Dual_Precision_Quantization_for_Efficient_and_Accurate_Deep_Neural_Networks_CVPRW_2025_paper.html)
 * GPTAQ: Yale Intelligent Computing Lab, main-author: Yuhang Li, arXiv:2504.02692.
+* Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
+* Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 * Humming Kernel: [InclusionAI](https://github.com/inclusionAI), vendored into `gptqmodel/humming` under the Apache-2.0 license with original attribution preserved in each source file.
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 
-## Citations:
+## Citations 📖
 
 ```bibtex
 # GPT-QModel
@@ -1064,9 +1250,9 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ```
 
-## Quick Notes
+## Quick Notes 🗒️
 
-### Limit log level
+### Limit log level 🔇
 
 `GPT-QModel` uses a shared `LogBar` logger. Set the level once near process startup:
 
@@ -1076,7 +1262,7 @@ from logbar import LogBar
 LogBar.shared().setLevel("WARNING")  # DEBUG, INFO, WARNING, ERROR, CRITICAL
 ```
 
-### Apply Triton nogil patch early in multi-package scripts
+### Apply Triton nogil patch early in multi-package scripts 🩹
 
 If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, and `sglang`), apply the patch at the very top before other Triton-related imports:
 

@@ -57,6 +57,7 @@ from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
     _normalize_legacy_tied_weights_keys,
+    ensure_qwen_drive_registered,
     prepare_remote_code_compat,
     sanitize_generation_config_file,
     sanitize_model_config,
@@ -247,6 +248,175 @@ def _materialize_meta_layers_from_turtle(model: torch.nn.Module, turtle_model) -
             log.warn("Model save: failed to materialize meta layer `%s` from turtle: %s", path, exc)
 
     return materialized
+
+
+def _checkpoint_prefixes_for_replacement(prefix: str, turtle_model) -> set[str]:
+    prefixes = {prefix}
+    resolver = getattr(turtle_model, "_resolve_checkpoint_module_path", None)
+    if callable(resolver):
+        resolved = resolver(prefix)
+        if resolved:
+            prefixes.add(resolved)
+    tensor_resolver = getattr(turtle_model, "_resolve_checkpoint_tensor_source", None)
+    if callable(tensor_resolver):
+        for leaf in ("weight", "bias"):
+            try:
+                checkpoint_name, _expert_index, _split_index, _split_dim = tensor_resolver(prefix, leaf)
+            except Exception:
+                checkpoint_name = None
+            if checkpoint_name:
+                prefixes.add(checkpoint_name[: -(len(leaf) + 1)] if checkpoint_name.endswith(f".{leaf}") else checkpoint_name)
+    return prefixes
+
+
+def _tensor_matches_prefixes(tensor_name: str, prefixes: set[str]) -> bool:
+    return tensor_name in prefixes or any(tensor_name.startswith(f"{prefix}.") for prefix in prefixes)
+
+
+def _module_name(model, target_module) -> Optional[str]:
+    if target_module is None:
+        return None
+    return next((name for name, module in model.named_modules() if module is target_module), None)
+
+
+def _save_embedding_replacement_safetensors(
+    model,
+    turtle_model,
+    embedding_prefixes: List[str],
+    *,
+    save_dir: str,
+    metadata: Dict[str, str],
+) -> tuple[List[str], Dict[str, str], int, List[str]]:
+    """Rewrite only checkpoint shards containing replaced embedding modules."""
+    if turtle_model is None or not hasattr(turtle_model, "_weight_map") or not hasattr(turtle_model, "model_local_path"):
+        raise ValueError("Embedding replacement save requires a LazyTurtle checkpoint source.")
+    prefixes = sorted({prefix for prefix in embedding_prefixes if isinstance(prefix, str) and prefix})
+    if not prefixes:
+        raise ValueError("Embedding replacement save requires at least one embedding prefix.")
+
+    config = getattr(model, "config", None)
+    tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
+    if not tie_word_embeddings:
+        source_config_path = os.path.join(turtle_model.model_local_path, "config.json")
+        if os.path.exists(source_config_path):
+            try:
+                with open(source_config_path, "r", encoding="utf-8") as handle:
+                    tie_word_embeddings = bool(json.load(handle).get("tie_word_embeddings", False))
+            except (OSError, TypeError, ValueError):
+                pass
+    input_prefix = _module_name(model, model.get_input_embeddings()) if hasattr(model, "get_input_embeddings") else None
+    output_prefix = _module_name(model, model.get_output_embeddings()) if hasattr(model, "get_output_embeddings") else None
+
+    # Untying happens before endpoint quantization. If only the input endpoint
+    # was requested, the cloned output head must still be serialized because
+    # the saved config is no longer tied.
+    if (
+        tie_word_embeddings
+        and input_prefix
+        and output_prefix
+        and input_prefix in prefixes
+        and output_prefix not in prefixes
+    ):
+        prefixes = sorted({*prefixes, output_prefix})
+
+    index_path = os.path.join(save_dir, "model.safetensors.index.json")
+    existing_weight_map = {}
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as handle:
+            existing_weight_map = json.load(handle).get("weight_map", {})
+
+    drop_by_shard: Dict[str, set[str]] = {}
+    replacements_by_shard: Dict[str, Dict[str, torch.Tensor]] = {}
+    removed_tensor_names: List[str] = []
+    matched_shards_by_prefix: Dict[str, List[str]] = {}
+    for prefix in prefixes:
+        checkpoint_prefixes = _checkpoint_prefixes_for_replacement(prefix, turtle_model)
+        matched_shards = []
+        for tensor_name, shard_name in turtle_model._weight_map.items():
+            if _tensor_matches_prefixes(tensor_name, checkpoint_prefixes):
+                drop_by_shard.setdefault(shard_name, set()).add(tensor_name)
+                if tensor_name not in removed_tensor_names:
+                    removed_tensor_names.append(tensor_name)
+                if shard_name not in matched_shards:
+                    matched_shards.append(shard_name)
+        for leaf in ("weight", "bias"):
+            runtime_name = f"{prefix}.{leaf}"
+            runtime_shard = existing_weight_map.get(runtime_name)
+            if runtime_shard:
+                drop_by_shard.setdefault(runtime_shard, set()).add(runtime_name)
+                if runtime_name not in removed_tensor_names:
+                    removed_tensor_names.append(runtime_name)
+                if runtime_shard not in matched_shards:
+                    matched_shards.append(runtime_shard)
+        matched_shards_by_prefix[prefix] = matched_shards
+
+    tied_input_shards = list(matched_shards_by_prefix.get(input_prefix, [])) if input_prefix else []
+    if tie_word_embeddings and input_prefix and not tied_input_shards:
+        input_checkpoint_prefixes = _checkpoint_prefixes_for_replacement(input_prefix, turtle_model)
+        for tensor_name, shard_name in turtle_model._weight_map.items():
+            if _tensor_matches_prefixes(tensor_name, input_checkpoint_prefixes) and shard_name not in tied_input_shards:
+                tied_input_shards.append(shard_name)
+
+    for prefix in prefixes:
+        matched_shards = matched_shards_by_prefix[prefix]
+        if not matched_shards and tie_word_embeddings and prefix == output_prefix:
+            matched_shards = tied_input_shards
+        if not matched_shards:
+            raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
+        try:
+            module = model.get_submodule(prefix)
+        except AttributeError as exc:
+            raise ValueError(f"Embedding replacement module `{prefix}` is not present in the model tree.") from exc
+        replacements = replacements_by_shard.setdefault(matched_shards[0], {})
+        drop_by_shard.setdefault(matched_shards[0], set())
+        for relative_name, tensor in module.state_dict().items():
+            replacements[f"{prefix}.{relative_name}" if relative_name else prefix] = tensor.detach().cpu()
+
+    rewritten_files = []
+    tensor_to_filename = {}
+    total_size_bytes = 0
+    for shard_name, dropped_names in drop_by_shard.items():
+        if not shard_name.endswith(".safetensors"):
+            raise NotImplementedError("Embedding-only replacement save currently supports safetensors checkpoints only.")
+        source_path = os.path.join(turtle_model.model_local_path, shard_name)
+        target_path = os.path.join(save_dir, shard_name)
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        read_path = target_path if os.path.exists(target_path) else source_path
+        tensors = {}
+        with safe_open(read_path, framework="pt", device="cpu") as handler:
+            for tensor_name in handler.keys():
+                if tensor_name not in dropped_names:
+                    tensors[tensor_name] = handler.get_tensor(tensor_name)
+                    tensor_to_filename[tensor_name] = shard_name
+        for tensor_name, tensor in replacements_by_shard.get(shard_name, {}).items():
+            tensors[tensor_name] = tensor
+            tensor_to_filename[tensor_name] = shard_name
+        save_file(tensors, target_path, metadata=metadata)
+        rewritten_files.append(shard_name)
+        total_size_bytes += os.path.getsize(target_path)
+    return rewritten_files, tensor_to_filename, total_size_bytes, removed_tensor_names
+
+
+def _copy_missing_checkpoint_files(source_dir: str, save_dir: str) -> List[str]:
+    source_root = os.path.realpath(source_dir)
+    save_root = os.path.realpath(save_dir)
+    if source_root == save_root:
+        return []
+    if os.path.commonpath([source_root, save_root]) == source_root:
+        raise ValueError("Embedding-only save destination must not be nested inside its checkpoint source.")
+    copied = []
+    for root, dirnames, filenames in os.walk(source_root):
+        dirnames.sort()
+        relative_root = os.path.relpath(root, source_root)
+        target_root = save_root if relative_root == "." else os.path.join(save_root, relative_root)
+        for filename in sorted(filenames):
+            target_path = os.path.join(target_root, filename)
+            if os.path.exists(target_path):
+                continue
+            os.makedirs(target_root, exist_ok=True)
+            shutil.copy2(os.path.join(root, filename), target_path)
+            copied.append(os.path.relpath(target_path, save_root))
+    return copied
 
 
 def _cleanup_saved_weight_files(
@@ -1488,7 +1658,12 @@ def ModelWriter(cls):
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
         if not self.load_quantized_model:
-            alias_all_from_turtle_if_meta(shell_model=self.model, turtle_model=self.turtle_model)
+            # Packed buffers named "weight" (e.g. BNB) belong to offload
+            # storage, not to the original dense checkpoint at the same path.
+            alias_all_from_turtle_if_meta(
+                shell_model=self.model, turtle_model=self.turtle_model,
+                skip_module_types=(BaseQuantLinear,),
+            )
             materialized_layers = _materialize_meta_layers_from_turtle(self.model, self.turtle_model)
             if materialized_layers:
                 log.info("Model save: materialized %s meta layer modules from turtle source.", materialized_layers)
@@ -1682,6 +1857,7 @@ def ModelWriter(cls):
 
     def get_model_with_quantize(self, qcfg, model_id_or_path, input_embeddings=None, output_embeddings=None):
 
+        ensure_qwen_drive_registered(model_id_or_path)
         config = AutoConfig.from_pretrained(
             model_id_or_path,
             trust_remote_code=True,
@@ -1689,7 +1865,7 @@ def ModelWriter(cls):
         prepare_remote_code_compat(config)
 
         with suspend_hf_weight_init():
-            model = cls.loader.from_config(
+            model = self.loader.from_config(
                 config, dtype=torch.float16
             )
 
@@ -1731,7 +1907,7 @@ def ModelWriter(cls):
                 qcfg=qcfg,
                 quant_result=modules,
                 backend=BACKEND.AUTO,
-                lm_head_name=cls.lm_head,
+                lm_head_name=self.lm_head,
                 pack=True,
                 device=DEVICE.CPU,
             )

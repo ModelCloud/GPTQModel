@@ -33,21 +33,27 @@ from ...utils.backend import BACKEND
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.marlin import (
-    _marlin_capability_supported,
+    _marlin_all_visible_devices_supported,
     _transform_param,
     apply_gptq_marlin_linear,
     gptq_marlin_gemm,
     gptq_marlin_repack,
     marlin_import_exception,
+    marlin_is_tile_aligned,
     marlin_is_k_full,
     marlin_make_empty_g_idx,
     marlin_make_workspace_new,
+    marlin_pad_dim,
+    marlin_pad_qweight,
+    marlin_pad_scales,
+    marlin_padded_nk,
     marlin_permute_bias,
     marlin_permute_scales,
     marlin_repeat_scales_on_all_ranks,
     marlin_runtime_available,
     marlin_runtime_error,
     marlin_sort_g_idx,
+    marlin_validate_runtime_device,
     replace_parameter,
 )
 from ...utils.marlin_lora import (
@@ -60,6 +66,10 @@ from ...utils.rocm import IS_ROCM
 
 
 log = setup_logger()
+
+# SM 7.5 is supported through the FP16-only Turing path.
+_MARLIN_SM75_CAPABILITY = (7, 5)
+_MARLIN_MIN_CAPABILITY = _MARLIN_SM75_CAPABILITY
 
 
 # Sample process-level policy once when each MarlinLinear is created. Automatic
@@ -381,10 +391,21 @@ class MarlinLinear(GPTQQuantLinear):
         # self.original_in_features = in_features
         # self.original_out_features = out_features
 
-        if desc_act and group_size == -1:
+        if desc_act and group_size in (-1, in_features):
             # In this case, act_order == True is the same as act_order == False
             # (since we have only one group per output channel)
             desc_act = False
+
+        selected_backend = kwargs.pop("backend", BACKEND.GPTQ_MARLIN)
+        # Padding adds work to every forward, so automatic selection stays conservative.
+        if selected_backend in (BACKEND.AUTO, BACKEND.AUTO_TRAINABLE) and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            raise NotImplementedError(
+                "Automatic Marlin selection keeps tile-misaligned shapes on "
+                "the next compatible backend; request GPTQ_MARLIN explicitly "
+                "to enable runtime tile padding."
+            )
 
         self.compute_dtype = kwargs.get("dtype") or torch.float16
         self.fp32 = env_flag("GPTQMODEL_MARLIN_USE_FP32", default=True)
@@ -421,7 +442,7 @@ class MarlinLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_MARLIN),
+            backend=selected_backend,
             adapter=adapter,
             register_buffers=False, # do not register buffers in super()
             **kwargs)
@@ -503,6 +524,16 @@ class MarlinLinear(GPTQQuantLinear):
             )
         )
 
+        # Runtime-only buffers must follow device-map and later module moves.
+        self.register_buffer(
+            "workspace", torch.empty(0, dtype=torch.int32), persistent=False
+        )
+        self.register_buffer(
+            "g_idx_sort_indices",
+            torch.empty(0, dtype=torch.int32),
+            persistent=False,
+        )
+
         if bias:
             self.register_buffer("bias", torch.zeros((self.out_features), dtype=self.compute_dtype))
         else:
@@ -537,26 +568,88 @@ class MarlinLinear(GPTQQuantLinear):
             return False, ImportError(marlin_import_exception)
         return True, None
 
+    @classmethod
+    def _validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
+        ok, err = super()._validate(**args)
+        if not ok:
+            return ok, err
+
+        bits = args.get("bits", 4)
+        in_features = args.get("in_features")
+        out_features = args.get("out_features")
+        desc_act = args.get("desc_act", False)
+        group_size = args.get("group_size", -1)
+        device = args.get("device")
+        dtype = args.get("dtype")
+        if dtype == torch.bfloat16 and not IS_ROCM:
+            if isinstance(device, torch.device) and device.type == "cuda":
+                capabilities = (torch.cuda.get_device_capability(device),)
+            elif device == DEVICE.CUDA:
+                capabilities = tuple(
+                    torch.cuda.get_device_capability(index)
+                    for index in range(torch.cuda.device_count())
+                )
+            else:
+                capabilities = ()
+            if _MARLIN_SM75_CAPABILITY in capabilities:
+                return False, NotImplementedError(
+                    "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
+                )
+        if in_features is None or out_features is None:
+            return True, None
+
+        pack_factor = 32 // bits
+        # Tile padding cannot repair a partially packed int32 row or column.
+        if in_features % pack_factor != 0 or out_features % pack_factor != 0:
+            return False, NotImplementedError(
+                "Marlin packed dimensions must be divisible by "
+                f"pack_factor={pack_factor}; got K={in_features}, "
+                f"N={out_features}."
+            )
+
+        effective_desc_act = desc_act and group_size not in (-1, in_features)
+        # Act-order indices only describe the original K dimension.
+        if effective_desc_act and not marlin_is_tile_aligned(
+            out_features, in_features
+        ):
+            return False, NotImplementedError(
+                "Marlin activation-order weights require an aligned thread "
+                f"tile; got K={in_features}, N={out_features}."
+            )
+
+        return True, None
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
-        if device == DEVICE.CUDA:
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
             if IS_ROCM:
                 raise NotImplementedError("Marlin kernel is not supported on ROCm.")
-
-            # Directly check capabilities of all currently visible CUDA devices
-            has_supported_cuda = all(
-                _marlin_capability_supported(*torch.cuda.get_device_capability(i))
-                for i in range(torch.cuda.device_count())
-            )
-            if not has_supported_cuda:
-                raise NotImplementedError(
-                    "Marlin kernel only supports compute capability >= 7.5."
+            if isinstance(device, DEVICE):
+                if not _marlin_all_visible_devices_supported(_MARLIN_MIN_CAPABILITY):
+                    raise NotImplementedError("Marlin kernel only supports compute capability >= 7.5.")
+                return
+            target = device if isinstance(device, torch.device) else device.to_torch_device()
+            try:
+                marlin_validate_runtime_device(
+                    target,
+                    min_capability=_MARLIN_MIN_CAPABILITY,
+                    backend_name="GPTQ Marlin",
                 )
+            except ValueError as exc:
+                raise NotImplementedError(str(exc)) from exc
 
     def post_init(self):
         device = self.qweight.device
+        capability = marlin_validate_runtime_device(
+            device,
+            min_capability=_MARLIN_MIN_CAPABILITY,
+            backend_name="GPTQ Marlin",
+        )
+        if capability == _MARLIN_SM75_CAPABILITY and self.compute_dtype != torch.float16:
+            raise ValueError(
+                "GPTQ Marlin on compute capability 7.5 requires dtype=torch.float16."
+            )
 
         if device.type == "cuda":
             properties = torch.cuda.get_device_properties(device)
@@ -609,8 +702,37 @@ class MarlinLinear(GPTQQuantLinear):
             ),
         )
 
+        # GPTQModel also accepts group_size=K as channelwise quantization.
+        marlin_group_size = (
+            -1
+            if self.requested_group_size == self.in_features
+            else self.requested_group_size
+        )
+        # Validation keeps act-order shapes aligned; other shapes may use zero padding.
+        if self.desc_act:
+            padded_n, padded_k = self.out_features, self.in_features
+        else:
+            padded_n, padded_k = marlin_padded_nk(
+                self.out_features,
+                self.in_features,
+                marlin_group_size,
+            )
+        self._marlin_tile_padding = (
+            None
+            if (padded_n, padded_k) == (self.out_features, self.in_features)
+            else (padded_n, padded_k)
+        )
+
         def transform_w_q(x):
-            x.data = gptq_marlin_repack(x.data.contiguous(),
+            # Pad in GPTQ layout before converting to Marlin layout.
+            padded = marlin_pad_qweight(
+                x.data.contiguous(),
+                self.out_features,
+                self.in_features,
+                padded_n,
+                padded_k,
+            )
+            x.data = gptq_marlin_repack(padded,
                                         perm=self.g_idx_sort_indices,
                                         size_k=self.padded_in_features,
                                         size_n=self.padded_out_features,
@@ -632,7 +754,7 @@ class MarlinLinear(GPTQQuantLinear):
             self.g_idx_sort_indices = g_idx_sort_indices
         else:
             setattr(self, "g_idx", marlin_make_empty_g_idx(device))
-            self.g_idx_sort_indices = marlin_make_empty_g_idx(device)
+            self.g_idx_sort_indices = torch.empty(0, dtype=torch.int, device=device)
 
         setattr(self, "qzeros", marlin_make_empty_g_idx(device))
 
@@ -640,7 +762,9 @@ class MarlinLinear(GPTQQuantLinear):
         _transform_param(self, "scales", transform_w_s)
 
         if hasattr(self, "bias") and self.bias is not None:
-            self.bias.data = marlin_permute_bias(self.bias)
+            self.bias.data = marlin_permute_bias(
+                marlin_pad_dim(self.bias, self.out_features, padded_n)
+            )
 
         super().post_init()
         self.lora_cuda_up_add = marlin_lora_cuda_up_add_enabled()
@@ -902,8 +1026,8 @@ class MarlinLinear(GPTQQuantLinear):
 
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
-        if x.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=x.dtype, device=x.device)
+        if self.input_rows(x) == 0:
+            return self.empty_linear_output(x)
 
         # make sure scales is synced with x/input
         if x.dtype != self.scales.dtype:

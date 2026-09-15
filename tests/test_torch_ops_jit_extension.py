@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -59,6 +60,223 @@ def _make_loader(tmp_path: Path, **overrides) -> cpp_module.TorchOpsJitExtension
     }
     params.update(overrides)
     return cpp_module.TorchOpsJitExtension(**params)
+
+
+def test_torch_ops_jit_extension_fingerprint_uses_python_abi_only_when_dependent(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("PYBIND11_MODULE(unit_test, m) {}\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)])
+    payloads = []
+    real_sha256 = cpp_module.hashlib.sha256
+
+    def capture_sha256(data=b""):
+        payloads.append(data)
+        return real_sha256(data)
+
+    monkeypatch.setattr(cpp_module.hashlib, "sha256", capture_sha256)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
+    monkeypatch.setattr(
+        cpp_module.sysconfig,
+        "get_config_var",
+        lambda name: "cpython-312-x86_64-linux-gnu" if name == "SOABI" else None,
+    )
+
+    first_fingerprint = loader._cache_fingerprint()
+    first_payload = payloads[-1].decode()
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+    second_fingerprint = loader._cache_fingerprint()
+
+    assert first_fingerprint == second_fingerprint
+    assert "python_abi=cpython-312-x86_64-linux-gnu" in first_payload
+    assert "python=3." not in first_payload
+
+
+def test_torch_ops_jit_extension_agnostic_fingerprint_ignores_python_version(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)])
+
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=12, micro=9))
+    first_fingerprint = loader._cache_fingerprint()
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13, micro=1))
+
+    assert loader._cache_fingerprint() == first_fingerprint
+
+
+def test_torch_ops_jit_extension_python_abi_falls_back_without_soabi(monkeypatch):
+    monkeypatch.setattr(cpp_module.sysconfig, "get_config_var", lambda name: None)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.setattr(cpp_module.sys, "abiflags", "t")
+
+    assert cpp_module._python_abi_tag() == "cpython-3.13t"
+
+
+def test_torch_ops_jit_extension_python_abi_fallback_handles_missing_abiflags(monkeypatch):
+    monkeypatch.setattr(cpp_module.sysconfig, "get_config_var", lambda name: None)
+    monkeypatch.setattr(cpp_module.sys, "version_info", SimpleNamespace(major=3, minor=13))
+    monkeypatch.delattr(cpp_module.sys, "abiflags", raising=False)
+
+    assert cpp_module._python_abi_tag() == "cpython-3.13"
+
+
+def test_torch_ops_jit_extension_detects_conservative_python_abi_markers(tmp_path):
+    markers = (
+        "#include <Python.h>\n",
+        '#include "Python.h"\n',
+        "#include <pybind11/pybind11.h>\n",
+        '#include "pybind11/pybind11.h"\n',
+        "#include <torch/extension.h>\n",
+        '#include "torch/python.h"\n',
+        "PyObject *object;\n",
+        "PyErr_Clear();\n",
+        "py::handle object;\n",
+        'PYBIND11_TYPE_CASTER(int, _("int"));\n',
+    )
+    for index, marker in enumerate(markers):
+        source = tmp_path / f"marker_{index}.cpp"
+        source.write_text(marker, encoding="utf-8")
+        loader = _make_loader(tmp_path, sources=[str(source)])
+
+        assert loader._source_abi_flags([str(source)], []) == (True, False)
+
+
+@pytest.mark.parametrize("header", ("c10/util/SmallVector.h", "caffe2/utils/TypeCast.h"))
+def test_torch_ops_jit_extension_explicit_stable_abi_rejects_nonstable_headers(tmp_path, header):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(f"#include <{header}>\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 10))
+
+    with pytest.raises(RuntimeError, match=header.replace("/", r"\/")):
+        loader._cache_fingerprint()
+
+
+def test_torch_ops_jit_extension_cpu_and_cuda_fingerprints_handle_wheel_switch(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text("int kernel() { return 1; }\n", encoding="utf-8")
+    cpu_loader = _make_loader(tmp_path, sources=[str(source)])
+    cuda_loader = _make_loader(tmp_path, sources=[str(source)], requires_cuda=True)
+
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+    cpu_fingerprint = cpu_loader._cache_fingerprint()
+    cuda_fingerprint = cuda_loader._cache_fingerprint()
+    for accelerator_tag in ("cu128", "rocm6.2", "xpu"):
+        monkeypatch.setattr(cpp_module.torch, "__version__", f"2.8.0+{accelerator_tag}")
+        assert cpu_loader._cache_fingerprint() == cpu_fingerprint
+        assert cuda_loader._cache_fingerprint() != cuda_fingerprint
+
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0")
+    plain_fingerprint = cpu_loader._cache_fingerprint()
+    assert plain_fingerprint == cpu_fingerprint
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+gitabc1234")
+    assert cpu_loader._cache_fingerprint() != cpu_fingerprint
+
+
+def test_torch_ops_jit_extension_fingerprint_includes_stable_abi_target(tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(
+        '#include <torch/csrc/stable/library.h>\nSTABLE_TORCH_LIBRARY(unit_test, m) {}\n',
+        encoding="utf-8",
+    )
+    loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 10))
+    first_fingerprint = loader._cache_fingerprint()
+    target_211_loader = _make_loader(tmp_path, sources=[str(source)], torch_stable_abi_target=(2, 11))
+
+    assert target_211_loader._cache_fingerprint() != first_fingerprint
+    assert "-DTORCH_TARGET_VERSION=0x020A000000000000" in loader._resolved_extra_cflags()
+    assert "-DTORCH_TARGET_VERSION=0x020A000000000000" in loader._resolved_extra_cuda_cflags()
+
+
+def test_torch_ops_jit_extension_auto_detected_stable_sources_keep_torch_version(monkeypatch, tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    source.write_text(
+        '#include <torch/csrc/stable/library.h>\nSTABLE_TORCH_LIBRARY(unit_test, m) {}\n',
+        encoding="utf-8",
+    )
+    loader = _make_loader(tmp_path, sources=[str(source)])
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+    first_fingerprint = loader._cache_fingerprint()
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.13.0+cpu")
+
+    assert loader._cache_fingerprint() != first_fingerprint
+
+
+def test_torch_ops_jit_extension_stable_target_rejects_older_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.9.0")
+    prebuilt_calls = []
+
+    def unexpected_prebuilt_load(_build_root):
+        prebuilt_calls.append(True)
+        raise AssertionError("stable ABI floor must prevent cache lookup")
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", unexpected_prebuilt_load)
+
+    assert loader.load() is False
+    assert "requires torch >= 2.10" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
+def test_torch_ops_jit_extension_stable_target_rejects_unparseable_torch(monkeypatch, tmp_path):
+    loader = _make_loader(tmp_path, torch_stable_abi_target=(2, 10))
+    monkeypatch.setattr(cpp_module.torch, "__version__", "nightly")
+    prebuilt_calls = []
+
+    monkeypatch.setattr(loader, "_try_load_prebuilt_library", lambda _build_root: prebuilt_calls.append(True))
+
+    assert loader.load() is False
+    assert "cannot verify torch stable ABI requirement" in loader.last_error_message()
+    assert prebuilt_calls == []
+
+
+def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path):
+    source = tmp_path / "unit_test.cpp"
+    include_root = tmp_path / "include"
+    include_root.mkdir()
+    wrapper = include_root / "wrapper.h"
+    source.write_text(
+        "#include <wrapper.h>\n#include <nonexistent_sys.h>\nint kernel() { return 1; }\n",
+        encoding="utf-8",
+    )
+    wrapper.write_text("#include <Python.h>\n", encoding="utf-8")
+    loader = _make_loader(tmp_path, sources=[str(source)], extra_include_paths=[str(include_root)])
+
+    assert loader._source_abi_flags([str(source)], [str(include_root)]) == (True, False)
+    first_fingerprint = loader._cache_fingerprint()
+    first_payload = loader._source_cache_fingerprint_payload(str(source), [str(include_root)])
+    assert not any("missing_include" in entry and "nonexistent_sys.h" in entry for entry in first_payload)
+
+    wrapper.write_text("#include <c10/util/SmallVector.h>\n", encoding="utf-8")
+    second_fingerprint = loader._cache_fingerprint()
+
+    assert second_fingerprint != first_fingerprint
+    stable_loader = _make_loader(
+        tmp_path,
+        sources=[str(source)],
+        extra_include_paths=[str(include_root)],
+        torch_stable_abi_target=(2, 10),
+    )
+    with pytest.raises(RuntimeError, match=r"c10/util/SmallVector\.h"):
+        stable_loader._cache_fingerprint()
+
+
+def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
+    monkeypatch.setattr(swordfish.torch, "__version__", "2.9.1+cpu")
+
+    error = swordfish._swordfish_static_runtime_error()
+
+    assert "requires torch >= 2.10" in error
+
+
+def test_swordfish_static_runtime_error_rejects_unparseable_torch(monkeypatch):
+    monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
+
+    error = swordfish._swordfish_static_runtime_error()
+
+    assert "cannot verify torch stable ABI requirement" in error
+
+
+def test_torch_stable_abi_target_define_matches_libtorch_encoding():
+    assert cpp_module.torch_stable_abi_target_define(2, 10) == "-DTORCH_TARGET_VERSION=0x020A000000000000"
 
 
 def test_default_jit_cflags_allow_noopt(monkeypatch):
@@ -467,6 +685,23 @@ def test_cuda_cache_fingerprint_payload_includes_resolved_arch_flags(monkeypatch
     ]
 
 
+def test_cuda_cache_fingerprint_ignores_compiler_parallelism(tmp_path):
+    """NVCC worker counts must not create duplicate binary caches."""
+
+    loader = _make_loader(tmp_path)
+    loader.extra_cuda_cflags = ["-lineinfo", "--threads", "1", "--split-compile=1"]
+    serial = loader._cache_fingerprint()
+
+    loader.extra_cuda_cflags = ["-lineinfo", "--threads=16", "--split-compile", "8"]
+    parallel = loader._cache_fingerprint()
+
+    loader.extra_cuda_cflags = ["-lineinfo", "-O2", "--threads", "16", "--split-compile=8"]
+    different_codegen = loader._cache_fingerprint()
+
+    assert serial == parallel
+    assert serial != different_codegen
+
+
 def test_default_torch_ops_build_root_ignores_removed_global_override(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_EXT_BUILD_BASE", "/tmp/obsolete-jit-root")
 
@@ -518,6 +753,120 @@ def test_torch_ops_jit_extension_prefers_cached_binary(monkeypatch, tmp_path):
     assert loader.load() is True
     assert load_library_calls == [str(library_path)]
     assert compile_calls == []
+
+
+def test_torch_ops_jit_extension_explicit_prebuilt_is_authoritative_and_reused(monkeypatch, tmp_path):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    source_calls: list[str] = []
+    load_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root") or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(
+        cpp_module.torch.ops, "load_library", lambda path: load_calls.append(path)
+    )
+    monkeypatch.setattr(loader, "_refresh_runtime_cache", lambda: True)
+
+    assert loader.load() is True
+    assert loader.load() is True
+    assert load_calls == [str(library)]
+    assert source_calls == []
+
+
+def test_torch_ops_jit_extension_rejects_prebuilt_when_ops_are_already_registered(
+    monkeypatch, tmp_path
+):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    loader = _make_loader(tmp_path, prebuilt_library_env="UNIT_TEST_PREBUILT")
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(loader, "_ops_available", lambda: True)
+    monkeypatch.setattr(
+        cpp_module.torch.ops,
+        "load_library",
+        lambda _path: pytest.fail("an unverified prebuilt library was loaded"),
+    )
+
+    assert loader.load() is False
+    assert "already registered" in loader.last_error_message()
+    assert "start a new process" in loader.last_error_message()
+
+
+def test_torch_ops_jit_extension_rejects_in_process_prebuilt_path_switch(
+    monkeypatch, tmp_path
+):
+    first_library = tmp_path / "first.so"
+    second_library = tmp_path / "second.so"
+    first_library.write_bytes(b"first")
+    second_library.write_bytes(b"second")
+    loader = _make_loader(tmp_path, prebuilt_library_env="UNIT_TEST_PREBUILT")
+    state = {"ops_available": False}
+    load_calls: list[str] = []
+
+    def fake_load_library(path: str):
+        load_calls.append(path)
+        state["ops_available"] = True
+
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(first_library))
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ops_available"])
+    monkeypatch.setattr(
+        loader, "_refresh_runtime_cache", lambda: state["ops_available"]
+    )
+    monkeypatch.setattr(cpp_module.torch.ops, "load_library", fake_load_library)
+
+    assert loader.load() is True
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(second_library))
+    loader.clear_cache()
+
+    assert loader.load() is False
+    assert load_calls == [str(first_library)]
+    assert str(first_library) in loader.last_error_message()
+    assert str(second_library) in loader.last_error_message()
+
+
+def test_torch_ops_jit_extension_prebuilt_clear_cache_does_not_touch_jit_root(
+    monkeypatch, tmp_path
+):
+    library = tmp_path / "machete.so"
+    library.write_bytes(b"prebuilt")
+    source_calls: list[str] = []
+    load_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root")
+        or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(library))
+    monkeypatch.setattr(cpp_module.torch.ops, "load_library", lambda path: load_calls.append(path))
+    monkeypatch.setattr(loader, "_refresh_runtime_cache", lambda: True)
+
+    assert loader.load() is True
+    loader.clear_cache()
+    assert loader.load() is True
+    assert load_calls == [str(library), str(library)]
+    assert source_calls == []
+
+
+def test_torch_ops_jit_extension_missing_prebuilt_does_not_fall_back_to_jit(monkeypatch, tmp_path):
+    source_calls: list[str] = []
+    loader = _make_loader(
+        tmp_path,
+        sources=lambda: source_calls.append("sources") or ["never.cpp"],
+        default_build_root=lambda: source_calls.append("build_root") or tmp_path / "jit_build",
+        prebuilt_library_env="UNIT_TEST_PREBUILT",
+    )
+    monkeypatch.setenv("UNIT_TEST_PREBUILT", str(tmp_path / "missing.so"))
+
+    assert loader.load() is False
+    assert "configured prebuilt library" in loader.last_error_message()
+    assert source_calls == []
 
 
 def test_torch_ops_jit_extension_force_rebuild_clears_cache(monkeypatch, tmp_path):
@@ -1088,3 +1437,178 @@ def test_torch_ops_jit_extension_fingerprint_tracks_transitive_local_includes(tm
     second_build_root = loader.build_root()
 
     assert first_build_root != second_build_root
+
+
+def test_torch_ops_jit_extension_fingerprint_ignores_unrelated_sibling_files(monkeypatch, tmp_path):
+    """One kernel's source/header shadow must not change an unrelated extension's cache key."""
+
+    project_root = tmp_path / "project"
+    src_dir = project_root / "src"
+    src_dir.mkdir(parents=True)
+    include_dir = project_root / "includes"
+    include_dir.mkdir(parents=True)
+    other_kernel_dir = project_root / "other_kernel"
+    other_kernel_dir.mkdir(parents=True)
+
+    source = src_dir / "unit_test.cpp"
+    source.write_text(
+        '#include "local.h"\n#include <torch/all.h>\n',
+        encoding="utf-8",
+    )
+    (src_dir / "local.h").write_text("int local_value = 1;\n", encoding="utf-8")
+
+    loader = _make_loader(
+        tmp_path,
+        sources=[str(source)],
+        extra_include_paths=[str(src_dir), str(include_dir)],
+        python_abi_dependent=False,
+    )
+    monkeypatch.setattr(cpp_module, "_FINGERPRINT_ROOT", project_root)
+    monkeypatch.setattr(cpp_module.torch, "__version__", "2.8.0+cpu")
+
+    first_fingerprint = loader._cache_fingerprint()
+
+    # Simulate an unrelated kernel dropping a header that would shadow the
+    # angle-bracket ``<torch/all.h>`` include if the cache scanner resolved
+    # system-style includes against local search roots.
+    shadow = include_dir / "torch" / "all.h"
+    shadow.parent.mkdir(parents=True)
+    shadow.write_text("// unrelated shadow header\n", encoding="utf-8")
+    (other_kernel_dir / "kernel.cu").write_text(
+        "__global__ void unrelated() {}\n",
+        encoding="utf-8",
+    )
+
+    second_fingerprint = loader._cache_fingerprint()
+    assert second_fingerprint == first_fingerprint
+
+    # Ensure the final payload does not embed the temporary absolute path so the
+    # cache key is independent of checkout/install location.
+    payloads = []
+    real_sha256 = cpp_module.hashlib.sha256
+
+    def capture_sha256(data=b""):
+        payloads.append(data)
+        return real_sha256(data)
+
+    monkeypatch.setattr(cpp_module.hashlib, "sha256", capture_sha256)
+    loader._cache_fingerprint()
+    final_payload = payloads[-1].decode("utf-8")
+    assert str(tmp_path) not in final_payload
+
+
+def _spawn_flock_holder(lock_path: Path) -> subprocess.Popen:
+    """Start a child process that holds an exclusive flock on `lock_path` until killed."""
+
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import fcntl, os, time\n"
+                f"fd = os.open({str(lock_path)!r}, os.O_CREAT | os.O_RDWR)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('held', flush=True)\n"
+                "time.sleep(60)\n"
+            ),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert holder.stdout.readline().strip() == "held"
+    return holder
+
+
+def test_torch_ops_jit_extension_removes_stale_torch_build_lock_before_compile(monkeypatch, tmp_path):
+    """Guard stale torch baton cleanup so a lock file left by a dead process cannot hang new builds."""
+
+    loader = _make_loader(tmp_path)
+    build_root = loader.build_root()
+    build_root.mkdir(parents=True)
+    stale_baton = build_root / "lock"
+    stale_baton.write_bytes(b"")
+
+    state = {"ready": False}
+    baton_present_during_compile = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+
+    def fake_compile(**kwargs):
+        baton_present_during_compile.append(stale_baton.exists())
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    assert loader.load() is True
+    assert baton_present_during_compile == [False]
+    assert stale_baton.exists() is False
+
+
+def test_torch_ops_jit_extension_build_lock_is_released_when_holder_is_killed(monkeypatch, tmp_path):
+    """Guard the killed-holder case so a dead process can never leave the JIT cache locked."""
+
+    if cpp_module.fcntl is None:
+        pytest.skip("requires fcntl-based cross-process locking")
+
+    loader = _make_loader(tmp_path)
+    lock_path = loader._cross_process_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = _spawn_flock_holder(lock_path)
+    holder.kill()
+    holder.wait()
+
+    state = {"ready": False}
+    compile_calls = []
+    logger = _FakeLogger()
+    runtime = type("RuntimeNamespace", (), {"kernel": object()})()
+
+    monkeypatch.setenv("GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT", "5")
+    monkeypatch.setattr(loader, "_ops_available", lambda: state["ready"])
+    monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+
+    def fake_compile(**kwargs):
+        compile_calls.append(kwargs)
+        state["ready"] = True
+        monkeypatch.setattr(cpp_module.torch.ops, "unit_test_ns", runtime, raising=False)
+
+    monkeypatch.setattr(cpp_module, "load", fake_compile)
+
+    started = time.perf_counter()
+    assert loader.load() is True
+    assert time.perf_counter() - started < 5.0
+    assert len(compile_calls) == 1
+    assert lock_path.exists() is True
+
+
+def test_torch_ops_jit_extension_build_lock_wait_is_bounded(monkeypatch, tmp_path):
+    """Guard the bounded wait so a stuck live holder degrades the load instead of hanging it."""
+
+    if cpp_module.fcntl is None:
+        pytest.skip("requires fcntl-based cross-process locking")
+
+    loader = _make_loader(tmp_path)
+    lock_path = loader._cross_process_lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    holder = _spawn_flock_holder(lock_path)
+    try:
+        compile_calls = []
+        logger = _FakeLogger()
+
+        monkeypatch.setenv("GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT", "0.5")
+        monkeypatch.setattr(loader, "_ops_available", lambda: False)
+        monkeypatch.setattr(cpp_module, "setup_logger", lambda: logger)
+        monkeypatch.setattr(cpp_module, "load", lambda **kwargs: compile_calls.append(kwargs))
+
+        assert loader.load() is False
+        assert compile_calls == []
+        assert "timed out" in loader.last_error_message()
+        assert any("fallback" in message for message in logger.info_messages)
+    finally:
+        holder.kill()
+        holder.wait()

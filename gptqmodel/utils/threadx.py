@@ -29,6 +29,7 @@ except Exception:  # pragma: no cover - defensive: optional dependency may be un
 from .. import DEBUG_ON
 from ..utils import torch as torch_utils
 from ..utils.ctx import ctx
+from ..utils.device_telemetry import capture_device_telemetry
 from ..utils.logger import setup_logger
 from ..utils.torch import HAS_NPU, torch_empty_cache_any, torch_sync
 
@@ -1155,7 +1156,7 @@ class DeviceThreadPool:
         # Mark in-flight before enqueue to avoid races with wait().
         self._mark_scheduled(key)
         try:
-            return worker.submit(fn, *args, cuda_event=cuda_event, **kwargs)
+            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
         except BaseException:
             # Roll back inflight if enqueue fails (rare)
             self._mark_finished(key)
@@ -1199,7 +1200,7 @@ class DeviceThreadPool:
         if DEBUG_ON: log.debug(f"submit_serial: device={key} fn={getattr(fn, '__name__', repr(fn))}")
         self._mark_scheduled(key)
         try:
-            return worker.submit(fn, *args, cuda_event=cuda_event, **kwargs)
+            return worker.submit(capture_device_telemetry(fn), *args, cuda_event=cuda_event, **kwargs)
         except BaseException:
             self._mark_finished(key)
             raise

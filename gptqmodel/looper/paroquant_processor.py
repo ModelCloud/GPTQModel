@@ -445,6 +445,8 @@ class ParoQuantProcessor(LoopProcessor):
             if entry is None:
                 entry = {"inputs": [], "batch_indices": []}
                 self.tasks[module_name] = entry
+            batch_index = self.current_batch_index()
+            entry.setdefault("input_batch_indices", []).append(batch_index)
             entry.setdefault("inputs", []).append(feature)
             entry.setdefault("batch_indices", []).append(self.current_batch_index())
 
@@ -627,6 +629,7 @@ class ParoQuantProcessor(LoopProcessor):
                 w_wq_diff = original_weight.to(dtype=torch.float32) - pseudo_weight.to(dtype=torch.float32)
             with self.lock:
                 module.state["w_wq_diff"] = w_wq_diff
+                module.state["wq"] = pseudo_weight.detach().to(device=CPU, copy=True)
 
         module.weight.data = pseudo_weight
 
@@ -1306,6 +1309,14 @@ class ParoQuantProcessor(LoopProcessor):
                 module_kwargs["position_ids"] = _LayerShardLoader._tensor_to_device(position_ids, target_device)
 
         module_kwargs["use_cache"] = False
+        prepare_replay_kwargs = getattr(self.gptq_model, "prepare_layer_replay_kwargs", None)
+        if prepare_replay_kwargs is not None:
+            module_kwargs = prepare_replay_kwargs(
+                layer=layer,
+                layer_input=[x],
+                additional_inputs=module_kwargs,
+                target_device=target_device,
+            )
         module_kwargs = self._normalize_group_runtime_metadata(module_kwargs)
         if prepared_cache_key is not None and prepared_cache is not None:
             prepared_cache[prepared_cache_key] = dict(module_kwargs)
@@ -2705,6 +2716,7 @@ class ParoQuantProcessor(LoopProcessor):
                 entry = self.tasks.get(module_name)
                 if entry is not None and entry.get("layer_index") == layer_index:
                     entry["inputs"] = []
+                    entry.pop("input_batch_indices", None)
         state.modules.clear()
         state.pending_modules.clear()
         state.processed_subsets.clear()
@@ -2837,6 +2849,7 @@ class ParoQuantProcessor(LoopProcessor):
         module.stream_sync()
         with self.lock:
             module.state.pop("w_wq_diff", None)
+            module.state.pop("wq", None)
             pack_weight = module.state.pop("pack_weight").clone()
             q_zeros = module.state.pop("q_zeros").clone()
             q_scales = module.state.pop("q_scales").clone()

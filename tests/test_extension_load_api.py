@@ -23,6 +23,7 @@ import gptqmodel.utils.gptq_block as gptq_block_utils
 import gptqmodel.utils.hadamard as hadamard_utils
 import gptqmodel.utils.machete as machete_utils
 import gptqmodel.utils.marlin as marlin_utils
+import gptqmodel.utils.mxfp4_cpu as mxfp4_cpu_utils
 import gptqmodel.utils.marlin_lora as marlin_lora_utils
 import gptqmodel.utils.marlin_moe as marlin_moe_utils
 import gptqmodel.utils.pangolin as pangolin_utils
@@ -78,6 +79,7 @@ def _install_fake_extensions(monkeypatch):
         "pack_block_cpu": _FakeExtension("pack_block_cpu"),
         "gptq_block": _FakeExtension("GPTQ CUDA block quantization"),
         "floatx_cpu": _FakeExtension("floatx_cpu"),
+        "mxfp4_cpu": _FakeExtension("mxfp4_cpu"),
         "awq": _FakeExtension("AWQ"),
         "qqq": _FakeExtension("QQQ"),
         "exllamav2": _FakeExtension("ExLlamaV2 GPTQ"),
@@ -116,13 +118,14 @@ def _install_fake_extensions(monkeypatch):
     )
     monkeypatch.setattr(gptq_block_utils, "gptq_block_cuda_supported", lambda: True)
     monkeypatch.setattr(cpp_utils, "_floatx_cpu_extension", lambda: fakes["floatx_cpu"])
+    monkeypatch.setattr(mxfp4_cpu_utils, "_mxfp4_cpu_extension", lambda: fakes["mxfp4_cpu"])
     monkeypatch.setattr(awq_utils, "_AWQ_TORCH_OPS_EXTENSION", fakes["awq"])
     monkeypatch.setattr(qqq_utils, "_QQQ_TORCH_OPS_EXTENSION", fakes["qqq"])
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION", fakes["exllamav2"])
     monkeypatch.setattr(exllamav2_utils, "_EXLLAMAV2_AWQ_TORCH_OPS_EXTENSION", fakes["exllamav2_awq"])
     monkeypatch.setattr(exllamav3_ext, "_EXLLAMAV3_TORCH_OPS_EXTENSION", fakes["exllamav3"])
     monkeypatch.setattr(machete_utils, "_MACHETE_TORCH_OPS_EXTENSION", fakes["machete"])
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: True)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: True)
     monkeypatch.setattr(marlin_utils, "_MARLIN_FP16_TORCH_OPS_EXTENSION", fakes["marlin_fp16"])
     monkeypatch.setattr(marlin_utils, "_MARLIN_BF16_TORCH_OPS_EXTENSION", fakes["marlin_bf16"])
     monkeypatch.setattr(marlin_lora_utils, "_MARLIN_LORA_TORCH_OPS_EXTENSION", fakes["marlin_lora"])
@@ -214,6 +217,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
         "pack_block_cpu": True,
         "gptq_block": True,
         "floatx_cpu": True,
+        "mxfp4_cpu": True,
         "awq": True,
         "qqq": True,
         "exllamav2": True,
@@ -240,7 +244,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
 
 def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: False)
 
     result = extension_api.load()
 
@@ -250,7 +254,7 @@ def test_load_all_skips_extensions_unsupported_on_this_host(monkeypatch):
 
 def test_load_specific_unsupported_extension_raises_without_building(monkeypatch):
     fakes = _install_fake_extensions(monkeypatch)
-    monkeypatch.setattr(machete_utils, "_validate_machete_device_support", lambda: False)
+    monkeypatch.setattr(machete_utils, "_validate_machete_build_support", lambda: False)
     monkeypatch.setattr(machete_utils, "machete_runtime_error", lambda: "Machete unsupported on this device.")
 
     with pytest.raises(RuntimeError, match="Machete unsupported on this device."):

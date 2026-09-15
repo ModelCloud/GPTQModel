@@ -17,7 +17,15 @@ import sysconfig
 import threading
 import time
 import traceback
+
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX hosts fall back to process-local locking
+    fcntl = None
+
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 
@@ -77,6 +85,61 @@ _NVCC_VERSION_CACHE: tuple[int, int] | None = None
 _DEFAULT_NVCC_THREADS = "8"
 _GLOBAL_KERNEL_REBUILD_ENV = "GPTQMODEL_KERNEL_REBUILD"
 _TORCH_OPS_BUILD_ROOT_ENV = "GPTQMODEL_TORCH_EXTENSIONS_DIR"
+_CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE = frozenset(("--threads", "--split-compile"))
+_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES = ("--threads=", "--split-compile=")
+# Cross-process JIT build lock tuning. The lock itself is a kernel-released
+# flock, so a killed holder can never leave the cache permanently locked; the
+# timeout only bounds how long a process waits for another's in-flight build.
+_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV = "GPTQMODEL_TORCH_OPS_LOCK_TIMEOUT"
+_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS = 600.0
+_TORCH_OPS_FILE_LOCK_POLL_SECONDS = 0.1
+
+
+def _python_abi_tag() -> str:
+    """Return the interpreter's extension-module ABI tag."""
+
+    soabi = sysconfig.get_config_var("SOABI")
+    if soabi:
+        return str(soabi)
+    # ``sys.abiflags`` is a Unix-only attribute on some supported Python
+    # builds (for example, Windows).  The SOABI fallback must still produce a
+    # stable key there instead of raising while constructing the cache path.
+    return f"cpython-{sys.version_info.major}.{sys.version_info.minor}{getattr(sys, 'abiflags', '')}"
+
+
+def _torch_cpu_cache_version() -> str:
+    """Return torch.__version__ with only accelerator-wheel local tags removed."""
+
+    version = torch.__version__
+    public, sep, local = version.partition("+")
+    if sep and _TORCH_ACCELERATOR_LOCAL_TAG_PATTERN.match(local):
+        return public
+    return version
+
+
+def torch_stable_abi_target_define(major: int, minor: int) -> str:
+    """Return the stable-ABI target define for a minimum torch major/minor version."""
+
+    encoded_version = (int(major) << 56) | (int(minor) << 48)
+    return f"-DTORCH_TARGET_VERSION=0x{encoded_version:016X}"
+
+
+def _cuda_cache_relevant_flags(flags: Sequence[str]) -> list[str]:
+    """Drop NVCC scheduling knobs that cannot change generated device code."""
+
+    relevant: list[str] = []
+    skip_value = False
+    for flag in flags:
+        if skip_value:
+            skip_value = False
+            continue
+        if flag in _CUDA_BUILD_SCHEDULING_FLAGS_WITH_VALUE:
+            skip_value = True
+            continue
+        if flag.startswith(_CUDA_BUILD_SCHEDULING_FLAG_PREFIXES):
+            continue
+        relevant.append(flag)
+    return relevant
 
 
 def _python_abi_tag() -> str:
@@ -372,6 +435,63 @@ def default_torch_ops_build_root(subdir: str) -> Path:
     return Path.home() / ".cache" / "gptqmodel" / "torch_extensions" / subdir
 
 
+def _torch_ops_file_lock_timeout_seconds() -> float:
+    """Resolve how long one process waits on another's in-flight JIT build."""
+
+    raw_timeout = os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV)
+    if raw_timeout is None:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+    try:
+        return max(0.0, float(raw_timeout))
+    except ValueError:
+        return _TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS
+
+
+@contextmanager
+def _cross_process_build_lock(lock_path: Path, *, timeout_seconds: float):
+    """Serialize on-disk JIT cache mutation across OS processes.
+
+    The process-local `_TORCH_OPS_JIT_LOCK` cannot see other interpreters, so
+    two independent processes sharing one cache directory can race the same
+    build. This holds an exclusive `flock` on `lock_path` instead. The lock
+    belongs to this process's open file descriptor, so the kernel releases it
+    automatically when the holder exits or is killed — a dead process can
+    never leave the cache permanently locked.
+
+    Yields True when the lock was acquired within `timeout_seconds`, else
+    False so the caller can degrade loudly instead of blocking forever. Hosts
+    without `fcntl` keep the existing process-local-only behavior and yield
+    True.
+    """
+
+    if fcntl is None:
+        yield True
+        return
+
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR)
+    acquired = False
+    try:
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_TORCH_OPS_FILE_LOCK_POLL_SECONDS)
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:  # pragma: no cover - closing the fd still releases the lock
+                pass
+        os.close(lock_fd)
+
+
 def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
     """Normalize and deduplicate include/library path strings while preserving order."""
 
@@ -384,6 +504,88 @@ def _dedupe_path_strings(paths: Sequence[str]) -> list[str]:
         seen.add(normalized)
         deduped.append(normalized)
     return deduped
+
+
+# Directory that contains the ``gptqmodel`` package.  In editable installs this
+# is the repository root; in wheel installs it is the site-packages root.
+# Fingerprint paths below this root are emitted as relative POSIX strings so the
+# cache key does not depend on checkout location or unrelated sibling files.
+_FINGERPRINT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _fingerprint_path_key(path: Path) -> str:
+    """Return a stable, location-independent key for *path*.
+
+    Paths inside the package/project root are returned relative to that root so
+    the cache key is not tied to where the repository is cloned or installed.
+    Paths outside the project root (system CUDA headers, third-party wheels,
+    etc.) are kept absolute because they are toolchain/dependency inputs.
+    """
+
+    normalized = path.expanduser().resolve(strict=False)
+    try:
+        relative = normalized.relative_to(_FINGERPRINT_ROOT)
+    except ValueError:
+        return str(normalized)
+    return relative.as_posix()
+
+
+@lru_cache(maxsize=None)
+def _system_include_roots() -> tuple[Path, ...]:
+    """Return system/dependency include directories used by the toolchain.
+
+    These roots identify headers (e.g. ``torch/``, ``ATen/``, ``c10/``,
+    ``Python.h``, ``cuda*.h``) whose contents are captured by the ABI/toolchain
+    portion of the cache key rather than by hashing the header files directly.
+    """
+
+    roots: list[Path] = []
+    try:
+        from torch.utils.cpp_extension import include_paths as _torch_include_paths
+
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in _torch_include_paths())
+    except Exception as exc:
+        log.debug("Torch include roots unavailable; continuing without them: %s", exc, exc_info=True)
+    try:
+        import sysconfig
+
+        roots.append(Path(sysconfig.get_paths()["include"]).expanduser().resolve(strict=False))
+    except Exception as exc:
+        log.debug("Python include root unavailable; continuing without it: %s", exc, exc_info=True)
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_local_cuda_include_paths())
+    except Exception as exc:
+        log.debug("Local CUDA include roots unavailable; continuing without them: %s", exc, exc_info=True)
+    try:
+        roots.extend(Path(p).expanduser().resolve(strict=False) for p in detected_cuda_wheel_include_paths())
+    except Exception as exc:
+        log.debug("CUDA wheel include roots unavailable; continuing without them: %s", exc, exc_info=True)
+
+    seen: set[Path] = set()
+    deduped: list[Path] = []
+    for root in roots:
+        if root in seen:
+            continue
+        seen.add(root)
+        deduped.append(root)
+    return tuple(deduped)
+
+
+def _is_system_or_dependency_header(include_name: str) -> bool:
+    """Return True if *include_name* names a system/dependency header.
+
+    The check is conservative: only headers that actually exist under a known
+    system include directory (torch, Python, CUDA, etc.) are skipped. This lets
+    legitimate local angle-bracket headers (e.g. ``<wrapper.h>`` under an
+    extension-specific include root) still be hashed while preventing files
+    dropped by unrelated kernels (e.g. ``gptqmodel_ext/torch/all.h``) from
+    leaking into an extension's cache key.
+    """
+
+    for root in _system_include_roots():
+        if (root / include_name).is_file():
+            return True
+    return False
 
 
 def detected_cuda_wheel_include_paths() -> list[str]:
@@ -715,6 +917,7 @@ class TorchOpsJitExtension:
         binary_names: Optional[Sequence[str]] = None,
         python_abi_dependent: bool | None = None,
         torch_stable_abi_target: tuple[int, int] | None = None,
+        prebuilt_library_env: Optional[str] = None,
     ) -> None:
         self.name = name
         self.namespace = namespace
@@ -734,6 +937,7 @@ class TorchOpsJitExtension:
         self.binary_names = tuple(binary_names or (name,))
         self.python_abi_dependent = python_abi_dependent
         self.torch_stable_abi_target = tuple(torch_stable_abi_target) if torch_stable_abi_target else None
+        self.prebuilt_library_env = prebuilt_library_env
         self._source_abi_detection_cache: dict[
             tuple[tuple[tuple[str, str], ...], tuple[str, ...]],
             tuple[bool, bool, tuple[str, ...]],
@@ -742,8 +946,13 @@ class TorchOpsJitExtension:
         self._load_attempted = False
         self._load_result = False
         self._last_error = ""
+        self._loaded_prebuilt_library: Optional[Path] = None
         self._namespace_cache: Optional[object] = None
         self._op_cache: dict[str, object] = {}
+        self._source_abi_detection_cache: dict[
+            tuple[tuple[tuple[str, str], ...], tuple[str, ...]],
+            tuple[bool, bool, tuple[str, ...]],
+        ] = {}
         self._lock = self._get_shared_lock()
 
     @classmethod
@@ -786,6 +995,20 @@ class TorchOpsJitExtension:
             return _dedupe_path_strings(include_paths)
         return cuda_include_paths_with_fallback(include_paths)
 
+    def _with_stable_abi_target(self, flags: Sequence[str]) -> list[str]:
+        resolved = list(flags)
+        if self.torch_stable_abi_target is not None:
+            target_define = torch_stable_abi_target_define(*self.torch_stable_abi_target)
+            if target_define not in resolved:
+                resolved.append(target_define)
+        return resolved
+
+    def _resolved_extra_cflags(self) -> list[str]:
+        return self._with_stable_abi_target(self._resolve_sequence(self.extra_cflags))
+
+    def _resolved_extra_cuda_cflags(self) -> list[str]:
+        return self._with_stable_abi_target(self._resolve_sequence(self.extra_cuda_cflags))
+
     def base_build_root(self) -> Path:
         """Return the user-visible cache root before applying the loader fingerprint."""
 
@@ -793,6 +1016,49 @@ class TorchOpsJitExtension:
         if override:
             return Path(override).expanduser()
         return self._resolve_path(self.default_build_root)
+
+    def _build_lock_timeout_seconds(self) -> float:
+        """Resolve the cross-process build lock wait, honoring the env override.
+
+        Without an explicit override the wait scales with this extension's
+        recorded compile baseline so a waiter never gives up on a slower host
+        while the builder is still legitimately compiling.
+        """
+
+        if os.getenv(_TORCH_OPS_FILE_LOCK_TIMEOUT_ENV) is not None:
+            return _torch_ops_file_lock_timeout_seconds()
+        baseline_seconds = self.compile_baseline_seconds or 0.0
+        return max(_TORCH_OPS_FILE_LOCK_TIMEOUT_DEFAULT_SECONDS, 5.0 * baseline_seconds)
+
+    def _cross_process_lock_path(self) -> Path:
+        """Return the flock path, kept outside the directory cache clears delete."""
+
+        base_build_root = self.base_build_root()
+        return base_build_root.parent / f"{base_build_root.name}.lock"
+
+    def _remove_stale_torch_build_lock(self, build_root: Path) -> None:
+        """Drop a leftover torch FileBaton lock file so a dead build cannot hang new ones.
+
+        torch's `_jit_compile` waits on `<build_root>/lock` with no timeout and
+        no owner check, so a lock file left behind by a killed process would
+        otherwise block every later build in this directory forever. Only safe
+        while holding the exclusive cross-process build lock, which proves no
+        live process is compiling here.
+        """
+
+        baton_path = build_root / "lock"
+        if not baton_path.exists():
+            return
+        log.warning(
+            "%s: removing stale torch JIT build lock left by a dead process: pid=%s path=%s",
+            self.display_name,
+            os.getpid(),
+            baton_path,
+        )
+        try:
+            baton_path.unlink()
+        except FileNotFoundError:  # pragma: no cover - already gone
+            pass
 
     def _source_cache_fingerprint_payload(self, source: str, include_paths: Sequence[str]) -> list[str]:
         """Hash one source file plus recursively discovered local includes."""
@@ -806,7 +1072,7 @@ class TorchOpsJitExtension:
             if normalized in visited:
                 return
             visited.add(normalized)
-            payload.append(str(normalized))
+            payload.append(_fingerprint_path_key(normalized))
 
             if not normalized.exists():
                 payload.append("missing")
@@ -835,6 +1101,92 @@ class TorchOpsJitExtension:
 
         visit(Path(source))
         return payload
+
+    def _source_abi_details(
+        self,
+        sources: Sequence[str],
+        include_paths: Sequence[str],
+    ) -> tuple[bool, bool, tuple[str, ...]]:
+        """Detect ABI requirements and report non-stable headers."""
+
+        source_texts = [
+            item
+            for source in sources
+            for item in self._source_texts(source, include_paths)
+        ]
+        source_key = tuple(
+            (_fingerprint_path_key(path), hashlib.sha256(text.encode("utf-8")).hexdigest())
+            for path, text in source_texts
+        )
+        cache_key = (source_key, tuple(include_paths))
+        cached = self._source_abi_detection_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        python_dependent = False
+        stable_registration = False
+        stable_torch_headers = True
+        non_stable_headers: set[str] = set()
+        for _, source_text in source_texts:
+            marker_text = _C_COMMENT_PATTERN.sub("", source_text)
+            if _PYTHON_ABI_USAGE_PATTERN.search(marker_text) or _REGISTER_EXTENSION_PATTERN.search(marker_text):
+                python_dependent = True
+            if _STABLE_TORCH_REGISTRATION_PATTERN.search(marker_text):
+                stable_registration = True
+            for include_name in _TORCH_INCLUDE_PATTERN.findall(marker_text):
+                python_include = (
+                    include_name == "Python.h"
+                    or include_name.startswith("pybind11/")
+                    or include_name in {"torch/extension.h", "torch/python.h"}
+                )
+                if python_include:
+                    python_dependent = True
+                is_non_stable = (
+                    include_name.startswith("ATen/")
+                    or include_name.startswith("c10/")
+                    or include_name.startswith("caffe2/")
+                    or (
+                        include_name.startswith("torch/")
+                        and not (
+                            include_name.startswith("torch/csrc/stable/")
+                            or include_name.startswith("torch/headeronly/")
+                        )
+                    )
+                )
+                if is_non_stable:
+                    stable_torch_headers = False
+                    non_stable_headers.add(include_name)
+
+        detected = (
+            python_dependent,
+            stable_registration and stable_torch_headers,
+            tuple(sorted(non_stable_headers)),
+        )
+        self._source_abi_detection_cache[cache_key] = detected
+        return detected
+
+    def _source_abi_flags(self, sources: Sequence[str], include_paths: Sequence[str]) -> tuple[bool, bool]:
+        """Detect Python and torch ABI requirements from sources and local includes."""
+
+        detected = self._source_abi_details(sources, include_paths)
+        return detected[:2]
+
+    def _resolved_abi_flags(self, sources: Sequence[str], include_paths: Sequence[str]) -> tuple[bool, bool]:
+        detected_python_abi_dependent, _, non_stable_headers = self._source_abi_details(
+            sources,
+            include_paths,
+        )
+        if self.torch_stable_abi_target is not None and non_stable_headers:
+            raise RuntimeError(
+                f"{self.display_name} explicitly requests the Torch stable ABI but uses non-stable header "
+                f"{non_stable_headers[0]!r}"
+            )
+        return (
+            self.python_abi_dependent
+            if self.python_abi_dependent is not None
+            else detected_python_abi_dependent,
+            self.torch_stable_abi_target is not None,
+        )
 
     def _source_texts(self, source: str, include_paths: Sequence[str]) -> list[tuple[Path, str]]:
         """Collect source text and recursively discovered quoted local includes."""
@@ -1095,6 +1447,70 @@ class TorchOpsJitExtension:
                         candidates.append(match)
         return candidates
 
+    def _configured_prebuilt_library(self) -> Optional[Path]:
+        if not self.prebuilt_library_env:
+            return None
+        configured = os.getenv(self.prebuilt_library_env)
+        if not configured:
+            return None
+        return Path(configured).expanduser().resolve(strict=False)
+
+    def _load_configured_prebuilt_library(self, library_path: Path) -> bool:
+        """Load an explicitly configured library without evaluating JIT callbacks."""
+
+        if (
+            self._loaded_prebuilt_library == library_path
+            and self._load_result
+            and library_path.is_file()
+        ):
+            return True
+        if not library_path.is_file():
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` does not exist. "
+                f"Unset `{self.prebuilt_library_env}` to enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        if self._ops_available() and self._loaded_prebuilt_library != library_path:
+            loaded_detail = (
+                f" from `{self._loaded_prebuilt_library}`"
+                if self._loaded_prebuilt_library is not None
+                else ""
+            )
+            self._last_error = (
+                f"{self.display_name}: required torch.ops are already registered{loaded_detail}; cannot verify "
+                f"that configured prebuilt library `{library_path}` provides them. PyTorch cannot unload operator "
+                "registrations in-process, so start a new process before selecting a different prebuilt library."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        try:
+            torch.ops.load_library(str(library_path))
+        except Exception as exc:
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` is incompatible: {exc}. "
+                f"Unset `{self.prebuilt_library_env}` to enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        if not self._refresh_runtime_cache():
+            self._last_error = (
+                f"{self.display_name}: configured prebuilt library `{library_path}` loaded but did not register "
+                f"required torch.ops ({', '.join(self.required_ops)}). Unset `{self.prebuilt_library_env}` to "
+                "enable JIT compilation, or provide a compatible file."
+            )
+            self._load_attempted = True
+            self._load_result = False
+            return False
+        self._load_attempted = True
+        self._load_result = True
+        self._loaded_prebuilt_library = library_path
+        self._last_error = ""
+        return True
+
     def _try_load_prebuilt_library(self, build_root: Path) -> bool:
         for library_path in self._candidate_binary_paths(build_root):
             if not library_path.is_file():
@@ -1114,15 +1530,32 @@ class TorchOpsJitExtension:
             self._load_attempted = False
             self._load_result = False
             self._last_error = ""
+            # torch.ops registrations cannot be unloaded. Keep the artifact
+            # identity so a later environment-path switch cannot claim the
+            # existing namespace as registrations from a different library.
             self._namespace_cache = None
             self._op_cache = {}
+            if self._configured_prebuilt_library() is not None:
+                return
             build_root = self.base_build_root()
             if build_root.exists():
-                _log_cache_clear_callsite(
-                    reason=f"{self.display_name}.clear_cache",
-                    target_path=build_root,
-                )
-                shutil.rmtree(build_root, ignore_errors=True)
+                lock_timeout_seconds = self._build_lock_timeout_seconds()
+                with _cross_process_build_lock(
+                    self._cross_process_lock_path(), timeout_seconds=lock_timeout_seconds
+                ) as build_lock_acquired:
+                    if not build_lock_acquired:
+                        log.warning(
+                            "%s: skipping on-disk cache clear; timed out after %.0fs waiting for the "
+                            "cross-process JIT build lock (another process may be building here).",
+                            self.display_name,
+                            lock_timeout_seconds,
+                        )
+                        return
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.clear_cache",
+                        target_path=build_root,
+                    )
+                    shutil.rmtree(build_root, ignore_errors=True)
 
     def last_error_message(self) -> str:
         """Return the most recent human-readable load failure."""
@@ -1278,41 +1711,117 @@ class TorchOpsJitExtension:
                         "candidate_binaries="
                         + ", ".join(f"{path}:{'exists' if path.exists() else 'missing'}" for path in candidate_paths)
                     )
+                    log.warning("%s", self._last_error)
+                    setup_logger().info(f"{self.display_name}: JIT build lock wait timed out; using fallback path.")
+                    return False
+
+                if force_rebuild and base_build_root.exists():
+                    setup_logger().info(f"{self.display_name}: clearing cached JIT extension at `{base_build_root}`.")
+                    _log_cache_clear_callsite(
+                        reason=f"{self.display_name}.force_rebuild",
+                        target_path=base_build_root,
+                    )
+                    shutil.rmtree(base_build_root, ignore_errors=True)
+
+                build_root.mkdir(parents=True, exist_ok=True)
+
+                if not force_rebuild and self._try_load_prebuilt_library(build_root):
+                    self._load_attempted = True
+                    self._load_result = True
+                    self._last_error = ""
+                    return True
+
+                self._remove_stale_torch_build_lock(build_root)
+
+                logger = setup_logger()
+                logger.info(f"{self.display_name}: compiling torch.ops JIT extension in `{build_root}`.")
+                progress_display = _CompileProgressDisplay(
+                    logger=logger,
+                    title=f"Compiling extension: {self.display_name}...",
+                    baseline_seconds=self.compile_baseline_seconds,
+                )
+                started = time.perf_counter()
+                build_invocation_succeeded = False
                 try:
-                    entries = sorted(build_root.iterdir())
-                    preview = ", ".join(entry.name for entry in entries[:24])
-                    if len(entries) > 24:
-                        preview += f", ... (+{len(entries) - 24} more)"
-                    diagnostic_lines.append(f"build_root_entries=[{preview}]")
-                except OSError as snapshot_exc:
-                    diagnostic_lines.append(f"build_root_entries=<unavailable: {snapshot_exc}>")
-                self._last_error = " | ".join(diagnostic_lines)
-                log.debug("%s", self._last_error, exc_info=True)
-                logger.info(
-                    f"{self.display_name}: torch.ops JIT compilation failed "
-                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
-                )
-                return False
-            finally:
+                    resolved_sources = self._resolve_sequence(self.sources)
+                    extra_include_paths = self._resolved_extra_include_paths()
+                    kwargs = {
+                        "name": self.name,
+                        "sources": resolved_sources,
+                        "build_directory": str(build_root),
+                        "is_python_module": False,
+                        "verbose": env_flag(self.verbose_env, default=False) if self.verbose_env else False,
+                    }
+                    extra_cflags = self._resolved_extra_cflags()
+                    if extra_cflags:
+                        kwargs["extra_cflags"] = extra_cflags
+                    extra_cuda_cflags = self._resolved_extra_cuda_cflags()
+                    if extra_cuda_cflags:
+                        kwargs["extra_cuda_cflags"] = extra_cuda_cflags
+                    if extra_include_paths:
+                        kwargs["extra_include_paths"] = extra_include_paths
+                    extra_ldflags = self._resolve_sequence(self.extra_ldflags)
+                    if extra_ldflags:
+                        kwargs["extra_ldflags"] = extra_ldflags
+                    with _temporary_merged_cuda_arch_override(
+                        enabled=self.merge_visible_cuda_arch_override
+                    ):
+                        load(**kwargs)
+                    build_invocation_succeeded = True
+                except Exception as exc:  # pragma: no cover - build depends on host toolchain
+                    elapsed = time.perf_counter() - started
+                    self._load_attempted = True
+                    self._load_result = False
+                    diagnostic_lines = [
+                        f"{self.display_name}: failed to build torch.ops JIT extension: {exc}",
+                        f"build_root={build_root}",
+                        f"base_build_root={base_build_root}",
+                        f"python={platform.python_version()}",
+                        f"pid={os.getpid()}",
+                        f"TORCH_EXTENSIONS_DIR={os.getenv('TORCH_EXTENSIONS_DIR', '')}",
+                        f"GPTQMODEL_TORCH_EXTENSIONS_DIR={os.getenv('GPTQMODEL_TORCH_EXTENSIONS_DIR', '')}",
+                    ]
+                    candidate_paths = self._candidate_binary_paths(build_root)
+                    if candidate_paths:
+                        diagnostic_lines.append(
+                            "candidate_binaries="
+                            + ", ".join(f"{path}:{'exists' if path.exists() else 'missing'}" for path in candidate_paths)
+                        )
+                    try:
+                        entries = sorted(build_root.iterdir())
+                        preview = ", ".join(entry.name for entry in entries[:24])
+                        if len(entries) > 24:
+                            preview += f", ... (+{len(entries) - 24} more)"
+                        diagnostic_lines.append(f"build_root_entries=[{preview}]")
+                    except OSError as snapshot_exc:
+                        diagnostic_lines.append(f"build_root_entries=<unavailable: {snapshot_exc}>")
+                    self._last_error = " | ".join(diagnostic_lines)
+                    log.debug("%s", self._last_error, exc_info=True)
+                    logger.info(
+                        f"{self.display_name}: torch.ops JIT compilation failed "
+                        f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}; using fallback path."
+                    )
+                    return False
+                finally:
+                    elapsed = time.perf_counter() - started
+                    progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
+
                 elapsed = time.perf_counter() - started
-                progress_display.close(succeeded=build_invocation_succeeded, elapsed_seconds=elapsed)
+                ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
+                self._load_attempted = True
+                self._load_result = ready
+                if ready:
+                    self._refresh_runtime_cache()
+                    self._last_error = ""
+                    logger.info(
+                        f"{self.display_name}: torch.ops JIT extension ready "
+                        f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
+                    )
+                    return True
 
-            elapsed = time.perf_counter() - started
-            ready = self._refresh_runtime_cache() or self._try_load_prebuilt_library(build_root)
-            self._load_attempted = True
-            self._load_result = ready
-            if ready:
-                self._refresh_runtime_cache()
-                self._last_error = ""
-                logger.info(
-                    f"{self.display_name}: torch.ops JIT extension ready "
-                    f"{_compile_baseline_summary(elapsed, self.compile_baseline_seconds)}."
-                )
-                return True
-
-            self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
-            logger.info(f"{self.display_name}: torch.ops JIT build finished without registering required ops.")
-            return False
+                self._last_error = f"{self.display_name}: build completed but required torch.ops were not registered."
+                logger.info(f"{self.display_name}: torch.ops JIT build finished without registering required ops.")
+                return False
 
     def namespace_object(self) -> object:
         """Return the cached torch.ops namespace after loading this extension."""

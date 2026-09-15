@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 from __future__ import annotations
 
+import math
 import subprocess
 import sys
 import threading
@@ -47,11 +48,57 @@ def _marlin_capability_supported(major: int, minor: int) -> bool:
     return major > 7 or (major == 7 and minor >= 5)
 
 
-def _marlin_environment_error() -> str:
+def _marlin_all_visible_devices_supported(min_capability: Tuple[int, int]) -> bool:
+    # PyTorch resolves CUDA_VISIBLE_DEVICES, including UUID and MIG entries.
+    device_count = torch.cuda.device_count()
+    return device_count > 0 and all(
+        torch.cuda.get_device_capability(index) >= min_capability
+        for index in range(device_count)
+    )
+
+
+def marlin_validate_runtime_device(
+        device: torch.device,
+        *,
+        min_capability: Tuple[int, int],
+        backend_name: str,
+) -> Tuple[int, int]:
+    """Validate the CUDA device that owns one Marlin module's weights."""
+    device = torch.device(device)
+    if IS_ROCM:
+        raise ValueError(f"{backend_name} is not supported on ROCm.")
+    if device.type != "cuda":
+        raise ValueError(f"{backend_name} requires CUDA tensors, got `{device}`.")
+
+    try:
+        capability = torch.cuda.get_device_capability(device)
+    except Exception as exc:  # pragma: no cover - depends on the CUDA runtime
+        raise ValueError(
+            f"{backend_name} failed to query CUDA device `{device}` capability: {exc}"
+        ) from exc
+
+    if capability < min_capability:
+        minimum = ".".join(str(part) for part in min_capability)
+        detected = ".".join(str(part) for part in capability)
+        raise ValueError(
+            f"{backend_name} requires compute capability >= {minimum}, "
+            f"got {detected} on `{device}`."
+        )
+    return capability
+
+
+def _marlin_build_environment_error() -> str:
     if IS_ROCM:
         return "Marlin kernel is not supported on ROCm."
     if not torch.cuda.is_available():
         return "Marlin kernel requires CUDA."
+    return ""
+
+
+def _marlin_environment_error() -> str:
+    build_error = _marlin_build_environment_error()
+    if build_error:
+        return build_error
     try:
         major, minor = torch.cuda.get_device_capability()
     except Exception as exc:  # pragma: no cover - depends on host CUDA runtime
@@ -61,7 +108,9 @@ def _marlin_environment_error() -> str:
     return ""
 
 
-marlin_import_exception = _marlin_environment_error() or None
+# Import/JIT availability must not freeze the capability of whichever device
+# happened to be current. Exact capability checks run in validate_device().
+marlin_import_exception = _marlin_build_environment_error() or None
 
 
 def _marlin_root() -> Path:
@@ -294,7 +343,7 @@ def _marlin_resolve_op(
 
 
 # Validate marlin support
-def _validate_marlin_device_support() -> bool:
+def _validate_marlin_device_support(device: Optional[torch.device] = None) -> bool:
     """
     Validates if the current device is compatible for Marlin.
     ref: https://github.com/IST-DASLab/marlin?tab=readme-ov-file#requirements
@@ -304,7 +353,12 @@ def _validate_marlin_device_support() -> bool:
     """
     if IS_ROCM or not torch.cuda.is_available():
         return False
-    major, minor = torch.cuda.get_device_capability()
+    target = torch.device(device) if device is not None else None
+    major, minor = (
+        torch.cuda.get_device_capability(target)
+        if target is not None
+        else torch.cuda.get_device_capability()
+    )
     return _marlin_capability_supported(major, minor)
 
 
@@ -333,6 +387,124 @@ def marlin_make_workspace_new(device: torch.device,
                        dtype=torch.int,
                        device=device,
                        requires_grad=False)
+
+
+def _round_up(value: int, multiple: int) -> int:
+    """Round value up to the next multiple."""
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+# Marlin accepts either orientation of its 64 x 128 thread tile.
+def marlin_is_tile_aligned(size_n: int, size_k: int) -> bool:
+    return (
+        size_n % 64 == 0 and size_k % 128 == 0
+    ) or (
+        size_n % 128 == 0 and size_k % 64 == 0
+    )
+
+
+def marlin_padded_nk(size_n: int, size_k: int,
+                     group_size: int = -1) -> Tuple[int, int]:
+    """Return the smallest N/K pair supported by a Marlin thread tile.
+
+    Padded K consumes zero activations; padded N uses zero scales, so neither
+    region changes the logical output.
+    """
+    group = group_size if group_size > 0 else 1
+    # Try both tile orientations and keep the one with the least padded work.
+    candidates = (
+        (_round_up(size_n, 64), _round_up(size_k, math.lcm(128, group))),
+        (_round_up(size_n, 128), _round_up(size_k, math.lcm(64, group))),
+    )
+    padded_nk = min(candidates, key=lambda nk: (nk[0] * nk[1], nk[0] + nk[1]))
+    if padded_nk != (size_n, size_k):
+        log.warn.once(
+            "Marlin is padding a tile-misaligned weight shape. Activations "
+            "and outputs for this layer are padded and sliced on each forward; "
+            "performance may be degraded."
+        )
+    return padded_nk
+
+
+def marlin_pad_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
+                       padded_n: int, padded_k: int) -> torch.Tensor:
+    """Zero-pad a GPTQ-layout packed weight before Marlin repacking."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qweight
+    # Each packed row stores pack_factor consecutive K values.
+    pack_factor = size_k // qweight.size(0)
+    return torch.nn.functional.pad(
+        qweight,
+        (0, padded_n - size_n, 0, (padded_k - size_k) // pack_factor),
+    )
+
+
+def marlin_pad_awq_qweight(qweight: torch.Tensor, size_n: int, size_k: int,
+                           padded_n: int, padded_k: int,
+                           num_bits: int) -> torch.Tensor:
+    """Zero-pad an AWQ-layout packed weight before Marlin repacking."""
+    pack_factor = 32 // num_bits
+    expected_shape = (size_k, size_n // pack_factor)
+    if tuple(qweight.shape) != expected_shape:
+        raise ValueError(
+            f"AWQ qweight shape must be {expected_shape}, got {tuple(qweight.shape)}."
+        )
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qweight
+    return torch.nn.functional.pad(
+        qweight,
+        (0, (padded_n - size_n) // pack_factor, 0, padded_k - size_k),
+    )
+
+
+def marlin_pad_awq_qzeros(qzeros: torch.Tensor, size_n: int, size_k: int,
+                          padded_n: int, padded_k: int, group_size: int,
+                          num_bits: int) -> torch.Tensor:
+    """Zero-pad AWQ packed zero-points to the padded group and N extents."""
+    pack_factor = 32 // num_bits
+    groups = size_k // group_size if group_size > 0 else 1
+    padded_groups = padded_k // group_size if group_size > 0 else 1
+    expected_shape = (groups, size_n // pack_factor)
+    if tuple(qzeros.shape) != expected_shape:
+        raise ValueError(
+            f"AWQ qzeros shape must be {expected_shape}, got {tuple(qzeros.shape)}."
+        )
+    if (padded_n, padded_k) == (size_n, size_k):
+        return qzeros
+    return torch.nn.functional.pad(
+        qzeros,
+        (0, (padded_n - size_n) // pack_factor, 0, padded_groups - groups),
+    )
+
+
+def marlin_pad_scales(scales: torch.Tensor, size_n: int, size_k: int,
+                      padded_n: int, padded_k: int,
+                      group_size: int) -> torch.Tensor:
+    """Zero-pad scale rows and columns to the padded Marlin shape."""
+    if (padded_n, padded_k) == (size_n, size_k):
+        return scales
+    # Extra K groups need zero scales so padded weights stay inactive.
+    pad_rows = padded_k // group_size - scales.size(0) if group_size > 0 else 0
+    if pad_rows < 0:
+        raise ValueError("Padded Marlin K cannot contain fewer scale groups.")
+    return torch.nn.functional.pad(
+        scales, (0, padded_n - size_n, 0, pad_rows)
+    )
+
+
+def marlin_pad_dim(x: torch.Tensor, size: int, padded: int) -> torch.Tensor:
+    """Zero-pad the last tensor dimension when a Marlin tile requires it."""
+    if padded == size:
+        return x
+    return torch.nn.functional.pad(x, (0, padded - size))
+
+
+def marlin_unpad_output(output: torch.Tensor, size_n: int,
+                        padded_n: int) -> torch.Tensor:
+    """Slice a padded Marlin result back to its logical output width."""
+    if padded_n == size_n:
+        return output
+    return output[..., :size_n].contiguous()
 
 
 def update_tensor_inplace(dst: torch.Tensor, src: torch.Tensor):
@@ -537,6 +709,46 @@ def apply_gptq_marlin_linear(
     return output if input_is_2d else output.reshape(out_shape)
 
 
+def apply_gptq_marlin_linear_padded(
+        *,
+        tile_padding: Tuple[int, int],
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        wtype: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        is_k_full: bool,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True,
+        use_atomics: bool = False,
+) -> torch.Tensor:
+    """Pad one tile-misaligned GEMM around the unchanged Marlin hot path."""
+    padded_n, padded_k = tile_padding
+    padded_input = marlin_pad_dim(input, input_size_per_partition, padded_k)
+    output = apply_gptq_marlin_linear(
+        input=padded_input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_zp=weight_zp,
+        g_idx=g_idx,
+        g_idx_sort_indices=g_idx_sort_indices,
+        workspace=workspace,
+        wtype=wtype,
+        output_size_per_partition=padded_n,
+        input_size_per_partition=padded_k,
+        is_k_full=is_k_full,
+        bias=bias,
+        use_fp32_reduce=use_fp32_reduce,
+        use_atomics=use_atomics,
+    )
+    return marlin_unpad_output(output, output_size_per_partition, padded_n)
+
+
 def apply_awq_marlin_linear(
         input: torch.Tensor,
         weight: torch.Tensor,
@@ -578,6 +790,42 @@ def apply_awq_marlin_linear(
                               is_zp_float=False)
 
     return output.reshape(out_shape)
+
+
+def apply_awq_marlin_linear_padded(
+        *,
+        tile_padding: Tuple[int, int],
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        weight_scale: torch.Tensor,
+        weight_zp: torch.Tensor,
+        g_idx: torch.Tensor,
+        g_idx_sort_indices: torch.Tensor,
+        workspace: torch.Tensor,
+        quant_type: ScalarType,
+        output_size_per_partition: int,
+        input_size_per_partition: int,
+        bias: Optional[torch.Tensor] = None,
+        use_fp32_reduce: bool = True,
+) -> torch.Tensor:
+    """Pad one AWQ GEMM around the unchanged Marlin call path."""
+    padded_n, padded_k = tile_padding
+    padded_input = marlin_pad_dim(input, input_size_per_partition, padded_k)
+    output = apply_awq_marlin_linear(
+        input=padded_input,
+        weight=weight,
+        weight_scale=weight_scale,
+        weight_zp=weight_zp,
+        g_idx=g_idx,
+        g_idx_sort_indices=g_idx_sort_indices,
+        workspace=workspace,
+        quant_type=quant_type,
+        output_size_per_partition=padded_n,
+        input_size_per_partition=padded_k,
+        bias=bias,
+        use_fp32_reduce=use_fp32_reduce,
+    )
+    return marlin_unpad_output(output, output_size_per_partition, padded_n)
 
 
 def gptq_marlin_gemm(a: torch.Tensor,

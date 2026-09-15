@@ -5,7 +5,6 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
-import os
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -254,18 +253,20 @@ class QQQLinear(GroupedQuantLinear):
         return cls._validate(**args)
 
     @classmethod
-    def validate_device(cls, device: DEVICE):
+    def validate_device(cls, device: DEVICE | torch.device):
         super().validate_device(device)
-        CUDA_VISIBLE_DEVICES = os.environ.get("CUDA_VISIBLE_DEVICES")
-        if device == DEVICE.CUDA:
-            if IS_ROCM:
-                raise NotImplementedError("Marlin kernel is not supported on ROCm.")
-
-            if CUDA_VISIBLE_DEVICES is None:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(torch.cuda.device_count()))
-            else:
-                has_cuda_v8 = all(torch.cuda.get_device_capability(i)[0] >= 8 for i in range(len(CUDA_VISIBLE_DEVICES.split(","))))
-            if not has_cuda_v8:
+        # QQQ has an independent ROCm implementation. ROCm exposes CUDA
+        # device values through torch, so an exact cuda:N target must not
+        # be mistaken for the unsupported CUDA Marlin path.
+        if IS_ROCM:
+            return
+        if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
+            targets = (
+                (device,)
+                if isinstance(device, torch.device)
+                else tuple(torch.device(f"cuda:{index}") for index in range(torch.cuda.device_count()))
+            )
+            if not targets or any(torch.cuda.get_device_capability(target)[0] < 8 for target in targets):
                 raise NotImplementedError("Marlin kernel only supports compute capability >= 8.0.")
 
     def post_init(self):
@@ -309,46 +310,41 @@ class QQQLinear(GroupedQuantLinear):
                 If you can ensure your GEMM results don't overflow torch.float16, it will still function correctly.
                 Otherwise, it will yield incorrect results."""
             )
-        s = scales.t()
-        w = linear.weight.data.t()
-        if self.group_size != self.in_features:
-            w = w.reshape((-1, self.group_size, self.out_features))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.group_size, -1))
-            s = s.reshape((1, -1))
-        w = torch.round(w / s).int()
-        if self.group_size != self.in_features:
-            w += (self.maxq + 1) // 2
-            w = torch.clamp(w, 0, self.maxq)
-        else:
-            w = torch.clamp(w, -self.maxq, self.maxq)
+
+        raw_scales = scales.t()
         if self.group_size != self.in_features:
             s_extra = s_extra.reshape(1, -1).to(dtype=torch.float32)
-            s = (s.reshape(-1, self.out_features) / s_extra).to(dtype=torch.float16)
-
-            w = w.reshape((self.group_size, -1, self.out_features))
-            w = w.permute(1, 0, 2)
-            w = w.reshape((self.in_features, self.out_features)).contiguous()
-            s = s.reshape((-1, len(self._scale_perm)))[:, self._scale_perm]
-            s_extra = s_extra.reshape((-1, len(self._scale_perm_single)))[
-                      :, self._scale_perm_single
-                      ]
-            s_extra = s_extra.reshape((-1, self.out_features)).contiguous()
+            packed_s_group = (raw_scales / s_extra).to(dtype=torch.float16)
+            packed_s_group = packed_s_group.reshape(
+                (-1, len(self._scale_perm))
+            )[:, self._scale_perm].reshape((-1, self.out_features)).contiguous()
+            packed_s_channel = s_extra.reshape(
+                (-1, len(self._scale_perm_single))
+            )[:, self._scale_perm_single].reshape((-1, self.out_features)).contiguous()
         else:
-            # NOTE(zhangying): div 2 ** (8 - self.bits)) to deal with right_shift in unpacking
-            s = (
-                (s / (2 ** (8 - self.bits)))
+            packed_s_group = None
+            packed_s_channel = (
+                (raw_scales / (2 ** (8 - self.bits)))
                 .reshape((-1, len(self._scale_perm_single)))[:, self._scale_perm_single]
                 .to(dtype=torch.float32)
+                .reshape((-1, self.out_features))
+                .contiguous()
             )
-        s = s.reshape((-1, self.out_features)).contiguous()
-        w = w.reshape(
-            (
-                self.in_features // self.tile,
-                self.tile,
-                self.out_features // self.tile,
-                self.tile,
+
+        input_chunk_size = min(1024, self.in_features)
+        output_chunk_size = min(256, self.out_features)
+        input_chunk_size -= input_chunk_size % self.tile
+        output_chunk_size -= output_chunk_size % 64
+        if input_chunk_size == 0 or output_chunk_size == 0:
+            raise ValueError(
+                f"QQQ pack requires dimensions divisible by {self.tile} and 64, "
+                f"got in_features={self.in_features}, out_features={self.out_features}"
             )
+
+        packed_weight = torch.empty(
+            (self.in_features // self.tile, self.out_features * 2),
+            dtype=torch.int32,
+            device=CPU,
         )
         w = w.permute((0, 2, 1, 3))
         w = w.reshape((self.in_features // self.tile, self.out_features * self.tile))
@@ -406,8 +402,8 @@ class QQQLinear(GroupedQuantLinear):
     def forward(self, A):
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
-        if A.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
+        if self.input_rows(A) == 0:
+            return self.empty_linear_output(A)
 
         A_dtype = A.dtype
         # qqq is float16 kernel only
@@ -521,8 +517,8 @@ class QQQTorchLinear(QQQLinear):
         return weight, s_channel
 
     def forward(self, A):
-        if A.shape[0] == 0:
-            return torch.empty((0, self.out_features), dtype=A.dtype, device=A.device)
+        if self.input_rows(A) == 0:
+            return self.empty_linear_output(A)
 
         A_dtype = A.dtype
         if A.dtype != torch.float16:

@@ -66,7 +66,7 @@ from .device import get_device
 from .env import env_flag
 from .hf import get_hf_config_dtype
 from .hub import hf_hub_download, model_info
-from .importer import select_quant_linear
+from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
 from .torch import HAS_CUDA, torch_empty_cache
@@ -172,6 +172,8 @@ MoETopKState = List[Tuple[nn.Module, str, int]]
 MOE_TOPK_FIELD_NAMES = [
     "top_k",
     "moe_k", # ernie4_5_vl_moe
+    # K2 Horizon's MoVA router uses this name instead of ``top_k``.
+    "num_experts_per_tok",
 ]
 
 MOE_NUM_EXPERTS_FIELD_NAMES = [
@@ -1651,6 +1653,7 @@ def pack_model(
     quant_linear_cls = make_quant(
         model,
         qcfg=qcfg,
+        quant_result=quant_result,
         backend=backend,
         lm_head_name=lm_head_name,
         pack=True,
@@ -1663,7 +1666,7 @@ def pack_model(
         if name in quant_result
     }
 
-    assert len(qModules) > 0, f"No quantizeed modules[{quant_linear_cls}] found in the model."
+    assert len(qModules) > 0, "No quantized modules found in the model."
 
     names = list(qModules.keys())
     lock = threading.Lock()
@@ -1705,6 +1708,90 @@ def pack_model(
     log.info("Model packed.")
     return quant_linear_cls
 
+
+def no_placement_module_names(model: nn.Module) -> set[str]:
+    """Resolve Transformers no-placement parameter patterns to leaf modules."""
+
+    patterns = getattr(model, "_no_placement_params", ()) or ()
+    patterns = tuple(pattern for pattern in patterns if isinstance(pattern, str) and pattern)
+    if not patterns:
+        return set()
+
+    names = set()
+    tensors = (*model.named_parameters(), *model.named_buffers())
+    for tensor_name, _ in tensors:
+        if any(tensor_name == pattern or tensor_name.endswith(f".{pattern}") for pattern in patterns):
+            names.add(tensor_name.rsplit(".", 1)[0])
+    return names
+
+
+def _remove_redundant_device_map_children(device_map: Dict[str, Union[str, int]]) -> None:
+    """Remove child entries already covered by a same-device parent."""
+
+    for name in sorted(device_map, key=lambda item: item.count(".")):
+        if name not in device_map:
+            continue
+        prefix = f"{name}." if name else ""
+        for child_name in list(device_map):
+            if child_name != name and child_name.startswith(prefix) and device_map[child_name] == device_map[name]:
+                device_map.pop(child_name)
+
+
+def _split_device_map_around_module(
+    model: nn.Module,
+    device_map: Dict[str, Union[str, int]],
+    ancestor_name: str,
+    target_name: str,
+    ancestor_device: Union[str, int],
+) -> None:
+    """Replace one parent mapping with non-overlapping branches around a target."""
+
+    current_name = ancestor_name
+    while current_name != target_name:
+        current_module = model if not current_name else model.get_submodule(current_name)
+        relative_target = target_name if not current_name else target_name[len(current_name) + 1:]
+        path_child = relative_target.split(".", 1)[0]
+
+        # Preserve direct tensors and sibling branches on the parent's device;
+        # descend only through the branch containing the excluded module.
+        for param_name, _ in (*current_module.named_parameters(recurse=False), *current_module.named_buffers(recurse=False)):
+            full_name = f"{current_name}.{param_name}" if current_name else param_name
+            device_map.setdefault(full_name, ancestor_device)
+        for child_name, _ in current_module.named_children():
+            full_name = f"{current_name}.{child_name}" if current_name else child_name
+            if child_name != path_child:
+                device_map.setdefault(full_name, ancestor_device)
+
+        current_name = f"{current_name}.{path_child}" if current_name else path_child
+
+
+def apply_no_placement_to_device_map(model: nn.Module, device_map: Dict[str, Union[str, int]]) -> Dict[str, Union[str, int]]:
+    """Build a non-overlapping load map with excluded leaf modules on CPU."""
+
+    result = dict(device_map)
+    _remove_redundant_device_map_children(result)
+    for module_name in no_placement_module_names(model):
+        ancestors = [
+            name
+            for name in result
+            if name != module_name and (not name or module_name.startswith(f"{name}."))
+        ]
+        for ancestor_name in sorted(ancestors, key=lambda item: item.count("."), reverse=True):
+            ancestor_device = result.pop(ancestor_name)
+            _split_device_map_around_module(
+                model,
+                result,
+                ancestor_name,
+                module_name,
+                ancestor_device,
+            )
+        # The checkpoint preloader expands parent and child entries independently;
+        # keep this map non-overlapping so the same tensor is not read on both devices.
+        result[module_name] = "cpu"
+    _remove_redundant_device_map_children(result)
+    return result
+
+
 def simple_dispatch_model(model, device_map):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
 
@@ -1731,7 +1818,15 @@ def simple_dispatch_model(model, device_map):
     else:
         main_device = [d for d in device_map.values() if d not in ["cpu", "disk"]][0]
 
-    cpu_offload_group = [(n, d) for n, d in device_map.items() if d == "cpu"]
+    # These modules perform their own CPU lookup and must remain resident;
+    # a normal CPU-offload hook would move their full weights back to the GPU.
+    resident_cpu_modules = no_placement_module_names(model)
+    module_names = dict(model.named_modules())
+    cpu_offload_group = [
+        (n, d)
+        for n, d in device_map.items()
+        if d == "cpu" and n not in resident_cpu_modules and n in module_names
+    ]
     prev_hook = None
     for idx, (n, d) in enumerate(cpu_offload_group):
         m = get_module_by_name_suffix(model, n)
@@ -1743,10 +1838,18 @@ def simple_dispatch_model(model, device_map):
     for n, d in device_map.items():
         if n == "":
             continue
-        m = get_module_by_name_suffix(model, n)
+        m = module_names.get(n)
+        if m is None:
+            # Fine-grained maps can contain direct parameter entries.
+            continue
         if d != "cpu":
             d = torch.device(d)
-            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=True)
+            has_other_device_child = any(
+                child_name.startswith(f"{n}.") and child_device != device_map[n]
+                for child_name, child_device in device_map.items()
+            )
+            # A mixed-device child means the parent hook may move inputs, but not descendants.
+            hook = AlignDevicesHook(d, io_same_device=True, place_submodules=not has_other_device_child)
             add_hook_to_module(m, hook)
     accelerate.utils.modeling.retie_parameters(model, tied_params)
 
@@ -2172,6 +2275,15 @@ def _resolve_offload_entry(
     else:
         shape = shape_hint
 
+    if resolved_dtype != dtype or shape != shape_hint:
+        name = f"{module_path}.{leaf}" if module_path else leaf
+        index_path = os.path.join(module_dir, "index.json")
+        raise ValueError(
+            f"Offload metadata mismatch for tensor '{name}' in '{index_path}': "
+            f"expected dtype {dtype} and shape {shape_hint}, "
+            f"found dtype {resolved_dtype} and shape {shape}."
+        )
+
     safetensors_file = entry.get("safetensors_file")
     if safetensors_file:
         path = safetensors_file
@@ -2196,7 +2308,7 @@ def _resolve_offload_entry(
         end = start + (_torch_dtype_num_bytes(resolved_dtype) * math.prod(shape or (1,)))
         return OffloadTensorRef(
             path=os.path.abspath(path),
-            dtype=resolved_dtype,
+            torch_dtype=resolved_dtype,
             shape=shape,
             format="dat",
             weight_name=None,
@@ -2581,6 +2693,109 @@ def find_config_seq_len(config_dict, target_keys):
     return None
 
 
+def get_module_name(module: nn.Module, child_module: nn.Module) -> str:
+    for name, candidate in module.named_modules():
+        if candidate is child_module:
+            return name
+    raise ValueError(f"Cannot find child_module {child_module} in module {module}")
+
+
+def untie_word_embeddings(model: nn.Module) -> nn.Module:
+    """Clone a tied output head so embedding endpoints can be quantized independently."""
+    if not getattr(model.config, "tie_word_embeddings", False):
+        return model
+
+    input_embeddings = model.get_input_embeddings()
+    output_embeddings = model.get_output_embeddings()
+    if input_embeddings is None or output_embeddings is None:
+        raise ValueError("Cannot untie word embeddings without both input and output embedding modules.")
+
+    model.config.tie_word_embeddings = False
+    new_head = nn.Linear(
+        input_embeddings.weight.shape[1],
+        input_embeddings.weight.shape[0],
+        bias=getattr(output_embeddings, "bias", None) is not None,
+        device=input_embeddings.weight.device,
+        dtype=input_embeddings.weight.dtype,
+    )
+    new_head.weight.data.copy_(input_embeddings.weight.data)
+    if new_head.bias is not None and output_embeddings.bias is not None:
+        new_head.bias.data.copy_(output_embeddings.bias.data)
+    model.set_output_embeddings(new_head)
+    return model
+
+
+def check_module_quantized_in_keys(keys, module_name: str) -> bool:
+    return any(
+        key.startswith(module_name + ".")
+        and (".qweight" in key or ".qzeros" in key or ".scales" in key)
+        for key in keys
+    )
+
+
+def validate_checkpoint_qweights(
+    model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT,
+) -> None:
+    """Reject GPTQ checkpoints that omit a module's required packed weight."""
+
+    if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+        return
+
+    checkpoint_keys = _checkpoint_tensor_keys(checkpoint)
+    if checkpoint_keys is None:
+        return
+
+    module_keys = collections.defaultdict(set)
+    for name, module in model.named_modules(remove_duplicate=False):
+        if isinstance(module, GPTQQuantLinear):
+            module_keys[id(module)].add(f"{name}.qweight" if name else "qweight")
+    missing = sorted(min(keys) for keys in module_keys.values() if not keys & checkpoint_keys)
+    if missing:
+        raise ValueError(
+            f"Missing required quantized weights in checkpoint {os.fspath(checkpoint)!r}: "
+            + ", ".join(missing)
+        )
+
+
+def is_embeddings_module_quantized(
+    model_dir: str,
+    input_embed_name: Optional[str],
+    output_embed_name: Optional[str],
+) -> Tuple[bool, bool]:
+    input_quantized = False
+    output_quantized = False
+
+    def inspect_keys(keys) -> Tuple[bool, bool]:
+        return (
+            bool(input_embed_name and check_module_quantized_in_keys(keys, input_embed_name)),
+            bool(output_embed_name and check_module_quantized_in_keys(keys, output_embed_name)),
+        )
+
+    index_path = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.exists(index_path):
+        with open(index_path, "r", encoding="utf-8") as handle:
+            index = json.load(handle)
+        return inspect_keys(index.get("weight_map", {}).keys())
+
+    safetensor_files = [
+        os.path.join(model_dir, filename)
+        for filename in os.listdir(model_dir)
+        if filename.endswith(".safetensors")
+    ]
+    for safefile in safetensor_files:
+        try:
+            with safe_open(safefile, framework="pt") as handle:
+                found_input, found_output = inspect_keys(handle.keys())
+                input_quantized = input_quantized or found_input
+                output_quantized = output_quantized or found_output
+                if input_quantized and output_quantized:
+                    break
+        except Exception as exc:
+            log.warn(f"Failed to inspect {safefile}: {exc}")
+
+    return input_quantized, output_quantized
+
+
 def has_any_attr(obj, names):
     return any(hasattr(obj, name) for name in names)
 
@@ -2588,22 +2803,51 @@ def has_any_attr(obj, names):
 def find_moe_routing_modules(model):
     modules = []
     for module in model.modules():
-        if has_any_attr(module, MOE_TOPK_FIELD_NAMES) and \
-                has_any_attr(module, MOE_NUM_EXPERTS_FIELD_NAMES):
+        if has_any_attr(module, MOE_TOPK_FIELD_NAMES) and _get_local_expert_count(module):
             modules.append(module)
     return modules
+
+
+def _get_local_expert_count(module: nn.Module) -> Optional[int]:
+    """Return the expert cardinality owned by one router module.
+
+    Most MoE implementations expose ``num_experts`` directly.  K2 Horizon's
+    MoVA value router instead owns an ``nn.ModuleList`` called ``v_experts``;
+    deriving its local count is important because the model also contains a
+    separate 100-expert MLP router.
+    """
+    for name in MOE_NUM_EXPERTS_FIELD_NAMES:
+        value = getattr(module, name, None)
+        if isinstance(value, int) and value > 0:
+            return value
+
+    experts = getattr(module, "v_experts", None)
+    if experts is not None:
+        try:
+            count = len(experts)
+        except TypeError:
+            count = 0
+        if count > 0:
+            return count
+    return None
 
 
 def set_moe_topk(model: nn.Module, new_topk: int) -> MoETopKState:
     routers = find_moe_routing_modules(model)
     state: MoETopKState = []
     for r in routers:
+        local_count = _get_local_expert_count(r)
+        if local_count is None:
+            continue
         for name in MOE_TOPK_FIELD_NAMES:
             if hasattr(r, name):
                 old = getattr(r, name)
                 assert isinstance(old, int)
                 state.append((r, name, old))
-                setattr(r, name, new_topk)
+                # A global override is resolved independently for every
+                # router.  In particular, an override of 100 means all 100
+                # MLP experts but only the 64 local MoVA value experts.
+                setattr(r, name, min(new_topk, local_count))
                 break
     return state
 

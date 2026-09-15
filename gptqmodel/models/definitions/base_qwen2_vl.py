@@ -9,7 +9,7 @@ import torch
 from PIL import Image
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
-from ...utils.calibration import batched
+from ...utils.calibration import batched_conversations
 from ...utils.image import extract_vision_info, fetch_image
 from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
@@ -295,7 +295,7 @@ class BaseQwen2VLGPTQ(BaseQModel):
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         processor = self.load_processor()
         calib_data = []
-        for batch in batched(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
+        for batch in batched_conversations(calibration_dataset, batch_size, process_func=self.preprocess_dataset):
             text = processor.apply_chat_template(
                 batch, tokenize=False, add_generation_prompt=True
             )

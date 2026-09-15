@@ -10,6 +10,8 @@ class Qwen3_5_MoeTextQModel(Qwen3MoeQModel):
     experts under `model.layers`.
     """
 
+    shared_input_verified_model_types = frozenset({"qwen3_5_moe_text"})
+
     layer_modules_strict = False
 
     pre_lm_head_norm_module = "model.norm"

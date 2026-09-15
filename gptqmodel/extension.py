@@ -103,7 +103,7 @@ _EXTENSION_SPECS = (
         name="machete",
         aliases=("gptq_machete", "awq_machete"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.machete", "_MACHETE_TORCH_OPS_EXTENSION"),
-        supported=lambda: _resolve_attr("gptqmodel.utils.machete", "_validate_machete_device_support")(),
+        supported=lambda: _resolve_attr("gptqmodel.utils.machete", "_validate_machete_build_support")(),
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.machete", "machete_runtime_error")(),
     ),
     _ExtensionSpec(

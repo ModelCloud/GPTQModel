@@ -244,6 +244,10 @@ class LoopProcessor:
         # result is total collection of all module results mapped by module.full_name
         self._results: Dict[str, Any] = {}
         self._results_lock = threading.Lock()
+        self._progress_lock = threading.Lock()
+        self._fwd_time_lock = threading.Lock()
+        self._device_smi_lock = threading.RLock()
+        self._input_cache_lock = threading.RLock()
 
         # Locks for the remaining shared state that workers touch concurrently.
         self._pb_lock = threading.Lock()
@@ -1149,6 +1153,43 @@ class LoopProcessor:
         """Override point for per-module forward hooks used during capture."""
 
         pass
+
+    def begin_shared_input_capture(
+        self,
+        model: Any,
+        subset_names: List[str],
+        is_lm_head_module: bool = False,
+    ) -> Dict[str, str]:
+        """Optionally elect one capture leader per explicit shared-input group in ``subset_names``.
+
+        Called before capture hooks are registered for a subset pass. Returns
+        ``{follower: leader}``; processors that do not dedup capture return ``{}``.
+        """
+
+        del model, subset_names, is_lm_head_module
+        return {}
+
+    def end_shared_input_capture(self, subset_names: List[str]) -> Optional[Dict[str, Any]]:
+        """Propagate leader statistics and optionally return capture lifecycle telemetry."""
+
+        del subset_names
+        return None
+
+    def register_moe_root_capture_hook(
+        self,
+        moe_block: Module,
+        moe_block_name: str,
+        handles: List[Any],
+    ) -> bool:
+        """Optionally register a processor-specific MoE-root capture hook.
+
+        The generic subset executor invokes this lifecycle extension without
+        knowing which processor owns the feature. Processors that do not need
+        a shared MoE-root capture leave the default no-op unchanged.
+        """
+
+        del moe_block, moe_block_name, handles
+        return False
 
     # do work and return processor.self state which will updated/merged
     def process(

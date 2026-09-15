@@ -59,14 +59,14 @@ from ..utils.hf import (
 )
 from ..utils.importer import (
     auto_select_device,
+    expand_selector_device_family,
     get_kernel_for_backend,
     normalize_device_device_map,
     select_quant_linear,
+    selector_device_family,
 )
 from ..utils.inspect import safe_kwargs_call
 from ..utils.logger import setup_logger
-from ..utils.machete import _validate_machete_device_support
-from ..utils.marlin import _marlin_capability_supported, _validate_marlin_device_support
 from ..utils.model import (
     _checkpoint_tensor_keys,
     auto_dtype,
@@ -83,6 +83,7 @@ from ..utils.model import (
     make_quant,
     materialize_meta_tensors,
     simple_dispatch_model,
+    validate_checkpoint_qweights,
 )
 from ..utils.moe_dispatch import (
     enable_grouped_dispatch_for_model,
@@ -326,6 +327,9 @@ def _setup_rotation_online_had(model, rotation: Optional[str]) -> None:
 def _is_accelerated_attention_device(device: object) -> bool:
     """Return True when the selected device can run fused attention."""
 
+    if isinstance(device, (tuple, list)):
+        return bool(device) and _is_accelerated_attention_device(device[0])
+
     if isinstance(device, torch.device):
         return device.type in {"cuda", "hip", "npu"}
     if isinstance(device, DEVICE):
@@ -368,10 +372,10 @@ def _resolve_native_gguf_profile(
 
     if (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.AUTO
     ):
-        log.info("Loader: Bonsai/Prism Q1_0_g128 PROFILE.AUTO resolved to PROFILE.FAST.")
+        log.info("Loader: Q1_0 PROFILE.AUTO resolved to PROFILE.FAST.")
         return PROFILE.FAST
     return profile
 
@@ -385,7 +389,7 @@ def _should_use_dense_native_gguf_path(
 
     return (
         native_gguf_qspec is not None
-        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+        and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
         and profile == PROFILE.FAST
     )
 
@@ -792,7 +796,11 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
-            dtype = auto_dtype(config=config, device=resolved_device, quant_inference=False)
+            dtype = auto_dtype(
+                config=config,
+                device=selector_device_family(resolved_device),
+                quant_inference=False,
+            )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Align config metadata with the dtype we will materialize weights in.
@@ -853,7 +861,7 @@ def ModelLoader(cls):
             hf_model_init_kwargs.update(hf_gguf_load_kwargs)
             if (
                 native_gguf_qspec is not None
-                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0_g128
+                and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
                 and atten_impl in {None, "auto"}
                 and _is_accelerated_attention_device(resolved_device)
                 and (config.model_type == "qwen3" or _supports_flash_attn_2(config))
@@ -1161,7 +1169,11 @@ def ModelLoader(cls):
 
         if dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype) :
             # TODO FIX ME for `dynamic`, non-quantized modules should be in native type
-            dtype = auto_dtype(config=config, device=device, quant_inference=True)
+            dtype = auto_dtype(
+                config=config,
+                device=selector_device_family(device),
+                quant_inference=True,
+            )
 
         if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
             # Ensure flash attention kernels see an explicit dtype instead of relying on defaults.
@@ -1185,18 +1197,24 @@ def ModelLoader(cls):
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
 
-        # Prism/Bonsai sign-only GGUF tensors only have a torch runtime today.
-        # Bypass higher-priority GGUF backends that either do not support 1-bit
-        # formats or depend on optional external runtimes.
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+        ):
+            raise ValueError(
+                "Native Q1_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                f"Actual backend: `{backend}`."
+            )
+        elif (
+            native_gguf_qspec is not None
+            and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q2_0
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
             elif backend != BACKEND.GGUF_TORCH:
                 raise ValueError(
-                    "Native Q1_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q2_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
                     f"Actual backend: `{backend}`."
                 )
         elif (
@@ -1226,14 +1244,14 @@ def ModelLoader(cls):
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
                 raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, or BACKEND.EXL3_TORCH.")
             if backend == BACKEND.AUTO:
-                if torch.cuda.is_available() and device in (DEVICE.CUDA, DEVICE.ROCM):
+                if torch.cuda.is_available() and selector_device_family(device) in (DEVICE.CUDA, DEVICE.ROCM):
                     backend = BACKEND.EXL3_EXLLAMA_V3
                 else:
                     backend = BACKEND.EXL3_TORCH
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
                     raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
-                if device not in (DEVICE.CUDA, DEVICE.ROCM):
+                if selector_device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM):
                     raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
         elif format_code == FORMAT.BITSANDBYTES:
             if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES):
@@ -1537,6 +1555,8 @@ def ModelLoader(cls):
                     is_sharded=is_sharded,
                 )
 
+        validate_checkpoint_qweights(model, model_save_name, format_code)
+
         if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
                 "balanced",
@@ -1570,31 +1590,16 @@ def ModelLoader(cls):
             """
 
             if num_gpus is None:
-                num_gpus = torch.cuda.device_count()
+                num_gpus = _layerwise_device_count(device)
             if num_gpus < 1:
-                raise RuntimeError("No CUDA devices detected")
+                family = selector_device_family(device) or DEVICE.CPU
+                raise RuntimeError(f"No devices detected for accelerator family `{family.value}`")
 
             device_ids = list(range(num_gpus))
             device_map: Dict[str, str] = {}
             mod2name = {m: n for n, m in model.named_modules()}
 
-            if device == DEVICE.CUDA:
-                if torch.cuda.is_available():
-                    device_strs = [f"cuda:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("CUDA is not available")
-            elif device == DEVICE.XPU:
-                if hasattr(torch, "xpu") and torch.xpu.is_available():
-                    device_strs = [f"xpu:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("XPU is not available")
-            elif device == DEVICE.NPU:
-                if HAS_NPU:
-                    device_strs = [f"npu:{i}" for i in range(num_gpus)]
-                else:
-                    raise RuntimeError("NPU is not available")
-            else:
-                device_strs = ["cpu"] * num_gpus
+            device_strs = _layerwise_device_strings(device, num_gpus)
 
             def assign(mod, device_id):
                 if mod is None:
@@ -1749,6 +1754,17 @@ def ModelLoader(cls):
         else:
             device_map = dict(explicit_device_map)
             log.info(f"Loader: honoring explicit device_map request: {device_map}")
+        original_device_map = dict(device_map)
+        # Checkpoint loading needs a non-overlapping map: parent and child entries
+        # would otherwise make Accelerate read the same PLE tensor on both devices.
+        device_map = apply_no_placement_to_device_map(model, device_map)
+        if device_map != original_device_map:
+            cpu_modules = sorted(no_placement_module_names(model))
+            log.info(f"Loader: keeping no-placement modules on CPU: {cpu_modules}")
+        # Runtime dispatch keeps the parent entry so layer inputs still move to
+        # the right GPU, while the explicit CPU leaf blocks recursive PLE moves.
+        dispatch_device_map = dict(original_device_map)
+        dispatch_device_map.update(dict.fromkeys(no_placement_module_names(model), "cpu"))
         log.info(f"Loader: device_map = {device_map}")
 
         load_checkpoint_in_model = native_gguf_qspec is None
@@ -1790,10 +1806,6 @@ def ModelLoader(cls):
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Machete is currently not supported."
                 )
-            if not _validate_machete_device_support():
-                raise ValueError(
-                    f"Kernel: Machete kernel requires compute capability >= 9.0. Detected capability: {torch.cuda.get_device_capability()}"
-                )
 
         if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
                 preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
@@ -1801,25 +1813,6 @@ def ModelLoader(cls):
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
-            device_capability = torch.cuda.get_device_capability()
-            if backend == BACKEND.GPTQ_MARLIN:
-                if not _validate_marlin_device_support():
-                    raise ValueError(
-                        "Kernel: Marlin kernel requires compute capability >= 7.5 for the "
-                        f"GPTQ Marlin backend. Detected capability: `{device_capability}`."
-                    )
-                if device_capability == (7, 5) and dtype == torch.bfloat16:
-                    raise ValueError(
-                        "Kernel: GPTQ Marlin on Turing (compute capability 7.5) supports "
-                        "dtype=torch.float16 only."
-                    )
-            elif backend == BACKEND.AWQ_MARLIN:
-                if not _marlin_capability_supported(*device_capability) or device_capability[0] < 8:
-                    raise ValueError(
-                        "Kernel: AWQ Marlin requires compute capability >= 8.0. "
-                        f"Detected capability: `{device_capability}`."
-                    )
-
             # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
             if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
@@ -1892,7 +1885,7 @@ def ModelLoader(cls):
             # meta after init_empty_weights; allocate them on the right device before dispatch.
             materialize_meta_tensors(model, device_map)
             # TODO: Why are we using this custom function and not dispatch_model?
-            model = simple_dispatch_model(model, device_map)
+            model = simple_dispatch_model(model, dispatch_device_map)
 
         if format_code == FORMAT.EXL3:
             qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear

@@ -72,6 +72,7 @@ from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
+from ..utils.device_telemetry import with_quantization_device_telemetry
 from ..utils.disk_telemetry import disk_telemetry
 from ..utils.hf import autofix_hf_model_config
 from ..utils.importer import select_quant_linear
@@ -108,6 +109,7 @@ from .writer import ModelWriter
 
 
 if TYPE_CHECKING:
+    from ..looper.checkpoint_store import CheckpointConfig
     try:
         from datasets import Dataset as HFDatasetType
         from datasets import IterableDataset as HFIterableDatasetType
@@ -312,6 +314,12 @@ class BaseQModel(nn.Module):
     # usage: set to property in model.config that holds this int value: total number of experts
     dynamic_expert_index: Optional[str] = None
 
+    # Optional per-module expert cardinalities for architectures that contain
+    # more than one expert family in a decoder layer.  Keys are layer-relative
+    # prefixes (for example ``mlp.experts``) and values are config attributes.
+    # Entries not matching a key continue to use ``dynamic_expert_index``.
+    dynamic_expert_indices: Optional[Dict[str, str]] = None
+
     # some models require a different model loader, such as mllama which uses AutoModelForPreTraining
     loader = AutoModelForCausalLM
 
@@ -376,6 +384,13 @@ class BaseQModel(nn.Module):
     # The actual experts live inside submodules (e.g. Qwen3MoeModel.mlp.experts),
     # so `defuser_module_paths` is used to explicitly locate and defuse them.
     defuser_module_paths = None
+
+    # Some encoder/decoder checkpoints tie toward the checkpoint-owned decoder.
+    # Their encoder capture path must materialize without immediately re-tying.
+    turtle_materialize_tie_weights = True
+
+    # Multimodal wrappers can reuse the checkpoint rules of their text model.
+    hf_conversion_model_type_alias: Optional[str] = None
 
     def __init__(
         self,
@@ -614,6 +629,15 @@ class BaseQModel(nn.Module):
         if configured_map is not None:
             return copy.deepcopy(configured_map)
 
+        model_type_alias = getattr(cls, "hf_conversion_model_type_alias", None)
+        if model_type_alias:
+            inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(
+                target_model=target_model,
+                model_type=model_type_alias,
+            )
+            if inferred_map is not None:
+                return copy.deepcopy(inferred_map)
+
         inferred_map = LazyTurtle.infer_hf_conversion_map_reversed(target_model=target_model)
         return copy.deepcopy(inferred_map) if inferred_map is not None else None
 
@@ -815,7 +839,16 @@ class BaseQModel(nn.Module):
                         if not is_expert_segment:
                             moe_simple[-1].extend(segment_names)
                             continue
-                        for index in range(num_experts):
+                        # Most definitions use one cardinality per block.  If
+                        # a block mixes families, retain each family's own
+                        # count instead of expanding every placeholder with
+                        # the global MoE count.
+                        segment_counts = {expert_count(n) for n in segment_names}
+                        if len(segment_counts) == 1:
+                            for index in range(segment_counts.pop()):
+                                for n in segment_names:
+                                    moe_simple[-1].append(n.replace(EXPERT_INDEX_PLACEHOLDER, str(index)))
+                        else:
                             for n in segment_names:
                                 expanded = n.replace(EXPERT_INDEX_PLACEHOLDER, str(index))
                                 moe_simple[-1].append(expanded)
@@ -841,6 +874,7 @@ class BaseQModel(nn.Module):
 
     @classmethod
     def get_num_experts(cls, model_config):
+        """Return the model-wide fallback expert count."""
         if hasattr(model_config, "text_config"):
             num_experts = getattr(model_config.text_config, cls.dynamic_expert_index)
         elif hasattr(model_config, "thinker_config"):
@@ -848,6 +882,50 @@ class BaseQModel(nn.Module):
         else:
             num_experts = getattr(model_config, cls.dynamic_expert_index)
         return num_experts
+
+    @classmethod
+    def get_num_experts_for_module(cls, model_config, module_name: str) -> Optional[int]:
+        """Resolve a placeholder's expert count from its longest matching prefix.
+
+        ``module_name`` is a layer-relative module-tree path.  A missing or
+        malformed mapped config field deliberately falls back to the legacy
+        ``dynamic_expert_index`` behavior so existing model definitions remain
+        compatible.
+        """
+        if not isinstance(module_name, str) or EXPERT_INDEX_PLACEHOLDER not in module_name:
+            return None
+
+        expert_prefix = module_name.split(EXPERT_INDEX_PLACEHOLDER, 1)[0].rstrip(".")
+        mappings = getattr(cls, "dynamic_expert_indices", None) or {}
+        matched = None
+        for prefix, field_name in mappings.items():
+            if not isinstance(prefix, str) or not isinstance(field_name, str):
+                continue
+            prefix = prefix.strip(".")
+            if expert_prefix == prefix or expert_prefix.startswith(f"{prefix}."):
+                if matched is None or len(prefix) > len(matched[0]):
+                    matched = (prefix, field_name)
+
+        field_name = matched[1] if matched is not None else cls.dynamic_expert_index
+        if not field_name:
+            return None
+
+        config = model_config
+        if hasattr(config, "text_config"):
+            config = config.text_config
+        elif hasattr(config, "thinker_config"):
+            config = config.thinker_config.text_config
+        value = getattr(config, field_name, None)
+        if value is None and matched is not None:
+            # Mapped fields are optional on dense/checkpoint compatibility
+            # configs; preserve the legacy fallback in that case.
+            value = getattr(config, cls.dynamic_expert_index, None) if cls.dynamic_expert_index else None
+        if value is None:
+            return None
+        try:
+            return max(int(value), 0)
+        except (TypeError, ValueError):
+            return None
 
     @classmethod
     def filter_not_quantize_module(cls, layer_modules, quantize_config):
@@ -889,6 +967,45 @@ class BaseQModel(nn.Module):
 
         # print(f"simple_layer_modules layer_modules: {layer_modules}")
         return layer_modules
+
+    @classmethod
+    def shared_input_verified(cls, model_config=None) -> bool:
+        """
+        True when this definition's `:in=<tag>` metadata was verified by a real forward
+        for `model_config.model_type`.
+
+        Only the model types a class lists in its own `shared_input_verified_model_types`
+        count (`module_tree` is inherited, the verification set is not), so a subclass or
+        an extra `model_type` mapped onto a verified definition stays singleton-only until
+        it is covered by `tests/module_tree/test_shared_input_cpu_forward.py`.
+        """
+        model_type = getattr(model_config, "model_type", None)
+        if not isinstance(model_type, str):
+            return False
+        verified = cls.__dict__.get("shared_input_verified_model_types", ())
+        return model_type in verified
+
+    @classmethod
+    def shared_input_plan(
+        cls,
+        model_config=None,
+        quantize_config=None,
+        is_awq_quantize: bool = False,
+    ) -> SharedInputPlan:
+        """
+        Group the quantizable modules of one decoder layer by shared input tensor.
+
+        Modules in the same group consume identical activations, so Hessian (X^T X)
+        collection only needs to run for the group leader. Every module is a singleton
+        unless sibling leaves opt in with the same `:in=<tag>` flag *and* the model type
+        is listed in `shared_input_verified_model_types` (see `shared_input_verified`).
+        """
+        layer_modules = cls.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
+        return build_shared_input_plan(
+            cls.module_tree,
+            layer_modules,
+            explicit_tags=cls.shared_input_verified(model_config),
+        )
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
@@ -952,6 +1069,7 @@ class BaseQModel(nn.Module):
             logger=log,
         )
 
+    @with_quantization_device_telemetry
     def quantize(
         self,
         calibration: Optional[Union[List[Dict[str, Union[List[int], torch.LongTensor]]], List[str], List[int]]] = None,
@@ -1258,6 +1376,7 @@ class BaseQModel(nn.Module):
 
         if self.quantize_config.uses_weight_only_lifecycle():
             result = self._quantize_weight_only(
+                checkpoint=checkpoint,
                 calibration=calibration,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
@@ -1282,6 +1401,10 @@ class BaseQModel(nn.Module):
                 calibration_concat_separator=calibration_concat_separator,
                 embed_quant_config=embed_quant_config,
             )
+
+        # Some definitions need the complete layer stack before they can
+        # restore cross-branch aliases (for example DiffusionGemma's decoder).
+        self.after_quantize()
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
@@ -1835,15 +1958,31 @@ class BaseQModel(nn.Module):
             else nullcontext()
         )
 
-        with gc_context:
-            return module_looper.loop(
-                backend=backend,
-                fallback=self.quantize_config.fallback,
+        from ..looper.gptq_checkpoint import checkpoint_session
+
+        checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
+        with gc_context, checkpoint_context as extension:
+            module_looper = ModuleLooper(
+                self, processors=processors, embed_quant_config=embed_quant_config,
+                extensions=(extension,) if extension is not None else (),
             )
+            use_cache = getattr(self.model.config, "use_cache", False)
+            try:
+                return module_looper.loop(backend=backend, fallback=self.quantize_config.fallback)
+            finally:
+                # Keep the run lease until every worker has stopped accessing
+                # the attempt directory, including exceptional/stop exits.
+                if extension is not None:
+                    try:
+                        DEVICE_THREAD_POOL.wait()
+                        module_looper.wait_dangling_threads()
+                    finally:
+                        self.model.config.use_cache = use_cache
 
     def _quantize_weight_only(
         self,
         *,
+        checkpoint=None,
         calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
@@ -1888,8 +2027,18 @@ class BaseQModel(nn.Module):
             else nullcontext()
         )
 
-        with gc_context:
-            return module_looper.loop(backend=backend)
+        from ..looper.gptq_checkpoint import checkpoint_session
+
+        with gc_context, (checkpoint_session(checkpoint, self) if checkpoint else nullcontext()) as extension:
+            module_looper = WeightOnlyLooper(
+                model=self, processor=processor, embed_quant_config=embed_quant_config,
+                extensions=(extension,) if extension else (),
+            )
+            try:
+                return module_looper.loop(backend=backend)
+            finally:
+                if checkpoint:
+                    DEVICE_THREAD_POOL.wait()
 
     def _eora_generate(
         self,
@@ -2813,6 +2962,11 @@ class BaseQModel(nn.Module):
             return result
         return move_to(module, device=CPU)
 
+    def after_quantize(self) -> None:
+        """Run model-specific finalization after the complete quantization loop."""
+
+        return None
+
     def _replace_live_submodule(
         self,
         current_submodule: nn.Module,
@@ -3341,6 +3495,26 @@ class BaseQModel(nn.Module):
     def awq_skip_modules_for_scaling(self) -> bool:
         pass
 
+    @classmethod
+    def awq_input_feature_aggregation(cls, module_name: str) -> Optional[Dict[str, Any]]:
+        """Declare bounded token-row aggregation for pointwise MoE modules."""
+
+        if not isinstance(module_name, str):
+            return None
+
+        for moe_root in cls.get_moe_module_name() or []:
+            if module_name == moe_root:
+                return {
+                    "mode": "token_rows",
+                    "capture_root": True,
+                }
+            if module_name.startswith(f"{moe_root}."):
+                return {
+                    "mode": "token_rows",
+                }
+
+        return None
+
     def awq_get_modules_for_scaling(self, module, input_feat, module_kwargs):
         nodes = []
         last_module = None  # most recent norm obj (from a '!...' block)
@@ -3459,6 +3633,7 @@ class BaseQModel(nn.Module):
                     n, root = generate_node_for_awq_scaling(inp=input_feat[name], prev_op=prev_op,
                                                             module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                             subset=subset, module2inspect=None)
+                    n["_input_feature_name"] = feature_name
                     if root is not None and last_module_root != root:
                         last_module_root = root
 
@@ -3524,6 +3699,7 @@ class BaseQModel(nn.Module):
                 n, root = generate_node_for_awq_scaling(inp=inp, prev_op=prev_op,
                                                         module_kwargs=_module_kwargs_for_feature(feature_name), nodes_size=len(nodes),
                                                         subset=subset, module2inspect=module2inspect)
+                n["_input_feature_name"] = feature_name
 
                 nodes.append(n)
 
@@ -3769,6 +3945,21 @@ class BaseQModel(nn.Module):
                     source=f"LazyTurtle batch count={len(submodules)} devices={','.join(devices)}",
                 )
 
+    def shell_direct_meta_materialize(
+            self,
+            target_submodule: torch.nn.Module,
+            device: Optional[torch.device] = None,
+    ):
+        with self._turtle_lock:
+            if self.turtle_model is None:
+                return None
+            return alias_direct_meta_from_turtle_for_submodule(
+                target_model=self.model,
+                turtle_model=self.turtle_model,
+                target_submodule=target_submodule,
+                device=device,
+            )
+
     ## overrides nn.module.train()
     # def train(self, mode=True):
     #     old_mode = self.training
@@ -3797,7 +3988,9 @@ class BaseQModel(nn.Module):
           - ':!' means participates in inference but is NOT quantized; keep this marker in output.
           - ':?' marks capture-only nodes; activations are recorded but the module is not quantized.
           - ':<digit>' means grouping; children with the same group id are emitted in the same block.
-          - Both can appear together, e.g. 'module_name:!:2'.
+          - ':in=<tag>' declares which sibling children consume the same input tensor (see shared_input.py);
+            it does not affect the emitted blocks.
+          - Flags can be combined, e.g. 'module_name:!:2' or 'module_name:1:in=q'.
           - Supports nested dict structures for MoE models with experts.
           - Special key "#" in nested dicts means direct children under parent (no additional nesting).
           - EXPERT_INDEX_PLACEHOLDER in keys will be handled by simple_layer_modules for MoE expansion.

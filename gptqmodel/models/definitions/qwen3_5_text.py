@@ -10,6 +10,8 @@ class Qwen3_5TextQModel(Qwen3QModel):
     decoder stack directly under `model.layers`.
     """
 
+    shared_input_verified_model_types = frozenset({"qwen3_5_text"})
+
     layer_modules_strict = False
 
     pre_lm_head_norm_module = "model.norm"
