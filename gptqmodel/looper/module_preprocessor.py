@@ -66,6 +66,8 @@ class ModulePreProcessor(LoopProcessor):
                     "code": preprocessor.code,
                     "source_dtype": preprocessor.source_dtype,
                     "target_dtype": preprocessor.target_dtype,
+                    "passthrough_forward_policy": preprocessor.passthrough_forward_policy,
+                    "passthrough_save_policy": preprocessor.passthrough_save_policy,
                     # Native is only a pre-quantization forward optimization.
                     # The source is decoded on the quantization hand-off, never
                     # during the W4 post-quantization replay.

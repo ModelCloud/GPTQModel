@@ -127,6 +127,19 @@ def test_native_floatx_source_format_reads_modelopt_sidecar(tmp_path):
     ) == "fp8"
 
 
+def test_auto_module_decoder_config_exposes_validated_policies():
+    config = AutoModuleDecoderConfig(
+        passthrough_forward_policy="NATIVE",
+        passthrough_save_policy="decode",
+    )
+
+    assert config.passthrough_forward_policy == "native"
+    assert config.to_dict()["passthrough_save_policy"] == "decode"
+
+    with pytest.raises(ValueError, match="passthrough_forward_policy"):
+        AutoModuleDecoderConfig(passthrough_forward_policy="invalid")
+
+
 def test_fp4_decoder_has_torch_only_fallback(monkeypatch):
     import gptqmodel.quantization.dtype as dtype_module
 

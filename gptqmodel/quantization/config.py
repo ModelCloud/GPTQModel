@@ -1165,6 +1165,11 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
     code: ClassVar[str] = PreProcessorCode.AUTO_MODULE_DECODER.value
     source_dtype: str = "auto"
     target_dtype: Union[str, torch.dtype] = torch.bfloat16
+    # ``native`` is an optional first-pass execution view.  ``decode`` is the
+    # portable fallback used when a source dtype or wrapper is unavailable.
+    passthrough_forward_policy: str = "native"
+    # Saved artifacts must contain standard dense/W4 weights, never a wrapper.
+    passthrough_save_policy: str = "decode"
 
     def __post_init__(self):
         """Normalize the decoder payload into canonical string and dtype values."""
@@ -1187,12 +1192,28 @@ class AutoModuleDecoderConfig(BasePreProcessorConfig):
             )
         self.target_dtype = normalized_dtype
 
+        forward_policy = str(self.passthrough_forward_policy).strip().lower()
+        if forward_policy not in {"native", "decode"}:
+            raise ValueError(
+                "AutoModuleDecoderConfig: `passthrough_forward_policy` must be `native` or `decode`."
+            )
+        self.passthrough_forward_policy = forward_policy
+
+        save_policy = str(self.passthrough_save_policy).strip().lower()
+        if save_policy != "decode":
+            raise ValueError(
+                "AutoModuleDecoderConfig: `passthrough_save_policy` must be `decode`."
+            )
+        self.passthrough_save_policy = save_policy
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize the decoder config with a stable dtype string payload."""
 
         payload = super().to_dict()
         payload["source_dtype"] = self.source_dtype
         payload["target_dtype"] = str(self.target_dtype).split(".")[-1]
+        payload["passthrough_forward_policy"] = self.passthrough_forward_policy
+        payload["passthrough_save_policy"] = self.passthrough_save_policy
         return payload
 
 
