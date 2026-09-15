@@ -2,11 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Auditable, resumable Qwen3.5-MoE multimodal calibration harness.
 
-The default command only freezes a matrix and writes its provenance.  Actual
-model work is opt-in (omit ``--dry-run``).  A worker is run in a fresh process
-per cell so an OOM or a broken model cannot contaminate another cell.  This
-file deliberately does not import or patch a Qwen model definition; it uses
-the public GPT-QModel load/quantize API and the model's native processor.
+The default command runs the frozen matrix.  Pass ``--dry-run`` to only write
+its provenance.  Every non-dry-run invocation must
+provide at least one existing image path with ``--image`` or ``--images``;
+that requirement is checked before any worker or model is started.  A worker
+is run in a fresh process per cell so an OOM or a broken model cannot
+contaminate another cell.  This file deliberately does not import or patch a
+Qwen model definition; it uses the public GPT-QModel load/quantize API and
+the model's native processor.
 """
 
 from __future__ import annotations
@@ -225,6 +228,28 @@ def _read_list(value: str | None, *, default: Sequence[str] = ()) -> list[str]:
     return [str(item) for item in parsed]
 
 
+def _validate_runtime_images(images: Sequence[str]) -> None:
+    """Validate required multimodal inputs before starting runtime work."""
+
+    if not images:
+        raise ValueError(
+            "actual multimodal evaluation requires at least one image; pass "
+            "--image PATH or --images LIST (or use --dry-run to freeze the plan)"
+        )
+    values = [str(image) for image in images]
+    invalid = [image for image in values if not image.strip()]
+    missing = [
+        image for image in values if image.strip() and not Path(image).is_file()
+    ]
+    if invalid or missing:
+        details = []
+        if invalid:
+            details.append("empty image path")
+        if missing:
+            details.append("missing image path(s): " + ", ".join(missing))
+        raise ValueError("actual multimodal evaluation requires existing image files (" + "; ".join(details) + ")")
+
+
 def _key_values(items: Iterable[str]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for item in items:
@@ -298,6 +323,8 @@ def make_cell_configs(args: argparse.Namespace) -> list[dict[str, Any]]:
     images = _read_list(args.images) + list(args.image)
     if not prompts:
         raise ValueError("at least one prompt is required")
+    if not args.dry_run:
+        _validate_runtime_images(images)
     protocol = build_protocol(args, prompts, images)
     phash = protocol_hash(protocol)
     configs = []
@@ -676,15 +703,18 @@ def _run_model_cell(
 
     cell_start = time.perf_counter()
     _set_seed(int(config["seed"]))
+    images = list(config.get("images", []))
+    inference_multimodal = (
+        config.get("inference_modality", "multimodal") == "multimodal"
+    )
+    if inference_multimodal:
+        _validate_runtime_images(images)
     import torch
     from gptqmodel import GPTQModel
     from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
 
     cell = str(config["cell"])
     calibration_multimodal = config["calibration_modality"] == "multimodal"
-    inference_multimodal = (
-        config.get("inference_modality", "multimodal") == "multimodal"
-    )
     kwargs: dict[str, Any] = {
         "trust_remote_code": bool(config.get("trust_remote_code")),
         "dtype": config["inference"].get("dtype", "auto"),
@@ -751,9 +781,6 @@ def _run_model_cell(
         model = GPTQModel.load(config["model_path"], quantize_config=qcfg, **kwargs)
     startup_s = time.perf_counter() - load_start
     prompts = list(config["prompts"])
-    images = list(config.get("images", []))
-    if inference_multimodal and not images:
-        raise ValueError("multimodal inference requires at least one image")
     calibration = []
     for index, prompt in enumerate(
         prompts[: int(config["quant"].get("calibration_rows") or len(prompts))]
@@ -924,6 +951,8 @@ def _worker(config_path: Path, artifact_root: Path, command: str) -> int:
         artifact_root / "invalid_attempts" / f"{stem}__{int(time.time())}.json"
     )
     try:
+        if config.get("inference_modality", "multimodal") == "multimodal":
+            _validate_runtime_images(list(config.get("images", [])))
         result = _run_model_cell(config, artifact_root, command)
         result.update(
             {
@@ -1005,7 +1034,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--images", help="JSON list, comma-separated list, or text/JSON file"
     )
     parser.add_argument(
-        "--image", action="append", default=[], help="one image path (repeatable)"
+        "--image",
+        action="append",
+        default=[],
+        help="one existing image path (repeatable; required unless --dry-run)",
     )
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--bits", type=int, default=4)
@@ -1032,7 +1064,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--stop-after-layer", type=int, default=None)
     parser.add_argument("--quant-output-root", type=Path, default=None)
     parser.add_argument("--trust-remote-code", action="store_true")
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="freeze configs and provenance without starting workers",
+    )
     parser.add_argument("--no-resume", action="store_true")
     parser.add_argument("--_worker-config", type=Path, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -1050,7 +1086,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     root = args.artifact_root.resolve()
     if args._worker_config:
         return _worker(args._worker_config.resolve(), root, command)
-    configs = make_cell_configs(args)
+    try:
+        configs = make_cell_configs(args)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     prepare_artifacts(root, configs, Path(__file__).resolve().parents[1], command)
     statuses: dict[str, str] = {}
     if not args.dry_run:

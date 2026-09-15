@@ -109,3 +109,56 @@ def test_dry_run_cli_writes_auditable_plan(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["cells"] == {"dense": "planned", "gptq-text": "planned"}
     assert not list((tmp_path / "manifests").glob("*.json"))
+
+
+def test_runtime_cli_rejects_missing_image_before_artifacts_or_worker(
+    tmp_path, monkeypatch, capsys
+):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("runtime work started before image validation")
+
+    monkeypatch.setattr(HARNESS.subprocess, "run", fail_if_called)
+    result = HARNESS.main(
+        [
+            "--model-path",
+            "fixture",
+            "--artifact-root",
+            str(tmp_path),
+            "--cells",
+            "dense",
+        ]
+    )
+    assert result == 2
+    assert "requires at least one image" in capsys.readouterr().err
+    assert not (tmp_path / "configs").exists()
+
+
+def test_runtime_cli_rejects_missing_image_path_before_worker(
+    tmp_path, monkeypatch, capsys
+):
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("runtime work started before image validation")
+
+    monkeypatch.setattr(HARNESS.subprocess, "run", fail_if_called)
+    result = HARNESS.main(
+        [
+            "--model-path",
+            "fixture",
+            "--artifact-root",
+            str(tmp_path),
+            "--cells",
+            "dense",
+            "--image",
+            str(tmp_path / "missing.png"),
+        ]
+    )
+    assert result == 2
+    assert "missing image path" in capsys.readouterr().err
+
+
+def test_runtime_config_accepts_existing_image(tmp_path):
+    image = tmp_path / "input.png"
+    image.touch()
+    args = _args(image=[str(image)], dry_run=False)
+    configs = HARNESS.make_cell_configs(args)
+    assert all(config["images"] == [str(image)] for config in configs)
