@@ -1890,7 +1890,11 @@ class BaseQModel(nn.Module):
     def _active_auto_module_decoder_config(self) -> Optional[AutoModuleDecoderConfig]:
         """Return the active auto-decoder preprocessor config, if any."""
 
-        preprocessors = getattr(self.quantize_config, "preprocessors", None) or []
+        # Read the instance dictionary directly: lightweight loader-validation
+        # harnesses may not have a quantize_config and BaseQModel.__getattr__
+        # otherwise delegates that lookup to the wrapped HF model.
+        quantize_config = self.__dict__.get("quantize_config")
+        preprocessors = getattr(quantize_config, "preprocessors", None) or []
         for preprocessor in reversed(preprocessors):
             if isinstance(preprocessor, AutoModuleDecoderConfig):
                 return preprocessor
@@ -2409,6 +2413,14 @@ class BaseQModel(nn.Module):
         """Reject unsupported ModelOpt activation quantization at load time."""
 
         if not self._uses_modelopt_runtime():
+            return
+
+        # A ModelOpt FP8/NVFP4 checkpoint can be a *source* for a fresh
+        # weight-only quantization.  In that path the loader has already
+        # installed the decoder and LazyTurtle supplies dense BF16 weights one
+        # module at a time, so ModelOpt's original activation metadata is never
+        # used for runtime execution.
+        if self._active_auto_module_decoder_config() is not None:
             return
 
         unsupported_mode = self._modelopt_activation_quantization_mode()

@@ -308,9 +308,6 @@ def _dequantize_f4_reference(
     axis: Optional[int] = 0,
     target_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.Tensor:
-    if unpack_uint4 is None or f4_unpacked_to_f32 is None:
-        raise RuntimeError("torchao with nvfp4 support is required for FP4 dequantization")
-
     if scale is not None and scale_inv is not None:
         raise ValueError("Provide either scale or scale_inv, not both")
 
@@ -323,10 +320,27 @@ def _dequantize_f4_reference(
     if not orig_shape:
         raise ValueError("Tensor must have at least one dimension")
 
-    unpacked = unpack_uint4(tensor.reshape(-1))
-    expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
-    unpacked = unpacked.view(*expanded_shape)
-    result = f4_unpacked_to_f32(unpacked).to(target_dtype)
+    if unpack_uint4 is not None and f4_unpacked_to_f32 is not None:
+        unpacked = unpack_uint4(tensor.reshape(-1))
+        expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
+        unpacked = unpacked.view(*expanded_shape)
+        result = f4_unpacked_to_f32(unpacked).to(target_dtype)
+    else:
+        # NVFP4 packs the first logical value in the low nibble and the
+        # second in the high nibble.  E2M1 has the sixteen values below; keep
+        # this fallback independent of TorchAO so native ModelOpt checkpoints
+        # remain usable in minimal GPTQModel installations.
+        lookup = torch.tensor(
+            (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+             -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0),
+            dtype=target_dtype,
+            device=tensor.device,
+        )
+        packed = tensor.contiguous().view(torch.uint8)
+        expanded_shape = orig_shape[:-1] + [orig_shape[-1] * 2]
+        result = torch.empty(*expanded_shape, dtype=target_dtype, device=tensor.device)
+        result[..., 0::2] = lookup[(packed & 0x0F).to(torch.long)]
+        result[..., 1::2] = lookup[(packed >> 4).to(torch.long)]
 
     if scale is not None:
         scale_tensor = _expand_scale(scale.to(result.dtype), result, axis_hint=axis)

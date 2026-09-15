@@ -14,8 +14,14 @@ from torch import nn
 import gptqmodel.models.base as base_module
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.looper.named_module import NamedModule
+import gptqmodel.models.loader as loader_module
+from gptqmodel.models.loader import (
+    configure_native_floatx_source_quantization,
+    native_floatx_source_format,
+)
 from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+from gptqmodel.quantization import AutoModuleDecoderConfig, QuantizeConfig
 from gptqmodel.quantization.dtype import (
     dequantize_f4_e2m1,
     dequantize_fp8,
@@ -42,6 +48,71 @@ def _write_index(path: Path, shard_name: str, keys: list[str]) -> None:
         json.dumps({"weight_map": weight_map}),
         encoding="utf-8",
     )
+
+
+def test_native_floatx_source_configuration_injects_decoder_and_preserves_lazy_weights(monkeypatch):
+    source_config = SimpleNamespace(
+        quantization_config={
+            "quant_method": "modelopt",
+            "quant_algo": "NVFP4",
+        }
+    )
+    qcfg = QuantizeConfig(bits=4, offload_to_disk=False)
+
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
+
+    source_format = configure_native_floatx_source_quantization(
+        source_config,
+        qcfg,
+        device=torch.device("cuda:0"),
+    )
+
+    assert source_format == "nvfp4"
+    assert qcfg.offload_to_disk is True
+    decoder = next(item for item in qcfg.preprocessors if isinstance(item, AutoModuleDecoderConfig))
+    assert decoder.target_dtype is torch.bfloat16
+
+
+def test_native_floatx_source_configuration_fails_before_model_load_without_bf16(monkeypatch):
+    source_config = SimpleNamespace(quantization_config={"quant_algo": "FP8"})
+    qcfg = QuantizeConfig(bits=4, offload_to_disk=False)
+
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: False)
+
+    with pytest.raises(EnvironmentError, match="BF16 linear support"):
+        configure_native_floatx_source_quantization(
+            source_config,
+            qcfg,
+            device=torch.device("cuda:0"),
+        )
+
+    assert qcfg.offload_to_disk is False
+    assert not any(isinstance(item, AutoModuleDecoderConfig) for item in qcfg.preprocessors)
+
+
+def test_native_floatx_source_format_reads_modelopt_sidecar(tmp_path):
+    (tmp_path / "hf_quant_config.json").write_text(
+        json.dumps({"quantization": {"quant_algo": "FP8"}}),
+        encoding="utf-8",
+    )
+
+    assert native_floatx_source_format(
+        SimpleNamespace(quantization_config=None),
+        model_local_path=str(tmp_path),
+    ) == "fp8"
+
+
+def test_fp4_decoder_has_torch_only_fallback(monkeypatch):
+    import gptqmodel.quantization.dtype as dtype_module
+
+    monkeypatch.setattr(dtype_module, "unpack_uint4", None)
+    monkeypatch.setattr(dtype_module, "f4_unpacked_to_f32", None)
+    packed = torch.tensor([[0x10, 0x98]], dtype=torch.uint8)
+
+    decoded = dequantize_f4_e2m1(packed, axis=None, target_dtype=torch.bfloat16)
+
+    expected = torch.tensor([[0.0, 0.5, 0.0, -0.5]], dtype=torch.bfloat16)
+    torch.testing.assert_close(decoded, expected)
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -517,6 +588,28 @@ def test_configure_modelopt_runtime_rejects_modelopt_input_activation_quantizati
 
     with pytest.raises(ValueError, match="activation quantization"):
         base_module.BaseQModel._configure_modelopt_runtime(harness)
+
+
+def test_configure_modelopt_runtime_allows_native_source_requantization():
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = SimpleNamespace(
+        config=SimpleNamespace(
+            quantization_config={
+                "quant_method": "modelopt",
+                "config_groups": {
+                    "group_0": {
+                        "input_activations": {"num_bits": 4, "type": "float", "dynamic": False},
+                    }
+                },
+            }
+        ),
+        state_dict=lambda: {},
+    )
+    harness.turtle_model = None
+    harness.quantize_config = SimpleNamespace(preprocessors=[AutoModuleDecoderConfig()])
+
+    base_module.BaseQModel._configure_modelopt_runtime(harness)
 
 
 def test_configure_modelopt_runtime_rejects_checkpoint_activation_scale_metadata():
