@@ -1016,7 +1016,8 @@ class PackableQuantLinear(GPTQQuantLinear):
                 t.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
                 self.wf_unsqueeze_zero  # self.wf.unsqueeze(0),
             ).to(self.dequant_dtype)
-            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.scales.shape)
+            zeros = t.bitwise_and(zeros, self.maxq).reshape(self.qzeros.shape[0], -1)
+            zeros = zeros[:, :self.scales.shape[1]]
 
             weight = t.bitwise_and(
                 _torch_right_shift(
@@ -1601,16 +1602,8 @@ class PackableQuantLinear(GPTQQuantLinear):
             qweight = np.zeros((math.ceil(int_weight.shape[0] * self.bits / self.pack_dtype_bits), int_weight.shape[1]),
                                dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
-                if is_embedding:
-                    packed_rows = qweight.shape[0] * self.pack_factor
-                    if int_weight.shape[0] < packed_rows:
-                        int_weight = np.pad(
-                            int_weight,
-                            ((0, packed_rows - int_weight.shape[0]), (0, 0)),
-                            mode="constant",
-                        )
                 for row in range(qweight.shape[0]):
-                    for j in range(self.pack_factor):
+                    for j in range(min(self.pack_factor, int_weight.shape[0] - row * self.pack_factor)):
                         qweight[row] |= int_weight[row * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 i = 0
@@ -1654,7 +1647,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             qzeros = np.zeros((zeros.shape[0], math.ceil(zeros.shape[1] * self.bits / self.pack_dtype_bits)), dtype=self.pack_np_math_dtype)
             if self.bits in [2, 4, 8]:
                 for col in range(qzeros.shape[1]):
-                    for j in range(self.pack_factor):
+                    for j in range(min(self.pack_factor, zeros.shape[1] - col * self.pack_factor)):
                         qzeros[:, col] |= zeros[:, col * self.pack_factor + j] << (self.bits * j)
             elif self.bits == 3 and not self.planar:
                 i = 0
