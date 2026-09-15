@@ -5,6 +5,9 @@ from __future__ import annotations
 import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 SCRIPT = (
@@ -162,3 +165,85 @@ def test_runtime_config_accepts_existing_image(tmp_path):
     args = _args(image=[str(image)], dry_run=False)
     configs = HARNESS.make_cell_configs(args)
     assert all(config["images"] == [str(image)] for config in configs)
+
+
+def test_set_seed_does_not_hide_torch_seed_failure(monkeypatch):
+    import torch
+
+    def fail_seed(_seed):
+        raise RuntimeError("seed failure")
+
+    monkeypatch.setattr(torch, "manual_seed", fail_seed)
+    with pytest.raises(RuntimeError, match="seed failure"):
+        HARNESS._set_seed(1234)
+
+
+def test_gpu_info_warns_when_nvidia_smi_enrichment_fails(monkeypatch, capsys):
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 0)
+
+    def fail_inventory(*args, **kwargs):
+        raise OSError("nvidia-smi unavailable")
+
+    monkeypatch.setattr(HARNESS.subprocess, "check_output", fail_inventory)
+    assert HARNESS._gpu_info() == []
+    stderr = capsys.readouterr().err
+    assert "unable to enrich GPU provenance" in stderr
+    assert "nvidia-smi unavailable" in stderr
+
+
+def test_first_device_warns_before_parameter_fallback(capsys):
+    class Model:
+        def get_input_embeddings(self):
+            raise RuntimeError("embedding unavailable")
+
+        def parameters(self):
+            yield SimpleNamespace(device="cpu")
+
+    assert HARNESS._first_device(Model()) == "cpu"
+    stderr = capsys.readouterr().err
+    assert "falling back to the first model parameter" in stderr
+    assert "embedding unavailable" in stderr
+
+
+def test_unreadable_resume_manifest_is_reported_and_archived(
+    tmp_path, monkeypatch, capsys
+):
+    image = tmp_path / "input.png"
+    image.touch()
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    manifest = manifest_dir / "dense.json"
+    manifest.write_text("not-json", encoding="utf-8")
+
+    real_run = HARNESS.subprocess.run
+
+    def skip_worker(command, *args, **kwargs):
+        if list(command[:2]) == ["git", "diff"]:
+            return real_run(command, *args, **kwargs)
+        return SimpleNamespace(returncode=1)
+
+    monkeypatch.setattr(HARNESS.subprocess, "run", skip_worker)
+    assert (
+        HARNESS.main(
+            [
+                "--model-path",
+                "fixture",
+                "--artifact-root",
+                str(tmp_path),
+                "--cells",
+                "dense",
+                "--image",
+                str(image),
+            ]
+        )
+        == 1
+    )
+    stderr = capsys.readouterr().err
+    assert f"unable to read or parse resume manifest {manifest}" in stderr
+    assert "Expecting value" in stderr
+    assert not manifest.exists()
+    stale = list((tmp_path / "invalid_attempts").glob("dense__stale-*.json"))
+    assert len(stale) == 1

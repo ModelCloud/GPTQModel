@@ -447,18 +447,20 @@ def _set_seed(seed: int) -> None:
     random.seed(seed)
     try:
         import numpy as np
-
+    except ImportError as exc:
+        print(
+            f"warning: NumPy is unavailable; continuing without NumPy seed: {exc}",
+            file=sys.stderr,
+        )
+    else:
+        # Once NumPy is importable, a seeding failure is an experiment failure.
         np.random.seed(seed)
-    except Exception:
-        pass
-    try:
-        import torch
 
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-    except Exception:
-        pass
+    import torch
+
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def _gpu_info() -> list[dict[str, Any]]:
@@ -490,8 +492,11 @@ def _gpu_info() -> list[dict[str, Any]]:
                 }
                 inventory[index_value] = item
                 inventory[uuid_value] = item
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                f"warning: unable to enrich GPU provenance with nvidia-smi: {exc}",
+                file=sys.stderr,
+            )
         visible = os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",")
         result = []
         for index in range(torch.cuda.device_count()):
@@ -544,8 +549,12 @@ def _first_device(model: Any) -> Any:
     if callable(get_input_embeddings):
         try:
             return get_input_embeddings().weight.device
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                "warning: unable to resolve the input-embedding device; "
+                f"falling back to the first model parameter: {exc}",
+                file=sys.stderr,
+            )
     try:
         return next(target.parameters()).device
     except Exception:
@@ -1101,14 +1110,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not args.no_resume and manifest_path.is_file():
                 try:
                     old = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except Exception as exc:
+                    print(
+                        f"warning: unable to read or parse resume manifest "
+                        f"{manifest_path}: {exc}",
+                        file=sys.stderr,
+                    )
+                else:
                     if (
                         is_valid_manifest(old)
                         and old.get("protocol_hash") == config["protocol_hash"]
                     ):
                         statuses[cell] = "resumed"
                         continue
-                except Exception:
-                    pass
                 stale = (
                     root / "invalid_attempts" / f"{stem}__stale-{int(time.time())}.json"
                 )
