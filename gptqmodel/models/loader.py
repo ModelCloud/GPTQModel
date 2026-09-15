@@ -147,7 +147,10 @@ def native_floatx_source_format(
 
     algorithms = []
     for payload in payloads:
-        for key in ("quant_algo", "quant_format", "format"):
+        # Hugging Face's Qwen FP8 exports declare ``quant_method: fp8`` while
+        # ModelOpt uses ``quant_algo``.  Both are native floatx source
+        # checkpoints when a caller supplies a fresh GPTQ/AWQ config.
+        for key in ("quant_algo", "quant_format", "format", "quant_method"):
             value = payload.get(key)
             if isinstance(value, str):
                 algorithms.append(value.lower())

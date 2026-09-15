@@ -124,6 +124,13 @@ def test_native_floatx_source_format_reads_modelopt_sidecar(tmp_path):
     ) == "fp8"
 
 
+def test_native_floatx_source_format_reads_hf_fp8_quant_method():
+    """Qwen's native FP8 export uses quant_method rather than quant_algo."""
+    assert loader_module.native_floatx_source_format(
+        SimpleNamespace(quantization_config={"quant_method": "fp8"}),
+    ) == "fp8"
+
+
 def test_auto_module_decoder_config_exposes_validated_policies():
     config = AutoModuleDecoderConfig(
         passthrough_forward_policy="NATIVE",
