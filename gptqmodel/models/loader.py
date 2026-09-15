@@ -82,6 +82,7 @@ from ..utils.model import (
     make_quant,
     no_placement_module_names,
     simple_dispatch_model,
+    validate_checkpoint_qweights,
 )
 from ._const import DEVICE, HAS_NPU, normalize_device
 
@@ -1470,6 +1471,8 @@ def ModelLoader(cls):
                     dtype=dtype,
                     is_sharded=is_sharded,
                 )
+
+        validate_checkpoint_qweights(model, model_save_name, format_code)
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
