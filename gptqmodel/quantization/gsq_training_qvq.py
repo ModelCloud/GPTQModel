@@ -78,6 +78,36 @@ class _SparseCandidateMatrixMixture(torch.autograd.Function):
         return probability_gradient.to(ctx.probability_dtype), None, None, None
 
 
+class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
+    """Exact P32 mixture with a fused CUDA probability adjoint."""
+
+    @staticmethod
+    def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas):
+        contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
+        matrix = baseline_matrix.flatten().clone().scatter_add(
+            0, matrix_indices.flatten(), contributions.flatten(),
+        ).reshape_as(baseline_matrix)
+        ctx.save_for_backward(matrix_indices, sparse_deltas)
+        ctx.probability_dtype = probabilities.dtype
+        return matrix
+
+    @staticmethod
+    def backward(ctx, grad_matrix):
+        from .qvq_gsq_triton import candidate_probability_gradient
+
+        matrix_indices, sparse_deltas = ctx.saved_tensors
+        probability_gradient = torch.empty(
+            (matrix_indices.shape[0], matrix_indices.shape[1] + 1),
+            dtype=ctx.probability_dtype,
+            device=grad_matrix.device,
+        )
+        candidate_probability_gradient(
+            grad_matrix.contiguous(), matrix_indices, sparse_deltas,
+            probability_gradient,
+        )
+        return probability_gradient, None, None, None
+
+
 class _ContiguousTranspose(torch.autograd.Function):
     """Rank-two transpose-copy with its transpose-copy adjoint."""
 
@@ -280,6 +310,13 @@ class GSQP32TrainingModule(torch.nn.Module):
     def _inner_from_probabilities(self, probabilities):
         if probabilities.shape != self.logits.shape:
             raise ValueError("P32 GSQ probabilities do not match logits")
+        if probabilities.device.type == "cuda":
+            return _FusedSparseCandidateMatrixMixture.apply(
+                probabilities,
+                self.baseline_matrix,
+                self.matrix_sparse_indices,
+                self.sparse_deltas,
+            )
         return _SparseCandidateMatrixMixture.apply(
             probabilities,
             self.baseline_matrix,

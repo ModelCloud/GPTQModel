@@ -232,7 +232,38 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
     return torch.nn.functional.mse_loss(student, teacher)
 
 
-def train_stage_update(quantizers, optimizer, microbatches, objective, *, generator, temperature, multiplier):
+def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
+                                      teacher, output_mask=None):
+    """Evaluate only the trainable path against an exact cached teacher output."""
+    parameters = {name: value.detach() for name, value in module.named_parameters()}
+    buffers = {name: value.detach().clone() for name, value in module.named_buffers()}
+    for name, value in student_weights.items():
+        if name not in parameters or value.shape != parameters[name].shape:
+            raise ValueError(f'GSQ stage replacement does not match parameter {name}')
+    student_state = {**parameters}
+    for name, value in student_weights.items():
+        parameter = parameters[name]
+        student_state[name] = value.to(
+            device=parameter.device, dtype=parameter.dtype,
+        ) if value.device != parameter.device or value.dtype != parameter.dtype else value
+    student = torch.func.functional_call(
+        module, (student_state, buffers), args, kwargs,
+    )
+    if not isinstance(student, torch.Tensor) or not isinstance(teacher, torch.Tensor):
+        raise TypeError('GSQ cached stage requires tensor student and teacher outputs')
+    if student.shape != teacher.shape or student.device != teacher.device:
+        raise ValueError('GSQ cached teacher output does not match the student stage')
+    if output_mask is not None:
+        if (not isinstance(output_mask, torch.Tensor) or output_mask.dtype != torch.bool
+                or output_mask.shape != student.shape[:-1] or output_mask.device != student.device
+                or not output_mask.any()):
+            raise ValueError('GSQ output mask must select valid tokens with an aligned boolean tensor')
+        student, teacher = student[output_mask], teacher[output_mask]
+    return torch.nn.functional.mse_loss(student, teacher)
+
+
+def train_stage_update(quantizers, optimizer, microbatches, objective, *, generator,
+                       temperature, multiplier):
     """One accumulated staged update; objective(batch, weights) returns mean MSE.
 
     Microbatches are (batch, element_count) pairs. Counts describe reconstructed
@@ -250,9 +281,14 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
         for batch, count in microbatches:
             weights = {}
             for name, quantizer in quantizers.items():
-                uniform = torch.rand(quantizer.logits.shape, dtype=quantizer.logits.dtype,
-                                     device=quantizer.logits.device, generator=generator)
-                weights[name] = quantizer(uniform=uniform, temperature=temperature, multiplier=multiplier)
+                uniform = torch.rand(
+                    quantizer.logits.shape, dtype=quantizer.logits.dtype,
+                    device=quantizer.logits.device, generator=generator,
+                )
+                weights[name] = quantizer(
+                    uniform=uniform, temperature=temperature,
+                    multiplier=multiplier,
+                )
             loss = objective(batch, weights)
             if loss.ndim != 0 or not torch.isfinite(loss):
                 raise ValueError('GSQ stage objective must be a finite scalar')
@@ -323,6 +359,18 @@ class LlamaGSQAttentionStage(torch.nn.Module):
             raise ValueError('GSQ reconstruction requires cache-free attention')
         output, _ = self.self_attn(self.input_layernorm(hidden_states), **kwargs)
         return hidden_states+output
+
+
+class LlamaGSQMLPStage(torch.nn.Module):
+    """Llama MLP objective beginning at the fixed post-attention residual."""
+
+    def __init__(self, decoder_layer):
+        super().__init__()
+        self.post_attention_layernorm = decoder_layer.post_attention_layernorm
+        self.mlp = decoder_layer.mlp
+
+    def forward(self, hidden_states):
+        return hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
 
 
 def stage_learning_rate(step, total_steps, *, base_lr, warmup_steps=0, min_lr=0., decay='linear'):

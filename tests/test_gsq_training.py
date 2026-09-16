@@ -210,6 +210,35 @@ def test_llama_full_block_mlp_objective_restores_teacher_attention():
     assert all(torch.equal(value, original[name]) for name, value in layer.named_parameters())
 
 
+def test_llama_mlp_stage_matches_full_block_from_post_attention_boundary():
+    from gptqmodel.quantization.gsq_training import (
+        LlamaGSQAttentionStage,
+        LlamaGSQMLPStage,
+    )
+    from transformers import LlamaConfig
+    from transformers.models.llama.modeling_llama import (
+        LlamaDecoderLayer,
+        LlamaRotaryEmbedding,
+    )
+
+    config = LlamaConfig(hidden_size=32, intermediate_size=64, num_attention_heads=4,
+                         num_key_value_heads=2, num_hidden_layers=1)
+    config._attn_implementation = 'eager'
+    layer = LlamaDecoderLayer(config, 0).eval()
+    inputs = torch.randn(2, 5, 32)
+    positions = torch.arange(5).unsqueeze(0).expand(2, -1)
+    kwargs = {
+        'position_embeddings': LlamaRotaryEmbedding(config)(inputs, positions),
+        'attention_mask': torch.full((5, 5), -torch.inf).triu(1)[None, None],
+        'use_cache': False,
+    }
+    with torch.no_grad():
+        post_attention = LlamaGSQAttentionStage(layer)(inputs, **kwargs)
+        staged = LlamaGSQMLPStage(layer)(post_attention)
+        reference = layer(inputs, **kwargs)
+    torch.testing.assert_close(staged, reference, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize('decay', ['linear', 'cosine', 'constant'])
 def test_author_learning_rate_warmup_and_final_update(decay):
     from gptqmodel.quantization.gsq_training import stage_learning_rate
