@@ -246,6 +246,54 @@ def test_complete_stage_driver_schedule_export_and_determinism():
     assert torch.isfinite(first['weights']['weight']).all()
 
 
+def test_stage_driver_restores_nonregressing_disjoint_validation_checkpoint():
+    from gptqmodel.quantization.gsq_training import GSQScalarTrainingModule, fit_reconstruction_stage
+
+    quantizer = GSQScalarTrainingModule(
+        torch.ones(1, 1), torch.ones(1, 1), 1, bits=2,
+        noise=torch.zeros(4, 1, 1),
+    )
+    train = [[(torch.tensor(-2.), 1)]]
+    heldout = [[(torch.tensor(1.), 1)]]
+
+    def objective(target, weights):
+        return (weights['weight'].squeeze()-target).square()
+
+    result = fit_reconstruction_stage(
+        {'weight': quantizer}, train, objective, epochs=4, seed=7,
+        assignment_lr=.1, scale_lr=.01, temperature=(2., .05),
+        multiplier=(100., 500.), validation_batches=heldout, restore_best=True,
+    )
+    assert result['validation_hard_loss_after'] <= result['validation_hard_loss_before']
+    assert result['best_validation_hard_loss'] == result['validation_hard_loss_after']
+    assert result['restored_best_validation_checkpoint'] is True
+    assert len(result['validation_history']) == 4
+    with pytest.raises(ValueError, match='validation batches'):
+        fit_reconstruction_stage(
+            {'weight': quantizer}, train, objective, epochs=1, restore_best=True,
+        )
+
+
+def test_checkpoint_global_guard_requires_all_metrics_to_avoid_regression():
+    from scripts.validate_qvq_gsq_checkpoint import strict_global_guard
+
+    incumbent = {
+        'forward_kld': 2., 'logit_mse': 4., 'cross_entropy': 3.,
+        'perplexity': 20., 'top1_agreement': .8,
+    }
+    candidate = {
+        'forward_kld': 1., 'logit_mse': 3., 'cross_entropy': 2.9,
+        'perplexity': 19., 'top1_agreement': .81,
+    }
+    accepted, improvements = strict_global_guard(incumbent, candidate)
+    assert accepted is True
+    assert improvements['forward_kld'] == 50.
+    candidate['top1_agreement'] = .79
+    accepted, improvements = strict_global_guard(incumbent, candidate)
+    assert accepted is False
+    assert improvements['top1_agreement_points'] < 0.
+
+
 def test_llama_staged_driver_executes_all_projections_without_mutating_teacher(monkeypatch):
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding

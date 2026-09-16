@@ -586,8 +586,8 @@ def main():
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument(
-        "--steps", type=int, default=640,
-        help="full-Fisher optimizer updates (640 matches 4096 samples / batch 64 * 10 GSQ epochs)",
+        "--steps", type=int, default=1280,
+        help="full-Fisher optimizer updates (1280 matches 4096 samples / batch 64 * 20 Llama GSQ epochs)",
     )
     parser.add_argument("--hard-eval-interval", type=int, default=64,
                         help="FP32 hard checkpoint interval (64 is one paper-style epoch)")

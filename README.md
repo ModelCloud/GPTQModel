@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 09/16/2026 `main`: Experimental GSQ recovery for QVQ W3/P32 now follows the paper's staged Q/K -> V/O -> MLP objectives, learns legal tile assignments plus native `SV`, propagates deployable quantized prefixes, and uses disjoint local/global hard-state guards. The bounded Llama 3.2 1B diagnostic improved every untouched final-logit endpoint and moved GSM8K-Platinum from 537/1209 to 540/1209, but used only 0.0977% of the paper reconstruction-token budget and predates deterministic training. GSQ therefore remains opt-in pending a full deterministic 4,096 x 4,096-token run. See [the configuration and promotion guide](docs/gsq.md) and [paper-alignment audit](docs/experiments/gsq-qvq-paper-alignment.md).
 * 09/08/2026 7.5.0-dev `main`: ✨ Added `k2_horizon` quantization support for K2-Horizon dense and MoVA/MoE models.
 * 09/07/2026 7.4.0-dev `main`: ✨ Added XHToken `ouro` and `spark2_5` quantization support.
 * 09/03/2026 7.4.0-dev `main`: ✨ Added GLM-5 Next MoE quantization support.

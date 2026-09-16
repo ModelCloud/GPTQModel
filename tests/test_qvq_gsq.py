@@ -150,6 +150,7 @@ def test_fisher_refinement_in_inference_mode_and_budget():
                       bits=2.5, bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([2]))
         result = refine_p32_fisher(baseline, config=GSQConfig(enabled=True, steps=2, candidates=3), **kwargs)
         assert result.calibration_after <= result.calibration_before
+        assert result.diagnostics["initialization"] == "paper_local_shift_gaussian"
         with pytest.raises(ValueError, match="max_candidate_bytes"):
             refine_p32_fisher(baseline, config=GSQConfig(enabled=True, max_candidate_bytes=1), **kwargs)
         with pytest.raises(ValueError, match="enabled GSQConfig"):
@@ -311,6 +312,13 @@ def test_fisher_screen_selects_best_of_four_local_shifts_per_tile():
     screened = fisher_screened_trellis_candidates(
         baseline, count=count, seed=7, bits=bits, layout="p32_window", target=target,
         input_hessian=torch.eye(32), output_hessian=torch.eye(32), bank_ids=bank, bank_alt_id=alt)
+    _, _, sparse_indices, sparse_deltas, sparse_shifts = fisher_screened_trellis_candidates(
+        baseline, count=count, seed=7, bits=bits, layout="p32_window", target=target,
+        input_hessian=torch.eye(32), output_hessian=torch.eye(32), bank_ids=bank, bank_alt_id=alt,
+        return_decoded=True, return_sparse=True, return_shifts=True)
+    assert sparse_indices.shape == sparse_deltas.shape
+    assert sparse_shifts.shape == (count - 1, len(baseline))
+    assert set(sparse_shifts.unique().tolist()) <= {-2, -1, 1, 2}
     raw = trellis_local_candidates(
         baseline, count=1 + 4 * (count - 1), seed=7, bits=bits, layout="p32_window")
     target_tiles = target.reshape(2, 16, 2, 16).permute(0, 2, 1, 3).reshape(4, 16, 16)
