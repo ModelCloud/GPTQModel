@@ -356,6 +356,77 @@ def _position_error_compact_kernel(probabilities, baseline, position_indices,
 
 
 @triton.jit
+def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
+                                   position_choices, position_deltas, output,
+                                   TILE_COUNT: tl.constexpr,
+                                   N: tl.constexpr,
+                                   OUTPUT_TILES: tl.constexpr,
+                                   CHOICES: tl.constexpr,
+                                   POSITIONS: tl.constexpr,
+                                   OVERLAP: tl.constexpr,
+                                   BLOCK: tl.constexpr):
+    """Materialize the exact tile mixture from its compact position map."""
+    tile = tl.program_id(0)
+    scalar = tl.arange(0, BLOCK)
+    scalar_mask = (tile < TILE_COUNT) & (scalar < 256)
+    tile_row = tile // OUTPUT_TILES
+    tile_col = tile - tile_row * OUTPUT_TILES
+    row = scalar // 16
+    column = scalar - row * 16
+    weight_offset = (tile_row * 16 + row) * N + tile_col * 16 + column
+    value = tl.load(baseline + tile * 256 + scalar,
+                    mask=scalar_mask, other=0.0).to(tl.float32)
+    tl.store(output + weight_offset, value, mask=scalar_mask)
+    tl.debug_barrier()
+
+    position_mask = (tile < TILE_COUNT) & (scalar < POSITIONS)
+    position_offset = (tile * POSITIONS + scalar) * OVERLAP
+    changed_scalar = tl.load(position_indices + tile * POSITIONS + scalar,
+                             mask=position_mask, other=0).to(tl.int32)
+    row = changed_scalar // 16
+    column = changed_scalar - row * 16
+    changed_weight_offset = (
+        (tile_row * 16 + row) * N + tile_col * 16 + column
+    )
+    changed_value = tl.load(baseline + tile * 256 + changed_scalar,
+                            mask=position_mask, other=0.0).to(tl.float32)
+    choice0 = tl.load(position_choices + position_offset,
+                      mask=position_mask, other=0).to(tl.int32)
+    choice1 = tl.load(position_choices + position_offset + 1,
+                      mask=position_mask, other=0).to(tl.int32)
+    choice2 = tl.load(position_choices + position_offset + 2,
+                      mask=position_mask, other=0).to(tl.int32)
+    active0 = position_mask & (choice0 > 0)
+    active1 = position_mask & (choice1 > 0)
+    active2 = position_mask & (choice2 > 0)
+    contribution0 = _fp32_multiply(
+        tl.load(probabilities + tile * CHOICES + choice0,
+                mask=active0, other=0.0).to(tl.float32),
+        tl.load(position_deltas + position_offset,
+                mask=active0, other=0.0).to(tl.float32),
+    )
+    contribution1 = _fp32_multiply(
+        tl.load(probabilities + tile * CHOICES + choice1,
+                mask=active1, other=0.0).to(tl.float32),
+        tl.load(position_deltas + position_offset + 1,
+                mask=active1, other=0.0).to(tl.float32),
+    )
+    contribution2 = _fp32_multiply(
+        tl.load(probabilities + tile * CHOICES + choice2,
+                mask=active2, other=0.0).to(tl.float32),
+        tl.load(position_deltas + position_offset + 2,
+                mask=active2, other=0.0).to(tl.float32),
+    )
+    # Match deterministic scatter_add: accumulate the sorted duplicate run
+    # from zero, then add that reduction to the existing baseline.
+    contribution = _fp32_add(
+        _fp32_add(contribution0, contribution1), contribution2,
+    )
+    changed_value = _fp32_add(changed_value, contribution)
+    tl.store(output + changed_weight_offset, changed_value, mask=position_mask)
+
+
+@triton.jit
 def _scheduled_sparse_lion_grouped_kernel(
         probabilities, metric_error, indices, deltas, denominator, logits,
         momentum, norm_square, temperature_schedule, kappa_schedule,
@@ -500,7 +571,7 @@ def build_position_map(indices, deltas):
     return choices, values
 
 
-def build_compact_position_map(indices, deltas):
+def build_compact_position_map(indices, deltas, matrix_indices=None):
     """Compress P32's repeated candidate entries into unique tile positions."""
     tile_count, alternatives, width = indices.shape
     overlap = width // 2
@@ -516,16 +587,45 @@ def build_compact_position_map(indices, deltas):
     overlap_slot = entry - run_start
     if bool((overlap_slot >= overlap).any()):
         raise ValueError("P32 sparse candidate position overlap exceeds compact capacity")
-    flat_deltas = deltas.flatten(1)
-    sorted_deltas = flat_deltas.gather(1, order)
-    entry_choices = torch.arange(
-        1, alternatives + 1, device=indices.device, dtype=torch.int64,
-    ).repeat_interleave(width).expand(tile_count, -1)
-    sorted_choices = entry_choices.gather(1, order)
     compact_indices = torch.zeros(
         (tile_count, positions), dtype=torch.uint8, device=indices.device,
     )
     compact_indices.scatter_(1, position_slot, sorted_indices.to(torch.uint8))
+    flat_deltas = deltas.flatten(1)
+    entry_choices = torch.arange(
+        1, alternatives + 1, device=indices.device, dtype=torch.int64,
+    ).repeat_interleave(width).expand(tile_count, -1)
+    if matrix_indices is not None:
+        if matrix_indices.shape != indices.shape:
+            raise ValueError("matrix indices do not match sparse candidate metadata")
+        global_indices = matrix_indices.flatten()
+        sorted_global_indices, global_order = global_indices.sort()
+        global_new = torch.ones_like(sorted_global_indices, dtype=torch.bool)
+        global_new[1:] = sorted_global_indices[1:] != sorted_global_indices[:-1]
+        global_entry = torch.arange(len(global_order), device=indices.device)
+        global_run_start = torch.where(global_new, global_entry, 0).cummax(0).values
+        global_overlap_slot = global_entry - global_run_start
+        if bool((global_overlap_slot >= overlap).any()):
+            raise ValueError("P32 global candidate overlap exceeds compact capacity")
+        ordered_tile = global_order // entries
+        ordered_entry = global_order - ordered_tile * entries
+        ordered_scalar = indices.flatten()[global_order]
+        ordered_choice = ordered_entry // width + 1
+        dense_slot = (
+            (ordered_tile * 256 + ordered_scalar) * overlap + global_overlap_slot
+        )
+        dense_choices = torch.zeros(
+            tile_count * 256 * overlap, dtype=torch.uint8, device=indices.device,
+        )
+        dense_deltas = torch.zeros_like(dense_choices, dtype=deltas.dtype)
+        dense_choices.scatter_(0, dense_slot, ordered_choice.to(torch.uint8))
+        dense_deltas.scatter_(0, dense_slot, deltas.flatten()[global_order])
+        gather = compact_indices.long().unsqueeze(-1).expand(-1, -1, overlap)
+        compact_choices = dense_choices.reshape(tile_count, 256, overlap).gather(1, gather)
+        compact_deltas = dense_deltas.reshape(tile_count, 256, overlap).gather(1, gather)
+        return compact_indices, compact_choices, compact_deltas
+    sorted_deltas = flat_deltas.gather(1, order)
+    sorted_choices = entry_choices.gather(1, order)
     compact_choices = torch.zeros(
         (tile_count, positions * overlap), dtype=torch.uint8,
         device=indices.device,
@@ -555,6 +655,24 @@ def candidate_probability_gradient(grad_matrix, matrix_indices, sparse_deltas,
         grad_matrix, matrix_indices, sparse_deltas, output, tile_count,
         CHOICES=alternatives + 1, WIDTH=width,
         BLOCK=block, num_warps=1,
+    )
+
+
+def compact_sparse_mixture(probabilities, baseline, position_indices,
+                           position_choices, position_deltas, output):
+    """Materialize a P32 sparse mixture without deterministic scatter sorting."""
+    tile_count = probabilities.shape[0]
+    choices = probabilities.shape[1]
+    positions = position_indices.shape[1]
+    overlap = position_choices.shape[2]
+    if overlap != 3:
+        raise ValueError("fused P32 sparse mixtures require overlap three")
+    _sparse_mixture_compact_kernel[(tile_count,)](
+        probabilities, baseline, position_indices, position_choices,
+        position_deltas, output,
+        TILE_COUNT=tile_count, N=output.shape[1],
+        OUTPUT_TILES=output.shape[1] // 16, CHOICES=choices,
+        POSITIONS=positions, OVERLAP=overlap, BLOCK=256, num_warps=8,
     )
 
 

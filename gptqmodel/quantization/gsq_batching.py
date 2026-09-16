@@ -71,8 +71,14 @@ def collate_llama_documents(documents, *, device=None, implicit_causal=False):
             if value.shape != (1, length, destination.shape[-1]):
                 raise ValueError('GSQ batching requires aligned rotary embeddings')
             destination[index, :length].copy_(value[0].to(device), non_blocking=True)
+    # A full fixed-length batch needs no output selection. Keeping the dense
+    # boolean mask makes autograd scatter the complete stage output back into
+    # an equally sized zero tensor, which is particularly expensive at the
+    # Llama MLP width. ``None`` already means "use every output" to the staged
+    # reconstruction objectives; retain the mask only when padding exists.
+    output_mask = None if all(length == maximum for length in lengths) else valid
     return hidden_batch, dict(attention_mask=mask, position_ids=positions,
-                              position_embeddings=rotary, use_cache=False), valid
+                              position_embeddings=rotary, use_cache=False), output_mask
 
 
 class LazyLlamaStageBatches:

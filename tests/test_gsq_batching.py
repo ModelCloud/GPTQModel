@@ -106,6 +106,7 @@ def test_lazy_sdpa_batches_move_cpu_documents_without_square_masks():
     )
     assert len(batches) == 2
     assert batches[0][0][0][1]['attention_mask'] is None
+    assert batches[0][0][0][2] is None
     with torch.no_grad():
         actual = layer(batches[0][0][0][0], **batches[0][0][0][1])
         expected = torch.cat([layer(hidden, **kwargs) for hidden, kwargs in documents[:2]])

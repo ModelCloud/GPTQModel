@@ -79,14 +79,25 @@ class _SparseCandidateMatrixMixture(torch.autograd.Function):
 
 
 class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
-    """Exact P32 mixture with a fused CUDA probability adjoint."""
+    """Exact P32 mixture with fused CUDA materialization and adjoint."""
 
     @staticmethod
-    def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas):
-        contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
-        matrix = baseline_matrix.flatten().clone().scatter_add(
-            0, matrix_indices.flatten(), contributions.flatten(),
-        ).reshape_as(baseline_matrix)
+    def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas,
+                baseline_tiles, position_indices, position_choices, position_deltas,
+                compact_forward):
+        from .qvq_gsq_triton import compact_sparse_mixture
+
+        if compact_forward:
+            matrix = torch.empty_like(baseline_matrix)
+            compact_sparse_mixture(
+                probabilities, baseline_tiles, position_indices,
+                position_choices, position_deltas, matrix,
+            )
+        else:
+            contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
+            matrix = baseline_matrix.flatten().clone().scatter_add(
+                0, matrix_indices.flatten(), contributions.flatten(),
+            ).reshape_as(baseline_matrix)
         ctx.save_for_backward(matrix_indices, sparse_deltas)
         ctx.probability_dtype = probabilities.dtype
         return matrix
@@ -105,7 +116,7 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
             grad_matrix.contiguous(), matrix_indices, sparse_deltas,
             probability_gradient,
         )
-        return probability_gradient, None, None, None
+        return probability_gradient, None, None, None, None, None, None, None, None
 
 
 class _ContiguousTranspose(torch.autograd.Function):
@@ -261,6 +272,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         self.training_hadamard_backend = (
             "fused_cuda_exact" if self.fast_hadamard else "eager"
         )
+        self.compact_forward = max(in_features, out_features) > 2048
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
         self.register_buffer("candidates", candidates.detach().clone().contiguous())
         self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
@@ -281,6 +293,25 @@ class GSQP32TrainingModule(torch.nn.Module):
             + local_indices % 16
         )
         self.register_buffer("matrix_sparse_indices", matrix_indices.contiguous())
+        if self.compact_forward:
+            from .qvq_gsq_triton import build_compact_position_map
+
+            position_indices, position_choices, position_deltas = build_compact_position_map(
+                self.sparse_indices, self.sparse_deltas, matrix_indices,
+            )
+        else:
+            position_indices = torch.empty(
+                (0, 0), dtype=torch.uint8, device=candidates.device,
+            )
+            position_choices = torch.empty(
+                (0, 0, 0), dtype=torch.uint8, device=candidates.device,
+            )
+            position_deltas = torch.empty(
+                (0, 0, 0), dtype=self.sparse_deltas.dtype, device=candidates.device,
+            )
+        self.register_buffer("position_indices", position_indices)
+        self.register_buffer("position_choices", position_choices)
+        self.register_buffer("position_deltas", position_deltas)
         baseline_matrix = (
             self.baseline_tiles.reshape(input_tiles, output_tiles, 16, 16)
             .permute(0, 2, 1, 3)
@@ -316,6 +347,11 @@ class GSQP32TrainingModule(torch.nn.Module):
                 self.baseline_matrix,
                 self.matrix_sparse_indices,
                 self.sparse_deltas,
+                self.baseline_tiles,
+                self.position_indices,
+                self.position_choices,
+                self.position_deltas,
+                self.compact_forward,
             )
         return _SparseCandidateMatrixMixture.apply(
             probabilities,

@@ -668,8 +668,9 @@ def main():
                     teacher_microbatches = []
                     for batch, count in validation_stage_batches[batch_index]:
                         hidden, kwargs, mask = batch
+                        teacher = dense_layer(hidden, **kwargs)
                         teacher_microbatches.append(
-                            ((batch, dense_layer(hidden, **kwargs)[mask]), count),
+                            ((batch, teacher if mask is None else teacher[mask]), count),
                         )
                     validation_teacher_batches.append(teacher_microbatches)
         return validation_teacher_batches
@@ -698,7 +699,8 @@ def main():
                         (student_state, block_buffers),
                         (hidden,),
                         kwargs,
-                    )[mask]
+                    )
+                    student = student if mask is None else student[mask]
                     weighted_loss += float(torch.nn.functional.mse_loss(student, teacher)) * count
                     elements += count
         if not elements:

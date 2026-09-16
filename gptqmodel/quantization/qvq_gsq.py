@@ -402,6 +402,7 @@ def refine_trellis_candidates(
     final_entropy = final_max_probability = None
     initializer_best = best
     initializer_choices = best_choices.clone()
+    best_device = torch.tensor(best, device=candidates.device)
     relaxation_improved_initializer = False
     stale_steps = 0
     hard_evaluations = 0
@@ -534,7 +535,11 @@ def refine_trellis_candidates(
                             metric_right_buffer.contiguous(), hadamard_scale,
                         )
                 objective = None
-                if evaluate_hard:
+                # The relaxed objective is diagnostic only; hard checkpoints
+                # below remain the authoritative best-state selector.  Report
+                # the final value without reducing two full KxN tensors at
+                # every hard checkpoint.
+                if step + 1 == steps:
                     objective_error = (
                         error_buffer.float() if relaxation_graph is not None
                         else error_accumulation_buffer
@@ -641,7 +646,9 @@ def refine_trellis_candidates(
             completed_steps = step + 1
             with torch.no_grad():
                 mean_probability = probability_stats / gumbel_samples
-                if step == 0 or evaluate_hard:
+                # Only endpoints are exported.  Scanning every tile/choice at
+                # intermediate hard checkpoints cannot affect optimization.
+                if step == 0 or step + 1 == steps:
                     entropy_value = (
                         -(mean_probability.clamp_min(1e-20).log() * mean_probability).sum(-1)
                     ).mean()
@@ -653,23 +660,59 @@ def refine_trellis_candidates(
                     final_max_probability = max_probability_value
                 if evaluate_hard:
                     hard_evaluations += 1
-                    if not bool(finite_state):
-                        raise ValueError("non-finite GSQ relaxed objective or logit gradient")
                     choices = logits.argmax(-1)
-                    hard_loss = float(loss(decoded[tile_ids, choices]))
-                    if not math.isfinite(hard_loss):
-                        raise ValueError("non-finite hard objective")
-                    history.append(hard_loss)
-                    if hard_loss < best:
-                        best, best_choices = hard_loss, choices.clone()
-                        relaxation_improved_initializer = True
-                        stale_steps = 0
+                    hard_loss_tensor = loss(decoded[tile_ids, choices])
+                    if relaxation_patience:
+                        if not bool(finite_state):
+                            raise ValueError("non-finite GSQ relaxed objective or logit gradient")
+                        hard_loss = float(hard_loss_tensor)
+                        if not math.isfinite(hard_loss):
+                            raise ValueError("non-finite hard objective")
+                        history.append(hard_loss)
+                        if hard_loss < best:
+                            best, best_choices = hard_loss, choices.clone()
+                            best_device.fill_(best)
+                            relaxation_improved_initializer = True
+                            stale_steps = 0
+                        else:
+                            stale_steps += 1
                     else:
-                        stale_steps += 1
+                        # A no-patience paper schedule never needs a host-side
+                        # decision inside the loop. Keep the exact hard oracle
+                        # and strict tie rule on device, then transfer once.
+                        torch._assert_async(
+                            finite_state,
+                            "non-finite GSQ relaxed objective or logit gradient",
+                        )
+                        torch._assert_async(
+                            torch.isfinite(hard_loss_tensor),
+                            "non-finite hard objective",
+                        )
+                        history.append(hard_loss_tensor.detach())
+                        improved = hard_loss_tensor < best_device
+                        best_choices.copy_(torch.where(
+                            improved, choices, best_choices,
+                        ))
+                        best_device.copy_(torch.minimum(
+                            best_device, hard_loss_tensor,
+                        ))
                 if progress is not None:
-                    progress(step + 1, best)
+                    progress(step + 1, float(best_device))
                 if evaluate_hard and relaxation_patience and stale_steps >= relaxation_patience:
                     break
+    if not relaxation_patience and hard_evaluations:
+        best = float(best_device)
+        relaxation_improved_initializer = best < initializer_best
+        tensor_indices = [
+            index for index, value in enumerate(history)
+            if isinstance(value, torch.Tensor)
+        ]
+        if tensor_indices:
+            tensor_values = torch.stack([
+                history[index] for index in tensor_indices
+            ]).cpu().tolist()
+            for index, value in zip(tensor_indices, tensor_values):
+                history[index] = value
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
     diagnostics = {
         "optimizer": "lion", "weight_decay": weight_decay,

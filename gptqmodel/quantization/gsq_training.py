@@ -276,7 +276,8 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
         raise ValueError('GSQ accumulation requires positive output element counts')
     total = sum(count for _, count in microbatches)
     optimizer.zero_grad(set_to_none=True)
-    reported = 0.
+    reported = None
+    finite = torch.ones((), dtype=torch.bool, device=next(iter(quantizers.values())).logits.device)
     try:
         for batch, count in microbatches:
             weights = {}
@@ -290,15 +291,20 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
                     multiplier=multiplier,
                 )
             loss = objective(batch, weights)
-            if loss.ndim != 0 or not torch.isfinite(loss):
-                raise ValueError('GSQ stage objective must be a finite scalar')
+            if loss.ndim != 0:
+                raise ValueError('GSQ stage objective must be a scalar')
+            finite.logical_and_(torch.isfinite(loss))
             fraction = count/total
             (loss*fraction).backward()
-            reported += float(loss.detach())*fraction
+            contribution = loss.detach()*fraction
+            reported = contribution if reported is None else reported+contribution
         for group in optimizer.param_groups:
             for parameter in group['params']:
-                if parameter.grad is not None and not torch.isfinite(parameter.grad).all():
-                    raise ValueError('GSQ stage gradient is nonfinite')
+                if parameter.grad is not None:
+                    finite.logical_and_(torch.isfinite(parameter.grad).all())
+        # Keep nonfinite detection on-device. Converting each check to a Python
+        # bool serializes the CUDA stream once per loss and trainable tensor.
+        torch._assert_async(finite, 'GSQ stage objective or gradient is nonfinite')
         optimizer.step()
     except Exception:
         optimizer.zero_grad(set_to_none=True)
@@ -466,6 +472,11 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 best_epoch = epoch
                 if restore_best:
                     best_parameters = parameter_snapshot()
+    # Preserve the public CPU-scalar history with one device transfer instead
+    # of one synchronizing scalar conversion per optimizer update.
+    history_losses = torch.stack([entry['loss'] for entry in history]).cpu().tolist()
+    for entry, loss in zip(history, history_losses):
+        entry['loss'] = loss
     if restore_best:
         with torch.no_grad():
             for quantizer_name, quantizer in quantizers.items():

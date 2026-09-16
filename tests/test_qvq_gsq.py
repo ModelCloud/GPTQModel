@@ -297,6 +297,37 @@ def test_corrected_optimizer_emits_efficacy_diagnostics():
     assert result.diagnostics["selected_arm"] in ("relaxation", "coordinate")
 
 
+def test_no_patience_device_selection_matches_synchronous_hard_oracle():
+    from gptqmodel.quantization.qvq_gsq import (
+        TrellisCandidateAdapter,
+        refine_trellis_candidates,
+    )
+
+    rng = torch.Generator().manual_seed(39)
+    candidates = torch.randint(
+        -(2**31), 2**31 - 1, (3, 1, 24), generator=rng, dtype=torch.int32,
+    )
+    adapter = TrellisCandidateAdapter("p32_window", 3)
+    bank, alt = torch.zeros(1, dtype=torch.uint8), torch.tensor([1])
+    target = adapter.inner(candidates[2], 16, 16, bank, alt)
+    options = {
+        "bits": 3, "bank_ids": bank, "bank_alt_id": alt, "target": target,
+        "inputs": torch.eye(16), "enabled": True, "steps": 8, "seed": 11,
+        "gumbel_samples": 2, "coordinate_sweeps": 1, "hard_eval_interval": 2,
+    }
+    asynchronous = refine_trellis_candidates(
+        candidates, relaxation_patience=0, **options,
+    )
+    synchronous = refine_trellis_candidates(
+        candidates, relaxation_patience=100, **options,
+    )
+
+    assert asynchronous.calibration_after == synchronous.calibration_after
+    assert asynchronous.history == synchronous.history
+    assert torch.equal(asynchronous.choices, synchronous.choices)
+    assert torch.equal(asynchronous.words, synchronous.words)
+
+
 def test_fisher_screen_selects_best_of_four_local_shifts_per_tile():
     from gptqmodel.quantization.qvq_gsq import (
         TrellisCandidateAdapter, fisher_screened_trellis_candidates, trellis_local_candidates,
