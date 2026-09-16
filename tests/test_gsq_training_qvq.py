@@ -21,7 +21,7 @@ from scripts.validate_qvq_gsq_staged_layer import (
 )
 
 
-def _training_module(device="cpu"):
+def _training_module(device="cpu", candidates=5):
     bits = 3
     baseline = torch.zeros((1, 24), dtype=torch.int32, device=device)
     bank = torch.zeros(1, dtype=torch.uint8, device=device)
@@ -30,7 +30,7 @@ def _training_module(device="cpu"):
     teacher = adapter.inner(baseline, 16, 16, bank, alt)
     candidates, decoded, indices, deltas, shifts = fisher_screened_trellis_candidates(
         baseline,
-        count=5,
+        count=candidates,
         seed=7,
         bits=bits,
         layout="p32_window",
@@ -112,29 +112,25 @@ def test_explicit_layout_adjoints_are_bitwise_exact(device):
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
-    module, _, _ = _training_module("cuda")
+    module, _, _ = _training_module("cuda", candidates=33)
     generator = torch.Generator(device="cuda").manual_seed(29)
-    probabilities_reference = torch.randn(
+    probabilities_matrix = torch.randn(
         module.logits.shape, device="cuda", generator=generator, requires_grad=True,
     )
-    probabilities_matrix = probabilities_reference.detach().clone().requires_grad_()
-    upstream_tiles = torch.randn(module.baseline_tiles.shape, device="cuda", generator=generator)
-    upstream_matrix = upstream_tiles.reshape(16, 16)
-
-    contributions = probabilities_reference[:, 1:, None] * module.sparse_deltas
-    tile_output = module.baseline_tiles.clone().scatter_add(
-        1, module.sparse_indices.flatten(1), contributions.flatten(1),
+    probabilities_fused = probabilities_matrix.detach().clone().requires_grad_()
+    upstream_matrix = torch.randn(
+        module.baseline_matrix.shape, device="cuda", generator=generator,
     )
-    reference = tile_output.reshape(16, 16)
     matrix = _SparseCandidateMatrixMixture.apply(
         probabilities_matrix, module.baseline_matrix,
         module.matrix_sparse_indices, module.sparse_deltas,
     )
-    reference.backward(upstream_matrix)
+    fused = module._inner_from_probabilities(probabilities_fused)
     matrix.backward(upstream_matrix)
+    fused.backward(upstream_matrix)
 
-    assert torch.equal(matrix, reference)
-    assert torch.equal(probabilities_matrix.grad, probabilities_reference.grad)
+    assert torch.equal(fused, matrix)
+    assert torch.equal(probabilities_fused.grad, probabilities_matrix.grad)
 
 
 def test_p32_staged_hard_state_is_exact_legal_candidate():

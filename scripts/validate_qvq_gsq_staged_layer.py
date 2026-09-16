@@ -42,10 +42,12 @@ from gptqmodel.looper.gsq_training_capture import (
 from gptqmodel.quantization.gsq_batching import llama_stage_batches
 from gptqmodel.quantization.gsq_training import (
     LlamaGSQAttentionStage,
+    LlamaGSQMLPStage,
     evaluate_hard_stage,
     fit_reconstruction_stage,
     prepare_qk_calibration_factor,
     reconstruction_stage_loss,
+    reconstruction_stage_student_loss,
 )
 from gptqmodel.quantization.gsq_training_qvq import (
     p32_payload_weight,
@@ -540,6 +542,7 @@ def main():
             sparse_candidate_shifts=quantizer.sparse_shifts.T.contiguous(),
             input_metric=input_metric,
             output_metric=output_metric,
+            output_metric_hadamard_diagonal=fisher_scales.square(),
             seed=args.seed,
         )
         inner = quantizer.adapter.inner(
@@ -637,7 +640,8 @@ def main():
     else:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
             qk_results = list(executor.map(qk_fit, PROJECTIONS[:2]))
-    fit_seconds += time.perf_counter() - qk_started
+    qk_fit_seconds = time.perf_counter() - qk_started
+    fit_seconds += qk_fit_seconds
     for result in qk_results:
         name, quantizer, state, weight, rounds, *fused_alternatives = result
         accepted_states[name] = state
@@ -716,30 +720,66 @@ def main():
                 (alternative["state"]["choices"] != 0).sum(),
             )
 
-    def fit_joint_stage(stage_name, names, stage):
+    def cache_stage_batches(source_batches, stage, prefix_stage=None):
+        cached = []
+        with torch.no_grad():
+            for batch_index in range(len(source_batches)):
+                cached_microbatches = []
+                for batch, count in source_batches[batch_index]:
+                    hidden, kwargs, mask = batch
+                    if prefix_stage is None:
+                        stage_hidden, stage_kwargs = hidden, kwargs
+                    else:
+                        stage_hidden = prefix_stage(hidden, **kwargs)
+                        stage_kwargs = {}
+                    teacher = stage(stage_hidden, **stage_kwargs)
+                    cached_microbatches.append(
+                        ((stage_hidden, stage_kwargs, mask, teacher), count),
+                    )
+                cached.append(cached_microbatches)
+        return cached
+
+    def fit_joint_stage(stage_name, names, stage, prefix_stage=None):
         nonlocal fit_seconds
         quantizers = {f"{name}.weight": new_quantizer(name) for name in names}
 
+        cache_started = time.perf_counter()
+        stage_train_batches = cache_stage_batches(
+            train_stage_batches, stage, prefix_stage,
+        )
+        stage_validation_batches = cache_stage_batches(
+            validation_stage_batches, stage, prefix_stage,
+        )
+        cache_seconds = time.perf_counter() - cache_started
+
         def objective(batch, weights):
-            hidden, kwargs, mask = batch
-            return reconstruction_stage_loss(
-                stage, (hidden,), kwargs, student_weights=weights, output_mask=mask,
+            hidden, kwargs, mask, teacher = batch
+            return reconstruction_stage_student_loss(
+                stage, (hidden,), kwargs, student_weights=weights,
+                teacher=teacher, output_mask=mask,
             )
 
         rounds = []
         for round_index in range(args.rounds):
-            result = fit_reconstruction_stage(
-                quantizers,
-                train_stage_batches,
-                objective,
-                **fitting_options(
-                    args,
-                    epochs=args.epochs,
-                    seed=args.seed + round_index,
-                    validation_batches=validation_stage_batches,
-                ),
+            torch.cuda.nvtx.range_push(f"gsq.stage.{stage_name}.round_{round_index + 1}")
+            try:
+                result = fit_reconstruction_stage(
+                    quantizers,
+                    stage_train_batches,
+                    objective,
+                    **fitting_options(
+                        args,
+                        epochs=args.epochs,
+                        seed=args.seed + round_index,
+                        validation_batches=stage_validation_batches,
+                    ),
+                )
+            finally:
+                torch.cuda.nvtx.range_pop()
+            round_seconds = result["elapsed_seconds"] + (
+                cache_seconds if round_index == 0 else 0.
             )
-            fit_seconds += result["elapsed_seconds"]
+            fit_seconds += round_seconds
             states = {name: quantizer.hard_state() for name, quantizer in quantizers.items()}
             rounds.append({
                 "round": round_index + 1,
@@ -748,6 +788,8 @@ def main():
                 "validation_before": result["validation_hard_loss_before"],
                 "validation_after": result["validation_hard_loss_after"],
                 "best_epoch": result["best_validation_epoch"],
+                "elapsed_seconds": round_seconds,
+                "teacher_cache_seconds": cache_seconds if round_index == 0 else 0.,
                 "changed_tiles": {
                     name: int((state["choices"] != 0).sum()) for name, state in states.items()
                 },
@@ -774,7 +816,12 @@ def main():
         PROJECTIONS[2:4],
         LlamaGSQAttentionStage(prepared),
     )
-    fit_joint_stage("mlp", PROJECTIONS[4:], prepared)
+    fit_joint_stage(
+        "mlp",
+        PROJECTIONS[4:],
+        LlamaGSQMLPStage(prepared),
+        prefix_stage=LlamaGSQAttentionStage(prepared),
+    )
 
     def materialize_state(name, state):
         _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
@@ -805,7 +852,10 @@ def main():
             "measurements": measurements,
         }
         install_qk_pair(q_alternative, k_alternative)
-        fit_seconds += time.perf_counter() - guard_started
+        qk_pair_guard_seconds = time.perf_counter() - guard_started
+        fit_seconds += qk_pair_guard_seconds
+    else:
+        qk_pair_guard_seconds = 0.
 
     final_weights = {}
     state_tensors = dict(prefix_tensors)
@@ -911,6 +961,14 @@ def main():
         "capture_seconds": capture_seconds,
         "candidate_seconds": candidate_seconds,
         "fit_seconds": fit_seconds,
+        "fit_stage_seconds": {
+            "qk": qk_fit_seconds,
+            "attention": sum(
+                record["elapsed_seconds"] for record in stage_records["attention"]
+            ),
+            "mlp": sum(record["elapsed_seconds"] for record in stage_records["mlp"]),
+            "qk_pair_guard": qk_pair_guard_seconds,
+        },
         "stages": stage_records,
         "qk_pair_guards": qk_pair_guards,
         "full_block_validation_before": baseline_validation,

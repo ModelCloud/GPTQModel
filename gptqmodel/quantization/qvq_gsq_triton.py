@@ -1,9 +1,42 @@
 """Fused CUDA primitives for sparse local-path GSQ relaxation."""
 
 import torch
-
 import triton
 import triton.language as tl
+
+
+@triton.jit
+def _fp32_multiply(left, right):
+    return tl.inline_asm_elementwise(
+        "mul.rn.f32 $0, $1, $2;", "=f,f,f", [left, right],
+        dtype=tl.float32, is_pure=True, pack=1,
+    )
+
+
+@triton.jit
+def _fp32_add(left, right):
+    return tl.inline_asm_elementwise(
+        "add.rn.f32 $0, $1, $2;", "=f,f,f", [left, right],
+        dtype=tl.float32, is_pure=True, pack=1,
+    )
+
+
+@triton.jit
+def _candidate_gradient_product(grad_matrix, matrix_indices, sparse_deltas,
+                                tile, tile_mask, choice,
+                                CHOICES: tl.constexpr,
+                                WIDTH: tl.constexpr,
+                                SPARSE_SLOT: tl.constexpr):
+    sparse_offset = (
+        (tile * (CHOICES - 1) + choice - 1) * WIDTH + SPARSE_SLOT
+    )
+    matrix_offset = tl.load(matrix_indices + sparse_offset,
+                            mask=tile_mask, other=0)
+    gradient = tl.load(grad_matrix + matrix_offset,
+                       mask=tile_mask, other=0.0).to(tl.float32)
+    delta = tl.load(sparse_deltas + sparse_offset,
+                    mask=tile_mask, other=0.0).to(tl.float32)
+    return _fp32_multiply(gradient, delta)
 
 
 @triton.jit
@@ -127,7 +160,7 @@ def _finish_norm_kernel(norm_square, norm_minimum, norm_maximum, finite_state):
     value = tl.sqrt(square)
     tl.store(norm_minimum, tl.minimum(tl.load(norm_minimum), value))
     tl.store(norm_maximum, tl.maximum(tl.load(norm_maximum), value))
-    finite = (value == value) & (tl.abs(value) != float("inf"))
+    finite = (value == value) & (tl.abs(value) != float("inf"))  # noqa: PLR0124
     tl.store(finite_state, tl.load(finite_state) & finite)
     tl.store(norm_square, 0.0)
 
@@ -156,6 +189,50 @@ def _build_position_map_kernel(indices, deltas, counters, position_choices,
     tl.store(position_deltas + output_offset,
              tl.load(deltas + entry, mask=mask, other=0.0),
              mask=mask & (slot < OVERLAP))
+
+
+@triton.jit
+def _candidate_probability_gradient_kernel(grad_matrix, matrix_indices,
+                                           sparse_deltas, output,
+                                           TILE_COUNT,
+                                           CHOICES: tl.constexpr,
+                                           WIDTH: tl.constexpr,
+                                           BLOCK: tl.constexpr):
+    tile = tl.program_id(0)
+    choice = tl.arange(0, BLOCK)
+    choice_mask = (tile < TILE_COUNT) & (choice < CHOICES)
+    alternative_mask = choice_mask & (choice > 0)
+    product0 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 0,
+    )
+    product1 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 1,
+    )
+    product2 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 2,
+    )
+    product3 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 3,
+    )
+    product4 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 4,
+    )
+    product5 = _candidate_gradient_product(
+        grad_matrix, matrix_indices, sparse_deltas, tile, alternative_mask,
+        choice, CHOICES, WIDTH, 5,
+    )
+    # Match PyTorch's six-lane CUDA reduction tree exactly. P32 legal
+    # neighbours always expose six sparse deltas per alternative.
+    even = _fp32_add(_fp32_add(product0, product4), product2)
+    odd = _fp32_add(_fp32_add(product1, product5), product3)
+    value = _fp32_add(even, odd)
+    value = tl.where(choice > 0, value, 0.0)
+    tl.store(output + tile * CHOICES + choice, value, mask=choice_mask)
 
 
 @triton.jit
@@ -464,6 +541,20 @@ def build_compact_position_map(indices, deltas):
         compact_indices,
         compact_choices.reshape(tile_count, positions, overlap),
         compact_deltas.reshape(tile_count, positions, overlap),
+    )
+
+
+def candidate_probability_gradient(grad_matrix, matrix_indices, sparse_deltas,
+                                   output):
+    """Apply the exact sparse-mixture adjoint without an indexed gather op."""
+    tile_count, alternatives, width = matrix_indices.shape
+    if width != 6:
+        raise ValueError("fused P32 candidate gradients require sparse width six")
+    block = triton.next_power_of_2(alternatives + 1)
+    _candidate_probability_gradient_kernel[(tile_count,)](
+        grad_matrix, matrix_indices, sparse_deltas, output, tile_count,
+        CHOICES=alternatives + 1, WIDTH=width,
+        BLOCK=block, num_warps=1,
     )
 
 

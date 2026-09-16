@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import torch
 
+from ..utils.hadamard import hadamard_transform
 from .qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     QVQ_V2B2_P32_STEPS_PER_SEGMENT,
@@ -133,6 +134,7 @@ def refine_trellis_candidates(
     sparse_candidate_shifts: torch.Tensor | None = None,
     input_metric: torch.Tensor | None = None,
     output_metric: torch.Tensor | None = None,
+    output_metric_hadamard_diagonal: torch.Tensor | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
 ) -> GSQResult:
@@ -237,6 +239,15 @@ def refine_trellis_candidates(
         g_metric = output_metric.detach().float()
         if h_metric.shape != (k, k) or g_metric.shape != (n, n):
             raise ValueError("input_metric and output_metric must match the Fisher objective dimensions")
+        if output_metric_hadamard_diagonal is not None:
+            if (output_metric_hadamard_diagonal.shape != (n,)
+                    or output_metric_hadamard_diagonal.device != candidates.device
+                    or not output_metric_hadamard_diagonal.is_floating_point()
+                    or not torch.isfinite(output_metric_hadamard_diagonal).all()
+                    or n < 8 or n > 32768 or n & (n - 1)):
+                raise ValueError(
+                    "structured output Fisher requires a finite power-of-two Hadamard diagonal"
+                )
         target_metric = h_metric @ target.detach().float() @ g_metric
         fisher_denominator = (target.detach().float() * target_metric).sum().clamp_min(
             torch.finfo(torch.float32).tiny
@@ -247,6 +258,10 @@ def refine_trellis_candidates(
         )
         h_relax = h_metric.to(relaxation_dtype)
         g_relax = g_metric.to(relaxation_dtype)
+        g_hadamard_diagonal = (
+            output_metric_hadamard_diagonal.detach().to(relaxation_dtype)
+            if output_metric_hadamard_diagonal is not None else None
+        )
         target_relax = target.detach().to(relaxation_dtype)
         if sparse_relaxation:
             # Candidate zero plus a tiny per-choice delta is sufficient for
@@ -342,11 +357,13 @@ def refine_trellis_candidates(
             logits[tile_ids, best_choices] = 1.0 / kappa_start
         initialization = "guard_choice_margin"
     if fused_sparse_relaxation:
+        from .qvq_gsq_triton import (
+            build_compact_position_map,
+            compact_position_error,
+            scheduled_grouped_gumbel_softmax,
+            scheduled_grouped_sparse_lion,
+        )
         from .qvq_gsq_triton import gumbel_softmax as fused_gumbel_softmax
-        from .qvq_gsq_triton import build_compact_position_map
-        from .qvq_gsq_triton import compact_position_error
-        from .qvq_gsq_triton import scheduled_grouped_gumbel_softmax
-        from .qvq_gsq_triton import scheduled_grouped_sparse_lion
         from .qvq_gsq_triton import sparse_error as fused_sparse_error
         from .qvq_gsq_triton import sparse_lion as fused_sparse_lion
         probabilities_buffer = torch.empty_like(logits)
@@ -416,7 +433,17 @@ def refine_trellis_candidates(
             position_deltas, target_relax, warm_error,
         )
         torch.mm(h_relax, warm_error, out=warm_metric_left)
-        torch.mm(warm_metric_left, g_relax, out=warm_metric_error)
+        if g_hadamard_diagonal is None:
+            torch.mm(warm_metric_left, g_relax, out=warm_metric_error)
+        else:
+            hadamard_scale = 1. / math.sqrt(n)
+            warm_metric_right = hadamard_transform(
+                warm_metric_left.contiguous(), hadamard_scale,
+            )
+            warm_metric_right.mul_(g_hadamard_diagonal)
+            warm_metric_error = hadamard_transform(
+                warm_metric_right.contiguous(), hadamard_scale,
+            )
         scheduled_grouped_sparse_lion(
             warm_probabilities, warm_metric_error, packed_sparse_indices_by_tile,
             sparse_deltas_by_tile, fisher_denominator, warm_logits,
@@ -437,7 +464,16 @@ def refine_trellis_candidates(
                 position_deltas, target_relax, error_buffer,
             )
             torch.mm(h_relax, error_buffer, out=metric_left_buffer)
-            torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+            if g_hadamard_diagonal is None:
+                torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+            else:
+                metric_right_buffer = hadamard_transform(
+                    metric_left_buffer.contiguous(), hadamard_scale,
+                )
+                metric_right_buffer.mul_(g_hadamard_diagonal)
+                metric_error_buffer = hadamard_transform(
+                    metric_right_buffer.contiguous(), hadamard_scale,
+                )
             scheduled_grouped_sparse_lion(
                 probabilities_buffer, metric_error_buffer,
                 packed_sparse_indices_by_tile, sparse_deltas_by_tile,
@@ -487,7 +523,16 @@ def refine_trellis_candidates(
                     )
                     error_buffer.copy_(error_accumulation_buffer)
                     torch.mm(h_relax, error_buffer, out=metric_left_buffer)
-                    torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+                    if g_hadamard_diagonal is None:
+                        torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+                    else:
+                        metric_right_buffer = hadamard_transform(
+                            metric_left_buffer.contiguous(), hadamard_scale,
+                        )
+                        metric_right_buffer.mul_(g_hadamard_diagonal)
+                        metric_error_buffer = hadamard_transform(
+                            metric_right_buffer.contiguous(), hadamard_scale,
+                        )
                 objective = None
                 if evaluate_hard:
                     objective_error = (
