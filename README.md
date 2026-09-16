@@ -4,7 +4,7 @@
 </div>
 <h1 align="center">GPT-QModel ⚡</h1>
 </p>
-<p align="center"><strong>One extensible platform to quantize, optimize, validate, and deploy LLMs.</strong><br>GPTQ, AWQ, ParoQuant, GGUF, FP8, EXL3, QQQ, and more—across NVIDIA CUDA, AMD ROCm, Huawei Ascend, Intel XPU, and CPU, with Transformers, vLLM, and SGLang.</p>
+<p align="center"><strong>An extensible platform for LLM quantization, validation, and deployment.</strong><br>GPTQ, AWQ, ParoQuant, GGUF, FP8, EXL3, QQQ, and more—across NVIDIA CUDA, AMD ROCm, Huawei Ascend, Intel XPU, and CPU, with Transformers, vLLM, and SGLang.</p>
 <p align="center">
     <a href="https://github.com/ModelCloud/GPTQModel/releases" style="text-decoration:none;"><img alt="GitHub release" src="https://img.shields.io/github/release/ModelCloud/GPTQModel.svg"></a>
     <a href="https://pypi.org/project/gptqmodel/" style="text-decoration:none;"><img alt="PyPI - Version" src="https://img.shields.io/pypi/v/gptqmodel"></a>
@@ -46,11 +46,11 @@ tokens = model.generate(
 print(model.tokenizer.decode(tokens, skip_special_tokens=True))
 ```
 
-## Quantization without a dead end
+## A unified quantization platform
 
-GPT-QModel is the all-in-one, production-grade quantization platform for LLMs: one API for quantization, calibration, quality evaluation, model conversion, and accelerated inference. It supports established methods—GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, and FOEM—while its modular method, format, backend, and kernel layers make room for the next method and the next accelerator.
+GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, and FOEM across supported hardware and runtime integrations.
 
-Use it as a focused GPTQ/AWQ tool today or as the extensible foundation for mixed, model-specific, and future quantization workflows. Quantize once; choose the best available kernel and runtime at deployment.
+Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
 
 ## Quantization Support 🛠️
 
