@@ -124,11 +124,20 @@ PYTHON_GIL=0 python scripts/validate_qvq_gsq_staged_layer.py \
   --output /path/to/logs/layer-0.json
 ```
 
-`PYTHON_GIL=0` is performance-critical on a free-threaded Python build: the
-driver fits independent Q and K projections on separate CUDA streams while
-preserving each projection's exact RNG and update order. GIL-enabled execution
-remains correct but serializes enough host dispatch to lose roughly 8% on the
-measured H100 workload.
+`PYTHON_GIL=0` remains recommended on a free-threaded Python build.  It is
+performance-critical for `--no-fused-qk-fisher`, where the driver fits
+independent Q and K projections on separate CUDA streams while preserving each
+projection's exact RNG and update order. GIL-enabled execution remains correct
+but serializes enough host dispatch to lose roughly 8% on that oracle path.
+
+The default single-round Q/K path now transforms the same quadratic objective
+into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
+solves the independent output scales in closed form and uses only the disjoint
+Q/K validation split to select among the original, scale-only, and edited P32
+states.  This preserves all requested GSQ updates and the final block-level
+held-out guard while avoiding dense RHT reconstruction and autograd on every
+Q/K update.  Pass `--no-fused-qk-fisher` for the previous differentiable Q/K
+oracle.  Multi-round P32 composition currently requires that oracle path.
 
 Choose `--microbatch-size` from available memory; it is an accumulation/memory
 control and does not change the logical batch size. Determinism is enabled by

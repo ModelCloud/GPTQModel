@@ -88,6 +88,49 @@ Artifacts for this phase are under
 `/root/qvq-results/gsq-next-2x-20260916/`; `nogil-r1` and `nogil-r2` are the
 two formal full-layer repetitions.
 
+## Third optimization phase
+
+The remaining Q/K path reconstructed dense rotated weights and differentiated
+through both Hadamard transforms for every update.  That is unnecessary for
+the paper's quadratic Q/K objective.  For fixed rotation scales, orthogonality
+gives the equivalent inner-coordinate Fisher objective
+
+`tr(G_out * E.T * H_in * E)`,
+
+where `E` is the P32 inner-weight error, `H_in` is the input Hessian transformed
+by `SU` and the input RHT, and `G_out` is the output metric transformed by `SV`
+and the output RHT.  The staged driver now uses the existing fused sparse GSQ
+optimizer and CUDA graph for that exact quadratic instead of rebuilding the
+dense Q/K weight through autograd 2,000 times.
+
+Output scales are independent in the Q/K quadratic once the hard P32 payload
+is fixed.  They are therefore solved in closed form.  The original state, the
+scale-only state, and the fused P32-plus-scale state are compared on the
+disjoint Q/K validation split; only the best non-regressing state proceeds to
+V/O fitting.  The final complete-block held-out guard remains authoritative.
+`--no-fused-qk-fisher` retains the previous differentiable Q/K path, and the
+fused path currently requires one P32 composition round.
+
+The same complete seven-projection layer workload measured 8.111 and 8.190
+seconds in two idle-gated runs.  This is 2.192x-2.213x faster than the prior
+17.951-second result, and 9.775x-9.870x faster than the original 80.053-second
+eager path.  A 16-layer serial extrapolation is approximately 2.2 minutes.
+
+Both repetitions were deterministic and produced all 14 state tensors
+bitwise equal to each other.  The complete-block held-out loss improved from
+`3.337860107421875e-05` to `2.8431415557861328e-05`, a 14.821428571428571%
+gain.  The previous path measured 15.178571428571429%; the accelerated path
+therefore retains 97.65% of that measured post-quantization gain while more
+than halving fitting time.  Strict quantization/evaluation split disjointness
+remained true.
+
+Artifacts for this phase are under
+`/root/qvq-results/gsq-third-2x-20260916/`; `final-clean-r1` and
+`final-clean-r2` are the two formal repetitions.  `nsys-final/profile.nsys-rep`
+is the accepted full-workload Nsight Systems trace; it records 4,000 CUDA graph
+replays for the two 2,000-update fused Q/K stages.  Profiling raised measured
+fit time to 8.619 seconds without changing the held-out result.
+
 ## SM90 audit
 
 Nsight Compute on a `2048 x 2048` FP32 reverse transform reports:
