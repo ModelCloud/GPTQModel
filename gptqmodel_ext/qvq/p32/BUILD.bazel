@@ -48,7 +48,7 @@ fi
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
   --split-compile=8 \
-  -gencode arch=compute_80,code=sm_80 \
+  -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -shared -o "$@" $(location qvq_p32_cuda.cu)
 """,
@@ -73,7 +73,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O2 -cudart=shared \
-  -gencode arch=compute_80,code=sm_80 \
+  -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -L$$(dirname $(location :libqvq_p32)) -lqvq_p32 \
   -Xlinker=-rpath -Xlinker='$$ORIGIN' \
