@@ -309,7 +309,11 @@ def execute(args):
                 qcfg = QVQConfig(bits=args.target_bits, format="qvq_v2b2_p32" if args.target_bits <= 3.5 else "qvq", offload_to_disk=False,
                                   codebook=cfg["codebook"], viterbi_pruning=cfg["viterbi_pruning"],
                                   yaqa={**cfg["yaqa"], "minimum_sequences": len(batches), "regularization": 0.02},
-                                  gsq=GSQConfig(enabled=True, steps=args.steps, candidates=args.candidates, seed=7))
+                                  gsq=GSQConfig(
+                                      enabled=True, steps=args.steps, candidates=args.candidates, seed=7,
+                                      qvq_hard_eval_interval=args.hard_eval_interval,
+                                      qvq_soft_dtype=args.soft_dtype,
+                                  ))
                 write_json(args.output / "gsq_target_quantize_config.json", qcfg.to_dict())
                 print("TARGET_GSQ_LIFECYCLE", name, flush=True)
                 report["state"] = "YAQA + GSQ quantizing " + name
@@ -581,13 +585,20 @@ def main():
     parser.add_argument("--eval-rows", type=int, default=32)
     parser.add_argument("--tokens", type=int, default=256)
     parser.add_argument("--candidates", type=int, default=33)
-    parser.add_argument("--steps", type=int, default=100)
+    parser.add_argument(
+        "--steps", type=int, default=640,
+        help="full-Fisher optimizer updates (640 matches 4096 samples / batch 64 * 10 GSQ epochs)",
+    )
+    parser.add_argument("--hard-eval-interval", type=int, default=64,
+                        help="FP32 hard checkpoint interval (64 is one paper-style epoch)")
+    parser.add_argument("--soft-dtype", choices=("float32", "bfloat16"), default="bfloat16",
+                        help="relaxation arithmetic; hard selection always remains FP32")
     parser.add_argument("--gsq", action="store_true", help="Enable experimental GSQ refinement (default: disabled)")
     parser.add_argument("--compare-deterministic", action="store_true",
                         help="Compare prepared-Fisher GSQ against three-sweep hard search on the identical pool")
     parser.add_argument("--gsq-lifecycle", action="store_true",
                         help="Test QVQConfig.gsq with the prepared YAQA Fisher objective")
-    parser.add_argument("--target-bits", type=float, choices=(2.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8),
+    parser.add_argument("--target-bits", type=float, choices=(2.5, 3, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8),
                         help="Fresh YAQA QKV baseline at the requested rate; all other F6 projections remain unchanged")
     args = parser.parse_args()
     if args.compare_deterministic and not args.gsq_lifecycle:
@@ -598,8 +609,8 @@ def main():
         parser.error("Non-banked targets require --gsq-lifecycle")
     if args.train_rows < 2 or args.train_rows % 2 or args.eval_rows < 2 or args.tokens < 2:
         parser.error("Use positive even train rows, >=2 eval rows and >=2 tokens")
-    if args.candidates < 2 or args.steps < 1:
-        parser.error("Use >=2 candidates and positive steps")
+    if args.candidates < 2 or args.steps < 1 or args.hard_eval_interval < 1:
+        parser.error("Use >=2 candidates and positive steps/hard-eval interval")
     if args.output.resolve().is_relative_to(args.snapshot.resolve()):
         parser.error("Keep partial experiment outputs outside the snapshot")
     if not args.prepare and (args.output / "report.json").exists():

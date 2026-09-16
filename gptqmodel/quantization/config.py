@@ -6581,20 +6581,85 @@ class GSQConfig:
     max_candidate_bytes: int = 1024**3
     learn_scales: bool = False
     modules: Optional[Tuple[str, ...]] = None
+    # QVQ uses the paper's assignment optimizer/schedule without changing the
+    # historical scalar/FP8 GSQ defaults above.  The categorical variables in
+    # QVQ select whole legal trellis paths, so their useful logit scale is very
+    # different from the older Adam prototype's scale.
+    qvq_learning_rate: float = 1e-4
+    qvq_temperature_start: float = 2.0
+    qvq_temperature_end: float = 0.05
+    qvq_kappa_start: float = 100.0
+    qvq_kappa_end: float = 500.0
+    qvq_weight_decay: float = 1.0
+    qvq_gumbel_samples: int = 1
+    qvq_soft_dtype: str = "float32"
+    qvq_coordinate_sweeps: int = 1
+    # 8K tiles keeps the two temporary [candidate,tile,16,16] tensors near
+    # 0.55 GiB for the default 33 choices and avoids dozens of tiny GEMMs.
+    qvq_coordinate_chunk_tiles: int = 8192
+    # Hard checkpoints are intentionally less frequent than gradient updates:
+    # each check evaluates the full dense Fisher objective.  A zero patience
+    # completes the requested annealing schedule instead of silently turning
+    # a 100-step request into ten updates.
+    qvq_hard_eval_interval: int = 10
+    qvq_relaxation_patience: int = 0
+    qvq_candidate_policy: str = "trellis_local"
+
+    @classmethod
+    def for_qvq_paper_schedule(
+        cls,
+        *,
+        num_samples: int = 4096,
+        batch_size: int = 64,
+        epochs: int = 10,
+        **kwargs,
+    ) -> "GSQConfig":
+        """Construct the official GSQ update budget for a QVQ adaptation.
+
+        This computes optimizer updates only; callers remain responsible for
+        feeding disjoint, packed calibration data with the declared sample and
+        token counts.  Full-Fisher QVQ updates consume the aggregate objective,
+        so they are deliberately reported as updates rather than epochs.
+        """
+        for name, value in (("num_samples", num_samples), ("batch_size", batch_size), ("epochs", epochs)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"GSQConfig: {name} must be a positive integer")
+        if "steps" in kwargs:
+            raise ValueError("GSQConfig: for_qvq_paper_schedule computes steps; do not pass steps")
+        updates_per_epoch = math.ceil(num_samples / batch_size)
+        kwargs.setdefault("qvq_hard_eval_interval", updates_per_epoch)
+        kwargs.setdefault("qvq_soft_dtype", "bfloat16")
+        return cls(
+            enabled=True,
+            steps=updates_per_epoch * epochs,
+            qvq_relaxation_patience=0,
+            **kwargs,
+        )
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
             raise TypeError("GSQConfig: enabled must be boolean")
         if not isinstance(self.learn_scales, bool):
             raise TypeError("GSQConfig: learn_scales must be boolean")
-        for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1)):
+        for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1),
+                              ("qvq_gumbel_samples", 1), ("qvq_coordinate_sweeps", 0),
+                              ("qvq_coordinate_chunk_tiles", 1), ("qvq_hard_eval_interval", 1),
+                              ("qvq_relaxation_patience", 0)):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"GSQConfig: {name} must be an integer >= {minimum}")
-        for name in ("learning_rate", "temperature_start", "temperature_end"):
+        for name in ("learning_rate", "temperature_start", "temperature_end", "qvq_learning_rate",
+                     "qvq_temperature_start", "qvq_temperature_end", "qvq_kappa_start", "qvq_kappa_end"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"GSQConfig: {name} must be finite and positive")
+        if (isinstance(self.qvq_weight_decay, bool) or not isinstance(self.qvq_weight_decay, (float, int))
+                or not math.isfinite(self.qvq_weight_decay) or self.qvq_weight_decay < 0):
+            raise ValueError("GSQConfig: qvq_weight_decay must be finite and nonnegative")
+        if self.qvq_candidate_policy not in ("trellis_local", "legacy_bitflip"):
+            raise ValueError("GSQConfig: qvq_candidate_policy must be 'trellis_local' or 'legacy_bitflip'")
+        if self.qvq_soft_dtype not in ("float32", "bfloat16"):
+            raise ValueError("GSQConfig: qvq_soft_dtype must be 'float32' or 'bfloat16'")
         if self.modules is not None:
             if not isinstance(self.modules, (tuple, list)) or not self.modules:
                 raise ValueError("GSQConfig: modules must be a nonempty list/tuple of regular expressions or None")

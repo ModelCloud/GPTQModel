@@ -221,6 +221,107 @@ def test_shared_pool_preserves_historical_draws(words):
             assert sum(int(word).bit_count() for word in tile) == 1
 
 
+@pytest.mark.parametrize("bits", [1, 1.5, 2, 2.5, 3, 3.5])
+def test_grouped_p32_shift_generation_matches_scalar_groups(bits):
+    from gptqmodel.quantization.qvq import qvq_words_per_tile
+    from gptqmodel.quantization.qvq_gsq import (
+        _p32_grouped_shift_alternatives,
+        _p32_shift_alternatives,
+    )
+
+    generator = torch.Generator().manual_seed(41)
+    tiles = 7
+    baseline = torch.randint(
+        -(2**31), 2**31 - 1,
+        (tiles, qvq_words_per_tile(bits, weight_count=256, vector_size=2)),
+        generator=generator,
+        dtype=torch.int32,
+    )
+    positions = torch.randint(128, (tiles, 5), generator=generator)
+    shifts = (-2, -1, 1, 2)
+    transition_bits = round(bits * 2)
+    grouped = _p32_grouped_shift_alternatives(
+        baseline, positions, shifts, transition_bits
+    )
+    expected = torch.stack([
+        _p32_shift_alternatives(baseline, positions[:, group], shifts, transition_bits)
+        for group in range(positions.shape[1])
+    ])
+    assert torch.equal(grouped, expected)
+
+
+@pytest.mark.parametrize("bits,layout", [(3, "p32_window"), (4, "qvq_planar")])
+def test_local_trellis_candidates_are_shifted_legal_paths(bits, layout):
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, trellis_local_candidates
+
+    adapter = TrellisCandidateAdapter(layout, bits)
+    rng = torch.Generator().manual_seed(23)
+    words = torch.randint(-(2**31), 2**31 - 1, (3, int(bits * 8)), generator=rng, dtype=torch.int32)
+    # Any packed circular edge stream decodes to a consistent tail-biting path.
+    baseline = adapter.pack(adapter.unpack(words))
+    candidates = trellis_local_candidates(
+        baseline, count=9, seed=7, bits=bits, layout=layout)
+    assert torch.equal(candidates[0], baseline)
+    assert candidates.shape == (9, *baseline.shape)
+    base_edges = adapter.unpack(baseline) & ((1 << int(bits * 2)) - 1)
+    deltas = []
+    for candidate in candidates[1:]:
+        assert torch.equal(adapter.pack(adapter.unpack(candidate)), candidate)
+        edges = adapter.unpack(candidate) & ((1 << int(bits * 2)) - 1)
+        changed = edges != base_edges
+        assert torch.equal(changed.sum(-1), torch.ones(3, dtype=torch.long))
+        delta = (edges[changed] - base_edges[changed]) & ((1 << int(bits * 2)) - 1)
+        deltas.append(int(delta[0]))
+    modulus = 1 << int(bits * 2)
+    assert deltas[:4] == [modulus - 2, modulus - 1, 1, 2]
+
+
+def test_corrected_optimizer_emits_efficacy_diagnostics():
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, refine_trellis_candidates
+
+    rng = torch.Generator().manual_seed(37)
+    candidates = torch.randint(-(2**31), 2**31 - 1, (3, 1, 24), generator=rng, dtype=torch.int32)
+    adapter = TrellisCandidateAdapter("p32_window", 3)
+    bank, alt = torch.zeros(1, dtype=torch.uint8), torch.tensor([1])
+    target = adapter.inner(candidates[1], 16, 16, bank, alt)
+    result = refine_trellis_candidates(
+        candidates, bits=3, bank_ids=bank, bank_alt_id=alt, target=target,
+        inputs=torch.eye(16), enabled=True, steps=8, seed=7, gumbel_samples=2,
+        coordinate_sweeps=1)
+    assert result.calibration_after == 0
+    assert result.diagnostics["optimizer"] == "lion"
+    assert result.diagnostics["kappa_start"] == 100
+    assert result.diagnostics["gradient_norm_max"] > 0
+    assert result.diagnostics["initial_entropy"] > 0
+    assert result.diagnostics["selected_arm"] in ("relaxation", "coordinate")
+
+
+def test_fisher_screen_selects_best_of_four_local_shifts_per_tile():
+    from gptqmodel.quantization.qvq_gsq import (
+        TrellisCandidateAdapter, fisher_screened_trellis_candidates, trellis_local_candidates,
+    )
+
+    bits, count = 3, 5
+    adapter = TrellisCandidateAdapter("p32_window", bits)
+    rng = torch.Generator().manual_seed(41)
+    words = torch.randint(-(2**31), 2**31 - 1, (4, 24), generator=rng, dtype=torch.int32)
+    baseline = adapter.pack(adapter.unpack(words))
+    bank, alt = torch.zeros(4, dtype=torch.uint8), torch.tensor([1])
+    target = adapter.inner(baseline, 32, 32, bank, alt) + torch.randn(32, 32, generator=rng) * .05
+    screened = fisher_screened_trellis_candidates(
+        baseline, count=count, seed=7, bits=bits, layout="p32_window", target=target,
+        input_hessian=torch.eye(32), output_hessian=torch.eye(32), bank_ids=bank, bank_alt_id=alt)
+    raw = trellis_local_candidates(
+        baseline, count=1 + 4 * (count - 1), seed=7, bits=bits, layout="p32_window")
+    target_tiles = target.reshape(2, 16, 2, 16).permute(0, 2, 1, 3).reshape(4, 16, 16)
+    for group in range(count - 1):
+        selected_loss = (adapter.decode(screened[group + 1], bank, alt).reshape(4, 16, 16) - target_tiles).square().sum((1, 2))
+        alternatives = torch.stack([
+            (adapter.decode(raw[1 + 4*group + shift], bank, alt).reshape(4, 16, 16) - target_tiles).square().sum((1, 2))
+            for shift in range(4)])
+        torch.testing.assert_close(selected_loss, alternatives.min(0).values)
+
+
 @pytest.mark.parametrize("bits,layout", [(2.5, "p32_window"), (4, "qvq_planar"), (8, "qvq_planar")])
 def test_deterministic_fisher_search_matches_full_recomputation(bits, layout):
     from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, deterministic_trellis_candidates
@@ -258,6 +359,32 @@ def test_deterministic_fisher_search_matches_full_recomputation(bits, layout):
     assert torch.equal(result.words, candidates[choices, torch.arange(4)])
     assert result.calibration_after < result.calibration_before
     assert result.calibration_after == pytest.approx(float(loss(current) / (x @ target @ right).square().sum()), rel=1e-5)
+
+
+@pytest.mark.parametrize("bits,layout", [(3, "p32_window"), (4, "qvq_planar")])
+def test_batched_initializer_recomputes_and_guards_full_objective(bits, layout):
+    from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, batched_trellis_candidates
+
+    rng = torch.Generator().manual_seed(73)
+    candidates = torch.randint(-(2**31), 2**31 - 1, (4, 4, int(bits * 8)),
+                               generator=rng, dtype=torch.int32)
+    bank = torch.zeros(4, dtype=torch.uint8) if layout == "p32_window" else None
+    alt = torch.tensor([1]) if bank is not None else None
+    adapter = TrellisCandidateAdapter(layout, bits)
+    tile_values = torch.stack([adapter.decode(c, bank, alt).reshape(4, 16, 16) for c in candidates])
+    decoded = tile_values.reshape(4, 2, 2, 16, 16).permute(0, 1, 3, 2, 4).reshape(4, 32, 32)
+    target = decoded[1] * .55 + decoded[2] * .3 + decoded[3] * .15
+    x, right = torch.randn(37, 32, generator=rng), torch.randn(32, 32, generator=rng)
+    result = batched_trellis_candidates(
+        candidates, target=target, inputs=x, right_factor=right, bits=bits, layout=layout,
+        bank_ids=bank, bank_alt_id=alt, sweeps=2, chunk_tiles=2)
+    selected = tile_values[result.choices, torch.arange(4)].reshape(2, 2, 16, 16).permute(
+        0, 2, 1, 3).reshape(32, 32)
+    denominator = (x @ target @ right).square().mean()
+    exact = float((x @ (selected - target) @ right).square().mean() / denominator)
+    assert result.calibration_after == pytest.approx(exact, rel=2e-6)
+    assert result.calibration_after <= result.calibration_before
+    assert torch.equal(result.words, candidates[result.choices, torch.arange(4)])
 
 
 def test_matched_experiment_records_exact_pool_and_restores_hook(tmp_path):
