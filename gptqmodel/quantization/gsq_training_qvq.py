@@ -56,6 +56,40 @@ def _training_hadamard(values, fast_hadamard):
     return _ExactTrainingHadamard.apply(values)
 
 
+class _SparseCandidateMatrixMixture(torch.autograd.Function):
+    """Exact P32 mixture directly in the Hadamard matrix layout."""
+
+    @staticmethod
+    def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas):
+        contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
+        matrix = baseline_matrix.flatten().clone().scatter_add(
+            0, matrix_indices.flatten(), contributions.flatten(),
+        ).reshape_as(baseline_matrix)
+        ctx.save_for_backward(matrix_indices, sparse_deltas)
+        ctx.probability_dtype = probabilities.dtype
+        return matrix
+
+    @staticmethod
+    def backward(ctx, grad_matrix):
+        matrix_indices, sparse_deltas = ctx.saved_tensors
+        selected = grad_matrix.flatten().gather(0, matrix_indices.flatten()).reshape_as(sparse_deltas)
+        candidate_gradient = (selected * sparse_deltas).sum(-1)
+        probability_gradient = torch.nn.functional.pad(candidate_gradient, (1, 0))
+        return probability_gradient.to(ctx.probability_dtype), None, None, None
+
+
+class _ContiguousTranspose(torch.autograd.Function):
+    """Rank-two transpose-copy with its transpose-copy adjoint."""
+
+    @staticmethod
+    def forward(ctx, values):
+        return values.transpose(0, 1).contiguous()
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.transpose(0, 1).contiguous()
+
+
 def _rht_reconstruct_differentiable(
     inner_weight,
     SU,
@@ -83,7 +117,7 @@ def _rht_reconstruct_differentiable(
     if output_hadamard:
         work = _training_hadamard(work, fast_hadamard)
     work = work * SV.to(work.dtype).unsqueeze(0)
-    return work.transpose(0, 1).contiguous()
+    return _ContiguousTranspose.apply(work)
 
 
 class GSQP32TrainingModule(torch.nn.Module):
@@ -102,6 +136,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         baseline_tiles,
         sparse_indices,
         sparse_deltas,
+        sparse_values,
         sparse_shifts,
         *,
         bits,
@@ -136,12 +171,15 @@ class GSQP32TrainingModule(torch.nn.Module):
             sparse_indices.ndim != 3
             or sparse_indices.shape[:2] != expected_sparse
             or sparse_deltas.shape != sparse_indices.shape
+            or sparse_values.shape != sparse_indices.shape
             or sparse_shifts.shape != expected_sparse
         ):
             raise ValueError("P32 GSQ sparse candidate metadata does not match candidates")
         if sparse_indices.dtype != torch.int64 or sparse_shifts.dtype != torch.int64:
             raise ValueError("P32 GSQ sparse indices and shifts must be int64")
-        if not sparse_deltas.is_floating_point() or not baseline_tiles.is_floating_point():
+        if (not sparse_deltas.is_floating_point()
+                or not sparse_values.is_floating_point()
+                or not baseline_tiles.is_floating_point()):
             raise ValueError("P32 GSQ decoded values must be floating point")
         if any(d % 16 for d in (in_features, out_features)):
             raise ValueError("P32 GSQ dimensions must be divisible by 16")
@@ -152,6 +190,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             baseline_tiles,
             sparse_indices,
             sparse_deltas,
+            sparse_values,
             sparse_shifts,
             bank_ids,
             bank_alt_id,
@@ -160,7 +199,9 @@ class GSQP32TrainingModule(torch.nn.Module):
         )
         if any(value.device != candidates.device for value in tensors):
             raise ValueError("P32 GSQ training tensors must share one device")
-        if not all(torch.isfinite(value).all() for value in (baseline_tiles, sparse_deltas, SU, SV)):
+        if not all(torch.isfinite(value).all() for value in (
+            baseline_tiles, sparse_deltas, sparse_values, SU, SV,
+        )):
             raise ValueError("P32 GSQ training tensors must be finite")
         if not math.isfinite(std) or std <= 0 or not math.isfinite(strength) or strength < 0:
             raise ValueError("P32 GSQ initialization controls are invalid")
@@ -193,9 +234,30 @@ class GSQP32TrainingModule(torch.nn.Module):
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
         self.register_buffer("candidates", candidates.detach().clone().contiguous())
         self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
-        # Training is tile-major so one scatter builds the complete inner matrix.
+        # Candidate metadata is tile-major; matrix indices below remove the
+        # tile-layout permutation from every differentiable reconstruction.
         self.register_buffer("sparse_indices", sparse_indices.permute(1, 0, 2).contiguous())
         self.register_buffer("sparse_deltas", sparse_deltas.permute(1, 0, 2).contiguous())
+        self.register_buffer("sparse_values", sparse_values.permute(1, 0, 2).contiguous())
+        input_tiles = in_features // 16
+        output_tiles = out_features // 16
+        tile_ids = torch.arange(tile_count, device=candidates.device)
+        input_tile_ids = tile_ids // output_tiles
+        output_tile_ids = tile_ids % output_tiles
+        local_indices = self.sparse_indices
+        matrix_indices = (
+            (input_tile_ids[:, None, None] * 16 + local_indices // 16) * out_features
+            + output_tile_ids[:, None, None] * 16
+            + local_indices % 16
+        )
+        self.register_buffer("matrix_sparse_indices", matrix_indices.contiguous())
+        baseline_matrix = (
+            self.baseline_tiles.reshape(input_tiles, output_tiles, 16, 16)
+            .permute(0, 2, 1, 3)
+            .reshape(in_features, out_features)
+            .contiguous()
+        )
+        self.register_buffer("baseline_matrix", baseline_matrix)
         self.register_buffer("sparse_shifts", sparse_shifts.T.contiguous())
         self.register_buffer("bank_ids", bank_ids.detach().clone().contiguous())
         self.register_buffer("bank_alt_id", bank_alt_id.detach().clone().contiguous())
@@ -218,17 +280,11 @@ class GSQP32TrainingModule(torch.nn.Module):
     def _inner_from_probabilities(self, probabilities):
         if probabilities.shape != self.logits.shape:
             raise ValueError("P32 GSQ probabilities do not match logits")
-        contributions = probabilities[:, 1:, None].to(self.sparse_deltas.dtype) * self.sparse_deltas
-        tiles = self.baseline_tiles.clone().scatter_add(
-            1,
-            self.sparse_indices.flatten(1),
-            contributions.flatten(1),
-        )
-        return (
-            tiles.reshape(self.in_features // 16, self.out_features // 16, 16, 16)
-            .permute(0, 2, 1, 3)
-            .reshape(self.in_features, self.out_features)
-            .contiguous()
+        return _SparseCandidateMatrixMixture.apply(
+            probabilities,
+            self.baseline_matrix,
+            self.matrix_sparse_indices,
+            self.sparse_deltas,
         )
 
     def forward(self, *, uniform, temperature, multiplier):
@@ -275,6 +331,35 @@ class GSQP32TrainingModule(torch.nn.Module):
             inner,
             self.SU,
             state["SV"],
+            input_hadamard=self.input_hadamard,
+            output_hadamard=self.output_hadamard,
+        )
+
+    @torch.no_grad()
+    def hard_weight_for_evaluation(self):
+        """Materialize a hard training checkpoint from its validated bank.
+
+        Candidate construction proves that every row in ``self.candidates``
+        is a legal round-trippable P32 payload. Repeating that payload audit at
+        every held-out checkpoint does not strengthen the invariant and is
+        particularly expensive for the 2,000-update Q/K stages. The public
+        ``hard_state`` and ``hard_weight`` paths retain the audit for export.
+        """
+        choices = self.logits.argmax(-1)
+        tile_ids = torch.arange(len(choices), device=choices.device)
+        candidate_ids = (choices - 1).clamp_min(0)
+        indices = self.sparse_indices[tile_ids, candidate_ids]
+        matrix_indices = self.matrix_sparse_indices[tile_ids, candidate_ids]
+        selected_values = self.sparse_values[tile_ids, candidate_ids]
+        baseline_values = self.baseline_tiles.gather(1, indices)
+        values = torch.where(choices[:, None] == 0, baseline_values, selected_values)
+        inner = self.baseline_matrix.flatten().clone().scatter_(
+            0, matrix_indices.flatten(), values.flatten(),
+        ).reshape_as(self.baseline_matrix)
+        return rht_reconstruct_weight(
+            inner,
+            self.SU,
+            self.scales,
             input_hadamard=self.input_hadamard,
             output_hadamard=self.output_hadamard,
         )
@@ -383,11 +468,15 @@ def p32_training_module_from_words(
         return_shifts=True,
     )
     candidate_words, decoded, indices, deltas, shifts = values
+    sparse_values = decoded[1:].reshape(len(decoded) - 1, len(baseline), 256).gather(
+        2, indices,
+    )
     return GSQP32TrainingModule(
         candidate_words,
         decoded[0],
         indices,
         deltas,
+        sparse_values,
         shifts,
         bits=3,
         bank_ids=bank_ids,

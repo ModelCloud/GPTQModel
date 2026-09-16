@@ -3,7 +3,9 @@ import torch
 
 from gptqmodel.quantization.gsq_training_qvq import (
     GSQP32TrainingModule,
+    _ContiguousTranspose,
     _rht_reconstruct_differentiable,
+    _SparseCandidateMatrixMixture,
     p32_training_module_from_words,
 )
 from gptqmodel.quantization.qvq import rht_reconstruct_weight
@@ -40,6 +42,7 @@ def _training_module(device="cpu"):
         decoded[0],
         indices,
         deltas,
+        decoded[1:].reshape(len(decoded) - 1, 1, 256).gather(2, indices),
         shifts,
         bits=bits,
         bank_ids=bank,
@@ -66,21 +69,85 @@ def test_p32_staged_soft_weight_has_assignment_and_scale_gradients():
     assert module.scales.grad.abs().sum() > 0
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param(
+    "cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+)])
+def test_explicit_layout_adjoints_are_bitwise_exact(device):
+    generator = torch.Generator(device=device).manual_seed(23)
+    tiles_reference = torch.randn((6, 256), device=device, generator=generator,
+                                  requires_grad=True)
+    tiles_exact = tiles_reference.detach().clone().requires_grad_()
+    upstream = torch.randn((32, 48), device=device, generator=generator)
+    reference = (
+        tiles_reference.reshape(2, 3, 16, 16).permute(0, 2, 1, 3)
+        .reshape(32, 48).contiguous()
+    )
+    exact = (
+        tiles_exact.reshape(2, 3, 16, 16).permute(0, 2, 1, 3)
+        .reshape(32, 48).contiguous()
+    )
+    reference.backward(upstream)
+    exact.backward(upstream)
+    assert torch.equal(exact, reference)
+    assert torch.equal(tiles_exact.grad, tiles_reference.grad)
+
+    matrix_reference = torch.randn((32, 48), device=device, generator=generator,
+                                   requires_grad=True)
+    matrix_exact = matrix_reference.detach().clone().requires_grad_()
+    transpose_upstream = torch.randn((48, 32), device=device, generator=generator)
+    reference = matrix_reference.transpose(0, 1).contiguous()
+    exact = _ContiguousTranspose.apply(matrix_exact)
+    reference.backward(transpose_upstream)
+    exact.backward(transpose_upstream)
+    assert torch.equal(exact, reference)
+    assert torch.equal(matrix_exact.grad, matrix_reference.grad)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
+    module, _, _ = _training_module("cuda")
+    generator = torch.Generator(device="cuda").manual_seed(29)
+    probabilities_reference = torch.randn(
+        module.logits.shape, device="cuda", generator=generator, requires_grad=True,
+    )
+    probabilities_matrix = probabilities_reference.detach().clone().requires_grad_()
+    upstream_tiles = torch.randn(module.baseline_tiles.shape, device="cuda", generator=generator)
+    upstream_matrix = upstream_tiles.reshape(16, 16)
+
+    contributions = probabilities_reference[:, 1:, None] * module.sparse_deltas
+    tile_output = module.baseline_tiles.clone().scatter_add(
+        1, module.sparse_indices.flatten(1), contributions.flatten(1),
+    )
+    reference = tile_output.reshape(16, 16)
+    matrix = _SparseCandidateMatrixMixture.apply(
+        probabilities_matrix, module.baseline_matrix,
+        module.matrix_sparse_indices, module.sparse_deltas,
+    )
+    reference.backward(upstream_matrix)
+    matrix.backward(upstream_matrix)
+
+    assert torch.equal(matrix, reference)
+    assert torch.equal(probabilities_matrix.grad, probabilities_reference.grad)
+
+
 def test_p32_staged_hard_state_is_exact_legal_candidate():
     module, candidates, _ = _training_module()
-    with torch.no_grad():
-        module.logits.fill_(-1)
-        module.logits[:, 1] = 1
-    state = module.hard_state()
-    assert torch.equal(state["words"], candidates[1])
-    assert torch.equal(module.adapter.pack(module.adapter.unpack(state["words"])), state["words"])
-    expected_inner = module.adapter.inner(
-        candidates[1], 16, 16, module.bank_ids, module.bank_alt_id,
-    )
-    torch.testing.assert_close(
-        module.hard_weight(),
-        rht_reconstruct_weight(expected_inner, module.SU, module.scales),
-    )
+    for choice in range(len(candidates)):
+        with torch.no_grad():
+            module.logits.fill_(-1)
+            module.logits[:, choice] = 1
+        state = module.hard_state()
+        assert torch.equal(state["words"], candidates[choice])
+        assert torch.equal(module.adapter.pack(module.adapter.unpack(state["words"])), state["words"])
+        expected_inner = module.adapter.inner(
+            candidates[choice], 16, 16, module.bank_ids, module.bank_alt_id,
+        )
+        torch.testing.assert_close(
+            module.hard_weight(),
+            rht_reconstruct_weight(expected_inner, module.SU, module.scales),
+        )
+        assert torch.equal(module.hard_weight_for_evaluation(), module.hard_weight())
 
 
 def test_p32_staged_rejects_inconsistent_sparse_metadata():
@@ -91,6 +158,7 @@ def test_p32_staged_rejects_inconsistent_sparse_metadata():
             decoded[0],
             module.sparse_indices.permute(1, 0, 2)[:, :, :-1],
             module.sparse_deltas.permute(1, 0, 2),
+            module.sparse_values.permute(1, 0, 2),
             module.sparse_shifts.T,
             bits=3,
             bank_ids=module.bank_ids,

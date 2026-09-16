@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from scripts import gpu_idle_preflight
-
 
 GPU_UUID = "GPU-20f7fde4-d88c-d6ca-e324-bd4e5e9e0855"
 INVENTORY = f"1, 00000000:2B:00.0, {GPU_UUID}, PG506-232, 0, 0\n"
@@ -87,6 +86,35 @@ def test_recheck_accepts_only_current_process_and_driver_baseline(monkeypatch):
     snapshot = gpu_idle_preflight.recheck_gpu_exclusivity(state)
 
     assert snapshot["memory_used_mib"] == 4108
+
+
+def test_recheck_accepts_allocator_owned_pid_namespace_context(monkeypatch):
+    host_pid = os.getpid() + 12345
+    inventory = f"1, 00000000:2B:00.0, {GPU_UUID}, PG506-232, 4108, 9\n"
+    processes = f"{GPU_UUID}, {host_pid}, [Not Found], 4096\n"
+    _install_queries(monkeypatch, inventory=inventory, processes=processes)
+    monkeypatch.setenv("GPU_ALLOCATOR_LEASE_ID", "exclusive-test-lease")
+    initial = {
+        "physical_id": 1,
+        "pci_bus_id": "00000000:2B:00.0",
+        "uuid": GPU_UUID,
+        "name": "PG506-232",
+        "memory_used_mib": 0,
+        "utilization_pct": 0,
+        "compute_processes": (),
+    }
+    state = gpu_idle_preflight.GPUIdlePreflightState(
+        physical_id=1,
+        pci_bus_id="00000000:2B:00.0",
+        uuid=GPU_UUID,
+        name="PG506-232",
+        config=gpu_idle_preflight.GPUIdlePreflightConfig(3, 0.0, 16),
+        samples=(initial, initial, initial),
+    )
+
+    snapshot = gpu_idle_preflight.recheck_gpu_exclusivity(state)
+
+    assert snapshot["compute_processes"][0]["pid"] == host_pid
 
 
 def test_recheck_rejects_unattributed_memory(monkeypatch):

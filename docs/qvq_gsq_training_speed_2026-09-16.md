@@ -54,6 +54,40 @@ epoch, changed-tile count, scale delta, and final held-out block result:
 At 16 decoder layers, serial GSQ fitting extrapolates to about 10.2 minutes;
 this excludes one-time calibration/capture and candidate-construction costs.
 
+## Second optimization phase
+
+The next profile showed that repeated held-out Q/K checkpoints were dominated
+by reconstructing already-validated P32 candidates and by serialized host
+dispatch. The second phase therefore:
+
+- keeps strict P32 pack/unpack validation on public export while using exact
+  sparse candidate values for intermediate held-out materialization;
+- stores those sparse values directly, rather than reconstructing them as
+  `baseline + delta`, which could introduce a new FP32 rounding boundary;
+- maps sparse tile coordinates into the Hadamard matrix layout once at module
+  construction, eliminating a per-update tile permutation and its adjoint;
+- fits independent Q and K projections concurrently on separate CUDA streams,
+  with separate identically seeded generators and unchanged per-projection
+  update/validation order; and
+- uses Python 3.14 free-threaded mode (`PYTHON_GIL=0`) so the two host dispatch
+  threads are not serialized by the GIL.
+
+The same complete seven-projection layer workload measured 18.031 and 17.951
+seconds in two idle-gated runs. This is 2.109x–2.119x faster than the prior
+38.031-second path and 4.440x–4.460x faster than the 80.053-second eager
+baseline. A 16-layer serial extrapolation is about 4.8 minutes.
+
+Every one of the 14 exported state tensors is bitwise equal to the accepted
+38.031-second oracle. Stage losses, validation losses, best epochs,
+changed-tile counts, learned scales, and the 15.178571428571429% held-out
+block improvement also match exactly. The formal validator now records the
+physical-GPU idle samples, pre-timing ownership recheck, and GIL state in its
+JSON output.
+
+Artifacts for this phase are under
+`/root/qvq-results/gsq-next-2x-20260916/`; `nogil-r1` and `nogil-r2` are the
+two formal full-layer repetitions.
+
 ## SM90 audit
 
 Nsight Compute on a `2048 x 2048` FP32 reverse transform reports:
