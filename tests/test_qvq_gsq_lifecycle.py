@@ -84,7 +84,7 @@ def test_gsq_low_level_rejects_unsupported(overrides, match):
 
 
 @pytest.mark.parametrize("bits", [2.5, 4, 8])
-def test_forced_nonbaseline_optimizer_choice_survives_lifecycle(bits, monkeypatch):
+def test_forced_nonbaseline_choice_survives_lifecycle(bits, monkeypatch):
     """Injected reachable teacher tests export plumbing, not recovery quality."""
     import gptqmodel.quantization.qvq_gsq as fitter
 
@@ -108,7 +108,10 @@ def test_forced_nonbaseline_optimizer_choice_survives_lifecycle(bits, monkeypatc
     result = quantize_qvq_linear(
         weight, torch.eye(32, device="cuda"), bits=bits, output_hessian=torch.eye(16, device="cuda"),
         rounding="yaqa", v2b2_p32=p32, bank_count=2 if p32 else 1, seed=7,
-        gsq=GSQConfig(enabled=True, candidates=2, steps=100, learning_rate=1.0))
+        # This is an export-plumbing test, so explicitly enable the deterministic
+        # reachability comparator that was formerly the production default.
+        gsq=GSQConfig(enabled=True, candidates=2, steps=100, learning_rate=1.0,
+                      qvq_coordinate_sweeps=1))
     assert result.gsq_diagnostics["changed_tiles"] > 0
     assert torch.equal(result.inner_weight, selected["inner"])
     tensors = result.serialized_tensors()

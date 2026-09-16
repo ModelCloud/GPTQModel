@@ -15,7 +15,7 @@ Profile target: real Llama 3.2 1B `model.layers.0.mlp.down_proj`, shape
   two dense GEMMs for `H E G` and injects exact `dL/dp` through the softmax,
   instead of retaining/backpropagating through a large GEMM graph.
 - Make hard-check cadence explicit and always check the final update. The
-  generic default is every ten updates; the paper schedule checks once per
+  generic default is every ten updates; the epoch-matched schedule checks once per
   64-update epoch. The baseline/coordinate hard guard remains authoritative.
 - Consume H and G directly. Redundant Cholesky factors and factor-form teacher
   products are no longer constructed for the exact-Fisher path.
@@ -29,7 +29,7 @@ Profile target: real Llama 3.2 1B `model.layers.0.mlp.down_proj`, shape
   checkpoints. Entropy and maximum-probability diagnostics are sampled at the
   first update and epoch boundaries, rather than forcing host synchronization
   every update.
-- Run the soft relaxation in BF16 for the paper schedule, matching the official
+- Run the soft relaxation in BF16 for the long schedule, matching the official
   GSQ logit precision. Candidate screening, coordinate initialization, hard
   Fisher evaluation, no-regression selection and exported weights remain FP32.
 
@@ -40,7 +40,7 @@ The earlier unprofiled 10-update workload completed in **0.5009 s**, down from
 gain there is only 1.08x because fixed metric, screening and coordinate setup
 dominate a ten-update run.
 
-On the corrected 640-update paper-budget workload, the new implementation
+On the then-assumed 640-update half-Llama-paper workload, the new implementation
 completes in **2.2173 s**, down from 10.2725 s: a further **4.63x** speedup.
 An intermediate FP32 run took 7.1264 s; BF16 soft relaxation plus one hard
 check per 64-update epoch took 2.7574 s; device-resident telemetry reduced it
@@ -92,7 +92,7 @@ old dense BF16 mixture:
   1,549 ties.
 
 No reduced-step shortcut or relaxed acceptance criterion is used. All 640
-updates run, all ten epoch checkpoints use the exact FP32 hard objective, and
+updates run, all ten historical checkpoints use the exact FP32 hard objective, and
 the baseline/coordinate no-regression guard remains authoritative.
 
 ## Compact-metadata follow-up
@@ -105,14 +105,14 @@ indices and choice IDs as uint8. Arithmetic is unchanged: position mixtures
 still accumulate in FP32, the soft Fisher products remain BF16, and every hard
 checkpoint and final acceptance remains FP32.
 
-With the authoritative 640-update schedule and ten exact hard checkpoints,
+With the historical 640-update schedule and ten exact hard checkpoints,
 steady state is now **0.58331 s**, versus 0.67319 s before this pass: a further
 **1.154x** speedup. The complete gain from the corrected 10.2725 s baseline is
 **17.61x**. The exact selected payload remains unchanged: 37 legal tiles and
 loss 0.0244182274 to 0.0244180374.
 
 A one-final-check timing run reaches **0.52140 s** (**1.291x** versus 0.67319 s),
-but it is recorded only as a policy floor; the default paper schedule still
+but it is recorded only as a policy floor; that benchmark policy still
 performs all ten hard checkpoints. The requested further 1.5x target would be
 0.44879 s and was not reached without changing numerical policy.
 
@@ -130,9 +130,12 @@ leased-H100 lifecycle suite passes 21/21.
 
 ## Dataset and epoch audit
 
-The official GSQ schedule uses 4,096 packed 4,096-token training samples,
-batch size 64, 128 validation samples and 10 per-layer epochs: 64 updates per
-epoch and **640 updates** total. Llama uses FineWeb-Edu in the official setup.
+Correction after checking arXiv v2: the official dense-Llama schedule uses
+4,096 packed 4,096-token training samples, batch size 64, 128 validation
+samples and **20** block-wise epochs: 64 updates per epoch and **1,280
+updates** total. Ten epochs is the Kimi schedule, not the Llama schedule.
+Llama uses FineWeb-Edu in the official setup. The 640-update measurements below
+remain valid performance measurements, but are half of the Llama paper budget.
 
 The completed QVQ experiment used 10,178 YAQA/Fisher sequences and 3,961,260
 valid tokens. This is more sequences but only 23.6% of the official packed-token
@@ -146,8 +149,8 @@ Corrections:
   kappa schedule to reach their endpoints.
 - Diagnostics explicitly report `updates_are_epochs: false`, completed updates,
   hard-check frequency and the `exact_full_fisher` regime.
-- `GSQConfig.for_qvq_paper_schedule()` constructs the 640-update reference
-  schedule, and the QVQ validation CLI now defaults to 640 updates.
+- `GSQConfig.for_qvq_paper_schedule()` now constructs the 1,280-update Llama
+  reference schedule, and the QVQ validation CLI now defaults to 1,280 updates.
 
 A baseline corrected 640-update run completed in 10.272 s. The previous pass
 reduced that to 2.217 s, and the fused sparse path now takes 0.673 s after
@@ -155,8 +158,10 @@ one-time process initialization. Entropy reaches 0.0001578 and mean maximum
 probability reaches 0.9999375, but the result remains exactly the same 37-tile
 coordinate solution; the relaxation improves zero tiles. Therefore the
 10-update truncation was a paper-parity bug, but it was **not** the cause of the
-no-op relaxation. The remaining limitation is the frozen 33-path candidate bank
-and per-projection/full-Fisher adaptation, not optimizer duration.
+no-op relaxation. A subsequent 1,280-update run with the old initializer also
+changed zero GSQ tiles. The remaining limitation is the frozen 33-path candidate
+bank, non-paper initialization, and per-projection/full-Fisher adaptation, not
+optimizer duration.
 
 ## Validation and artifacts
 

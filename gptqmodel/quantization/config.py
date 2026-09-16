@@ -6591,9 +6591,15 @@ class GSQConfig:
     qvq_kappa_start: float = 100.0
     qvq_kappa_end: float = 500.0
     qvq_weight_decay: float = 1.0
+    qvq_initialization_std: float = 0.01
+    qvq_initialization_strength: float = 6.0
     qvq_gumbel_samples: int = 1
     qvq_soft_dtype: str = "float32"
-    qvq_coordinate_sweeps: int = 1
+    # The deterministic Fisher coordinate search is an ablation/comparator,
+    # not part of GSQ. Enabling it can consume the same frozen candidate pool
+    # before Gumbel training and make the selected result falsely look like a
+    # GSQ improvement.
+    qvq_coordinate_sweeps: int = 0
     # 8K tiles keeps the two temporary [candidate,tile,16,16] tensors near
     # 0.55 GiB for the default 33 choices and avoids dozens of tiny GEMMs.
     qvq_coordinate_chunk_tiles: int = 8192
@@ -6611,15 +6617,17 @@ class GSQConfig:
         *,
         num_samples: int = 4096,
         batch_size: int = 64,
-        epochs: int = 10,
+        epochs: int = 20,
         **kwargs,
     ) -> "GSQConfig":
-        """Construct the official GSQ update budget for a QVQ adaptation.
+        """Construct the Llama GSQ paper's update budget for a QVQ adaptation.
 
         This computes optimizer updates only; callers remain responsible for
         feeding disjoint, packed calibration data with the declared sample and
-        token counts.  Full-Fisher QVQ updates consume the aggregate objective,
-        so they are deliberately reported as updates rather than epochs.
+        token counts.  The paper uses 20 block-wise epochs for dense Llama and
+        10 for Kimi; pass ``epochs=10`` explicitly for the latter. Full-Fisher
+        QVQ updates consume the aggregate objective, so they are deliberately
+        reported as updates rather than epochs or paper-equivalent training.
         """
         for name, value in (("num_samples", num_samples), ("batch_size", batch_size), ("epochs", epochs)):
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
@@ -6649,13 +6657,19 @@ class GSQConfig:
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
                 raise ValueError(f"GSQConfig: {name} must be an integer >= {minimum}")
         for name in ("learning_rate", "temperature_start", "temperature_end", "qvq_learning_rate",
-                     "qvq_temperature_start", "qvq_temperature_end", "qvq_kappa_start", "qvq_kappa_end"):
+                     "qvq_temperature_start", "qvq_temperature_end", "qvq_kappa_start", "qvq_kappa_end",
+                     "qvq_initialization_std"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
                 raise ValueError(f"GSQConfig: {name} must be finite and positive")
         if (isinstance(self.qvq_weight_decay, bool) or not isinstance(self.qvq_weight_decay, (float, int))
                 or not math.isfinite(self.qvq_weight_decay) or self.qvq_weight_decay < 0):
             raise ValueError("GSQConfig: qvq_weight_decay must be finite and nonnegative")
+        if (isinstance(self.qvq_initialization_strength, bool)
+                or not isinstance(self.qvq_initialization_strength, (float, int))
+                or not math.isfinite(self.qvq_initialization_strength)
+                or self.qvq_initialization_strength < 0):
+            raise ValueError("GSQConfig: qvq_initialization_strength must be finite and nonnegative")
         if self.qvq_candidate_policy not in ("trellis_local", "legacy_bitflip"):
             raise ValueError("GSQConfig: qvq_candidate_policy must be 'trellis_local' or 'legacy_bitflip'")
         if self.qvq_soft_dtype not in ("float32", "bfloat16"):

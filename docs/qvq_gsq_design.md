@@ -84,11 +84,12 @@ For tile `t` and candidate `j`, the decoded inner tile is `D[t, j]`. GSQ
 relaxes the hard choice with:
 
 ```text
-p[t, j] = softmax((z[t, j] + g[t, j]) / temperature)
+p[t, j] = softmax((kappa * z[t, j] + g[t, j]) / temperature)
 W_tilde[t] = sum_j p[t, j] * D[t, j]
 ```
 
-where `g` is fixed Gumbel noise for one optimization run. At the end, the
+where fresh `g ~ Gumbel(0,1)` noise is drawn for each forward/microbatch, and
+`kappa` and temperature follow the paper's linear schedules. At the end, the
 candidate with the best measured hard objective is selected. The payload is
 then repacked using the native QVQ adapter. The relaxed tensor is never
 serialized and never passed to a runtime kernel.

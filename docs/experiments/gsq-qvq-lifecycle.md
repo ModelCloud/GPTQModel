@@ -36,7 +36,10 @@ config = QVQConfig(
 ```
 
 This is GSQ-inspired fixed-scale, whole-tile candidate optimization, not a
-reproduction of scalar GSQ. Initialization, scales and banks remain YAQA-owned.
+reproduction of scalar GSQ. P32 local choices now use the paper's Gaussian
+shift-prior logit initialization, while scales and banks remain YAQA-owned.
+The deterministic Fisher coordinate sweep is an explicit opt-in comparator;
+it is not enabled by default and is not reported as GSQ optimization.
 The optional solve runs before packing; any rank-8 correction is fitted afterward.
 It updates states, decoded inner weight, reconstructed weight and diagnostics
 together. Adapter round-trips and normal packing remain authoritative; P32 also

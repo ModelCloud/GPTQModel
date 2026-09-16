@@ -119,6 +119,8 @@ def refine_trellis_candidates(
     kappa_start: float = 100.0,
     kappa_end: float = 500.0,
     weight_decay: float = 1.0,
+    initialization_std: float = 0.01,
+    initialization_strength: float = 6.0,
     gumbel_samples: int = 1,
     soft_dtype: str = "float32",
     coordinate_sweeps: int = 1,
@@ -128,6 +130,7 @@ def refine_trellis_candidates(
     decoded_candidates: torch.Tensor | None = None,
     sparse_candidate_indices: torch.Tensor | None = None,
     sparse_candidate_deltas: torch.Tensor | None = None,
+    sparse_candidate_shifts: torch.Tensor | None = None,
     input_metric: torch.Tensor | None = None,
     output_metric: torch.Tensor | None = None,
     seed: int = 0,
@@ -182,6 +185,10 @@ def refine_trellis_candidates(
         raise ValueError("learning rate, temperatures and kappa values must be finite and positive")
     if not math.isfinite(weight_decay) or weight_decay < 0:
         raise ValueError("weight_decay must be finite and nonnegative")
+    if not math.isfinite(initialization_std) or initialization_std <= 0:
+        raise ValueError("initialization_std must be finite and positive")
+    if not math.isfinite(initialization_strength) or initialization_strength < 0:
+        raise ValueError("initialization_strength must be finite and nonnegative")
     if soft_dtype not in ("float32", "bfloat16"):
         raise ValueError("soft_dtype must be 'float32' or 'bfloat16'")
     for name, value, minimum in (("gumbel_samples", gumbel_samples, 1),
@@ -216,6 +223,11 @@ def refine_trellis_candidates(
             )
         if not sparse_candidate_deltas.is_floating_point():
             raise ValueError("sparse candidate deltas must be floating point")
+        if (sparse_candidate_shifts is not None
+                and (sparse_candidate_shifts.shape != expected_prefix
+                     or sparse_candidate_shifts.device != candidates.device
+                     or sparse_candidate_shifts.dtype != torch.int64)):
+            raise ValueError("sparse candidate shifts must match int64 [choices-1,tiles]")
         if bool(((sparse_candidate_indices < 0) | (sparse_candidate_indices >= 256)).any()):
             raise ValueError("sparse candidate indices must be in [0,256)")
     fisher_objective = input_metric is not None and output_metric is not None
@@ -302,14 +314,33 @@ def refine_trellis_candidates(
         fisher_objective and sparse_relaxation and candidates.device.type == "cuda"
         and gumbel_samples == 1
     )
-    logits = torch.zeros(
-        decoded.shape[:2], device=candidates.device,
-        requires_grad=not fused_sparse_relaxation,
-    )
-    # A 1/kappa prior makes the hard assignment unambiguous while keeping the
-    # initial effective margin at one, instead of the old saturated +2*kappa.
-    with torch.no_grad():
-        logits[tile_ids, best_choices] = 1.0 / kappa_start
+    if sparse_candidate_shifts is not None:
+        # Paper Appendix A initialization for b>2: a Gaussian-like prior over
+        # local shifts, plus isotropic Gaussian noise.  QVQ's choices are legal
+        # one-edge path edits rather than scalar codes, but each still carries
+        # an exact {-2,-1,0,+1,+2} transition shift.  Keep the coordinate result
+        # only as the hard no-regression guard; biasing logits toward that
+        # already-minimized solution would pre-empt the stochastic search.
+        shifts = torch.nn.functional.pad(sparse_candidate_shifts.T, (1, 0)).float()
+        prior = -0.5 * shifts.square()
+        prior -= prior.mean(-1, keepdim=True)
+        init_generator = torch.Generator(device=candidates.device).manual_seed(seed)
+        logits = initialization_std * (
+            torch.randn(prior.shape, device=prior.device, generator=init_generator)
+            + initialization_strength * prior
+        )
+        logits.requires_grad_(not fused_sparse_relaxation)
+        initialization = "paper_local_shift_gaussian"
+    else:
+        logits = torch.zeros(
+            decoded.shape[:2], device=candidates.device,
+            requires_grad=not fused_sparse_relaxation,
+        )
+        # Legacy adapters do not expose a local-shift coordinate. Keep a small
+        # unambiguous prior without pretending that it is paper initialization.
+        with torch.no_grad():
+            logits[tile_ids, best_choices] = 1.0 / kappa_start
+        initialization = "guard_choice_margin"
     if fused_sparse_relaxation:
         from .qvq_gsq_triton import gumbel_softmax as fused_gumbel_softmax
         from .qvq_gsq_triton import build_compact_position_map
@@ -363,7 +394,7 @@ def refine_trellis_candidates(
         # CUDA graph capture needs every kernel/module loaded first. Warm the
         # exact scheduled path on scratch state, then capture one update. The
         # graph reads its schedule and uniform slice from the GPU step counter,
-        # so one graph is valid for all 640 paper-schedule updates.
+        # so one graph is valid for the complete requested schedule.
         warm_logits = logits.detach().clone()
         warm_probabilities = torch.empty_like(probabilities_buffer)
         warm_error = torch.empty_like(error_buffer)
@@ -416,8 +447,18 @@ def refine_trellis_candidates(
                 learning_rate, weight_decay,
             )
         with torch.no_grad():
-            logits.zero_()
-            logits[tile_ids, best_choices] = 1.0 / kappa_start
+            if sparse_candidate_shifts is not None:
+                shifts = torch.nn.functional.pad(sparse_candidate_shifts.T, (1, 0)).float()
+                prior = -0.5 * shifts.square()
+                prior -= prior.mean(-1, keepdim=True)
+                init_generator = torch.Generator(device=candidates.device).manual_seed(seed)
+                logits.copy_(initialization_std * (
+                    torch.randn(prior.shape, device=prior.device, generator=init_generator)
+                    + initialization_strength * prior
+                ))
+            else:
+                logits.zero_()
+                logits[tile_ids, best_choices] = 1.0 / kappa_start
             momentum.zero_()
             gradient_norm_square.zero_()
             gradient_norm_min.fill_(math.inf)
@@ -587,6 +628,9 @@ def refine_trellis_candidates(
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
     diagnostics = {
         "optimizer": "lion", "weight_decay": weight_decay,
+        "initialization": initialization,
+        "initialization_std": initialization_std,
+        "initialization_strength": initialization_strength,
         "temperature_start": temperature_start, "temperature_end": temperature_end,
         "kappa_start": kappa_start, "kappa_end": kappa_end,
         "gumbel_samples": gumbel_samples,
@@ -888,6 +932,7 @@ def _p32_sparse_shift_screen(
         cost,
         scalar_indices,
         selected_delta,
+        selected_shift_values.T.contiguous(),
     )
 
 
@@ -945,6 +990,7 @@ def fisher_screened_trellis_candidates(
     bank_ids=None, bank_alt_id=None, codebook_version=PGC16_CODEBOOK_VERSION,
     return_decoded=False,
     return_sparse=False,
+    return_shifts=False,
 ):
     """Screen four paper-local shifts at each candidate transition.
 
@@ -987,6 +1033,7 @@ def fisher_screened_trellis_candidates(
     screened_values = [baseline_tiles]
     sparse_indices = []
     sparse_deltas = []
+    sparse_shifts = []
     with _nvtx_range("gsq.candidates.decode_and_screen", baseline):
         # Sparse P32 scoring touches at most 16 scalars (six at W3), so sixteen
         # groups fit comfortably while amortizing dispatch and index setup.
@@ -996,7 +1043,7 @@ def fisher_screened_trellis_candidates(
             stop = min(start + screen_groups, count - 1)
             group_count = stop - start
             if layout == "p32_window":
-                selected_words, selected_values, _, selected_indices, selected_deltas = _p32_sparse_shift_screen(
+                selected_words, selected_values, _, selected_indices, selected_deltas, selected_shifts = _p32_sparse_shift_screen(
                     baseline,
                     positions[:, start:stop],
                     (-2, -1, 1, 2),
@@ -1013,6 +1060,7 @@ def fisher_screened_trellis_candidates(
                 screened_values.extend(selected_values.unbind(0))
                 sparse_indices.extend(selected_indices.unbind(0))
                 sparse_deltas.extend(selected_deltas.unbind(0))
+                sparse_shifts.extend(selected_shifts.unbind(0))
                 continue
             alternatives = (_p32_grouped_shift_alternatives(
                 baseline, positions[:, start:stop], (-2, -1, 1, 2), transition_bits)
@@ -1041,8 +1089,10 @@ def fisher_screened_trellis_candidates(
         decoded = torch.stack(screened_values)
         if return_sparse:
             if layout != "p32_window" or len(sparse_indices) != count - 1:
-                return candidates, decoded, None, None
-            return candidates, decoded, torch.stack(sparse_indices), torch.stack(sparse_deltas)
+                result = (candidates, decoded, None, None)
+                return (*result, None) if return_shifts else result
+            result = (candidates, decoded, torch.stack(sparse_indices), torch.stack(sparse_deltas))
+            return (*result, torch.stack(sparse_shifts)) if return_shifts else result
         return candidates, decoded
     if return_sparse:
         raise ValueError("return_sparse requires return_decoded")
@@ -1078,13 +1128,13 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
         # despite being mathematically redundant here.
         factor_placeholder = target.new_zeros((1, target.shape[0]))
         decoded_candidates = None
-        sparse_candidate_indices = sparse_candidate_deltas = None
+        sparse_candidate_indices = sparse_candidate_deltas = sparse_candidate_shifts = None
         if config.qvq_candidate_policy == "trellis_local":
-            candidates, decoded_candidates, sparse_candidate_indices, sparse_candidate_deltas = fisher_screened_trellis_candidates(
+            candidates, decoded_candidates, sparse_candidate_indices, sparse_candidate_deltas, sparse_candidate_shifts = fisher_screened_trellis_candidates(
                 baseline, count=config.candidates, seed=config.seed, bits=bits, layout=layout,
                 target=target, input_hessian=input_hessian, output_hessian=output_hessian,
                 bank_ids=bank_ids, bank_alt_id=bank_alt_id, codebook_version=codebook_version,
-                return_decoded=True, return_sparse=True)
+                return_decoded=True, return_sparse=True, return_shifts=True)
         else:
             candidates = baseline_bitflip_candidates(baseline, count=config.candidates, seed=config.seed)
         return refine_trellis_candidates(
@@ -1096,6 +1146,8 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
             temperature_start=config.qvq_temperature_start, temperature_end=config.qvq_temperature_end,
             kappa_start=config.qvq_kappa_start, kappa_end=config.qvq_kappa_end,
             weight_decay=config.qvq_weight_decay, gumbel_samples=config.qvq_gumbel_samples,
+            initialization_std=config.qvq_initialization_std,
+            initialization_strength=config.qvq_initialization_strength,
             soft_dtype=config.qvq_soft_dtype,
             coordinate_sweeps=config.qvq_coordinate_sweeps,
             coordinate_chunk_tiles=config.qvq_coordinate_chunk_tiles,
@@ -1104,6 +1156,7 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
             decoded_candidates=decoded_candidates,
             sparse_candidate_indices=sparse_candidate_indices,
             sparse_candidate_deltas=sparse_candidate_deltas,
+            sparse_candidate_shifts=sparse_candidate_shifts,
             input_metric=input_hessian, output_metric=output_hessian)
 
 

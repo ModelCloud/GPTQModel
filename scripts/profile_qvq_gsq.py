@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--steps", type=int, default=10)
     parser.add_argument("--gumbel-samples", type=int, default=4)
     parser.add_argument("--hard-eval-interval", type=int, default=10)
+    parser.add_argument("--coordinate-sweeps", type=int, default=0,
+                        help="hard coordinate sweeps before the relaxation; use 0 to isolate GSQ")
     parser.add_argument("--soft-dtype", choices=("float32", "bfloat16"), default="float32")
     parser.add_argument("--repeats", type=int, default=1,
                         help="repeat the complete projection fit in one process")
@@ -48,7 +50,7 @@ def main():
     config = GSQConfig(
         enabled=True, steps=args.steps, candidates=33, seed=7,
         max_candidate_bytes=4 * 1024**3,
-        qvq_gumbel_samples=args.gumbel_samples, qvq_coordinate_sweeps=1,
+        qvq_gumbel_samples=args.gumbel_samples, qvq_coordinate_sweeps=args.coordinate_sweeps,
         qvq_hard_eval_interval=args.hard_eval_interval, qvq_soft_dtype=args.soft_dtype)
     if args.repeats < 1:
         parser.error("--repeats must be positive")
@@ -66,7 +68,8 @@ def main():
         torch.cuda.nvtx.range_pop()
     payload = {
         "module": args.module, "shape": list(target.shape), "steps": args.steps,
-        "gumbel_samples": args.gumbel_samples, "seconds": repeat_seconds[-1],
+        "gumbel_samples": args.gumbel_samples, "coordinate_sweeps": args.coordinate_sweeps,
+        "seconds": repeat_seconds[-1],
         "repeat_seconds": repeat_seconds,
         "before": result.calibration_before, "after": result.calibration_after,
         "changed_tiles": int((result.choices != 0).sum()), "diagnostics": result.diagnostics,
