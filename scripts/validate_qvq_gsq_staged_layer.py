@@ -3,15 +3,32 @@
 
 import argparse
 import atexit
+import concurrent.futures
 import copy
 import json
 import os
+import sys
+import threading
 import time
 from pathlib import Path
 
 # cuBLAS requires a workspace contract for bitwise deterministic GEMM. This
 # must be present before the first CUDA context is initialized.
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+for import_root in (SCRIPT_DIR, REPO_ROOT):
+    if str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
+
+from gpu_idle_preflight import (
+    add_gpu_idle_preflight_args,
+    bootstrap_gpu_idle_preflight,
+    recheck_gpu_exclusivity,
+)
+
+_GPU_IDLE_PREFLIGHT = bootstrap_gpu_idle_preflight() if __name__ == "__main__" else None
 
 import torch
 from safetensors.torch import load_file, save_file
@@ -103,6 +120,7 @@ def parse_args():
     parser.add_argument("--prefix-state", type=Path)
     parser.add_argument("--state-output", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    add_gpu_idle_preflight_args(parser)
     return parser.parse_args()
 
 
@@ -293,6 +311,7 @@ def main():
         )
 
     training_hadamard_backends = set()
+    quantizer_metadata_lock = threading.Lock()
 
     def new_quantizer(name, words=None, scales=None, round_index=0):
         nonlocal candidate_seconds
@@ -310,8 +329,9 @@ def main():
                 candidates=args.candidates, seed=args.seed + round_index,
                 fast_hadamard=not args.disable_fast_training_hadamard,
             )
-        training_hadamard_backends.add(quantizer.training_hadamard_backend)
-        candidate_seconds += time.perf_counter() - started
+        with quantizer_metadata_lock:
+            training_hadamard_backends.add(quantizer.training_hadamard_backend)
+            candidate_seconds += time.perf_counter() - started
         return quantizer
 
     implicit_causal = prepared.self_attn.config._attn_implementation == "sdpa"
@@ -345,46 +365,62 @@ def main():
         device=device,
         transform=prepared.input_layernorm,
     )
-    for name in PROJECTIONS[:2]:
-        quantizer = new_quantizer(name)
+    timing_exclusivity = (
+        recheck_gpu_exclusivity(_GPU_IDLE_PREFLIGHT)
+        if _GPU_IDLE_PREFLIGHT is not None else None
+    )
+    qk_quantizers = {name: new_quantizer(name) for name in PROJECTIONS[:2]}
+    qk_streams = {name: torch.cuda.Stream() for name in PROJECTIONS[:2]}
+
+    def fit_qk_projection(name):
+        quantizer = qk_quantizers[name]
         target = constants[name][-1].clone()
 
-        def qk_objective(batch, weights, target=target):
+        def qk_objective(batch, weights):
             factor, dead = batch
             error = (target - weights["weight"]).masked_fill(dead[None], 0.)
             return (error @ factor).square().sum()
 
         rounds = []
-        for round_index in range(args.rounds):
-            result = fit_reconstruction_stage(
-                {"weight": quantizer},
-                [[((train_factor, train_dead), 1)]],
-                qk_objective,
-                **fitting_options(
-                    args,
-                    epochs=args.qk_steps,
-                    seed=args.seed + round_index,
-                    validation_batches=[[((validation_factor, validation_dead), 1)]],
-                ),
-            )
-            fit_seconds += result["elapsed_seconds"]
-            state = quantizer.hard_state()
-            rounds.append({
-                "round": round_index + 1,
-                "train_before": result["hard_loss_before"],
-                "train_after": result["hard_loss_after"],
-                "validation_before": result["validation_hard_loss_before"],
-                "validation_after": result["validation_hard_loss_after"],
-                "best_epoch": result["best_validation_epoch"],
-                "changed_tiles": int((state["choices"] != 0).sum()),
-            })
-            if round_index + 1 < args.rounds:
-                quantizer = new_quantizer(
-                    name, state["words"], state["SV"], round_index + 1,
+        with torch.cuda.stream(qk_streams[name]):
+            for round_index in range(args.rounds):
+                result = fit_reconstruction_stage(
+                    {"weight": quantizer},
+                    [[((train_factor, train_dead), 1)]],
+                    qk_objective,
+                    **fitting_options(
+                        args,
+                        epochs=args.qk_steps,
+                        seed=args.seed + round_index,
+                        validation_batches=[[((validation_factor, validation_dead), 1)]],
+                    ),
                 )
+                state = quantizer.hard_state()
+                rounds.append({
+                    "round": round_index + 1,
+                    "train_before": result["hard_loss_before"],
+                    "train_after": result["hard_loss_after"],
+                    "validation_before": result["validation_hard_loss_before"],
+                    "validation_after": result["validation_hard_loss_after"],
+                    "best_epoch": result["best_validation_epoch"],
+                    "changed_tiles": int((state["choices"] != 0).sum()),
+                })
+                if round_index + 1 < args.rounds:
+                    quantizer = new_quantizer(
+                        name, state["words"], state["SV"], round_index + 1,
+                    )
+            weight = quantizer.hard_weight().to(torch.bfloat16)
+        qk_streams[name].synchronize()
+        return name, quantizer, state, weight, rounds
+
+    qk_started = time.perf_counter()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        qk_results = list(executor.map(fit_qk_projection, PROJECTIONS[:2]))
+    fit_seconds += time.perf_counter() - qk_started
+    for name, quantizer, state, weight, rounds in qk_results:
         accepted_states[name] = state
         with torch.no_grad():
-            prepared.get_submodule(name).weight.copy_(quantizer.hard_weight().to(torch.bfloat16))
+            prepared.get_submodule(name).weight.copy_(weight)
         stage_records[name] = rounds
 
     def fit_joint_stage(stage_name, names, stage):
@@ -538,8 +574,15 @@ def main():
         "microbatch_size": args.microbatch_size,
         "training_hadamard_backends": sorted(training_hadamard_backends),
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "python_gil_enabled": (
+            sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else None
+        ),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "offload_capture": args.offload_capture,
+        "gpu_idle_preflight": (
+            _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
+        ),
+        "gpu_timing_exclusivity": timing_exclusivity,
         "capture_seconds": capture_seconds,
         "candidate_seconds": candidate_seconds,
         "fit_seconds": fit_seconds,

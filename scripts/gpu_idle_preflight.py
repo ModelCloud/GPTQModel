@@ -7,13 +7,14 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict, dataclass
 import json
 import os
 import subprocess
 import sys
 import time
-from typing import Any, Sequence
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -238,8 +239,24 @@ def recheck_gpu_exclusivity(state: GPUIdlePreflightState) -> dict[str, Any]:
         )
 
     current_pid = os.getpid()
+    own_pids = {current_pid}
+    # NVML can report the host PID while /proc exposes only the container PID.
+    # In that configuration nvidia-smi also cannot resolve the process name.
+    # The allocator's exclusive lease plus the clean pre-import samples make a
+    # sole newly-created, unresolvable context attributable to this process.
+    unresolved = tuple(
+        process for process in snapshot["compute_processes"]
+        if process["process_name"] == "[Not Found]"
+    )
+    allocator_namespace_context = (
+        bool(os.environ.get("GPU_ALLOCATOR_LEASE_ID"))
+        and len(snapshot["compute_processes"]) == 1
+        and len(unresolved) == 1
+    )
+    if allocator_namespace_context:
+        own_pids.add(unresolved[0]["pid"])
     foreign_processes = tuple(
-        process for process in snapshot["compute_processes"] if process["pid"] != current_pid
+        process for process in snapshot["compute_processes"] if process["pid"] not in own_pids
     )
     if foreign_processes:
         raise RuntimeError(
@@ -249,7 +266,7 @@ def recheck_gpu_exclusivity(state: GPUIdlePreflightState) -> dict[str, Any]:
         )
 
     own_processes = tuple(
-        process for process in snapshot["compute_processes"] if process["pid"] == current_pid
+        process for process in snapshot["compute_processes"] if process["pid"] in own_pids
     )
     if any(process["memory_used_mib"] is None for process in own_processes):
         raise RuntimeError(

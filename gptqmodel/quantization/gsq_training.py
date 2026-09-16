@@ -276,7 +276,18 @@ def evaluate_hard_stage(quantizers, batches, objective):
     import logging
     import time
 
-    weights = {name: quantizer.hard_weight() for name, quantizer in quantizers.items()}
+    # Candidate banks validate every serialized payload when they are built.
+    # Their training-only materializer can therefore avoid repeating the much
+    # more expensive pack/unpack legality audit at every held-out checkpoint.
+    # Public/export materialization deliberately continues to use hard_weight.
+    weights = {
+        name: (
+            quantizer.hard_weight_for_evaluation()
+            if hasattr(quantizer, "hard_weight_for_evaluation")
+            else quantizer.hard_weight()
+        )
+        for name, quantizer in quantizers.items()
+    }
     weighted_loss = 0.
     elements = 0
     progress_at = time.monotonic()+60

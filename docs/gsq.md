@@ -107,7 +107,7 @@ driver below until that lifecycle is integrated into the main quantizer.
 path. A paper-budget layer run has this shape:
 
 ```bash
-python scripts/validate_qvq_gsq_staged_layer.py \
+PYTHON_GIL=0 python scripts/validate_qvq_gsq_staged_layer.py \
   --dense-model /path/to/Llama-3.2-1B-Instruct \
   --qvq-model /path/to/source-w3-p32-qvq \
   --token-cache /path/to/fineweb-edu-4864x4096.safetensors \
@@ -123,6 +123,12 @@ python scripts/validate_qvq_gsq_staged_layer.py \
   --state-output /path/to/states/layer-0.safetensors \
   --output /path/to/logs/layer-0.json
 ```
+
+`PYTHON_GIL=0` is performance-critical on a free-threaded Python build: the
+driver fits independent Q and K projections on separate CUDA streams while
+preserving each projection's exact RNG and update order. GIL-enabled execution
+remains correct but serializes enough host dispatch to lose roughly 8% on the
+measured H100 workload.
 
 Choose `--microbatch-size` from available memory; it is an accumulation/memory
 control and does not change the logical batch size. Determinism is enabled by
