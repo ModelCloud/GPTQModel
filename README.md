@@ -257,6 +257,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 |---|---|
 | A.X-K2 | `axk2` |
 | AfMoE / Trinity | `afmoe` |
+| Agnes 3.0 Flash | `agnes` |
 | Apertus 1 / 1.5 | `apertus`, `apertus1p5`, `apertus1p5_text` |
 | Baichuan | `baichuan` |
 | Bailing MoE / Hybrid (LING / RING) | `bailing_moe`, `bailing_hybrid` |
@@ -344,6 +345,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 
 Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
 
+Agnes 3.0 Flash Preview requires `trust_remote_code=True`. GPT-QModel quantizes its language backbone only; the vision tower and MTP tensors remain in their original precision.
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 

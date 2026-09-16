@@ -65,6 +65,7 @@ from ..utils.model import find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
+from .definitions.agnes import AgnesQModel  # noqa: E402
 from .definitions.apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel  # noqa: E402
 from .definitions.axk2 import AXK2QModel  # noqa: E402
 from .definitions.baichuan import BaiChuanQModel  # noqa: E402
@@ -218,6 +219,7 @@ else:
 
 
 MODEL_MAP = {
+    "agnes": AgnesQModel,
     "apertus": ApertusQModel,
     "apertus1p5": Apertus1p5QModel,
     "apertus1p5_text": Apertus1p5TextQModel,
