@@ -1,6 +1,7 @@
 # QVQ + GSQ accuracy-recovery design
 
-Status: design proposal for PR 212 follow-up work
+Status: experimental implementation and validation design. For the current
+paper-aligned configuration and runbook, see [gsq.md](gsq.md).
 
 This document defines how GSQ should be integrated with QVQ at ultra-low bit
 rates. The goal is complementary composition: QVQ remains responsible for its
@@ -23,7 +24,7 @@ QVQ and scalar GSQ solve different problems:
 | Runtime | `QVQLinear`, kernels, payload compatibility, reload | No runtime kernel or payload interpretation |
 | Validation | Native QVQ pack/decode/reload parity | Independent held-out improvement over the QVQ baseline |
 
-The recommended first production slice is fixed-metadata QVQ-GSQ:
+The first format-aware slice was fixed-metadata QVQ-GSQ:
 
 1. Run ordinary QVQ/YAQA and retain the canonical serialized payload.
 2. Build a bounded set of legal decoded QVQ tile alternatives.
@@ -32,29 +33,39 @@ The recommended first production slice is fixed-metadata QVQ-GSQ:
 5. Install the selected candidate and continue the sequential model-prefix capture.
 6. Serialize through the native `QVQLinear` path and reload before held-out scoring.
 
-Learning QVQ scales, Hadamard transforms, bank families, or codebooks is not
-part of this first slice. Those variables are coupled to payload legality and
-runtime behavior and require separate ablations.
+That slice was useful as a representation and runtime contract, but it did not
+produce a GSQ-attributable QVQ gain. The staged W3/P32 implementation now also
+learns the native serialized output scale vector (`SV`) while keeping Hadamard
+transforms, bank families, and codebooks fixed. The positive-recovery recipe is
+the staged data-dependent path in [gsq.md](gsq.md), not the aggregate Fisher
+adapter by itself.
 
 ## Current implementation and boundary
 
-The repository already contains an experimental format-aware path in
-`gptqmodel/quantization/qvq_gsq.py`. It is deliberately narrower than scalar
-GSQ:
+The repository contains two experimental format-aware paths. The aggregate
+Fisher adapter in `gptqmodel/quantization/qvq_gsq.py` is deliberately narrower
+than scalar GSQ:
 
 - `TrellisCandidateAdapter` decodes and repacks the actual QVQ format.
 - `refine_trellis_candidates` applies a Gumbel-softmax relaxation over tile
   candidates and returns a hard payload.
 - `refine_trellis_fisher` uses prepared input/output Fisher factors.
 - `baseline_bitflip_candidates` creates a shared prototype candidate pool.
-- QVQ configuration currently rejects GSQ scale learning and restricts GSQ to
-  plain YAQA formats without alignment, replay, SwiGLU search, activation
-  quantization, scale search, or spectral refinement.
+- QVQ lifecycle configuration rejects generic scalar GSQ scale learning and
+  restricts GSQ to plain YAQA formats without alignment, replay, SwiGLU
+  search, activation quantization, scale search, or spectral refinement.
 
-This path should be treated as the starting engine, not as permission to reuse
-`GSQScalarTrainingModule` directly. Scalar GSQ assumes a groupwise scalar grid
-and trainable scalar scales. QVQ has vector codebooks, trellis history,
-overlapping windows, optional bank selectors, and transform metadata. A scalar
+The paper-aligned staged path in
+`gptqmodel/quantization/gsq_training_qvq.py` and
+`scripts/validate_qvq_gsq_staged_layer.py` adds native `SV` learning, legal
+multi-round P32 composition, Q/K -> V/O -> MLP reconstruction, disjoint hard
+selection, and quantized-prefix propagation. It remains a validation driver;
+setting `QVQConfig.gsq` alone does not enable that complete lifecycle.
+
+The aggregate path should be treated as a comparator and candidate engine, not
+as permission to reuse `GSQScalarTrainingModule` directly. Scalar GSQ assumes
+a groupwise scalar grid and trainable scalar scales. QVQ has vector codebooks,
+trellis history, overlapping windows, optional bank selectors, and transform metadata. A scalar
 weight substitution would produce candidates that cannot be represented by a
 valid QVQ payload.
 
@@ -482,7 +493,8 @@ This design does not:
 
 - replace QVQ's YAQA initializer;
 - make scalar GPTQ group size meaningful inside QVQ;
-- introduce scalar GSQ scales into QVQ;
+- introduce scalar group scales that are not part of the QVQ payload; the
+  staged P32 path may optimize its native serialized `SV`;
 - optimize the relaxed tensor as a runtime weight;
 - claim paper reproduction from a 128-row diagnostic;
 - combine GSQ with QVQ replay/alignment/activation/spectral features before
