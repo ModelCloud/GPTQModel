@@ -6,6 +6,7 @@ import atexit
 import concurrent.futures
 import copy
 import json
+import math
 import os
 import sys
 import threading
@@ -54,7 +55,11 @@ from gptqmodel.quantization.gsq_training_qvq import (
 from gptqmodel.quantization.qvq import (
     repack_p32_planar_to_window,
     repack_p32_window_to_planar,
+    rht_preprocess_weight,
+    rht_reconstruct_weight,
 )
+from gptqmodel.quantization.qvq_gsq import refine_trellis_candidates
+from gptqmodel.utils.hadamard import hadamard_transform
 from scripts.validate_qvq_gsq_staged_mlp import projection_payload
 from scripts.validate_qvq_gsq_staged_projection import digest, fineweb_chunks
 
@@ -62,6 +67,69 @@ PROJECTIONS = (
     "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
     "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj",
 )
+
+
+def two_sided_normalized_hadamard(matrix):
+    """Return H @ matrix @ H for the normalized Walsh-Hadamard matrix H."""
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError("two-sided Hadamard input must be square")
+    width = matrix.shape[0]
+    if width < 8 or width > 32768 or width & (width - 1):
+        raise ValueError("two-sided Hadamard width must be a supported power of two")
+    scale = 1. / math.sqrt(width)
+    right = hadamard_transform(matrix.contiguous(), scale)
+    return hadamard_transform(right.T.contiguous(), scale).T.contiguous()
+
+
+def closed_form_qk_scales(target, unscaled, factor, dead):
+    """Solve independent output scales for ||(target - diag(s) W) D F||²."""
+    if target.shape != unscaled.shape or target.ndim != 2:
+        raise ValueError("Q/K scale solve requires matching rank-two weights")
+    if factor.shape != (target.shape[1], target.shape[1]) or dead.shape != (target.shape[1],):
+        raise ValueError("Q/K scale solve metric does not match the input width")
+    target_factor = target.masked_fill(dead[None], 0.) @ factor
+    unscaled_factor = unscaled.masked_fill(dead[None], 0.) @ factor
+    return (
+        (target_factor * unscaled_factor).sum(1)
+        / unscaled_factor.square().sum(1).clamp_min(torch.finfo(torch.float32).tiny)
+    )
+
+
+def select_qk_pair(q_alternatives, k_alternatives, objective):
+    """Select the Q/K Cartesian pair with the lowest downstream objective."""
+    if not q_alternatives or not k_alternatives:
+        raise ValueError("Q/K pair selection requires non-empty alternatives")
+    measurements = []
+    for q_alternative in q_alternatives:
+        for k_alternative in k_alternatives:
+            loss = objective(q_alternative, k_alternative)
+            if not math.isfinite(loss):
+                raise ValueError("Q/K downstream replay produced a nonfinite loss")
+            measurements.append({
+                "q_selection": q_alternative["selection"],
+                "k_selection": k_alternative["selection"],
+                "loss": loss,
+            })
+    best_index = min(range(len(measurements)), key=lambda index: measurements[index]["loss"])
+    k_count = len(k_alternatives)
+    return (
+        q_alternatives[best_index // k_count],
+        k_alternatives[best_index % k_count],
+        measurements,
+    )
+
+
+def unique_qk_alternatives(alternatives):
+    """Remove states that serialize to the same P32 payload and scales."""
+    unique = []
+    for alternative in alternatives:
+        if not any(
+            torch.equal(alternative["state"]["words"], accepted["state"]["words"])
+            and torch.equal(alternative["state"]["SV"], accepted["state"]["SV"])
+            for accepted in unique
+        ):
+            unique.append(alternative)
+    return unique
 
 
 class DocumentSlice:
@@ -115,6 +183,12 @@ def parse_args():
         "--disable-fast-training-hadamard",
         action="store_true",
         help="Use the eager FP32 Hadamard oracle during GSQ optimization",
+    )
+    parser.add_argument(
+        "--fused-qk-fisher",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the fused exact-Fisher P32 optimizer and closed-form Q/K scales",
     )
     parser.add_argument("--token-cache", type=Path)
     parser.add_argument("--prefix-state", type=Path)
@@ -197,6 +271,8 @@ def fitting_options(args, *, epochs, seed, validation_batches):
 
 def main():
     args = parse_args()
+    if args.fused_qk_fisher and args.rounds != 1:
+        raise ValueError("fused Q/K Fisher fitting currently requires exactly one P32 round")
     if not args.allow_nondeterministic:
         torch.use_deterministic_algorithms(True)
     torch.manual_seed(args.seed)
@@ -353,6 +429,8 @@ def main():
     )
     stage_records = {}
     accepted_states = {}
+    qk_alternatives = {}
+    qk_pair_guards = {}
     fit_seconds = 0.
 
     train_factor, train_dead = prepare_qk_calibration_factor(
@@ -413,15 +491,230 @@ def main():
         qk_streams[name].synchronize()
         return name, quantizer, state, weight, rounds
 
+    def fit_qk_projection_fused(name):
+        quantizer = qk_quantizers[name]
+        target = constants[name][-1].clone()
+        masked_factor = train_factor.masked_fill(train_dead[:, None], 0.)
+        hessian = masked_factor @ masked_factor.T
+
+        def solve_scales(inner):
+            unscaled = rht_reconstruct_weight(
+                inner,
+                quantizer.SU,
+                torch.ones_like(quantizer.scales),
+            )
+            return closed_form_qk_scales(target, unscaled, train_factor, train_dead)
+
+        fisher_scales = solve_scales(quantizer.baseline_matrix)
+
+        input_metric = two_sided_normalized_hadamard(
+            quantizer.SU[:, None] * hessian * quantizer.SU[None, :],
+        )
+        output_metric = two_sided_normalized_hadamard(torch.diag(fisher_scales.square()))
+        inner_target = rht_preprocess_weight(
+            target,
+            quantizer.SU.reciprocal(),
+            fisher_scales.reciprocal(),
+        ).float()
+        optimized = refine_trellis_candidates(
+            quantizer.candidates,
+            bits=3,
+            bank_ids=quantizer.bank_ids,
+            bank_alt_id=quantizer.bank_alt_id,
+            target=inner_target,
+            inputs=inner_target.new_zeros((1, inner_target.shape[0])),
+            enabled=True,
+            steps=args.qk_steps,
+            learning_rate=1e-4,
+            temperature_start=2.,
+            temperature_end=.05,
+            kappa_start=100.,
+            kappa_end=500.,
+            weight_decay=1.,
+            coordinate_sweeps=0,
+            hard_eval_interval=max(1, min(10, args.qk_steps)),
+            relaxation_patience=0,
+            decoded_candidates=None,
+            sparse_candidate_indices=quantizer.sparse_indices.permute(1, 0, 2).contiguous(),
+            sparse_candidate_deltas=quantizer.sparse_deltas.permute(1, 0, 2).contiguous(),
+            sparse_candidate_shifts=quantizer.sparse_shifts.T.contiguous(),
+            input_metric=input_metric,
+            output_metric=output_metric,
+            seed=args.seed,
+        )
+        inner = quantizer.adapter.inner(
+            optimized.words,
+            quantizer.in_features,
+            quantizer.out_features,
+            quantizer.bank_ids,
+            quantizer.bank_alt_id,
+        )
+        scales = solve_scales(inner)
+        state = {
+            "words": optimized.words,
+            "choices": optimized.choices,
+            "SV": scales,
+        }
+        candidate_weight = rht_reconstruct_weight(
+            inner, quantizer.SU, scales,
+        )
+        baseline_scale_weight = rht_reconstruct_weight(
+            quantizer.baseline_matrix, quantizer.SU, fisher_scales,
+        )
+
+        def qk_loss(factor, dead, candidate):
+            error = (target - candidate).masked_fill(dead[None], 0.)
+            return float((error @ factor).square().sum())
+
+        baseline = quantizer.hard_weight_for_evaluation()
+        train_before = qk_loss(train_factor, train_dead, baseline)
+        validation_before = qk_loss(validation_factor, validation_dead, baseline)
+        alternatives = [
+            {
+                "validation_loss": validation_before,
+                "train_loss": train_before,
+                "state": quantizer.hard_state(),
+                "weight": baseline,
+                "selection": "original",
+            },
+            {
+                "validation_loss": qk_loss(
+                    validation_factor, validation_dead, baseline_scale_weight,
+                ),
+                "train_loss": qk_loss(train_factor, train_dead, baseline_scale_weight),
+                "state": {
+                    "words": quantizer.candidates[0].clone(),
+                    "choices": torch.zeros_like(optimized.choices),
+                    "SV": fisher_scales,
+                },
+                "weight": baseline_scale_weight,
+                "selection": "closed_form_scale",
+            },
+            {
+                "validation_loss": qk_loss(
+                    validation_factor, validation_dead, candidate_weight,
+                ),
+                "train_loss": qk_loss(train_factor, train_dead, candidate_weight),
+                "state": state,
+                "weight": candidate_weight,
+                "selection": "fused_p32_and_closed_form_scale",
+            },
+        ]
+        selected = min(
+            alternatives, key=lambda alternative: alternative["validation_loss"],
+        )
+        validation_after = selected["validation_loss"]
+        train_after = selected["train_loss"]
+        state = selected["state"]
+        selected_weight = selected["weight"]
+        selection = selected["selection"]
+        weight = selected_weight.to(torch.bfloat16)
+        if validation_after > validation_before:
+            state = quantizer.hard_state()
+            weight = baseline.to(torch.bfloat16)
+            train_after = train_before
+            validation_after = validation_before
+        rounds = [{
+            "round": 1,
+            "train_before": train_before,
+            "train_after": train_after,
+            "validation_before": validation_before,
+            "validation_after": validation_after,
+            "best_epoch": args.qk_steps - 1 if selection.startswith("fused_p32") else -1,
+            "changed_tiles": int((state["choices"] != 0).sum()),
+            "optimizer": "fused_exact_fisher_closed_form_scale",
+            "selection": selection,
+            "relaxation_requested_steps": args.qk_steps,
+            "relaxation_completed_steps": optimized.diagnostics["completed_steps"],
+            "relaxation_changed_tiles": optimized.diagnostics["relaxation_changed_tiles"],
+        }]
+        return name, quantizer, state, weight, rounds, alternatives
+
     qk_started = time.perf_counter()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        qk_results = list(executor.map(fit_qk_projection, PROJECTIONS[:2]))
+    qk_fit = fit_qk_projection_fused if args.fused_qk_fisher else fit_qk_projection
+    if args.fused_qk_fisher:
+        qk_results = [qk_fit(name) for name in PROJECTIONS[:2]]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            qk_results = list(executor.map(qk_fit, PROJECTIONS[:2]))
     fit_seconds += time.perf_counter() - qk_started
-    for name, quantizer, state, weight, rounds in qk_results:
+    for result in qk_results:
+        name, quantizer, state, weight, rounds, *fused_alternatives = result
         accepted_states[name] = state
         with torch.no_grad():
             prepared.get_submodule(name).weight.copy_(weight)
         stage_records[name] = rounds
+        if fused_alternatives:
+            qk_alternatives[name] = unique_qk_alternatives(fused_alternatives[0])
+
+    block_parameters = {
+        name: value.detach() for name, value in dense_layer.named_parameters()
+    }
+    block_buffers = {
+        name: value.detach().clone() for name, value in dense_layer.named_buffers()
+    }
+    validation_teacher_batches = None
+
+    def validation_teachers():
+        nonlocal validation_teacher_batches
+        if validation_teacher_batches is None:
+            validation_teacher_batches = []
+            with torch.no_grad():
+                for batch_index in range(len(validation_stage_batches)):
+                    teacher_microbatches = []
+                    for batch, count in validation_stage_batches[batch_index]:
+                        hidden, kwargs, mask = batch
+                        teacher_microbatches.append(
+                            ((batch, dense_layer(hidden, **kwargs)[mask]), count),
+                        )
+                    validation_teacher_batches.append(teacher_microbatches)
+        return validation_teacher_batches
+
+    def qk_pair_replay_weights(q_alternative, k_alternative, downstream_weights):
+        return {
+            **downstream_weights,
+            "self_attn.q_proj.weight": q_alternative["weight"],
+            "self_attn.k_proj.weight": k_alternative["weight"],
+        }
+
+    def qk_pair_replay_objective(q_alternative, k_alternative, downstream_weights):
+        weights = qk_pair_replay_weights(q_alternative, k_alternative, downstream_weights)
+        student_state = {**block_parameters}
+        for name, value in weights.items():
+            parameter = block_parameters[name]
+            student_state[name] = value.to(device=parameter.device, dtype=parameter.dtype)
+        weighted_loss = 0.
+        elements = 0
+        with torch.no_grad():
+            for teacher_microbatches in validation_teachers():
+                for (batch, teacher), count in teacher_microbatches:
+                    hidden, kwargs, mask = batch
+                    student = torch.func.functional_call(
+                        dense_layer,
+                        (student_state, block_buffers),
+                        (hidden,),
+                        kwargs,
+                    )[mask]
+                    weighted_loss += float(torch.nn.functional.mse_loss(student, teacher)) * count
+                    elements += count
+        if not elements:
+            raise ValueError("Q/K downstream replay requires held-out output elements")
+        return weighted_loss / elements
+
+    def install_qk_pair(q_alternative, k_alternative):
+        for name, alternative in zip(PROJECTIONS[:2], (q_alternative, k_alternative)):
+            accepted_states[name] = alternative["state"]
+            with torch.no_grad():
+                prepared.get_submodule(name).weight.copy_(
+                    alternative["weight"].to(torch.bfloat16),
+                )
+            record = stage_records[name][-1]
+            record["selection"] = alternative["selection"]
+            record["train_after"] = alternative["train_loss"]
+            record["validation_after"] = alternative["validation_loss"]
+            record["changed_tiles"] = int(
+                (alternative["state"]["choices"] != 0).sum(),
+            )
 
     def fit_joint_stage(stage_name, names, stage):
         nonlocal fit_seconds
@@ -482,6 +775,37 @@ def main():
         LlamaGSQAttentionStage(prepared),
     )
     fit_joint_stage("mlp", PROJECTIONS[4:], prepared)
+
+    def materialize_state(name, state):
+        _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
+        return p32_training_module_from_words(
+            state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
+            candidates=2, seed=args.seed,
+        ).hard_weight()
+
+    if len(qk_alternatives) == 2:
+        guard_started = time.perf_counter()
+        downstream_weights = {
+            f"{name}.weight": materialize_state(name, accepted_states[name])
+            for name in PROJECTIONS[2:]
+        }
+        for name in PROJECTIONS[:2]:
+            for alternative in qk_alternatives[name]:
+                alternative["weight"] = materialize_state(name, alternative["state"])
+        q_alternative, k_alternative, measurements = select_qk_pair(
+            qk_alternatives[PROJECTIONS[0]],
+            qk_alternatives[PROJECTIONS[1]],
+            lambda q, k: qk_pair_replay_objective(q, k, downstream_weights),
+        )
+        qk_pair_guards["after_downstream_fit"] = {
+            "applied": True,
+            "q_selection": q_alternative["selection"],
+            "k_selection": k_alternative["selection"],
+            "loss": min(measurement["loss"] for measurement in measurements),
+            "measurements": measurements,
+        }
+        install_qk_pair(q_alternative, k_alternative)
+        fit_seconds += time.perf_counter() - guard_started
 
     final_weights = {}
     state_tensors = dict(prefix_tensors)
@@ -573,6 +897,7 @@ def main():
         "batch_size": args.batch_size,
         "microbatch_size": args.microbatch_size,
         "training_hadamard_backends": sorted(training_hadamard_backends),
+        "fused_qk_fisher": args.fused_qk_fisher,
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "python_gil_enabled": (
             sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else None
@@ -587,6 +912,7 @@ def main():
         "candidate_seconds": candidate_seconds,
         "fit_seconds": fit_seconds,
         "stages": stage_records,
+        "qk_pair_guards": qk_pair_guards,
         "full_block_validation_before": baseline_validation,
         "full_block_validation_candidate": candidate_full_block_validation,
         "full_block_validation_after": final_validation,

@@ -8,10 +8,16 @@ from gptqmodel.quantization.gsq_training_qvq import (
     _SparseCandidateMatrixMixture,
     p32_training_module_from_words,
 )
-from gptqmodel.quantization.qvq import rht_reconstruct_weight
+from gptqmodel.quantization.qvq import rht_preprocess_weight, rht_reconstruct_weight
 from gptqmodel.quantization.qvq_gsq import (
     TrellisCandidateAdapter,
     fisher_screened_trellis_candidates,
+)
+from scripts.validate_qvq_gsq_staged_layer import (
+    closed_form_qk_scales,
+    select_qk_pair,
+    two_sided_normalized_hadamard,
+    unique_qk_alternatives,
 )
 
 
@@ -195,6 +201,97 @@ def test_p32_next_round_uses_prior_hard_words_and_scales_as_baseline():
     assert torch.equal(state["words"], accepted["words"])
     torch.testing.assert_close(state["SV"], accepted["SV"])
     torch.testing.assert_close(second.hard_weight(), teacher)
+
+
+def test_closed_form_qk_scales_minimize_the_masked_quadratic():
+    generator = torch.Generator().manual_seed(43)
+    unscaled = torch.randn((7, 16), generator=generator)
+    expected = torch.linspace(.5, 1.5, 7)
+    target = expected[:, None] * unscaled
+    factor = torch.randn((16, 16), generator=generator)
+    dead = torch.zeros(16, dtype=torch.bool)
+    dead[[2, 11]] = True
+
+    actual = closed_form_qk_scales(target, unscaled, factor, dead)
+
+    torch.testing.assert_close(actual, expected, rtol=2e-6, atol=2e-6)
+
+
+def test_qk_pair_selector_uses_joint_downstream_loss_and_stable_ties():
+    q_alternatives = [
+        {"selection": "original", "value": 0},
+        {"selection": "local_q", "value": 2},
+    ]
+    k_alternatives = [
+        {"selection": "original", "value": 0},
+        {"selection": "local_k", "value": 3},
+    ]
+
+    q_selected, k_selected, measurements = select_qk_pair(
+        q_alternatives,
+        k_alternatives,
+        lambda q, k: abs(q["value"] + k["value"] - 3),
+    )
+
+    assert q_selected["selection"] == "original"
+    assert k_selected["selection"] == "local_k"
+    assert len(measurements) == 4
+    assert measurements[-1] == {
+        "q_selection": "local_q",
+        "k_selection": "local_k",
+        "loss": 2,
+    }
+
+
+def test_qk_pair_selector_rejects_nonfinite_replay():
+    alternatives = [{"selection": "original"}]
+    with pytest.raises(ValueError, match="nonfinite"):
+        select_qk_pair(alternatives, alternatives, lambda _q, _k: float("nan"))
+
+
+def test_qk_pair_alternatives_deduplicate_identical_serialized_states():
+    original = {
+        "selection": "original",
+        "state": {"words": torch.zeros(2, 3), "SV": torch.ones(2)},
+    }
+    duplicate = {
+        "selection": "duplicate",
+        "state": {"words": original["state"]["words"].clone(), "SV": torch.ones(2)},
+    }
+    changed = {
+        "selection": "changed",
+        "state": {"words": torch.ones(2, 3), "SV": torch.ones(2)},
+    }
+
+    unique = unique_qk_alternatives([original, duplicate, changed])
+
+    assert [alternative["selection"] for alternative in unique] == ["original", "changed"]
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_inner_fisher_metric_matches_dense_qk_quadratic():
+    generator = torch.Generator(device="cuda").manual_seed(47)
+    inner = torch.randn((16, 16), device="cuda", generator=generator)
+    target = torch.randn((16, 16), device="cuda", generator=generator)
+    su = torch.rand(16, device="cuda", generator=generator) + .5
+    sv = torch.rand(16, device="cuda", generator=generator) + .5
+    factor = torch.randn((16, 16), device="cuda", generator=generator)
+
+    weight = rht_reconstruct_weight(inner, su, sv)
+    target_inner = rht_preprocess_weight(
+        target, su.reciprocal(), sv.reciprocal(),
+    ).float()
+    error = inner - target_inner
+    input_metric = two_sided_normalized_hadamard(
+        su[:, None] * (factor @ factor.T) * su[None, :],
+    )
+    output_metric = two_sided_normalized_hadamard(torch.diag(sv.square()))
+
+    dense_loss = ((target - weight) @ factor).square().sum()
+    inner_loss = (error * (input_metric @ error @ output_metric)).sum()
+
+    torch.testing.assert_close(inner_loss, dense_loss, rtol=2e-6, atol=2e-3)
 
 
 @pytest.mark.cuda
