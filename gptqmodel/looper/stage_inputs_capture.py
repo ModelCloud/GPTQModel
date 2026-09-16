@@ -78,6 +78,42 @@ class StageInputsCapture:
         embedding_device = get_device(embedding)
         return fallback if embedding_device == META else embedding_device
 
+    def _first_layer_has_deferred_floatx_source(self, layer: torch.nn.Module) -> bool:
+        """Whether input capture must not materialize a packed floatx layer.
+
+        The first decoder layer is only used as a pre-forward hook during input
+        capture: the hook raises before that layer executes.  Materializing its
+        packed leaf tensors first bypasses the module-local decoder and fails
+        for layouts such as NVFP4, whose storage shape deliberately differs
+        from the dense ``nn.Linear`` shell shape.
+        """
+
+        active_decoder = getattr(self.gptq_model, "_active_auto_module_decoder_config", None)
+        if not callable(active_decoder) or active_decoder() is None:
+            return False
+
+        turtle_model = getattr(self.gptq_model, "turtle_model", None)
+        get_tensors = getattr(turtle_model, "checkpoint_tensors_for_submodule", None)
+        decoder_format = getattr(self.gptq_model, "_decoder_weight_format", None)
+        if not callable(get_tensors) or not callable(decoder_format):
+            return False
+
+        for submodule in layer.modules():
+            if not hasattr(submodule, "weight"):
+                continue
+            checkpoint_tensors = get_tensors(
+                target_model=self.gptq_model.model,
+                target_submodule=submodule,
+                recurse=False,
+            )
+            weight = checkpoint_tensors.get("weight") if isinstance(checkpoint_tensors, dict) else None
+            if isinstance(weight, torch.Tensor) and decoder_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+            ) is not None:
+                return True
+        return False
+
     def cache_inputs(
         self,
         layers: Sequence[torch.nn.Module],
@@ -148,11 +184,16 @@ class StageInputsCapture:
         # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
         # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
         # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
-        layers[0] = self.gptq_model.shell_module_materialize(
-            target_submodule=layers[0],
-            device=CPU,
-            module_path=module_path,
-        )
+        if self._first_layer_has_deferred_floatx_source(layers[0]):
+            self.logger.info(
+                "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
+            )
+        else:
+            layers[0] = self.gptq_model.shell_module_materialize(
+                target_submodule=layers[0],
+                device=CPU,
+                module_path=module_path,
+            )
         cur_layer_device = CPU
 
         # Use calibration_data_device if specified, otherwise use cur_layer_device

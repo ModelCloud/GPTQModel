@@ -2215,6 +2215,8 @@ class BaseQModel(nn.Module):
 
     def pre_quantize(self, module: nn.Module) -> nn.Module:
         if get_device(module) == META or _module_has_meta_tensors(module):
+            if self._materialize_floatx_layer_shell(module, self.quantize_config.device):
+                return module
             return self.shell_module_materialize(
                 target_submodule=module,
                 device=self.quantize_config.device,
@@ -2223,6 +2225,55 @@ class BaseQModel(nn.Module):
             return move_to(module, device=self.quantize_config.device)
         else:
             return module
+
+    def _materialize_floatx_layer_shell(self, module: nn.Module, device: torch.device) -> bool:
+        """Materialize one lazy layer without copying packed floatx storage into dense shells.
+
+        Layer staging happens before its quantizable children have ``NamedModule``
+        plans.  A regular LazyTurtle materialization therefore attempts to copy
+        an NVFP4 packed tensor into the dense ``nn.Linear.weight`` parameter.
+        Decode only those leaf shells long enough to construct the layer; the
+        later module-local forward plan still reloads the original checkpoint
+        tensors and selects native FP8/NVFP4 execution for Hessian collection.
+        """
+
+        decoder_cfg = self._active_auto_module_decoder_config()
+        if decoder_cfg is None or not isinstance(self.turtle_model, LazyTurtle):
+            return False
+
+        decoded_any = False
+        # Traverse leaves first, because replacement invalidates the old
+        # submodule's qualified path in the live model tree.
+        for submodule in reversed(list(module.modules())):
+            if submodule is module or not hasattr(submodule, "weight"):
+                continue
+            checkpoint_tensors = self.turtle_model.checkpoint_tensors_for_submodule(
+                target_model=self.model,
+                target_submodule=submodule,
+                recurse=False,
+            )
+            weight = checkpoint_tensors.get("weight")
+            if not isinstance(weight, torch.Tensor):
+                continue
+            if self._decoder_weight_format(weight=weight, checkpoint_tensors=checkpoint_tensors) is None:
+                continue
+            decoded = self._build_decoder_quant_source_module(
+                submodule,
+                checkpoint_tensors=checkpoint_tensors,
+                target_dtype=decoder_cfg.target_dtype,
+            )
+            self._replace_live_submodule(submodule, decoded)
+            decoded_any = True
+
+        if not decoded_any:
+            return False
+
+        # Materialize normal direct tensors (norm weights, etc.) after every
+        # packed leaf has been replaced by a shape-compatible dense shell.
+        for submodule in module.modules():
+            self.shell_direct_meta_materialize(target_submodule=submodule, device=device)
+        move_to(module, device=device)
+        return True
 
     def forward_device_for_module(self, module: nn.Module, planned_device: torch.device) -> torch.device:
         """Apply model-declared placement exclusions to subset replay planning."""

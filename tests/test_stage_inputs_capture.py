@@ -48,6 +48,8 @@ class TestStageInputsCapture(unittest.TestCase):
         gptq_model.get_input_embeddings_name.return_value = None
         gptq_model.shell_module_materialize.return_value = layer
         gptq_model.shell_direct_meta_materialize.return_value = None
+        gptq_model._active_auto_module_decoder_config.return_value = None
+        gptq_model.turtle_model = None
         gptq_model.ATTENTION_MASKS_REQUIRED_FOR_INPUT = False
         gptq_model.quant_region_timer = None
 
@@ -125,6 +127,24 @@ class TestStageInputsCapture(unittest.TestCase):
 
         call_kwargs = gptq_model.shell_module_materialize.call_args[1]
         self.assertEqual(call_kwargs["module_path"], "custom.path.layer_0")
+
+    def test_floatx_input_capture_keeps_first_layer_lazy(self):
+        """Packed floatx leaves must reach the pre-hook before materialization."""
+
+        layer = FakeLayer()
+        capture, layers, _, gptq_model = self._make_capture(layer)
+        gptq_model._active_auto_module_decoder_config.return_value = object()
+        turtle_model = MagicMock()
+        turtle_model.checkpoint_tensors_for_submodule.return_value = {
+            "weight": torch.empty((1,), dtype=torch.uint8),
+            "weight_scale": torch.empty((1,), dtype=torch.float32),
+        }
+        gptq_model.turtle_model = turtle_model
+        gptq_model._decoder_weight_format.return_value = "fp4"
+
+        capture.cache_inputs(layers=layers, calibration_data=[], use_cache=False)
+
+        gptq_model.shell_module_materialize.assert_not_called()
 
     def test_cache_inputs_warns_when_caller_name_differs_from_full_name(self):
         """A caller-supplied `layer_names[0]` wins, but a mismatch against `full_name` is logged."""
