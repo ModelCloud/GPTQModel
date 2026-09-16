@@ -28,9 +28,9 @@
 * 08/19/2026 [7.3.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.4): 🚀🔥⚡ Added the `Swordfish` Blackwell GPTQ/AWQ kernel, planar GPTQ checkpoint formats, native MPS quantization, and Cohere Compass / A.X-K2 model support, with quantization performance and reliability improvements.
 Older releases and development notes: [changelog archive](docs/changelog/archive.md).
 
-## Special Notes 📝
+## Prism Bonsai GGUF compatibility 📝
 
-PrismAI/Bonsai inference sample script. GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
+GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
 
 ```py
 from gptqmodel import GPTQModel
@@ -99,7 +99,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
 * ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. Prism Bonsai `Q1_0_g128` remains accepted as a compatibility alias for the official 128-element `Q1_0` layout.
-* 🚀 Quantize MoE models with ease even with extreme routing activation bias via `Moe.Routing` and/or `FailSafe`.
+* 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
 * ✨ Linux, macOS, Windows platform support for CUDA (NVIDIA), NPU (Huawei Ascend), XPU (Intel), ROCm (AMD), MPS (Apple Silicon), CPU (Intel/AMD/Apple Silicon).
@@ -111,7 +111,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 * 🚀 [Microsoft/BITBLAS](https://github.com/microsoft/BitBLAS) optimized tile based inference.
 * 💯 CI unit-test coverage for all supported models and kernels including post-quantization quality regression.
 
-## Who's Using GPT-QModel? 🌐
+## Organizations and projects using GPT-QModel 🌐
 
 Selected public references where teams or companies explicitly mention GPT-QModel in documentation, integration notes, or quantized model usage. This is not an exhaustive customer list.
 
@@ -121,7 +121,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 * <img src="https://cdn.simpleicons.org/alibabacloud/FF6A00" alt="Alibaba Cloud logo" height="14"> Alibaba Cloud
 
 
-## Quality: GPTQ 4bit can match native BF16 🏆
+## Quality: GPTQ 4-bit evaluation 🏆
 🤗 [ModelCloud quantized Vortex models on HF](https://huggingface.co/collections/ModelCloud/vortex-673743382af0a52b2a8b9fe2)
 
 <img src=https://github.com/user-attachments/assets/c1b89394-f8f6-44e5-9949-bef15a124723 width="51%"> <img src=https://github.com/user-attachments/assets/23901236-10c5-4435-ac2f-06cf2e097f1e width="47%">
@@ -340,7 +340,7 @@ model.serve(host="0.0.0.0",port="12345")
 ```
 
 ### Quantization 🔧
-Basic example of using `GPT-QModel` to quantize an LLM model:
+Example: quantizing an LLM with `GPT-QModel`:
 
 ```py
 from datasets import load_dataset
@@ -597,15 +597,15 @@ Only add `:in=` tags after verifying them against a real (tiny, CPU) model with 
 
 ### Pair with Evaluation for post-quantization LLM Benchmarks 📊
 
-GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a modern benchmarking toolkit with 153 of the world's most widely used benchmark suites.
-We highly recommend using Evalution to measure post-quant accuracy recovery after quantization instead of relying on narrow regression-only language-model metrics.
+GPT-QModel evaluation is integrated into [Evalution](https://github.com/ModelCloud/Evalution), a benchmarking toolkit with 153 benchmark suites.
+Use Evalution to measure post-quantization accuracy recovery instead of relying only on narrow regression language-model metrics.
 
 ```
 # install Evalution
 pip install Evalution
 ```
 
-Below is a short example running `gsm8k_platinum` through Evalution's native GPT-QModel engine.
+Example: running `gsm8k_platinum` through Evalution's native GPT-QModel engine.
 
 ```py
 import evalution as eval
@@ -668,9 +668,9 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
 ```py
-# Note GPTAQ is currently experimental, not MoE compatible, and requires 2-4x more VRAM to execute
-# We have many reports of GPTAQ not working better or exceeding GPTQ so please use for testing only
-# If OOM on 1 GPU, please set CUDA_VISIBLE_DEVICES=0,1 to 2 GPUs and gptqmodel will auto use second GPU
+# GPTAQ is experimental, is not MoE compatible, and requires 2-4x more VRAM.
+# It may not improve quality relative to GPTQ; evaluate it for the target model and workload.
+# If one GPU OOMs, set CUDA_VISIBLE_DEVICES=0,1; GPTQModel will use the second GPU automatically.
 quant_config = QuantizeConfig(bits=4, group_size=128, gptaq=GPTAQConfig(alpha=0.25, device="auto"))
 ```
 
@@ -683,7 +683,7 @@ quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0,
 ```
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
 
-GPT-QModel has fully supplanted AutoGPTQ and AutoAWQ for HF Transformers/Optimum/Peft integration. Model inference has drop-in support with zero changes. 
+GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
 
 For model quantization, there are some config changes for AutoAWQ:
 
@@ -837,7 +837,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ```
 
-## Quick Notes 🗒️
+## Operational notes 🗒️
 
 ### Limit log level 🔇
 
@@ -856,7 +856,7 @@ If your script imports multiple Triton users (for example `gptqmodel`, `vllm`, a
 ```python
 from gptqmodel import TritonPatch
 
-# Fix Triton crashing under nogil/free-threading Python 3.13+ where the kernel cache storage in Triton is not thread-safe
+# Mitigate Triton kernel-cache crashes under nogil/free-threading Python 3.13+, where the cache storage is not thread-safe.
 TritonPatch.apply()
 ```
 
