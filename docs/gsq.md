@@ -134,10 +134,13 @@ The default single-round Q/K path now transforms the same quadratic objective
 into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
 solves the independent output scales in closed form and uses only the disjoint
 Q/K validation split to select among the original, scale-only, and edited P32
-states.  This preserves all requested GSQ updates and the final block-level
+states. After V/O and MLP fitting, it replays the unique Q/K alternatives with
+those downstream states fixed and installs only the pair with the lowest
+whole-block held-out loss. Dense teacher outputs are cached once for this
+guard. This preserves all requested GSQ updates and the final block-level
 held-out guard while avoiding dense RHT reconstruction and autograd on every
-Q/K update.  Pass `--no-fused-qk-fisher` for the previous differentiable Q/K
-oracle.  Multi-round P32 composition currently requires that oracle path.
+Q/K update. Pass `--no-fused-qk-fisher` for the previous differentiable Q/K
+oracle. Multi-round P32 composition currently requires that oracle path.
 
 Choose `--microbatch-size` from available memory; it is an accumulation/memory
 control and does not change the logical batch size. Determinism is enabled by

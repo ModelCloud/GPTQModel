@@ -131,6 +131,36 @@ is the accepted full-workload Nsight Systems trace; it records 4,000 CUDA graph
 replays for the two 2,000-update fused Q/K stages.  Profiling raised measured
 fit time to 8.619 seconds without changing the held-out result.
 
+### Downstream Q/K guard
+
+The 0.357-point difference from the differentiable Q/K path is not an error in
+the transformed Fisher algebra.  The fused scale-only Q/K states have lower
+disjoint local Fisher losses than the earlier 72-Q/21-K tile state, but they
+change the activation trajectory used to fit V/O and MLP.  The earlier,
+locally worse Q/K tile state happens to produce one lower BF16 whole-block MSE
+bin after those stages.
+
+The driver now retains original, scale-only, and fused Q/K alternatives until
+downstream fitting is complete.  It caches each dense held-out teacher output
+once, removes byte-identical alternatives, replays the Cartesian Q/K pairs
+with the fitted V/O and MLP states fixed, and installs only the best final
+whole-block pair.  This guard is authoritative; local Fisher selection cannot
+force a worse available downstream state.  Ties preserve candidate order and
+therefore favor the original payload.
+
+On the matched H100 workload, two guarded runs take 8.372 and 8.448 seconds
+versus 8.111-8.190 seconds without the extra replay. This remains
+2.125x-2.144x faster than the prior 17.951-second path and
+9.476x-9.562x faster than the original 80.053-second path. Both repetitions
+produce all 14 state tensors bitwise equal. The guard selects original Q plus
+closed-form-scale K and retains the same 14.821428571428571% held-out gain.
+An exact coordinate candidate (150 Q / 32 K edits) and Fisher-ranked 50%/75%
+subsets were also replayed during the audit; every edited combination was
+worse on the whole-block guard, so those extra search arms are not retained in
+the implementation.  Recovering the older 15.178571428571429% point requires
+a different block-aware candidate-generation trajectory, not weaker
+acceptance of the current Fisher candidates.
+
 ## SM90 audit
 
 Nsight Compute on a `2048 x 2048` FP32 reverse transform reports:

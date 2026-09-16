@@ -15,7 +15,9 @@ from gptqmodel.quantization.qvq_gsq import (
 )
 from scripts.validate_qvq_gsq_staged_layer import (
     closed_form_qk_scales,
+    select_qk_pair,
     two_sided_normalized_hadamard,
+    unique_qk_alternatives,
 )
 
 
@@ -213,6 +215,57 @@ def test_closed_form_qk_scales_minimize_the_masked_quadratic():
     actual = closed_form_qk_scales(target, unscaled, factor, dead)
 
     torch.testing.assert_close(actual, expected, rtol=2e-6, atol=2e-6)
+
+
+def test_qk_pair_selector_uses_joint_downstream_loss_and_stable_ties():
+    q_alternatives = [
+        {"selection": "original", "value": 0},
+        {"selection": "local_q", "value": 2},
+    ]
+    k_alternatives = [
+        {"selection": "original", "value": 0},
+        {"selection": "local_k", "value": 3},
+    ]
+
+    q_selected, k_selected, measurements = select_qk_pair(
+        q_alternatives,
+        k_alternatives,
+        lambda q, k: abs(q["value"] + k["value"] - 3),
+    )
+
+    assert q_selected["selection"] == "original"
+    assert k_selected["selection"] == "local_k"
+    assert len(measurements) == 4
+    assert measurements[-1] == {
+        "q_selection": "local_q",
+        "k_selection": "local_k",
+        "loss": 2,
+    }
+
+
+def test_qk_pair_selector_rejects_nonfinite_replay():
+    alternatives = [{"selection": "original"}]
+    with pytest.raises(ValueError, match="nonfinite"):
+        select_qk_pair(alternatives, alternatives, lambda _q, _k: float("nan"))
+
+
+def test_qk_pair_alternatives_deduplicate_identical_serialized_states():
+    original = {
+        "selection": "original",
+        "state": {"words": torch.zeros(2, 3), "SV": torch.ones(2)},
+    }
+    duplicate = {
+        "selection": "duplicate",
+        "state": {"words": original["state"]["words"].clone(), "SV": torch.ones(2)},
+    }
+    changed = {
+        "selection": "changed",
+        "state": {"words": torch.ones(2, 3), "SV": torch.ones(2)},
+    }
+
+    unique = unique_qk_alternatives([original, duplicate, changed])
+
+    assert [alternative["selection"] for alternative in unique] == ["original", "changed"]
 
 
 @pytest.mark.cuda
