@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
 
 import torch
 
@@ -57,6 +56,7 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     namespace=_HADAMARD_NAMESPACE,
     required_ops=(
         "fast_hadamard_transform",
+        "fast_hadamard_transform_reverse",
         "fast_hadamard_transform_12N",
         "fast_hadamard_transform_20N",
         "fast_hadamard_transform_28N",
@@ -102,7 +102,7 @@ def hadamard_op(op_name: str = "fast_hadamard_transform"):
     return _extension_api().op("hadamard", op_name)
 
 
-def hadamard_transform(x: torch.Tensor, scale: Optional[float] = None) -> torch.Tensor:
+def hadamard_transform(x: torch.Tensor, scale: float | None = None) -> torch.Tensor:
     """Apply the fast Hadamard transform to the last dimension of `x`.
 
     Args:
@@ -115,4 +115,16 @@ def hadamard_transform(x: torch.Tensor, scale: Optional[float] = None) -> torch.
     if scale is None:
         scale = 1.0
     op = hadamard_op("fast_hadamard_transform")
+    return op(x, float(scale))
+
+
+def hadamard_transform_reverse(x: torch.Tensor, scale: float | None = None) -> torch.Tensor:
+    """Apply power-of-two Hadamard butterfly stages in descending order.
+
+    ``scale`` is rounded into the input before any butterfly. This matches the
+    operation order produced by autograd for the normalized eager transform.
+    """
+    if scale is None:
+        scale = 1.0
+    op = hadamard_op("fast_hadamard_transform_reverse")
     return op(x, float(scale))

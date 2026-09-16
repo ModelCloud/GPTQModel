@@ -3,6 +3,7 @@ import torch
 
 from gptqmodel.quantization.gsq_training_qvq import (
     GSQP32TrainingModule,
+    _rht_reconstruct_differentiable,
     p32_training_module_from_words,
 )
 from gptqmodel.quantization.qvq import rht_reconstruct_weight
@@ -126,3 +127,33 @@ def test_p32_next_round_uses_prior_hard_words_and_scales_as_baseline():
     assert torch.equal(state["words"], accepted["words"])
     torch.testing.assert_close(state["SV"], accepted["SV"])
     torch.testing.assert_close(second.hard_weight(), teacher)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_training_hadamard_is_bitwise_exact_forward_and_backward():
+    generator = torch.Generator(device="cuda").manual_seed(41)
+    # Llama 3.2 1B K-projection geometry exercises both transform widths used
+    # by the measured Q/K stage without making this a model-backed test.
+    inner_eager = torch.randn((2048, 512), device="cuda", generator=generator,
+                              requires_grad=True)
+    inner_fused = inner_eager.detach().clone().requires_grad_()
+    su = torch.randn((2048,), device="cuda", generator=generator)
+    sv_eager = torch.randn((512,), device="cuda", generator=generator,
+                           requires_grad=True)
+    sv_fused = sv_eager.detach().clone().requires_grad_()
+    upstream = torch.randn((512, 2048), device="cuda", generator=generator)
+
+    eager = _rht_reconstruct_differentiable(inner_eager, su, sv_eager)
+    fused = _rht_reconstruct_differentiable(
+        inner_fused,
+        su,
+        sv_fused,
+        fast_hadamard=True,
+    )
+    eager.backward(upstream)
+    fused.backward(upstream)
+
+    assert torch.equal(fused, eager)
+    assert torch.equal(inner_fused.grad, inner_eager.grad)
+    assert torch.equal(sv_fused.grad, sv_eager.grad)

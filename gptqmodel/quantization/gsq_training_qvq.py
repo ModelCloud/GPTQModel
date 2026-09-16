@@ -10,6 +10,11 @@ import math
 
 import torch
 
+from ..utils.hadamard import (
+    hadamard_available,
+    hadamard_transform,
+    hadamard_transform_reverse,
+)
 from .qvq import (
     repack_p32_planar_to_window,
     rht_preprocess_weight,
@@ -23,6 +28,34 @@ from .qvq_gsq import (
 from .rotation.hadamard_utils import matmul_hadU
 
 
+class _ExactTrainingHadamard(torch.autograd.Function):
+    """Fused normalized Hadamard with the eager path's exact FP32 gradient.
+
+    The native kernel evaluates butterfly stages in forward order. Autograd
+    traverses the eager reference's stages in reverse order, which changes
+    FP32 rounding despite the Walsh-Hadamard matrix being self-adjoint. The
+    backward therefore uses the native descending-stage kernel.
+    """
+
+    @staticmethod
+    def forward(ctx, values):
+        width = values.shape[-1]
+        ctx.width = width
+        return hadamard_transform(values.contiguous(), 1. / math.sqrt(width))
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return hadamard_transform_reverse(
+            grad_output.contiguous(), 1. / math.sqrt(ctx.width),
+        )
+
+
+def _training_hadamard(values, fast_hadamard):
+    if not fast_hadamard:
+        return matmul_hadU(values)
+    return _ExactTrainingHadamard.apply(values)
+
+
 def _rht_reconstruct_differentiable(
     inner_weight,
     SU,
@@ -30,6 +63,7 @@ def _rht_reconstruct_differentiable(
     *,
     input_hadamard=True,
     output_hadamard=True,
+    fast_hadamard=False,
 ):
     """Unchecked differentiable form of ``rht_reconstruct_weight``.
 
@@ -39,10 +73,15 @@ def _rht_reconstruct_differentiable(
     """
     work = inner_weight
     if input_hadamard:
-        work = matmul_hadU(work.transpose(0, 1), transpose=True).transpose(0, 1)
+        if not fast_hadamard:
+            work = matmul_hadU(work.transpose(0, 1), transpose=True).transpose(0, 1)
+        else:
+            work = _training_hadamard(
+                work.transpose(0, 1), fast_hadamard,
+            ).transpose(0, 1)
     work = work * SU.to(work.dtype).unsqueeze(1)
     if output_hadamard:
-        work = matmul_hadU(work)
+        work = _training_hadamard(work, fast_hadamard)
     work = work * SV.to(work.dtype).unsqueeze(0)
     return work.transpose(0, 1).contiguous()
 
@@ -78,6 +117,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         logits_dtype=torch.float32,
         input_hadamard=True,
         output_hadamard=True,
+        fast_hadamard=True,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -130,6 +170,26 @@ class GSQP32TrainingModule(torch.nn.Module):
         self.out_features = out_features
         self.input_hadamard = input_hadamard
         self.output_hadamard = output_hadamard
+        fast_widths = {
+            width
+            for enabled, width in (
+                (input_hadamard, in_features),
+                (output_hadamard, out_features),
+            )
+            if enabled
+        }
+        fast_compatible = (
+            candidates.device.type == "cuda"
+            and baseline_tiles.dtype == torch.float32
+            and all(width >= 8 and width <= 32768 and not width & (width - 1)
+                    for width in fast_widths)
+        )
+        self.fast_hadamard = bool(
+            fast_hadamard and fast_compatible and hadamard_available()
+        )
+        self.training_hadamard_backend = (
+            "fused_cuda_exact" if self.fast_hadamard else "eager"
+        )
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
         self.register_buffer("candidates", candidates.detach().clone().contiguous())
         self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
@@ -185,6 +245,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             self.scales,
             input_hadamard=self.input_hadamard,
             output_hadamard=self.output_hadamard,
+            fast_hadamard=self.fast_hadamard,
         )
 
     @torch.no_grad()
@@ -239,6 +300,7 @@ def p32_training_module_from_payload(
     output_metric=None,
     input_hadamard=True,
     output_hadamard=True,
+    fast_hadamard=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -257,6 +319,7 @@ def p32_training_module_from_payload(
         output_metric=output_metric,
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
+        fast_hadamard=fast_hadamard,
     )
 
 
@@ -274,6 +337,7 @@ def p32_training_module_from_words(
     output_metric=None,
     input_hadamard=True,
     output_hadamard=True,
+    fast_hadamard=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -335,6 +399,7 @@ def p32_training_module_from_words(
         seed=seed,
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
+        fast_hadamard=fast_hadamard,
     )
 
 

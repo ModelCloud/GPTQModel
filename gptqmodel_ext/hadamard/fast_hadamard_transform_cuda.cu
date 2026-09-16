@@ -231,6 +231,53 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     store_output<kNChunks, kNElts, input_t>(out, x_vals, params.dim, params.scale);
 }
 
+template<typename input_t>
+__global__ __launch_bounds__(256)
+void fast_hadamard_transform_reverse_kernel(HadamardParamsBase params) {
+    extern __shared__ float values[];
+    input_t *x = reinterpret_cast<input_t *>(params.x_ptr)
+        + blockIdx.x * params.x_batch_stride;
+    input_t *out = reinterpret_cast<input_t *>(params.out_ptr)
+        + blockIdx.x * params.out_batch_stride;
+
+    // Autograd applies the normalization before traversing the eager
+    // butterfly stages in reverse. Materializing the scaled values in shared
+    // memory preserves that FP32 rounding boundary.
+    for (int index = threadIdx.x; index < params.dim; index += blockDim.x) {
+        values[index] = float(x[index]) * params.scale;
+    }
+    __syncthreads();
+
+    for (int stride = params.dim >> 1; stride >= 1; stride >>= 1) {
+        for (int pair = threadIdx.x; pair < params.dim / 2; pair += blockDim.x) {
+            const int low = pair & (stride - 1);
+            const int index = (pair - low) * 2 + low;
+            const float a = values[index];
+            const float b = values[index + stride];
+            values[index] = a + b;
+            values[index + stride] = a - b;
+        }
+        __syncthreads();
+    }
+
+    for (int index = threadIdx.x; index < params.dim; index += blockDim.x) {
+        out[index] = input_t(values[index]);
+    }
+}
+
+template<typename input_t>
+void fast_hadamard_transform_reverse_cuda(HadamardParamsBase &params, cudaStream_t stream) {
+    constexpr int kThreads = 256;
+    const int shared_bytes = params.dim * sizeof(float);
+    auto kernel = &fast_hadamard_transform_reverse_kernel<input_t>;
+    if (shared_bytes >= 48 * 1024) {
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
+    }
+    kernel<<<params.batch, kThreads, shared_bytes, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template<int kNThreads, int kLogN, typename input_t>
 void fast_hadamard_transform_launch(HadamardParamsBase &params, cudaStream_t stream) {
     using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
@@ -427,6 +474,10 @@ void fast_hadamard_transform_40N_cuda(HadamardParamsBase &params, cudaStream_t s
 template void fast_hadamard_transform_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
+
+template void fast_hadamard_transform_reverse_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_reverse_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_reverse_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
 
 template void fast_hadamard_transform_12N_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_12N_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);

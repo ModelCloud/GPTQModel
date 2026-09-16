@@ -47,6 +47,11 @@ def parse_args():
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--candidates", type=int, default=5)
     parser.add_argument("--seed", type=int, default=7)
+    parser.add_argument(
+        "--disable-fast-training-hadamard",
+        action="store_true",
+        help="Use the eager FP32 Hadamard oracle during GSQ optimization",
+    )
     parser.add_argument("--token-cache", type=Path)
     parser.add_argument("--state-output", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -127,6 +132,7 @@ def main():
     initial_words = {}
     initial_scales = {}
     candidate_seconds = 0.
+    training_hadamard_backends = set()
     for leaf in ("gate_proj", "up_proj", "down_proj"):
         short_name = f"mlp.{leaf}"
         full_name = f"{layer_prefix}.{short_name}"
@@ -148,6 +154,10 @@ def main():
             projection.weight.detach().float(),
             candidates=args.candidates,
             seed=args.seed,
+            fast_hadamard=not args.disable_fast_training_hadamard,
+        )
+        training_hadamard_backends.add(
+            quantizers[key].training_hadamard_backend
         )
         candidate_seconds += time.perf_counter() - started
 
@@ -216,6 +226,10 @@ def main():
                 teacher_weight,
                 candidates=args.candidates,
                 seed=args.seed + round_index + 1,
+                fast_hadamard=not args.disable_fast_training_hadamard,
+            )
+            training_hadamard_backends.add(
+                next_quantizers[name].training_hadamard_backend
             )
             candidate_seconds += time.perf_counter() - started
         quantizers = next_quantizers
@@ -258,6 +272,7 @@ def main():
         "rounds": args.rounds,
         "updates": args.rounds * args.epochs * args.train_samples,
         "candidates": args.candidates,
+        "training_hadamard_backends": sorted(training_hadamard_backends),
         "capture_seconds": capture_seconds,
         "candidate_seconds": candidate_seconds,
         "fit_seconds": fit_seconds,
