@@ -333,19 +333,40 @@ def stage_learning_rate(step, total_steps, *, base_lr, warmup_steps=0, min_lr=0.
 def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              assignment_lr=2e-4, scale_lr=1e-4, weight_decay=1., betas=(.9, .95),
                              temperature=(2., .5), multiplier=(10., 50.), warmup_steps=0,
-                             min_lr=0., decay='linear', optimizer='lion'):
-    """Train one stage and export final hard weights, without a surrogate guard.
+                             min_lr=0., decay='linear', optimizer='lion',
+                             validation_batches=None, restore_best=False):
+    """Train one stage and export final hard weights with an optional held-out guard.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
-    owns capture, teacher state, stage ordering and held-out evaluation. Epochs
-    shuffle whole batches, as in the author trainer, using private RNG state.
+    owns capture, teacher state and stage ordering. When validation batches are
+    supplied, hard checkpoints are selected only on that disjoint objective.
+    Epochs shuffle whole batches, as in the author trainer, using private RNG.
     """
     if not quantizers or not batches or isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
         raise ValueError('GSQ stage fitting requires quantizers, batches and positive epochs')
+    if restore_best and not validation_batches:
+        raise ValueError('GSQ restore_best requires nonempty held-out validation batches')
     import time
 
     started = time.perf_counter()
     hard_loss_before = evaluate_hard_stage(quantizers, batches, objective)
+    validation_hard_loss_before = (
+        evaluate_hard_stage(quantizers, validation_batches, objective)
+        if validation_batches else None
+    )
+
+    def parameter_snapshot():
+        return {
+            quantizer_name: {
+                parameter_name: parameter.detach().clone()
+                for parameter_name, parameter in quantizer.named_parameters()
+            }
+            for quantizer_name, quantizer in quantizers.items()
+        }
+
+    best_validation_loss = validation_hard_loss_before
+    best_epoch = -1
+    best_parameters = parameter_snapshot() if restore_best else None
     groups = []
     for quantizer in quantizers.values():
         groups.extend(quantizer.optimizer_groups(assignment_lr=assignment_lr, scale_lr=scale_lr,
@@ -360,6 +381,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     shuffle_rng = torch.Generator().manual_seed(seed)
     total_steps = epochs*len(batches)
     history = []
+    validation_history = []
     progress_at = time.monotonic()+60
     for epoch in range(epochs):
         for index in torch.randperm(len(batches), generator=shuffle_rng).tolist():
@@ -377,11 +399,34 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 progress_at = time.monotonic()+60
             history.append(dict(epoch=epoch, step=step, batch=index, loss=loss, temperature=tau,
                                 multiplier=kappa, learning_rates=[group['lr'] for group in optimizer.param_groups]))
+        if validation_batches:
+            validation_loss = evaluate_hard_stage(quantizers, validation_batches, objective)
+            validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
+            if validation_loss < best_validation_loss:
+                best_validation_loss = validation_loss
+                best_epoch = epoch
+                if restore_best:
+                    best_parameters = parameter_snapshot()
+    if restore_best:
+        with torch.no_grad():
+            for quantizer_name, quantizer in quantizers.items():
+                parameters = dict(quantizer.named_parameters())
+                for parameter_name, value in best_parameters[quantizer_name].items():
+                    parameters[parameter_name].copy_(value)
     result = dict(weights={name: quantizer.hard_weight().detach().clone() for name, quantizer in quantizers.items()},
                   scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
                   history=history, hard_loss_before=hard_loss_before)
     result['hard_loss_after'] = evaluate_hard_stage(quantizers, batches, objective)
     result['hard_loss_delta'] = result['hard_loss_after']-hard_loss_before
+    result['validation_history'] = validation_history
+    result['validation_hard_loss_before'] = validation_hard_loss_before
+    result['validation_hard_loss_after'] = (
+        evaluate_hard_stage(quantizers, validation_batches, objective)
+        if validation_batches else None
+    )
+    result['best_validation_hard_loss'] = best_validation_loss
+    result['best_validation_epoch'] = best_epoch
+    result['restored_best_validation_checkpoint'] = bool(restore_best)
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     result['elapsed_seconds'] = time.perf_counter()-started
