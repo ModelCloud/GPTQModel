@@ -94,6 +94,11 @@ def parse_args():
     parser.add_argument("--capture-directory", type=Path)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--allow-nondeterministic", action="store_true")
+    parser.add_argument(
+        "--disable-fast-training-hadamard",
+        action="store_true",
+        help="Use the eager FP32 Hadamard oracle during GSQ optimization",
+    )
     parser.add_argument("--token-cache", type=Path)
     parser.add_argument("--prefix-state", type=Path)
     parser.add_argument("--state-output", type=Path, required=True)
@@ -287,6 +292,8 @@ def main():
             out_features=projection.out_features,
         )
 
+    training_hadamard_backends = set()
+
     def new_quantizer(name, words=None, scales=None, round_index=0):
         nonlocal candidate_seconds
         trellis, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
@@ -295,12 +302,15 @@ def main():
             quantizer = p32_training_module_from_payload(
                 trellis, SU, initial_scales[name], bank_ids, bank_alt_id, teacher_weight,
                 candidates=args.candidates, seed=args.seed + round_index,
+                fast_hadamard=not args.disable_fast_training_hadamard,
             )
         else:
             quantizer = p32_training_module_from_words(
                 words, SU, scales, bank_ids, bank_alt_id, teacher_weight,
                 candidates=args.candidates, seed=args.seed + round_index,
+                fast_hadamard=not args.disable_fast_training_hadamard,
             )
+        training_hadamard_backends.add(quantizer.training_hadamard_backend)
         candidate_seconds += time.perf_counter() - started
         return quantizer
 
@@ -526,6 +536,7 @@ def main():
         "candidates": args.candidates,
         "batch_size": args.batch_size,
         "microbatch_size": args.microbatch_size,
+        "training_hadamard_backends": sorted(training_hadamard_backends),
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "offload_capture": args.offload_capture,
