@@ -1,0 +1,30 @@
+{
+  "bits": 3,
+  "format": "qvq_v2b2_p32",
+  "bank_count": 2,
+  "rounding": "yaqa",
+  "yaqa": {
+    "seed": 0,
+    "regularization": 0.02,
+    "minimum_sequences": 10178,
+    "batch_size": 1,
+    "sequence_sort": "desc",
+    "activation_checkpointing": true,
+    "v2b2_family_mode": "reselect",
+    "sample_strategy": "full"
+  },
+  "gsq": {
+    "enabled": true,
+    "steps": 100,
+    "candidates": 33,
+    "seed": 7,
+    "learning_rate": 0.1,
+    "temperature_start": 1.0,
+    "temperature_end": 0.1,
+    "max_candidate_bytes": 4294967296,
+    "learn_scales": false,
+    "modules": null
+  },
+  "device": "cuda:0",
+  "offload_to_disk": false
+}

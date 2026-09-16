@@ -8745,6 +8745,7 @@ def quantize_qvq_linear(
                 "changed_tiles": changed_tiles, "steps": gsq.steps, "candidates": gsq.candidates,
                 "seed": gsq.seed,
                 "layout": adapter.layout,
+                "optimizer": refined.diagnostics,
             }
             if telemetry is not None:
                 telemetry.count("gsq_steps", gsq.steps)

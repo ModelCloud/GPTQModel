@@ -7,21 +7,34 @@ QVQ optionally uses the prepared YAQA Fisher metric before final packing.
 """
 
 import math
-from dataclasses import dataclass
-from typing import Callable
+from collections.abc import Callable
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 
 import torch
 
 from .qvq import (
+    QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
     decode_p32_window_tiles,
     decode_trellis_tiles,
     pack_trellis_states,
+    planar_pack_rows,
     repack_p32_planar_to_window,
     unpack_p32_window_states,
+    unpack_qvq_binary_bank_ids,
     unpack_trellis_states,
 )
-from .qvq_codecs import PGC16_CODEBOOK_VERSION
+from .qvq_codecs import (
+    PGC16_CODEBOOK_VERSION,
+    pgc16_decode_states_v2_banked,
+    pgc16_levels_for_version,
+)
 from .qvq_rates import normalize_qvq_rate
+
+
+def _nvtx_range(name: str, tensor: torch.Tensor):
+    return torch.cuda.nvtx.range(name) if tensor.device.type == "cuda" else nullcontext()
 
 
 @dataclass
@@ -31,6 +44,7 @@ class GSQResult:
     calibration_before: float | None
     calibration_after: float | None
     history: list[float]
+    diagnostics: dict = field(default_factory=dict)
 
     @property
     def window_words(self):
@@ -75,14 +89,15 @@ class TrellisCandidateAdapter:
         return tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n).contiguous()
 
 
-def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temperature: float) -> torch.Tensor:
-    """GSQ's softmax((kappa * logits + Gumbel(0,1)) / tau), with kappa=1.
+def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temperature: float,
+                             kappa: float = 1.0) -> torch.Tensor:
+    """GSQ's softmax((kappa * logits + Gumbel(0,1)) / tau).
 
     The caller supplies fixed noise for gradient checks and a private RNG for
     fitting. Clamp the uniform endpoints before this function, not the logits.
     """
     gumbel = -(-uniform.log()).log()
-    return ((logits + gumbel) / temperature).softmax(-1)
+    return ((kappa * logits + gumbel) / temperature).softmax(-1)
 
 
 def refine_trellis_candidates(
@@ -98,9 +113,23 @@ def refine_trellis_candidates(
     layout: str = "p32_window",
     codebook_version: str = PGC16_CODEBOOK_VERSION,
     steps: int = 100,
-    learning_rate: float = 0.1,
-    temperature_start: float = 1.0,
-    temperature_end: float = 0.1,
+    learning_rate: float = 1e-4,
+    temperature_start: float = 2.0,
+    temperature_end: float = 0.05,
+    kappa_start: float = 100.0,
+    kappa_end: float = 500.0,
+    weight_decay: float = 1.0,
+    gumbel_samples: int = 1,
+    soft_dtype: str = "float32",
+    coordinate_sweeps: int = 1,
+    coordinate_chunk_tiles: int = 1024,
+    hard_eval_interval: int = 10,
+    relaxation_patience: int = 10,
+    decoded_candidates: torch.Tensor | None = None,
+    sparse_candidate_indices: torch.Tensor | None = None,
+    sparse_candidate_deltas: torch.Tensor | None = None,
+    input_metric: torch.Tensor | None = None,
+    output_metric: torch.Tensor | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
 ) -> GSQResult:
@@ -148,19 +177,92 @@ def refine_trellis_candidates(
         right_factor = right_factor.detach().float()
     if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0:
         raise ValueError("steps must be a nonnegative integer")
-    if any(not math.isfinite(v) or v <= 0 for v in (learning_rate, temperature_start, temperature_end)):
-        raise ValueError("learning rate and temperatures must be finite and positive")
-    decoded = torch.stack([
-        adapter.decode(c, bank_ids, bank_alt_id) for c in candidates
-    ]).detach().transpose(0, 1).contiguous()  # [tile, choice, 256]
+    if any(not math.isfinite(v) or v <= 0 for v in
+           (learning_rate, temperature_start, temperature_end, kappa_start, kappa_end)):
+        raise ValueError("learning rate, temperatures and kappa values must be finite and positive")
+    if not math.isfinite(weight_decay) or weight_decay < 0:
+        raise ValueError("weight_decay must be finite and nonnegative")
+    if soft_dtype not in ("float32", "bfloat16"):
+        raise ValueError("soft_dtype must be 'float32' or 'bfloat16'")
+    for name, value, minimum in (("gumbel_samples", gumbel_samples, 1),
+                                 ("coordinate_sweeps", coordinate_sweeps, 0),
+                                 ("coordinate_chunk_tiles", coordinate_chunk_tiles, 1),
+                                 ("hard_eval_interval", hard_eval_interval, 1),
+                                 ("relaxation_patience", relaxation_patience, 0)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"{name} must be an integer >= {minimum}")
+    with _nvtx_range("gsq.decode_candidate_bank", candidates):
+        if decoded_candidates is None:
+            decoded = torch.stack([
+                adapter.decode(c, bank_ids, bank_alt_id) for c in candidates
+            ]).detach().transpose(0, 1).contiguous()  # [tile, choice, 256]
+        else:
+            expected = (candidates.shape[0], candidates.shape[1], 16, 16)
+            if decoded_candidates.shape != expected or decoded_candidates.device != candidates.device:
+                raise ValueError(f"decoded_candidates must have shape {expected} on the candidate device")
+            decoded = decoded_candidates.detach().reshape(*expected[:2], 256).transpose(0, 1).contiguous()
+    sparse_relaxation = sparse_candidate_indices is not None or sparse_candidate_deltas is not None
+    if sparse_relaxation:
+        expected_prefix = (candidates.shape[0] - 1, candidates.shape[1])
+        if (sparse_candidate_indices is None or sparse_candidate_deltas is None
+                or sparse_candidate_indices.shape != sparse_candidate_deltas.shape
+                or sparse_candidate_indices.shape[:2] != expected_prefix
+                or sparse_candidate_indices.device != candidates.device
+                or sparse_candidate_deltas.device != candidates.device
+                or sparse_candidate_indices.dtype != torch.int64
+                or sparse_candidate_indices.ndim != 3):
+            raise ValueError(
+                "sparse candidate indices/deltas must match int64/float [choices-1,tiles,width] tensors"
+            )
+        if not sparse_candidate_deltas.is_floating_point():
+            raise ValueError("sparse candidate deltas must be floating point")
+        if bool(((sparse_candidate_indices < 0) | (sparse_candidate_indices >= 256)).any()):
+            raise ValueError("sparse candidate indices must be in [0,256)")
+    fisher_objective = input_metric is not None and output_metric is not None
     x = inputs.detach().float()
-    teacher = x @ target.detach().float()
-    if right_factor is not None:
-        teacher = teacher @ right_factor
-    normalizer = teacher.square().mean().clamp_min(torch.finfo(torch.float32).tiny)
+    if fisher_objective:
+        h_metric = input_metric.detach().float()
+        g_metric = output_metric.detach().float()
+        if h_metric.shape != (k, k) or g_metric.shape != (n, n):
+            raise ValueError("input_metric and output_metric must match the Fisher objective dimensions")
+        target_metric = h_metric @ target.detach().float() @ g_metric
+        fisher_denominator = (target.detach().float() * target_metric).sum().clamp_min(
+            torch.finfo(torch.float32).tiny
+        )
+        relaxation_dtype = (
+            torch.bfloat16 if soft_dtype == "bfloat16" and candidates.device.type == "cuda"
+            else torch.float32
+        )
+        h_relax = h_metric.to(relaxation_dtype)
+        g_relax = g_metric.to(relaxation_dtype)
+        target_relax = target.detach().to(relaxation_dtype)
+        if sparse_relaxation:
+            # Candidate zero plus a tiny per-choice delta is sufficient for
+            # P32 local-path relaxation. W3 has six changed values per choice,
+            # versus reading all 256 values in the dense candidate bank.
+            decoded_relax = None
+            baseline_relax = decoded[:, 0].to(relaxation_dtype)
+            sparse_indices_by_tile = sparse_candidate_indices.permute(1, 0, 2).contiguous()
+            sparse_deltas_by_tile = sparse_candidate_deltas.permute(1, 0, 2).to(
+                relaxation_dtype).contiguous()
+            sparse_indices_flat = sparse_indices_by_tile.flatten(1)
+        else:
+            decoded_relax = decoded.to(relaxation_dtype)
+    else:
+        teacher = x @ target.detach().float()
+        if right_factor is not None:
+            teacher = teacher @ right_factor
+        normalizer = teacher.square().mean().clamp_min(torch.finfo(torch.float32).tiny)
+
+    def tiles_to_weight(tiles):
+        return tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n)
 
     def loss(tiles):
-        weight = tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n)
+        weight = tiles_to_weight(tiles)
+        if fisher_objective:
+            error = weight - target
+            metric_error = h_metric @ error @ g_metric
+            return (error * metric_error).sum() / fisher_denominator
         prediction = x @ weight
         if right_factor is not None:
             prediction = prediction @ right_factor
@@ -173,34 +275,355 @@ def refine_trellis_candidates(
         raise ValueError("non-finite calibration objective")
     best = before
     history = [before]
-    logits = torch.zeros(decoded.shape[:2], device=candidates.device, requires_grad=True)
+    coordinate_before = coordinate_after = before
+    coordinate_changed = 0
+    if coordinate_sweeps:
+        # Start the continuous relaxation from an on-manifold assignment that
+        # is already no worse than candidate zero.  This is also the matched
+        # hard control used to measure the relaxation gap.
+        with _nvtx_range("gsq.coordinate_initializer", candidates):
+            coordinate_right = right_factor
+            if not fisher_objective and coordinate_right is None:
+                coordinate_right = torch.eye(n, device=target.device, dtype=target.dtype)
+            coordinate = batched_trellis_candidates(
+                candidates, target=target, inputs=inputs,
+                right_factor=coordinate_right, bits=bits, layout=layout,
+                bank_ids=bank_ids, bank_alt_id=bank_alt_id, codebook_version=codebook_version,
+                sweeps=coordinate_sweeps, chunk_tiles=coordinate_chunk_tiles,
+                decoded_candidates=decoded.transpose(0, 1).reshape(candidates.shape[0], -1, 16, 16),
+                input_metric=input_metric, output_metric=output_metric,
+            )
+        coordinate_before, coordinate_after = coordinate.calibration_before, coordinate.calibration_after
+        coordinate_changed = int((coordinate.choices != 0).sum())
+        history.extend(coordinate.history[1:])
+        if coordinate.calibration_after < best:
+            best, best_choices = coordinate.calibration_after, coordinate.choices.clone()
+    fused_sparse_relaxation = (
+        fisher_objective and sparse_relaxation and candidates.device.type == "cuda"
+        and gumbel_samples == 1
+    )
+    logits = torch.zeros(
+        decoded.shape[:2], device=candidates.device,
+        requires_grad=not fused_sparse_relaxation,
+    )
+    # A 1/kappa prior makes the hard assignment unambiguous while keeping the
+    # initial effective margin at one, instead of the old saturated +2*kappa.
     with torch.no_grad():
-        logits[:, 0] = 2.0
-    optimizer = torch.optim.Adam([logits], lr=learning_rate)
+        logits[tile_ids, best_choices] = 1.0 / kappa_start
+    if fused_sparse_relaxation:
+        from .qvq_gsq_triton import gumbel_softmax as fused_gumbel_softmax
+        from .qvq_gsq_triton import build_compact_position_map
+        from .qvq_gsq_triton import compact_position_error
+        from .qvq_gsq_triton import scheduled_grouped_gumbel_softmax
+        from .qvq_gsq_triton import scheduled_grouped_sparse_lion
+        from .qvq_gsq_triton import sparse_error as fused_sparse_error
+        from .qvq_gsq_triton import sparse_lion as fused_sparse_lion
+        probabilities_buffer = torch.empty_like(logits)
+        error_accumulation_buffer = torch.empty_like(target_relax, dtype=torch.float32)
+        error_buffer = torch.empty_like(target_relax)
+        metric_left_buffer = torch.empty_like(target_relax)
+        metric_error_buffer = torch.empty_like(target_relax)
+        momentum = torch.zeros_like(logits)
+        gradient_norm_square = torch.zeros((), device=candidates.device)
+        graph_chunk_steps = min(64, max(steps, 1))
+        uniform_chunk = torch.empty(
+            (graph_chunk_steps, *logits.shape), device=logits.device,
+        )
+        temperature_schedule = torch.tensor([
+            temperature_start + (temperature_end - temperature_start)
+            * step / max(steps - 1, 1) for step in range(steps)
+        ], device=logits.device)
+        kappa_schedule = torch.tensor([
+            kappa_start + (kappa_end - kappa_start)
+            * step / max(steps - 1, 1) for step in range(steps)
+        ], device=logits.device)
+        graph_step = torch.zeros((), dtype=torch.int32, device=logits.device)
+        position_indices, position_choices, position_deltas = build_compact_position_map(
+            sparse_indices_by_tile, sparse_deltas_by_tile,
+        )
+        packed_sparse_indices_by_tile = sparse_indices_by_tile.to(torch.uint8)
+    else:
+        from .gsq_training import GSQLion
+        optimizer = GSQLion([logits], lr=learning_rate, weight_decay=weight_decay)
     generator = torch.Generator(device=candidates.device).manual_seed(seed)
-    with torch.enable_grad():
+    gradient_norm_min = torch.full((), math.inf, device=candidates.device)
+    gradient_norm_max = torch.zeros((), device=candidates.device)
+    finite_state = torch.ones((), dtype=torch.bool, device=candidates.device)
+    relaxed_objective_last = None
+    initial_entropy = initial_max_probability = None
+    final_entropy = final_max_probability = None
+    initializer_best = best
+    initializer_choices = best_choices.clone()
+    relaxation_improved_initializer = False
+    stale_steps = 0
+    hard_evaluations = 0
+    completed_steps = 0
+    relaxation_graph = None
+    if fused_sparse_relaxation and steps:
+        # CUDA graph capture needs every kernel/module loaded first. Warm the
+        # exact scheduled path on scratch state, then capture one update. The
+        # graph reads its schedule and uniform slice from the GPU step counter,
+        # so one graph is valid for all 640 paper-schedule updates.
+        warm_logits = logits.detach().clone()
+        warm_probabilities = torch.empty_like(probabilities_buffer)
+        warm_error = torch.empty_like(error_buffer)
+        warm_metric_left = torch.empty_like(metric_left_buffer)
+        warm_metric_error = torch.empty_like(metric_error_buffer)
+        warm_momentum = torch.zeros_like(momentum)
+        warm_norm_square = torch.zeros_like(gradient_norm_square)
+        warm_norm_minimum = torch.full_like(gradient_norm_min, math.inf)
+        warm_norm_maximum = torch.zeros_like(gradient_norm_max)
+        warm_finite = torch.ones_like(finite_state)
+        warm_step = torch.zeros_like(graph_step)
+        uniform_chunk.uniform_(generator=generator)
+        scheduled_grouped_gumbel_softmax(
+            warm_logits, uniform_chunk, warm_probabilities,
+            temperature_schedule, kappa_schedule, warm_step,
+        )
+        compact_position_error(
+            warm_probabilities, baseline_relax, position_indices, position_choices,
+            position_deltas, target_relax, warm_error,
+        )
+        torch.mm(h_relax, warm_error, out=warm_metric_left)
+        torch.mm(warm_metric_left, g_relax, out=warm_metric_error)
+        scheduled_grouped_sparse_lion(
+            warm_probabilities, warm_metric_error, packed_sparse_indices_by_tile,
+            sparse_deltas_by_tile, fisher_denominator, warm_logits,
+            warm_momentum, warm_norm_square, warm_norm_minimum,
+            warm_norm_maximum, warm_finite, temperature_schedule,
+            kappa_schedule, warm_step, learning_rate, weight_decay,
+        )
+        torch.cuda.synchronize()
+        generator.manual_seed(seed)
+        relaxation_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(relaxation_graph):
+            scheduled_grouped_gumbel_softmax(
+                logits, uniform_chunk, probabilities_buffer,
+                temperature_schedule, kappa_schedule, graph_step,
+            )
+            compact_position_error(
+                probabilities_buffer, baseline_relax, position_indices, position_choices,
+                position_deltas, target_relax, error_buffer,
+            )
+            torch.mm(h_relax, error_buffer, out=metric_left_buffer)
+            torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+            scheduled_grouped_sparse_lion(
+                probabilities_buffer, metric_error_buffer,
+                packed_sparse_indices_by_tile, sparse_deltas_by_tile,
+                fisher_denominator, logits, momentum, gradient_norm_square,
+                gradient_norm_min, gradient_norm_max, finite_state,
+                temperature_schedule, kappa_schedule, graph_step,
+                learning_rate, weight_decay,
+            )
+        with torch.no_grad():
+            logits.zero_()
+            logits[tile_ids, best_choices] = 1.0 / kappa_start
+            momentum.zero_()
+            gradient_norm_square.zero_()
+            gradient_norm_min.fill_(math.inf)
+            gradient_norm_max.zero_()
+            finite_state.fill_(True)
+            graph_step.zero_()
+        torch.cuda.synchronize()
+        generator.manual_seed(seed)
+    with torch.enable_grad(), _nvtx_range("gsq.lion_relaxation", candidates):
         for step in range(steps):
-            tau = temperature_start * (temperature_end / temperature_start) ** (step / max(steps - 1, 1))
-            uniform = torch.rand(logits.shape, device=logits.device, generator=generator).clamp_(1e-6, 1 - 1e-6)
-            probabilities = _candidate_probabilities(logits, uniform, tau)
-            objective = loss((probabilities.unsqueeze(-1) * decoded).sum(1))
-            if not torch.isfinite(objective):
-                raise ValueError("non-finite relaxed objective")
-            optimizer.zero_grad()
-            objective.backward()
-            optimizer.step()
+            fraction = step / max(steps - 1, 1)
+            tau = temperature_start + (temperature_end - temperature_start) * fraction
+            kappa = kappa_start + (kappa_end - kappa_start) * fraction
+            evaluate_hard = (step + 1) % hard_eval_interval == 0 or step + 1 == steps
+            if fused_sparse_relaxation:
+                if relaxation_graph is not None:
+                    if step % graph_chunk_steps == 0:
+                        uniform_chunk.uniform_(generator=generator)
+                    relaxation_graph.replay()
+                else:
+                    uniform = torch.rand(logits.shape, device=logits.device, generator=generator).clamp_(1e-6, 1 - 1e-6)
+                    fused_gumbel_softmax(logits, uniform, probabilities_buffer, tau, kappa)
+                    fused_sparse_error(
+                        probabilities_buffer, baseline_relax, sparse_indices_by_tile,
+                        sparse_deltas_by_tile, target_relax, error_accumulation_buffer,
+                    )
+                    error_buffer.copy_(error_accumulation_buffer)
+                    torch.mm(h_relax, error_buffer, out=metric_left_buffer)
+                    torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+                objective = None
+                if evaluate_hard:
+                    objective_error = (
+                        error_buffer.float() if relaxation_graph is not None
+                        else error_accumulation_buffer
+                    )
+                    objective = (
+                        objective_error * metric_error_buffer.float()
+                    ).sum() / fisher_denominator
+                    finite_state &= torch.isfinite(objective)
+                    relaxed_objective_last = objective.detach()
+                if relaxation_graph is None:
+                    fused_sparse_lion(
+                        probabilities_buffer, metric_error_buffer,
+                        sparse_indices_by_tile, sparse_deltas_by_tile,
+                        fisher_denominator, logits, momentum, gradient_norm_square,
+                        gradient_norm_min, gradient_norm_max, finite_state,
+                        tau, kappa, learning_rate, weight_decay,
+                    )
+                probability_stats = probabilities_buffer
+            else:
+                objectives = []
+                probability_stats = None
+                gradient_surrogates = []
+                for _ in range(gumbel_samples):
+                    uniform = torch.rand(logits.shape, device=logits.device, generator=generator).clamp_(1e-6, 1 - 1e-6)
+                    probabilities = _candidate_probabilities(logits, uniform, tau, kappa)
+                    if fisher_objective:
+                        # Evaluate the exact Kronecker Fisher objective with two
+                        # GEMMs, then inject its analytic dL/dp through softmax.
+                        # This avoids retaining and backpropagating through the
+                        # huge KxK and NxN GEMM graph.
+                        with torch.no_grad():
+                            if sparse_relaxation:
+                                # Local P32 candidates share candidate zero at
+                                # all but a handful of scalar positions.
+                                weighted_deltas = (
+                                    probabilities.detach()[:, 1:].to(relaxation_dtype).unsqueeze(-1)
+                                    * sparse_deltas_by_tile
+                                )
+                                soft_tiles = baseline_relax.clone()
+                                soft_tiles.scatter_add_(
+                                    1, sparse_indices_flat, weighted_deltas.flatten(1),
+                                )
+                            else:
+                                # Batched 1xC @ Cx256 avoids materializing a
+                                # [tile,candidate,256] product (2.2 GiB here).
+                                soft_tiles = torch.bmm(
+                                    probabilities.detach().to(relaxation_dtype).unsqueeze(1), decoded_relax,
+                                ).squeeze(1)
+                            soft_weight = tiles_to_weight(soft_tiles)
+                            error = soft_weight - target_relax
+                            metric_error = h_relax @ error @ g_relax
+                        # This scalar is diagnostic only: the exact analytic
+                        # gradient below already consumes H E G. Reducing two
+                        # full KxN FP32 tensors every update needlessly costs
+                        # more than the sparse relaxation itself, so sample it
+                        # at the same authoritative hard checkpoints.
+                            if evaluate_hard:
+                                soft_objective = (
+                                    error.float() * metric_error.float()
+                                ).sum() / fisher_denominator
+                            weight_gradient = 2 * metric_error.float() / fisher_denominator
+                            tile_gradient = (
+                                weight_gradient.reshape(k // 16, 16, n // 16, 16)
+                                .permute(0, 2, 1, 3).reshape(-1, 256)
+                            )
+                            if sparse_relaxation:
+                                changed_gradient = tile_gradient.to(relaxation_dtype).gather(
+                                    1, sparse_indices_flat,
+                                ).reshape_as(sparse_deltas_by_tile)
+                                alternative_gradient = (
+                                    changed_gradient * sparse_deltas_by_tile
+                                ).sum(-1).float()
+                            # The baseline dot-product is common to every
+                            # choice and cancels exactly in the softmax
+                            # Jacobian, so candidate zero can be represented
+                            # by zero here.
+                                probability_gradient = torch.nn.functional.pad(
+                                    alternative_gradient, (1, 0), value=0,
+                                )
+                            else:
+                                probability_gradient = torch.bmm(
+                                    decoded_relax, tile_gradient.to(relaxation_dtype).unsqueeze(-1),
+                                ).squeeze(-1).float()
+                        if evaluate_hard:
+                            objectives.append(soft_objective)
+                        gradient_surrogates.append((probabilities * probability_gradient).sum())
+                    else:
+                        value = loss((probabilities.unsqueeze(-1) * decoded).sum(1))
+                        objectives.append(value)
+                        gradient_surrogates.append(value)
+                    probability_stats = probabilities if probability_stats is None else probability_stats + probabilities
+                objective = torch.stack(objectives).mean() if objectives else None
+                optimizer.zero_grad()
+                torch.stack(gradient_surrogates).mean().backward()
+                gradient_norm = logits.grad.norm()
+                finite_state &= torch.isfinite(gradient_norm)
+                if objective is not None:
+                    finite_state &= torch.isfinite(objective)
+                gradient_norm_min = torch.minimum(gradient_norm_min, gradient_norm.detach())
+                gradient_norm_max = torch.maximum(gradient_norm_max, gradient_norm.detach())
+                if objective is not None:
+                    relaxed_objective_last = objective.detach()
+                optimizer.step()
+            completed_steps = step + 1
             with torch.no_grad():
-                choices = logits.argmax(-1)
-                hard_loss = float(loss(decoded[tile_ids, choices]))
-                if not math.isfinite(hard_loss):
-                    raise ValueError("non-finite hard objective")
-                history.append(hard_loss)
-                if hard_loss < best:
-                    best, best_choices = hard_loss, choices.clone()
+                mean_probability = probability_stats / gumbel_samples
+                if step == 0 or evaluate_hard:
+                    entropy_value = (
+                        -(mean_probability.clamp_min(1e-20).log() * mean_probability).sum(-1)
+                    ).mean()
+                    max_probability_value = mean_probability.max(-1).values.mean()
+                    if initial_entropy is None:
+                        initial_entropy = entropy_value
+                        initial_max_probability = max_probability_value
+                    final_entropy = entropy_value
+                    final_max_probability = max_probability_value
+                if evaluate_hard:
+                    hard_evaluations += 1
+                    if not bool(finite_state):
+                        raise ValueError("non-finite GSQ relaxed objective or logit gradient")
+                    choices = logits.argmax(-1)
+                    hard_loss = float(loss(decoded[tile_ids, choices]))
+                    if not math.isfinite(hard_loss):
+                        raise ValueError("non-finite hard objective")
+                    history.append(hard_loss)
+                    if hard_loss < best:
+                        best, best_choices = hard_loss, choices.clone()
+                        relaxation_improved_initializer = True
+                        stale_steps = 0
+                    else:
+                        stale_steps += 1
                 if progress is not None:
                     progress(step + 1, best)
+                if evaluate_hard and relaxation_patience and stale_steps >= relaxation_patience:
+                    break
     words = candidates[best_choices, tile_ids].detach().clone().contiguous()
-    return GSQResult(words, best_choices, before, best, history)
+    diagnostics = {
+        "optimizer": "lion", "weight_decay": weight_decay,
+        "temperature_start": temperature_start, "temperature_end": temperature_end,
+        "kappa_start": kappa_start, "kappa_end": kappa_end,
+        "gumbel_samples": gumbel_samples,
+        "soft_dtype": str(relaxation_dtype).removeprefix("torch.") if fisher_objective else "float32",
+        "requested_steps": steps,
+        "completed_steps": completed_steps,
+        "hard_eval_interval": hard_eval_interval,
+        "hard_evaluations": hard_evaluations,
+        "relaxation_patience": relaxation_patience,
+        "optimization_regime": "exact_full_fisher" if fisher_objective else "activation_reconstruction",
+        "sparse_relaxation": sparse_relaxation,
+        "fused_sparse_relaxation": fused_sparse_relaxation,
+        "cuda_graph_relaxation": relaxation_graph is not None,
+        "sparse_width": int(sparse_candidate_indices.shape[2]) if sparse_relaxation else None,
+        "sparse_accumulation_dtype": "float32" if fused_sparse_relaxation else None,
+        "sparse_index_dtype": "uint8" if fused_sparse_relaxation else None,
+        "compact_positions": int(position_indices.shape[1]) if fused_sparse_relaxation else None,
+        "updates_are_epochs": False,
+        "initial_entropy": None if initial_entropy is None else float(initial_entropy),
+        "final_entropy": None if final_entropy is None else float(final_entropy),
+        "initial_mean_max_probability": None if initial_max_probability is None else float(initial_max_probability),
+        "final_mean_max_probability": None if final_max_probability is None else float(final_max_probability),
+        "gradient_norm_min": None if not completed_steps else float(gradient_norm_min),
+        "gradient_norm_max": None if not completed_steps else float(gradient_norm_max),
+        "relaxed_objective_last": None if relaxed_objective_last is None else float(relaxed_objective_last),
+        "initializer_after": initializer_best,
+        "initializer_changed_tiles": int((initializer_choices != 0).sum()),
+        "relaxation_hard_after": best,
+        "relaxation_changed_tiles": int((best_choices != 0).sum()),
+        "relaxation_improved_initializer": relaxation_improved_initializer,
+        "coordinate_before": coordinate_before,
+        "coordinate_after": coordinate_after,
+        "coordinate_changed_tiles": coordinate_changed,
+        "selected_arm": "relaxation" if relaxation_improved_initializer else (
+            "coordinate" if coordinate_sweeps else "baseline"),
+    }
+    return GSQResult(words, best_choices, before, best, history, diagnostics)
 
 
 def baseline_bitflip_candidates(baseline, *, count, seed):
@@ -220,6 +643,409 @@ def baseline_bitflip_candidates(baseline, *, count, seed):
         bit = torch.randint(baseline.shape[1] * 32, (len(baseline),),
                             device=baseline.device, generator=generator)
         candidates[candidate, tiles, bit // 32] ^= (torch.ones_like(bit) << (bit % 32)).to(torch.int32)
+    return candidates
+
+
+def _transition_positions(tile_count, edge_count, group_count, *, device, generator):
+    """Generate distinct per-tile transition positions without a 128-way sort."""
+    offsets = torch.randint(edge_count, (tile_count,), device=device, generator=generator)
+    # P32 has 128 edges.  Every odd stride is coprime to 128, so this affine
+    # walk is a permutation and the first ``group_count`` positions are unique.
+    strides = 2 * torch.randint(edge_count // 2, (tile_count,), device=device, generator=generator) + 1
+    groups = torch.arange(group_count, device=device, dtype=torch.int64)
+    return (offsets[:, None] + strides[:, None] * groups[None, :]) % edge_count
+
+
+def _p32_shift_alternatives(baseline, positions, shifts, transition_bits):
+    """Edit one logical P32 edge per tile directly in continuous-window words."""
+    word_mask = (1 << 32) - 1
+    edge_mask = (1 << transition_bits) - 1
+    flat = baseline.reshape(len(baseline), -1).to(torch.int64) & word_mask
+    tile_ids = torch.arange(len(flat), device=flat.device)
+    bit_positions = (127 - positions.to(torch.int64)) * transition_bits
+    word_ids, offsets = bit_positions >> 5, bit_positions & 31
+    old = (flat[tile_ids, word_ids] >> offsets) & edge_mask
+    crosses = offsets + transition_bits > 32
+    crossing_tiles = tile_ids[crosses]
+    crossing_words = word_ids[crosses] + 1
+    old[crosses] |= (flat[crossing_tiles, crossing_words] << (32 - offsets[crosses])) & edge_mask
+
+    alternatives = flat.unsqueeze(0).repeat(len(shifts), 1, 1)
+    low_width = torch.minimum(torch.full_like(offsets, transition_bits), 32 - offsets)
+    low_mask = ((torch.ones_like(low_width) << low_width) - 1) << offsets
+    for shift_index, shift in enumerate(shifts):
+        new = (old + shift) & edge_mask
+        words = alternatives[shift_index, tile_ids, word_ids]
+        words = (words & (word_mask ^ low_mask)) | ((new << offsets) & word_mask)
+        alternatives[shift_index, tile_ids, word_ids] = words
+        high_width = offsets[crosses] + transition_bits - 32
+        high_mask = (torch.ones_like(high_width) << high_width) - 1
+        words = alternatives[shift_index, crossing_tiles, crossing_words]
+        words = (words & (word_mask ^ high_mask)) | ((new[crosses] >> (32 - offsets[crosses])) & high_mask)
+        alternatives[shift_index, crossing_tiles, crossing_words] = words
+    return alternatives.to(torch.int32).contiguous()
+
+
+def _p32_grouped_shift_alternatives(baseline, positions, shifts, transition_bits):
+    """Edit several independent P32 edges per tile in one batched dispatch.
+
+    ``positions`` is ``[tiles, groups]``.  The returned group-major tensor has
+    shape ``[groups, shifts, tiles, words]`` and is bit-identical to stacking
+    :func:`_p32_shift_alternatives` over the group dimension.  Keeping several
+    groups in one tensor amortizes P32 unpack/decode and Fisher-screen launch
+    overhead without changing the legal one-edge candidate definition.
+    """
+    if positions.ndim != 2 or positions.shape[0] != len(baseline):
+        raise ValueError("grouped P32 positions must have shape [tiles,groups]")
+    word_mask = (1 << 32) - 1
+    edge_mask = (1 << transition_bits) - 1
+    flat = baseline.reshape(len(baseline), -1).to(torch.int64) & word_mask
+    tile_count, group_count = positions.shape
+    shift_count = len(shifts)
+    bit_positions = (127 - positions.to(torch.int64)) * transition_bits
+    word_ids, offsets = bit_positions >> 5, bit_positions & 31
+    old = flat.gather(1, word_ids) >> offsets
+    crosses = offsets + transition_bits > 32
+    crossing_words = word_ids + 1
+    high_source = flat.gather(1, crossing_words.clamp_max(flat.shape[1] - 1))
+    old |= torch.where(crosses, high_source << (32 - offsets), torch.zeros_like(old))
+    old &= edge_mask
+
+    # [group,shift,tile,word].  Expand is allocation-free; clone materializes
+    # the output once instead of repeating the baseline separately per group.
+    alternatives = flat.T.mT[None, None].expand(
+        group_count, shift_count, tile_count, flat.shape[1]
+    ).clone()
+    group_word_ids = word_ids.T[:, None, :, None].expand(group_count, shift_count, tile_count, 1)
+    group_offsets = offsets.T[:, None, :]
+    group_crosses = crosses.T[:, None, :]
+    low_width = torch.minimum(torch.full_like(group_offsets, transition_bits), 32 - group_offsets)
+    low_mask = ((torch.ones_like(low_width) << low_width) - 1) << group_offsets
+    shifts_tensor = torch.as_tensor(shifts, device=flat.device, dtype=torch.int64)[None, :, None]
+    new = (old.T[:, None, :] + shifts_tensor) & edge_mask
+
+    words = alternatives.gather(3, group_word_ids).squeeze(3)
+    words = (words & (word_mask ^ low_mask)) | ((new << group_offsets) & word_mask)
+    alternatives.scatter_(3, group_word_ids, words.unsqueeze(3))
+
+    crossing_word_ids = crossing_words.T[:, None, :, None].expand_as(group_word_ids)
+    high_width = group_offsets + transition_bits - 32
+    high_mask = torch.where(
+        group_crosses,
+        (torch.ones_like(high_width) << high_width.clamp_min(0)) - 1,
+        torch.zeros_like(high_width),
+    )
+    words = alternatives.gather(3, crossing_word_ids.clamp_max(flat.shape[1] - 1)).squeeze(3)
+    high_values = (new >> (32 - group_offsets)) & high_mask
+    words = torch.where(group_crosses, (words & (word_mask ^ high_mask)) | high_values, words)
+    alternatives.scatter_(3, crossing_word_ids.clamp_max(flat.shape[1] - 1), words.unsqueeze(3))
+    return alternatives.to(torch.int32).contiguous()
+
+
+def _p32_selected_shift_alternatives(baseline, positions, selected_shifts, transition_bits):
+    """Edit one already-selected edge shift for each ``[tile,group]`` pair."""
+    if positions.ndim != 2 or positions.shape != selected_shifts.shape or positions.shape[0] != len(baseline):
+        raise ValueError("selected P32 positions and shifts must have shape [tiles,groups]")
+    word_mask = (1 << 32) - 1
+    edge_mask = (1 << transition_bits) - 1
+    flat = baseline.reshape(len(baseline), -1).to(torch.int64) & word_mask
+    tile_count, group_count = positions.shape
+    bit_positions = (127 - positions.to(torch.int64)) * transition_bits
+    word_ids, offsets = bit_positions >> 5, bit_positions & 31
+    old = flat.gather(1, word_ids) >> offsets
+    crosses = offsets + transition_bits > 32
+    crossing_words = word_ids + 1
+    high_source = flat.gather(1, crossing_words.clamp_max(flat.shape[1] - 1))
+    old |= torch.where(crosses, high_source << (32 - offsets), torch.zeros_like(old))
+    new = (old + selected_shifts.to(torch.int64)) & edge_mask
+
+    # Work group-major so the output can be appended directly to the candidate
+    # bank.  Only the selected payload is materialized, not all four trials.
+    alternatives = flat[None].expand(group_count, tile_count, flat.shape[1]).clone()
+    group_word_ids = word_ids.T[:, :, None]
+    group_offsets = offsets.T
+    low_width = torch.minimum(torch.full_like(group_offsets, transition_bits), 32 - group_offsets)
+    low_mask = ((torch.ones_like(low_width) << low_width) - 1) << group_offsets
+    words = alternatives.gather(2, group_word_ids).squeeze(2)
+    words = (words & (word_mask ^ low_mask)) | ((new.T << group_offsets) & word_mask)
+    alternatives.scatter_(2, group_word_ids, words.unsqueeze(2))
+
+    group_crosses = crosses.T
+    crossing_word_ids = crossing_words.T[:, :, None]
+    high_width = group_offsets + transition_bits - 32
+    high_mask = torch.where(
+        group_crosses,
+        (torch.ones_like(high_width) << high_width.clamp_min(0)) - 1,
+        torch.zeros_like(high_width),
+    )
+    words = alternatives.gather(2, crossing_word_ids.clamp_max(flat.shape[1] - 1)).squeeze(2)
+    high_values = (new.T >> (32 - group_offsets)) & high_mask
+    words = torch.where(group_crosses, (words & (word_mask ^ high_mask)) | high_values, words)
+    alternatives.scatter_(2, crossing_word_ids.clamp_max(flat.shape[1] - 1), words.unsqueeze(2))
+    return alternatives.to(torch.int32).contiguous()
+
+
+def _p32_sparse_shift_screen(
+    baseline,
+    positions,
+    shifts,
+    *,
+    bits,
+    bank_ids,
+    bank_alt_id,
+    baseline_tiles,
+    metric_tiles,
+    h_tiles,
+    g_tiles,
+    codebook_version,
+):
+    """Exactly score local P32 edits using only decoder states they change.
+
+    A state is a 16-bit circular window beginning on an edge boundary.  An
+    edited ``b``-bit edge can therefore affect only ``ceil(16 / b)`` states.
+    At W3 that is three states (six scalar weights), versus decoding and
+    multiplying the full 256-value tile for every trial in the old path.
+    """
+    if bank_ids is None or bank_alt_id is None:
+        raise ValueError("sparse P32 screening requires selectors and an alternative bank")
+    transition_bits = round(normalize_qvq_rate(bits) * 2)
+    tile_count, group_count = positions.shape
+    affected_count = (16 + transition_bits - 1) // transition_bits
+    state_offsets = torch.arange(affected_count, device=baseline.device, dtype=torch.int64)
+    affected_states = (positions.T[:, :, None] + state_offsets[None, None, :]) % 128
+
+    states = unpack_p32_window_states(baseline, bits=bits).reshape(tile_count, 128)
+    tile_ids = torch.arange(tile_count, device=baseline.device, dtype=torch.int64)
+    old_states = states[tile_ids[None, :, None], affected_states]
+    old_edges = old_states[:, :, 0] & ((1 << transition_bits) - 1)
+    shift_tensor = torch.as_tensor(shifts, device=baseline.device, dtype=torch.int64)
+    new_edges = (old_edges[:, None, :] + shift_tensor[None, :, None]) & ((1 << transition_bits) - 1)
+
+    bit_offsets = state_offsets * transition_bits
+    widths = torch.minimum(torch.full_like(bit_offsets, transition_bits), 16 - bit_offsets)
+    value_masks = (torch.ones_like(widths) << widths) - 1
+    state_masks = value_masks << bit_offsets
+    new_states = (
+        old_states[:, None].to(torch.int64) & (0xFFFF ^ state_masks[None, None, None, :])
+    ) | (
+        (new_edges[:, :, :, None] & value_masks[None, None, None, :])
+        << bit_offsets[None, None, None, :]
+    )
+
+    alt_id = int(bank_alt_id.item())
+    binary_ids = unpack_qvq_binary_bank_ids(
+        bank_ids, tile_count * QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+    )
+    state_bank_ids = (
+        binary_ids.reshape(tile_count, QVQ_V2B2_P32_SEGMENTS_PER_TILE)
+        .repeat_interleave(QVQ_V2B2_P32_STEPS_PER_SEGMENT, dim=1)
+        .mul(alt_id)
+    )
+    affected_banks = state_bank_ids[tile_ids[None, :, None], affected_states]
+    levels = pgc16_levels_for_version(codebook_version).to(device=baseline.device)
+    new_values = pgc16_decode_states_v2_banked(
+        new_states,
+        affected_banks[:, None].expand_as(new_states),
+        bits=bits,
+        levels=levels,
+    ).float()
+
+    scalar_indices = torch.stack((2 * affected_states, 2 * affected_states + 1), dim=-1)
+    scalar_indices = scalar_indices.reshape(group_count, tile_count, -1)
+    baseline_flat = baseline_tiles.reshape(tile_count, 256)
+    old_values = baseline_flat[tile_ids[None, :, None], scalar_indices]
+    delta = new_values.reshape(group_count, len(shifts), tile_count, -1) - old_values[:, None]
+    rows, columns = scalar_indices // 16, scalar_indices % 16
+    metric_values = metric_tiles[tile_ids[None, :, None], rows, columns]
+    cost = 2 * (delta * metric_values[:, None]).sum(-1)
+
+    # Exact sparse form of tr(delta.T H delta G).  The largest W1 case has
+    # only 16 changed scalars, while W3 has six.
+    h_pairs = h_tiles[
+        tile_ids[None, :, None, None], rows[:, :, :, None], rows[:, :, None, :]
+    ]
+    g_pairs = g_tiles[
+        tile_ids[None, :, None, None], columns[:, :, :, None], columns[:, :, None, :]
+    ]
+    pair_metric = h_pairs * g_pairs
+    cost += (
+        delta[..., :, None] * delta[..., None, :] * pair_metric[:, None]
+    ).sum((-1, -2))
+
+    selected = cost.argmin(1)
+    group_ids = torch.arange(group_count, device=baseline.device)[:, None]
+    selected_new_values = new_values[group_ids, selected, tile_ids[None]]
+    selected_values = baseline_flat[None].expand(group_count, -1, -1).clone()
+    selected_values.scatter_(2, scalar_indices, selected_new_values.reshape(group_count, tile_count, -1))
+    selected_shift_values = shift_tensor[selected].T
+    selected_words = _p32_selected_shift_alternatives(
+        baseline, positions, selected_shift_values, transition_bits,
+    )
+    selected_delta = selected_new_values.reshape(group_count, tile_count, -1) - old_values
+    return (
+        selected_words,
+        selected_values.reshape(group_count, tile_count, 16, 16),
+        cost,
+        scalar_indices,
+        selected_delta,
+    )
+
+
+def trellis_local_candidates(baseline, *, count, seed, bits, layout, codebook_version=PGC16_CODEBOOK_VERSION):
+    """Create reproducible local path substitutions in transition space.
+
+    Candidate zero is the exact payload.  Remaining candidates are grouped in
+    the paper's four non-zero W3 shifts {-2,-1,+1,+2}; each group selects a
+    different transition in every tile without replacement.  Packing from the
+    edited circular edge stream reconstructs all overlapping 16-bit states, so
+    every candidate is a legal tail-biting QVQ path and round-trips exactly.
+    """
+    if baseline.ndim != 2 or baseline.dtype != torch.int32 or min(baseline.shape) <= 0:
+        raise ValueError("GSQ baseline must be nonempty int32 [tiles,words]")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 2:
+        raise ValueError("GSQ candidate count must be an integer >= 2")
+    adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
+    edge_count = 128
+    transition_bits = round(normalize_qvq_rate(bits) * 2)
+    edge_mask = (1 << transition_bits) - 1
+    generator = torch.Generator(device=baseline.device).manual_seed(seed)
+    positions = _transition_positions(
+        len(baseline), edge_count, (count - 2) // 4 + 1,
+        device=baseline.device, generator=generator)
+    shifts = (-2, -1, 1, 2)
+    candidates = [baseline.detach().clone()]
+    if layout == "p32_window":
+        for group in range(positions.shape[1]):
+            alternatives = _p32_shift_alternatives(
+                baseline, positions[:, group], shifts, transition_bits)
+            candidates.extend(alternatives.unbind(0))
+        return torch.stack(candidates[:count])
+
+    states = adapter.unpack(baseline)
+    base_edges = states & edge_mask
+    tile_ids = torch.arange(len(baseline), device=baseline.device)
+    for index in range(1, count):
+        group, shift_index = divmod(index - 1, len(shifts))
+        edges = base_edges.clone()
+        position = positions[:, group]
+        edges[tile_ids, position] = (edges[tile_ids, position] + shifts[shift_index]) & edge_mask
+        columns = edges.reshape(-1, edge_count).transpose(0, 1).contiguous()
+        planar = planar_pack_rows(columns, transition_bits).transpose(0, 1).contiguous()
+        consistent_states = unpack_trellis_states(planar, bits=bits)
+        candidate = adapter.pack(consistent_states)
+        if not torch.equal(adapter.unpack(candidate), consistent_states):
+            raise RuntimeError("GSQ local trellis candidate failed exact round-trip")
+        candidates.append(candidate)
+    return torch.stack(candidates)
+
+
+@torch.no_grad()
+def fisher_screened_trellis_candidates(
+    baseline, *, count, seed, bits, layout, target, input_hessian, output_hessian,
+    bank_ids=None, bank_alt_id=None, codebook_version=PGC16_CODEBOOK_VERSION,
+    return_decoded=False,
+    return_sparse=False,
+):
+    """Screen four paper-local shifts at each candidate transition.
+
+    A 33-candidate budget cannot retain {-2,-1,+1,+2} independently at all 128
+    transitions of a tile.  For each of 32 distinct transition positions this
+    routine evaluates all four shifts with the exact one-tile Fisher delta and
+    retains the best shift independently per tile.  The resulting shared bank
+    covers four times as many path coordinates as grouping four output choices
+    per position, while the later coupled search remains authoritative.
+    """
+    if target.ndim != 2 or input_hessian.shape != (target.shape[0], target.shape[0]):
+        raise ValueError("GSQ Fisher candidate screen requires a matching target and input Hessian")
+    if output_hessian.shape != (target.shape[1], target.shape[1]):
+        raise ValueError("GSQ Fisher candidate screen requires a matching output Hessian")
+    adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
+    transition_bits = round(normalize_qvq_rate(bits) * 2)
+    generator = torch.Generator(device=baseline.device).manual_seed(seed)
+    positions = _transition_positions(
+        len(baseline), 128, count - 1, device=baseline.device, generator=generator)
+    raw = None
+    if layout != "p32_window":
+        with _nvtx_range("gsq.candidates.raw_local_shifts", baseline):
+            raw = trellis_local_candidates(
+                baseline, count=1 + 4 * (count - 1), seed=seed, bits=bits, layout=layout,
+                codebook_version=codebook_version)
+    k, n = target.shape
+    input_tiles, output_tiles = k // 16, n // 16
+    h, g = input_hessian.float(), output_hessian.float()
+    current = adapter.inner(baseline, k, n, bank_ids, bank_alt_id).float()
+    with _nvtx_range("gsq.candidates.metric_error", baseline):
+        metric_error = h @ (current - target.float()) @ g
+    metric_tiles = metric_error.reshape(input_tiles, 16, output_tiles, 16).permute(0, 2, 1, 3).reshape(-1, 16, 16)
+    h_blocks = torch.stack([h[16*i:16*(i+1), 16*i:16*(i+1)] for i in range(input_tiles)])
+    g_blocks = torch.stack([g[16*j:16*(j+1), 16*j:16*(j+1)] for j in range(output_tiles)])
+    h_tiles = h_blocks.repeat_interleave(output_tiles, 0)
+    g_tiles = g_blocks.repeat(input_tiles, 1, 1)
+    baseline_tiles = adapter.decode(baseline, bank_ids, bank_alt_id).reshape(-1, 16, 16).float()
+    tile_ids = torch.arange(len(baseline), device=baseline.device)
+    screened = [baseline.detach().clone()]
+    screened_values = [baseline_tiles]
+    sparse_indices = []
+    sparse_deltas = []
+    with _nvtx_range("gsq.candidates.decode_and_screen", baseline):
+        # Sparse P32 scoring touches at most 16 scalars (six at W3), so sixteen
+        # groups fit comfortably while amortizing dispatch and index setup.
+        # The candidate order and each per-tile argmin remain unchanged.
+        screen_groups = 16 if layout == "p32_window" else 1
+        for start in range(0, count - 1, screen_groups):
+            stop = min(start + screen_groups, count - 1)
+            group_count = stop - start
+            if layout == "p32_window":
+                selected_words, selected_values, _, selected_indices, selected_deltas = _p32_sparse_shift_screen(
+                    baseline,
+                    positions[:, start:stop],
+                    (-2, -1, 1, 2),
+                    bits=bits,
+                    bank_ids=bank_ids,
+                    bank_alt_id=bank_alt_id,
+                    baseline_tiles=baseline_tiles,
+                    metric_tiles=metric_tiles,
+                    h_tiles=h_tiles,
+                    g_tiles=g_tiles,
+                    codebook_version=codebook_version,
+                )
+                screened.extend(selected_words.unbind(0))
+                screened_values.extend(selected_values.unbind(0))
+                sparse_indices.extend(selected_indices.unbind(0))
+                sparse_deltas.extend(selected_deltas.unbind(0))
+                continue
+            alternatives = (_p32_grouped_shift_alternatives(
+                baseline, positions[:, start:stop], (-2, -1, 1, 2), transition_bits)
+                if layout == "p32_window" else
+                raw[1 + 4*start:1 + 4*stop].reshape(group_count, 4, *raw.shape[1:]))
+            # Group-major flattening requires one selector copy per shift in
+            # every group.  All groups share the same packed selector stream.
+            decode_banks = bank_ids.repeat(group_count * 4) if bank_ids is not None else None
+            values = adapter.decode(
+                alternatives.reshape(-1, alternatives.shape[-1]), decode_banks, bank_alt_id,
+            ).reshape(group_count, 4, -1, 16, 16).float()
+            delta = values - baseline_tiles[None, None]
+            cost = 2 * (delta * metric_tiles[None, None]).sum((3, 4))
+            quadratic = torch.matmul(
+                torch.matmul(h_tiles[None, None], delta), g_tiles[None, None]
+            )
+            cost += (quadratic * delta).sum((3, 4))
+            selected = cost.argmin(1)
+            group_ids = torch.arange(group_count, device=baseline.device)[:, None]
+            selected_words = alternatives[group_ids, selected, tile_ids[None]].contiguous()
+            selected_values = values[group_ids, selected, tile_ids[None]].contiguous()
+            screened.extend(selected_words.unbind(0))
+            screened_values.extend(selected_values.unbind(0))
+    candidates = torch.stack(screened)
+    if return_decoded:
+        decoded = torch.stack(screened_values)
+        if return_sparse:
+            if layout != "p32_window" or len(sparse_indices) != count - 1:
+                return candidates, decoded, None, None
+            return candidates, decoded, torch.stack(sparse_indices), torch.stack(sparse_deltas)
+        return candidates, decoded
+    if return_sparse:
+        raise ValueError("return_sparse requires return_decoded")
     return candidates
 
 
@@ -247,15 +1073,38 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
     # constants outside it so autograd can save them for logit gradients.
     with torch.inference_mode(False), torch.enable_grad():
         target = target.detach().float().clone()
-        left = torch.linalg.cholesky(input_hessian.detach().float().clone()).T.contiguous()
-        right = torch.linalg.cholesky(output_hessian.detach().float().clone())
-        candidates = baseline_bitflip_candidates(baseline, count=config.candidates, seed=config.seed)
+        # The exact Fisher path consumes H and G directly and uses an analytic
+        # gradient.  Cholesky factors previously cost time and K^2/N^2 memory
+        # despite being mathematically redundant here.
+        factor_placeholder = target.new_zeros((1, target.shape[0]))
+        decoded_candidates = None
+        sparse_candidate_indices = sparse_candidate_deltas = None
+        if config.qvq_candidate_policy == "trellis_local":
+            candidates, decoded_candidates, sparse_candidate_indices, sparse_candidate_deltas = fisher_screened_trellis_candidates(
+                baseline, count=config.candidates, seed=config.seed, bits=bits, layout=layout,
+                target=target, input_hessian=input_hessian, output_hessian=output_hessian,
+                bank_ids=bank_ids, bank_alt_id=bank_alt_id, codebook_version=codebook_version,
+                return_decoded=True, return_sparse=True)
+        else:
+            candidates = baseline_bitflip_candidates(baseline, count=config.candidates, seed=config.seed)
         return refine_trellis_candidates(
             candidates, bits=bits, bank_ids=None if bank_ids is None else bank_ids.detach().clone(),
             bank_alt_id=None if bank_alt_id is None else bank_alt_id.detach().clone(), layout=layout,
-            target=target, inputs=left, right_factor=right, enabled=True, codebook_version=codebook_version,
-            steps=config.steps, seed=config.seed, learning_rate=config.learning_rate,
-            temperature_start=config.temperature_start, temperature_end=config.temperature_end)
+            target=target, inputs=factor_placeholder, right_factor=None, enabled=True,
+            codebook_version=codebook_version,
+            steps=config.steps, seed=config.seed, learning_rate=config.qvq_learning_rate,
+            temperature_start=config.qvq_temperature_start, temperature_end=config.qvq_temperature_end,
+            kappa_start=config.qvq_kappa_start, kappa_end=config.qvq_kappa_end,
+            weight_decay=config.qvq_weight_decay, gumbel_samples=config.qvq_gumbel_samples,
+            soft_dtype=config.qvq_soft_dtype,
+            coordinate_sweeps=config.qvq_coordinate_sweeps,
+            coordinate_chunk_tiles=config.qvq_coordinate_chunk_tiles,
+            hard_eval_interval=config.qvq_hard_eval_interval,
+            relaxation_patience=config.qvq_relaxation_patience,
+            decoded_candidates=decoded_candidates,
+            sparse_candidate_indices=sparse_candidate_indices,
+            sparse_candidate_deltas=sparse_candidate_deltas,
+            input_metric=input_hessian, output_metric=output_hessian)
 
 
 def refine_p32_candidates(candidates, **kwargs) -> GSQResult:
@@ -266,6 +1115,159 @@ def refine_p32_candidates(candidates, **kwargs) -> GSQResult:
 def refine_p32_fisher(baseline, **kwargs) -> GSQResult:
     """Backward-compatible P32 Fisher entry point."""
     return refine_trellis_fisher(baseline, layout="p32_window", **kwargs)
+
+
+@torch.no_grad()
+def batched_trellis_candidates(
+    candidates, *, target, inputs, right_factor, bits, layout,
+    bank_ids=None, bank_alt_id=None, codebook_version=PGC16_CODEBOOK_VERSION,
+    sweeps=1, chunk_tiles=1024, decoded_candidates=None,
+    input_metric=None, output_metric=None,
+):
+    """GPU-batched hard initializer with an exact full-objective guard.
+
+    Candidate deltas are scored in tile chunks using the same Fisher quadratic
+    as the sequential comparator.  A simultaneous proposal is accepted only
+    after recomputing the complete objective; interacting proposals are backed
+    off geometrically down to one tile.  This removes one Python dispatch and
+    synchronization per tile while retaining the baseline/no-regression guard.
+    """
+    if isinstance(sweeps, bool) or not isinstance(sweeps, int) or sweeps < 1:
+        raise ValueError("batched GSQ initializer requires positive integer sweeps")
+    if isinstance(chunk_tiles, bool) or not isinstance(chunk_tiles, int) or chunk_tiles < 1:
+        raise ValueError("batched GSQ chunk_tiles must be a positive integer")
+    adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
+    if target.ndim != 2 or target.shape[0] % 16 or target.shape[1] % 16:
+        raise ValueError("batched GSQ target must have tile-aligned [K,N] shape")
+    k, n = target.shape
+    tile_count = k * n // 256
+    if candidates.ndim != 3 or candidates.shape[1] != tile_count or candidates.dtype != torch.int32:
+        raise ValueError("batched GSQ candidates must be int32 [choices,tiles,words]")
+    exact_fisher = input_metric is not None and output_metric is not None
+    if inputs.ndim != 2 or inputs.shape[1] != k:
+        raise ValueError("batched GSQ input factor must match target dimensions")
+    if not exact_fisher and (right_factor is None or right_factor.shape != (n, n)):
+        raise ValueError("batched GSQ right factor must match target dimensions")
+    tensors = (target, inputs) if right_factor is None else (target, inputs, right_factor)
+    if any(t.device != candidates.device or not t.is_floating_point() or not torch.isfinite(t).all()
+           for t in tensors):
+        raise ValueError("batched GSQ target/factors must be finite floating tensors on the candidate device")
+
+    x, teacher = inputs.float(), target.float()
+    right = None if right_factor is None else right_factor.float()
+    if decoded_candidates is None:
+        values = torch.stack([adapter.decode(c, bank_ids, bank_alt_id) for c in candidates]).reshape(
+            candidates.shape[0], tile_count, 16, 16).float()
+    else:
+        expected = (candidates.shape[0], tile_count, 16, 16)
+        if decoded_candidates.shape != expected or decoded_candidates.device != candidates.device:
+            raise ValueError(f"decoded_candidates must have shape {expected} on the candidate device")
+        values = decoded_candidates.detach().float()
+
+    def metric_or_factor(metric, expected, fallback, name):
+        if metric is None:
+            return fallback()
+        if (metric.shape != expected or metric.device != candidates.device
+                or not metric.is_floating_point() or not torch.isfinite(metric).all()):
+            raise ValueError(f"{name} must be finite floating point {expected} on the candidate device")
+        return metric.detach().float()
+
+    h = metric_or_factor(input_metric, (k, k), lambda: x.T @ x, "input_metric")
+    g = metric_or_factor(output_metric, (n, n), lambda: right @ right.T, "output_metric")
+    input_tiles, output_tiles = k // 16, n // 16
+    input_ids = torch.arange(input_tiles, device=candidates.device)
+    output_ids = torch.arange(output_tiles, device=candidates.device)
+    h_blocks = h.reshape(input_tiles, 16, input_tiles, 16)[input_ids, :, input_ids, :]
+    g_blocks = g.reshape(output_tiles, 16, output_tiles, 16)[output_ids, :, output_ids, :]
+    if exact_fisher:
+        teacher_metric = h @ teacher @ g
+        normalizer = (teacher * teacher_metric).sum().clamp_min(torch.finfo(torch.float32).tiny)
+    else:
+        teacher_output = x @ teacher @ right
+        normalizer = teacher_output.square().mean().clamp_min(torch.finfo(torch.float32).tiny)
+
+    def dense(tiles):
+        return tiles.reshape(input_tiles, output_tiles, 16, 16).permute(0, 2, 1, 3).reshape(k, n)
+
+    def score(tiles):
+        if exact_fisher:
+            error = dense(tiles) - teacher
+            return float((error * (h @ error @ g)).sum() / normalizer)
+        return float(((x @ dense(tiles) @ right) - teacher_output).square().mean() / normalizer)
+
+    current_tiles = values[0].clone()
+    choices = torch.zeros(tile_count, device=candidates.device, dtype=torch.long)
+    before = score(current_tiles)
+    if not math.isfinite(before):
+        raise ValueError("non-finite batched GSQ baseline objective")
+    best, best_choices, best_tiles = before, choices.clone(), current_tiles.clone()
+    history = [before]
+    all_tile_ids = torch.arange(tile_count, device=candidates.device)
+
+    for _ in range(sweeps):
+        metric_error = h @ (dense(current_tiles) - teacher) @ g
+        metric_tiles = metric_error.reshape(input_tiles, 16, output_tiles, 16).permute(
+            0, 2, 1, 3).reshape(tile_count, 16, 16)
+        proposed_choices = choices.clone()
+        predicted_cost = torch.zeros(tile_count, device=candidates.device)
+        for start in range(0, tile_count, chunk_tiles):
+            stop = min(start + chunk_tiles, tile_count)
+            ids = all_tile_ids[start:stop]
+            ib, jb = torch.div(ids, output_tiles, rounding_mode="floor"), ids % output_tiles
+            delta = values[:, start:stop] - current_tiles[start:stop].unsqueeze(0)
+            cost = 2 * (delta * metric_tiles[start:stop].unsqueeze(0)).sum((2, 3))
+            quadratic = torch.matmul(torch.matmul(h_blocks[ib].unsqueeze(0), delta),
+                                     g_blocks[jb].unsqueeze(0))
+            cost += (quadratic * delta).sum((2, 3))
+            selected_cost, selected = cost.min(0)
+            improving = selected_cost < 0
+            proposed_choices[start:stop] = torch.where(improving, selected, choices[start:stop])
+            predicted_cost[start:stop] = torch.where(improving, selected_cost, torch.zeros_like(selected_cost))
+
+        changed = proposed_choices != choices
+        if not bool(changed.any()):
+            history.append(best)
+            break
+        proposal_tiles = current_tiles.clone()
+        proposal_tiles[changed] = values[proposed_choices[changed], all_tile_ids[changed]]
+        value = score(proposal_tiles)
+        accepted_choices, accepted_tiles = proposed_choices, proposal_tiles
+        if not math.isfinite(value):
+            raise ValueError("non-finite batched GSQ hard objective")
+
+        if value >= best:
+            ranked = torch.nonzero(changed, as_tuple=False).flatten()
+            ranked = ranked[predicted_cost[ranked].argsort()]
+            accepted_choices, accepted_tiles, value = None, None, best
+            keep = len(ranked) // 2
+            while keep >= 1:
+                selected_ids = ranked[:keep]
+                trial_choices = choices.clone()
+                trial_choices[selected_ids] = proposed_choices[selected_ids]
+                trial_tiles = current_tiles.clone()
+                trial_tiles[selected_ids] = values[trial_choices[selected_ids], selected_ids]
+                trial_value = score(trial_tiles)
+                if not math.isfinite(trial_value):
+                    raise ValueError("non-finite batched GSQ backoff objective")
+                if trial_value < best:
+                    accepted_choices, accepted_tiles, value = trial_choices, trial_tiles, trial_value
+                    break
+                keep //= 2
+            if accepted_choices is None:
+                history.append(best)
+                break
+
+        choices, current_tiles = accepted_choices, accepted_tiles
+        history.append(value)
+        if value < best:
+            best, best_choices, best_tiles = value, choices.clone(), current_tiles.clone()
+
+    del best_tiles  # The packed payload is selected directly from the legal candidate bank.
+    return GSQResult(
+        candidates[best_choices, all_tile_ids].clone().contiguous(), best_choices,
+        before, best, history,
+        {"initializer": "batched_guarded", "chunk_tiles": chunk_tiles},
+    )
 
 
 @torch.no_grad()

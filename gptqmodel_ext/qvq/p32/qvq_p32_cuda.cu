@@ -354,7 +354,10 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     int output_stride,
     int64_t partial_segment_offset,
     int64_t partial_split_stride = 0) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+// Hopper retains the Ampere cp.async, ldmatrix, and mma.sync instructions
+// used by this path.  Keep SM100+ gated until its runtime contract is proven,
+// but do not compile an empty kernel body for SM90.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 1000
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kStageColumnsForKernel = StageKTiles * kTileRows;
   constexpr int kRowsPerBlock = kRows * RowGroups;
@@ -815,7 +818,10 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     int64_t output_n_offset,
     int output_stride,
     int64_t partial_segment_offset) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+// Hopper retains the Ampere cp.async, ldmatrix, and mma.sync instructions
+// used by this path.  Keep SM100+ gated until its runtime contract is proven,
+// but do not compile an empty kernel body for SM90.
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 1000
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
   static_assert(StaticK == 0 || StaticK % kTileRows == 0,
@@ -3616,7 +3622,7 @@ extern "C" int qvq_device_is_supported(int device) {
   cudaDeviceProp properties{};
   const cudaError_t error = cudaGetDeviceProperties(&properties, device);
   if (error != cudaSuccess) return 0;
-  return properties.major == 8 && properties.minor == 0 ? 1 : 0;
+  return properties.major * 10 + properties.minor == QVQ_P32_COMPILED_SM ? 1 : 0;
 }
 
 extern "C" const char* qvq_last_error(void) {

@@ -175,6 +175,7 @@ bool test_grouped_launch_plans() {
   int cases = 0;
   float max_absolute = 0;
   float independent_max_absolute = 0;
+  bool observed_nonzero_output = false;
   for (int bits = 4; bits <= 7; ++bits)
   for (int m = 1; m <= kMaxM; ++m)
   for (int threads : {64, 128, 256})
@@ -223,6 +224,8 @@ bool test_grouped_launch_plans() {
     for (int i = 0; i < m * kN; ++i) {
       const float error = std::fabs(actual[i] - expected[i]);
       max_absolute = std::max(max_absolute, error);
+      observed_nonzero_output =
+          observed_nonzero_output || std::fabs(expected[i]) > 1.0e-6f;
       // Both paths select the same kernel, arguments and reduction order.
       if (!std::isfinite(actual[i]) || !std::isfinite(expected[i]) || error != 0) {
         std::fprintf(stderr, "plan mismatch M=%d bits=%d threads=%d stage=%d groups=%d pattern=%d index=%d drift=%g\n",
@@ -328,6 +331,11 @@ bool test_grouped_launch_plans() {
       }
     }
     ++cases;
+  }
+  if (!observed_nonzero_output) {
+    std::fprintf(stderr,
+                 "all P32 launch-plan outputs were zero; device kernel body may be unavailable for this SM\n");
+    return false;
   }
   std::printf("qvq_p32_launch_plans=PASS cases=%d modes=native,partials_dispatch,partials_record rejected=%d max_absolute=%g K=%d N=%d dtype=f16/f32\n",
               cases, rejected, max_absolute, kK, kN);

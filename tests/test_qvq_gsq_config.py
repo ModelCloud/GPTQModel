@@ -18,6 +18,16 @@ def test_gsq_default_and_json_roundtrip():
     assert QuantizeConfig.from_quant_config(old).gsq is None
 
 
+def test_qvq_paper_schedule_has_ten_epoch_update_budget():
+    cfg = GSQConfig.for_qvq_paper_schedule()
+    assert cfg.enabled and cfg.steps == 640 and cfg.qvq_relaxation_patience == 0
+    assert cfg.qvq_hard_eval_interval == 64
+    assert cfg.qvq_soft_dtype == "bfloat16"
+    assert GSQConfig.for_qvq_paper_schedule(num_samples=101, batch_size=64, epochs=3).steps == 6
+    with pytest.raises(ValueError, match="computes steps"):
+        GSQConfig.for_qvq_paper_schedule(steps=10)
+
+
 def test_gsq_dynamic_scope_includes_f6_nonbank_w4_modules():
     cfg = QVQConfig(format="qvq_v2b2_p32", gsq={"enabled": True, "modules": [r"self_attn\."]},
                     dynamic={r".*o_proj$": {"bits": 4, "format": "qvq"}})
@@ -39,6 +49,12 @@ def test_nonbank_gsq_config_roundtrip(bits):
     {"enabled": "false"}, {"steps": 0}, {"steps": True}, {"candidates": 1}, {"seed": -1},
     {"max_candidate_bytes": 0}, {"learning_rate": float("nan")}, {"temperature_end": 0},
     {"temperature_start": True}, {"modules": []}, {"modules": "q_proj"}, {"modules": [""]},
+    {"qvq_learning_rate": 0}, {"qvq_kappa_start": float("nan")}, {"qvq_weight_decay": -1},
+    {"qvq_gumbel_samples": 0}, {"qvq_coordinate_sweeps": -1},
+    {"qvq_coordinate_chunk_tiles": 0}, {"qvq_hard_eval_interval": 0},
+    {"qvq_relaxation_patience": -1},
+    {"qvq_soft_dtype": "float16"},
+    {"qvq_candidate_policy": "bits"},
 ])
 def test_gsq_invalid_controls(kwargs):
     with pytest.raises((TypeError, ValueError)):
