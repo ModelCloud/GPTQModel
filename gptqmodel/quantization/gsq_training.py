@@ -309,10 +309,36 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
             (loss*fraction).backward()
             contribution = loss.detach()*fraction
             reported = contribution if reported is None else reported+contribution
-        for group in optimizer.param_groups:
-            for parameter in group['params']:
-                if parameter.grad is not None:
-                    finite.logical_and_(torch.isfinite(parameter.grad).all())
+        gradients = [
+            parameter.grad
+            for group in optimizer.param_groups
+            for parameter in group['params']
+            if parameter.grad is not None
+        ]
+        if gradients and all(
+            gradient.is_cuda and gradient.is_floating_point()
+            and not gradient.is_sparse
+            for gradient in gradients
+        ):
+            # GSQ's logits and scales are dense CUDA tensors. The AMP
+            # multi-tensor primitive checks the whole list in one pass; an
+            # inverse scale of one leaves every gradient byte unchanged.
+            state = getattr(optimizer, '_gsq_finite_state', None)
+            if state is None or state[0].device != finite.device:
+                state = (
+                    torch.zeros((), dtype=torch.float32, device=finite.device),
+                    torch.ones((), dtype=torch.float32, device=finite.device),
+                )
+                optimizer._gsq_finite_state = state
+            found_inf, inverse_scale = state
+            found_inf.zero_()
+            torch._amp_foreach_non_finite_check_and_unscale_(
+                gradients, found_inf, inverse_scale,
+            )
+            finite.logical_and_(found_inf == 0)
+        else:
+            for gradient in gradients:
+                finite.logical_and_(torch.isfinite(gradient).all())
         # Keep nonfinite detection on-device. Converting each check to a Python
         # bool serializes the CUDA stream once per loss and trainable tensor.
         torch._assert_async(finite, 'GSQ stage objective or gradient is nonfinite')
