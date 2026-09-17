@@ -106,6 +106,17 @@ class GSQLion(torch.optim.Optimizer):
                 if 'exp_avg' not in state:
                     state['exp_avg'] = torch.zeros_like(parameter)
                 momentum = state['exp_avg']
+                if (parameter.is_cuda and parameter.dtype == torch.float32
+                        and parameter.is_contiguous() and gradient.is_contiguous()
+                        and momentum.is_contiguous()):
+                    from .qvq_gsq_triton import lion_update
+
+                    lion_update(
+                        parameter, gradient, momentum,
+                        learning_rate=group['lr'], beta1=beta1, beta2=beta2,
+                        weight_decay=group['weight_decay'],
+                    )
+                    continue
                 direction = momentum.clone().mul_(beta1).add(gradient, alpha=1-beta1).sign_()
                 parameter.mul_(1-group['lr']*group['weight_decay'])
                 parameter.add_(direction, alpha=-group['lr'])
