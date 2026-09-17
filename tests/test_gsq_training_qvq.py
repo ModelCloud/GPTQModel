@@ -1,12 +1,13 @@
 import pytest
 import torch
 
+from gptqmodel.quantization.gsq_training import GSQLion
 from gptqmodel.quantization.gsq_training_qvq import (
     GSQP32TrainingModule,
     _ExactTrainingHadamard,
-    _TransposeView,
     _rht_reconstruct_differentiable,
     _SparseCandidateMatrixMixture,
+    _TransposeView,
     p32_training_module_from_words,
 )
 from gptqmodel.quantization.qvq import rht_preprocess_weight, rht_reconstruct_weight
@@ -449,3 +450,38 @@ def test_scaled_hadamard_matches_prior_bfloat16_native_operation_order():
     assert torch.equal(fused, prior)
     assert torch.equal(inner_fused.grad, inner_prior.grad)
     assert torch.equal(sv_fused.grad, sv_prior.grad)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_gsq_lion_is_bitwise_exact():
+    generator = torch.Generator(device="cuda").manual_seed(47)
+    initial = torch.randn(12345, device="cuda", generator=generator)
+    fused = torch.nn.Parameter(initial.clone())
+    reference = initial.clone()
+    reference_momentum = torch.zeros_like(reference)
+    optimizer = GSQLion(
+        [{"params": [fused], "lr": 2e-4, "weight_decay": 1.0}],
+        betas=(0.9, 0.95),
+    )
+
+    for step in range(20):
+        gradient = torch.randn(
+            fused.shape, device="cuda", generator=generator,
+        )
+        learning_rate = 2e-4 * (1.0 - step / 20)
+        optimizer.param_groups[0]["lr"] = learning_rate
+        fused.grad = gradient.clone()
+        optimizer.step()
+
+        direction = reference_momentum.clone().mul_(0.9).add_(
+            gradient, alpha=0.1,
+        ).sign_()
+        reference.mul_(1.0 - learning_rate).add_(
+            direction, alpha=-learning_rate,
+        )
+        reference_momentum.mul_(0.95).add_(gradient, alpha=0.05)
+        assert torch.equal(fused, reference)
+        assert torch.equal(
+            optimizer.state[fused]["exp_avg"], reference_momentum,
+        )
