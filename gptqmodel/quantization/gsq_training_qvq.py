@@ -16,6 +16,7 @@ from ..utils.hadamard import (
     hadamard_transform_reverse,
     hadamard_transform_reverse_scaled,
     hadamard_transform_scaled,
+    hadamard_transform_scaled_saved,
 )
 from .qvq import (
     repack_p32_planar_to_window,
@@ -70,6 +71,29 @@ class _ExactTrainingHadamardFixedScale(torch.autograd.Function):
         return hadamard_transform_reverse_scaled(
             grad_output.contiguous(), vector, 1. / math.sqrt(ctx.width),
         ), None
+
+
+class _ExactTrainingHadamardTrainableScale(torch.autograd.Function):
+    """Fuse a trainable scale while retaining its exact reduction input."""
+
+    @staticmethod
+    def forward(ctx, values, vector):
+        width = values.shape[-1]
+        ctx.width = width
+        scaled, unscaled = hadamard_transform_scaled_saved(
+            values.contiguous(), vector, 1. / math.sqrt(width),
+        )
+        ctx.save_for_backward(vector, unscaled)
+        return scaled
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        vector, unscaled = ctx.saved_tensors
+        grad_values = hadamard_transform_reverse_scaled(
+            grad_output.contiguous(), vector, 1. / math.sqrt(ctx.width),
+        )
+        grad_vector = (grad_output * unscaled).sum(0)
+        return grad_values, grad_vector
 
 
 def _training_hadamard(values, fast_hadamard):
@@ -183,9 +207,14 @@ def _rht_reconstruct_differentiable(
             ).transpose(0, 1)
     if not (input_hadamard and fast_hadamard):
         work = work * SU.to(work.dtype).unsqueeze(1)
-    if output_hadamard:
-        work = _training_hadamard(work, fast_hadamard)
-    work = work * SV.to(work.dtype).unsqueeze(0)
+    if output_hadamard and fast_hadamard:
+        work = _ExactTrainingHadamardTrainableScale.apply(
+            work, SV.to(work.dtype),
+        )
+    else:
+        if output_hadamard:
+            work = _training_hadamard(work, fast_hadamard)
+        work = work * SV.to(work.dtype).unsqueeze(0)
     return _TransposeView.apply(work)
 
 
