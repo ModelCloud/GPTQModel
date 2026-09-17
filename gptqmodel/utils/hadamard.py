@@ -61,6 +61,7 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "fast_hadamard_transform_scaled",
         "fast_hadamard_transform_reverse_scaled",
         "fast_hadamard_transform_scaled_saved",
+        "fast_hadamard_transform_sandwich",
         "fast_hadamard_transform_12N",
         "fast_hadamard_transform_20N",
         "fast_hadamard_transform_28N",
@@ -168,3 +169,12 @@ def hadamard_transform_scaled_saved(
         scale = 1.0
     op = hadamard_op("fast_hadamard_transform_scaled_saved")
     return op(x, vector, float(scale))
+
+
+def hadamard_transform_sandwich(
+    x: torch.Tensor, vector: torch.Tensor, scale: float,
+) -> torch.Tensor:
+    """Apply normalized Hadamard, vector scale, and normalized Hadamard."""
+    return hadamard_op("fast_hadamard_transform_sandwich")(
+        x, vector, float(scale),
+    )

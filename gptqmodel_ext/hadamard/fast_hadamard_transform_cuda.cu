@@ -153,7 +153,8 @@ __device__ __forceinline__ void hadamard_mult_thread_chunk_40(float x[kNChunks][
     for (int c = 0; c < kNChunks; ++c) { hadamard_mult_thread_40(x[c]); }
 }
 
-template<typename Ktraits, bool kVectorScale = false, bool kSaveUnscaled = false>
+template<typename Ktraits, bool kVectorScale = false, bool kSaveUnscaled = false,
+         bool kSandwich = false>
 __global__ __launch_bounds__(Ktraits::kNThreads)
 void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     constexpr int kNThreads = Ktraits::kNThreads;
@@ -228,7 +229,54 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
         }
     }
 
-    if constexpr (kVectorScale) {
+    if constexpr (kSandwich) {
+        static_assert(kVectorScale && !kSaveUnscaled);
+        const input_t *vector = reinterpret_cast<const input_t *>(params.vector_ptr);
+        #pragma unroll
+        for (int c = 0; c < kNChunks; ++c) {
+            #pragma unroll
+            for (int i = 0; i < kNElts; ++i) {
+                const int index = (c * blockDim.x + threadIdx.x) * kNElts + i;
+                const input_t rounded = input_t(x_vals[c][i] * params.scale);
+                const input_t scaled = index < params.dim
+                    ? input_t(float(rounded) * float(vector[index]))
+                    : input_t(0.f);
+                x_vals[c][i] = float(scaled);
+            }
+        }
+
+        hadamard_mult_thread<kLogNElts, kNChunks>(x_vals);
+        hadamard_mult_warp<kLogWarpSize, 0, kNChunks, kNElts>(x_vals);
+        if constexpr (kNWarps > 1) {
+            exchange_smem_pre<kNChunks, kChunksPerExchange, kNElts,
+                              kWarpSize, kNWarps, true, vec_t>(x_vals, smem_exchange);
+            hadamard_mult_warp<kLogNWarps, 0, kNChunks, kNElts>(x_vals);
+            exchange_smem_pre<kNChunks, kChunksPerExchange, kNElts,
+                              kWarpSize, kNWarps, false, vec_t>(x_vals, smem_exchange);
+        }
+        if constexpr (kNChunks > 1) {
+            float x_vals_transposed[kNElts][kNChunks];
+            #pragma unroll
+            for (int c = 0; c < kNChunks; ++c) {
+                #pragma unroll
+                for (int i = 0; i < kNElts; ++i) {
+                    x_vals_transposed[i][c] = x_vals[c][i];
+                }
+            }
+            constexpr int kLogNChunks = cilog2(kNChunks);
+            static_assert(1 << kLogNChunks == kNChunks);
+            hadamard_mult_thread<kLogNChunks, kNElts>(x_vals_transposed);
+            #pragma unroll
+            for (int c = 0; c < kNChunks; ++c) {
+                #pragma unroll
+                for (int i = 0; i < kNElts; ++i) {
+                    x_vals[c][i] = x_vals_transposed[i][c];
+                }
+            }
+        }
+        store_output<kNChunks, kNElts, input_t>(
+            out, x_vals, params.dim, params.scale);
+    } else if constexpr (kVectorScale) {
         const input_t *vector = reinterpret_cast<const input_t *>(params.vector_ptr);
         if constexpr (kSaveUnscaled) {
             input_t *unscaled = reinterpret_cast<input_t *>(params.auxiliary_ptr)
@@ -354,6 +402,23 @@ void fast_hadamard_transform_scaled_saved_launch(HadamardParamsBase &params, cud
     }
     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template<int kNThreads, int kLogN, typename input_t>
+void fast_hadamard_transform_sandwich_launch(HadamardParamsBase &params,
+                                              cudaStream_t stream) {
+    using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize;
+    dim3 grid(params.batch);
+    auto kernel = &fast_hadamard_transform_kernel<Ktraits, true, false, true>;
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template<typename input_t>
+void fast_hadamard_transform_sandwich_cuda(HadamardParamsBase &params,
+                                            cudaStream_t stream) {
+    fast_hadamard_transform_sandwich_launch<256, 11, input_t>(params, stream);
 }
 
 template<typename input_t>
@@ -608,6 +673,8 @@ template void fast_hadamard_transform_scaled_cuda<at::BFloat16>(HadamardParamsBa
 template void fast_hadamard_transform_scaled_saved_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_scaled_saved_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_scaled_saved_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
+
+template void fast_hadamard_transform_sandwich_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
 
 template void fast_hadamard_transform_reverse_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_reverse_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
