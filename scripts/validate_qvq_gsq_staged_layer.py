@@ -309,6 +309,10 @@ def main():
         raise ValueError("fused Q/K Fisher fitting currently requires exactly one P32 round")
     if not args.allow_nondeterministic:
         torch.use_deterministic_algorithms(True)
+        # GSQ's large workspaces are fully overwritten before they are read.
+        # Avoid deterministic mode's NaN poison fills for torch.empty buffers;
+        # the poison is a debug guard, not part of deterministic execution.
+        torch.utils.deterministic.fill_uninitialized_memory = False
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     device = torch.device("cuda")
@@ -1049,6 +1053,9 @@ def main():
         "training_hadamard_backends": sorted(training_hadamard_backends),
         "fused_qk_fisher": args.fused_qk_fisher,
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "deterministic_fill_uninitialized_memory": (
+            torch.utils.deterministic.fill_uninitialized_memory
+        ),
         "float32_matmul_precision": torch.get_float32_matmul_precision(),
         "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
         "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
