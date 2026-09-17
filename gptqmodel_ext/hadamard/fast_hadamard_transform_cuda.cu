@@ -418,7 +418,11 @@ void fast_hadamard_transform_sandwich_launch(HadamardParamsBase &params,
 template<typename input_t>
 void fast_hadamard_transform_sandwich_cuda(HadamardParamsBase &params,
                                             cudaStream_t stream) {
-    fast_hadamard_transform_sandwich_launch<256, 11, input_t>(params, stream);
+    if (params.log_N == 9) {
+        fast_hadamard_transform_sandwich_launch<32, 9, input_t>(params, stream);
+    } else if (params.log_N == 11) {
+        fast_hadamard_transform_sandwich_launch<256, 11, input_t>(params, stream);
+    }
 }
 
 template<typename input_t>
