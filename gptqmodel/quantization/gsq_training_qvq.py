@@ -119,16 +119,21 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
         return probability_gradient, None, None, None, None, None, None, None, None
 
 
-class _ContiguousTranspose(torch.autograd.Function):
-    """Rank-two transpose-copy with its transpose-copy adjoint."""
+class _TransposeView(torch.autograd.Function):
+    """Rank-two transpose view with its exact transpose adjoint.
+
+    The caller immediately converts reconstructed FP32 weights to the model's
+    BF16 dtype. Keeping this as a view lets that conversion consume the
+    transposed layout directly instead of copying a full FP32 matrix first.
+    """
 
     @staticmethod
     def forward(ctx, values):
-        return values.transpose(0, 1).contiguous()
+        return values.transpose(0, 1)
 
     @staticmethod
     def backward(ctx, grad_output):
-        return grad_output.transpose(0, 1).contiguous()
+        return grad_output.transpose(0, 1)
 
 
 def _rht_reconstruct_differentiable(
@@ -158,7 +163,7 @@ def _rht_reconstruct_differentiable(
     if output_hadamard:
         work = _training_hadamard(work, fast_hadamard)
     work = work * SV.to(work.dtype).unsqueeze(0)
-    return _ContiguousTranspose.apply(work)
+    return _TransposeView.apply(work)
 
 
 class GSQP32TrainingModule(torch.nn.Module):
