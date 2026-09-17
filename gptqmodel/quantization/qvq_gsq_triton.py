@@ -204,7 +204,15 @@ def _finish_norm_kernel(norm_square, norm_minimum, norm_maximum, finite_state):
 
 
 @triton.jit
-def _advance_step_kernel(step_pointer):
+def _finish_norm_advance_step_kernel(
+        norm_square, norm_minimum, norm_maximum, finite_state, step_pointer):
+    square = tl.load(norm_square)
+    value = tl.sqrt(square)
+    tl.store(norm_minimum, tl.minimum(tl.load(norm_minimum), value))
+    tl.store(norm_maximum, tl.maximum(tl.load(norm_maximum), value))
+    finite = (value == value) & (tl.abs(value) != float("inf"))  # noqa: PLR0124
+    tl.store(finite_state, tl.load(finite_state) & finite)
+    tl.store(norm_square, 0.0)
     tl.store(step_pointer, tl.load(step_pointer) + 1)
 
 
@@ -600,9 +608,10 @@ def scheduled_sparse_lion(probabilities, metric_error, indices, deltas,
         N=metric_error.shape[1], OUTPUT_TILES=metric_error.shape[1] // 16,
         CHOICES=choices, WIDTH=indices.shape[2], BLOCK=block, num_warps=1,
     )
-    _finish_norm_kernel[(1,)](norm_square, norm_minimum, norm_maximum,
-                              finite_state, num_warps=1)
-    _advance_step_kernel[(1,)](step_pointer, num_warps=1)
+    _finish_norm_advance_step_kernel[(1,)](
+        norm_square, norm_minimum, norm_maximum, finite_state, step_pointer,
+        num_warps=1,
+    )
 
 
 def build_position_map(indices, deltas):
@@ -835,7 +844,9 @@ def scheduled_grouped_sparse_lion(
         temperature_schedule, kappa_schedule, step_pointer,
         learning_rate: float, weight_decay: float):
     choices = probabilities.shape[1]
-    tiles = 4
+    # Eight tiles preserve each tile's choice reduction while exposing enough
+    # independent work to saturate SM90 for both Llama 3.2 Q and K geometry.
+    tiles = 8
     block = triton.next_power_of_2(choices)
     _scheduled_sparse_lion_grouped_kernel[(
         triton.cdiv(probabilities.shape[0], tiles),
@@ -845,8 +856,9 @@ def scheduled_grouped_sparse_lion(
         step_pointer, learning_rate, 1.0 - learning_rate * weight_decay,
         TILE_COUNT=probabilities.shape[0], N=metric_error.shape[1],
         OUTPUT_TILES=metric_error.shape[1] // 16, CHOICES=choices,
-        WIDTH=indices.shape[2], TILES=tiles, BLOCK=block, num_warps=4,
+        WIDTH=indices.shape[2], TILES=tiles, BLOCK=block, num_warps=8,
     )
-    _finish_norm_kernel[(1,)](norm_square, norm_minimum, norm_maximum,
-                              finite_state, num_warps=1)
-    _advance_step_kernel[(1,)](step_pointer, num_warps=1)
+    _finish_norm_advance_step_kernel[(1,)](
+        norm_square, norm_minimum, norm_maximum, finite_state, step_pointer,
+        num_warps=1,
+    )

@@ -558,3 +558,57 @@ def test_fused_gsq_lion_is_bitwise_exact():
         assert torch.equal(
             optimizer.state[fused]["exp_avg"], reference_momentum,
         )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_grouped_sparse_lion_eight_tiles_preserves_optimizer_state():
+    from gptqmodel.quantization.qvq_gsq_triton import (
+        _scheduled_sparse_lion_grouped_kernel,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(83)
+    tile_count, width, n, choices = 64, 6, 128, 33
+    probabilities = torch.randn(
+        (tile_count, choices), device="cuda", generator=generator,
+    ).softmax(-1)
+    metric_error = torch.randn(
+        (n, n), dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
+    indices = torch.randint(
+        0, 256, (tile_count, choices - 1, width), dtype=torch.uint8,
+        device="cuda", generator=generator,
+    )
+    deltas = torch.randn(
+        indices.shape, dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
+    denominator = torch.tensor(1234.0, device="cuda")
+    temperature = torch.linspace(1.0, 0.5, 20, device="cuda")
+    kappa = torch.linspace(1.0, 2.0, 20, device="cuda")
+    initial_logits = torch.randn(
+        (tile_count, choices), device="cuda", generator=generator,
+    )
+    initial_momentum = torch.randn(
+        initial_logits.shape, device="cuda", generator=generator,
+    )
+
+    def run(tiles, warps):
+        logits = initial_logits.clone()
+        momentum = initial_momentum.clone()
+        norm = torch.zeros((), device="cuda")
+        step_pointer = torch.zeros((), dtype=torch.int32, device="cuda")
+        for step in range(20):
+            step_pointer.fill_(step)
+            _scheduled_sparse_lion_grouped_kernel[((tile_count + tiles - 1) // tiles,)](
+                probabilities, metric_error, indices, deltas, denominator,
+                logits, momentum, norm, temperature, kappa, step_pointer,
+                1e-4, 0.999, TILE_COUNT=tile_count, N=n,
+                OUTPUT_TILES=n // 16, CHOICES=choices, WIDTH=width,
+                TILES=tiles, BLOCK=64, num_warps=warps,
+            )
+        return logits, momentum
+
+    reference_logits, reference_momentum = run(4, 4)
+    actual_logits, actual_momentum = run(8, 8)
+    assert torch.equal(actual_logits, reference_logits)
+    assert torch.equal(actual_momentum, reference_momentum)
