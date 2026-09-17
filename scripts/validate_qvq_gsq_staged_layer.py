@@ -184,6 +184,10 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--qk-steps", type=int, default=16)
     parser.add_argument(
+        "--qk-hard-eval-interval", type=int, default=20,
+        help="Updates between exact structured Q/K hard-oracle checkpoints",
+    )
+    parser.add_argument(
         "--qk-hard-dense-verify-topk", type=int, default=4,
         help="Dense-FP32 verification candidates after structured Q/K hard scoring",
     )
@@ -311,6 +315,8 @@ def main():
     args = parse_args()
     if args.attention_validation_tail_epochs < 1:
         raise ValueError("attention validation tail epochs must be positive")
+    if args.qk_hard_eval_interval < 1:
+        raise ValueError("Q/K hard evaluation interval must be positive")
     if args.fused_qk_fisher and args.rounds != 1:
         raise ValueError("fused Q/K Fisher fitting currently requires exactly one P32 round")
     if not args.allow_nondeterministic:
@@ -580,7 +586,7 @@ def main():
             weight_decay=1.,
             soft_dtype=args.qk_soft_dtype,
             coordinate_sweeps=0,
-            hard_eval_interval=max(1, min(10, args.qk_steps)),
+            hard_eval_interval=min(args.qk_hard_eval_interval, args.qk_steps),
             relaxation_patience=0,
             decoded_candidates=None,
             sparse_candidate_indices=quantizer.sparse_indices.permute(1, 0, 2).contiguous(),
@@ -1053,6 +1059,7 @@ def main():
         "strict_disjoint": not bool(set(train_hashes) & set(validation_hashes)),
         "epochs": args.epochs,
         "qk_steps": args.qk_steps,
+        "qk_hard_eval_interval": args.qk_hard_eval_interval,
         "qk_soft_dtype": args.qk_soft_dtype,
         "mlp_soft_dtype": args.mlp_soft_dtype,
         "mlp_fp32_tail_epochs": args.mlp_fp32_tail_epochs,
