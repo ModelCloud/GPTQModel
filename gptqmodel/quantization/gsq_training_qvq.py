@@ -14,6 +14,8 @@ from ..utils.hadamard import (
     hadamard_available,
     hadamard_transform,
     hadamard_transform_reverse,
+    hadamard_transform_reverse_scaled,
+    hadamard_transform_scaled,
 )
 from .qvq import (
     repack_p32_planar_to_window,
@@ -48,6 +50,26 @@ class _ExactTrainingHadamard(torch.autograd.Function):
         return hadamard_transform_reverse(
             grad_output.contiguous(), 1. / math.sqrt(ctx.width),
         )
+
+
+class _ExactTrainingHadamardFixedScale(torch.autograd.Function):
+    """Fuse a fixed vector scale while preserving both dtype boundaries."""
+
+    @staticmethod
+    def forward(ctx, values, vector):
+        width = values.shape[-1]
+        ctx.width = width
+        ctx.save_for_backward(vector)
+        return hadamard_transform_scaled(
+            values.contiguous(), vector, 1. / math.sqrt(width),
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        vector, = ctx.saved_tensors
+        return hadamard_transform_reverse_scaled(
+            grad_output.contiguous(), vector, 1. / math.sqrt(ctx.width),
+        ), None
 
 
 def _training_hadamard(values, fast_hadamard):
@@ -156,10 +178,11 @@ def _rht_reconstruct_differentiable(
         if not fast_hadamard:
             work = matmul_hadU(work.transpose(0, 1), transpose=True).transpose(0, 1)
         else:
-            work = _training_hadamard(
-                work.transpose(0, 1), fast_hadamard,
+            work = _ExactTrainingHadamardFixedScale.apply(
+                work.transpose(0, 1), SU.to(work.dtype),
             ).transpose(0, 1)
-    work = work * SU.to(work.dtype).unsqueeze(1)
+    if not (input_hadamard and fast_hadamard):
+        work = work * SU.to(work.dtype).unsqueeze(1)
     if output_hadamard:
         work = _training_hadamard(work, fast_hadamard)
     work = work * SV.to(work.dtype).unsqueeze(0)

@@ -3,6 +3,7 @@ import torch
 
 from gptqmodel.quantization.gsq_training_qvq import (
     GSQP32TrainingModule,
+    _ExactTrainingHadamard,
     _TransposeView,
     _rht_reconstruct_differentiable,
     _SparseCandidateMatrixMixture,
@@ -394,3 +395,40 @@ def test_fused_training_hadamard_is_bitwise_exact_forward_and_backward():
     assert torch.equal(fused, eager)
     assert torch.equal(inner_fused.grad, inner_eager.grad)
     assert torch.equal(sv_fused.grad, sv_eager.grad)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_scaled_hadamard_matches_prior_bfloat16_native_operation_order():
+    generator = torch.Generator(device="cuda").manual_seed(43)
+    inner_prior = torch.randn(
+        (2048, 512), device="cuda", dtype=torch.bfloat16,
+        generator=generator, requires_grad=True,
+    )
+    inner_fused = inner_prior.detach().clone().requires_grad_()
+    su = torch.randn(
+        (2048,), device="cuda", dtype=torch.bfloat16, generator=generator,
+    )
+    sv_prior = torch.randn(
+        (512,), device="cuda", dtype=torch.bfloat16,
+        generator=generator, requires_grad=True,
+    )
+    sv_fused = sv_prior.detach().clone().requires_grad_()
+    upstream = torch.randn(
+        (512, 2048), device="cuda", dtype=torch.bfloat16, generator=generator,
+    )
+
+    prior = _ExactTrainingHadamard.apply(inner_prior.T.contiguous()).T
+    prior = prior * su.unsqueeze(1)
+    prior = _ExactTrainingHadamard.apply(prior)
+    prior = prior * sv_prior.unsqueeze(0)
+    prior = _TransposeView.apply(prior)
+    fused = _rht_reconstruct_differentiable(
+        inner_fused, su, sv_fused, fast_hadamard=True,
+    )
+    prior.backward(upstream)
+    fused.backward(upstream)
+
+    assert torch.equal(fused, prior)
+    assert torch.equal(inner_fused.grad, inner_prior.grad)
+    assert torch.equal(sv_fused.grad, sv_prior.grad)

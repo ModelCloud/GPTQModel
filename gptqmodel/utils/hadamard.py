@@ -57,6 +57,8 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
     required_ops=(
         "fast_hadamard_transform",
         "fast_hadamard_transform_reverse",
+        "fast_hadamard_transform_scaled",
+        "fast_hadamard_transform_reverse_scaled",
         "fast_hadamard_transform_12N",
         "fast_hadamard_transform_20N",
         "fast_hadamard_transform_28N",
@@ -128,3 +130,23 @@ def hadamard_transform_reverse(x: torch.Tensor, scale: float | None = None) -> t
         scale = 1.0
     op = hadamard_op("fast_hadamard_transform_reverse")
     return op(x, float(scale))
+
+
+def hadamard_transform_scaled(
+    x: torch.Tensor, vector: torch.Tensor, scale: float | None = None,
+) -> torch.Tensor:
+    """Apply normalized Hadamard then an exact last-dimension vector scale."""
+    if scale is None:
+        scale = 1.0
+    op = hadamard_op("fast_hadamard_transform_scaled")
+    return op(x, vector, float(scale))
+
+
+def hadamard_transform_reverse_scaled(
+    x: torch.Tensor, vector: torch.Tensor, scale: float | None = None,
+) -> torch.Tensor:
+    """Round a vector-scaled input before descending Hadamard stages."""
+    if scale is None:
+        scale = 1.0
+    op = hadamard_op("fast_hadamard_transform_reverse_scaled")
+    return op(x, vector, float(scale))
