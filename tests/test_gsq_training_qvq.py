@@ -516,7 +516,8 @@ def test_scaled_hadamard_matches_prior_bfloat16_native_operation_order():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_fused_hadamard_sandwich_is_bitwise_exact():
+@pytest.mark.parametrize("width", [512, 2048])
+def test_fused_hadamard_sandwich_is_bitwise_exact(width):
     from gptqmodel.utils.hadamard import (
         hadamard_transform,
         hadamard_transform_sandwich,
@@ -525,12 +526,12 @@ def test_fused_hadamard_sandwich_is_bitwise_exact():
 
     generator = torch.Generator(device="cuda").manual_seed(71)
     values = torch.randn(
-        (64, 2048), dtype=torch.bfloat16, device="cuda", generator=generator,
+        (64, width), dtype=torch.bfloat16, device="cuda", generator=generator,
     )
     diagonal = torch.randn(
-        (2048,), dtype=torch.bfloat16, device="cuda", generator=generator,
+        (width,), dtype=torch.bfloat16, device="cuda", generator=generator,
     )
-    scale = 1.0 / math.sqrt(2048)
+    scale = 1.0 / math.sqrt(width)
     intermediate = hadamard_transform_scaled(values, diagonal, scale)
     expected = hadamard_transform(intermediate, scale)
     actual = hadamard_transform_sandwich(values, diagonal, scale)

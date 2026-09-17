@@ -264,8 +264,8 @@ torch::Tensor fast_hadamard_transform_sandwich(torch::Tensor x,
                 "fast_hadamard_transform_sandwich requires a CUDA BF16 tensor");
     const auto shapes_og = x.sizes();
     const int dim = x.size(-1);
-    TORCH_CHECK(dim == 2048,
-                "fast_hadamard_transform_sandwich currently requires dimension 2048");
+    TORCH_CHECK(dim == 512 || dim == 2048,
+                "fast_hadamard_transform_sandwich currently requires dimension 512 or 2048");
     x = x.reshape({-1, dim});
     if (x.stride(-1) != 1) { x = x.contiguous(); }
     TORCH_CHECK(vector.is_cuda() && vector.device() == x.device() &&

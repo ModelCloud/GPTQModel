@@ -44,7 +44,7 @@ _CUDA_GRAPH_CAPTURE_LOCK = threading.Lock()
 
 def _right_fisher_hadamard(values, diagonal, scale):
     if (values.dtype == torch.bfloat16 and diagonal.dtype == torch.bfloat16
-            and values.shape[-1] == 2048):
+            and values.shape[-1] in (512, 2048)):
         return hadamard_transform_sandwich(values.contiguous(), diagonal, scale)
     intermediate = hadamard_transform_scaled(values.contiguous(), diagonal, scale)
     return hadamard_transform(intermediate.contiguous(), scale)
