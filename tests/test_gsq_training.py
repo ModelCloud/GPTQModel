@@ -303,6 +303,48 @@ def test_stage_driver_restores_nonregressing_disjoint_validation_checkpoint():
         )
 
 
+def test_stage_driver_fp32_tail_and_optional_weight_export():
+    from gptqmodel.quantization.gsq_training import fit_reconstruction_stage
+
+    class TrackingQuantizer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.ones(()))
+            self.scales = torch.nn.Parameter(torch.ones(()))
+            self.training_dtype = torch.bfloat16
+            self.seen = []
+
+        def forward(self, **_):
+            self.seen.append(self.training_dtype)
+            return self.logits * self.scales
+
+        def hard_weight(self):
+            return (self.logits * self.scales).detach()
+
+        def optimizer_groups(self, *, assignment_lr, scale_lr, weight_decay):
+            return [
+                {'params': [self.logits], 'lr': assignment_lr,
+                 'weight_decay': weight_decay},
+                {'params': [self.scales], 'lr': scale_lr, 'weight_decay': 0.},
+            ]
+
+    quantizer = TrackingQuantizer()
+    batches = [[(torch.ones(()), 1)]]
+
+    def objective(target, weights):
+        return (weights['weight']-target).square()
+
+    result = fit_reconstruction_stage(
+        {'weight': quantizer}, batches, objective, epochs=4,
+        fp32_tail_epochs=2, export_weights=False,
+    )
+    assert quantizer.seen == [
+        torch.bfloat16, torch.bfloat16, torch.float32, torch.float32,
+    ]
+    assert result['weights'] is None
+    assert result['fp32_tail_epochs'] == 2
+
+
 def test_checkpoint_global_guard_requires_all_metrics_to_avoid_regression():
     from scripts.validate_qvq_gsq_checkpoint import strict_global_guard
 

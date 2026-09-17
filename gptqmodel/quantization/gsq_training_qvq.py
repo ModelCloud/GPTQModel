@@ -84,11 +84,11 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
     @staticmethod
     def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas,
                 baseline_tiles, position_indices, position_choices, position_deltas,
-                compact_forward):
+                compact_forward, output_dtype):
         from .qvq_gsq_triton import compact_sparse_mixture
 
         if compact_forward:
-            matrix = torch.empty_like(baseline_matrix)
+            matrix = torch.empty_like(baseline_matrix, dtype=output_dtype)
             compact_sparse_mixture(
                 probabilities, baseline_tiles, position_indices,
                 position_choices, position_deltas, matrix,
@@ -116,7 +116,7 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
             grad_matrix.contiguous(), matrix_indices, sparse_deltas,
             probability_gradient,
         )
-        return probability_gradient, None, None, None, None, None, None, None, None
+        return probability_gradient, None, None, None, None, None, None, None, None, None
 
 
 class _TransposeView(torch.autograd.Function):
@@ -199,6 +199,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         input_hadamard=True,
         output_hadamard=True,
         fast_hadamard=True,
+        training_dtype=torch.float32,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -251,12 +252,17 @@ class GSQP32TrainingModule(torch.nn.Module):
             raise ValueError("P32 GSQ training tensors must be finite")
         if not math.isfinite(std) or std <= 0 or not math.isfinite(strength) or strength < 0:
             raise ValueError("P32 GSQ initialization controls are invalid")
+        if training_dtype not in (torch.float32, torch.bfloat16):
+            raise ValueError("P32 GSQ training dtype must be float32 or bfloat16")
+        if training_dtype == torch.bfloat16 and candidates.device.type != "cuda":
+            raise ValueError("P32 GSQ bfloat16 training requires CUDA")
 
         self.bits = bits
         self.in_features = in_features
         self.out_features = out_features
         self.input_hadamard = input_hadamard
         self.output_hadamard = output_hadamard
+        self.training_dtype = training_dtype
         fast_widths = {
             width
             for enabled, width in (
@@ -343,9 +349,11 @@ class GSQP32TrainingModule(torch.nn.Module):
         logits[:, 0] = torch.maximum(logits[:, 0], logits[:, 1:].amax(-1) + std * 1e-3)
         self.logits = torch.nn.Parameter(logits.to(logits_dtype))
 
-    def _inner_from_probabilities(self, probabilities):
+    def _inner_from_probabilities(self, probabilities, output_dtype=None):
         if probabilities.shape != self.logits.shape:
             raise ValueError("P32 GSQ probabilities do not match logits")
+        if output_dtype is None:
+            output_dtype = self.baseline_matrix.dtype
         if probabilities.device.type == "cuda":
             return _FusedSparseCandidateMatrixMixture.apply(
                 probabilities,
@@ -357,6 +365,7 @@ class GSQP32TrainingModule(torch.nn.Module):
                 self.position_choices,
                 self.position_deltas,
                 self.compact_forward,
+                output_dtype,
             )
         return _SparseCandidateMatrixMixture.apply(
             probabilities,
@@ -372,7 +381,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             temperature,
             multiplier,
         )
-        inner = self._inner_from_probabilities(probabilities)
+        inner = self._inner_from_probabilities(probabilities, self.training_dtype)
         return _rht_reconstruct_differentiable(
             inner,
             self.SU,
@@ -434,12 +443,13 @@ class GSQP32TrainingModule(torch.nn.Module):
         inner = self.baseline_matrix.flatten().clone().scatter_(
             0, matrix_indices.flatten(), values.flatten(),
         ).reshape_as(self.baseline_matrix)
-        return rht_reconstruct_weight(
+        return _rht_reconstruct_differentiable(
             inner,
             self.SU,
             self.scales,
             input_hadamard=self.input_hadamard,
             output_hadamard=self.output_hadamard,
+            fast_hadamard=self.fast_hadamard,
         )
 
     def optimizer_groups(self, *, assignment_lr, scale_lr, weight_decay):
@@ -464,6 +474,7 @@ def p32_training_module_from_payload(
     input_hadamard=True,
     output_hadamard=True,
     fast_hadamard=True,
+    training_dtype=torch.float32,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -483,6 +494,7 @@ def p32_training_module_from_payload(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
         fast_hadamard=fast_hadamard,
+        training_dtype=training_dtype,
     )
 
 
@@ -501,6 +513,7 @@ def p32_training_module_from_words(
     input_hadamard=True,
     output_hadamard=True,
     fast_hadamard=True,
+    training_dtype=torch.float32,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -567,6 +580,7 @@ def p32_training_module_from_words(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
         fast_hadamard=fast_hadamard,
+        training_dtype=training_dtype,
     )
 
 

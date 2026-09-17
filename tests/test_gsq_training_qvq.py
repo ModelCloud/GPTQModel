@@ -141,6 +141,41 @@ def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
     assert torch.equal(probabilities_fused.grad, probabilities_matrix.grad)
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_compact_mixture_writes_bfloat16_directly_without_changing_gradients():
+    module, _, _ = _training_module("cuda", candidates=33)
+    from gptqmodel.quantization.qvq_gsq_triton import build_compact_position_map
+
+    position_map = build_compact_position_map(
+        module.sparse_indices, module.sparse_deltas, module.matrix_sparse_indices,
+    )
+    module.position_indices, module.position_choices, module.position_deltas = position_map
+    module.compact_forward = True
+    generator = torch.Generator(device="cuda").manual_seed(31)
+    probabilities_reference = torch.randn(
+        module.logits.shape, device="cuda", generator=generator, requires_grad=True,
+    )
+    probabilities_direct = probabilities_reference.detach().clone().requires_grad_()
+    upstream = torch.randn(
+        module.baseline_matrix.shape, dtype=torch.bfloat16,
+        device="cuda", generator=generator,
+    )
+
+    reference = module._inner_from_probabilities(
+        probabilities_reference, torch.float32,
+    ).to(torch.bfloat16)
+    direct = module._inner_from_probabilities(
+        probabilities_direct, torch.bfloat16,
+    )
+    reference.backward(upstream)
+    direct.backward(upstream)
+
+    assert direct.dtype == torch.bfloat16
+    assert torch.equal(direct, reference)
+    assert torch.equal(probabilities_direct.grad, probabilities_reference.grad)
+
+
 def test_p32_staged_hard_state_is_exact_legal_candidate():
     module, candidates, _ = _training_module()
     for choice in range(len(candidates)):
@@ -158,6 +193,23 @@ def test_p32_staged_hard_state_is_exact_legal_candidate():
             rht_reconstruct_weight(expected_inner, module.SU, module.scales),
         )
         assert torch.equal(module.hard_weight_for_evaluation(), module.hard_weight())
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fast_hard_evaluation_is_bitwise_equal_to_export_weight():
+    module, candidates, _ = _training_module("cuda", candidates=33)
+    assert module.fast_hadamard is True
+    with torch.no_grad():
+        module.logits.fill_(-1)
+        module.logits[:, 17] = 1
+        module.scales.copy_(torch.linspace(.5, 1.5, len(module.scales), device="cuda"))
+
+    evaluated = module.hard_weight_for_evaluation()
+    exported = module.hard_weight()
+
+    assert torch.equal(evaluated, exported)
+    assert torch.equal(module.hard_state()["words"], candidates[17])
 
 
 def test_p32_staged_rejects_inconsistent_sparse_metadata():
