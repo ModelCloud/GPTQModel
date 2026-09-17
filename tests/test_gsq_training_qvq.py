@@ -1,3 +1,5 @@
+import math
+
 import pytest
 import torch
 
@@ -498,6 +500,29 @@ def test_scaled_hadamard_matches_prior_bfloat16_native_operation_order():
     assert torch.equal(fused, prior)
     assert torch.equal(inner_fused.grad, inner_prior.grad)
     assert torch.equal(sv_fused.grad, sv_prior.grad)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_fused_hadamard_sandwich_is_bitwise_exact():
+    from gptqmodel.utils.hadamard import (
+        hadamard_transform,
+        hadamard_transform_sandwich,
+        hadamard_transform_scaled,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(71)
+    values = torch.randn(
+        (64, 2048), dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
+    diagonal = torch.randn(
+        (2048,), dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
+    scale = 1.0 / math.sqrt(2048)
+    intermediate = hadamard_transform_scaled(values, diagonal, scale)
+    expected = hadamard_transform(intermediate, scale)
+    actual = hadamard_transform_sandwich(values, diagonal, scale)
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.cuda
