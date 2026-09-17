@@ -204,6 +204,7 @@ def test_position_error_matches_real_p32_compact_mixture():
     from gptqmodel.quantization.qvq_gsq_triton import (
         build_compact_position_map,
         compact_position_error,
+        update_compact_position_error,
     )
 
     indices, choices, deltas = build_compact_position_map(
@@ -243,6 +244,17 @@ def test_position_error_matches_real_p32_compact_mixture():
         changed += probability * deltas[..., slot].float()
     expected.flatten().scatter_(0, matrix_indices.flatten(), changed.to(torch.bfloat16).flatten())
     assert torch.equal(native, expected)
+
+    next_probabilities = probabilities.flip(-1).contiguous()
+    rebuilt = torch.empty_like(target)
+    compact_position_error(
+        next_probabilities, baseline, indices, choices, deltas, target, rebuilt,
+    )
+    updated = native.clone()
+    update_compact_position_error(
+        next_probabilities, baseline, indices, choices, deltas, target, updated,
+    )
+    assert torch.equal(updated, rebuilt)
 
 
 def test_p32_staged_hard_state_is_exact_legal_candidate():

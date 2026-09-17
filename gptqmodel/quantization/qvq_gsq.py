@@ -403,6 +403,7 @@ def refine_trellis_candidates(
             compact_position_error,
             scheduled_grouped_gumbel_softmax,
             scheduled_grouped_sparse_lion,
+            update_compact_position_error,
         )
         from .qvq_gsq_triton import gumbel_softmax as fused_gumbel_softmax
         from .qvq_gsq_triton import sparse_error as fused_sparse_error
@@ -491,6 +492,13 @@ def refine_trellis_candidates(
             warm_probabilities, baseline_relax, position_indices, position_choices,
             position_deltas, target_relax, warm_error,
         )
+        # Only compact positions vary across relaxation updates. Preserve the
+        # dense baseline once; captured updates overwrite every active entry.
+        error_buffer.copy_(warm_error)
+        update_compact_position_error(
+            warm_probabilities, baseline_relax, position_indices,
+            position_choices, position_deltas, target_relax, error_buffer,
+        )
         torch.mm(h_relax, warm_error, out=warm_metric_left)
         if g_hadamard_diagonal is None:
             torch.mm(warm_metric_left, g_relax, out=warm_metric_error)
@@ -507,6 +515,13 @@ def refine_trellis_candidates(
             kappa_schedule, warm_step, learning_rate, weight_decay,
         )
         torch.cuda.synchronize()
+        if capture_barrier is not None:
+            try:
+                capture_barrier.wait(timeout=60.)
+            except threading.BrokenBarrierError as error:
+                raise RuntimeError(
+                    "concurrent GSQ CUDA graph warm-up barrier failed"
+                ) from error
         generator.manual_seed(seed)
         relaxation_graph = torch.cuda.CUDAGraph()
         if (not relaxation_patience and progress is None
@@ -524,7 +539,7 @@ def refine_trellis_candidates(
                         logits, uniform_chunk, probabilities_buffer,
                         temperature_schedule, kappa_schedule, graph_step,
                     )
-                    compact_position_error(
+                    update_compact_position_error(
                         probabilities_buffer, baseline_relax, position_indices, position_choices,
                         position_deltas, target_relax, error_buffer,
                     )
