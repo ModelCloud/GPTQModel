@@ -359,11 +359,13 @@ def _position_error_compact_kernel(probabilities, baseline, position_indices,
 def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
                                    position_choices, position_deltas, output,
                                    TILE_COUNT: tl.constexpr,
-                                   N: tl.constexpr,
+                                   IN_FEATURES: tl.constexpr,
+                                   OUT_FEATURES: tl.constexpr,
                                    OUTPUT_TILES: tl.constexpr,
                                    CHOICES: tl.constexpr,
                                    POSITIONS: tl.constexpr,
                                    OVERLAP: tl.constexpr,
+                                   TRANSPOSED: tl.constexpr,
                                    BLOCK: tl.constexpr):
     """Materialize the exact tile mixture from its compact position map."""
     tile = tl.program_id(0)
@@ -371,10 +373,20 @@ def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
     scalar_mask = (tile < TILE_COUNT) & (scalar < 256)
     tile_row = tile // OUTPUT_TILES
     tile_col = tile - tile_row * OUTPUT_TILES
-    row = scalar // 16
-    column = scalar - row * 16
-    weight_offset = (tile_row * 16 + row) * N + tile_col * 16 + column
-    value = tl.load(baseline + tile * 256 + scalar,
+    if TRANSPOSED:
+        row = scalar % 16
+        column = scalar // 16
+    else:
+        row = scalar // 16
+        column = scalar - row * 16
+    source_scalar = row * 16 + column
+    if TRANSPOSED:
+        weight_offset = ((tile_col * 16 + column) * IN_FEATURES
+                         + tile_row * 16 + row)
+    else:
+        weight_offset = ((tile_row * 16 + row) * OUT_FEATURES
+                         + tile_col * 16 + column)
+    value = tl.load(baseline + tile * 256 + source_scalar,
                     mask=scalar_mask, other=0.0).to(tl.float32)
     tl.store(output + weight_offset, value, mask=scalar_mask)
     tl.debug_barrier()
@@ -385,9 +397,14 @@ def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
                              mask=position_mask, other=0).to(tl.int32)
     row = changed_scalar // 16
     column = changed_scalar - row * 16
-    changed_weight_offset = (
-        (tile_row * 16 + row) * N + tile_col * 16 + column
-    )
+    if TRANSPOSED:
+        changed_weight_offset = (
+            (tile_col * 16 + column) * IN_FEATURES + tile_row * 16 + row
+        )
+    else:
+        changed_weight_offset = (
+            (tile_row * 16 + row) * OUT_FEATURES + tile_col * 16 + column
+        )
     changed_value = tl.load(baseline + tile * 256 + changed_scalar,
                             mask=position_mask, other=0.0).to(tl.float32)
     choice0 = tl.load(position_choices + position_offset,
@@ -644,6 +661,25 @@ def build_compact_position_map(indices, deltas, matrix_indices=None):
     )
 
 
+def transpose_compact_position_map(indices, choices, deltas):
+    """Order compact tile positions for coalesced transposed matrix stores."""
+    active = choices[..., 0] > 0
+    transpose_key = ((indices % 16) * 16 + indices // 16).to(torch.int16)
+    padding_order = torch.arange(
+        indices.shape[1], device=indices.device, dtype=torch.int16,
+    )
+    transpose_key = torch.where(
+        active, transpose_key, 256 + padding_order.unsqueeze(0),
+    )
+    order = transpose_key.argsort(1)
+    gather = order.unsqueeze(-1).expand_as(choices)
+    return (
+        indices.gather(1, order),
+        choices.gather(1, gather),
+        deltas.gather(1, gather),
+    )
+
+
 def candidate_probability_gradient(grad_matrix, matrix_indices, sparse_deltas,
                                    output):
     """Apply the exact sparse-mixture adjoint without an indexed gather op."""
@@ -659,7 +695,9 @@ def candidate_probability_gradient(grad_matrix, matrix_indices, sparse_deltas,
 
 
 def compact_sparse_mixture(probabilities, baseline, position_indices,
-                           position_choices, position_deltas, output):
+                           position_choices, position_deltas, output, *,
+                           in_features=None, out_features=None,
+                           transposed=False):
     """Materialize a P32 sparse mixture without deterministic scatter sorting."""
     tile_count = probabilities.shape[0]
     choices = probabilities.shape[1]
@@ -667,12 +705,19 @@ def compact_sparse_mixture(probabilities, baseline, position_indices,
     overlap = position_choices.shape[2]
     if overlap != 3:
         raise ValueError("fused P32 sparse mixtures require overlap three")
+    if in_features is None or out_features is None:
+        in_features, out_features = output.shape
+    expected = ((out_features, in_features) if transposed
+                else (in_features, out_features))
+    if output.shape != expected:
+        raise ValueError("fused P32 sparse mixture output shape is invalid")
     _sparse_mixture_compact_kernel[(tile_count,)](
         probabilities, baseline, position_indices, position_choices,
         position_deltas, output,
-        TILE_COUNT=tile_count, N=output.shape[1],
-        OUTPUT_TILES=output.shape[1] // 16, CHOICES=choices,
-        POSITIONS=positions, OVERLAP=overlap, BLOCK=256, num_warps=8,
+        TILE_COUNT=tile_count, IN_FEATURES=in_features,
+        OUT_FEATURES=out_features, OUTPUT_TILES=out_features // 16,
+        CHOICES=choices, POSITIONS=positions, OVERLAP=overlap,
+        TRANSPOSED=transposed, BLOCK=256, num_warps=8,
     )
 
 

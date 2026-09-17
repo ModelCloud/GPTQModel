@@ -130,14 +130,18 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
     @staticmethod
     def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas,
                 baseline_tiles, position_indices, position_choices, position_deltas,
-                compact_forward, output_dtype):
+                compact_forward, output_dtype, transposed_output):
         from .qvq_gsq_triton import compact_sparse_mixture
 
         if compact_forward:
-            matrix = torch.empty_like(baseline_matrix, dtype=output_dtype)
+            shape = (baseline_matrix.shape[1], baseline_matrix.shape[0]) if transposed_output else baseline_matrix.shape
+            matrix = torch.empty(shape, dtype=output_dtype, device=baseline_matrix.device)
             compact_sparse_mixture(
                 probabilities, baseline_tiles, position_indices,
                 position_choices, position_deltas, matrix,
+                in_features=baseline_matrix.shape[0],
+                out_features=baseline_matrix.shape[1],
+                transposed=transposed_output,
             )
         else:
             contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
@@ -162,7 +166,7 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
             grad_matrix.contiguous(), matrix_indices, sparse_deltas,
             probability_gradient,
         )
-        return probability_gradient, None, None, None, None, None, None, None, None, None
+        return probability_gradient, None, None, None, None, None, None, None, None, None, None
 
 
 class _TransposeView(torch.autograd.Function):
@@ -190,6 +194,7 @@ def _rht_reconstruct_differentiable(
     input_hadamard=True,
     output_hadamard=True,
     fast_hadamard=False,
+    inner_transposed=False,
 ):
     """Unchecked differentiable form of ``rht_reconstruct_weight``.
 
@@ -203,7 +208,8 @@ def _rht_reconstruct_differentiable(
             work = matmul_hadU(work.transpose(0, 1), transpose=True).transpose(0, 1)
         else:
             work = _ExactTrainingHadamardFixedScale.apply(
-                work.transpose(0, 1), SU.to(work.dtype),
+                work if inner_transposed else work.transpose(0, 1),
+                SU.to(work.dtype),
             ).transpose(0, 1)
     if not (input_hadamard and fast_hadamard):
         work = work * SU.to(work.dtype).unsqueeze(1)
@@ -356,11 +362,25 @@ class GSQP32TrainingModule(torch.nn.Module):
             + local_indices % 16
         )
         self.register_buffer("matrix_sparse_indices", matrix_indices.contiguous())
+        transposed_indices = (
+            (matrix_indices % out_features) * in_features
+            + matrix_indices // out_features
+        )
+        self.register_buffer(
+            "matrix_sparse_indices_transposed", transposed_indices.contiguous(),
+        )
         if self.compact_forward:
-            from .qvq_gsq_triton import build_compact_position_map
+            from .qvq_gsq_triton import (
+                build_compact_position_map,
+                transpose_compact_position_map,
+            )
 
             position_indices, position_choices, position_deltas = build_compact_position_map(
                 self.sparse_indices, self.sparse_deltas, matrix_indices,
+            )
+            (transposed_position_indices, transposed_position_choices,
+             transposed_position_deltas) = transpose_compact_position_map(
+                position_indices, position_choices, position_deltas,
             )
         else:
             position_indices = torch.empty(
@@ -372,9 +392,15 @@ class GSQP32TrainingModule(torch.nn.Module):
             position_deltas = torch.empty(
                 (0, 0, 0), dtype=self.sparse_deltas.dtype, device=candidates.device,
             )
+            transposed_position_indices = position_indices
+            transposed_position_choices = position_choices
+            transposed_position_deltas = position_deltas
         self.register_buffer("position_indices", position_indices)
         self.register_buffer("position_choices", position_choices)
         self.register_buffer("position_deltas", position_deltas)
+        self.register_buffer("transposed_position_indices", transposed_position_indices)
+        self.register_buffer("transposed_position_choices", transposed_position_choices)
+        self.register_buffer("transposed_position_deltas", transposed_position_deltas)
         baseline_matrix = (
             self.baseline_tiles.reshape(input_tiles, output_tiles, 16, 16)
             .permute(0, 2, 1, 3)
@@ -401,23 +427,43 @@ class GSQP32TrainingModule(torch.nn.Module):
         logits[:, 0] = torch.maximum(logits[:, 0], logits[:, 1:].amax(-1) + std * 1e-3)
         self.logits = torch.nn.Parameter(logits.to(logits_dtype))
 
-    def _inner_from_probabilities(self, probabilities, output_dtype=None):
+    def _inner_from_probabilities(self, probabilities, output_dtype=None,
+                                  transposed_output=False):
         if probabilities.shape != self.logits.shape:
             raise ValueError("P32 GSQ probabilities do not match logits")
         if output_dtype is None:
             output_dtype = self.baseline_matrix.dtype
+        if transposed_output and not self.compact_forward:
+            raise ValueError("transposed P32 mixtures require compact materialization")
         if probabilities.device.type == "cuda":
+            matrix_indices = (
+                self.matrix_sparse_indices_transposed
+                if transposed_output else self.matrix_sparse_indices
+            )
+            position_indices = (
+                self.transposed_position_indices
+                if transposed_output else self.position_indices
+            )
+            position_choices = (
+                self.transposed_position_choices
+                if transposed_output else self.position_choices
+            )
+            position_deltas = (
+                self.transposed_position_deltas
+                if transposed_output else self.position_deltas
+            )
             return _FusedSparseCandidateMatrixMixture.apply(
                 probabilities,
                 self.baseline_matrix,
-                self.matrix_sparse_indices,
+                matrix_indices,
                 self.sparse_deltas,
                 self.baseline_tiles,
-                self.position_indices,
-                self.position_choices,
-                self.position_deltas,
+                position_indices,
+                position_choices,
+                position_deltas,
                 self.compact_forward,
                 output_dtype,
+                transposed_output,
             )
         return _SparseCandidateMatrixMixture.apply(
             probabilities,
@@ -433,7 +479,13 @@ class GSQP32TrainingModule(torch.nn.Module):
             temperature,
             multiplier,
         )
-        inner = self._inner_from_probabilities(probabilities, self.training_dtype)
+        inner_transposed = (
+            self.compact_forward and self.input_hadamard and self.fast_hadamard
+        )
+        inner = self._inner_from_probabilities(
+            probabilities, self.training_dtype,
+            transposed_output=inner_transposed,
+        )
         return _rht_reconstruct_differentiable(
             inner,
             self.SU,
@@ -441,6 +493,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             input_hadamard=self.input_hadamard,
             output_hadamard=self.output_hadamard,
             fast_hadamard=self.fast_hadamard,
+            inner_transposed=inner_transposed,
         )
 
     @torch.no_grad()

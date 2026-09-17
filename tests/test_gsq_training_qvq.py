@@ -120,12 +120,23 @@ def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
         module.logits.shape, device="cuda", generator=generator, requires_grad=True,
     )
     probabilities_fused = probabilities_matrix.detach().clone().requires_grad_()
-    from gptqmodel.quantization.qvq_gsq_triton import build_compact_position_map
+    probabilities_transposed = probabilities_matrix.detach().clone().requires_grad_()
+    from gptqmodel.quantization.qvq_gsq_triton import (
+        build_compact_position_map,
+        transpose_compact_position_map,
+    )
 
     position_map = build_compact_position_map(
         module.sparse_indices, module.sparse_deltas, module.matrix_sparse_indices,
     )
     module.position_indices, module.position_choices, module.position_deltas = position_map
+    transposed_map = transpose_compact_position_map(*position_map)
+    (module.transposed_position_indices, module.transposed_position_choices,
+     module.transposed_position_deltas) = transposed_map
+    module.matrix_sparse_indices_transposed = (
+        (module.matrix_sparse_indices % module.out_features) * module.in_features
+        + module.matrix_sparse_indices // module.out_features
+    )
     module.compact_forward = True
     upstream_matrix = torch.randn(
         module.baseline_matrix.shape, device="cuda", generator=generator,
@@ -135,11 +146,17 @@ def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
         module.matrix_sparse_indices, module.sparse_deltas,
     )
     fused = module._inner_from_probabilities(probabilities_fused)
+    transposed = module._inner_from_probabilities(
+        probabilities_transposed, transposed_output=True,
+    )
     matrix.backward(upstream_matrix)
     fused.backward(upstream_matrix)
+    transposed.backward(upstream_matrix.T.contiguous())
 
     torch.testing.assert_close(fused, matrix, rtol=0, atol=5e-7)
+    assert torch.equal(transposed, fused.T.contiguous())
     assert torch.equal(probabilities_fused.grad, probabilities_matrix.grad)
+    assert torch.equal(probabilities_transposed.grad, probabilities_matrix.grad)
 
 
 @pytest.mark.cuda
