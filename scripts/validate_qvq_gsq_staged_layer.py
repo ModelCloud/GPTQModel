@@ -173,6 +173,12 @@ def parse_args():
     parser.add_argument("--qk-offset", type=int)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--qk-steps", type=int, default=16)
+    parser.add_argument(
+        "--qk-soft-dtype",
+        choices=("float32", "bfloat16"),
+        default="bfloat16",
+        help="Soft exact-Fisher relaxation dtype; hard Fisher and held-out guards remain FP32",
+    )
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -451,6 +457,7 @@ def main():
     )
     qk_quantizers = {name: new_quantizer(name) for name in PROJECTIONS[:2]}
     qk_streams = {name: torch.cuda.Stream() for name in PROJECTIONS[:2]}
+    qk_capture_barrier = threading.Barrier(2) if args.fused_qk_fisher else None
 
     def fit_qk_projection(name):
         quantizer = qk_quantizers[name]
@@ -533,6 +540,7 @@ def main():
             kappa_start=100.,
             kappa_end=500.,
             weight_decay=1.,
+            soft_dtype=args.qk_soft_dtype,
             coordinate_sweeps=0,
             hard_eval_interval=max(1, min(10, args.qk_steps)),
             relaxation_patience=0,
@@ -543,6 +551,7 @@ def main():
             input_metric=input_metric,
             output_metric=output_metric,
             output_metric_hadamard_diagonal=fisher_scales.square(),
+            capture_barrier=qk_capture_barrier,
             seed=args.seed,
         )
         inner = quantizer.adapter.inner(
@@ -630,16 +639,25 @@ def main():
             "relaxation_requested_steps": args.qk_steps,
             "relaxation_completed_steps": optimized.diagnostics["completed_steps"],
             "relaxation_changed_tiles": optimized.diagnostics["relaxation_changed_tiles"],
+            "relaxation_soft_dtype": optimized.diagnostics["soft_dtype"],
         }]
         return name, quantizer, state, weight, rounds, alternatives
 
+    def fit_qk_projection_fused_on_stream(name):
+        stream = qk_streams[name]
+        with torch.cuda.stream(stream):
+            result = fit_qk_projection_fused(name)
+        stream.synchronize()
+        return result
+
     qk_started = time.perf_counter()
-    qk_fit = fit_qk_projection_fused if args.fused_qk_fisher else fit_qk_projection
-    if args.fused_qk_fisher:
-        qk_results = [qk_fit(name) for name in PROJECTIONS[:2]]
-    else:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            qk_results = list(executor.map(qk_fit, PROJECTIONS[:2]))
+    torch.cuda.current_stream().synchronize()
+    qk_fit = (
+        fit_qk_projection_fused_on_stream
+        if args.fused_qk_fisher else fit_qk_projection
+    )
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        qk_results = list(executor.map(qk_fit, PROJECTIONS[:2]))
     qk_fit_seconds = time.perf_counter() - qk_started
     fit_seconds += qk_fit_seconds
     for result in qk_results:
@@ -721,6 +739,40 @@ def main():
             record["changed_tiles"] = int(
                 (alternative["state"]["choices"] != 0).sum(),
             )
+
+    def materialize_state(name, state):
+        _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
+        return p32_training_module_from_words(
+            state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
+            candidates=2, seed=args.seed,
+        ).hard_weight()
+
+    qk_pair_guard_seconds = 0.
+    if len(qk_alternatives) == 2:
+        guard_started = time.perf_counter()
+        initial_downstream_weights = {
+            f"{name}.weight": baseline_weights[f"{name}.weight"]
+            for name in PROJECTIONS[2:]
+        }
+        for name in PROJECTIONS[:2]:
+            for alternative in qk_alternatives[name]:
+                alternative["weight"] = materialize_state(name, alternative["state"])
+        q_alternative, k_alternative, measurements = select_qk_pair(
+            qk_alternatives[PROJECTIONS[0]],
+            qk_alternatives[PROJECTIONS[1]],
+            lambda q, k: qk_pair_replay_objective(
+                q, k, initial_downstream_weights,
+            ),
+        )
+        qk_pair_guards["before_downstream_fit"] = {
+            "applied": True,
+            "q_selection": q_alternative["selection"],
+            "k_selection": k_alternative["selection"],
+            "loss": min(measurement["loss"] for measurement in measurements),
+            "measurements": measurements,
+        }
+        install_qk_pair(q_alternative, k_alternative)
+        qk_pair_guard_seconds += time.perf_counter() - guard_started
 
     def cache_stage_batches(source_batches, stage, prefix_stage=None):
         cached = []
@@ -825,13 +877,6 @@ def main():
         prefix_stage=LlamaGSQAttentionStage(prepared),
     )
 
-    def materialize_state(name, state):
-        _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
-        return p32_training_module_from_words(
-            state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
-            candidates=2, seed=args.seed,
-        ).hard_weight()
-
     if len(qk_alternatives) == 2:
         guard_started = time.perf_counter()
         downstream_weights = {
@@ -854,10 +899,8 @@ def main():
             "measurements": measurements,
         }
         install_qk_pair(q_alternative, k_alternative)
-        qk_pair_guard_seconds = time.perf_counter() - guard_started
-        fit_seconds += qk_pair_guard_seconds
-    else:
-        qk_pair_guard_seconds = 0.
+        qk_pair_guard_seconds += time.perf_counter() - guard_started
+    fit_seconds += qk_pair_guard_seconds
 
     final_weights = {}
     state_tensors = dict(prefix_tensors)
@@ -944,6 +987,7 @@ def main():
         "strict_disjoint": not bool(set(train_hashes) & set(validation_hashes)),
         "epochs": args.epochs,
         "qk_steps": args.qk_steps,
+        "qk_soft_dtype": args.qk_soft_dtype,
         "rounds": args.rounds,
         "candidates": args.candidates,
         "batch_size": args.batch_size,
