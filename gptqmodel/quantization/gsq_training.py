@@ -313,7 +313,20 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
 
 
 @torch.no_grad()
-def evaluate_hard_stage(quantizers, batches, objective):
+def _hard_stage_weights(quantizers):
+    """Materialize one reusable set of deterministic hard stage weights."""
+    return {
+        name: (
+            quantizer.hard_weight_for_evaluation()
+            if hasattr(quantizer, "hard_weight_for_evaluation")
+            else quantizer.hard_weight()
+        )
+        for name, quantizer in quantizers.items()
+    }
+
+
+@torch.no_grad()
+def evaluate_hard_stage(quantizers, batches, objective, *, weights=None):
     """Measure deterministic hard assignments over the complete stage dataset."""
     import logging
     import time
@@ -322,14 +335,10 @@ def evaluate_hard_stage(quantizers, batches, objective):
     # Their training-only materializer can therefore avoid repeating the much
     # more expensive pack/unpack legality audit at every held-out checkpoint.
     # Public/export materialization deliberately continues to use hard_weight.
-    weights = {
-        name: (
-            quantizer.hard_weight_for_evaluation()
-            if hasattr(quantizer, "hard_weight_for_evaluation")
-            else quantizer.hard_weight()
-        )
-        for name, quantizer in quantizers.items()
-    }
+    if weights is None:
+        weights = _hard_stage_weights(quantizers)
+    elif set(weights) != set(quantizers):
+        raise ValueError('GSQ hard stage weights do not match quantizers')
     weighted_loss = 0.
     elements = 0
     progress_at = time.monotonic()+60
@@ -432,11 +441,18 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     import time
 
     started = time.perf_counter()
-    hard_loss_before = evaluate_hard_stage(quantizers, batches, objective)
+    initial_hard_weights = _hard_stage_weights(quantizers)
+    hard_loss_before = evaluate_hard_stage(
+        quantizers, batches, objective, weights=initial_hard_weights,
+    )
     validation_hard_loss_before = (
-        evaluate_hard_stage(quantizers, validation_batches, objective)
+        evaluate_hard_stage(
+            quantizers, validation_batches, objective,
+            weights=initial_hard_weights,
+        )
         if validation_batches else None
     )
+    del initial_hard_weights
 
     def parameter_snapshot():
         return {
@@ -511,14 +527,23 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                   ),
                   scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
                   history=history, hard_loss_before=hard_loss_before)
-    result['hard_loss_after'] = evaluate_hard_stage(quantizers, batches, objective)
+    final_hard_weights = _hard_stage_weights(quantizers)
+    result['hard_loss_after'] = evaluate_hard_stage(
+        quantizers, batches, objective, weights=final_hard_weights,
+    )
     result['hard_loss_delta'] = result['hard_loss_after']-hard_loss_before
     result['validation_history'] = validation_history
     result['validation_hard_loss_before'] = validation_hard_loss_before
-    result['validation_hard_loss_after'] = (
-        evaluate_hard_stage(quantizers, validation_batches, objective)
-        if validation_batches else None
-    )
+    if not validation_batches:
+        result['validation_hard_loss_after'] = None
+    elif restore_best:
+        result['validation_hard_loss_after'] = best_validation_loss
+    else:
+        result['validation_hard_loss_after'] = evaluate_hard_stage(
+            quantizers, validation_batches, objective,
+            weights=final_hard_weights,
+        )
+    del final_hard_weights
     result['best_validation_hard_loss'] = best_validation_loss
     result['best_validation_epoch'] = best_epoch
     result['restored_best_validation_checkpoint'] = bool(restore_best)
