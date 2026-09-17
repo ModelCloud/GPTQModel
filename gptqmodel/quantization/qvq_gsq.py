@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 
 import torch
 
-from ..utils.hadamard import hadamard_transform
+from ..utils.hadamard import hadamard_transform, hadamard_transform_scaled
 from .qvq import (
     QVQ_V2B2_P32_SEGMENTS_PER_TILE,
     QVQ_V2B2_P32_STEPS_PER_SEGMENT,
@@ -309,10 +309,10 @@ def refine_trellis_candidates(
                 if g_hadamard_diagonal_hard is None:
                     raise ValueError("structured hard Fisher loss requires a Hadamard diagonal")
                 hadamard_scale = 1. / math.sqrt(n)
-                metric_error = hadamard_transform(
-                    metric_error.contiguous(), hadamard_scale,
+                metric_error = hadamard_transform_scaled(
+                    metric_error.contiguous(), g_hadamard_diagonal_hard,
+                    hadamard_scale,
                 )
-                metric_error.mul_(g_hadamard_diagonal_hard)
                 metric_error = hadamard_transform(
                     metric_error.contiguous(), hadamard_scale,
                 )
@@ -484,10 +484,10 @@ def refine_trellis_candidates(
             torch.mm(warm_metric_left, g_relax, out=warm_metric_error)
         else:
             hadamard_scale = 1. / math.sqrt(n)
-            warm_metric_right = hadamard_transform(
-                warm_metric_left.contiguous(), hadamard_scale,
+            warm_metric_right = hadamard_transform_scaled(
+                warm_metric_left.contiguous(), g_hadamard_diagonal,
+                hadamard_scale,
             )
-            warm_metric_right.mul_(g_hadamard_diagonal)
             warm_metric_error = hadamard_transform(
                 warm_metric_right.contiguous(), hadamard_scale,
             )
@@ -524,10 +524,10 @@ def refine_trellis_candidates(
                     if g_hadamard_diagonal is None:
                         torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
                     else:
-                        metric_right_buffer = hadamard_transform(
-                            metric_left_buffer.contiguous(), hadamard_scale,
+                        metric_right_buffer = hadamard_transform_scaled(
+                            metric_left_buffer.contiguous(), g_hadamard_diagonal,
+                            hadamard_scale,
                         )
-                        metric_right_buffer.mul_(g_hadamard_diagonal)
                         metric_error_buffer = hadamard_transform(
                             metric_right_buffer.contiguous(), hadamard_scale,
                         )
@@ -589,10 +589,10 @@ def refine_trellis_candidates(
                     if g_hadamard_diagonal is None:
                         torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
                     else:
-                        metric_right_buffer = hadamard_transform(
-                            metric_left_buffer.contiguous(), hadamard_scale,
+                        metric_right_buffer = hadamard_transform_scaled(
+                            metric_left_buffer.contiguous(), g_hadamard_diagonal,
+                            hadamard_scale,
                         )
-                        metric_right_buffer.mul_(g_hadamard_diagonal)
                         metric_error_buffer = hadamard_transform(
                             metric_right_buffer.contiguous(), hadamard_scale,
                         )
