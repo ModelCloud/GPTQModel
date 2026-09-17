@@ -369,6 +369,48 @@ def test_stage_driver_can_validate_only_the_refinement_tail():
     assert result['validation_start_epoch'] == 2
 
 
+def test_stage_driver_reuses_hard_weights_and_selected_validation_loss():
+    from gptqmodel.quantization.gsq_training import fit_reconstruction_stage
+
+    class CountingQuantizer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.ones(()))
+            self.scales = torch.nn.Parameter(torch.ones(()))
+            self.materializations = 0
+
+        def forward(self, **_):
+            return self.logits * self.scales
+
+        def hard_weight(self):
+            self.materializations += 1
+            return (self.logits * self.scales).detach()
+
+        def optimizer_groups(self, *, assignment_lr, scale_lr, weight_decay):
+            return [
+                {'params': [self.logits], 'lr': assignment_lr,
+                 'weight_decay': weight_decay},
+                {'params': [self.scales], 'lr': scale_lr, 'weight_decay': 0.},
+            ]
+
+    quantizer = CountingQuantizer()
+    batches = [[(torch.ones(()), 1)]]
+
+    def objective(target, weights):
+        return (weights['weight']-target).square()
+
+    result = fit_reconstruction_stage(
+        {'weight': quantizer}, batches, objective, epochs=2,
+        validation_batches=batches, restore_best=True,
+        export_weights=False,
+    )
+    # Initial train/validation share one materialization, each epoch validates
+    # once, and final train evaluation materializes once. The restored held-out
+    # loss is the already-measured selected checkpoint.
+    assert quantizer.materializations == 4
+    assert result['validation_hard_loss_after'] == result['best_validation_hard_loss']
+
+
 def test_checkpoint_global_guard_requires_all_metrics_to_avoid_regression():
     from scripts.validate_qvq_gsq_checkpoint import strict_global_guard
 
