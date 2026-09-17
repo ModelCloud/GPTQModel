@@ -690,7 +690,7 @@ def candidate_probability_gradient(grad_matrix, matrix_indices, sparse_deltas,
     _candidate_probability_gradient_kernel[(tile_count,)](
         grad_matrix, matrix_indices, sparse_deltas, output, tile_count,
         CHOICES=alternatives + 1, WIDTH=width,
-        BLOCK=block, num_warps=1,
+        BLOCK=block, num_warps=2,
     )
 
 
