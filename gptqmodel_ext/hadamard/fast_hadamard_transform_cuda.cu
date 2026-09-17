@@ -244,8 +244,8 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     }
 }
 
-template<typename input_t, bool kVectorScale = false>
-__global__ __launch_bounds__(256)
+template<typename input_t, bool kVectorScale = false, int kThreads = 256>
+__global__ __launch_bounds__(kThreads)
 void fast_hadamard_transform_reverse_kernel(HadamardParamsBase params) {
     extern __shared__ float values[];
     input_t *x = reinterpret_cast<input_t *>(params.x_ptr)
@@ -286,27 +286,31 @@ void fast_hadamard_transform_reverse_kernel(HadamardParamsBase params) {
 
 template<typename input_t>
 void fast_hadamard_transform_reverse_cuda(HadamardParamsBase &params, cudaStream_t stream) {
-    constexpr int kThreads = 256;
     const int shared_bytes = params.dim * sizeof(float);
-    auto kernel = &fast_hadamard_transform_reverse_kernel<input_t>;
+    auto kernel256 = &fast_hadamard_transform_reverse_kernel<input_t, false, 256>;
+    auto kernel512 = &fast_hadamard_transform_reverse_kernel<input_t, false, 512>;
+    auto kernel = params.dim >= 8192 ? kernel512 : kernel256;
+    const int threads = params.dim >= 8192 ? 512 : 256;
     if (shared_bytes >= 48 * 1024) {
         C10_CUDA_CHECK(cudaFuncSetAttribute(
             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
     }
-    kernel<<<params.batch, kThreads, shared_bytes, stream>>>(params);
+    kernel<<<params.batch, threads, shared_bytes, stream>>>(params);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 template<typename input_t>
 void fast_hadamard_transform_reverse_scaled_cuda(HadamardParamsBase &params, cudaStream_t stream) {
-    constexpr int kThreads = 256;
     const int shared_bytes = params.dim * sizeof(float);
-    auto kernel = &fast_hadamard_transform_reverse_kernel<input_t, true>;
+    auto kernel256 = &fast_hadamard_transform_reverse_kernel<input_t, true, 256>;
+    auto kernel512 = &fast_hadamard_transform_reverse_kernel<input_t, true, 512>;
+    auto kernel = params.dim >= 8192 ? kernel512 : kernel256;
+    const int threads = params.dim >= 8192 ? 512 : 256;
     if (shared_bytes >= 48 * 1024) {
         C10_CUDA_CHECK(cudaFuncSetAttribute(
             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
     }
-    kernel<<<params.batch, kThreads, shared_bytes, stream>>>(params);
+    kernel<<<params.batch, threads, shared_bytes, stream>>>(params);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
