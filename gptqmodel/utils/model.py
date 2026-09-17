@@ -1652,6 +1652,7 @@ def check_requires_version(requires_version, current_version):
 class MODALITY(str, Enum):
     TEXT = "text"
     IMAGE_TO_TEXT = "image_to_text"
+    VIDEO_TO_TEXT = "video_to_text"
     # TEXT_TO_IMAGE = "text_to_image"
 
 

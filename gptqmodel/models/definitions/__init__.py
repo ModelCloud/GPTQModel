@@ -115,6 +115,7 @@ from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel
 from .zamba import ZambaQModel
 from .zamba2 import Zamba2QModel
+from .zdtaichu5 import ZDTaichu5QModel
 from .pangu_alpha import PanguAlphaQModel
 from .longcat_flash import LongCatFlashQModel
 from .locateanything import LocateAnythingQModel

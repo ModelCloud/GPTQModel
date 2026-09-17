@@ -211,11 +211,13 @@ if TRANSFORMERS_SUPPORTS_QWEN3_5:
     from .definitions.qwen3_5_moe import Qwen3_5_MoeQModel  # noqa: E402
     from .definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel  # noqa: E402
     from .definitions.qwen3_5_text import Qwen3_5TextQModel  # noqa: E402
+    from .definitions.zdtaichu5 import ZDTaichu5QModel  # noqa: E402
 else:
     Qwen3_5QModel = None
     Qwen3_5_MoeQModel = None
     Qwen3_5_MoeTextQModel = None
     Qwen3_5TextQModel = None
+    ZDTaichu5QModel = None
 
 
 MODEL_MAP = {
@@ -399,6 +401,9 @@ if Qwen3_5QModel is not None:
 if Qwen3_5_MoeQModel is not None:
     MODEL_MAP["qwen3_5_moe"] = Qwen3_5_MoeQModel
     MODEL_MAP["qwen3_5_moe_text"] = Qwen3_5_MoeTextQModel
+
+if ZDTaichu5QModel is not None:
+    MODEL_MAP["zdtaichu5_0"] = ZDTaichu5QModel
 
 SUPPORTED_MODELS = list(MODEL_MAP.keys())
 

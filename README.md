@@ -218,9 +218,12 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | XVERSE | `xverse` |
 | Yi | `yi` |
 | Zamba / Zamba2 | `zamba`, `zamba2` |
+| ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
 
 Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
+
+ZDTaichu 5.0 support targets [`TaichuAI/ZDTaichu5.0-9B`](https://huggingface.co/TaichuAI/ZDTaichu5.0-9B). It requires Transformers 5.3.0 or newer with `trust_remote_code=True`, plus the official RADIO dependencies (`timm` and compatible `torchvision`). GPT-QModel quantizes the language decoder while retaining the root `vision_model` and `mlp1` projector in dense form. [`TestZDTaichu5`](tests/models/test_zdtaichu5.py) measures native ARC `acc` and `acc_norm` at runtime and compares quantized scores against that baseline, with a 4% relative floor tolerance.
 
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
