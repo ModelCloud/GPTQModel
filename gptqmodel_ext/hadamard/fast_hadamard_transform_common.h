@@ -163,6 +163,36 @@ inline __device__ void store_output(output_t *out, float out_vals[kNChunks][kNEl
     }
 }
 
+
+template <int kNChunks, int kNElts, typename output_t>
+inline __device__ void store_output_scaled(output_t *out,
+                                           float out_vals[kNChunks][kNElts],
+                                           const output_t *vector,
+                                           int dim, float scale=1.f) {
+    using vec_t = typename BytesToType<sizeof(output_t) * kNElts>::Type;
+    output_t out_vals_store[kNChunks][kNElts];
+    #pragma unroll
+    for (int c = 0; c < kNChunks; ++c) {
+        #pragma unroll
+        for (int i = 0; i < kNElts; ++i) {
+            const int index = (c * blockDim.x + threadIdx.x) * kNElts + i;
+            // Preserve the unfused dtype boundary: normalized Hadamard is
+            // rounded first, then the vector product is rounded separately.
+            const output_t rounded = output_t(out_vals[c][i] * scale);
+            out_vals_store[c][i] = index < dim
+                ? output_t(float(rounded) * float(vector[index]))
+                : output_t(0.f);
+        }
+    }
+    #pragma unroll
+    for (int c = 0; c < kNChunks; ++c) {
+        if ((c * blockDim.x + threadIdx.x) * kNElts < dim) {
+            reinterpret_cast<vec_t*>(out)[c * blockDim.x + threadIdx.x]
+                = reinterpret_cast<const vec_t*>(out_vals_store)[c];
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Pre=true means the exchange before the hadamard_mult_warp, Pre=false means after.

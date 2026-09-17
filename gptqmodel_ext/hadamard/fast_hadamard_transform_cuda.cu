@@ -153,7 +153,7 @@ __device__ __forceinline__ void hadamard_mult_thread_chunk_40(float x[kNChunks][
     for (int c = 0; c < kNChunks; ++c) { hadamard_mult_thread_40(x[c]); }
 }
 
-template<typename Ktraits>
+template<typename Ktraits, bool kVectorScale = false>
 __global__ __launch_bounds__(Ktraits::kNThreads)
 void fast_hadamard_transform_kernel(HadamardParamsBase params) {
     constexpr int kNThreads = Ktraits::kNThreads;
@@ -228,10 +228,16 @@ void fast_hadamard_transform_kernel(HadamardParamsBase params) {
         }
     }
 
-    store_output<kNChunks, kNElts, input_t>(out, x_vals, params.dim, params.scale);
+    if constexpr (kVectorScale) {
+        const input_t *vector = reinterpret_cast<const input_t *>(params.vector_ptr);
+        store_output_scaled<kNChunks, kNElts, input_t>(
+            out, x_vals, vector, params.dim, params.scale);
+    } else {
+        store_output<kNChunks, kNElts, input_t>(out, x_vals, params.dim, params.scale);
+    }
 }
 
-template<typename input_t>
+template<typename input_t, bool kVectorScale = false>
 __global__ __launch_bounds__(256)
 void fast_hadamard_transform_reverse_kernel(HadamardParamsBase params) {
     extern __shared__ float values[];
@@ -244,7 +250,13 @@ void fast_hadamard_transform_reverse_kernel(HadamardParamsBase params) {
     // butterfly stages in reverse. Materializing the scaled values in shared
     // memory preserves that FP32 rounding boundary.
     for (int index = threadIdx.x; index < params.dim; index += blockDim.x) {
-        values[index] = float(x[index]) * params.scale;
+        if constexpr (kVectorScale) {
+            const input_t *vector = reinterpret_cast<const input_t *>(params.vector_ptr);
+            const input_t rounded = input_t(float(x[index]) * float(vector[index]));
+            values[index] = float(rounded) * params.scale;
+        } else {
+            values[index] = float(x[index]) * params.scale;
+        }
     }
     __syncthreads();
 
@@ -278,6 +290,19 @@ void fast_hadamard_transform_reverse_cuda(HadamardParamsBase &params, cudaStream
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template<typename input_t>
+void fast_hadamard_transform_reverse_scaled_cuda(HadamardParamsBase &params, cudaStream_t stream) {
+    constexpr int kThreads = 256;
+    const int shared_bytes = params.dim * sizeof(float);
+    auto kernel = &fast_hadamard_transform_reverse_kernel<input_t, true>;
+    if (shared_bytes >= 48 * 1024) {
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, shared_bytes));
+    }
+    kernel<<<params.batch, kThreads, shared_bytes, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 template<int kNThreads, int kLogN, typename input_t>
 void fast_hadamard_transform_launch(HadamardParamsBase &params, cudaStream_t stream) {
     using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
@@ -288,6 +313,20 @@ void fast_hadamard_transform_launch(HadamardParamsBase &params, cudaStream_t str
         C10_CUDA_CHECK(cudaFuncSetAttribute(
             kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
         }
+    kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template<int kNThreads, int kLogN, typename input_t>
+void fast_hadamard_transform_scaled_launch(HadamardParamsBase &params, cudaStream_t stream) {
+    using Ktraits = fast_hadamard_transform_kernel_traits<kNThreads, kLogN, input_t>;
+    constexpr int kSmemSize = Ktraits::kSmemSize;
+    dim3 grid(params.batch);
+    auto kernel = &fast_hadamard_transform_kernel<Ktraits, true>;
+    if (kSmemSize >= 48 * 1024) {
+        C10_CUDA_CHECK(cudaFuncSetAttribute(
+            kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemSize));
+    }
     kernel<<<grid, Ktraits::kNThreads, kSmemSize, stream>>>(params);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -320,6 +359,37 @@ void fast_hadamard_transform_cuda(HadamardParamsBase &params, cudaStream_t strea
         fast_hadamard_transform_launch<256, 14, input_t>(params, stream);
     } else if (params.log_N == 15) {
         fast_hadamard_transform_launch<256, 15, input_t>(params, stream);
+    }
+}
+
+template<typename input_t>
+void fast_hadamard_transform_scaled_cuda(HadamardParamsBase &params, cudaStream_t stream) {
+    if (params.log_N == 3) {
+        fast_hadamard_transform_scaled_launch<1, 3, input_t>(params, stream);
+    } else if (params.log_N == 4) {
+        fast_hadamard_transform_scaled_launch<2, 4, input_t>(params, stream);
+    } else if (params.log_N == 5) {
+        fast_hadamard_transform_scaled_launch<4, 5, input_t>(params, stream);
+    } else if (params.log_N == 6) {
+        fast_hadamard_transform_scaled_launch<8, 6, input_t>(params, stream);
+    } else if (params.log_N == 7) {
+        fast_hadamard_transform_scaled_launch<16, 7, input_t>(params, stream);
+    } else if (params.log_N == 8) {
+        fast_hadamard_transform_scaled_launch<32, 8, input_t>(params, stream);
+    } else if (params.log_N == 9) {
+        fast_hadamard_transform_scaled_launch<32, 9, input_t>(params, stream);
+    } else if (params.log_N == 10) {
+        fast_hadamard_transform_scaled_launch<128, 10, input_t>(params, stream);
+    } else if (params.log_N == 11) {
+        fast_hadamard_transform_scaled_launch<256, 11, input_t>(params, stream);
+    } else if (params.log_N == 12) {
+        fast_hadamard_transform_scaled_launch<256, 12, input_t>(params, stream);
+    } else if (params.log_N == 13) {
+        fast_hadamard_transform_scaled_launch<256, 13, input_t>(params, stream);
+    } else if (params.log_N == 14) {
+        fast_hadamard_transform_scaled_launch<256, 14, input_t>(params, stream);
+    } else if (params.log_N == 15) {
+        fast_hadamard_transform_scaled_launch<256, 15, input_t>(params, stream);
     }
 }
 
@@ -475,9 +545,17 @@ template void fast_hadamard_transform_cuda<float>(HadamardParamsBase &params, cu
 template void fast_hadamard_transform_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
 
+template void fast_hadamard_transform_scaled_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_scaled_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_scaled_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
+
 template void fast_hadamard_transform_reverse_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_reverse_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_reverse_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
+
+template void fast_hadamard_transform_reverse_scaled_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_reverse_scaled_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
+template void fast_hadamard_transform_reverse_scaled_cuda<at::BFloat16>(HadamardParamsBase &params, cudaStream_t stream);
 
 template void fast_hadamard_transform_12N_cuda<float>(HadamardParamsBase &params, cudaStream_t stream);
 template void fast_hadamard_transform_12N_cuda<at::Half>(HadamardParamsBase &params, cudaStream_t stream);
