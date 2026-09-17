@@ -343,9 +343,8 @@ def _position_error_compact_kernel(probabilities, baseline, position_indices,
                                    BLOCK: tl.constexpr):
     """Build E from a dense baseline and only the positions candidates edit.
 
-    P32 W3's 32 legal alternatives touch 64 unique scalars per tile, with
-    three alternatives sharing each scalar.  Keeping only those 64 positions
-    avoids streaming a [tile, 256, 3] mostly-empty choice map every update.
+    The compact map retains only candidate-edited scalars and their three
+    overlapping alternatives, avoiding a mostly-empty [tile, 256, 3] map.
     """
     tile = tl.program_id(0) * TILES + tl.arange(0, TILES)[:, None]
     scalar = tl.arange(0, BLOCK)[None, :]
@@ -816,14 +815,17 @@ def compact_position_error(probabilities, baseline, position_indices,
             )
             return
     block = 256
-    tiles = 2
+    # A two-tile program is only legal for the original 64-position map.  Real
+    # QVQ P32 maps can contain 192 positions; their second tile otherwise aliases
+    # the first tile's compact lanes and silently drops legal corrections.
+    tiles = 2 if position_indices.shape[1] == 64 else 1
     _position_error_compact_kernel[(triton.cdiv(probabilities.shape[0], tiles),)](
         probabilities, baseline, position_indices, position_choices,
         position_deltas, target, output, TILE_COUNT=probabilities.shape[0],
         N=target.shape[1],
         OUTPUT_TILES=target.shape[1] // 16, CHOICES=probabilities.shape[1],
         POSITIONS=position_indices.shape[1], OVERLAP=position_choices.shape[2],
-        TILES=tiles, BLOCK=block, num_warps=8,
+        TILES=tiles, BLOCK=block, num_warps=8 if tiles == 2 else 4,
     )
 
 
