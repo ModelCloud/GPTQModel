@@ -122,6 +122,18 @@ def test_control_requires_boolean():
                               target=torch.empty(0), inputs=torch.empty(0), enabled="false")
 
 
+@pytest.mark.parametrize("value,error", [(True, TypeError), (-1, ValueError)])
+def test_hard_dense_verify_topk_validation(value, error):
+    from gptqmodel.quantization.qvq_gsq import refine_trellis_candidates
+
+    with pytest.raises(error, match="hard_dense_verify_topk"):
+        refine_trellis_candidates(
+            torch.zeros(2, 1, 32, dtype=torch.int32), bits=4,
+            target=torch.zeros(16, 16), inputs=torch.zeros(1, 16),
+            enabled=True, hard_dense_verify_topk=value,
+        )
+
+
 def test_fisher_loss_matches_independent_quadratic():
     gen = torch.Generator().manual_seed(7)
     candidates = torch.randint(-(2**31), 2**31-1, (2, 2, 20), dtype=torch.int32, generator=gen)

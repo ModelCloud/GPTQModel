@@ -101,17 +101,27 @@ def select_qk_pair(q_alternatives, k_alternatives, objective):
     """Select the Q/K Cartesian pair with the lowest downstream objective."""
     if not q_alternatives or not k_alternatives:
         raise ValueError("Q/K pair selection requires non-empty alternatives")
-    measurements = []
+    pairs = []
+    losses = []
     for q_alternative in q_alternatives:
         for k_alternative in k_alternatives:
-            loss = objective(q_alternative, k_alternative)
-            if not math.isfinite(loss):
-                raise ValueError("Q/K downstream replay produced a nonfinite loss")
-            measurements.append({
+            pairs.append((q_alternative, k_alternative))
+            losses.append(objective(q_alternative, k_alternative))
+    if any(isinstance(loss, torch.Tensor) for loss in losses):
+        if not all(isinstance(loss, torch.Tensor) and loss.numel() == 1 for loss in losses):
+            raise TypeError("Q/K downstream replay losses must all be scalar tensors")
+        loss_values = torch.stack(losses).detach().cpu().tolist()
+    else:
+        loss_values = losses
+    measurements = []
+    for (q_alternative, k_alternative), loss in zip(pairs, loss_values):
+        if not math.isfinite(loss):
+            raise ValueError("Q/K downstream replay produced a nonfinite loss")
+        measurements.append({
                 "q_selection": q_alternative["selection"],
                 "k_selection": k_alternative["selection"],
                 "loss": loss,
-            })
+        })
     best_index = min(range(len(measurements)), key=lambda index: measurements[index]["loss"])
     k_count = len(k_alternatives)
     return (
@@ -173,6 +183,10 @@ def parse_args():
     parser.add_argument("--qk-offset", type=int)
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--qk-steps", type=int, default=16)
+    parser.add_argument(
+        "--qk-hard-dense-verify-topk", type=int, default=4,
+        help="Dense-FP32 verification candidates after structured Q/K hard scoring",
+    )
     parser.add_argument(
         "--qk-soft-dtype",
         choices=("float32", "bfloat16"),
@@ -551,6 +565,7 @@ def main():
             input_metric=input_metric,
             output_metric=output_metric,
             output_metric_hadamard_diagonal=fisher_scales.square(),
+            hard_dense_verify_topk=args.qk_hard_dense_verify_topk,
             capture_barrier=qk_capture_barrier,
             seed=args.seed,
         )
@@ -640,6 +655,8 @@ def main():
             "relaxation_completed_steps": optimized.diagnostics["completed_steps"],
             "relaxation_changed_tiles": optimized.diagnostics["relaxation_changed_tiles"],
             "relaxation_soft_dtype": optimized.diagnostics["soft_dtype"],
+            "hard_oracle": optimized.diagnostics["hard_oracle"],
+            "hard_dense_verify_topk": optimized.diagnostics["hard_dense_verify_topk"],
         }]
         return name, quantizer, state, weight, rounds, alternatives
 
@@ -706,7 +723,7 @@ def main():
         for name, value in weights.items():
             parameter = block_parameters[name]
             student_state[name] = value.to(device=parameter.device, dtype=parameter.dtype)
-        weighted_loss = 0.
+        weighted_loss = torch.zeros((), device=device)
         elements = 0
         with torch.no_grad():
             for teacher_microbatches in validation_teachers():
@@ -719,7 +736,7 @@ def main():
                         kwargs,
                     )
                     student = student if mask is None else student[mask]
-                    weighted_loss += float(torch.nn.functional.mse_loss(student, teacher)) * count
+                    weighted_loss += torch.nn.functional.mse_loss(student, teacher) * count
                     elements += count
         if not elements:
             raise ValueError("Q/K downstream replay requires held-out output elements")
@@ -742,6 +759,13 @@ def main():
 
     def materialize_state(name, state):
         _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
+        if name in qk_quantizers:
+            quantizer = qk_quantizers[name]
+            inner = quantizer.adapter.inner(
+                state["words"], teacher_weight.shape[1], teacher_weight.shape[0],
+                bank_ids, bank_alt_id,
+            )
+            return rht_reconstruct_weight(inner, SU, state["SV"])
         return p32_training_module_from_words(
             state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
             candidates=2, seed=args.seed,
@@ -754,9 +778,6 @@ def main():
             f"{name}.weight": baseline_weights[f"{name}.weight"]
             for name in PROJECTIONS[2:]
         }
-        for name in PROJECTIONS[:2]:
-            for alternative in qk_alternatives[name]:
-                alternative["weight"] = materialize_state(name, alternative["state"])
         q_alternative, k_alternative, measurements = select_qk_pair(
             qk_alternatives[PROJECTIONS[0]],
             qk_alternatives[PROJECTIONS[1]],
@@ -988,6 +1009,7 @@ def main():
         "epochs": args.epochs,
         "qk_steps": args.qk_steps,
         "qk_soft_dtype": args.qk_soft_dtype,
+        "qk_hard_dense_verify_topk": args.qk_hard_dense_verify_topk,
         "rounds": args.rounds,
         "candidates": args.candidates,
         "batch_size": args.batch_size,
@@ -995,6 +1017,9 @@ def main():
         "training_hadamard_backends": sorted(training_hadamard_backends),
         "fused_qk_fisher": args.fused_qk_fisher,
         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+        "float32_matmul_precision": torch.get_float32_matmul_precision(),
+        "cuda_matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+        "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
         "python_gil_enabled": (
             sys._is_gil_enabled() if hasattr(sys, "_is_gil_enabled") else None
         ),
