@@ -339,15 +339,17 @@ def evaluate_hard_stage(quantizers, batches, objective, *, weights=None):
         weights = _hard_stage_weights(quantizers)
     elif set(weights) != set(quantizers):
         raise ValueError('GSQ hard stage weights do not match quantizers')
-    weighted_loss = 0.
+    losses = []
+    counts = []
     elements = 0
     progress_at = time.monotonic()+60
     for batch_index in range(len(batches)):
         for batch, count in batches[batch_index]:
             loss = objective(batch, weights)
-            if loss.ndim != 0 or not torch.isfinite(loss):
+            if loss.ndim != 0:
                 raise ValueError('GSQ hard stage objective must be a finite scalar')
-            weighted_loss += float(loss)*count
+            losses.append(loss.detach())
+            counts.append(count)
             elements += count
         if time.monotonic() >= progress_at:
             logging.getLogger(__name__).info(
@@ -358,7 +360,13 @@ def evaluate_hard_stage(quantizers, batches, objective, *, weights=None):
             progress_at = time.monotonic()+60
     if not elements:
         raise ValueError('GSQ hard stage evaluation requires output elements')
-    return weighted_loss/elements
+    # Transfer all scalar losses together. Converting every microbatch loss to
+    # ``float`` above would serialize the CUDA stream once per microbatch. The
+    # CPU weighted sum retains the historical binary64 operation order.
+    loss_values = torch.stack(losses).cpu().tolist()
+    if not all(math.isfinite(value) for value in loss_values):
+        raise ValueError('GSQ hard stage objective must be a finite scalar')
+    return sum(value*count for value, count in zip(loss_values, counts))/elements
 
 
 class LlamaGSQAttentionStage(torch.nn.Module):
