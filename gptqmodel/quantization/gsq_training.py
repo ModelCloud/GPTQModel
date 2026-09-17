@@ -399,18 +399,29 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              assignment_lr=2e-4, scale_lr=1e-4, weight_decay=1., betas=(.9, .95),
                              temperature=(2., .5), multiplier=(10., 50.), warmup_steps=0,
                              min_lr=0., decay='linear', optimizer='lion',
-                             validation_batches=None, restore_best=False):
-    """Train one stage and export final hard weights with an optional held-out guard.
+                             validation_batches=None, restore_best=False,
+                             fp32_tail_epochs=0, export_weights=True):
+    """Train one stage with an optional held-out guard and hard-weight export.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
     owns capture, teacher state and stage ordering. When validation batches are
     supplied, hard checkpoints are selected only on that disjoint objective.
     Epochs shuffle whole batches, as in the author trainer, using private RNG.
+    ``export_weights=False`` avoids a redundant dense materialization when the
+    caller exports the quantizer's legal payload directly.
     """
     if not quantizers or not batches or isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
         raise ValueError('GSQ stage fitting requires quantizers, batches and positive epochs')
     if restore_best and not validation_batches:
         raise ValueError('GSQ restore_best requires nonempty held-out validation batches')
+    if (isinstance(fp32_tail_epochs, bool) or not isinstance(fp32_tail_epochs, int)
+            or not 0 <= fp32_tail_epochs <= epochs):
+        raise ValueError('GSQ FP32 tail epochs must be an integer in [0, epochs]')
+    if fp32_tail_epochs and any(not hasattr(quantizer, 'training_dtype')
+                               for quantizer in quantizers.values()):
+        raise ValueError('GSQ FP32 tail requires quantizers with a training dtype')
+    if not isinstance(export_weights, bool):
+        raise ValueError('GSQ export_weights must be boolean')
     import time
 
     started = time.perf_counter()
@@ -449,6 +460,9 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     validation_history = []
     progress_at = time.monotonic()+60
     for epoch in range(epochs):
+        if fp32_tail_epochs and epoch == epochs-fp32_tail_epochs:
+            for quantizer in quantizers.values():
+                quantizer.training_dtype = torch.float32
         for index in torch.randperm(len(batches), generator=shuffle_rng).tolist():
             step = len(history)
             tau, kappa = sampling_schedule(step, total_steps, temperature=temperature, multiplier=multiplier)
@@ -483,7 +497,11 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 parameters = dict(quantizer.named_parameters())
                 for parameter_name, value in best_parameters[quantizer_name].items():
                     parameters[parameter_name].copy_(value)
-    result = dict(weights={name: quantizer.hard_weight().detach().clone() for name, quantizer in quantizers.items()},
+    result = dict(weights=(
+                      {name: quantizer.hard_weight().detach().clone()
+                       for name, quantizer in quantizers.items()}
+                      if export_weights else None
+                  ),
                   scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
                   history=history, hard_loss_before=hard_loss_before)
     result['hard_loss_after'] = evaluate_hard_stage(quantizers, batches, objective)
@@ -497,6 +515,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     result['best_validation_hard_loss'] = best_validation_loss
     result['best_validation_epoch'] = best_epoch
     result['restored_best_validation_checkpoint'] = bool(restore_best)
+    result['fp32_tail_epochs'] = fp32_tail_epochs
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     result['elapsed_seconds'] = time.perf_counter()-started

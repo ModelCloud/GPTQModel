@@ -193,6 +193,14 @@ def parse_args():
         default="bfloat16",
         help="Soft exact-Fisher relaxation dtype; hard Fisher and held-out guards remain FP32",
     )
+    parser.add_argument(
+        "--mlp-soft-dtype", choices=("float32", "bfloat16"), default="float32",
+        help="Relaxed MLP weight reconstruction dtype; attention remains FP32",
+    )
+    parser.add_argument(
+        "--mlp-fp32-tail-epochs", type=int, default=0,
+        help="Final MLP epochs reconstructed in FP32 after an optional BF16 prefix",
+    )
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -274,7 +282,7 @@ def documents_for_run(args, tokenizer):
     return documents
 
 
-def fitting_options(args, *, epochs, seed, validation_batches):
+def fitting_options(args, *, epochs, seed, validation_batches, fp32_tail_epochs=0):
     return {
         "epochs": epochs,
         "seed": seed,
@@ -288,6 +296,8 @@ def fitting_options(args, *, epochs, seed, validation_batches):
         "decay": "cosine",
         "validation_batches": validation_batches,
         "restore_best": True,
+        "fp32_tail_epochs": fp32_tail_epochs,
+        "export_weights": False,
     }
 
 
@@ -411,7 +421,7 @@ def main():
     training_hadamard_backends = set()
     quantizer_metadata_lock = threading.Lock()
 
-    def new_quantizer(name, words=None, scales=None, round_index=0):
+    def new_quantizer(name, words=None, scales=None, round_index=0, training_dtype="float32"):
         nonlocal candidate_seconds
         trellis, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
         started = time.perf_counter()
@@ -420,12 +430,14 @@ def main():
                 trellis, SU, initial_scales[name], bank_ids, bank_alt_id, teacher_weight,
                 candidates=args.candidates, seed=args.seed + round_index,
                 fast_hadamard=not args.disable_fast_training_hadamard,
+                training_dtype=getattr(torch, training_dtype),
             )
         else:
             quantizer = p32_training_module_from_words(
                 words, SU, scales, bank_ids, bank_alt_id, teacher_weight,
                 candidates=args.candidates, seed=args.seed + round_index,
                 fast_hadamard=not args.disable_fast_training_hadamard,
+                training_dtype=getattr(torch, training_dtype),
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -816,7 +828,11 @@ def main():
 
     def fit_joint_stage(stage_name, names, stage, prefix_stage=None):
         nonlocal fit_seconds
-        quantizers = {f"{name}.weight": new_quantizer(name) for name in names}
+        training_dtype = args.mlp_soft_dtype if stage_name == "mlp" else "float32"
+        quantizers = {
+            f"{name}.weight": new_quantizer(name, training_dtype=training_dtype)
+            for name in names
+        }
 
         cache_started = time.perf_counter()
         stage_train_batches = cache_stage_batches(
@@ -847,6 +863,9 @@ def main():
                         epochs=args.epochs,
                         seed=args.seed + round_index,
                         validation_batches=stage_validation_batches,
+                        fp32_tail_epochs=(
+                            args.mlp_fp32_tail_epochs if stage_name == "mlp" else 0
+                        ),
                     ),
                 )
             finally:
@@ -865,6 +884,7 @@ def main():
                 "best_epoch": result["best_validation_epoch"],
                 "elapsed_seconds": round_seconds,
                 "teacher_cache_seconds": cache_seconds if round_index == 0 else 0.,
+                "fp32_tail_epochs": result["fp32_tail_epochs"],
                 "changed_tiles": {
                     name: int((state["choices"] != 0).sum()) for name, state in states.items()
                 },
@@ -876,6 +896,7 @@ def main():
                         state["words"],
                         state["SV"],
                         round_index + 1,
+                        training_dtype=training_dtype,
                     )
                     for key, state in states.items()
                 }
@@ -1009,6 +1030,8 @@ def main():
         "epochs": args.epochs,
         "qk_steps": args.qk_steps,
         "qk_soft_dtype": args.qk_soft_dtype,
+        "mlp_soft_dtype": args.mlp_soft_dtype,
+        "mlp_fp32_tail_epochs": args.mlp_fp32_tail_epochs,
         "qk_hard_dense_verify_topk": args.qk_hard_dense_verify_topk,
         "rounds": args.rounds,
         "candidates": args.candidates,
