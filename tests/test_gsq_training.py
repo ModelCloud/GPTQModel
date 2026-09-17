@@ -411,6 +411,28 @@ def test_stage_driver_reuses_hard_weights_and_selected_validation_loss():
     assert result['validation_hard_loss_after'] == result['best_validation_hard_loss']
 
 
+def test_hard_stage_batches_scalar_transfers_and_rejects_nonfinite_loss():
+    from gptqmodel.quantization.gsq_training import evaluate_hard_stage
+
+    class Quantizer:
+        def hard_weight(self):
+            return torch.ones(())
+
+    batches = [[(torch.tensor(1.), 1), (torch.tensor(2.), 2)],
+               [(torch.tensor(3.), 3)]]
+    result = evaluate_hard_stage(
+        {'weight': Quantizer()}, batches,
+        lambda target, _: target,
+    )
+    assert result == (1.+4.+9.)/6
+
+    with pytest.raises(ValueError, match='finite scalar'):
+        evaluate_hard_stage(
+            {'weight': Quantizer()}, [[(torch.tensor(float('nan')), 1)]],
+            lambda target, _: target,
+        )
+
+
 def test_checkpoint_global_guard_requires_all_metrics_to_avoid_regression():
     from scripts.validate_qvq_gsq_checkpoint import strict_global_guard
 
