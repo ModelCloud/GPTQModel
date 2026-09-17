@@ -116,7 +116,7 @@ PYTHON_GIL=0 python scripts/validate_qvq_gsq_staged_layer.py \
   --train-offset 0 --train-samples 4096 \
   --validation-offset 4096 --validation-samples 128 \
   --qk-offset 4224 --qk-samples 512 \
-  --epochs 20 --qk-steps 2000 \
+  --epochs 20 --qk-steps 2000 --qk-hard-eval-interval 100 \
   --batch-size 64 --microbatch-size 1 \
   --candidates 33 --rounds 1 \
   --offload-capture --capture-directory /path/to/capture/layer-0 \
@@ -141,6 +141,14 @@ guard. This preserves all requested GSQ updates and the final block-level
 held-out guard while avoiding dense RHT reconstruction and autograd on every
 Q/K update. Pass `--no-fused-qk-fisher` for the previous differentiable Q/K
 oracle. Multi-round P32 composition currently requires that oracle path.
+
+For the 2,000-update staged Q/K schedule, checkpoint the structured hard
+oracle every 100 updates. This still evaluates 20 points along the relaxation
+trajectory plus the exact dense top-k verification, while avoiding redundant
+hard decodes. On the controlled H100 layer run, 100 updates was faster than
+40, 80, or 200; it retained the exact final model state and held-out loss.
+The 640-update paper helper remains epoch-aligned at 64 updates and is not
+changed by this staged-driver default.
 
 Choose `--microbatch-size` from available memory; it is an accumulation/memory
 control and does not change the logical batch size. Determinism is enabled by
