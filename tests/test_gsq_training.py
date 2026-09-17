@@ -150,6 +150,55 @@ def test_stage_update_consumes_remainder_and_keeps_global_rng_private():
     assert optimizer.state[module.scales]['exp_avg'].abs().sum() > 0
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_stage_update_fuses_cuda_finite_checks_without_scaling(monkeypatch):
+    from gptqmodel.quantization.gsq_training import (
+        GSQScalarTrainingModule,
+        GSQLion,
+        train_stage_update,
+    )
+
+    module = GSQScalarTrainingModule(
+        torch.ones(2, 4, device="cuda"),
+        torch.ones(2, 2, device="cuda"),
+        2,
+        bits=2,
+        noise=torch.zeros(4, 2, 4, device="cuda"),
+    )
+    optimizer = GSQLion(
+        module.optimizer_groups(
+            assignment_lr=.001, scale_lr=.001, weight_decay=1.,
+        ),
+    )
+    original = torch._amp_foreach_non_finite_check_and_unscale_
+    checked = []
+
+    def capture(gradients, found_inf, inverse_scale):
+        before = [gradient.clone() for gradient in gradients]
+        original(gradients, found_inf, inverse_scale)
+        checked.append((len(gradients), [
+            torch.equal(actual, expected)
+            for actual, expected in zip(gradients, before)
+        ]))
+
+    monkeypatch.setattr(
+        torch, "_amp_foreach_non_finite_check_and_unscale_", capture,
+    )
+    batch = torch.ones(2, 4, device="cuda")
+    train_stage_update(
+        {"weight": module}, optimizer, [(batch, 8)],
+        lambda inputs, weights: (inputs @ weights["weight"].T).square().mean(),
+        generator=torch.Generator(device="cuda").manual_seed(7),
+        temperature=1., multiplier=10.,
+    )
+
+    assert checked == [(2, [True, True])]
+    found_inf, inverse_scale = optimizer._gsq_finite_state
+    assert found_inf.item() == 0
+    assert inverse_scale.item() == 1
+
+
 def test_llama_attention_stage_matches_real_decoder_boundary_and_vo_gradients():
     from transformers import LlamaConfig
     from transformers.models.llama.modeling_llama import LlamaDecoderLayer, LlamaRotaryEmbedding
