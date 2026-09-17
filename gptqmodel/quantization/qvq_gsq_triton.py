@@ -717,7 +717,7 @@ def compact_sparse_mixture(probabilities, baseline, position_indices,
         TILE_COUNT=tile_count, IN_FEATURES=in_features,
         OUT_FEATURES=out_features, OUTPUT_TILES=out_features // 16,
         CHOICES=choices, POSITIONS=positions, OVERLAP=overlap,
-        TRANSPOSED=transposed, BLOCK=256, num_warps=4,
+        TRANSPOSED=transposed, BLOCK=256, num_warps=2,
     )
 
 
