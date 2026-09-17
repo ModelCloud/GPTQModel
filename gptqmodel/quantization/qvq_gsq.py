@@ -1206,10 +1206,20 @@ def fisher_screened_trellis_candidates(
     sparse_deltas = []
     sparse_shifts = []
     with _nvtx_range("gsq.candidates.decode_and_screen", baseline):
-        # Sparse P32 scoring touches at most 16 scalars (six at W3), so sixteen
-        # groups fit comfortably while amortizing dispatch and index setup.
+        # Sparse P32 scoring touches at most 16 scalars (six at W3).  Hopper can
+        # screen the full default bank together so state and selector unpacking
+        # happens once per projection instead of once per half-bank.  Preserve
+        # the lower-memory chunk on unmeasured architectures and cap custom
+        # candidate banks at the measured 32-group launch.
         # The candidate order and each per-tile argmin remain unchanged.
-        screen_groups = 16 if layout == "p32_window" else 1
+        hopper = (
+            baseline.device.type == "cuda"
+            and torch.cuda.get_device_capability(baseline.device)[0] >= 9
+        )
+        screen_groups = (
+            min(count - 1, 32 if hopper else 16)
+            if layout == "p32_window" else 1
+        )
         for start in range(0, count - 1, screen_groups):
             stop = min(start + screen_groups, count - 1)
             group_count = stop - start
