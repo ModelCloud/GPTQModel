@@ -400,13 +400,16 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              temperature=(2., .5), multiplier=(10., 50.), warmup_steps=0,
                              min_lr=0., decay='linear', optimizer='lion',
                              validation_batches=None, restore_best=False,
-                             fp32_tail_epochs=0, export_weights=True):
+                             fp32_tail_epochs=0, validation_start_epoch=0,
+                             export_weights=True):
     """Train one stage with an optional held-out guard and hard-weight export.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
     owns capture, teacher state and stage ordering. When validation batches are
     supplied, hard checkpoints are selected only on that disjoint objective.
     Epochs shuffle whole batches, as in the author trainer, using private RNG.
+    ``validation_start_epoch`` can defer per-epoch hard checkpoints while the
+    initial held-out baseline remains eligible for restoration.
     ``export_weights=False`` avoids a redundant dense materialization when the
     caller exports the quantizer's legal payload directly.
     """
@@ -420,6 +423,10 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     if fp32_tail_epochs and any(not hasattr(quantizer, 'training_dtype')
                                for quantizer in quantizers.values()):
         raise ValueError('GSQ FP32 tail requires quantizers with a training dtype')
+    if (isinstance(validation_start_epoch, bool)
+            or not isinstance(validation_start_epoch, int)
+            or not 0 <= validation_start_epoch < epochs):
+        raise ValueError('GSQ validation start epoch must be an integer in [0, epochs)')
     if not isinstance(export_weights, bool):
         raise ValueError('GSQ export_weights must be boolean')
     import time
@@ -478,7 +485,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 progress_at = time.monotonic()+60
             history.append(dict(epoch=epoch, step=step, batch=index, loss=loss, temperature=tau,
                                 multiplier=kappa, learning_rates=[group['lr'] for group in optimizer.param_groups]))
-        if validation_batches:
+        if validation_batches and epoch >= validation_start_epoch:
             validation_loss = evaluate_hard_stage(quantizers, validation_batches, objective)
             validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
             if validation_loss < best_validation_loss:
@@ -516,6 +523,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     result['best_validation_epoch'] = best_epoch
     result['restored_best_validation_checkpoint'] = bool(restore_best)
     result['fp32_tail_epochs'] = fp32_tail_epochs
+    result['validation_start_epoch'] = validation_start_epoch
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     result['elapsed_seconds'] = time.perf_counter()-started
