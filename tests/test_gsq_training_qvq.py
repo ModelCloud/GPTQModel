@@ -3,7 +3,7 @@ import torch
 
 from gptqmodel.quantization.gsq_training_qvq import (
     GSQP32TrainingModule,
-    _ContiguousTranspose,
+    _TransposeView,
     _rht_reconstruct_differentiable,
     _SparseCandidateMatrixMixture,
     p32_training_module_from_words,
@@ -102,10 +102,11 @@ def test_explicit_layout_adjoints_are_bitwise_exact(device):
     matrix_exact = matrix_reference.detach().clone().requires_grad_()
     transpose_upstream = torch.randn((48, 32), device=device, generator=generator)
     reference = matrix_reference.transpose(0, 1).contiguous()
-    exact = _ContiguousTranspose.apply(matrix_exact)
+    exact = _TransposeView.apply(matrix_exact)
     reference.backward(transpose_upstream)
     exact.backward(transpose_upstream)
     assert torch.equal(exact, reference)
+    assert not exact.is_contiguous()
     assert torch.equal(matrix_exact.grad, matrix_reference.grad)
 
 
