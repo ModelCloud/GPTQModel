@@ -128,6 +128,7 @@ from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .mistral3 import Mistral3GPTQ
 from .afmoe import AfMoeQModel
+from .agnes import AgnesQModel
 from .glm4v import Glm4vGPTQ
 from .glm4v_moe import Glm4vMoeQModel, Glm4vMoeTextQModel
 from .voxtral import VoxtralGPTQ
