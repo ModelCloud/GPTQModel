@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
@@ -247,6 +248,7 @@ def get_calib_dataset(model):
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
         or isinstance(model, MuseGlimmerQModel)
+        or isinstance(model, ZDTaichu5QModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
 
