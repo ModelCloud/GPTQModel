@@ -130,6 +130,13 @@ independent Q and K projections on separate CUDA streams while preserving each
 projection's exact RNG and update order. GIL-enabled execution remains correct
 but serializes enough host dispatch to lose roughly 8% on that oracle path.
 
+Independent P32 candidate banks are also built concurrently by default. Each
+projection keeps its own seeded generator and CUDA stream, so candidate words,
+the selected model state, and held-out loss remain unchanged. On the controlled
+H100 layer run this reduced candidate construction from 0.5077s to 0.4048s
+(1.254x) and candidate-build-plus-fit time from 2.6221s to 2.5384s (1.033x).
+Use `--no-parallel-candidate-build` only for serial diagnostics.
+
 The default single-round Q/K path now transforms the same quadratic objective
 into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
 solves the independent output scales in closed form and uses only the disjoint

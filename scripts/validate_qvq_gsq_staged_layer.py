@@ -227,6 +227,12 @@ def parse_args():
         help="Use the eager FP32 Hadamard oracle during GSQ optimization",
     )
     parser.add_argument(
+        "--parallel-candidate-build",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build independent projection candidate banks on concurrent CUDA streams",
+    )
+    parser.add_argument(
         "--fused-qk-fisher",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -444,6 +450,7 @@ def main():
 
     training_hadamard_backends = set()
     quantizer_metadata_lock = threading.Lock()
+    candidate_wall_seconds = 0.
 
     def new_quantizer(name, words=None, scales=None, round_index=0, training_dtype="float32"):
         nonlocal candidate_seconds
@@ -467,6 +474,36 @@ def main():
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
             candidate_seconds += time.perf_counter() - started
         return quantizer
+
+    def new_quantizers(names, *, training_dtype="float32"):
+        """Build independent projection candidate banks on concurrent streams."""
+        nonlocal candidate_wall_seconds
+        names = tuple(names)
+        if len(names) == 1 or not args.parallel_candidate_build:
+            started = time.perf_counter()
+            result = {
+                name: new_quantizer(name, training_dtype=training_dtype)
+                for name in names
+            }
+            candidate_wall_seconds += time.perf_counter() - started
+            return result
+        ready = torch.cuda.Event()
+        ready.record()
+        streams = {name: torch.cuda.Stream() for name in names}
+
+        def build(name):
+            stream = streams[name]
+            with torch.cuda.stream(stream):
+                stream.wait_event(ready)
+                quantizer = new_quantizer(name, training_dtype=training_dtype)
+            stream.synchronize()
+            return name, quantizer
+
+        started = time.perf_counter()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(names)) as executor:
+            result = dict(executor.map(build, names))
+        candidate_wall_seconds += time.perf_counter() - started
+        return result
 
     implicit_causal = prepared.self_attn.config._attn_implementation == "sdpa"
     train_stage_batches = llama_stage_batches(
@@ -505,7 +542,7 @@ def main():
         recheck_gpu_exclusivity(_GPU_IDLE_PREFLIGHT)
         if _GPU_IDLE_PREFLIGHT is not None else None
     )
-    qk_quantizers = {name: new_quantizer(name) for name in PROJECTIONS[:2]}
+    qk_quantizers = new_quantizers(PROJECTIONS[:2])
     qk_streams = {name: torch.cuda.Stream() for name in PROJECTIONS[:2]}
     qk_capture_barrier = threading.Barrier(2) if args.fused_qk_fisher else None
 
@@ -855,8 +892,10 @@ def main():
         nonlocal fit_seconds
         training_dtype = args.mlp_soft_dtype if stage_name == "mlp" else "float32"
         quantizers = {
-            f"{name}.weight": new_quantizer(name, training_dtype=training_dtype)
-            for name in names
+            f"{name}.weight": quantizer
+            for name, quantizer in new_quantizers(
+                names, training_dtype=training_dtype,
+            ).items()
         }
 
         cache_started = time.perf_counter()
@@ -1091,12 +1130,14 @@ def main():
         ),
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "offload_capture": args.offload_capture,
+        "parallel_candidate_build": args.parallel_candidate_build,
         "gpu_idle_preflight": (
             _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
         ),
         "gpu_timing_exclusivity": timing_exclusivity,
         "capture_seconds": capture_seconds,
         "candidate_seconds": candidate_seconds,
+        "candidate_wall_seconds": candidate_wall_seconds,
         "fit_seconds": fit_seconds,
         "fit_stage_seconds": {
             "qk": qk_fit_seconds,
