@@ -140,6 +140,7 @@ def refine_trellis_candidates(
     output_metric: torch.Tensor | None = None,
     output_metric_hadamard_diagonal: torch.Tensor | None = None,
     hard_dense_verify_topk: int = 4,
+    cuda_graph_updates_per_replay: int = 1,
     capture_barrier: threading.Barrier | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
@@ -207,6 +208,7 @@ def refine_trellis_candidates(
                                  ("coordinate_sweeps", coordinate_sweeps, 0),
                                  ("coordinate_chunk_tiles", coordinate_chunk_tiles, 1),
                                  ("hard_eval_interval", hard_eval_interval, 1),
+                                 ("cuda_graph_updates_per_replay", cuda_graph_updates_per_replay, 1),
                                  ("relaxation_patience", relaxation_patience, 0)):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
@@ -435,6 +437,7 @@ def refine_trellis_candidates(
     hard_evaluations = 0
     completed_steps = 0
     relaxation_graph = None
+    graph_updates_per_replay = 1
     structured_hard_oracle = bool(
         fisher_objective and g_hadamard_diagonal_hard is not None
         and not relaxation_patience and hard_dense_verify_topk
@@ -498,38 +501,44 @@ def refine_trellis_candidates(
         torch.cuda.synchronize()
         generator.manual_seed(seed)
         relaxation_graph = torch.cuda.CUDAGraph()
+        if (not relaxation_patience and progress is None
+                and steps % cuda_graph_updates_per_replay == 0
+                and hard_eval_interval % cuda_graph_updates_per_replay == 0
+                and graph_chunk_steps % cuda_graph_updates_per_replay == 0):
+            graph_updates_per_replay = cuda_graph_updates_per_replay
         # Q and K Fisher refinements may be captured concurrently on independent
         # host threads and CUDA streams. Thread-local capture keeps unrelated
         # work on the peer stream from invalidating either graph.
         with _CUDA_GRAPH_CAPTURE_LOCK:
             with torch.cuda.graph(relaxation_graph, capture_error_mode="thread_local"):
-                scheduled_grouped_gumbel_softmax(
-                    logits, uniform_chunk, probabilities_buffer,
-                    temperature_schedule, kappa_schedule, graph_step,
-                )
-                compact_position_error(
-                    probabilities_buffer, baseline_relax, position_indices, position_choices,
-                    position_deltas, target_relax, error_buffer,
-                )
-                torch.mm(h_relax, error_buffer, out=metric_left_buffer)
-                if g_hadamard_diagonal is None:
-                    torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
-                else:
-                    metric_right_buffer = hadamard_transform(
-                        metric_left_buffer.contiguous(), hadamard_scale,
+                for _ in range(graph_updates_per_replay):
+                    scheduled_grouped_gumbel_softmax(
+                        logits, uniform_chunk, probabilities_buffer,
+                        temperature_schedule, kappa_schedule, graph_step,
                     )
-                    metric_right_buffer.mul_(g_hadamard_diagonal)
-                    metric_error_buffer = hadamard_transform(
-                        metric_right_buffer.contiguous(), hadamard_scale,
+                    compact_position_error(
+                        probabilities_buffer, baseline_relax, position_indices, position_choices,
+                        position_deltas, target_relax, error_buffer,
                     )
-                scheduled_grouped_sparse_lion(
-                    probabilities_buffer, metric_error_buffer,
-                    packed_sparse_indices_by_tile, sparse_deltas_by_tile,
-                    fisher_denominator, logits, momentum, gradient_norm_square,
-                    gradient_norm_min, gradient_norm_max, finite_state,
-                    temperature_schedule, kappa_schedule, graph_step,
-                    learning_rate, weight_decay,
-                )
+                    torch.mm(h_relax, error_buffer, out=metric_left_buffer)
+                    if g_hadamard_diagonal is None:
+                        torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+                    else:
+                        metric_right_buffer = hadamard_transform(
+                            metric_left_buffer.contiguous(), hadamard_scale,
+                        )
+                        metric_right_buffer.mul_(g_hadamard_diagonal)
+                        metric_error_buffer = hadamard_transform(
+                            metric_right_buffer.contiguous(), hadamard_scale,
+                        )
+                    scheduled_grouped_sparse_lion(
+                        probabilities_buffer, metric_error_buffer,
+                        packed_sparse_indices_by_tile, sparse_deltas_by_tile,
+                        fisher_denominator, logits, momentum, gradient_norm_square,
+                        gradient_norm_min, gradient_norm_max, finite_state,
+                        temperature_schedule, kappa_schedule, graph_step,
+                        learning_rate, weight_decay,
+                    )
             with torch.no_grad():
                 if sparse_candidate_shifts is not None:
                     shifts = torch.nn.functional.pad(sparse_candidate_shifts.T, (1, 0)).float()
@@ -557,14 +566,15 @@ def refine_trellis_candidates(
             except threading.BrokenBarrierError as error:
                 raise RuntimeError("concurrent GSQ CUDA graph capture barrier failed") from error
     with torch.enable_grad(), _nvtx_range("gsq.lion_relaxation", candidates):
-        for step in range(steps):
+        for replay_start in range(0, steps, graph_updates_per_replay):
+            step = replay_start + graph_updates_per_replay - 1
             fraction = step / max(steps - 1, 1)
             tau = temperature_start + (temperature_end - temperature_start) * fraction
             kappa = kappa_start + (kappa_end - kappa_start) * fraction
             evaluate_hard = (step + 1) % hard_eval_interval == 0 or step + 1 == steps
             if fused_sparse_relaxation:
                 if relaxation_graph is not None:
-                    if step % graph_chunk_steps == 0:
+                    if replay_start % graph_chunk_steps == 0:
                         uniform_chunk.uniform_(generator=generator)
                     relaxation_graph.replay()
                 else:
@@ -700,7 +710,7 @@ def refine_trellis_candidates(
                 mean_probability = probability_stats / gumbel_samples
                 # Only endpoints are exported.  Scanning every tile/choice at
                 # intermediate hard checkpoints cannot affect optimization.
-                if step == 0 or step + 1 == steps:
+                if initial_entropy is None or step + 1 == steps:
                     entropy_value = (
                         -(mean_probability.clamp_min(1e-20).log() * mean_probability).sum(-1)
                     ).mean()
@@ -815,6 +825,8 @@ def refine_trellis_candidates(
         "sparse_relaxation": sparse_relaxation,
         "fused_sparse_relaxation": fused_sparse_relaxation,
         "cuda_graph_relaxation": relaxation_graph is not None,
+        "cuda_graph_updates_per_replay": graph_updates_per_replay,
+        "initial_probability_update": graph_updates_per_replay,
         "sparse_width": int(sparse_candidate_indices.shape[2]) if sparse_relaxation else None,
         "sparse_accumulation_dtype": "float32" if fused_sparse_relaxation else None,
         "sparse_index_dtype": "uint8" if fused_sparse_relaxation else None,
@@ -1333,6 +1345,7 @@ def refine_trellis_fisher(baseline, *, target, input_hessian, output_hessian, co
             coordinate_sweeps=config.qvq_coordinate_sweeps,
             coordinate_chunk_tiles=config.qvq_coordinate_chunk_tiles,
             hard_eval_interval=config.qvq_hard_eval_interval,
+            cuda_graph_updates_per_replay=config.qvq_cuda_graph_updates_per_replay,
             relaxation_patience=config.qvq_relaxation_patience,
             decoded_candidates=decoded_candidates,
             sparse_candidate_indices=sparse_candidate_indices,
