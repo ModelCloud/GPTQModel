@@ -7,6 +7,7 @@ QVQ optionally uses the prepared YAQA Fisher metric before final packing.
 """
 
 import math
+import threading
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -32,6 +33,9 @@ from .qvq_codecs import (
     pgc16_levels_for_version,
 )
 from .qvq_rates import normalize_qvq_rate
+
+
+_CUDA_GRAPH_CAPTURE_LOCK = threading.Lock()
 
 
 def _nvtx_range(name: str, tensor: torch.Tensor):
@@ -135,6 +139,7 @@ def refine_trellis_candidates(
     input_metric: torch.Tensor | None = None,
     output_metric: torch.Tensor | None = None,
     output_metric_hadamard_diagonal: torch.Tensor | None = None,
+    capture_barrier: threading.Barrier | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
 ) -> GSQResult:
@@ -455,55 +460,64 @@ def refine_trellis_candidates(
         torch.cuda.synchronize()
         generator.manual_seed(seed)
         relaxation_graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(relaxation_graph):
-            scheduled_grouped_gumbel_softmax(
-                logits, uniform_chunk, probabilities_buffer,
-                temperature_schedule, kappa_schedule, graph_step,
-            )
-            compact_position_error(
-                probabilities_buffer, baseline_relax, position_indices, position_choices,
-                position_deltas, target_relax, error_buffer,
-            )
-            torch.mm(h_relax, error_buffer, out=metric_left_buffer)
-            if g_hadamard_diagonal is None:
-                torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
-            else:
-                metric_right_buffer = hadamard_transform(
-                    metric_left_buffer.contiguous(), hadamard_scale,
+        # Q and K Fisher refinements may be captured concurrently on independent
+        # host threads and CUDA streams. Thread-local capture keeps unrelated
+        # work on the peer stream from invalidating either graph.
+        with _CUDA_GRAPH_CAPTURE_LOCK:
+            with torch.cuda.graph(relaxation_graph, capture_error_mode="thread_local"):
+                scheduled_grouped_gumbel_softmax(
+                    logits, uniform_chunk, probabilities_buffer,
+                    temperature_schedule, kappa_schedule, graph_step,
                 )
-                metric_right_buffer.mul_(g_hadamard_diagonal)
-                metric_error_buffer = hadamard_transform(
-                    metric_right_buffer.contiguous(), hadamard_scale,
+                compact_position_error(
+                    probabilities_buffer, baseline_relax, position_indices, position_choices,
+                    position_deltas, target_relax, error_buffer,
                 )
-            scheduled_grouped_sparse_lion(
-                probabilities_buffer, metric_error_buffer,
-                packed_sparse_indices_by_tile, sparse_deltas_by_tile,
-                fisher_denominator, logits, momentum, gradient_norm_square,
-                gradient_norm_min, gradient_norm_max, finite_state,
-                temperature_schedule, kappa_schedule, graph_step,
-                learning_rate, weight_decay,
-            )
-        with torch.no_grad():
-            if sparse_candidate_shifts is not None:
-                shifts = torch.nn.functional.pad(sparse_candidate_shifts.T, (1, 0)).float()
-                prior = -0.5 * shifts.square()
-                prior -= prior.mean(-1, keepdim=True)
-                init_generator = torch.Generator(device=candidates.device).manual_seed(seed)
-                logits.copy_(initialization_std * (
-                    torch.randn(prior.shape, device=prior.device, generator=init_generator)
-                    + initialization_strength * prior
-                ))
-            else:
-                logits.zero_()
-                logits[tile_ids, best_choices] = 1.0 / kappa_start
-            momentum.zero_()
-            gradient_norm_square.zero_()
-            gradient_norm_min.fill_(math.inf)
-            gradient_norm_max.zero_()
-            finite_state.fill_(True)
-            graph_step.zero_()
-        torch.cuda.synchronize()
-        generator.manual_seed(seed)
+                torch.mm(h_relax, error_buffer, out=metric_left_buffer)
+                if g_hadamard_diagonal is None:
+                    torch.mm(metric_left_buffer, g_relax, out=metric_error_buffer)
+                else:
+                    metric_right_buffer = hadamard_transform(
+                        metric_left_buffer.contiguous(), hadamard_scale,
+                    )
+                    metric_right_buffer.mul_(g_hadamard_diagonal)
+                    metric_error_buffer = hadamard_transform(
+                        metric_right_buffer.contiguous(), hadamard_scale,
+                    )
+                scheduled_grouped_sparse_lion(
+                    probabilities_buffer, metric_error_buffer,
+                    packed_sparse_indices_by_tile, sparse_deltas_by_tile,
+                    fisher_denominator, logits, momentum, gradient_norm_square,
+                    gradient_norm_min, gradient_norm_max, finite_state,
+                    temperature_schedule, kappa_schedule, graph_step,
+                    learning_rate, weight_decay,
+                )
+            with torch.no_grad():
+                if sparse_candidate_shifts is not None:
+                    shifts = torch.nn.functional.pad(sparse_candidate_shifts.T, (1, 0)).float()
+                    prior = -0.5 * shifts.square()
+                    prior -= prior.mean(-1, keepdim=True)
+                    init_generator = torch.Generator(device=candidates.device).manual_seed(seed)
+                    logits.copy_(initialization_std * (
+                        torch.randn(prior.shape, device=prior.device, generator=init_generator)
+                        + initialization_strength * prior
+                    ))
+                else:
+                    logits.zero_()
+                    logits[tile_ids, best_choices] = 1.0 / kappa_start
+                momentum.zero_()
+                gradient_norm_square.zero_()
+                gradient_norm_min.fill_(math.inf)
+                gradient_norm_max.zero_()
+                finite_state.fill_(True)
+                graph_step.zero_()
+            torch.cuda.synchronize()
+            generator.manual_seed(seed)
+        if capture_barrier is not None:
+            try:
+                capture_barrier.wait(timeout=60.)
+            except threading.BrokenBarrierError as error:
+                raise RuntimeError("concurrent GSQ CUDA graph capture barrier failed") from error
     with torch.enable_grad(), _nvtx_range("gsq.lion_relaxation", candidates):
         for step in range(steps):
             fraction = step / max(steps - 1, 1)
