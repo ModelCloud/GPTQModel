@@ -184,7 +184,7 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--qk-steps", type=int, default=16)
     parser.add_argument(
-        "--qk-hard-eval-interval", type=int, default=20,
+        "--qk-hard-eval-interval", type=int, default=40,
         help="Updates between exact structured Q/K hard-oracle checkpoints",
     )
     parser.add_argument(
