@@ -59,7 +59,62 @@ void fast_hadamard_transform_28N_cuda(HadamardParamsBase &params, cudaStream_t s
 template<typename input_t>
 void fast_hadamard_transform_40N_cuda(HadamardParamsBase &params, cudaStream_t stream);
 
+void gsq_position_error_cuda(
+    const at::Tensor probabilities, const at::Tensor baseline,
+    const at::Tensor position_indices, const at::Tensor position_choices,
+    const at::Tensor position_deltas, const at::Tensor target,
+    at::Tensor error, cudaStream_t stream);
+
 namespace gptqmodel_hadamard {
+
+void gsq_position_error(
+    const at::Tensor probabilities, const at::Tensor baseline,
+    const at::Tensor position_indices, const at::Tensor position_choices,
+    const at::Tensor position_deltas, const at::Tensor target,
+    at::Tensor error) {
+    TORCH_CHECK(probabilities.is_cuda(), "gsq_position_error expects CUDA tensors");
+    TORCH_CHECK(probabilities.scalar_type() == at::ScalarType::Float,
+                "GSQ probabilities must be FP32");
+    for (const auto &tensor : {baseline, position_deltas, target, error}) {
+        TORCH_CHECK(tensor.is_cuda() && tensor.device() == probabilities.device(),
+                    "GSQ tensors must share one CUDA device");
+        TORCH_CHECK(tensor.scalar_type() == at::ScalarType::BFloat16,
+                    "GSQ value tensors must be BF16");
+        TORCH_CHECK(tensor.is_contiguous(), "GSQ value tensors must be contiguous");
+    }
+    for (const auto &tensor : {position_indices, position_choices}) {
+        TORCH_CHECK(tensor.is_cuda() && tensor.device() == probabilities.device(),
+                    "GSQ metadata must share the CUDA device");
+        TORCH_CHECK(tensor.scalar_type() == at::ScalarType::Byte && tensor.is_contiguous(),
+                    "GSQ metadata must be contiguous uint8");
+    }
+    TORCH_CHECK(probabilities.is_contiguous(), "GSQ probabilities must be contiguous");
+    TORCH_CHECK(probabilities.dim() == 2 && baseline.dim() == 2 && target.dim() == 2,
+                "GSQ probabilities, baseline, and target must be matrices");
+    TORCH_CHECK(position_indices.dim() == 2 && position_choices.dim() == 3 &&
+                position_deltas.dim() == 3, "GSQ compact metadata has invalid rank");
+    TORCH_CHECK(position_indices.size(1) == 64 && position_choices.size(2) == 3,
+                "native GSQ error kernel requires P32's 64x3 compact map");
+    TORCH_CHECK(position_indices.size(0) == probabilities.size(0) &&
+                position_choices.sizes() == torch::IntArrayRef({probabilities.size(0), 64, 3}) &&
+                position_deltas.sizes() == position_choices.sizes(),
+                "GSQ compact metadata shape is invalid");
+    TORCH_CHECK(target.sizes() == error.sizes() && target.size(1) % 16 == 0,
+                "GSQ target/output shape is invalid");
+    TORCH_CHECK(baseline.size(0) == probabilities.size(0) && baseline.size(1) == 256,
+                "GSQ baseline shape is invalid");
+    TORCH_CHECK(target.numel() == probabilities.size(0) * 256,
+                "GSQ target does not match the tile count");
+
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
+    c10::DeviceGuard device_guard(probabilities.device());
+#else
+    at::cuda::CUDAGuard device_guard{probabilities.device()};
+#endif
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    gsq_position_error_cuda(probabilities, baseline, position_indices,
+                            position_choices, position_deltas, target, error, stream);
+}
 
 void set_hadamard_params(HadamardParamsBase &params,
                          const size_t batch,
@@ -467,6 +522,7 @@ TORCH_LIBRARY(gptqmodel_hadamard, m) {
     m.def("fast_hadamard_transform_20N(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_28N(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_40N(Tensor x, float scale) -> Tensor");
+    m.def("gsq_position_error(Tensor probabilities, Tensor baseline, Tensor position_indices, Tensor position_choices, Tensor position_deltas, Tensor target, Tensor(a!) error) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_hadamard, CUDA, m) {
@@ -479,4 +535,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_hadamard, CUDA, m) {
     m.impl("fast_hadamard_transform_20N", &gptqmodel_hadamard::fast_hadamard_transform_20N);
     m.impl("fast_hadamard_transform_28N", &gptqmodel_hadamard::fast_hadamard_transform_28N);
     m.impl("fast_hadamard_transform_40N", &gptqmodel_hadamard::fast_hadamard_transform_40N);
+    m.impl("gsq_position_error", &gptqmodel_hadamard::gsq_position_error);
 }

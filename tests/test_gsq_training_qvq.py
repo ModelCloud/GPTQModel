@@ -195,6 +195,53 @@ def test_compact_mixture_writes_bfloat16_directly_without_changing_gradients():
     assert torch.equal(probabilities_direct.grad, probabilities_reference.grad)
 
 
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_native_position_error_matches_real_p32_compact_mixture():
+    module, _, _ = _training_module("cuda", candidates=33)
+    from gptqmodel.quantization.qvq_gsq_triton import (
+        build_compact_position_map,
+        compact_position_error,
+    )
+
+    indices, choices, deltas = build_compact_position_map(
+        module.sparse_indices, module.sparse_deltas.to(torch.bfloat16),
+    )
+    indices = indices.repeat(2, 1)
+    choices = choices.repeat(2, 1, 1)
+    deltas = deltas.repeat(2, 1, 1)
+    generator = torch.Generator(device="cuda").manual_seed(37)
+    probabilities = torch.randn(
+        (2, module.logits.shape[1]), device="cuda", generator=generator,
+    ).softmax(-1)
+    baseline = module.baseline_tiles.to(torch.bfloat16).repeat(2, 1)
+    target = torch.randn(
+        (16, 32), dtype=torch.bfloat16, device="cuda", generator=generator,
+    )
+    native = torch.empty_like(target)
+    compact_position_error(
+        probabilities, baseline, indices, choices, deltas, target, native,
+    )
+    baseline_matrix = baseline.reshape(1, 2, 16, 16).permute(
+        0, 2, 1, 3,
+    ).reshape_as(target)
+    expected = (baseline_matrix - target).clone()
+    tile_rows = torch.zeros_like(indices, dtype=torch.int64)
+    tile_columns = torch.arange(2, device="cuda")[:, None].expand_as(indices)
+    rows = indices.long() // 16
+    columns = indices.long() % 16
+    matrix_indices = (
+        (tile_rows * 16 + rows) * 32 + tile_columns * 16 + columns
+    )
+    changed = baseline.gather(1, indices.long()).float()
+    changed -= target.flatten().gather(0, matrix_indices.flatten()).reshape_as(indices).float()
+    for slot in range(3):
+        probability = probabilities.gather(1, choices[..., slot].long())
+        changed += probability * deltas[..., slot].float()
+    expected.flatten().scatter_(0, matrix_indices.flatten(), changed.to(torch.bfloat16).flatten())
+    assert torch.equal(native, expected)
+
+
 def test_p32_staged_hard_state_is_exact_legal_candidate():
     module, candidates, _ = _training_module()
     for choice in range(len(candidates)):
