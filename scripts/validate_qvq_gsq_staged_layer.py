@@ -201,6 +201,10 @@ def parse_args():
         "--mlp-fp32-tail-epochs", type=int, default=0,
         help="Final MLP epochs reconstructed in FP32 after an optional BF16 prefix",
     )
+    parser.add_argument(
+        "--attention-validation-tail-epochs", type=int, default=6,
+        help="Validate hard attention checkpoints only during this many final epochs",
+    )
     parser.add_argument("--rounds", type=int, default=1)
     parser.add_argument("--candidates", type=int, default=33)
     parser.add_argument("--batch-size", type=int, default=1)
@@ -305,6 +309,8 @@ def fitting_options(args, *, epochs, seed, validation_batches, fp32_tail_epochs=
 
 def main():
     args = parse_args()
+    if args.attention_validation_tail_epochs < 1:
+        raise ValueError("attention validation tail epochs must be positive")
     if args.fused_qk_fisher and args.rounds != 1:
         raise ValueError("fused Q/K Fisher fitting currently requires exactly one P32 round")
     if not args.allow_nondeterministic:
@@ -858,6 +864,16 @@ def main():
 
         rounds = []
         for round_index in range(args.rounds):
+            validation_start_epoch = 0
+            if stage_name == "attention":
+                validation_start_epoch = max(
+                    0, args.epochs - args.attention_validation_tail_epochs,
+                )
+            elif (args.mlp_soft_dtype == "bfloat16"
+                  and args.mlp_fp32_tail_epochs):
+                validation_start_epoch = max(
+                    0, args.epochs - args.mlp_fp32_tail_epochs - 1,
+                )
             torch.cuda.nvtx.range_push(f"gsq.stage.{stage_name}.round_{round_index + 1}")
             try:
                 result = fit_reconstruction_stage(
@@ -872,12 +888,7 @@ def main():
                         fp32_tail_epochs=(
                             args.mlp_fp32_tail_epochs if stage_name == "mlp" else 0
                         ),
-                        validation_start_epoch=(
-                            max(0, args.epochs - args.mlp_fp32_tail_epochs - 1)
-                            if stage_name == "mlp"
-                            and args.mlp_soft_dtype == "bfloat16"
-                            and args.mlp_fp32_tail_epochs else 0
-                        ),
+                        validation_start_epoch=validation_start_epoch,
                     ),
                 )
             finally:
@@ -1045,6 +1056,7 @@ def main():
         "qk_soft_dtype": args.qk_soft_dtype,
         "mlp_soft_dtype": args.mlp_soft_dtype,
         "mlp_fp32_tail_epochs": args.mlp_fp32_tail_epochs,
+        "attention_validation_tail_epochs": args.attention_validation_tail_epochs,
         "qk_hard_dense_verify_topk": args.qk_hard_dense_verify_topk,
         "rounds": args.rounds,
         "candidates": args.candidates,
