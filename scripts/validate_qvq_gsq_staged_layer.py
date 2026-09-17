@@ -282,7 +282,8 @@ def documents_for_run(args, tokenizer):
     return documents
 
 
-def fitting_options(args, *, epochs, seed, validation_batches, fp32_tail_epochs=0):
+def fitting_options(args, *, epochs, seed, validation_batches, fp32_tail_epochs=0,
+                    validation_start_epoch=0):
     return {
         "epochs": epochs,
         "seed": seed,
@@ -297,6 +298,7 @@ def fitting_options(args, *, epochs, seed, validation_batches, fp32_tail_epochs=
         "validation_batches": validation_batches,
         "restore_best": True,
         "fp32_tail_epochs": fp32_tail_epochs,
+        "validation_start_epoch": validation_start_epoch,
         "export_weights": False,
     }
 
@@ -866,6 +868,12 @@ def main():
                         fp32_tail_epochs=(
                             args.mlp_fp32_tail_epochs if stage_name == "mlp" else 0
                         ),
+                        validation_start_epoch=(
+                            max(0, args.epochs - args.mlp_fp32_tail_epochs - 1)
+                            if stage_name == "mlp"
+                            and args.mlp_soft_dtype == "bfloat16"
+                            and args.mlp_fp32_tail_epochs else 0
+                        ),
                     ),
                 )
             finally:
@@ -885,6 +893,7 @@ def main():
                 "elapsed_seconds": round_seconds,
                 "teacher_cache_seconds": cache_seconds if round_index == 0 else 0.,
                 "fp32_tail_epochs": result["fp32_tail_epochs"],
+                "validation_start_epoch": result["validation_start_epoch"],
                 "changed_tiles": {
                     name: int((state["choices"] != 0).sum()) for name, state in states.items()
                 },

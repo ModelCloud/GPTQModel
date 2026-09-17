@@ -345,6 +345,30 @@ def test_stage_driver_fp32_tail_and_optional_weight_export():
     assert result['fp32_tail_epochs'] == 2
 
 
+def test_stage_driver_can_validate_only_the_refinement_tail():
+    from gptqmodel.quantization.gsq_training import (
+        GSQScalarTrainingModule,
+        fit_reconstruction_stage,
+    )
+
+    quantizer = GSQScalarTrainingModule(
+        torch.ones(1, 1), torch.ones(1, 1), 1, bits=2,
+        noise=torch.zeros(4, 1, 1),
+    )
+    batches = [[(torch.ones(()), 1)]]
+
+    def objective(target, weights):
+        return (weights['weight'].squeeze()-target).square()
+
+    result = fit_reconstruction_stage(
+        {'weight': quantizer}, batches, objective, epochs=4,
+        validation_batches=batches, restore_best=True,
+        validation_start_epoch=2,
+    )
+    assert [entry['epoch'] for entry in result['validation_history']] == [2, 3]
+    assert result['validation_start_epoch'] == 2
+
+
 def test_checkpoint_global_guard_requires_all_metrics_to_avoid_regression():
     from scripts.validate_qvq_gsq_checkpoint import strict_global_guard
 
