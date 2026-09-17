@@ -401,6 +401,44 @@ def _position_error_compact_kernel(probabilities, baseline, position_indices,
 
 
 @triton.jit
+def _position_error_compact_update_kernel(
+        probabilities, baseline, position_indices, position_choices,
+        position_deltas, target, error, TILE_COUNT: tl.constexpr,
+        N: tl.constexpr, OUTPUT_TILES: tl.constexpr,
+        CHOICES: tl.constexpr, POSITIONS: tl.constexpr,
+        OVERLAP: tl.constexpr, BLOCK: tl.constexpr):
+    """Overwrite only candidate-edited positions in a preinitialized E."""
+    tile = tl.program_id(0)
+    position = tl.arange(0, BLOCK)
+    compact_offset = (tile * POSITIONS + position) * OVERLAP
+    first_choice = tl.load(
+        position_choices + compact_offset,
+        mask=position < POSITIONS, other=0,
+    ).to(tl.int32)
+    position_mask = (position < POSITIONS) & (first_choice > 0)
+    scalar = tl.load(position_indices + tile * POSITIONS + position,
+                     mask=position_mask, other=0).to(tl.int32)
+    tile_row = tile // OUTPUT_TILES
+    tile_col = tile - tile_row * OUTPUT_TILES
+    row = scalar // 16
+    column = scalar - row * 16
+    weight_offset = (tile_row * 16 + row) * N + tile_col * 16 + column
+    value = tl.load(baseline + tile * 256 + scalar,
+                    mask=position_mask, other=0.0).to(tl.float32)
+    value -= tl.load(target + weight_offset,
+                     mask=position_mask, other=0.0).to(tl.float32)
+    for slot in tl.static_range(0, OVERLAP):
+        choice = tl.load(position_choices + compact_offset + slot,
+                         mask=position_mask, other=0).to(tl.int32)
+        probability = tl.load(probabilities + tile * CHOICES + choice,
+                              mask=position_mask, other=0.0)
+        delta = tl.load(position_deltas + compact_offset + slot,
+                        mask=position_mask, other=0.0)
+        value += probability * delta
+    tl.store(error + weight_offset, value, mask=position_mask)
+
+
+@triton.jit
 def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
                                    position_choices, position_deltas, output,
                                    TILE_COUNT: tl.constexpr,
@@ -796,7 +834,7 @@ def scheduled_grouped_gumbel_softmax(logits, uniform_chunk, output,
         logits, uniform_chunk, output, temperature_schedule, kappa_schedule,
         step_pointer, TILE_COUNT=logits.shape[0], CHOICES=choices,
         UNIFORM_CHUNK=uniform_chunk.shape[0], TILES=tiles, BLOCK=block,
-        num_warps=4,
+        num_warps=2,
     )
 
 
@@ -835,6 +873,19 @@ def compact_position_error(probabilities, baseline, position_indices,
         OUTPUT_TILES=target.shape[1] // 16, CHOICES=probabilities.shape[1],
         POSITIONS=position_indices.shape[1], OVERLAP=position_choices.shape[2],
         TILES=tiles, BLOCK=block, num_warps=8 if tiles == 2 else 4,
+    )
+
+
+def update_compact_position_error(probabilities, baseline, position_indices,
+                                  position_choices, position_deltas, target,
+                                  output):
+    """Update compact positions after ``output`` receives its dense baseline."""
+    _position_error_compact_update_kernel[(probabilities.shape[0],)](
+        probabilities, baseline, position_indices, position_choices,
+        position_deltas, target, output, TILE_COUNT=probabilities.shape[0],
+        N=target.shape[1], OUTPUT_TILES=target.shape[1] // 16,
+        CHOICES=probabilities.shape[1], POSITIONS=position_indices.shape[1],
+        OVERLAP=position_choices.shape[2], BLOCK=256, num_warps=4,
     )
 
 
