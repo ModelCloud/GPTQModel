@@ -31,6 +31,7 @@ def _hadamard_sources() -> list[str]:
     return [
         str(root / "hadamard.cpp"),
         str(root / "fast_hadamard_transform_cuda.cu"),
+        str(root / "gsq_position_error_cuda.cu"),
     ]
 
 
@@ -64,6 +65,7 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "fast_hadamard_transform_20N",
         "fast_hadamard_transform_28N",
         "fast_hadamard_transform_40N",
+        "gsq_position_error",
     ),
     sources=_hadamard_sources,
     build_root_env="GPTQMODEL_HADAMARD_BUILD_ROOT",
@@ -103,6 +105,11 @@ def hadamard_available() -> bool:
 
 def hadamard_op(op_name: str = "fast_hadamard_transform"):
     return _extension_api().op("hadamard", op_name)
+
+
+def gsq_position_error(*args) -> None:
+    """Build the exact BF16 P32 GSQ error matrix with the native CUDA kernel."""
+    hadamard_op("gsq_position_error")(*args)
 
 
 def hadamard_transform(x: torch.Tensor, scale: float | None = None) -> torch.Tensor:

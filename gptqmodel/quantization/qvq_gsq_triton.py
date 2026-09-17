@@ -805,6 +805,16 @@ def grouped_position_error(probabilities, baseline, position_choices,
 
 def compact_position_error(probabilities, baseline, position_indices,
                            position_choices, position_deltas, target, output):
+    if (baseline.dtype == torch.bfloat16 and target.dtype == torch.bfloat16
+            and probabilities.shape[0] % 2 == 0
+            and position_indices.shape[1] == 64 and position_choices.shape[2] == 3):
+        from ..utils.hadamard import gsq_position_error, hadamard_available
+        if hadamard_available():
+            gsq_position_error(
+                probabilities, baseline, position_indices, position_choices,
+                position_deltas, target, output,
+            )
+            return
     block = 256
     tiles = 2
     _position_error_compact_kernel[(triton.cdiv(probabilities.shape[0], tiles),)](
