@@ -19,9 +19,10 @@ import triton
 import triton.language as tl
 
 from gptqmodel.utils.env import env_flag
+from .scheduler import SUPPORTED_GROUP_SIZES, validate_fused_config
 
 
-AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, *SUPPORTED_GROUP_SIZES]
 # Shared runtime default: fp32 accumulation trades a little speed for lower numerical drift.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
@@ -263,15 +264,29 @@ def awq_dequantize_triton(
     block_size_x: int = 32,
     block_size_y: int = 32,
 ) -> torch.Tensor:
+    if qweight.ndim != 2 or scales.ndim != 2 or zeros.ndim != 2:
+        raise ValueError("AWQ Triton tensors must be rank-2")
     K = qweight.shape[0]
     M = scales.shape[1]
-    group_size = qweight.shape[0] // scales.shape[0]
-
-    assert K > 0 and M > 0
-    assert scales.shape[0] == K // group_size and scales.shape[1] == M
-    assert zeros.shape[0] == K // group_size and zeros.shape[1] == M // 8
-    assert group_size <= K
-    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
+    if K <= 0 or M <= 0 or scales.shape[0] <= 0 or K % scales.shape[0] != 0:
+        raise ValueError("invalid AWQ Triton dequantization shapes")
+    group_size = K // scales.shape[0]
+    if (
+        qweight.shape[1] != M // 8
+        or scales.shape != (K // group_size, M)
+        or zeros.shape != (K // group_size, M // 8)
+    ):
+        raise ValueError("AWQ Triton scale/zero shapes do not match packed weight")
+    if M % 8:
+        raise ValueError("AWQ Triton packed output features must be a multiple of 8")
+    if group_size not in AWQ_TRITON_SUPPORTED_GROUP_SIZES and group_size != K:
+        raise ValueError(f"unsupported AWQ Triton group_size={group_size}")
+    if qweight.dtype != torch.int32 or zeros.dtype != torch.int32 or scales.dtype != torch.float16:
+        raise ValueError("AWQ Triton dequantization requires int32 weights/zeros and float16 scales")
+    if qweight.device != scales.device or qweight.device != zeros.device:
+        raise ValueError("AWQ Triton dequantization tensors must be on the same device")
+    if not all(t.is_contiguous() for t in (qweight, zeros, scales)):
+        raise ValueError("AWQ Triton dequantization tensors must be contiguous")
 
     # Result tensor:
     # number of rows = same as input tensor
@@ -323,19 +338,49 @@ def awq_gemm_triton(
     block_size_k: int = 32,
     fp32_accum: bool = FP32_ACCUM,
     output_dtype: torch.dtype | None = None,
+    num_warps: int | None = None,
+    num_stages: int | None = None,
 ) -> torch.Tensor:
+    if input.ndim != 2 or qweight.ndim != 2 or qzeros.ndim != 2 or scales.ndim != 2:
+        raise ValueError("AWQ Triton tensors must be rank-2")
     M, K = input.shape
+    if M <= 0 or K <= 0 or qweight.shape[0] != K or qweight.shape[1] <= 0:
+        raise ValueError("AWQ Triton GEMM requires positive M/K and qweight.shape[0] == K")
     N = qweight.shape[1] * 8
-    group_size = qweight.shape[0] // qzeros.shape[0]
-
-    assert N > 0 and K > 0 and M > 0
-    assert qweight.shape[0] == K and qweight.shape[1] == N // 8
-    assert qzeros.shape[0] == K // group_size and qzeros.shape[1] == N // 8
-    assert scales.shape[0] == K // group_size and scales.shape[1] == N
-    assert split_k_iters & (split_k_iters - 1) == 0 and split_k_iters != 0
-    assert split_k_iters <= 32
-    assert group_size <= K
-    assert group_size in AWQ_TRITON_SUPPORTED_GROUP_SIZES or group_size == K
+    if N <= 0:
+        raise ValueError("AWQ Triton packed N must be positive")
+    if qzeros.shape[0] <= 0 or K % qzeros.shape[0] != 0:
+        raise ValueError("AWQ Triton qzeros rows must be a positive divisor of K")
+    group_size = K // qzeros.shape[0]
+    if qzeros.shape[1] != N // 8 or scales.shape != (qzeros.shape[0], N):
+        raise ValueError("AWQ Triton qzeros/scales shapes do not match packed weight")
+    if input.dtype != torch.float16 or scales.dtype != torch.float16:
+        raise ValueError("AWQ Triton GEMM requires float16 input and scales")
+    if qweight.dtype != torch.int32 or qzeros.dtype != torch.int32:
+        raise ValueError("AWQ Triton GEMM requires int32 packed weights and zeros")
+    if any(t.device != input.device for t in (qweight, qzeros, scales)):
+        raise ValueError("AWQ Triton GEMM tensors must be on the same device")
+    if not all(t.is_contiguous() for t in (input, qweight, qzeros, scales)):
+        raise ValueError("AWQ Triton GEMM tensors must be contiguous")
+    # Validate before launching so an illegal tile cannot read the wrong
+    # scale/zero group from the packed AWQ buffers.
+    ok, reason = validate_fused_config(
+        M=M,
+        N=N,
+        K=K,
+        group_size=group_size,
+        block_size_m=block_size_m,
+        block_size_n=block_size_n,
+        block_size_k=block_size_k,
+        split_k_iters=split_k_iters,
+        num_warps=num_warps,
+        num_stages=num_stages,
+        # Preserve the public low-level/legacy contract. Offline candidates
+        # use the stricter default and never select a zero-work split.
+        allow_empty_splits=True,
+    )
+    if not ok:
+        raise ValueError(f"invalid AWQ Triton GEMM configuration: {reason}")
 
     def grid(META):
         return (
@@ -347,10 +392,22 @@ def awq_gemm_triton(
         output_dtype = scales.dtype
 
     accum_dtype = torch.float32 if fp32_accum else output_dtype
-    result = torch.zeros((M, N), dtype=accum_dtype, device=input.device)
+    # A single CTA owns every output element, so it can overwrite an
+    # uninitialized buffer.  Atomic split-K needs a correctly initialized
+    # accumulation target; do not turn this branch into ``empty``.
+    result = (
+        torch.empty((M, N), dtype=accum_dtype, device=input.device)
+        if split_k_iters == 1
+        else torch.zeros((M, N), dtype=accum_dtype, device=input.device)
+    )
 
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
+    launch_kwargs = {}
+    if num_warps is not None:
+        launch_kwargs["num_warps"] = num_warps
+    if num_stages is not None:
+        launch_kwargs["num_stages"] = num_stages
     with get_same_device_cm(qweight):
         awq_gemm_kernel[grid](
             input,
@@ -367,6 +424,7 @@ def awq_gemm_triton(
             BLOCK_SIZE_K=block_size_k,
             SPLIT_K=split_k_iters,
             USE_FP32_ACCUM=fp32_accum,
+            **launch_kwargs,
         )
 
     if result.dtype != output_dtype:

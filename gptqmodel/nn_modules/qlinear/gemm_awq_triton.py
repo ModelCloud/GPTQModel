@@ -12,6 +12,15 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.modules.triton.scheduler import (
+    AwqTritonPlan,
+    candidate_plans,
+    clear_awq_triton_plan_cache,
+    legacy_plan,
+    mark_awq_triton_plan_warmed,
+    select_awq_triton_plan,
+    validate_fused_config,
+)
 from ...utils import has_gil_disabled
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -20,6 +29,16 @@ from ...utils.torch import HAS_XPU
 
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
 FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
+
+
+def _cuda_graph_capturing(device: torch.device) -> bool:
+    """Query capture state without synchronization (and tolerate mock devices)."""
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return False
+    try:
+        return bool(torch.cuda.is_current_stream_capturing())
+    except Exception:
+        return False
 
 
 class AwqGemmTritonFn(torch.autograd.Function):
@@ -43,6 +62,7 @@ class AwqGemmTritonFn(torch.autograd.Function):
         ctx.out_features = out_features
 
         out_shape = x.shape[:-1] + (out_features,)
+        function_input_dtype = x.dtype
         x = x.to(torch.float16)
         rows = input_rows(x)
         ctx.input_rows = rows
@@ -52,12 +72,41 @@ class AwqGemmTritonFn(torch.autograd.Function):
             return empty_linear_output(x, out_features)
 
         from ...quantization.awq.modules.triton.gemm import awq_dequantize_triton, awq_gemm_triton
-
-        # Dense matmul is faster once the flattened row count is large enough.
-        FULL_DEQUANT_MATMUL_THRESHOLD = rows > 128
         # Triton consumes [rows, features]; restore leading dimensions later.
         x_2d = x.reshape(rows, x.shape[-1])
-        if FULL_DEQUANT_MATMUL_THRESHOLD:
+        K = x_2d.shape[1]
+        if qweight.ndim != 2 or qweight.shape[0] != K or qweight.shape[1] <= 0:
+            raise ValueError("AWQ Triton qweight must be rank-2 with qweight.shape[0] == K")
+        N = qweight.shape[1] * 8
+        request = prefer_backend if isinstance(prefer_backend, dict) else {}
+        fp32_accum = bool(request.get("fp32_accum", FP32_ACCUM))
+        if qzeros.ndim != 2 or scales.ndim != 2 or qzeros.shape[0] <= 0:
+            raise ValueError("AWQ Triton qzeros/scales must be non-empty rank-2 tensors")
+        if K % qzeros.shape[0] or scales.shape[0] != qzeros.shape[0]:
+            raise ValueError("AWQ Triton qzeros/scales group rows must divide K and match")
+        if qzeros.shape[1] != qweight.shape[1] or scales.shape[1] != N:
+            raise ValueError("AWQ Triton qweight/qzeros/scales output shapes must match")
+        actual_group_size = K // qzeros.shape[0]
+        # Check the public group-size declaration against the packed buffers
+        # before asking the scheduler or kernel to interpret them.
+        declared_group_size = K if group_size == -1 else group_size
+        if declared_group_size != actual_group_size:
+            raise ValueError(
+                "AWQ Triton declared group_size does not match quantized buffers: "
+                f"declared={declared_group_size}, actual={actual_group_size}"
+            )
+        original_input_dtype = request.get("input_dtype", function_input_dtype)
+        final_output_dtype = request.get("output_dtype", original_input_dtype)
+        capturing = _cuda_graph_capturing(x.device)
+        plan = select_awq_triton_plan(
+            M=rows, N=N, K=K, group_size=actual_group_size,
+            device=x.device, input_dtype=original_input_dtype,
+            compute_dtype=x.dtype, output_dtype=final_output_dtype,
+            fp32_accum=fp32_accum, mode=request.get("schedule_mode"),
+            explicit=request.get("schedule"), training=bool(request.get("training", False)),
+            cuda_graph=capturing,
+        )
+        if not plan.fused:
             out = awq_dequantize_triton(qweight, scales, qzeros)
             out = torch.matmul(x_2d, out.to(x.dtype))
         else:
@@ -66,13 +115,23 @@ class AwqGemmTritonFn(torch.autograd.Function):
                 qweight,
                 scales,
                 qzeros,
-                split_k_iters=8,
-                fp32_accum=FP32_ACCUM,
+                fp32_accum=fp32_accum,
                 output_dtype=x.dtype,
+                **plan.as_kwargs(),
             )
 
         out = out + bias if bias is not None else out
         out = out.reshape(out_shape)
+        if not capturing:
+            mark_awq_triton_plan_warmed(
+                plan, M=rows, N=N, K=K, group_size=actual_group_size,
+                device=x.device, input_dtype=original_input_dtype,
+                compute_dtype=x.dtype, output_dtype=final_output_dtype,
+                fp32_accum=fp32_accum,
+                mode=request.get("schedule_mode"),
+                explicit=request.get("schedule"),
+                training=bool(request.get("training", False)),
+            )
         return out
 
     @staticmethod
@@ -100,14 +159,18 @@ class AwqGEMMTritonLinear(AWQuantLinear):
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 50}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # The Triton kernel broadcasts one scale/zero per BK tile and has only
+    # been validated for these packing group sizes.  G=16 is module metadata
+    # from a different AWQ backend and must not reach this kernel.
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    # BK is at least 32 and every tile boundary must stay group-aligned.
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
 
     # TODO: ROCM also has Triton support. Need to validate ROCM for triton
     SUPPORTS_DEVICES = [DEVICE.CUDA]
@@ -150,6 +213,13 @@ class AwqGEMMTritonLinear(AWQuantLinear):
         register_buffers: bool = False,
         **kwargs,
     ):
+        fp32_accum = bool(kwargs.pop("fp32_accum", FP32_ACCUM))
+        schedule_mode = kwargs.pop(
+            "schedule_mode", kwargs.pop("awq_triton_schedule_mode", None)
+        )
+        schedule = kwargs.pop(
+            "schedule", kwargs.pop("awq_triton_schedule", None)
+        )
         super().__init__(
             bits=bits,
             group_size=group_size,
@@ -163,6 +233,9 @@ class AwqGEMMTritonLinear(AWQuantLinear):
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)
+        self.fp32_accum = fp32_accum
+        self.awq_triton_schedule_mode = schedule_mode
+        self.awq_triton_schedule = schedule
 
     def post_init(self):
         if self.scales is not None:
@@ -207,7 +280,14 @@ class AwqGEMMTritonLinear(AWQuantLinear):
                     self.group_size,
                     self.bias,
                     self.out_features,
-                    "triton",
+                    {
+                        "fp32_accum": getattr(self, "fp32_accum", FP32_ACCUM),
+                        "schedule_mode": getattr(self, "awq_triton_schedule_mode", None),
+                        "schedule": getattr(self, "awq_triton_schedule", None),
+                        "training": self.training,
+                        "input_dtype": input_dtype,
+                        "output_dtype": input_dtype,
+                    },
                 )
 
         if input_dtype != torch.float16:
@@ -222,4 +302,11 @@ class AwqGEMMTritonLinear(AWQuantLinear):
 __all__ = [
     "AwqGemmTritonFn",
     "AwqGEMMTritonLinear",
+    "AwqTritonPlan",
+    "candidate_plans",
+    "clear_awq_triton_plan_cache",
+    "legacy_plan",
+    "mark_awq_triton_plan_warmed",
+    "select_awq_triton_plan",
+    "validate_fused_config",
 ]
