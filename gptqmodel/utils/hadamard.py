@@ -59,6 +59,7 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "fast_hadamard_transform_reverse",
         "fast_hadamard_transform_scaled",
         "fast_hadamard_transform_reverse_scaled",
+        "fast_hadamard_transform_scaled_saved",
         "fast_hadamard_transform_12N",
         "fast_hadamard_transform_20N",
         "fast_hadamard_transform_28N",
@@ -149,4 +150,14 @@ def hadamard_transform_reverse_scaled(
     if scale is None:
         scale = 1.0
     op = hadamard_op("fast_hadamard_transform_reverse_scaled")
+    return op(x, vector, float(scale))
+
+
+def hadamard_transform_scaled_saved(
+    x: torch.Tensor, vector: torch.Tensor, scale: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return vector-scaled and rounded unscaled Hadamard outputs."""
+    if scale is None:
+        scale = 1.0
+    op = hadamard_op("fast_hadamard_transform_scaled_saved")
     return op(x, vector, float(scale))

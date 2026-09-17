@@ -42,6 +42,9 @@ template<typename input_t>
 void fast_hadamard_transform_scaled_cuda(HadamardParamsBase &params, cudaStream_t stream);
 
 template<typename input_t>
+void fast_hadamard_transform_scaled_saved_cuda(HadamardParamsBase &params, cudaStream_t stream);
+
+template<typename input_t>
 void fast_hadamard_transform_reverse_scaled_cuda(HadamardParamsBase &params, cudaStream_t stream);
 
 template<typename input_t>
@@ -236,6 +239,46 @@ torch::Tensor fast_hadamard_transform_reverse_scaled(torch::Tensor x,
     return out.reshape(shapes_og);
 }
 
+std::tuple<torch::Tensor, torch::Tensor> fast_hadamard_transform_scaled_saved(
+        torch::Tensor x, torch::Tensor vector, double scale) {
+    auto input_type = x.scalar_type();
+    TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
+    TORCH_CHECK(x.is_cuda(), "fast_hadamard_transform_scaled_saved expects a CUDA tensor");
+
+    const auto shapes_og = x.sizes();
+    const int dim = x.size(-1);
+    x = x.reshape({-1, dim});
+    if (x.stride(-1) != 1) { x = x.contiguous(); }
+    const int batch_size = x.size(0);
+    TORCH_CHECK(dim >= 8 && dim <= 32768,
+                "fast_hadamard_transform_scaled_saved supports dimensions from 8 through 32768");
+    TORCH_CHECK((dim & (dim - 1)) == 0,
+                "fast_hadamard_transform_scaled_saved requires a power-of-two dimension");
+    TORCH_CHECK(vector.is_cuda() && vector.device() == x.device(),
+                "fast_hadamard_transform_scaled_saved requires a CUDA vector on the input device");
+    TORCH_CHECK(vector.scalar_type() == input_type && vector.sizes() == torch::IntArrayRef({dim}),
+                "fast_hadamard_transform_scaled_saved vector must match the input dtype and last dimension");
+    vector = vector.contiguous();
+
+    at::Tensor out = torch::empty_like(x);
+    at::Tensor unscaled = torch::empty_like(x);
+    HadamardParamsBase params;
+    set_hadamard_params(params, batch_size, dim, 1, x, out, scale);
+    params.vector_ptr = vector.data_ptr();
+    params.auxiliary_ptr = unscaled.data_ptr();
+
+#if TORCH_VERSION_MAJOR > 2 || (TORCH_VERSION_MAJOR == 2 && TORCH_VERSION_MINOR >= 6)
+    c10::DeviceGuard device_guard(x.device());
+#else
+    at::cuda::CUDAGuard device_guard{x.device()};
+#endif
+    auto stream = at::cuda::getCurrentCUDAStream().stream();
+    DISPATCH_ITYPE_FLOAT_AND_HALF_AND_BF16(input_type, "fast_hadamard_transform_scaled_saved", [&] {
+        fast_hadamard_transform_scaled_saved_cuda<input_t>(params, stream);
+    });
+    return {out.reshape(shapes_og), unscaled.reshape(shapes_og)};
+}
+
 torch::Tensor fast_hadamard_transform_12N(torch::Tensor x, double scale) {
     auto input_type = x.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -419,6 +462,7 @@ TORCH_LIBRARY(gptqmodel_hadamard, m) {
     m.def("fast_hadamard_transform_reverse(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_scaled(Tensor x, Tensor vector, float scale) -> Tensor");
     m.def("fast_hadamard_transform_reverse_scaled(Tensor x, Tensor vector, float scale) -> Tensor");
+    m.def("fast_hadamard_transform_scaled_saved(Tensor x, Tensor vector, float scale) -> (Tensor, Tensor)");
     m.def("fast_hadamard_transform_12N(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_20N(Tensor x, float scale) -> Tensor");
     m.def("fast_hadamard_transform_28N(Tensor x, float scale) -> Tensor");
@@ -430,6 +474,7 @@ TORCH_LIBRARY_IMPL(gptqmodel_hadamard, CUDA, m) {
     m.impl("fast_hadamard_transform_reverse", &gptqmodel_hadamard::fast_hadamard_transform_reverse);
     m.impl("fast_hadamard_transform_scaled", &gptqmodel_hadamard::fast_hadamard_transform_scaled);
     m.impl("fast_hadamard_transform_reverse_scaled", &gptqmodel_hadamard::fast_hadamard_transform_reverse_scaled);
+    m.impl("fast_hadamard_transform_scaled_saved", &gptqmodel_hadamard::fast_hadamard_transform_scaled_saved);
     m.impl("fast_hadamard_transform_12N", &gptqmodel_hadamard::fast_hadamard_transform_12N);
     m.impl("fast_hadamard_transform_20N", &gptqmodel_hadamard::fast_hadamard_transform_20N);
     m.impl("fast_hadamard_transform_28N", &gptqmodel_hadamard::fast_hadamard_transform_28N);

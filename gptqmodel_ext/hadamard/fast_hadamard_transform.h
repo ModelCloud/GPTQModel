@@ -23,4 +23,5 @@ struct HadamardParamsBase {
     void *__restrict__ x_ptr;
     void *__restrict__ out_ptr;
     void *__restrict__ vector_ptr;
+    void *__restrict__ auxiliary_ptr;
 };
