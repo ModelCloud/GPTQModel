@@ -139,6 +139,7 @@ def refine_trellis_candidates(
     input_metric: torch.Tensor | None = None,
     output_metric: torch.Tensor | None = None,
     output_metric_hadamard_diagonal: torch.Tensor | None = None,
+    hard_dense_verify_topk: int = 4,
     capture_barrier: threading.Barrier | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
@@ -159,6 +160,10 @@ def refine_trellis_candidates(
     """
     if not isinstance(enabled, bool):
         raise TypeError("enabled must be boolean")
+    if isinstance(hard_dense_verify_topk, bool) or not isinstance(hard_dense_verify_topk, int):
+        raise TypeError("hard_dense_verify_topk must be an integer")
+    if hard_dense_verify_topk < 0:
+        raise ValueError("hard_dense_verify_topk must be nonnegative")
     if candidates.ndim != 3 or candidates.dtype != torch.int32 or candidates.shape[0] < 2:
         raise ValueError("candidates must be int32 [choices>=2, tiles, words]")
     if not enabled:
@@ -267,6 +272,10 @@ def refine_trellis_candidates(
             output_metric_hadamard_diagonal.detach().to(relaxation_dtype)
             if output_metric_hadamard_diagonal is not None else None
         )
+        g_hadamard_diagonal_hard = (
+            output_metric_hadamard_diagonal.detach().float()
+            if output_metric_hadamard_diagonal is not None else None
+        )
         target_relax = target.detach().to(relaxation_dtype)
         if sparse_relaxation:
             # Candidate zero plus a tiny per-choice delta is sufficient for
@@ -289,11 +298,24 @@ def refine_trellis_candidates(
     def tiles_to_weight(tiles):
         return tiles.reshape(k // 16, n // 16, 16, 16).permute(0, 2, 1, 3).reshape(k, n)
 
-    def loss(tiles):
+    def loss(tiles, *, structured_output=False):
         weight = tiles_to_weight(tiles)
         if fisher_objective:
             error = weight - target
-            metric_error = h_metric @ error @ g_metric
+            metric_error = h_metric @ error
+            if structured_output:
+                if g_hadamard_diagonal_hard is None:
+                    raise ValueError("structured hard Fisher loss requires a Hadamard diagonal")
+                hadamard_scale = 1. / math.sqrt(n)
+                metric_error = hadamard_transform(
+                    metric_error.contiguous(), hadamard_scale,
+                )
+                metric_error.mul_(g_hadamard_diagonal_hard)
+                metric_error = hadamard_transform(
+                    metric_error.contiguous(), hadamard_scale,
+                )
+            else:
+                metric_error = metric_error @ g_metric
             return (error * metric_error).sum() / fisher_denominator
         prediction = x @ weight
         if right_factor is not None:
@@ -413,6 +435,22 @@ def refine_trellis_candidates(
     hard_evaluations = 0
     completed_steps = 0
     relaxation_graph = None
+    structured_hard_oracle = bool(
+        fisher_objective and g_hadamard_diagonal_hard is not None
+        and not relaxation_patience and hard_dense_verify_topk
+    )
+    hard_checkpoint_count = (
+        steps // hard_eval_interval + int(bool(steps % hard_eval_interval))
+    )
+    if structured_hard_oracle and hard_checkpoint_count:
+        hard_checkpoint_losses = torch.empty(
+            hard_checkpoint_count, device=candidates.device, dtype=torch.float32,
+        )
+        hard_checkpoint_choices = torch.empty(
+            (hard_checkpoint_count, candidates.shape[1]),
+            device=candidates.device,
+            dtype=torch.uint8 if candidates.shape[0] <= 256 else torch.int32,
+        )
     if fused_sparse_relaxation and steps:
         # CUDA graph capture needs every kernel/module loaded first. Warm the
         # exact scheduled path on scratch state, then capture one update. The
@@ -673,9 +711,15 @@ def refine_trellis_candidates(
                     final_entropy = entropy_value
                     final_max_probability = max_probability_value
                 if evaluate_hard:
-                    hard_evaluations += 1
                     choices = logits.argmax(-1)
-                    hard_loss_tensor = loss(decoded[tile_ids, choices])
+                    hard_loss_tensor = loss(
+                        decoded[tile_ids, choices],
+                        structured_output=structured_hard_oracle,
+                    )
+                    if structured_hard_oracle:
+                        hard_checkpoint_losses[hard_evaluations].copy_(hard_loss_tensor)
+                        hard_checkpoint_choices[hard_evaluations].copy_(choices)
+                    hard_evaluations += 1
                     if relaxation_patience:
                         if not bool(finite_state):
                             raise ValueError("non-finite GSQ relaxed objective or logit gradient")
@@ -703,18 +747,36 @@ def refine_trellis_candidates(
                             "non-finite hard objective",
                         )
                         history.append(hard_loss_tensor.detach())
-                        improved = hard_loss_tensor < best_device
-                        best_choices.copy_(torch.where(
-                            improved, choices, best_choices,
-                        ))
-                        best_device.copy_(torch.minimum(
-                            best_device, hard_loss_tensor,
-                        ))
+                        if not structured_hard_oracle:
+                            improved = hard_loss_tensor < best_device
+                            best_choices.copy_(torch.where(
+                                improved, choices, best_choices,
+                            ))
+                            best_device.copy_(torch.minimum(
+                                best_device, hard_loss_tensor,
+                            ))
                 if progress is not None:
                     progress(step + 1, float(best_device))
                 if evaluate_hard and relaxation_patience and stale_steps >= relaxation_patience:
                     break
     if not relaxation_patience and hard_evaluations:
+        if structured_hard_oracle:
+            verify_count = min(hard_dense_verify_topk, hard_evaluations)
+            # Stable ordering makes the verification set and strict dense
+            # tie-breaking deterministic when structured FP32 scores collide.
+            verify_indices = torch.argsort(
+                hard_checkpoint_losses[:hard_evaluations], stable=True,
+            )[:verify_count].sort().values
+            for checkpoint_index in verify_indices.unbind():
+                choices = hard_checkpoint_choices[checkpoint_index].long()
+                hard_loss_tensor = loss(decoded[tile_ids, choices])
+                torch._assert_async(
+                    torch.isfinite(hard_loss_tensor),
+                    "non-finite dense verification objective",
+                )
+                improved = hard_loss_tensor < best_device
+                best_choices.copy_(torch.where(improved, choices, best_choices))
+                best_device.copy_(torch.minimum(best_device, hard_loss_tensor))
         best = float(best_device)
         relaxation_improved_initializer = best < initializer_best
         tensor_indices = [
@@ -741,6 +803,13 @@ def refine_trellis_candidates(
         "completed_steps": completed_steps,
         "hard_eval_interval": hard_eval_interval,
         "hard_evaluations": hard_evaluations,
+        "hard_oracle": (
+            "structured_fp32_dense_topk" if structured_hard_oracle else "dense_fp32"
+        ),
+        "hard_dense_verify_topk": (
+            min(hard_dense_verify_topk, hard_evaluations)
+            if structured_hard_oracle else 0
+        ),
         "relaxation_patience": relaxation_patience,
         "optimization_regime": "exact_full_fisher" if fisher_objective else "activation_reconstruction",
         "sparse_relaxation": sparse_relaxation,

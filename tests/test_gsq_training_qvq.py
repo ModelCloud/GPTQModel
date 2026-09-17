@@ -253,6 +253,22 @@ def test_qk_pair_selector_rejects_nonfinite_replay():
         select_qk_pair(alternatives, alternatives, lambda _q, _k: float("nan"))
 
 
+def test_qk_pair_selector_batches_scalar_tensor_losses_and_preserves_ties():
+    alternatives = [
+        {"selection": "first", "value": 0},
+        {"selection": "second", "value": 1},
+    ]
+    q_selected, k_selected, measurements = select_qk_pair(
+        alternatives,
+        alternatives,
+        lambda q, k: torch.tensor(float(q["value"] + k["value"])),
+    )
+
+    assert q_selected["selection"] == "first"
+    assert k_selected["selection"] == "first"
+    assert [measurement["loss"] for measurement in measurements] == [0., 1., 1., 2.]
+
+
 def test_qk_pair_alternatives_deduplicate_identical_serialized_states():
     original = {
         "selection": "original",
