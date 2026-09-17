@@ -6608,6 +6608,10 @@ class GSQConfig:
     # completes the requested annealing schedule instead of silently turning
     # a 100-step request into ten updates.
     qvq_hard_eval_interval: int = 10
+    # Capture several exact Fisher updates in one CUDA graph when the update,
+    # hard-checkpoint, and random-buffer cadences align.  Incompatible runs
+    # automatically retain one update per replay.
+    qvq_cuda_graph_updates_per_replay: int = 4
     qvq_relaxation_patience: int = 0
     qvq_candidate_policy: str = "trellis_local"
 
@@ -6652,6 +6656,7 @@ class GSQConfig:
         for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1),
                               ("qvq_gumbel_samples", 1), ("qvq_coordinate_sweeps", 0),
                               ("qvq_coordinate_chunk_tiles", 1), ("qvq_hard_eval_interval", 1),
+                              ("qvq_cuda_graph_updates_per_replay", 1),
                               ("qvq_relaxation_patience", 0)):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < minimum:

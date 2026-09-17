@@ -192,6 +192,10 @@ def parse_args():
         help="Dense-FP32 verification candidates after structured Q/K hard scoring",
     )
     parser.add_argument(
+        "--qk-cuda-graph-updates-per-replay", type=int, default=4,
+        help="Exact Fisher updates captured per Q/K CUDA graph replay when cadences align",
+    )
+    parser.add_argument(
         "--qk-soft-dtype",
         choices=("float32", "bfloat16"),
         default="bfloat16",
@@ -317,6 +321,8 @@ def main():
         raise ValueError("attention validation tail epochs must be positive")
     if args.qk_hard_eval_interval < 1:
         raise ValueError("Q/K hard evaluation interval must be positive")
+    if args.qk_cuda_graph_updates_per_replay < 1:
+        raise ValueError("Q/K CUDA graph updates per replay must be positive")
     if args.fused_qk_fisher and args.rounds != 1:
         raise ValueError("fused Q/K Fisher fitting currently requires exactly one P32 round")
     if not args.allow_nondeterministic:
@@ -596,6 +602,7 @@ def main():
             output_metric=output_metric,
             output_metric_hadamard_diagonal=fisher_scales.square(),
             hard_dense_verify_topk=args.qk_hard_dense_verify_topk,
+            cuda_graph_updates_per_replay=args.qk_cuda_graph_updates_per_replay,
             capture_barrier=qk_capture_barrier,
             seed=args.seed,
         )
@@ -1060,6 +1067,7 @@ def main():
         "epochs": args.epochs,
         "qk_steps": args.qk_steps,
         "qk_hard_eval_interval": args.qk_hard_eval_interval,
+        "qk_cuda_graph_updates_per_replay": args.qk_cuda_graph_updates_per_replay,
         "qk_soft_dtype": args.qk_soft_dtype,
         "mlp_soft_dtype": args.mlp_soft_dtype,
         "mlp_fp32_tail_epochs": args.mlp_fp32_tail_epochs,

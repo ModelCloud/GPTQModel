@@ -122,15 +122,21 @@ def test_control_requires_boolean():
                               target=torch.empty(0), inputs=torch.empty(0), enabled="false")
 
 
-@pytest.mark.parametrize("value,error", [(True, TypeError), (-1, ValueError)])
-def test_hard_dense_verify_topk_validation(value, error):
+@pytest.mark.parametrize("name,value,error", [
+    ("hard_dense_verify_topk", True, TypeError),
+    ("hard_dense_verify_topk", -1, ValueError),
+    ("cuda_graph_updates_per_replay", True, ValueError),
+    ("cuda_graph_updates_per_replay", 0, ValueError),
+])
+def test_integer_control_validation(name, value, error):
     from gptqmodel.quantization.qvq_gsq import refine_trellis_candidates
 
-    with pytest.raises(error, match="hard_dense_verify_topk"):
+    with pytest.raises(error, match=name):
         refine_trellis_candidates(
-            torch.zeros(2, 1, 32, dtype=torch.int32), bits=4,
+            torch.zeros(2, 1, 24, dtype=torch.int32), bits=3,
+            bank_ids=torch.zeros(1, dtype=torch.uint8), bank_alt_id=torch.tensor([1]),
             target=torch.zeros(16, 16), inputs=torch.zeros(1, 16),
-            enabled=True, hard_dense_verify_topk=value,
+            enabled=True, **{name: value},
         )
 
 
@@ -338,6 +344,64 @@ def test_no_patience_device_selection_matches_synchronous_hard_oracle():
     assert asynchronous.history == synchronous.history
     assert torch.equal(asynchronous.choices, synchronous.choices)
     assert torch.equal(asynchronous.words, synchronous.words)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_batched_cuda_graph_replays_preserve_exact_fisher_updates():
+    from gptqmodel.quantization.qvq_gsq import (
+        TrellisCandidateAdapter,
+        fisher_screened_trellis_candidates,
+        refine_trellis_candidates,
+    )
+
+    device = torch.device("cuda")
+    bits = 3
+    baseline = torch.zeros((1, 24), dtype=torch.int32, device=device)
+    bank = torch.zeros(1, dtype=torch.uint8, device=device)
+    alt = torch.ones(1, dtype=torch.uint8, device=device)
+    adapter = TrellisCandidateAdapter("p32_window", bits)
+    teacher = adapter.inner(baseline, 16, 16, bank, alt)
+    target = teacher + torch.eye(16, device=device)
+    candidates, decoded, indices, deltas, shifts = fisher_screened_trellis_candidates(
+        baseline, count=5, seed=7, bits=bits, layout="p32_window", target=target,
+        input_hessian=torch.eye(16, device=device),
+        output_hessian=torch.eye(16, device=device), bank_ids=bank,
+        bank_alt_id=alt, return_decoded=True, return_sparse=True, return_shifts=True,
+    )
+    options = {
+        "bits": bits,
+        "bank_ids": bank,
+        "bank_alt_id": alt,
+        "target": target,
+        "inputs": target.new_zeros((1, 16)),
+        "enabled": True,
+        "steps": 8,
+        "seed": 11,
+        "coordinate_sweeps": 0,
+        "hard_eval_interval": 4,
+        "relaxation_patience": 0,
+        "decoded_candidates": decoded,
+        "sparse_candidate_indices": indices,
+        "sparse_candidate_deltas": deltas,
+        "sparse_candidate_shifts": shifts,
+        "input_metric": torch.eye(16, device=device),
+        "output_metric": torch.eye(16, device=device),
+        "output_metric_hadamard_diagonal": torch.ones(16, device=device),
+    }
+    single = refine_trellis_candidates(
+        candidates, cuda_graph_updates_per_replay=1, **options,
+    )
+    batched = refine_trellis_candidates(
+        candidates, cuda_graph_updates_per_replay=4, **options,
+    )
+
+    assert single.diagnostics["cuda_graph_updates_per_replay"] == 1
+    assert batched.diagnostics["cuda_graph_updates_per_replay"] == 4
+    assert batched.diagnostics["initial_probability_update"] == 4
+    assert single.calibration_after == batched.calibration_after
+    assert single.history == batched.history
+    assert torch.equal(single.choices, batched.choices)
+    assert torch.equal(single.words, batched.words)
 
 
 def test_fisher_screen_selects_best_of_four_local_shifts_per_tile():
