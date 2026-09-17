@@ -514,7 +514,7 @@ def refine_trellis_candidates(
             warm_norm_maximum, warm_finite, temperature_schedule,
             kappa_schedule, warm_step, learning_rate, weight_decay,
         )
-        torch.cuda.synchronize()
+        torch.cuda.current_stream().synchronize()
         if capture_barrier is not None:
             try:
                 capture_barrier.wait(timeout=60.)
@@ -577,7 +577,7 @@ def refine_trellis_candidates(
                 gradient_norm_max.zero_()
                 finite_state.fill_(True)
                 graph_step.zero_()
-            torch.cuda.synchronize()
+            torch.cuda.current_stream().synchronize()
             generator.manual_seed(seed)
         if capture_barrier is not None:
             try:
