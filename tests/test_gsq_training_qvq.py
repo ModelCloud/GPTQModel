@@ -197,7 +197,7 @@ def test_compact_mixture_writes_bfloat16_directly_without_changing_gradients():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_native_position_error_matches_real_p32_compact_mixture():
+def test_position_error_matches_real_p32_compact_mixture():
     module, _, _ = _training_module("cuda", candidates=33)
     from gptqmodel.quantization.qvq_gsq_triton import (
         build_compact_position_map,
@@ -207,6 +207,7 @@ def test_native_position_error_matches_real_p32_compact_mixture():
     indices, choices, deltas = build_compact_position_map(
         module.sparse_indices, module.sparse_deltas.to(torch.bfloat16),
     )
+    assert indices.shape[1] > 64
     indices = indices.repeat(2, 1)
     choices = choices.repeat(2, 1, 1)
     deltas = deltas.repeat(2, 1, 1)
