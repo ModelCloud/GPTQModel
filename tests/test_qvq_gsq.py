@@ -394,6 +394,10 @@ def test_batched_cuda_graph_replays_preserve_exact_fisher_updates():
     batched = refine_trellis_candidates(
         candidates, cuda_graph_updates_per_replay=4, **options,
     )
+    generic_map = refine_trellis_candidates(
+        candidates, cuda_graph_updates_per_replay=4,
+        fast_position_map=False, **options,
+    )
     sparse_values = decoded[1:].reshape(
         len(decoded) - 1, len(baseline), 256,
     ).gather(2, indices)
@@ -410,12 +414,18 @@ def test_batched_cuda_graph_replays_preserve_exact_fisher_updates():
     assert single.diagnostics["cuda_graph_updates_per_replay"] == 1
     assert batched.diagnostics["cuda_graph_updates_per_replay"] == 4
     assert batched.diagnostics["initial_probability_update"] == 4
+    assert generic_map.diagnostics["position_map_backend"] == "generic_sort"
+    assert batched.diagnostics["position_map_backend"] == "p32_direct"
     assert not batched.diagnostics["sparse_hard_candidate_bank"]
     assert sparse_bank.diagnostics["sparse_hard_candidate_bank"]
     assert single.calibration_after == batched.calibration_after
     assert single.history == batched.history
     assert torch.equal(single.choices, batched.choices)
     assert torch.equal(single.words, batched.words)
+    assert generic_map.calibration_after == batched.calibration_after
+    assert generic_map.history == batched.history
+    assert torch.equal(generic_map.choices, batched.choices)
+    assert torch.equal(generic_map.words, batched.words)
     assert sparse_bank.calibration_before == batched.calibration_before
     assert sparse_bank.calibration_after == batched.calibration_after
     assert sparse_bank.history == batched.history

@@ -258,6 +258,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         output_hadamard=True,
         fast_hadamard=True,
         training_dtype=torch.float32,
+        fast_position_map=True,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -372,15 +373,27 @@ class GSQP32TrainingModule(torch.nn.Module):
         if self.compact_forward:
             from .qvq_gsq_triton import (
                 build_compact_position_map,
+                build_p32_dense_position_map,
                 transpose_compact_position_map,
+                transpose_p32_dense_position_map,
             )
 
-            position_indices, position_choices, position_deltas = build_compact_position_map(
-                self.sparse_indices, self.sparse_deltas, matrix_indices,
+            position_indices, position_choices, position_deltas = (
+                build_p32_dense_position_map(
+                    self.sparse_indices, self.sparse_deltas,
+                ) if fast_position_map else
+                build_compact_position_map(
+                    self.sparse_indices, self.sparse_deltas, matrix_indices,
+                )
             )
             (transposed_position_indices, transposed_position_choices,
-             transposed_position_deltas) = transpose_compact_position_map(
-                position_indices, position_choices, position_deltas,
+             transposed_position_deltas) = (
+                transpose_p32_dense_position_map(
+                    position_indices, position_choices, position_deltas,
+                ) if fast_position_map else
+                transpose_compact_position_map(
+                    position_indices, position_choices, position_deltas,
+                )
             )
         else:
             position_indices = torch.empty(
@@ -581,6 +594,7 @@ def p32_training_module_from_payload(
     fast_hadamard=True,
     training_dtype=torch.float32,
     fast_identity_metric=True,
+    fast_position_map=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -602,6 +616,7 @@ def p32_training_module_from_payload(
         fast_hadamard=fast_hadamard,
         training_dtype=training_dtype,
         fast_identity_metric=fast_identity_metric,
+        fast_position_map=fast_position_map,
     )
 
 
@@ -622,6 +637,7 @@ def p32_training_module_from_words(
     fast_hadamard=True,
     training_dtype=torch.float32,
     fast_identity_metric=True,
+    fast_position_map=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -694,6 +710,7 @@ def p32_training_module_from_words(
         output_hadamard=output_hadamard,
         fast_hadamard=fast_hadamard,
         training_dtype=training_dtype,
+        fast_position_map=fast_position_map,
     )
 
 
