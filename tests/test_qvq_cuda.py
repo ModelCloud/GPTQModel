@@ -62,6 +62,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
@@ -2394,6 +2395,77 @@ def test_qvq_cuda_family_batched_segmented_v2_matches_independent_searches(bits,
         assert all(torch.equal(expected[family][index], actual[index][family]) for index in range(3))
 
 
+@pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
+@pytest.mark.parametrize("batch", (1, 7, 64))
+def test_qvq_cuda_family_midpoint_matches_full_provisional_traceback(bits, batch):
+    generator = torch.Generator(device="cuda").manual_seed(20260919 + batch + int(bits * 10))
+    families = 2
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+    codebooks = torch.stack(
+        tuple(
+            torch.stack(
+                (
+                    pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+                    pgc16_codebook_v2_bank(family, bits=bits, dtype=torch.float32),
+                )
+            )
+            for family in (1, 3)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    rotated = torch.roll(sequences, shifts=64, dims=2).contiguous()
+    full = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        rotated,
+        codebooks,
+        transition_bits,
+        16,
+        None,
+        None,
+    )
+    expected = (full[0][:, :, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    actual = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
+        rotated,
+        codebooks,
+        transition_bits,
+        16,
+        None,
+    )
+
+    assert torch.equal(actual, expected)
+
+
+def test_qvq_cuda_family_midpoint_matches_weighted_full_provisional_traceback():
+    generator = torch.Generator(device="cuda").manual_seed(20260920)
+    families, batch, bits = 2, 7, 3.0
+    sequences = torch.randn((families, batch, 128, 2), generator=generator, device="cuda")
+    step_weights = torch.rand(
+        (families, batch, 128), generator=generator, device="cuda", dtype=torch.float32
+    ).add_(0.25)
+    codebooks = torch.stack(
+        tuple(
+            torch.stack(
+                (
+                    pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+                    pgc16_codebook_v2_bank(family, bits=bits, dtype=torch.float32),
+                )
+            )
+            for family in (1, 3)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    rotated = torch.roll(sequences, shifts=64, dims=2).contiguous()
+    rotated_weights = torch.roll(step_weights, shifts=64, dims=2).contiguous()
+    full = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        rotated, codebooks, transition_bits, 16, None, rotated_weights
+    )
+    expected = (full[0][:, :, 63] & ((1 << (16 - transition_bits)) - 1)).contiguous()
+    actual = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
+        rotated, codebooks, transition_bits, 16, rotated_weights
+    )
+
+    assert torch.equal(actual, expected)
+
+
 def _fused_family_grid_dispatch_count() -> int:
     """Process-wide count of fused W2 family-grid kernel dispatches (see qvq_viterbi_cuda.cu)."""
 
@@ -3847,6 +3919,40 @@ def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
     assert counters["viterbi_provisional_states_produced"] == (
         counters["viterbi_provisional_states_consumed"] * 128
     )
+
+
+def test_qvq_v2b2_w3_family_batch_uses_exact_midpoint_only_provisional_pass():
+    generator = torch.Generator(device="cuda").manual_seed(20260918)
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
+    hessian = torch.eye(32, device="cuda", dtype=torch.float32)
+    pair_stacks = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=weight.device,
+            bits=3.0,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float16,
+        )
+    ).contiguous()
+    telemetry = QVQQuantizationTelemetry()
+
+    _yaqa_inner_v2b2_family_batch_cuda(
+        weight,
+        hessian,
+        hessian,
+        pair_stacks,
+        bits=3.0,
+        factorization=None,
+        rounding_bias=None,
+        telemetry=telemetry,
+    )
+    counters = telemetry.finalize()["counters"]
+
+    assert counters["viterbi_provisional_midpoint_only"] > 0
+    assert counters["viterbi_provisional_states_produced"] == counters[
+        "viterbi_provisional_states_consumed"
+    ]
+    assert counters.get("viterbi_provisional_losses_discarded", 0) == 0
+    assert counters.get("viterbi_provisional_selectors_discarded", 0) == 0
 
 
 def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely():

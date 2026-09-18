@@ -3521,6 +3521,63 @@ def block_ldlq_inner_v2b4_p64(
     )
 
 
+def _qvq_cuda_family_tail_biting_overlaps(
+    sequences: torch.Tensor,
+    family_stacks: torch.Tensor,
+    transition_bits: int,
+    *,
+    step_weights: torch.Tensor | None = None,
+    telemetry: QVQQuantizationTelemetry | None,
+) -> torch.Tensor:
+    """Return exact P32 tail-biting overlaps, specializing the profitable W3 case."""
+
+    from ..utils.qvq_cuda import (
+        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op,
+    )
+
+    midpoint = sequences.shape[2] // 2
+    rolled = torch.roll(sequences, shifts=midpoint, dims=2).contiguous()
+    rolled_weights = (
+        None
+        if step_weights is None
+        else torch.roll(step_weights, shifts=midpoint, dims=2).contiguous()
+    )
+    family_sequences = sequences.shape[0] * sequences.shape[1]
+    if transition_bits == 6:
+        overlaps = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
+            rolled,
+            family_stacks,
+            transition_bits,
+            QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+            rolled_weights,
+        )
+        if telemetry is not None:
+            telemetry.count("viterbi_provisional_midpoint_only", family_sequences)
+            telemetry.count("viterbi_provisional_states_produced", family_sequences)
+            telemetry.count("viterbi_provisional_states_consumed", family_sequences)
+        return overlaps
+
+    provisional, _, _ = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        rolled,
+        family_stacks,
+        transition_bits,
+        QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+        None,
+        rolled_weights,
+    )
+    if telemetry is not None:
+        telemetry.count("viterbi_provisional_states_produced", family_sequences * sequences.shape[2])
+        telemetry.count("viterbi_provisional_states_consumed", family_sequences)
+        telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
+        telemetry.count(
+            "viterbi_provisional_selectors_discarded",
+            family_sequences * QVQ_V2B2_P32_SEGMENTS_PER_TILE,
+        )
+    overlap_mask = (1 << (16 - transition_bits)) - 1
+    return (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+
+
 def _block_ldlq_v2b2_family_batch_cuda(
     inner_weight: torch.Tensor,
     H: torch.Tensor,
@@ -3551,8 +3608,6 @@ def _block_ldlq_v2b2_family_batch_cuda(
     states = torch.empty((families, input_tiles, output_tiles, 128), device=source.device, dtype=torch.long)
     selectors = torch.empty((families, input_tiles, output_tiles, 8), device=source.device, dtype=torch.uint8)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
-    midpoint = 64
-    overlap_mask = (1 << (16 - transition_bits)) - 1
     family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
     family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
     # Six CTAs are generated per logical tile (three families x two banks).
@@ -3590,17 +3645,13 @@ def _block_ldlq_v2b2_family_batch_cuda(
                 chunk_weights = None
                 if step_weights is not None:
                     chunk_weights = step_weights.view(1, 1, 128).expand(families, chunk_count, -1).contiguous()
-                provisional, _, _ = family_viterbi(
-                    torch.roll(chunk, shifts=midpoint, dims=2).contiguous(),
+                overlaps = _qvq_cuda_family_tail_biting_overlaps(
+                    chunk,
                     family_stacks,
                     transition_bits,
-                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                    None,
-                    None
-                    if chunk_weights is None
-                    else torch.roll(chunk_weights, shifts=midpoint, dims=2).contiguous(),
+                    step_weights=chunk_weights,
+                    telemetry=telemetry,
                 )
-                overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
                 if telemetry is not None:
                     family_sequences = families * chunk_count
                     telemetry.count("viterbi_family_grid_calls", 2)
@@ -3608,10 +3659,6 @@ def _block_ldlq_v2b2_family_batch_cuda(
                     telemetry.count("viterbi_unique_logical_solve_ids", 2)
                     telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
                     telemetry.count("viterbi_family_state_steps", family_sequences * 128 * 2)
-                    telemetry.count("viterbi_provisional_states_produced", family_sequences * 128)
-                    telemetry.count("viterbi_provisional_states_consumed", family_sequences)
-                    telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
-                    telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
                     # Each block/chunk is generated once and feedback changes
                     # before the next block, so no call has identical inputs.
                     telemetry.count("viterbi_exact_reuse_candidates", 0)
@@ -5149,8 +5196,6 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     safe_bound = math.sqrt(torch.finfo(torch.float32).max / steps) / (2.0 * math.sqrt(2.0))
     invalid.logical_or_(family_stacks.detach().abs().amax(dim=(1, 2, 3)) > safe_bound)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
-    midpoint = steps // 2
-    overlap_mask = (1 << (16 - transition_bits)) - 1
 
     from ..utils.qvq_cuda import (
         _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
@@ -5172,15 +5217,12 @@ def _yaqa_inner_v2b2_family_batch_cuda(
             torch.logical_or(~torch.isfinite(sequences).all(dim=(1, 2, 3)), sequences.abs().amax(dim=(1, 2, 3)) > safe_bound)
         )
         with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
-            provisional, _, _ = family_viterbi(
-                torch.roll(sequences, shifts=midpoint, dims=2).contiguous(),
+            overlaps = _qvq_cuda_family_tail_biting_overlaps(
+                sequences,
                 family_stacks,
                 transition_bits,
-                QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                None,
-                None,
+                telemetry=telemetry,
             )
-            overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
             if telemetry is not None:
                 family_sequences = families * count
                 telemetry.count("viterbi_family_grid_calls", 2)
@@ -5188,10 +5230,6 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 telemetry.count("viterbi_unique_logical_solve_ids", 2)
                 telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
                 telemetry.count("viterbi_family_state_steps", family_sequences * steps * 2)
-                telemetry.count("viterbi_provisional_states_produced", family_sequences * steps)
-                telemetry.count("viterbi_provisional_states_consumed", family_sequences)
-                telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
-                telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
                 # Anti-diagonal coordinates are disjoint and the feedback
                 # tensors mutate after every commit; exact reuse is impossible.
                 telemetry.count("viterbi_exact_reuse_candidates", 0)
@@ -5269,8 +5307,6 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
     safe_bound = math.sqrt(torch.finfo(torch.float32).max / steps) / (2.0 * math.sqrt(2.0))
     invalid.logical_or_(family_stacks.detach().abs().amax(dim=(1, 2, 3)) > safe_bound)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
-    midpoint = steps // 2
-    overlap_mask = (1 << (16 - transition_bits)) - 1
     bias_blocks = None
     if rounding_bias is not None:
         bias_blocks = rounding_bias.to(torch.float32).view(input_blocks, tile, output_blocks, tile).permute(0, 2, 1, 3)
@@ -5297,15 +5333,12 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
             )
         )
         with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
-            provisional, _, _ = family_viterbi(
-                torch.roll(sequences, shifts=midpoint, dims=2).contiguous(),
+            overlaps = _qvq_cuda_family_tail_biting_overlaps(
+                sequences,
                 family_stacks,
                 transition_bits,
-                QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                None,
-                None,
+                telemetry=telemetry,
             )
-            overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
             states, _, segment_ids = family_viterbi(
                 sequences,
                 family_stacks,
@@ -5347,10 +5380,6 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
             telemetry.count("viterbi_unique_logical_solve_ids", 2)
             telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
             telemetry.count("viterbi_family_state_steps", family_sequences * steps * 2)
-            telemetry.count("viterbi_provisional_states_produced", family_sequences * steps)
-            telemetry.count("viterbi_provisional_states_consumed", family_sequences)
-            telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
-            telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
             telemetry.count("viterbi_exact_reuse_candidates", 0)
             telemetry.count("viterbi_reselection_revisits", 0)
     return (
@@ -5584,17 +5613,12 @@ def yaqa_inner_v2b2_p32(
                     .contiguous()
                 )
                 transition_bits = qvq_transition_bits(kwargs["bits"], vector_size=2)
-                midpoint = family_sequences.shape[2] // 2
-                provisional_states, _, _ = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
-                    torch.roll(family_sequences, shifts=midpoint, dims=2).contiguous(),
+                overlaps = _qvq_cuda_family_tail_biting_overlaps(
+                    family_sequences,
                     family_codebooks,
                     transition_bits,
-                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                    None,
-                    None,
+                    telemetry=telemetry,
                 )
-                overlap_mask = (1 << (16 - transition_bits)) - 1
-                overlaps = (provisional_states[:, :, midpoint - 1] & overlap_mask).contiguous()
                 if telemetry is not None:
                     family_sequences_count = 3 * sample_count
                     telemetry.count("viterbi_family_grid_calls", 2)
@@ -5602,10 +5626,6 @@ def yaqa_inner_v2b2_p32(
                     telemetry.count("viterbi_unique_logical_solve_ids", 2)
                     telemetry.count("viterbi_family_grid_sequences", family_sequences_count * 2)
                     telemetry.count("viterbi_family_state_steps", family_sequences_count * 128 * 2)
-                    telemetry.count("viterbi_provisional_states_produced", family_sequences_count * 128)
-                    telemetry.count("viterbi_provisional_states_consumed", family_sequences_count)
-                    telemetry.count("viterbi_provisional_losses_discarded", family_sequences_count)
-                    telemetry.count("viterbi_provisional_selectors_discarded", family_sequences_count * 8)
                     telemetry.count("viterbi_exact_reuse_candidates", 0)
                     telemetry.count("viterbi_reselection_revisits", 0)
                 family_states, _, family_selectors = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(

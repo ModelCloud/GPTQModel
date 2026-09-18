@@ -50,7 +50,31 @@ held-out results therefore carry over without a statistical recheck.
 The three wide MLP projections now account for most layer quantization time.
 Their dominant phase is the exact two-family segmented Viterbi recurrence.
 The current SM90 implementation launches one grid-parallel kernel per P32
-segment plus traceback for each anti-diagonal and tail-biting pass. A future
-phase should prototype persistent exact W3/W3.5 family-grid kernels, gated by
-bitwise payload parity first and the FP32/FP64 plus disjoint held-out oracles
-if operation ordering changes.
+segment plus traceback for each anti-diagonal and tail-biting pass.
+
+## W3 midpoint-only tail biting
+
+The follow-up profiled and tested the proposed persistent replacement before
+shipping it. On H100 the existing grid kernel is already compute/L2 bound
+(`78.14%` SM throughput, `89.62%` active warps, and negligible DRAM traffic).
+The persistent prototype was 1.23--2.90x slower over production family-batch
+sizes and was rejected.
+
+The safe remaining redundancy was the provisional circular pass. Its caller
+consumes only state 63, but the former family-grid API materialized 128 states,
+one loss, and eight selectors per sequence. The W3 path now invokes an exact
+midpoint-only family operator and skips the unused traceback products. Dispatch
+is intentionally restricted to W3: CUDA-event A/B measurements showed
+1.154--1.173x at family batches 1--32 and 1.015--1.022x at batches 64--128,
+whereas W2.5 regressed and W3.5 was neutral.
+
+On the same matched Llama layer-0 protocol, total segmented-Viterbi GPU time
+fell from `17,898.308 ms` to `17,597.927 ms` (1.017x), and quantization process
+time fell from `29.302 s` to `29.162 s` (1.005x). This is an incremental exact
+win rather than a new 2x phase. All 174 saved tensors, including all 21
+quantized payload tensors, match bit-for-bit. Every per-module FP32 and FP64
+Kronecker-Fisher objective also matches exactly, so no held-out rerun is needed.
+
+Telemetry reports midpoint-only production directly: one provisional state is
+produced and consumed per family sequence, with no discarded provisional loss
+or selector payload. W2.5 and W3.5 retain the previous full provisional solve.
