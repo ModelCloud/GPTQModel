@@ -257,6 +257,12 @@ def parse_args():
         help="Return exact sparse P32 candidate values without a dense decoded bank",
     )
     parser.add_argument(
+        "--compact-attention-forward",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use the fused sparse P32 materializer for 2048-wide attention projections",
+    )
+    parser.add_argument(
         "--direct-qk-pair-guard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -501,6 +507,7 @@ def main():
                 fast_identity_metric=args.fast_identity_candidate_metric,
                 fast_position_map=args.fast_p32_position_map,
                 compact_sparse_candidates=args.compact_sparse_candidates,
+                compact_attention_forward=args.compact_attention_forward,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -511,6 +518,7 @@ def main():
                 fast_identity_metric=args.fast_identity_candidate_metric,
                 fast_position_map=args.fast_p32_position_map,
                 compact_sparse_candidates=args.compact_sparse_candidates,
+                compact_attention_forward=args.compact_attention_forward,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -1254,6 +1262,7 @@ def main():
         "sparse_qk_candidate_bank": args.sparse_qk_candidate_bank,
         "fast_p32_position_map": args.fast_p32_position_map,
         "compact_sparse_candidates": args.compact_sparse_candidates,
+        "compact_attention_forward": args.compact_attention_forward,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (
