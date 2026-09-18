@@ -1106,6 +1106,7 @@ def _p32_sparse_shift_screen(
     codebook_version,
     identity_metric=False,
     materialize_dense=True,
+    fused_identity=False,
 ):
     """Exactly score local P32 edits using only decoder states they change.
 
@@ -1118,6 +1119,37 @@ def _p32_sparse_shift_screen(
         raise ValueError("sparse P32 screening requires selectors and an alternative bank")
     transition_bits = round(normalize_qvq_rate(bits) * 2)
     tile_count, group_count = positions.shape
+    if fused_identity:
+        if not identity_metric or transition_bits != 6:
+            raise ValueError("fused P32 screening requires the W3 identity metric")
+        from .qvq_gsq_triton import screen_p32_w3_identity_shifts
+
+        levels = pgc16_levels_for_version(codebook_version).to(device=baseline.device)
+        (scalar_indices, selected_delta, selected_shifts,
+         selected_new_values) = screen_p32_w3_identity_shifts(
+            baseline, positions, bank_ids, bank_alt_id, baseline_tiles,
+            metric_tiles, levels,
+        )
+        selected_words = _p32_selected_shift_alternatives(
+            baseline, positions, selected_shifts.T.contiguous(), transition_bits,
+        )
+        if materialize_dense:
+            selected_values = baseline_tiles.reshape(tile_count, 256)[None].expand(
+                group_count, -1, -1,
+            ).clone()
+            selected_values.scatter_(2, scalar_indices, selected_new_values)
+        else:
+            selected_values = None
+        return (
+            selected_words,
+            (None if selected_values is None else
+             selected_values.reshape(group_count, tile_count, 16, 16)),
+            None,
+            scalar_indices,
+            selected_delta,
+            selected_shifts,
+            selected_new_values,
+        )
     affected_count = (16 + transition_bits - 1) // transition_bits
     state_offsets = torch.arange(affected_count, device=baseline.device, dtype=torch.int64)
     affected_states = (positions.T[:, :, None] + state_offsets[None, None, :]) % 128
@@ -1272,6 +1304,7 @@ def fisher_screened_trellis_candidates(
     return_shifts=False,
     compact_sparse=False,
     identity_metric=False,
+    fused_identity_screen=True,
 ):
     """Screen four paper-local shifts at each candidate transition.
 
@@ -1289,6 +1322,8 @@ def fisher_screened_trellis_candidates(
         raise ValueError("GSQ Fisher candidate screen requires a rank-two target")
     if identity_metric and layout != "p32_window":
         raise ValueError("identity candidate screening currently requires P32 window layout")
+    if not isinstance(fused_identity_screen, bool):
+        raise TypeError("fused identity screening control must be boolean")
     if compact_sparse and (layout != "p32_window" or not return_decoded or not return_sparse):
         raise ValueError(
             "compact sparse candidate screening requires decoded sparse P32 output"
@@ -1317,7 +1352,9 @@ def fisher_screened_trellis_candidates(
             if identity_metric else
             input_hessian.float() @ (current - target.float()) @ output_hessian.float()
         )
-    metric_tiles = metric_error.reshape(input_tiles, 16, output_tiles, 16).permute(0, 2, 1, 3).reshape(-1, 16, 16)
+    metric_tiles = metric_error.reshape(
+        input_tiles, 16, output_tiles, 16,
+    ).permute(0, 2, 1, 3).reshape(-1, 16, 16).contiguous()
     if identity_metric:
         h_tiles = g_tiles = None
     else:
@@ -1368,6 +1405,10 @@ def fisher_screened_trellis_candidates(
                     codebook_version=codebook_version,
                     identity_metric=identity_metric,
                     materialize_dense=not compact_sparse,
+                    fused_identity=(
+                        fused_identity_screen and identity_metric
+                        and baseline.device.type == "cuda" and transition_bits == 6
+                    ),
                 )
                 screened.extend(selected_words.unbind(0))
                 if screened_values is not None:

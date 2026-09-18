@@ -261,6 +261,21 @@ changed-tile counts, and held-out losses remained bit-for-bit equal, strict
 split disjointness passed, and gains remained exactly 15.0000% and 29.2717%.
 Use `--no-inline-p32-overlap` to compare against the dense overlap-map path.
 
+W3/P32 identity-Fisher candidate screening now fuses four legal shift decodes,
+the six affected PGC16 scalar decodes, the exact FP32 local quadratic, and the
+stable shift selection into one Triton program per tile and candidate position.
+The fallback remains available with `--no-fused-p32-identity-screen`. On an
+H100, the complete 8,192 x 2,048 candidate constructor improved from 20.59ms
+to 8.69ms after warmup (2.37x), including legal word and sparse-value output.
+With seven projection banks built concurrently, median candidate wall time at
+32/8/32 x 512 tokens improved from 0.2656s to 0.2345s (1.13x). A controlled
+64/16/64 x 256-token pair improved from 0.2702s to 0.2172s (1.24x). All three
+512-token pairs and the 256-token pair produced bit-for-bit equal 14-tensor
+states, identical changed-tile counts and guards, and exact held-out gains of
+15.0000% and 29.2717%, respectively. Strict train/validation/QK split
+disjointness passed. Regression coverage compares the fused and eager oracles
+for packed and unpacked selectors with every alternate PGC16 bank.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

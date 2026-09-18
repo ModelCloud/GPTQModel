@@ -30,6 +30,115 @@ def _fp32_fma(left, right, addend):
 
 
 @triton.jit
+def _p32_w3_identity_shift_screen_kernel(
+        baseline, positions, packed_banks, bank_alt_id, baseline_tiles,
+        metric_tiles, levels, output_indices, output_deltas, output_shifts,
+        output_values, TILE_COUNT: tl.constexpr, GROUP_COUNT: tl.constexpr,
+        WORDS: tl.constexpr, PACKED_BANKS: tl.constexpr):
+    """Select the best of four W3 shifts from six exact changed scalars."""
+    program = tl.program_id(0)
+    tile = program // GROUP_COUNT
+    group = program - tile * GROUP_COUNT
+    shift_index = tl.arange(0, 4)
+    shift_id = shift_index[:, None]
+    lane = tl.arange(0, 8)[None, :]
+    lane_mask = lane < 6
+    state_offset = lane // 2
+    parity = lane - state_offset * 2
+    position = tl.load(positions + tile * GROUP_COUNT + group).to(tl.int32)
+    state = (position + state_offset) & 127
+
+    bit_position = (127 - state) * 6
+    word_id = bit_position // 32
+    bit_shift = bit_position - word_id * 32
+    word = tl.load(baseline + tile * WORDS + word_id).to(tl.int64) & 0xFFFFFFFF
+    next_word = tl.load(
+        baseline + tile * WORDS + ((word_id + 1) % WORDS),
+    ).to(tl.int64) & 0xFFFFFFFF
+    old_state = word >> bit_shift
+    old_state |= tl.where(bit_shift > 16, next_word << (32 - bit_shift), 0)
+    old_state &= 0xFFFF
+    edge_bit_position = (127 - position) * 6
+    edge_word_id = edge_bit_position // 32
+    edge_shift = edge_bit_position - edge_word_id * 32
+    edge_word = tl.load(
+        baseline + tile * WORDS + edge_word_id,
+    ).to(tl.int64) & 0xFFFFFFFF
+    edge_next_word = tl.load(
+        baseline + tile * WORDS + ((edge_word_id + 1) % WORDS),
+    ).to(tl.int64) & 0xFFFFFFFF
+    edge_state = edge_word >> edge_shift
+    edge_state |= tl.where(
+        edge_shift > 16, edge_next_word << (32 - edge_shift), 0,
+    )
+    old_edge = edge_state & 63
+    shift = tl.where(
+        shift_id == 0, -2,
+        tl.where(shift_id == 1, -1, tl.where(shift_id == 2, 1, 2)),
+    )
+    new_edge = (old_edge + shift) & 63
+    edge_bit = state_offset * 6
+    width = tl.minimum(6, 16 - edge_bit)
+    value_mask = (1 << width) - 1
+    state_mask = value_mask << edge_bit
+    new_state = (
+        (old_state & (0xFFFF ^ state_mask))
+        | ((new_edge & value_mask) << edge_bit)
+    )
+
+    selector = tile * 8 + state // 16
+    if PACKED_BANKS:
+        bank_byte = tl.load(packed_banks + selector // 8).to(tl.int32)
+        binary_bank = (bank_byte >> (selector & 7)) & 1
+    else:
+        binary_bank = tl.load(packed_banks + selector).to(tl.int32)
+    bank = binary_bank * tl.load(bank_alt_id).to(tl.int32)
+    xor_mask = tl.where(
+        bank == 0, 0,
+        tl.where(bank == 1, 26985, tl.where(bank == 2, 23130, 15420)),
+    )
+    mixed = new_state ^ xor_mask
+    mixed ^= mixed >> 8
+    mixed = (mixed * 40503 + 17011) & 0xFFFF
+    mixed ^= mixed >> 7
+    level_index = tl.where(parity == 0, mixed >> 8, mixed & 255)
+    new_value = tl.load(levels + level_index, mask=lane_mask, other=0.0).to(tl.float32)
+    scalar = state * 2 + parity
+    old_value = tl.load(
+        baseline_tiles + tile * 256 + scalar, mask=lane_mask, other=0.0,
+    ).to(tl.float32)
+    metric = tl.load(
+        metric_tiles + tile * 256 + scalar, mask=lane_mask, other=0.0,
+    ).to(tl.float32)
+    delta = new_value - old_value
+    linear = tl.sum(tl.where(
+        lane_mask, _fp32_multiply(delta, metric), 0.0,
+    ), axis=1)
+    quadratic = tl.sum(tl.where(
+        lane_mask, _fp32_multiply(delta, delta), 0.0,
+    ), axis=1)
+    cost = _fp32_add(_fp32_multiply(linear, 2.0), quadratic)
+    minimum = tl.min(cost, axis=0)
+    selected = tl.min(tl.where(cost == minimum, shift_index, 4), axis=0)
+
+    selected_value = tl.sum(
+        tl.where((shift_id == selected) & lane_mask, new_value, 0.0), axis=0,
+    )
+    selected_delta = tl.sum(
+        tl.where((shift_id == selected) & lane_mask, delta, 0.0), axis=0,
+    )
+    output_base = (group * TILE_COUNT + tile) * 6 + lane
+    tl.store(output_indices + output_base, scalar, mask=lane_mask)
+    tl.store(output_deltas + output_base, selected_delta, mask=lane_mask)
+    tl.store(output_values + output_base, selected_value, mask=lane_mask)
+    selected_shift = tl.where(
+        selected == 0, -2,
+        tl.where(selected == 1, -1, tl.where(selected == 2, 1, 2)),
+    )
+    tl.store(output_shifts + group * TILE_COUNT + tile, selected_shift)
+
+
+@triton.jit
 def _lion_update_kernel(parameter, gradient, momentum, size,
                         beta1, beta1_complement, beta2, beta2_complement,
                         learning_rate, decay, BLOCK: tl.constexpr):
@@ -886,6 +995,52 @@ def lion_update(parameter, gradient, momentum, *, learning_rate: float,
         learning_rate, 1.0 - learning_rate * weight_decay,
         BLOCK=block, num_warps=4,
     )
+
+
+def screen_p32_w3_identity_shifts(baseline, positions, bank_ids, bank_alt_id,
+                                  baseline_tiles, metric_tiles, levels):
+    """Fuse exact identity-Fisher screening of four W3 shifts per position."""
+    if (baseline.dtype != torch.int32 or baseline.ndim != 2
+            or baseline.shape[1] != 24 or not baseline.is_cuda
+            or not baseline.is_contiguous()):
+        raise ValueError("fused P32 W3 screening requires contiguous CUDA int32 [tiles,24] words")
+    tile_count = baseline.shape[0]
+    if (positions.dtype != torch.int64 or positions.ndim != 2
+            or positions.shape[0] != tile_count or not positions.is_cuda
+            or not positions.is_contiguous()):
+        raise ValueError("fused P32 W3 screening requires contiguous CUDA int64 positions")
+    group_count = positions.shape[1]
+    selector_count = tile_count * 8
+    packed_banks = bank_ids.numel() == (selector_count + 7) // 8
+    if (bank_ids.ndim != 1 or bank_ids.dtype != torch.uint8
+            or bank_ids.device != baseline.device or not bank_ids.is_contiguous()
+            or bank_ids.numel() not in (selector_count, (selector_count + 7) // 8)):
+        raise ValueError("fused P32 W3 screening bank selectors are invalid")
+    if (bank_alt_id.numel() != 1 or bank_alt_id.device != baseline.device):
+        raise ValueError("fused P32 W3 screening alternative bank is invalid")
+    expected_tiles = (tile_count, 16, 16)
+    if (baseline_tiles.shape != expected_tiles or metric_tiles.shape != expected_tiles
+            or baseline_tiles.dtype != torch.float32
+            or metric_tiles.dtype != torch.float32
+            or not baseline_tiles.is_contiguous() or not metric_tiles.is_contiguous()):
+        raise ValueError("fused P32 W3 screening tiles are invalid")
+    if (levels.shape != (256,) or levels.dtype != torch.float16
+            or levels.device != baseline.device or not levels.is_contiguous()):
+        raise ValueError("fused P32 W3 screening levels are invalid")
+    shape = (group_count, tile_count, 6)
+    indices = torch.empty(shape, dtype=torch.int64, device=baseline.device)
+    deltas = torch.empty(shape, dtype=torch.float32, device=baseline.device)
+    values = torch.empty(shape, dtype=torch.float32, device=baseline.device)
+    shifts = torch.empty(
+        (group_count, tile_count), dtype=torch.int64, device=baseline.device,
+    )
+    _p32_w3_identity_shift_screen_kernel[(tile_count * group_count,)](
+        baseline, positions, bank_ids, bank_alt_id, baseline_tiles,
+        metric_tiles, levels, indices, deltas, shifts, values,
+        TILE_COUNT=tile_count, GROUP_COUNT=group_count, WORDS=24,
+        PACKED_BANKS=packed_banks, num_warps=1,
+    )
+    return indices, deltas, shifts, values
 
 
 def build_p32_choice_lookup(indices):
