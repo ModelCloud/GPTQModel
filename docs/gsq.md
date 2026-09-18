@@ -288,6 +288,21 @@ time 1.070x. Every matched 14-tensor state, guard, changed-tile count, and
 held-out loss was bit-for-bit equal; strict split disjointness passed and gains
 remained exactly 15.0000% and 29.2717%.
 
+FP32-trained attention reconstruction can also write its final BF16 tensor
+directly from the fused Hadamard kernel. The transform, scale multiplication,
+saved tensor, and backward reduction remain FP32 in the original operation
+order; only the final store converts to BF16. This removes the separate cast
+kernel without changing optimization math. On H100, the isolated 2,048 x 512
+and 2,048 x 2,048 operators improved 1.27x and 1.20x. Across warm alternating
+32/8/32 x 512-token runs, attention fitting improved 1.023x by paired means
+(1.055x by three-run medians). The 64/16/64 x 256-token geometry improved
+attention fitting 1.059x and total fitting 1.031x. All matched 14-tensor states,
+gradients in direct operator tests, guards, changed-tile counts, and held-out
+losses were bit-for-bit equal; strict split disjointness passed and gains
+remained exactly 15.0000% and 29.2717%. The optimization is enabled by default
+in the staged driver and can be isolated with
+`--no-direct-bf16-attention-output`.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

@@ -778,6 +778,38 @@ def test_scaled_hadamard_matches_prior_bfloat16_native_operation_order():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_direct_bfloat16_hadamard_output_preserves_forward_and_gradients():
+    generator = torch.Generator(device="cuda").manual_seed(47)
+    inner_prior = torch.randn(
+        (2048, 512), device="cuda", generator=generator, requires_grad=True,
+    )
+    inner_fused = inner_prior.detach().clone().requires_grad_()
+    su = torch.randn((2048,), device="cuda", generator=generator)
+    sv_prior = torch.randn(
+        (512,), device="cuda", generator=generator, requires_grad=True,
+    )
+    sv_fused = sv_prior.detach().clone().requires_grad_()
+    upstream = torch.randn(
+        (512, 2048), device="cuda", dtype=torch.bfloat16, generator=generator,
+    )
+
+    prior = _rht_reconstruct_differentiable(
+        inner_prior, su, sv_prior, fast_hadamard=True,
+    ).to(torch.bfloat16)
+    fused = _rht_reconstruct_differentiable(
+        inner_fused, su, sv_fused, fast_hadamard=True,
+        output_dtype=torch.bfloat16,
+    )
+    prior.backward(upstream)
+    fused.backward(upstream)
+
+    assert torch.equal(fused, prior)
+    assert torch.equal(inner_fused.grad, inner_prior.grad)
+    assert torch.equal(sv_fused.grad, sv_prior.grad)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("width", [512, 2048])
 def test_fused_hadamard_sandwich_is_bitwise_exact(width):
     from gptqmodel.utils.hadamard import (

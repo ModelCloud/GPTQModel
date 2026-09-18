@@ -17,6 +17,7 @@ from ..utils.hadamard import (
     hadamard_transform_reverse_scaled,
     hadamard_transform_scaled,
     hadamard_transform_scaled_saved,
+    hadamard_transform_scaled_saved_bf16,
 )
 from .qvq import (
     repack_p32_planar_to_window,
@@ -77,10 +78,15 @@ class _ExactTrainingHadamardTrainableScale(torch.autograd.Function):
     """Fuse a trainable scale while retaining its exact reduction input."""
 
     @staticmethod
-    def forward(ctx, values, vector):
+    def forward(ctx, values, vector, output_bf16=False):
         width = values.shape[-1]
         ctx.width = width
-        scaled, unscaled = hadamard_transform_scaled_saved(
+        ctx.output_bf16 = output_bf16
+        operation = (
+            hadamard_transform_scaled_saved_bf16
+            if output_bf16 else hadamard_transform_scaled_saved
+        )
+        scaled, unscaled = operation(
             values.contiguous(), vector, 1. / math.sqrt(width),
         )
         ctx.save_for_backward(vector, unscaled)
@@ -89,11 +95,13 @@ class _ExactTrainingHadamardTrainableScale(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         vector, unscaled = ctx.saved_tensors
+        if ctx.output_bf16:
+            grad_output = grad_output.float()
         grad_values = hadamard_transform_reverse_scaled(
             grad_output.contiguous(), vector, 1. / math.sqrt(ctx.width),
         )
         grad_vector = (grad_output * unscaled).sum(0)
-        return grad_values, grad_vector
+        return grad_values, grad_vector, None
 
 
 def _training_hadamard(values, fast_hadamard):
@@ -208,6 +216,7 @@ def _rht_reconstruct_differentiable(
     output_hadamard=True,
     fast_hadamard=False,
     inner_transposed=False,
+    output_dtype=None,
 ):
     """Unchecked differentiable form of ``rht_reconstruct_weight``.
 
@@ -228,12 +237,14 @@ def _rht_reconstruct_differentiable(
         work = work * SU.to(work.dtype).unsqueeze(1)
     if output_hadamard and fast_hadamard:
         work = _ExactTrainingHadamardTrainableScale.apply(
-            work, SV.to(work.dtype),
+            work, SV.to(work.dtype), output_dtype == torch.bfloat16,
         )
     else:
         if output_hadamard:
             work = _training_hadamard(work, fast_hadamard)
         work = work * SV.to(work.dtype).unsqueeze(0)
+    if output_dtype is not None and work.dtype != output_dtype:
+        work = work.to(output_dtype)
     return _TransposeView.apply(work)
 
 
@@ -274,6 +285,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         fast_position_map=True,
         compact_attention_forward=True,
         inline_p32_overlap=True,
+        direct_bf16_output=False,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -330,6 +342,8 @@ class GSQP32TrainingModule(torch.nn.Module):
             raise ValueError("P32 GSQ training dtype must be float32 or bfloat16")
         if training_dtype == torch.bfloat16 and candidates.device.type != "cuda":
             raise ValueError("P32 GSQ bfloat16 training requires CUDA")
+        if not isinstance(direct_bf16_output, bool):
+            raise TypeError("direct BF16 output control must be boolean")
 
         self.bits = bits
         self.in_features = in_features
@@ -353,6 +367,10 @@ class GSQP32TrainingModule(torch.nn.Module):
         )
         self.fast_hadamard = bool(
             fast_hadamard and fast_compatible and hadamard_available()
+        )
+        self.direct_bf16_output = bool(
+            direct_bf16_output and training_dtype == torch.float32
+            and self.fast_hadamard and output_hadamard
         )
         self.training_hadamard_backend = (
             "fused_cuda_exact" if self.fast_hadamard else "eager"
@@ -578,6 +596,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             output_hadamard=self.output_hadamard,
             fast_hadamard=self.fast_hadamard,
             inner_transposed=inner_transposed,
+            output_dtype=(torch.bfloat16 if self.direct_bf16_output else None),
         )
 
     @torch.no_grad()
@@ -670,6 +689,7 @@ def p32_training_module_from_payload(
     compact_sparse_candidates=True,
     compact_attention_forward=True,
     inline_p32_overlap=True,
+    direct_bf16_output=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -696,6 +716,7 @@ def p32_training_module_from_payload(
         compact_sparse_candidates=compact_sparse_candidates,
         compact_attention_forward=compact_attention_forward,
         inline_p32_overlap=inline_p32_overlap,
+        direct_bf16_output=direct_bf16_output,
     )
 
 
@@ -721,6 +742,7 @@ def p32_training_module_from_words(
     compact_sparse_candidates=True,
     compact_attention_forward=True,
     inline_p32_overlap=True,
+    direct_bf16_output=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -802,6 +824,7 @@ def p32_training_module_from_words(
         fast_position_map=fast_position_map,
         compact_attention_forward=compact_attention_forward,
         inline_p32_overlap=inline_p32_overlap,
+        direct_bf16_output=direct_bf16_output,
     )
 
 

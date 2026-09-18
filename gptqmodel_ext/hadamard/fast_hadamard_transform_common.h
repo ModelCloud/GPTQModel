@@ -225,6 +225,40 @@ inline __device__ void store_output_scaled_saved(
     }
 }
 
+
+template <int kNChunks, int kNElts, typename input_t, typename output_t>
+inline __device__ void store_output_scaled_saved_as(
+        output_t *out, input_t *unscaled,
+        float out_vals[kNChunks][kNElts], const input_t *vector,
+        int dim, float scale=1.f) {
+    using out_vec_t = typename BytesToType<sizeof(output_t) * kNElts>::Type;
+    using saved_vec_t = typename BytesToType<sizeof(input_t) * kNElts>::Type;
+    output_t scaled_store[kNChunks][kNElts];
+    input_t unscaled_store[kNChunks][kNElts];
+    #pragma unroll
+    for (int c = 0; c < kNChunks; ++c) {
+        #pragma unroll
+        for (int i = 0; i < kNElts; ++i) {
+            const int index = (c * blockDim.x + threadIdx.x) * kNElts + i;
+            const input_t rounded = input_t(out_vals[c][i] * scale);
+            const input_t scaled = index < dim
+                ? input_t(float(rounded) * float(vector[index]))
+                : input_t(0.f);
+            unscaled_store[c][i] = rounded;
+            scaled_store[c][i] = output_t(float(scaled));
+        }
+    }
+    #pragma unroll
+    for (int c = 0; c < kNChunks; ++c) {
+        if ((c * blockDim.x + threadIdx.x) * kNElts < dim) {
+            reinterpret_cast<out_vec_t*>(out)[c * blockDim.x + threadIdx.x]
+                = reinterpret_cast<const out_vec_t*>(scaled_store)[c];
+            reinterpret_cast<saved_vec_t*>(unscaled)[c * blockDim.x + threadIdx.x]
+                = reinterpret_cast<const saved_vec_t*>(unscaled_store)[c];
+        }
+    }
+}
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 // Pre=true means the exchange before the hadamard_mult_warp, Pre=false means after.

@@ -269,6 +269,12 @@ def parse_args():
         help="Use the fused sparse P32 materializer for 2048-wide attention projections",
     )
     parser.add_argument(
+        "--direct-bf16-attention-output",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write FP32-trained attention reconstruction directly as BF16",
+    )
+    parser.add_argument(
         "--inline-p32-overlap",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -522,6 +528,7 @@ def main():
                 compact_sparse_candidates=args.compact_sparse_candidates,
                 compact_attention_forward=args.compact_attention_forward,
                 inline_p32_overlap=args.inline_p32_overlap,
+                direct_bf16_output=args.direct_bf16_attention_output,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -535,6 +542,7 @@ def main():
                 compact_sparse_candidates=args.compact_sparse_candidates,
                 compact_attention_forward=args.compact_attention_forward,
                 inline_p32_overlap=args.inline_p32_overlap,
+                direct_bf16_output=args.direct_bf16_attention_output,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -1280,6 +1288,7 @@ def main():
         "fast_p32_position_map": args.fast_p32_position_map,
         "compact_sparse_candidates": args.compact_sparse_candidates,
         "compact_attention_forward": args.compact_attention_forward,
+        "direct_bf16_attention_output": args.direct_bf16_attention_output,
         "inline_p32_overlap": args.inline_p32_overlap,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
