@@ -21,6 +21,7 @@
 
 ## Latest News
 
+* 09/18/2026 `main`: The complete QVQ W3/P32 GSQ optimization effort is summarized in a reusable [math, CUDA, and performance retrospective](docs/gsq_optimization_retrospective.md), including the exact sparse-Fisher derivation, staged quality gains, 9.5x layer-fit and 17.6x projection-fit journeys, graph/fusion/layout techniques, rejected shortcuts, and the handoff to QVQ + YAQA optimization.
 * 09/18/2026 `main`: Experimental QVQ W3/P32 GSQ MLP hard checkpoints now cast reconstructed weights to the Llama BF16 parameter dtype once per checkpoint and reuse the selected checkpoint for final reporting. Canonical MLP fitting improves 1.005x--1.008x on H100, with bit-for-bit model states and identical held-out losses. See [the configuration and promotion guide](docs/gsq.md).
 * 09/18/2026 `main`: Experimental QVQ W3/P32 GSQ candidate construction now reuses validated in-process buffers directly and avoids redundant payload and finite-value synchronizations. Canonical candidate wall time improves 1.35x--1.38x on H100, with bit-for-bit model states and identical held-out losses. See [the configuration and promotion guide](docs/gsq.md).
 * 09/18/2026 `main`: Experimental QVQ W3/P32 GSQ now replays fixed-shape attention optimizer updates through one CUDA graph with live Gumbel noise and exact per-update schedules. Canonical attention fitting improves 1.67x--2.27x on H100 and total fitting improves 1.09x--1.16x, with bit-for-bit model states and unchanged held-out gains. See [the configuration and promotion guide](docs/gsq.md).

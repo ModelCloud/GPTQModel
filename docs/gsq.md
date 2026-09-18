@@ -12,7 +12,10 @@ reasonable but could not improve the deployed model.
 References: [GSQ paper](https://arxiv.org/abs/2604.18556),
 [pinned author implementation](https://github.com/IST-DASLab/GSQ/tree/03fc16484c369e3127225615d5e03e8d3a6043e3),
 [QVQ/GSQ design](qvq_gsq_design.md), and the
-[paper-alignment audit](experiments/gsq-qvq-paper-alignment.md).
+[paper-alignment audit](experiments/gsq-qvq-paper-alignment.md). The
+[optimization retrospective](gsq_optimization_retrospective.md) consolidates
+the successful math, CUDA techniques, performance results, and reusable
+lessons from the complete H100 effort.
 
 ## What makes GSQ work
 
