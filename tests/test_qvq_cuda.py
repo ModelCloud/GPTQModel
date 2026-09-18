@@ -3976,6 +3976,40 @@ def test_qvq_v2b2_w3_family_batch_uses_exact_midpoint_only_provisional_pass():
     assert counters.get("viterbi_provisional_selectors_discarded", 0) == 0
 
 
+def test_qvq_v2b2_family_batch_reports_provisional_direct_distance(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional")
+    generator = torch.Generator(device="cuda").manual_seed(20260922)
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
+    hessian = torch.eye(32, device="cuda", dtype=torch.float32)
+    pair_stacks = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=weight.device,
+            bits=3.0,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float16,
+        )
+    ).contiguous()
+    telemetry = QVQQuantizationTelemetry()
+
+    quantized, states, selectors, _ = _yaqa_inner_v2b2_family_batch_cuda(
+        weight,
+        hessian,
+        hessian,
+        pair_stacks,
+        bits=3.0,
+        factorization=None,
+        rounding_bias=None,
+        telemetry=telemetry,
+    )
+    counters = telemetry.finalize()["counters"]
+
+    assert torch.isfinite(quantized).all()
+    assert states.shape[-1] == 128
+    assert selectors.dtype == torch.uint8
+    assert counters["viterbi_provisional_direct_distance"] > 0
+    assert counters.get("viterbi_final_direct_distance", 0) == 0
+
+
 def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely():
     weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260876)
     kwargs = {
