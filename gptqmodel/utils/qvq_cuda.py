@@ -47,6 +47,7 @@ _QVQ_CUDA_VITERBI_V2_SEGMENT_GRID_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_TAIL_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_MIDPOINT_TRUSTED_OP: Callable | None = None
 _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP: Callable | None = None
+_QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP: Callable | None = None
 
 
 def _validate_viterbi_distance_range(
@@ -145,6 +146,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "viterbi_v2_segment_tail_trusted",
         "viterbi_v2_segment_midpoint_trusted",
         "viterbi_v2_segment_family_grid_trusted",
+        "viterbi_v2_segment_family_midpoint_trusted",
         "hadamard",
         "quantize_fp8_per_row",
         "hadamard_pair_fp32_to_fp16",
@@ -682,6 +684,23 @@ def _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op() -> Callable:
                     "qvq_cuda", "viterbi_v2_segment_family_grid_trusted"
                 )
     return _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_GRID_TRUSTED_OP
+
+
+def _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op() -> Callable:
+    """Resolve the family-batched midpoint-only B2-P32 operator."""
+
+    global _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP
+    _require_qvq_cuda_op_warm(
+        _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP,
+        "viterbi_v2_segment_family_midpoint_trusted",
+    )
+    if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP is None:
+                _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP = _extension_api().op(
+                    "qvq_cuda", "viterbi_v2_segment_family_midpoint_trusted"
+                )
+    return _QVQ_CUDA_VITERBI_V2_SEGMENT_FAMILY_MIDPOINT_TRUSTED_OP
 
 
 def qvq_cuda_viterbi(

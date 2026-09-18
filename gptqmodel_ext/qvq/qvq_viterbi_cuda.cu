@@ -3669,8 +3669,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     cooperative = cooperative_threads != 0;
     grid_parallel = !cooperative && grid_parallel;
   }
-  TORCH_CHECK(!midpoint_only || (grid_parallel && properties.major == 8 && properties.minor == 0),
-              "midpoint-only segmented V2 currently requires an sm_80 grid recurrence");
+  TORCH_CHECK(!midpoint_only || grid_parallel,
+              "midpoint-only segmented V2 requires the grid-parallel recurrence");
   TORCH_CHECK(!cooperative || (!midpoint_only && transition_bits == 5 && bank_count == 2 && segment_steps == 16),
               "cooperative segmented V2 currently supports only full W2.5 B2-P32 recurrence");
   TORCH_CHECK(pruning_policy >= kViterbiPruningAuto && pruning_policy <= kViterbiPruningRequired,
@@ -4177,6 +4177,42 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_gri
   };
 }
 
+at::Tensor qvq_viterbi_v2_segment_family_midpoint_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& step_weights) {
+  TORCH_CHECK(sequences.dim() == 4 && sequences.size(2) == 128 && sequences.size(3) == 2,
+              "family-batched segmented V2 sequences must have shape [families, batch, 128, 2]");
+  TORCH_CHECK(codebooks.dim() == 4 && codebooks.size(0) == sequences.size(0) && codebooks.size(1) == 2 &&
+                  codebooks.size(2) == kStateCount && codebooks.size(3) == 2,
+              "family-batched segmented V2 codebooks must have shape [families, 2, 65536, 2]");
+  const int64_t families = sequences.size(0);
+  const int64_t family_batch = sequences.size(1);
+  const at::Tensor flat_sequences = sequences.view({families * family_batch, 128, 2});
+  const at::Tensor flat_codebooks = codebooks.view({families * 2, kStateCount, 2});
+  c10::optional<at::Tensor> flat_weights = c10::nullopt;
+  if (step_weights.has_value()) {
+    TORCH_CHECK(step_weights->sizes() == at::IntArrayRef({families, family_batch, 128}),
+                "family-batched segmented V2 weights must have shape [families, batch, 128]");
+    flat_weights = step_weights->view({families * family_batch, 128});
+  }
+  auto result = qvq_viterbi_v2_segment_banked_cuda_impl(
+      flat_sequences,
+      flat_codebooks,
+      transition_bits,
+      segment_steps,
+      c10::nullopt,
+      flat_weights,
+      2,
+      false,
+      static_cast<int>(family_batch),
+      2,
+      true);
+  return std::get<0>(result).view({families, family_batch});
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
@@ -4207,6 +4243,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) "
         "-> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_family_midpoint_trusted(Tensor sequences, Tensor codebooks, "
+        "int transition_bits, int segment_steps, Tensor? step_weights=None) -> Tensor");
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
   m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);
@@ -4228,4 +4266,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_tail_trusted", &qvq_viterbi_v2_segment_tail_trusted_cuda);
   m.impl("viterbi_v2_segment_midpoint_trusted", &qvq_viterbi_v2_segment_midpoint_trusted_cuda);
   m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
+  m.impl("viterbi_v2_segment_family_midpoint_trusted", &qvq_viterbi_v2_segment_family_midpoint_trusted_cuda);
 }
