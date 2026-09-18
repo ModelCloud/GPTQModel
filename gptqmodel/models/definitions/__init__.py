@@ -110,6 +110,7 @@ from .spark2_5 import Spark2_5QModel
 from .starcoder2 import Starcoder2QModel
 from .telechat2 import TeleChat2QModel
 from .unlimited_ocr import UnlimitedOCRQModel
+from .xing4_0 import Xing4_0QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel

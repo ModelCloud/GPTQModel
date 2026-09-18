@@ -201,6 +201,7 @@ from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
 from .definitions.unlimited_ocr import UnlimitedOCRQModel  # noqa: E402
 from .definitions.voxtral import VoxtralGPTQ  # noqa: E402
+from .definitions.xing4_0 import Xing4_0QModel  # noqa: E402
 from .definitions.xverse import XverseQModel  # noqa: E402
 from .definitions.zamba import ZambaQModel  # noqa: E402
 from .definitions.zamba2 import Zamba2QModel  # noqa: E402
@@ -283,6 +284,7 @@ MODEL_MAP = {
     "mistral": LlamaQModel, # 100% llama clone
     "yi": LlamaQModel, # 100% llama clone
     "xverse": XverseQModel,
+    "xing4_0": Xing4_0QModel,
     "deci": DeciLMQModel,
     "nemotron-nas": DeciLMQModel,
     "stablelm_epoch": LlamaQModel, # 100% llama clone
