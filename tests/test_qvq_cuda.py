@@ -23,6 +23,7 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
     _yaqa_inner_v2b2_family_batch_cuda,
+    _yaqa_inner_v2b2_family_batch_dense_cuda,
     batched_viterbi_quantize,
     block_ldlq_inner,
     block_ldlq_inner_banked,
@@ -3625,6 +3626,114 @@ def test_qvq_cuda_b2_yaqa_candidate_batch_is_bit_exact():
         _parallel_candidates=True,
         **kwargs,
     )
+    assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
+
+
+@pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
+def test_qvq_cuda_b2_yaqa_dense_family_batch_is_bit_exact(bits):
+    generator = torch.Generator(device="cuda").manual_seed(20260918 + int(bits * 10))
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float32) * 0.05
+    input_samples = torch.randn((47, 32), generator=generator, device="cuda")
+    output_samples = torch.randn((43, 32), generator=generator, device="cuda")
+    input_hessian = input_samples.T @ input_samples / input_samples.shape[0]
+    output_hessian = output_samples.T @ output_samples / output_samples.shape[0]
+    input_hessian.diagonal().add_(0.1)
+    output_hessian.diagonal().add_(0.1)
+    pairs = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=weight.device,
+            bits=bits,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float32,
+        )
+    ).contiguous()
+    canonical_pair = torch.stack((pairs[0, 0], pairs[0, 0])).unsqueeze(0)
+    family_stacks = torch.cat((canonical_pair, pairs[[0, 2]]))
+
+    actual = _yaqa_inner_v2b2_family_batch_dense_cuda(
+        weight,
+        input_hessian,
+        output_hessian,
+        family_stacks,
+        bits=bits,
+        factorization=None,
+        rounding_bias=None,
+        telemetry=None,
+    )
+    expected = []
+    for family_stack in family_stacks:
+        expected.append(
+            yaqa_inner(
+                weight,
+                input_hessian,
+                output_hessian,
+                family_stack[0],
+                bits=bits,
+                trellis_batch_size=1,
+                bank_codebooks=tuple(family_stack),
+                segmented_bank_stack=family_stack,
+                v2b2_p32=True,
+                _defer_segmented_cuda_checks=True,
+                _incremental_cuda_feedback=True,
+            )
+        )
+
+    expected_weights = torch.stack([result[0] for result in expected])
+    expected_states = torch.stack([result[1] for result in expected])
+    expected_selectors = torch.stack([result[2] for result in expected])
+    assert torch.equal(actual[0], expected_weights)
+    assert torch.equal(actual[1], expected_states)
+    assert torch.equal(actual[2], expected_selectors)
+    assert not bool(actual[3].any())
+
+
+def test_qvq_cuda_b2_yaqa_dense_family_batch_production_dispatch_is_bit_exact():
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260923)
+    bits = 3.0
+    banks = _canonical_qvq_v2b4_banks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    pairs = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=bits,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    kwargs = {
+        "bits": bits,
+        "family_mode": "reselect",
+        "sample_strategy": "256_16x16",
+        "bank_codebook_pair_stacks": pairs,
+        "trellis_batch_size": 1,
+        "_incremental_cuda_feedback": True,
+        "_sampled_family_candidates": 2,
+        "_sampled_family_selection": "diversity",
+    }
+    reference = yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        banks,
+        _parallel_candidates=False,
+        **kwargs,
+    )
+    with patch(
+        "gptqmodel.quantization.qvq._yaqa_inner_v2b2_family_batch_dense_cuda",
+        wraps=_yaqa_inner_v2b2_family_batch_dense_cuda,
+    ) as dense_batch:
+        actual = yaqa_inner_v2b2_p32(
+            weight,
+            input_hessian,
+            output_hessian,
+            banks,
+            _parallel_candidates=True,
+            **kwargs,
+        )
+
+    dense_batch.assert_called_once()
     assert all(torch.equal(candidate, expected) for candidate, expected in zip(actual, reference, strict=True))
 
 
