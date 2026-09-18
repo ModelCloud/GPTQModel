@@ -194,6 +194,18 @@ held-out guard while avoiding dense RHT reconstruction and autograd on every
 Q/K update. Pass `--no-fused-qk-fisher` for the previous differentiable Q/K
 oracle. Multi-round P32 composition currently requires that oracle path.
 
+The fused Q/K path also reuses the exact FP32 baseline and sparse candidate
+values produced during P32 screening. Hard checkpoints scatter those values
+into the baseline instead of decoding a dense 33-choice candidate bank. This
+does not approximate the structured or dense hard oracle and removes the two
+largest remaining candidate-bank decodes. Across three paired H100 runs per
+geometry, all 14 state tensors, hard-oracle diagnostics, Q/K guards, and
+held-out losses were bit-for-bit equal. Median Q/K fit time improved from
+0.5956s to 0.5575s (1.068x) at 32/8/32 x 512 tokens and from 0.6013s to
+0.5538s (1.086x) at 64/16/64 x 256 tokens. Candidate-build-plus-fit-plus-final
+time improved 1.025x and 1.020x, respectively. Use
+`--no-sparse-qk-candidate-bank` only for comparison with the dense decode path.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

@@ -239,6 +239,12 @@ def parse_args():
         help="Specialize first-round candidate screening for identity Fisher metrics",
     )
     parser.add_argument(
+        "--sparse-qk-candidate-bank",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse exact sparse P32 values instead of decoding a dense Q/K candidate bank",
+    )
+    parser.add_argument(
         "--direct-qk-pair-guard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -652,8 +658,15 @@ def main():
             hard_eval_interval=min(args.qk_hard_eval_interval, args.qk_steps),
             relaxation_patience=0,
             decoded_candidates=None,
+            decoded_baseline=(
+                quantizer.baseline_tiles if args.sparse_qk_candidate_bank else None
+            ),
             sparse_candidate_indices=quantizer.sparse_indices.permute(1, 0, 2).contiguous(),
             sparse_candidate_deltas=quantizer.sparse_deltas.permute(1, 0, 2).contiguous(),
+            sparse_candidate_values=(
+                quantizer.sparse_values.permute(1, 0, 2).contiguous()
+                if args.sparse_qk_candidate_bank else None
+            ),
             sparse_candidate_shifts=quantizer.sparse_shifts.T.contiguous(),
             input_metric=input_metric,
             output_metric=output_metric,
@@ -1221,6 +1234,7 @@ def main():
         "offload_capture": args.offload_capture,
         "parallel_candidate_build": args.parallel_candidate_build,
         "fast_identity_candidate_metric": args.fast_identity_candidate_metric,
+        "sparse_qk_candidate_bank": args.sparse_qk_candidate_bank,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (
