@@ -3544,6 +3544,9 @@ def _qvq_cuda_family_tail_biting_overlaps(
         else torch.roll(step_weights, shifts=midpoint, dims=2).contiguous()
     )
     family_sequences = sequences.shape[0] * sequences.shape[1]
+    direct_distance_mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
+    if telemetry is not None and direct_distance_mode in {"1", "provisional"}:
+        telemetry.count("viterbi_provisional_direct_distance", family_sequences)
     if transition_bits == 6:
         overlaps = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
             rolled,
@@ -3654,6 +3657,8 @@ def _block_ldlq_v2b2_family_batch_cuda(
                 )
                 if telemetry is not None:
                     family_sequences = families * chunk_count
+                    if os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0") in {"1", "final"}:
+                        telemetry.count("viterbi_final_direct_distance", family_sequences)
                     telemetry.count("viterbi_family_grid_calls", 2)
                     telemetry.count("viterbi_logical_solve_ids", 2)
                     telemetry.count("viterbi_unique_logical_solve_ids", 2)

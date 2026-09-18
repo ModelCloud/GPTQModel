@@ -123,3 +123,39 @@ FP32 cache updates was tested as a mitigation, but worsened W3 held-out drift
 from `+0.02369%` to `+0.05951%` with no speed benefit. The paired TF32 mode is
 therefore the validated option. Telemetry records
 `yaqa_fast_tf32_feedback_calls` when it is active.
+
+## Provisional direct-distance Viterbi
+
+The family-grid recurrence normally expands squared distance as
+`||t||^2 + ||c||^2 - 2 t.c`. An opt-in CUDA path, validated on SM90, evaluates the same metric as
+`(t0-c0)^2 + (t1-c1)^2` in FP32. This removes the packed FP32 codebook-norm
+load and shortens the hot instruction sequence, but changes FP32 operation
+ordering and can resolve near-ties differently. The safe validated mode uses
+it only for the provisional tail-biting pass; the constrained final solve,
+path costs, tie precedence, and traceback remain on the exact formulation:
+
+```bash
+GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE=provisional python scripts/qvq_quantize.py ...
+```
+
+On H100, the direct recurrence improves a two-family, 128-tile call by 1.22x
+at W2.5, 1.12x at W3, and 1.17x at W3.5. Provisional-only matched Llama 3.2
+1B layer-0 results are:
+
+| Rate | Exact layer | Provisional-direct layer | Speedup | FP64 Fisher range | Disjoint held-out MSE delta |
+|---|---:|---:|---:|---:|---:|
+| W2.5 | 25.001 s | 23.497 s | 1.064x | -1.084% to 0.000% | +0.08494% |
+| W3 | 29.257 s | 27.522 s | 1.063x | -0.140% to +0.083% | +0.02034% |
+| W3.5 | 27.344 s | 25.553 s | 1.070x | -0.413% to +0.073% | -0.03620% |
+
+Negative deltas improve quality. FP32 and FP64 Fisher deltas agree closely.
+Held-out validation uses the same 256 disjoint GSM8K Platinum questions and
+352,926,720 projection elements as the feedback gate. W2.5 and W3 accept small
+held-out regressions in exchange for speed; W3.5 is a speed/held-out-quality
+double win. Telemetry reports `viterbi_provisional_direct_distance`.
+
+Setting the variable to `1` applies direct distance to both passes. It is an
+aggressive diagnostic mode, not the recommended configuration: at W3 it was
+1.080x faster end-to-end but increased held-out MSE by 0.0987%. The
+provisional-only mitigation retained most of the layer speedup while reducing
+that drift by 4.85x. `final` is also available for controlled A/B experiments.
