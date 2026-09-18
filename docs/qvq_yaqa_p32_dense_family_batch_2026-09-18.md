@@ -277,3 +277,42 @@ Unified W2.5 improved all three MLP Fisher objectives but was 1.6% slower;
 unified W3.5 improved up and down but was 3.5% slower and slightly regressed
 gate. Saved arithmetic is not sufficient when the larger family-grid batch
 loses overlap, so do not broaden this gate based on objective movement alone.
+
+### Optional device-resident Sketch-B factors
+
+Exact CUDA Sketch-B collection normally copies every completed FP32 factor to
+CPU for bounded long-lived storage. A one-layer Llama 3.2 1B run then copies
+those same factors back to the same H100 as each projection is quantized. When
+the complete exact factor set fits in one CUDA collection pass, this round trip
+can be removed:
+
+```bash
+GPTQMODEL_QVQ_YAQA_RETAIN_DEVICE_FACTORS=1 python scripts/qvq_quantize.py ...
+```
+
+The opt-in fails closed unless collection uses CUDA, the exact dense Gram
+strategy, and one factor pass. CPU, MPS, projected, streaming-projected, and
+memory-bounded multi-pass collection retain their existing host-storage path.
+Factors are released module by module after their final quantization consumer.
+Telemetry reports `factor_device` and `retained_device_factors`.
+
+Matched H100 validation retained 958,398,464 bytes of factors and reduced the
+final host-transfer region from 1.08--1.34 seconds to about 0.003 seconds:
+
+| Rate | Host-factor prepare + quantize | Device-resident | Speedup |
+|---|---:|---:|---:|
+| W2.5 | 26.976 s | 25.575 s | 1.055x |
+| W3 | 30.511 s | 28.958 s | 1.054x |
+| W3.5 | 28.940 s | 27.731 s | 1.044x |
+
+All 37 saved layer tensors were bit-for-bit identical at every rate. Every
+per-projection FP32 and FP64 Fisher objective was also numerically identical.
+The W3 comparison includes the accepted W3 unified-family schedule in both
+arms. Since serialized payloads are exact, the previously recorded strictly
+disjoint held-out results are unchanged.
+
+Batch-size changes are not a substitute for this optimization. Increasing
+Sketch-B batch size from 8 to 16 slowed capture from 3.49 to 3.75 seconds and
+changed 19 layer tensors because stochastic sampling is consumed in a
+different grouping. Device retention leaves batch size, seed consumption,
+Gram accumulation, and quantizer ordering unchanged.

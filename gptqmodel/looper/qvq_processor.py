@@ -1705,6 +1705,17 @@ class QVQProcessor(LoopProcessor):
                 packed_symmetric=packed_symmetric_accumulators,
             )
         )
+        retain_device_factors = (
+            os.environ.get("GPTQMODEL_QVQ_YAQA_RETAIN_DEVICE_FACTORS", "0") == "1"
+        )
+        if retain_device_factors and (
+            target_device.type != "cuda"
+            or gram_strategy != "exact"
+            or len(target_chunks) != 1
+        ):
+            raise ValueError(
+                "QVQ YAQA device-resident factors require one exact CUDA factor pass"
+            )
         log.info(
             "QVQ YAQA: collecting full-model Sketch-B factors targets=%d batches=%d device=%s seed=%d "
             "minimum_sequences=%d regularization=%.6g batch_size=%d activation_checkpointing=%s "
@@ -1775,6 +1786,7 @@ class QVQProcessor(LoopProcessor):
                             if gram_strategy == "streaming_projected"
                             else None
                         ),
+                        retain_accumulator_device=retain_device_factors,
                     )
                     input_hessians.update(pass_inputs)
                     output_hessians.update(pass_outputs)

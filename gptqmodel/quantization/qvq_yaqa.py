@@ -500,6 +500,7 @@ def capture_yaqa_sketch_b(
     checkpoint_modules: Sequence[nn.Module] = (),
     progress_callback: Callable[[dict[str, int]], None] | None = None,
     accumulator_device: torch.device | None = None,
+    retain_accumulator_device: bool = False,
     mps_cleanup_interval: int = 8,
     mps_pack_symmetric_grams: bool = True,
     gram_strategy: str = "batched",
@@ -523,6 +524,8 @@ def capture_yaqa_sketch_b(
         raise TypeError("YAQA Sketch B seed must be an integer")
     if isinstance(minimum_sequences, bool) or not isinstance(minimum_sequences, int) or minimum_sequences < 1:
         raise ValueError("YAQA Sketch B minimum sequence count must be a positive integer")
+    if not isinstance(retain_accumulator_device, bool):
+        raise TypeError("YAQA retain_accumulator_device must be a boolean")
     if any(not isinstance(module, nn.Linear) for module in modules.values()):
         raise TypeError("YAQA Sketch B targets must all be linear modules")
     if len({id(module) for module in modules.values()}) != len(modules):
@@ -667,6 +670,14 @@ def capture_yaqa_sketch_b(
         and device.type == "mps"
         and accumulator_device.type == "cpu"
     )
+    if retain_accumulator_device and (
+        accumulator_device != device
+        or factor_transfer is not None
+        or packed_symmetric_accumulators
+    ):
+        raise ValueError(
+            "YAQA device-resident factors require dense accumulators on the collection device"
+        )
     gram_projections: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
     if gram_strategy == "projected":
         assert gram_projection_rank is not None
@@ -1111,7 +1122,7 @@ def capture_yaqa_sketch_b(
             output_accumulators[name] = qvq_mlx_unpack_symmetric_gram_to_torch_cpu(
                 output_accumulators[name], width=module.out_features,
             )
-        elif factor_transfer is None:
+        elif factor_transfer is None and not retain_accumulator_device:
             input_accumulators[name] = input_accumulators[name].to(device="cpu")
             output_accumulators[name] = output_accumulators[name].to(device="cpu")
             if gram_strategy == "streaming_projected":
@@ -1250,6 +1261,12 @@ def capture_yaqa_sketch_b(
             "maximum_scale": maximum_scale,
             "modules": module_summaries,
         }
+    first_input_factor = next(iter(input_hessians.values()))
+    factor_device = (
+        first_input_factor.source.device.type
+        if isinstance(first_input_factor, YaqaGramSketch)
+        else first_input_factor.device.type
+    )
     return (
         input_hessians,
         output_hessians,
@@ -1271,6 +1288,8 @@ def capture_yaqa_sketch_b(
             "activation_checkpointing": bool(checkpoint_modules),
             "checkpointed_modules": len(checkpoint_modules),
             "accumulator_device": accumulator_device.type,
+            "factor_device": factor_device,
+            "retained_device_factors": retain_accumulator_device,
             "factor_transfer_overlap": factor_transfer is not None,
             "phase_wall_seconds": phase_seconds,
             "mps_cleanup_interval": mps_cleanup_interval,
