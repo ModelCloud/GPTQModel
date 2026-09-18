@@ -276,6 +276,18 @@ states, identical changed-tile counts and guards, and exact held-out gains of
 disjointness passed. Regression coverage compares the fused and eager oracles
 for packed and unpacked selectors with every alternate PGC16 bank.
 
+The same identity-screen kernel now emits each selected legal 24-word P32
+payload directly. This removes the eager int64 clone, gather, mask, and scatter
+chain that previously repacked the winning shift after fused scoring. On H100,
+the complete 8,192 x 2,048 constructor improved again from 8.69ms to 6.77ms
+(1.28x, or 3.04x cumulatively versus the original 20.59ms path). Across two
+warm alternating 32/8/32 x 512-token pairs, aggregate candidate work improved
+from 0.515s to 0.465s (1.11x) and candidate wall time from 0.233s to 0.215s
+(1.084x). A 64/16/64 x 256-token pair improved candidate work 1.086x and wall
+time 1.070x. Every matched 14-tensor state, guard, changed-tile count, and
+held-out loss was bit-for-bit equal; strict split disjointness passed and gains
+remained exactly 15.0000% and 29.2717%.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant
@@ -346,6 +358,8 @@ GSM8K-Platinum task. See the
 | dense weights for rejected or unprocessed prefix layers | Later stages optimized against a model that could not be deployed |
 | shared calibration, selection, and reporting rows | Apparent improvement was model selection on the evaluation set |
 | nondeterministic final training | Same seed produced different payloads, scales, and metrics |
+| BF16 attention prefix plus six-epoch FP32 tail | Warm attention time was unchanged (~0.339s), while held-out gain fell from 15.0000% to 14.6429% |
+| Q/K CUDA graph replay depth 8 or 16 | States were bit-for-bit equal, but warm Q/K time did not improve over replay depth 4 |
 
 These are algorithmic failures, not reasons to remove hard no-regression guards
 or to accept more changed tiles. Tile count is a diagnostic; held-out deployed

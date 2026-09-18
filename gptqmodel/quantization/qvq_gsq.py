@@ -1125,13 +1125,10 @@ def _p32_sparse_shift_screen(
         from .qvq_gsq_triton import screen_p32_w3_identity_shifts
 
         levels = pgc16_levels_for_version(codebook_version).to(device=baseline.device)
-        (scalar_indices, selected_delta, selected_shifts,
+        (selected_words, scalar_indices, selected_delta, selected_shifts,
          selected_new_values) = screen_p32_w3_identity_shifts(
             baseline, positions, bank_ids, bank_alt_id, baseline_tiles,
             metric_tiles, levels,
-        )
-        selected_words = _p32_selected_shift_alternatives(
-            baseline, positions, selected_shifts.T.contiguous(), transition_bits,
         )
         if materialize_dense:
             selected_values = baseline_tiles.reshape(tile_count, 256)[None].expand(
