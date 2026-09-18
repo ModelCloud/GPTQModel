@@ -1,4 +1,5 @@
 #define MARLIN_GEMM_EXPORT_NAME gptq_marlin_gemm_bf16
+#define MARLIN_SCRATCH_SIZES_EXPORT_NAME gptq_marlin_scratch_sizes_bf16
 #define MARLIN_ENABLE_FP16 0
 #define MARLIN_ENABLE_BF16 1
 

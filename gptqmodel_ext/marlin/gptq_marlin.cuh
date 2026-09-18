@@ -2,6 +2,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/types.h>
+#include <tuple>
 #include "core/scalar_type.hpp"
 
 torch::Tensor gptq_marlin_gemm(
@@ -14,4 +15,10 @@ torch::Tensor gptq_marlin_gemm(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float);
+    bool is_zp_float,
+    std::optional<torch::Tensor> c_tmp_or_none = std::nullopt,
+    std::optional<torch::Tensor> a_tmp_or_none = std::nullopt);
+
+std::tuple<int64_t, int64_t> gptq_marlin_scratch_sizes(
+    torch::Tensor& a, int64_t size_m, int64_t size_k, bool use_fp32_reduce,
+    bool has_act_order);
