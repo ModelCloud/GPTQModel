@@ -451,13 +451,24 @@ def test_stage_driver_reuses_hard_weights_and_selected_validation_loss():
     result = fit_reconstruction_stage(
         {'weight': quantizer}, batches, objective, epochs=2,
         validation_batches=batches, restore_best=True,
-        export_weights=False,
+        export_weights=False, reuse_best_hard_weights=True,
     )
-    # Initial train/validation share one materialization, each epoch validates
-    # once, and final train evaluation materializes once. The restored held-out
-    # loss is the already-measured selected checkpoint.
-    assert quantizer.materializations == 4
+    # Initial train/validation share one materialization and each epoch validates
+    # once. Final training loss reuses the selected checkpoint's exact detached
+    # weights, while held-out loss reuses its already-measured scalar.
+    assert quantizer.materializations == 3
     assert result['validation_hard_loss_after'] == result['best_validation_hard_loss']
+
+
+def test_hard_stage_weights_can_be_precast_once_for_repeated_evaluation():
+    from gptqmodel.quantization.gsq_training import _hard_stage_weights
+
+    class Quantizer:
+        def hard_weight(self):
+            return torch.ones(2, dtype=torch.float32)
+
+    weights = _hard_stage_weights({'weight': Quantizer()}, dtype=torch.bfloat16)
+    assert weights['weight'].dtype is torch.bfloat16
 
 
 def test_hard_stage_batches_scalar_transfers_and_rejects_nonfinite_loss():
