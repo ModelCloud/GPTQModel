@@ -184,6 +184,8 @@ class YaqaConfig:
     gram_projection_rank: int = 256
     v2b2_family_mode: str = "reselect"
     sample_strategy: str = "full"
+    sampled_family_candidates: int = 1
+    sampled_family_selection: str = "lowest"
     spectral_refinement: bool = False
     spectral_ranks: tuple[int, ...] = (8, 16, 32)
     spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0)
@@ -338,6 +340,19 @@ class YaqaConfig:
             )
         if self.v2b2_family_mode != "reselect" and self.sample_strategy != "full":
             raise ValueError("YaqaConfig: sampled family selection requires `v2b2_family_mode=reselect`.")
+        if (
+            isinstance(self.sampled_family_candidates, bool)
+            or not isinstance(self.sampled_family_candidates, int)
+            or self.sampled_family_candidates not in (1, 2, 3)
+        ):
+            raise ValueError("YaqaConfig: `sampled_family_candidates` must be 1, 2, or 3.")
+        if not isinstance(self.sampled_family_selection, str):
+            raise TypeError("YaqaConfig: `sampled_family_selection` must be a string.")
+        self.sampled_family_selection = self.sampled_family_selection.strip().lower()
+        if self.sampled_family_selection not in {"lowest", "diversity"}:
+            raise ValueError("YaqaConfig: `sampled_family_selection` must be `lowest` or `diversity`.")
+        if self.sampled_family_selection == "diversity" and self.sampled_family_candidates != 2:
+            raise ValueError("YaqaConfig: diversity sampled-family selection requires exactly two candidates.")
         if not isinstance(self.spectral_refinement, bool):
             raise TypeError("YaqaConfig: `spectral_refinement` must be boolean.")
         if not isinstance(self.spectral_push, bool):

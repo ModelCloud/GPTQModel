@@ -431,6 +431,7 @@ class QVQLinearQuantizationResult:
     output_hadamard: bool = True
     rounding: str = "block_ldlq"
     kronecker_proxy_loss: torch.Tensor | None = None
+    kronecker_proxy_loss_fp64: torch.Tensor | None = None
     gsq_diagnostics: dict[str, object] | None = None
     module_scale_search_selected: bool = False
     module_scale_multiplier: float = 1.0
@@ -5346,6 +5347,8 @@ def yaqa_inner_v2b2_p32(
     diagnostics: dict[str, object] | None = None,
     _parallel_candidates: bool = True,
     _collect_block_family_diagnostics: bool = True,
+    _sampled_family_candidates: int = 1,
+    _sampled_family_selection: str = "lowest",
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select one complementary V2 family per module under YAQA's full proxy."""
@@ -5375,6 +5378,16 @@ def yaqa_inner_v2b2_p32(
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
     if not isinstance(_collect_block_family_diagnostics, bool):
         raise TypeError("YAQA block-family diagnostic collection flag must be bool.")
+    if (
+        isinstance(_sampled_family_candidates, bool)
+        or not isinstance(_sampled_family_candidates, int)
+        or _sampled_family_candidates not in (1, 2, 3)
+    ):
+        raise ValueError("YAQA sampled family candidates must be 1, 2, or 3.")
+    if _sampled_family_selection not in {"lowest", "diversity"}:
+        raise ValueError("YAQA sampled family selection must be `lowest` or `diversity`.")
+    if _sampled_family_selection == "diversity" and _sampled_family_candidates != 2:
+        raise ValueError("YAQA diversity sampled-family selection requires exactly two candidates.")
     if sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
             "YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `96_16x16`, `128_16x16`, "
@@ -5385,6 +5398,7 @@ def yaqa_inner_v2b2_p32(
     if telemetry is not None:
         telemetry.count("yaqa_v2b2_modules")
         telemetry.count("yaqa_v2b2_reselect_modules", int(family_mode == "reselect"))
+    sampled_alternative_ids: tuple[int, ...] | None = None
     if sample_strategy != "full":
         input_blocks = inner_weight.shape[0] // 16
         output_blocks = inner_weight.shape[1] // 16
@@ -5500,7 +5514,14 @@ def yaqa_inner_v2b2_p32(
                     family_losses.append(
                         torch.einsum("bij,bik,bkl,blj->", error, input_blocks_h, error, output_blocks_h)
                     )
-        block_alt_id = int(torch.stack(family_losses).argmin().item()) + 1
+        ranked_families = torch.argsort(torch.stack(family_losses)).tolist()
+        if _sampled_family_selection == "diversity":
+            sampled_alternative_ids = (ranked_families[0] + 1, ranked_families[-1] + 1)
+        else:
+            sampled_alternative_ids = tuple(
+                index + 1 for index in ranked_families[:_sampled_family_candidates]
+            )
+        block_alt_id = sampled_alternative_ids[0]
         block_selectors = None
         if telemetry is not None:
             telemetry.count("yaqa_v2b2_sampled_family_tiles", sample_count)
@@ -5537,7 +5558,11 @@ def yaqa_inner_v2b2_p32(
             raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
         block_alt_id = block_family_id
         block_selectors = None
-    alternative_ids = (block_alt_id,) if family_mode != "reselect" or sample_strategy != "full" else (1, 2, 3)
+    alternative_ids = (
+        sampled_alternative_ids
+        if sampled_alternative_ids is not None
+        else ((block_alt_id,) if family_mode != "reselect" else (1, 2, 3))
+    )
     native_amd_families = (
         torch.version.hip is not None
         and os.environ.get("GPTQMODEL_QVQ_AMD_NATIVE_QUANTIZATION", "0") == "1"
@@ -6981,6 +7006,23 @@ def yaqa_proxy_loss(
     return loss
 
 
+def _yaqa_proxy_loss_fp64_unchecked(
+    weight: torch.Tensor,
+    reconstructed_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+) -> torch.Tensor:
+    """Independent high-precision YAQA objective for opt-in acceptance gates."""
+
+    error = reconstructed_weight.to(torch.float64) - weight.to(torch.float64)
+    input_fp64 = input_hessian.to(torch.float64)
+    output_fp64 = output_hessian.to(torch.float64)
+    loss = (error @ input_fp64 @ error.transpose(0, 1) * output_fp64.transpose(0, 1)).sum()
+    if not torch.isfinite(loss):
+        raise ValueError("YAQA proxy-loss arithmetic overflowed FP64")
+    return loss
+
+
 def _qvq_proxy_loss_unchecked(
     weight: torch.Tensor,
     reconstructed_weight: torch.Tensor,
@@ -7221,6 +7263,8 @@ def quantize_qvq_linear(
     yaqa_v2b2_family_mode: str = "reselect",
     yaqa_v2b2_fixed_family_id: int | None = None,
     yaqa_sample_strategy: str = "full",
+    yaqa_sampled_family_candidates: int = 1,
+    yaqa_sampled_family_selection: str = "lowest",
     yaqa_spectral_refinement: bool = False,
     yaqa_spectral_ranks: tuple[int, ...] = (8, 16, 32),
     yaqa_spectral_lambdas: tuple[float, ...] = (0.1, 0.25, 0.5, 1.0),
@@ -7442,6 +7486,19 @@ def quantize_qvq_linear(
         )
     if yaqa_v2b2_family_mode != "reselect" and yaqa_sample_strategy != "full":
         raise ValueError("QVQ YAQA sampled family selection requires `yaqa_v2b2_family_mode=reselect`.")
+    if (
+        isinstance(yaqa_sampled_family_candidates, bool)
+        or not isinstance(yaqa_sampled_family_candidates, int)
+        or yaqa_sampled_family_candidates not in (1, 2, 3)
+    ):
+        raise ValueError("QVQ YAQA sampled family candidates must be 1, 2, or 3.")
+    if not isinstance(yaqa_sampled_family_selection, str):
+        raise TypeError("QVQ YAQA sampled family selection must be a string.")
+    yaqa_sampled_family_selection = yaqa_sampled_family_selection.strip().lower()
+    if yaqa_sampled_family_selection not in {"lowest", "diversity"}:
+        raise ValueError("QVQ YAQA sampled family selection must be `lowest` or `diversity`.")
+    if yaqa_sampled_family_selection == "diversity" and yaqa_sampled_family_candidates != 2:
+        raise ValueError("QVQ YAQA diversity sampled-family selection requires exactly two candidates.")
     if not isinstance(yaqa_spectral_refinement, bool):
         raise TypeError("QVQ YAQA spectral refinement must be boolean.")
     if not isinstance(yaqa_spectral_push, bool):
@@ -7797,6 +7854,8 @@ def quantize_qvq_linear(
                 "yaqa_v2b2_family_mode": yaqa_v2b2_family_mode,
                 "yaqa_v2b2_fixed_family_id": yaqa_v2b2_fixed_family_id,
                 "yaqa_sample_strategy": yaqa_sample_strategy,
+                "yaqa_sampled_family_candidates": yaqa_sampled_family_candidates,
+                "yaqa_sampled_family_selection": yaqa_sampled_family_selection,
             }
             temporary_file = snapshot_file.with_suffix(snapshot_file.suffix + ".tmp")
             torch.save(snapshot_payload, temporary_file)
@@ -8006,6 +8065,8 @@ def quantize_qvq_linear(
                     _collect_block_family_diagnostics=(
                         yaqa_spectral_refinement or yaqa_spectral_push
                     ),
+                    _sampled_family_candidates=yaqa_sampled_family_candidates,
+                    _sampled_family_selection=yaqa_sampled_family_selection,
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                     telemetry=telemetry,
@@ -8846,6 +8907,7 @@ def quantize_qvq_linear(
         if telemetry is not None:
             telemetry.count("packed_roundtrip_verifications")
     kronecker_proxy_loss = None
+    kronecker_proxy_loss_fp64 = None
     if output_hessian is not None:
         kronecker_proxy_loss = yaqa_proxy_loss(
             weight,
@@ -8853,6 +8915,15 @@ def quantize_qvq_linear(
             source_H,
             output_hessian.to(device=device),
         )
+        if os.environ.get("GPTQMODEL_QVQ_DUAL_ORACLE", "0") == "1":
+            if device.type == "mps":
+                raise ValueError("QVQ FP64 dual-oracle validation is unavailable on MPS.")
+            kronecker_proxy_loss_fp64 = _yaqa_proxy_loss_fp64_unchecked(
+                weight,
+                reconstructed_weight,
+                source_H,
+                output_hessian.to(device=device),
+            )
 
     telemetry_result = None if telemetry is None else telemetry.finalize()
     result = QVQLinearQuantizationResult(
@@ -8871,6 +8942,7 @@ def quantize_qvq_linear(
         output_hadamard=output_hadamard,
         rounding=rounding,
         kronecker_proxy_loss=kronecker_proxy_loss,
+        kronecker_proxy_loss_fp64=kronecker_proxy_loss_fp64,
         gsq_diagnostics=gsq_diagnostics,
         module_scale_search_selected=module_scale_search_selected,
         module_scale_multiplier=module_scale_multiplier,
