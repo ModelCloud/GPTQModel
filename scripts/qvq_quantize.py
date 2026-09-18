@@ -220,6 +220,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--yaqa-sequence-sort", choices=("none", "asc", "desc"), default="desc"
     )
     parser.add_argument("--yaqa-sample-strategy", default="full")
+    parser.add_argument("--yaqa-sampled-family-candidates", type=int, choices=(1, 2, 3), default=1)
+    parser.add_argument("--yaqa-sampled-family-selection", choices=("lowest", "diversity"), default="lowest")
     parser.add_argument(
         "--yaqa-v2b2-family-mode",
         choices=("fixed_block_ldlq", "reselect"),
@@ -394,6 +396,8 @@ def build_quantize_config(args: argparse.Namespace) -> QVQConfig:
         batch_size=args.yaqa_batch_size,
         sequence_sort=args.yaqa_sequence_sort,
         sample_strategy=args.yaqa_sample_strategy,
+        sampled_family_candidates=args.yaqa_sampled_family_candidates,
+        sampled_family_selection=args.yaqa_sampled_family_selection,
         v2b2_family_mode=args.yaqa_v2b2_family_mode,
         activation_checkpointing=not args.yaqa_no_activation_checkpointing,
         max_factor_bytes_per_pass=args.yaqa_max_factor_bytes_per_pass,

@@ -2769,6 +2769,8 @@ class QVQProcessor(LoopProcessor):
                 "gsq": module_qcfg.gsq,
                 "yaqa_v2b2_family_mode": module_qcfg.yaqa.v2b2_family_mode,
                 "yaqa_sample_strategy": module_qcfg.yaqa.sample_strategy,
+                "yaqa_sampled_family_candidates": module_qcfg.yaqa.sampled_family_candidates,
+                "yaqa_sampled_family_selection": module_qcfg.yaqa.sampled_family_selection,
                 "yaqa_spectral_refinement": module_qcfg.yaqa.spectral_refinement,
                 "yaqa_spectral_ranks": module_qcfg.yaqa.spectral_ranks,
                 "yaqa_spectral_lambdas": module_qcfg.yaqa.spectral_lambdas,
@@ -2930,6 +2932,16 @@ class QVQProcessor(LoopProcessor):
                     if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
                     else None
                 ),
+                "yaqa_sampled_family_candidates": (
+                    module_qcfg.yaqa.sampled_family_candidates
+                    if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
+                    else None
+                ),
+                "yaqa_sampled_family_selection": (
+                    module_qcfg.yaqa.sampled_family_selection
+                    if module_qcfg.rounding == "yaqa" and module_qcfg.format == FORMAT.QVQ_V2B2_P32
+                    else None
+                ),
                 "yaqa_bank_fallback_to_v2": result.yaqa_bank_fallback_to_v2,
                 "yaqa_selector_churn": result.yaqa_selector_churn,
                 "yaqa_family_changed": result.yaqa_family_changed,
@@ -2953,6 +2965,11 @@ class QVQProcessor(LoopProcessor):
                 "bank_selector_nonzero_fraction": selector_nonzero_fraction,
                 "yaqa_kronecker_proxy_loss": (
                     None if result.kronecker_proxy_loss is None else float(result.kronecker_proxy_loss.item())
+                ),
+                "yaqa_kronecker_proxy_loss_fp64": (
+                    None
+                    if getattr(result, "kronecker_proxy_loss_fp64", None) is None
+                    else float(result.kronecker_proxy_loss_fp64.item())
                 ),
                 "module_granular_replay": self._module_replay_stats.get(module.full_name),
                 "activation_quantization_error": activation_quantization_error,

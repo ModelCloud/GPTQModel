@@ -2045,6 +2045,26 @@ def test_qvq_v2b2_p32_yaqa_sample_strategy_config_round_trip(sample_strategy):
     assert reloaded.yaqa.sample_strategy == sample_strategy
 
 
+def test_qvq_v2b2_p32_yaqa_sampled_family_policy_config_round_trip():
+    config = QVQConfig(
+        bits=3,
+        format=FORMAT.QVQ_V2B2_P32,
+        rounding="yaqa",
+        yaqa=YaqaConfig(
+            sample_strategy="256_16x16",
+            sampled_family_candidates=2,
+            sampled_family_selection="diversity",
+        ),
+        offload_to_disk=False,
+    )
+
+    reloaded = QVQConfig.from_quant_config(config.to_dict())
+
+    assert reloaded.yaqa.sample_strategy == "256_16x16"
+    assert reloaded.yaqa.sampled_family_candidates == 2
+    assert reloaded.yaqa.sampled_family_selection == "diversity"
+
+
 def test_qvq_v2b2_p32_yaqa_spectral_config_round_trip():
     config = QVQConfig(
         bits=2,
@@ -2185,6 +2205,15 @@ def test_qvq_v2b2_p32_sample_strategy_requires_reselected_yaqa_family():
             yaqa=YaqaConfig(sample_strategy="64_16x16"),
             offload_to_disk=False,
         )
+
+
+def test_qvq_v2b2_p32_diversity_sampling_requires_two_candidates():
+    with pytest.raises(ValueError, match="exactly two"):
+        YaqaConfig(sampled_family_candidates=1, sampled_family_selection="diversity")
+    with pytest.raises(ValueError, match="sampled_family_candidates"):
+        YaqaConfig(sampled_family_candidates=4)
+    with pytest.raises(ValueError, match="sampled_family_selection"):
+        YaqaConfig(sampled_family_selection="middle")
 
 
 @pytest.mark.parametrize(
@@ -3728,6 +3757,47 @@ def test_qvq_v2b2_p32_sampled_strategy_scores_all_families_then_runs_one_complet
     assert counters[f"yaqa_v2b2_sample_strategy_{sample_strategy}"] == 1
     assert counters["yaqa_v2b2_sampled_family_2"] == 1
     assert counters["yaqa_v2b2_family_candidates"] == 1
+
+
+def test_qvq_v2b2_p32_diversity_sampling_runs_best_and_worst_proxy_families():
+    weight = torch.zeros((16, 16))
+    hessian = torch.eye(16)
+    states = torch.zeros((1, 128), dtype=torch.long)
+    codebooks = tuple(torch.full((1 << 16, 2), family_id, dtype=torch.float32) for family_id in range(4))
+    sampled_values = {1: 1.0, 2: 0.2, 3: 0.5}
+
+    def fake_tail(_tiles, pair_stack, **_kwargs):
+        family_id = int(pair_stack[1, 0, 0].item())
+        return SimpleNamespace(values=torch.full((1, 128, 2), sampled_values[family_id]))
+
+    def fake_yaqa(*_args, bank_codebooks=None, **_kwargs):
+        if bank_codebooks is None:
+            return torch.ones_like(weight), states
+        family_id = int(bank_codebooks[1][0, 0].item())
+        candidate = torch.full_like(weight, {1: 0.05, 2: 0.1}[family_id])
+        return candidate, states, torch.ones((8,), dtype=torch.uint8)
+
+    telemetry = QVQQuantizationTelemetry()
+    with (
+        patch("gptqmodel.quantization.qvq._tail_biting_v2_banked_quantize", side_effect=fake_tail),
+        patch("gptqmodel.quantization.qvq.yaqa_inner", side_effect=fake_yaqa) as complete,
+    ):
+        _, _, _, family = yaqa_inner_v2b2_p32(
+            weight,
+            hessian,
+            hessian,
+            codebooks,
+            bits=2,
+            family_mode="reselect",
+            sample_strategy="256_16x16",
+            telemetry=telemetry,
+            _sampled_family_candidates=2,
+            _sampled_family_selection="diversity",
+        )
+
+    assert complete.call_count == 3  # canonical plus sampled best (2) and worst (1)
+    assert int(family.item()) == 1
+    assert telemetry.finalize()["counters"]["yaqa_v2b2_family_candidates"] == 2
 
 
 @pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16"))

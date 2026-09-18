@@ -397,6 +397,26 @@ def test_qvq_l18_v4_yaqa_quantize_pack_and_torch_linear_are_synchronized():
     assert torch.isfinite(result.kronecker_proxy_loss)
 
 
+def test_qvq_yaqa_opt_in_dual_oracle_reports_matching_fp64_objective(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_QVQ_DUAL_ORACLE", "1")
+    generator = torch.Generator().manual_seed(18220)
+    weight = torch.randn((16, 16), generator=generator)
+    hessian = torch.eye(16)
+    result = quantize_qvq_linear(
+        weight,
+        hessian,
+        output_hessian=hessian,
+        bits=2,
+        rounding="yaqa",
+        trellis_batch_size=1,
+    )
+
+    error = result.weight.double() - weight.double()
+    expected = torch.trace(error.T @ hessian.double() @ error @ hessian.double())
+    assert result.kronecker_proxy_loss_fp64 is not None
+    torch.testing.assert_close(result.kronecker_proxy_loss_fp64, expected, rtol=0, atol=0)
+
+
 def test_qvq_v4_toggle_rejects_high_rate_and_manual_vector_size():
     with pytest.raises(ValueError, match="unsupported bits|W1 through W4"):
         QVQConfig(bits=4.5, format="qvq_v4", offload_to_disk=False)
