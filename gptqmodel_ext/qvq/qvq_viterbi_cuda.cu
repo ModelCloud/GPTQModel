@@ -1856,7 +1856,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // outward-directed rounding:
 //
 //   slack  = max(U*(1+eps)[ru] - floor, 0)          >= (U - floor)(1 + c1*u)
-//   radius = sqrt_ru(slack*(1+eps)[ru] + tn*eps[ru])
+//   radius = sqrt_approx(slack*(1+eps)[ru] + tn*eps[ru])*(1+eps)[ru]
 //   root   = sqrt_rn(tn)
 //   root_lo/root_hi = adjacent FP32 values below/above root
 //   band   = [ (root_lo - radius)^2_rd , (root_hi*(1+eps)[ru] + radius)^2_ru ]
@@ -1867,9 +1867,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // quadratic in r = |sqrt(tn) - sqrt(nu)| consumes < 9u*tn); the remaining
 // >= 3x margin enters under the square root, so the band widens by an
 // O(sqrt(u)) sliver that admits essentially no extra survivors.  Nothing here
-// needs directed-rounding square roots: correctly rounded sqrt_rn lies within
-// its two adjacent representable FP32 values, so those neighbors are an exact
-// outward enclosure of the real square root while requiring only one sqrt.
+// needs directed-rounding square roots.  PTX bounds sqrt.approx.f32 relative
+// error by 2^-23 = 2u, so the radius's 1+32u outward scale remains a strict
+// upper bound.  The correctly rounded target sqrt_rn lies within its two
+// adjacent representable FP32 values, so those neighbors exactly enclose the
+// real target square root while requiring only one correctly rounded sqrt.
 // Nothing here relies on the FP32 bound being monotone in nu: the band is contiguous
 // because the *table* is sorted by the very same cached FP32 norms, and every
 // rounding decision above only widens the interval.  Non-finite targets or
@@ -1884,6 +1886,12 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // ---------------------------------------------------------------------------
 constexpr float kNormRankEps = 1.9073486328125e-06f;         // 2^-19, exact in FP32
 constexpr float kNormRankRelax = 1.0000019073486328125f;     // 1 + 2^-19, exact in FP32
+
+__device__ __forceinline__ float qvq_sqrt_approx(float value) {
+  float result;
+  asm("sqrt.approx.f32 %0, %1;" : "=f"(result) : "f"(value));
+  return result;
+}
 
 // Telemetry is opt-in through GPTQMODEL_QVQ_TELEMETRY.  Each CTA contributes
 // one pair of 64-bit atomics after reducing its per-thread totals in shared
@@ -2144,12 +2152,13 @@ void qvq_v2_segment_grid_norm_rank_kernel(
         // stop at the first chunk no lane can use.
         const float slack =
             fmaxf(__fsub_ru(__fmul_ru(best, kNormRankRelax), floor_cost), 0.0f);
-        // A correctly rounded square root under-estimates the real value by at
-        // most one ulp, so scaling it up by 1 + 32u keeps the radius a strict
-        // upper bound while avoiding the long directed-rounding sqrt sequence.
-        const float radius = __fmul_ru(
-            __fsqrt_rn(__fadd_ru(__fmul_ru(slack, kNormRankRelax), target_slack)),
-            kNormRankRelax);
+        // PTX bounds sqrt.approx.f32 relative error by 2^-23 = 2u.  Scaling
+        // upward by 1 + 32u therefore keeps this radius a strict upper bound
+        // while leaving the exact candidate score arithmetic untouched.
+        const float radius_argument =
+            __fadd_ru(__fmul_ru(slack, kNormRankRelax), target_slack);
+        const float radius =
+            __fmul_ru(qvq_sqrt_approx(radius_argument), kNormRankRelax);
         const float inner = __fsub_rd(root_low, radius);
         float norm_low = inner > 0.0f ? __fmul_rd(inner, inner) : 0.0f;
         const float outer = __fadd_ru(root_high, radius);

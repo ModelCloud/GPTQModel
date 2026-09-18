@@ -535,3 +535,49 @@ batches, and exact candidate telemetry.
 
 This is quantization-only. Post-quant inference does not construct norm bands
 or evaluate this square root, so no inference code or checkpoint format changes.
+
+### Fast conservative pruning radius
+
+The norm-band radius is a search enclosure, not part of the candidate score.
+PTX specifies a maximum relative error of `2^-23` for `sqrt.approx.f32` over
+positive finite FP32 inputs. The kernel already multiplies the radius upward
+by exactly `1 + 2^-19`, a factor sixteen times larger than that error bound.
+Replacing the correctly rounded radius square root with `sqrt.approx.f32`
+therefore preserves a strict upper radius bound. Candidate distances still use
+the original FP32 FMA/add/subtract sequence, and prefix scan order, ties,
+backpointers, and traceback are unchanged. Zero retains radius zero; non-finite
+enclosures continue to fall back to the exact full scan.
+
+Warm real Llama 3.2 1B B2/P32 medians on H100 improved in every unconstrained
+cell measured:
+
+| Rate | Batch range | One-sqrt control | Fast radius | Speedup range |
+|---|---:|---:|---:|---:|
+| W2.5 | 32--256 | 0.623--2.000 ms | 0.614--1.973 ms | 1.004--1.015x |
+| W3 | 32--256 | 0.382--1.300 ms | 0.379--1.285 ms | 1.008--1.015x |
+| W3.5 | 32--256 | 0.266--0.706 ms | 0.264--0.696 ms | 1.007--1.015x |
+
+The constrained pass also improved all 12 measured cells: W2.5 by
+1.015--1.026x, W3 by 1.004--1.013x, and W3.5 by 1.002--1.008x. The matched
+one-layer W3.5 run was correctly treated as pipeline-neutral: segmented
+Viterbi moved from 16.3700 s to 16.3611 s and prepare plus quantize from
+30.5684 s to 30.5656 s, while process quantization moved from 25.649 s to
+25.656 s (+7 ms noise). No layer-level speedup is claimed.
+
+A frozen 2048x2048 W3.5 solver A/B selected family 2 and produced identical
+SHA-256 hashes for reconstructed weights, trellis states, P32 selectors, and
+the family ID. Both independent objectives were bit-identical: FP32
+`0.22860166430473328` and FP64 `0.22860163687284052`. The 113-test exact
+norm-rank and pruning-policy suite passed, including constrained grids,
+rounding edges, ties, tiny/large values, and telemetry.
+
+Two alternatives were rejected before this result. Computing the target norm
+once per warp and broadcasting six values regressed all rates by roughly
+3--6%; retaining only two root-bound shuffles still regressed by 2--4%.
+Locally folding next-frontier shared atomics was also negative: W3/W3.5 lost
+3--5%, while W2.5 gained only about 0.5% at large batches and regressed small
+batches. None of those experiments remains in production source.
+
+This change is quantization-only. Inference consumes the selected states and
+P32 selectors and never constructs this pruning radius, so there is no safe
+inference-side transplant and no checkpoint-format change.
