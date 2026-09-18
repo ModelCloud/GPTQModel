@@ -5229,6 +5229,138 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     )
 
 
+def _yaqa_inner_v2b2_family_batch_dense_cuda(
+    inner_weight: torch.Tensor,
+    input_hessian: torch.Tensor,
+    output_hessian: torch.Tensor,
+    family_stacks: torch.Tensor,
+    *,
+    bits: float,
+    factorization: tuple[BlockLDLFactorization, BlockLDLFactorization] | None,
+    rounding_bias: torch.Tensor | None,
+    telemetry: QVQQuantizationTelemetry | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run canonical and B2 YAQA histories in one dense-feedback CUDA schedule."""
+
+    families, in_features, out_features = family_stacks.shape[0], *inner_weight.shape
+    tile = 16
+    input_blocks, output_blocks = in_features // tile, out_features // tile
+    steps = tile * tile // 2
+    if factorization is None:
+        input_L, _ = block_ldl_factor(input_hessian.to(torch.float32), block_size=tile)
+        output_L, _ = block_ldl_factor(output_hessian.to(torch.float32), block_size=tile)
+    else:
+        input_L, output_L = factorization[0].L, factorization[1].L
+    source = inner_weight.to(torch.float32)
+    feedback_temp = torch.empty_like(source)
+    transformed_base = torch.empty_like(source)
+    torch.mm(input_L.transpose(0, 1), source, out=feedback_temp)
+    torch.mm(feedback_temp, output_L, out=transformed_base)
+    transformed = transformed_base.unsqueeze(0).expand(families, -1, -1).clone()
+    quantized = torch.zeros((families, in_features, out_features), device=source.device, dtype=torch.float32)
+    quantized_blocks = quantized.view(families, input_blocks, tile, output_blocks, tile).permute(0, 1, 3, 2, 4)
+    tile_states = torch.empty((families, input_blocks, output_blocks, steps), device=source.device, dtype=torch.long)
+    selectors = torch.empty(
+        (families, input_blocks * output_blocks, QVQ_V2B2_P32_SEGMENTS_PER_TILE),
+        device=source.device,
+        dtype=torch.uint8,
+    )
+    invalid = torch.zeros((families,), device=source.device, dtype=torch.bool)
+    safe_bound = math.sqrt(torch.finfo(torch.float32).max / steps) / (2.0 * math.sqrt(2.0))
+    invalid.logical_or_(family_stacks.detach().abs().amax(dim=(1, 2, 3)) > safe_bound)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    midpoint = steps // 2
+    overlap_mask = (1 << (16 - transition_bits)) - 1
+    bias_blocks = None
+    if rounding_bias is not None:
+        bias_blocks = rounding_bias.to(torch.float32).view(input_blocks, tile, output_blocks, tile).permute(0, 2, 1, 3)
+
+    from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+
+    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
+    family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
+    for coordinates, input_indices, output_indices, flat_indices, input_rows, output_rows in schedule:
+        count = len(coordinates)
+        with _qvq_phase(telemetry, "yaqa_feedback", source.device):
+            transformed_blocks = transformed.view(
+                families, input_blocks, tile, output_blocks, tile
+            ).permute(0, 1, 3, 2, 4)
+            corrected = transformed_blocks[:, input_indices, output_indices]
+            if bias_blocks is not None:
+                corrected = corrected + bias_blocks[input_indices, output_indices].unsqueeze(0)
+        sequences = corrected.reshape(families, count, steps, 2).contiguous()
+        invalid.logical_or_(
+            torch.logical_or(
+                ~torch.isfinite(sequences).all(dim=(1, 2, 3)),
+                sequences.abs().amax(dim=(1, 2, 3)) > safe_bound,
+            )
+        )
+        with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
+            provisional, _, _ = family_viterbi(
+                torch.roll(sequences, shifts=midpoint, dims=2).contiguous(),
+                family_stacks,
+                transition_bits,
+                QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                None,
+                None,
+            )
+            overlaps = (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+            states, _, segment_ids = family_viterbi(
+                sequences,
+                family_stacks,
+                transition_bits,
+                QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                overlaps,
+                None,
+            )
+        path_banks = segment_ids.to(torch.long).repeat_interleave(
+            QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+            dim=2,
+        )
+        reconstructed = family_stacks[family_indices, path_banks, states].reshape(
+            families, count, tile, tile
+        ).to(torch.float32)
+        with _qvq_phase(telemetry, "yaqa_commit", source.device):
+            quantized_blocks[:, input_indices, output_indices] = reconstructed
+            tile_states[:, input_indices, output_indices] = states
+            selectors[:, flat_indices] = segment_ids
+        with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
+            left_factor = input_L[input_rows].transpose(0, 1)
+            for family in range(families):
+                right_factor = torch.bmm(
+                    reconstructed[family], output_L[output_rows]
+                ).reshape(count * tile, out_features)
+                torch.addmm(
+                    transformed[family],
+                    left_factor,
+                    right_factor,
+                    beta=1,
+                    alpha=-1,
+                    out=transformed[family],
+                )
+        if telemetry is not None:
+            family_sequences = families * count
+            telemetry.count("yaqa_segmented_v2_chunks")
+            telemetry.count("viterbi_family_grid_calls", 2)
+            telemetry.count("viterbi_logical_solve_ids", 2)
+            telemetry.count("viterbi_unique_logical_solve_ids", 2)
+            telemetry.count("viterbi_family_grid_sequences", family_sequences * 2)
+            telemetry.count("viterbi_family_state_steps", family_sequences * steps * 2)
+            telemetry.count("viterbi_provisional_states_produced", family_sequences * steps)
+            telemetry.count("viterbi_provisional_states_consumed", family_sequences)
+            telemetry.count("viterbi_provisional_losses_discarded", family_sequences)
+            telemetry.count("viterbi_provisional_selectors_discarded", family_sequences * 8)
+            telemetry.count("viterbi_exact_reuse_candidates", 0)
+            telemetry.count("viterbi_reselection_revisits", 0)
+    return (
+        quantized.to(inner_weight.dtype),
+        tile_states.reshape(families, -1, steps),
+        selectors.reshape(families, -1),
+        invalid,
+    )
+
+
 def _yaqa_inner_v2b2_family_batch_amd(
     inner_weight: torch.Tensor,
     input_hessian: torch.Tensor,
@@ -5580,11 +5712,19 @@ def yaqa_inner_v2b2_p32(
     unified_amd_families = (
         parallel_families and native_amd_families and tuple(alternative_ids) == (1, 2, 3)
     )
+    unified_dense_cuda_families = (
+        _parallel_candidates
+        and inner_weight.device.type == "cuda"
+        and torch.version.hip is None
+        and kwargs.get("_incremental_cuda_feedback", False)
+        and len(alternative_ids) >= 1
+    )
+    unified_family_batch = unified_amd_families or unified_dense_cuda_families
     current_stream = None
     canonical_completion = None
     canonical_diagnostics: dict[str, object] = {}
     family_streams: tuple[torch.cuda.Stream, ...] = ()
-    if parallel_families and not unified_amd_families:
+    if parallel_families and not unified_family_batch:
         current_stream = torch.cuda.current_stream(inner_weight.device)
         _yaqa_anti_diagonal_schedule(
             inner_weight.device,
@@ -5609,7 +5749,7 @@ def yaqa_inner_v2b2_p32(
                 )
             canonical_completion = torch.cuda.Event(enable_timing=False, blocking=False)
             canonical_completion.record(canonical_stream)
-    elif not unified_amd_families:
+    elif not unified_family_batch:
         with _qvq_phase(telemetry, "yaqa_v2b2_canonical", inner_weight.device):
             canonical_weight, canonical_states = yaqa_inner(
                 inner_weight,
@@ -5626,7 +5766,7 @@ def yaqa_inner_v2b2_p32(
         error = candidate.to(torch.float32) - source
         return torch.einsum("ij,ik,kl,lj->", error, input_hessian_fp32, error, output_hessian_fp32)
 
-    if unified_amd_families:
+    if unified_family_batch:
         pair_stacks = torch.stack(
             (
                 torch.stack((codebook_library[0], codebook_library[0])),
@@ -5642,7 +5782,12 @@ def yaqa_inner_v2b2_p32(
             telemetry.count("yaqa_v2b2_family_candidates", len(alternative_ids))
             telemetry.count("yaqa_v2b2_candidate_batches")
         with _qvq_phase(telemetry, "yaqa_v2b2_family_candidate", inner_weight.device):
-            all_weights, all_states, all_selectors, invalid = _yaqa_inner_v2b2_family_batch_amd(
+            family_batch = (
+                _yaqa_inner_v2b2_family_batch_amd
+                if unified_amd_families
+                else _yaqa_inner_v2b2_family_batch_dense_cuda
+            )
+            all_weights, all_states, all_selectors, invalid = family_batch(
                 inner_weight,
                 input_hessian,
                 output_hessian,
@@ -5666,10 +5811,10 @@ def yaqa_inner_v2b2_p32(
         if diagnostics is not None or telemetry is not None:
             winner_index = int(winner.item())
             canonical_loss_value = float(all_losses[0].item())
-            for alt_id in alternative_ids:
-                candidate_loss_value = float(all_losses[alt_id].item())
-                candidate_selectors = all_selectors[alt_id]
-                candidate_states = all_states[alt_id]
+            for candidate_index, alt_id in enumerate(alternative_ids, start=1):
+                candidate_loss_value = float(all_losses[candidate_index].item())
+                candidate_selectors = all_selectors[candidate_index]
+                candidate_states = all_states[candidate_index]
                 fallback = not math.isfinite(candidate_loss_value) or candidate_loss_value >= canonical_loss_value
                 family_diagnostics[str(alt_id)] = {
                     "fallback_to_bank0": fallback,
@@ -5685,11 +5830,10 @@ def yaqa_inner_v2b2_p32(
                 if telemetry is not None:
                     telemetry.count("yaqa_bank0_fallback", int(fallback))
             selected_banked_candidate = winner_index != 0
-            best_alt_id = winner_index if selected_banked_candidate else block_alt_id
+            best_alt_id = alternative_ids[winner_index - 1] if selected_banked_candidate else block_alt_id
         else:
-            best_alt_id_tensor = torch.where(
-                winner == 0, winner.new_tensor(block_alt_id), winner
-            ).to(torch.uint8).reshape(1)
+            family_ids = winner.new_tensor((block_alt_id, *alternative_ids))
+            best_alt_id_tensor = family_ids[winner].to(torch.uint8).reshape(1)
         if diagnostics is not None:
             diagnostics["fallback_to_v2"] = not selected_banked_candidate
             if block_selectors is not None:
