@@ -218,6 +218,19 @@ time improved 1.058x and 1.030x, respectively. Held-out gains remained exactly
 15.0000% and 29.2717%. Use `--no-fast-p32-position-map` only for comparison
 with the generic radix-sort path.
 
+Candidate screening now returns the exact six changed P32 values directly to
+the staged training module instead of materializing a dense 33-choice decoded
+bank and gathering those values afterward. For a Llama 3.2 1B layer this
+removes about 8 GiB of transient FP32 candidate data across the seven
+concurrently built projections. Across three alternating paired H100 runs per
+geometry, all guards, losses, changed-tile counts, and 14 state tensors were
+bit-for-bit equal. Median candidate wall time improved from 0.2833s to 0.2498s
+(1.134x) at 32/8/32 x 512 tokens and from 0.2854s to 0.2486s (1.148x) at
+64/16/64 x 256 tokens. Candidate-build-plus-fit-plus-final time improved
+1.021x and 1.011x, respectively. Held-out gains remained exactly 15.0000% and
+29.2717%. Use `--no-compact-sparse-candidates` only to compare against the
+dense decoded-bank path.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

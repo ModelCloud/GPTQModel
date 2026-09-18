@@ -251,6 +251,12 @@ def parse_args():
         help="Build P32 overlap maps directly without generic radix sorting",
     )
     parser.add_argument(
+        "--compact-sparse-candidates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Return exact sparse P32 candidate values without a dense decoded bank",
+    )
+    parser.add_argument(
         "--direct-qk-pair-guard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -494,6 +500,7 @@ def main():
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
                 fast_position_map=args.fast_p32_position_map,
+                compact_sparse_candidates=args.compact_sparse_candidates,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -503,6 +510,7 @@ def main():
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
                 fast_position_map=args.fast_p32_position_map,
+                compact_sparse_candidates=args.compact_sparse_candidates,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -1245,6 +1253,7 @@ def main():
         "fast_identity_candidate_metric": args.fast_identity_candidate_metric,
         "sparse_qk_candidate_bank": args.sparse_qk_candidate_bank,
         "fast_p32_position_map": args.fast_p32_position_map,
+        "compact_sparse_candidates": args.compact_sparse_candidates,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (

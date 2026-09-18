@@ -1105,6 +1105,7 @@ def _p32_sparse_shift_screen(
     g_tiles,
     codebook_version,
     identity_metric=False,
+    materialize_dense=True,
 ):
     """Exactly score local P32 edits using only decoder states they change.
 
@@ -1188,20 +1189,29 @@ def _p32_sparse_shift_screen(
     selected = cost.argmin(1)
     group_ids = torch.arange(group_count, device=baseline.device)[:, None]
     selected_new_values = new_values[group_ids, selected, tile_ids[None]]
-    selected_values = baseline_flat[None].expand(group_count, -1, -1).clone()
-    selected_values.scatter_(2, scalar_indices, selected_new_values.reshape(group_count, tile_count, -1))
+    if materialize_dense:
+        selected_values = baseline_flat[None].expand(group_count, -1, -1).clone()
+        selected_values.scatter_(
+            2, scalar_indices,
+            selected_new_values.reshape(group_count, tile_count, -1),
+        )
+    else:
+        selected_values = None
     selected_shift_values = shift_tensor[selected].T
     selected_words = _p32_selected_shift_alternatives(
         baseline, positions, selected_shift_values, transition_bits,
     )
-    selected_delta = selected_new_values.reshape(group_count, tile_count, -1) - old_values
+    selected_new_values = selected_new_values.reshape(group_count, tile_count, -1)
+    selected_delta = selected_new_values - old_values
     return (
         selected_words,
-        selected_values.reshape(group_count, tile_count, 16, 16),
+        (None if selected_values is None else
+         selected_values.reshape(group_count, tile_count, 16, 16)),
         cost,
         scalar_indices,
         selected_delta,
         selected_shift_values.T.contiguous(),
+        selected_new_values,
     )
 
 
@@ -1260,6 +1270,7 @@ def fisher_screened_trellis_candidates(
     return_decoded=False,
     return_sparse=False,
     return_shifts=False,
+    compact_sparse=False,
     identity_metric=False,
 ):
     """Screen four paper-local shifts at each candidate transition.
@@ -1270,11 +1281,18 @@ def fisher_screened_trellis_candidates(
     retains the best shift independently per tile.  The resulting shared bank
     covers four times as many path coordinates as grouping four output choices
     per position, while the later coupled search remains authoritative.
+
+    ``compact_sparse`` replaces the dense decoded bank in the return tuple
+    with the decoded baseline and appends exact values for the sparse entries.
     """
     if target.ndim != 2:
         raise ValueError("GSQ Fisher candidate screen requires a rank-two target")
     if identity_metric and layout != "p32_window":
         raise ValueError("identity candidate screening currently requires P32 window layout")
+    if compact_sparse and (layout != "p32_window" or not return_decoded or not return_sparse):
+        raise ValueError(
+            "compact sparse candidate screening requires decoded sparse P32 output"
+        )
     if not identity_metric and input_hessian.shape != (target.shape[0], target.shape[0]):
         raise ValueError("GSQ Fisher candidate screen requires a matching target and input Hessian")
     if not identity_metric and output_hessian.shape != (target.shape[1], target.shape[1]):
@@ -1311,10 +1329,11 @@ def fisher_screened_trellis_candidates(
     baseline_tiles = adapter.decode(baseline, bank_ids, bank_alt_id).reshape(-1, 16, 16).float()
     tile_ids = torch.arange(len(baseline), device=baseline.device)
     screened = [baseline.detach().clone()]
-    screened_values = [baseline_tiles]
+    screened_values = None if compact_sparse else [baseline_tiles]
     sparse_indices = []
     sparse_deltas = []
     sparse_shifts = []
+    sparse_values = []
     with _nvtx_range("gsq.candidates.decode_and_screen", baseline):
         # Sparse P32 scoring touches at most 16 scalars (six at W3).  Hopper can
         # screen the full default bank together so state and selector unpacking
@@ -1334,7 +1353,8 @@ def fisher_screened_trellis_candidates(
             stop = min(start + screen_groups, count - 1)
             group_count = stop - start
             if layout == "p32_window":
-                selected_words, selected_values, _, selected_indices, selected_deltas, selected_shifts = _p32_sparse_shift_screen(
+                (selected_words, selected_values, _, selected_indices,
+                 selected_deltas, selected_shifts, selected_sparse_values) = _p32_sparse_shift_screen(
                     baseline,
                     positions[:, start:stop],
                     (-2, -1, 1, 2),
@@ -1347,12 +1367,15 @@ def fisher_screened_trellis_candidates(
                     g_tiles=g_tiles,
                     codebook_version=codebook_version,
                     identity_metric=identity_metric,
+                    materialize_dense=not compact_sparse,
                 )
                 screened.extend(selected_words.unbind(0))
-                screened_values.extend(selected_values.unbind(0))
+                if screened_values is not None:
+                    screened_values.extend(selected_values.unbind(0))
                 sparse_indices.extend(selected_indices.unbind(0))
                 sparse_deltas.extend(selected_deltas.unbind(0))
                 sparse_shifts.extend(selected_shifts.unbind(0))
+                sparse_values.extend(selected_sparse_values.unbind(0))
                 continue
             alternatives = (_p32_grouped_shift_alternatives(
                 baseline, positions[:, start:stop], (-2, -1, 1, 2), transition_bits)
@@ -1378,6 +1401,15 @@ def fisher_screened_trellis_candidates(
             screened_values.extend(selected_values.unbind(0))
     candidates = torch.stack(screened)
     if return_decoded:
+        if compact_sparse:
+            return (
+                candidates,
+                baseline_tiles,
+                torch.stack(sparse_indices),
+                torch.stack(sparse_deltas),
+                torch.stack(sparse_shifts),
+                torch.stack(sparse_values),
+            )
         decoded = torch.stack(screened_values)
         if return_sparse:
             if layout != "p32_window" or len(sparse_indices) != count - 1:
