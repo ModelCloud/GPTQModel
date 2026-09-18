@@ -32,9 +32,10 @@ def _fp32_fma(left, right, addend):
 @triton.jit
 def _p32_w3_identity_shift_screen_kernel(
         baseline, positions, packed_banks, bank_alt_id, baseline_tiles,
-        metric_tiles, levels, output_indices, output_deltas, output_shifts,
-        output_values, TILE_COUNT: tl.constexpr, GROUP_COUNT: tl.constexpr,
-        WORDS: tl.constexpr, PACKED_BANKS: tl.constexpr):
+        metric_tiles, levels, output_words, output_indices, output_deltas,
+        output_shifts, output_values, TILE_COUNT: tl.constexpr,
+        GROUP_COUNT: tl.constexpr, WORDS: tl.constexpr,
+        PACKED_BANKS: tl.constexpr):
     """Select the best of four W3 shifts from six exact changed scalars."""
     program = tl.program_id(0)
     tile = program // GROUP_COUNT
@@ -136,6 +137,35 @@ def _p32_w3_identity_shift_screen_kernel(
         tl.where(selected == 1, -1, tl.where(selected == 2, 1, 2)),
     )
     tl.store(output_shifts + group * TILE_COUNT + tile, selected_shift)
+    selected_new_edge = (old_edge + selected_shift) & 63
+
+    # Emit the selected legal payload while the position and winning shift are
+    # still in registers. Eight lanes copy three words each; at most two words
+    # receive the six-bit edge patch.
+    for word_chunk in tl.static_range(0, 3):
+        word_lane = lane + word_chunk * 8
+        output_word = tl.load(
+            baseline + tile * WORDS + word_lane,
+        ).to(tl.int64) & 0xFFFFFFFF
+        low_width = tl.minimum(6, 32 - edge_shift)
+        low_mask = (((1 << low_width) - 1) << edge_shift).to(tl.int64)
+        low_word = (
+            (output_word & ~low_mask)
+            | ((selected_new_edge << edge_shift) & low_mask)
+        )
+        output_word = tl.where(word_lane == edge_word_id, low_word, output_word)
+        crosses = edge_shift > 26
+        high_width = tl.maximum(edge_shift + 6 - 32, 0)
+        high_mask = tl.where(crosses, (1 << high_width) - 1, 0).to(tl.int64)
+        high_word = (
+            (output_word & ~high_mask)
+            | ((selected_new_edge >> (32 - edge_shift)) & high_mask)
+        )
+        output_word = tl.where(
+            crosses & (word_lane == edge_word_id + 1), high_word, output_word,
+        )
+        output_word_base = (group * TILE_COUNT + tile) * WORDS + word_lane
+        tl.store(output_words + output_word_base, output_word.to(tl.int32))
 
 
 @triton.jit
@@ -1028,6 +1058,9 @@ def screen_p32_w3_identity_shifts(baseline, positions, bank_ids, bank_alt_id,
             or levels.device != baseline.device or not levels.is_contiguous()):
         raise ValueError("fused P32 W3 screening levels are invalid")
     shape = (group_count, tile_count, 6)
+    words = torch.empty(
+        (group_count, tile_count, 24), dtype=torch.int32, device=baseline.device,
+    )
     indices = torch.empty(shape, dtype=torch.int64, device=baseline.device)
     deltas = torch.empty(shape, dtype=torch.float32, device=baseline.device)
     values = torch.empty(shape, dtype=torch.float32, device=baseline.device)
@@ -1036,11 +1069,11 @@ def screen_p32_w3_identity_shifts(baseline, positions, bank_ids, bank_alt_id,
     )
     _p32_w3_identity_shift_screen_kernel[(tile_count * group_count,)](
         baseline, positions, bank_ids, bank_alt_id, baseline_tiles,
-        metric_tiles, levels, indices, deltas, shifts, values,
+        metric_tiles, levels, words, indices, deltas, shifts, values,
         TILE_COUNT=tile_count, GROUP_COUNT=group_count, WORDS=24,
         PACKED_BANKS=packed_banks, num_warps=1,
     )
-    return indices, deltas, shifts, values
+    return words, indices, deltas, shifts, values
 
 
 def build_p32_choice_lookup(indices):
