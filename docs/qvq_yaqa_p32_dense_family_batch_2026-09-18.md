@@ -499,3 +499,39 @@ inference path is warp-specialized around fixed WGMMA tile geometry rather than
 one CTA per trellis suffix grid; changing its CTA width would change the MMA
 mapping instead of merely assigning another suffix column to each thread. No
 inference code or checkpoint layout changes in this phase.
+
+### One-sqrt exact norm enclosure
+
+Each exact norm-band step previously evaluated the target norm with
+`sqrt_rd`, `sqrt_ru`, and `sqrt_rn`. The first two values only enclosed the
+real square root for pruning; they never participated in candidate scoring.
+The optimized kernel computes one correctly rounded `sqrt_rn` and uses the
+immediately adjacent FP32 values as its lower and upper endpoints. Correct
+rounding guarantees that the real square root lies between those neighbors,
+so the interval remains conservative. Candidate distance arithmetic, scan
+order, tie precedence, and traceback are unchanged.
+
+Warm real Llama 3.2 1B B2/P32 medians on H100 were:
+
+| Rate | Batch range | Previous | One sqrt | Speedup range |
+|---|---:|---:|---:|---:|
+| W2.5 | 32--256 | 0.622--2.014 ms | 0.623--2.000 ms | 0.998--1.009x |
+| W3 | 32--256 | 0.389--1.321 ms | 0.382--1.300 ms | 1.014--1.019x |
+| W3.5 | 32--256 | 0.271--0.711 ms | 0.266--0.706 ms | 1.007--1.020x |
+
+The W2.5 batch-64 movement is 0.18% negative and within run-to-run noise; all
+other listed cells improve. Constrained W3.5 improves 1.017x, 1.022x, 1.000x,
+and 1.018x at batches 32, 64, 128, and 256 respectively.
+
+In the matched one-layer W3.5 run, exact segmented-Viterbi GPU time fell from
+16.957 s to 16.370 s (1.036x), inclusive projection quantization from 25.867 s
+to 25.649 s (1.009x), and prepare plus quantize from 30.791 s to 30.568 s
+(1.007x). A frozen 2048x2048 solver input produced identical reconstructed
+weights, trellis states, and selectors against merged main. Its independent
+objectives were identical in both arms: FP32 `0.22860166430473328` and FP64
+`0.22860163687284052`. The full norm-rank/pruning-policy suite passed all 113
+tests, including adversarial ties, tiny/large values, constrained family
+batches, and exact candidate telemetry.
+
+This is quantization-only. Post-quant inference does not construct norm bands
+or evaluate this square root, so no inference code or checkpoint format changes.

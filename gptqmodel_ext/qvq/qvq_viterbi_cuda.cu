@@ -1857,7 +1857,9 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 //
 //   slack  = max(U*(1+eps)[ru] - floor, 0)          >= (U - floor)(1 + c1*u)
 //   radius = sqrt_ru(slack*(1+eps)[ru] + tn*eps[ru])
-//   band   = [ (sqrt_rd(tn) - radius)^2_rd , (sqrt_ru(tn)*(1+eps)[ru] + radius)^2_ru ]
+//   root   = sqrt_rn(tn)
+//   root_lo/root_hi = adjacent FP32 values below/above root
+//   band   = [ (root_lo - radius)^2_rd , (root_hi*(1+eps)[ru] + radius)^2_ru ]
 //
 // The eps*slack term inside the square root covers every multiplicative error
 // (32u versus the required < 5u) and the eps*tn term covers every additive
@@ -1865,7 +1867,10 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // quadratic in r = |sqrt(tn) - sqrt(nu)| consumes < 9u*tn); the remaining
 // >= 3x margin enters under the square root, so the band widens by an
 // O(sqrt(u)) sliver that admits essentially no extra survivors.  Nothing here
-// relies on the FP32 bound being monotone in nu: the band is contiguous
+// needs directed-rounding square roots: correctly rounded sqrt_rn lies within
+// its two adjacent representable FP32 values, so those neighbors are an exact
+// outward enclosure of the real square root while requiring only one sqrt.
+// Nothing here relies on the FP32 bound being monotone in nu: the band is contiguous
 // because the *table* is sorted by the very same cached FP32 norms, and every
 // rounding decision above only widens the interval.  Non-finite targets or
 // frontiers collapse the lane's band to the full list, which is exactly the
@@ -2033,8 +2038,11 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     const float tx = target[0];
     const float ty = target[1];
     const float tn = __fadd_rn(__fmul_rn(tx, tx), __fmul_rn(ty, ty));
-    const float root_low = __fsqrt_rd(tn);
-    const float root_high = __fmul_ru(__fsqrt_ru(tn), kNormRankRelax);
+    const float root = __fsqrt_rn(tn);
+    const unsigned root_bits = __float_as_uint(root);
+    const float root_low = root_bits == 0u ? 0.0f : __uint_as_float(root_bits - 1u);
+    const float root_upper = __uint_as_float(root_bits + 1u);
+    const float root_high = __fmul_ru(root_upper, kNormRankRelax);
     const float target_slack = __fmul_ru(tn, kNormRankEps);
     const int64_t step_pointer_base =
         pointer_base + static_cast<int64_t>(step) * bank_suffix_count;
