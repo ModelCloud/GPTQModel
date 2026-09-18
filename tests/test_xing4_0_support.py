@@ -4,7 +4,6 @@
 from copy import deepcopy
 from types import SimpleNamespace
 
-import pytest
 import torch
 from torch import nn
 
