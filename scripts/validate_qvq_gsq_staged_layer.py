@@ -233,6 +233,12 @@ def parse_args():
         help="Build independent projection candidate banks on concurrent CUDA streams",
     )
     parser.add_argument(
+        "--direct-qk-pair-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Replay Q/K held-out pairs by swapping weights on the teacher layer",
+    )
+    parser.add_argument(
         "--fused-qk-fisher",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -816,6 +822,72 @@ def main():
             raise ValueError("Q/K downstream replay requires held-out output elements")
         return weighted_loss / elements
 
+    def direct_qk_pair_losses(q_alternatives, k_alternatives, downstream_weights):
+        """Evaluate pairs sequentially without repeated stateless functional calls."""
+        teacher_batches = validation_teachers()
+        pairs = [
+            (q_alternative, k_alternative)
+            for q_alternative in q_alternatives
+            for k_alternative in k_alternatives
+        ]
+        saved_weights = {
+            name: dense_layer.get_submodule(name).weight.detach().clone()
+            for name in PROJECTIONS
+        }
+        losses = []
+        try:
+            with torch.no_grad():
+                for name, value in downstream_weights.items():
+                    dense_layer.get_submodule(name.removesuffix(".weight")).weight.copy_(
+                        value.to(torch.bfloat16),
+                    )
+                for q_alternative, k_alternative in pairs:
+                    dense_layer.self_attn.q_proj.weight.copy_(
+                        q_alternative["weight"].to(torch.bfloat16),
+                    )
+                    dense_layer.self_attn.k_proj.weight.copy_(
+                        k_alternative["weight"].to(torch.bfloat16),
+                    )
+                    weighted_loss = torch.zeros((), device=device)
+                    elements = 0
+                    for teacher_microbatches in teacher_batches:
+                        for (batch, teacher), count in teacher_microbatches:
+                            hidden, kwargs, mask = batch
+                            student = dense_layer(hidden, **kwargs)
+                            student = student if mask is None else student[mask]
+                            weighted_loss += torch.nn.functional.mse_loss(
+                                student, teacher,
+                            ) * count
+                            elements += count
+                    if not elements:
+                        raise ValueError("Q/K downstream replay requires held-out output elements")
+                    losses.append(weighted_loss / elements)
+                loss_values = torch.stack(losses).cpu().tolist()
+        finally:
+            with torch.no_grad():
+                for name, value in saved_weights.items():
+                    dense_layer.get_submodule(name).weight.copy_(value)
+        return {
+            (id(q_alternative), id(k_alternative)): loss
+            for (q_alternative, k_alternative), loss in zip(pairs, loss_values)
+        }
+
+    def select_guarded_qk_pair(q_alternatives, k_alternatives, downstream_weights):
+        if not args.direct_qk_pair_guard:
+            return select_qk_pair(
+                q_alternatives,
+                k_alternatives,
+                lambda q, k: qk_pair_replay_objective(q, k, downstream_weights),
+            )
+        losses = direct_qk_pair_losses(
+            q_alternatives, k_alternatives, downstream_weights,
+        )
+        return select_qk_pair(
+            q_alternatives,
+            k_alternatives,
+            lambda q, k: losses[(id(q), id(k))],
+        )
+
     def install_qk_pair(q_alternative, k_alternative):
         for name, alternative in zip(PROJECTIONS[:2], (q_alternative, k_alternative)):
             accepted_states[name] = alternative["state"]
@@ -852,12 +924,10 @@ def main():
             f"{name}.weight": baseline_weights[f"{name}.weight"]
             for name in PROJECTIONS[2:]
         }
-        q_alternative, k_alternative, measurements = select_qk_pair(
+        q_alternative, k_alternative, measurements = select_guarded_qk_pair(
             qk_alternatives[PROJECTIONS[0]],
             qk_alternatives[PROJECTIONS[1]],
-            lambda q, k: qk_pair_replay_objective(
-                q, k, initial_downstream_weights,
-            ),
+            initial_downstream_weights,
         )
         qk_pair_guards["before_downstream_fit"] = {
             "applied": True,
@@ -1004,10 +1074,10 @@ def main():
         for name in PROJECTIONS[:2]:
             for alternative in qk_alternatives[name]:
                 alternative["weight"] = materialize_state(name, alternative["state"])
-        q_alternative, k_alternative, measurements = select_qk_pair(
+        q_alternative, k_alternative, measurements = select_guarded_qk_pair(
             qk_alternatives[PROJECTIONS[0]],
             qk_alternatives[PROJECTIONS[1]],
-            lambda q, k: qk_pair_replay_objective(q, k, downstream_weights),
+            downstream_weights,
         )
         qk_pair_guards["after_downstream_fit"] = {
             "applied": True,
@@ -1139,6 +1209,7 @@ def main():
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "offload_capture": args.offload_capture,
         "parallel_candidate_build": args.parallel_candidate_build,
+        "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "gpu_idle_preflight": (
             _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
         ),

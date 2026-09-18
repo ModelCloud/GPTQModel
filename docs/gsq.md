@@ -147,6 +147,17 @@ were bit-for-bit equal to their matched serial model states. Result JSON and
 state metadata record sequence length and split sample counts. Use
 `--no-parallel-candidate-build` only for serial diagnostics.
 
+The two whole-block Q/K pair guards also replay alternatives directly on the
+teacher layer by default. The driver caches dense held-out outputs first,
+temporarily installs each BF16 Q/K pair plus the stage's fixed downstream
+weights, and restores every dense projection afterward. This removes repeated
+stateless functional-call setup without changing the operation being scored.
+Across three paired H100 runs, all guard losses, selected alternatives, and
+14-tensor states were bit-for-bit equal. Median guard time improved from
+0.2618s to 0.2570s (1.019x) at 32/8/32 x 512 tokens and from 0.2611s to
+0.2590s (1.008x) at 64/16/64 x 256 tokens. Use
+`--no-direct-qk-pair-guard` for the prior functional-call diagnostic path.
+
 The default single-round Q/K path now transforms the same quadratic objective
 into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
 solves the independent output scales in closed form and uses only the disjoint
