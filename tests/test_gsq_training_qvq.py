@@ -280,6 +280,44 @@ def test_direct_p32_position_map_matches_generic_sorted_map():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("transposed", [False, True])
+def test_inline_p32_overlap_matches_dense_map_bitwise(transposed):
+    module, _, _ = _training_module("cuda", candidates=33)
+    from gptqmodel.quantization.qvq_gsq_triton import (
+        build_p32_choice_lookup,
+        build_p32_dense_position_map,
+        compact_sparse_mixture,
+        inline_p32_sparse_mixture,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(47)
+    probabilities = torch.randn(
+        module.logits.shape, device="cuda", generator=generator,
+    ).softmax(-1)
+    position_map = build_p32_dense_position_map(
+        module.sparse_indices, module.sparse_deltas, transposed=transposed,
+    )
+    lookup = build_p32_choice_lookup(module.sparse_indices)
+    shape = ((module.out_features, module.in_features) if transposed
+             else (module.in_features, module.out_features))
+    dense = torch.empty(shape, device="cuda")
+    inline = torch.empty_like(dense)
+    compact_sparse_mixture(
+        probabilities, module.baseline_tiles, *position_map, dense,
+        in_features=module.in_features, out_features=module.out_features,
+        transposed=transposed,
+    )
+    inline_p32_sparse_mixture(
+        probabilities, module.baseline_tiles, lookup, module.sparse_deltas,
+        inline, in_features=module.in_features,
+        out_features=module.out_features, transposed=transposed,
+    )
+
+    assert torch.equal(inline, dense)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_compact_attention_materializer_matches_deterministic_scatter():
     width = 2048
     tile_count = (width // 16) ** 2

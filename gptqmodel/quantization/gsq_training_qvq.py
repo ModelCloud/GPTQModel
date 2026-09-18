@@ -129,20 +129,33 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, probabilities, baseline_matrix, matrix_indices, sparse_deltas,
-                baseline_tiles, position_indices, position_choices, position_deltas,
-                compact_forward, output_dtype, transposed_output):
-        from .qvq_gsq_triton import compact_sparse_mixture
+                baseline_tiles, p32_choice_lookup, position_indices,
+                position_choices, position_deltas, compact_forward,
+                inline_p32_overlap, output_dtype, transposed_output):
+        from .qvq_gsq_triton import (
+            compact_sparse_mixture,
+            inline_p32_sparse_mixture,
+        )
 
         if compact_forward:
             shape = (baseline_matrix.shape[1], baseline_matrix.shape[0]) if transposed_output else baseline_matrix.shape
             matrix = torch.empty(shape, dtype=output_dtype, device=baseline_matrix.device)
-            compact_sparse_mixture(
-                probabilities, baseline_tiles, position_indices,
-                position_choices, position_deltas, matrix,
-                in_features=baseline_matrix.shape[0],
-                out_features=baseline_matrix.shape[1],
-                transposed=transposed_output,
-            )
+            if inline_p32_overlap:
+                inline_p32_sparse_mixture(
+                    probabilities, baseline_tiles, p32_choice_lookup,
+                    sparse_deltas, matrix,
+                    in_features=baseline_matrix.shape[0],
+                    out_features=baseline_matrix.shape[1],
+                    transposed=transposed_output,
+                )
+            else:
+                compact_sparse_mixture(
+                    probabilities, baseline_tiles, position_indices,
+                    position_choices, position_deltas, matrix,
+                    in_features=baseline_matrix.shape[0],
+                    out_features=baseline_matrix.shape[1],
+                    transposed=transposed_output,
+                )
         else:
             contributions = probabilities[:, 1:, None].to(sparse_deltas.dtype) * sparse_deltas
             matrix = baseline_matrix.flatten().clone().scatter_add(
@@ -166,7 +179,7 @@ class _FusedSparseCandidateMatrixMixture(torch.autograd.Function):
             grad_matrix.contiguous(), matrix_indices, sparse_deltas,
             probability_gradient,
         )
-        return probability_gradient, None, None, None, None, None, None, None, None, None, None
+        return (probability_gradient,) + (None,) * 12
 
 
 class _TransposeView(torch.autograd.Function):
@@ -260,6 +273,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         training_dtype=torch.float32,
         fast_position_map=True,
         compact_attention_forward=True,
+        inline_p32_overlap=True,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -351,6 +365,9 @@ class GSQP32TrainingModule(torch.nn.Module):
                 or compact_attention_forward and maximum_width == 2048
             )
         )
+        self.inline_p32_overlap = bool(
+            self.compact_forward and inline_p32_overlap
+        )
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
         self.register_buffer("candidates", candidates.detach().clone().contiguous())
         self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
@@ -381,12 +398,31 @@ class GSQP32TrainingModule(torch.nn.Module):
         if self.compact_forward:
             from .qvq_gsq_triton import (
                 build_compact_position_map,
+                build_p32_choice_lookup,
                 build_p32_dense_position_map,
                 transpose_compact_position_map,
             )
 
             transposed_mixture = input_hadamard and self.fast_hadamard
-            if fast_position_map:
+            if self.inline_p32_overlap:
+                p32_choice_lookup = build_p32_choice_lookup(self.sparse_indices)
+                position_indices = torch.empty(
+                    (0, 0), dtype=torch.uint8, device=candidates.device,
+                )
+                position_choices = torch.empty(
+                    (0, 0, 0), dtype=torch.uint8, device=candidates.device,
+                )
+                position_deltas = torch.empty(
+                    (0, 0, 0), dtype=self.sparse_deltas.dtype,
+                    device=candidates.device,
+                )
+                transposed_position_indices = position_indices
+                transposed_position_choices = position_choices
+                transposed_position_deltas = position_deltas
+            elif fast_position_map:
+                p32_choice_lookup = torch.empty(
+                    (0, 0), dtype=torch.uint8, device=candidates.device,
+                )
                 direct_map = build_p32_dense_position_map(
                     self.sparse_indices, self.sparse_deltas,
                     transposed=transposed_mixture,
@@ -414,6 +450,9 @@ class GSQP32TrainingModule(torch.nn.Module):
                         empty_indices, empty_choices, empty_deltas,
                     )
             else:
+                p32_choice_lookup = torch.empty(
+                    (0, 0), dtype=torch.uint8, device=candidates.device,
+                )
                 position_indices, position_choices, position_deltas = build_compact_position_map(
                     self.sparse_indices, self.sparse_deltas, matrix_indices,
                 )
@@ -422,6 +461,9 @@ class GSQP32TrainingModule(torch.nn.Module):
                     position_indices, position_choices, position_deltas,
                 )
         else:
+            p32_choice_lookup = torch.empty(
+                (0, 0), dtype=torch.uint8, device=candidates.device,
+            )
             position_indices = torch.empty(
                 (0, 0), dtype=torch.uint8, device=candidates.device,
             )
@@ -434,6 +476,7 @@ class GSQP32TrainingModule(torch.nn.Module):
             transposed_position_indices = position_indices
             transposed_position_choices = position_choices
             transposed_position_deltas = position_deltas
+        self.register_buffer("p32_choice_lookup", p32_choice_lookup)
         self.register_buffer("position_indices", position_indices)
         self.register_buffer("position_choices", position_choices)
         self.register_buffer("position_deltas", position_deltas)
@@ -497,10 +540,12 @@ class GSQP32TrainingModule(torch.nn.Module):
                 matrix_indices,
                 self.sparse_deltas,
                 self.baseline_tiles,
+                self.p32_choice_lookup,
                 position_indices,
                 position_choices,
                 position_deltas,
                 self.compact_forward,
+                self.inline_p32_overlap,
                 output_dtype,
                 transposed_output,
             )
@@ -623,6 +668,7 @@ def p32_training_module_from_payload(
     fast_position_map=True,
     compact_sparse_candidates=True,
     compact_attention_forward=True,
+    inline_p32_overlap=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -647,6 +693,7 @@ def p32_training_module_from_payload(
         fast_position_map=fast_position_map,
         compact_sparse_candidates=compact_sparse_candidates,
         compact_attention_forward=compact_attention_forward,
+        inline_p32_overlap=inline_p32_overlap,
     )
 
 
@@ -670,6 +717,7 @@ def p32_training_module_from_words(
     fast_position_map=True,
     compact_sparse_candidates=True,
     compact_attention_forward=True,
+    inline_p32_overlap=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -749,6 +797,7 @@ def p32_training_module_from_words(
         training_dtype=training_dtype,
         fast_position_map=fast_position_map,
         compact_attention_forward=compact_attention_forward,
+        inline_p32_overlap=inline_p32_overlap,
     )
 
 
