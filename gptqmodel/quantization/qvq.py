@@ -3529,7 +3529,7 @@ def _qvq_cuda_family_tail_biting_overlaps(
     step_weights: torch.Tensor | None = None,
     telemetry: QVQQuantizationTelemetry | None,
 ) -> torch.Tensor:
-    """Return exact P32 tail-biting overlaps, specializing the profitable W3 case."""
+    """Return P32 overlaps with exact norm-band or ordering-preserving midpoint work."""
 
     from ..utils.qvq_cuda import (
         _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
@@ -3545,11 +3545,12 @@ def _qvq_cuda_family_tail_biting_overlaps(
     )
     family_sequences = sequences.shape[0] * sequences.shape[1]
     direct_distance_mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
-    if telemetry is not None and direct_distance_mode in {
-        "1", "provisional", "provisional_large_final"
-    }:
+    provisional_direct = direct_distance_mode not in {"", "0", "final"}
+    if telemetry is not None and provisional_direct:
         telemetry.count("viterbi_provisional_direct_distance", family_sequences)
-    if transition_bits == 6:
+    pruning_escape = os.environ.get("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "")
+    pruning_disabled = bool(pruning_escape) and pruning_escape != "0"
+    if transition_bits == 6 and (pruning_disabled or provisional_direct):
         overlaps = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
             rolled,
             family_stacks,

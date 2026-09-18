@@ -55,14 +55,22 @@ The four legal combinations map one-to-one onto the native policy codes in
 `gptqmodel/quantization/qvq_pruning.py` (`0` auto, `1` off, `2` auto+error,
 `3` required), which are what the CUDA op actually receives.
 
-### Eligibility is not broadened
+### Eligibility
 
-The eligible set is exactly PR #45's benchmark-supported set and is unchanged:
-grid-parallel, non-cooperative, non-midpoint-only, unconstrained, unweighted,
-non-family-batched, FP16 codebooks, `bank_count` 2 with `segment_steps` 16 or
-`bank_count` 4 with `segment_steps` 32, and `transition_bits` 5 (W2.5) or 6
-(W3). W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
+The eligible set is grid-parallel, non-cooperative, non-midpoint-only,
+unconstrained, unweighted, FP16 codebooks, `bank_count` 2 with
+`segment_steps` 16 or `bank_count` 4 with `segment_steps` 32, and
+`transition_bits` 5 (W2.5) or 6 (W3). Exact family-batched B2-P32 calls are
+also eligible: the kernel derives a physical codebook bank from the sequence's
+family while preserving the original logical-bank frontier and traceback
+layout. W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
 `required` and under `auto` + `fallback="error"`.
+
+Family-grid direct-distance calls remain ineligible because they deliberately
+use a different FP32 operation order. At W3, exact automatic pruning uses the
+full norm-band provisional recurrence because it is faster than the
+midpoint-only baseline on H100. Direct-distance or explicitly disabled
+pruning keeps the midpoint-only provisional path.
 
 ## Runtime telemetry
 
@@ -183,8 +191,9 @@ current path rather than "unsupported" in a user-visible sense:
 - The second pass of the two-pass tail-biting recurrence is always
   constrained (it is given the wrap-around overlap), so it is never band
   eligible.
-- On `sm_80`, the two-bank tail pass runs family-batched, which is also not
-  band eligible.
+- Direct-distance, midpoint-only, weighted, FP32-codebook, and unsupported-rate
+  calls remain ineligible even when their surrounding schedule is
+  family-batched.
 
 `required` is therefore a diagnostic and A/B tool for direct kernel-level
 callers, not a production quantization mode. Production runs should use

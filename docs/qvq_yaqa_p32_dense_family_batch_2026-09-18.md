@@ -316,3 +316,39 @@ Sketch-B batch size from 8 to 16 slowed capture from 3.49 to 3.75 seconds and
 changed 19 layer tensors because stochastic sampling is consumed in a
 different grouping. Device retention leaves batch size, seed consumption,
 Gram accumulation, and quantizer ordering unchanged.
+
+### Exact norm-band pruning for family batches
+
+The exact norm-band segmented-Viterbi kernel originally excluded
+family-batched YAQA calls, leaving the default `viterbi_pruning=auto` policy as
+a no-op for the dominant B2 family histories. The family grid now maps each
+logical `(sequence, bank)` CTA to its physical family codebook tables while
+keeping the same FP32 expanded-distance arithmetic, candidate order, tie
+precedence, frontiers, backpointers, and final traceback.
+
+Only unconstrained, unweighted W2.5/W3 FP16-codebook calls are eligible.
+W3.5 and every constrained final pass remain on the baseline. Explicit
+direct-distance modes also retain their existing recurrence because their
+rounding order is intentionally different. For exact W3, the full norm-band
+provisional recurrence replaces midpoint-only traceback when pruning is
+enabled; H100 microbenchmarks found it 1.13--1.41x faster across family batch
+widths 1--128.
+
+Matched one-layer Llama 3.2 1B runs used CUDA-resident exact factors, no TF32
+or direct-distance rounding, FP32 and FP64 objective scoring, and the same
+disjoint calibration rows `[0,32)` and YAQA rows `[64,96)`:
+
+| Rate | Pristine quantization | Family norm-band | Speedup | Candidate reduction |
+|---|---:|---:|---:|---:|
+| W2.5 | 24.424 s | 24.230 s | 1.008x | 0.829% |
+| W3 | 28.647 s | 27.693 s | 1.034x | 1.833% |
+| W3.5 | unchanged | ineligible | 1.000x | 0% |
+
+All 17 serialized model shards have identical SHA-256 hashes between the
+enabled and pristine arms at W2.5 and W3. Consequently every saved tensor and
+both Fisher oracle values are exactly unchanged, and the existing strictly
+disjoint held-out results carry through without rerunning inference.
+
+An inference-tensor cache experiment raised retained norm-rank table entries
+from zero to seven but moved W3 from 27.693 to 27.744 seconds. It was rejected
+to avoid persistent GPU memory with no measured speed benefit.
