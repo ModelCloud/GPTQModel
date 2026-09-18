@@ -61,6 +61,7 @@ _HADAMARD_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "fast_hadamard_transform_scaled",
         "fast_hadamard_transform_reverse_scaled",
         "fast_hadamard_transform_scaled_saved",
+        "fast_hadamard_transform_scaled_saved_bf16",
         "fast_hadamard_transform_sandwich",
         "fast_hadamard_transform_12N",
         "fast_hadamard_transform_20N",
@@ -168,6 +169,16 @@ def hadamard_transform_scaled_saved(
     if scale is None:
         scale = 1.0
     op = hadamard_op("fast_hadamard_transform_scaled_saved")
+    return op(x, vector, float(scale))
+
+
+def hadamard_transform_scaled_saved_bf16(
+    x: torch.Tensor, vector: torch.Tensor, scale: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a BF16 scaled output and exact FP32 unscaled Hadamard output."""
+    if scale is None:
+        scale = 1.0
+    op = hadamard_op("fast_hadamard_transform_scaled_saved_bf16")
     return op(x, vector, float(scale))
 
 
