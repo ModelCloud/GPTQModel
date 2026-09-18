@@ -22,6 +22,7 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v2b4_bank_stack,
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
+    _qvq_family_final_direct_distance_enabled,
     _yaqa_inner_v2b2_family_batch_cuda,
     _yaqa_inner_v2b2_family_batch_dense_cuda,
     batched_viterbi_quantize,
@@ -4026,6 +4027,55 @@ def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(monkeypatch):
     assert selectors.dtype == torch.uint8
     assert counters["viterbi_provisional_direct_distance"] > 0
     assert counters.get("viterbi_final_direct_distance", 0) == 0
+
+
+def test_qvq_yaqa_large_final_distance_has_a_frozen_family_batch_gate(monkeypatch):
+    monkeypatch.setenv(
+        "GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional_large_final"
+    )
+
+    assert not _qvq_family_final_direct_distance_enabled(63)
+    assert _qvq_family_final_direct_distance_enabled(64)
+    assert _qvq_family_final_direct_distance_enabled(128)
+
+
+@pytest.mark.parametrize(("batch", "reference_mode"), ((63, "provisional"), (64, "1")))
+def test_qvq_yaqa_large_final_distance_native_dispatch_matches_threshold_policy(
+    monkeypatch, batch, reference_mode
+):
+    generator = torch.Generator(device="cuda").manual_seed(20260923 + batch)
+    families = 2
+    bits = 3.5
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    sequences = torch.randn(
+        (families, batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
+    )
+    family_stacks = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=sequences.device,
+            bits=bits,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float16,
+        )[:families]
+    ).contiguous()
+    overlaps = torch.randint(
+        0,
+        1 << (16 - transition_bits),
+        (families, batch),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int64,
+    )
+    op = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", reference_mode)
+    expected = op(sequences, family_stacks, transition_bits, 16, overlaps, None)
+    monkeypatch.setenv(
+        "GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional_large_final"
+    )
+    actual = op(sequences, family_stacks, transition_bits, 16, overlaps, None)
+
+    assert all(torch.equal(left, right) for left, right in zip(actual, expected, strict=True))
 
 
 def test_qvq_v2b2_p32_yaqa_reselection_uses_non_default_producer_stream_safely():
