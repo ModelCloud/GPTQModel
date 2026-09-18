@@ -32,10 +32,9 @@ TEMPLATE = ("template __global__ void Marlin<"
             "{{'true' if is_zp_float else 'false'}}>"
             "( MARLIN_KERNEL_PARAMS );")
 
-# int8 with zero point case (vllm::kU8) is also supported,
-# we don't add it to reduce wheel size.
 SCALAR_TYPES = [
-    "vllm::kU4", "vllm::kU4B8", "vllm::kU8B128", "vllm::kFE4M3fn",
+    "vllm::kU4", "vllm::kU4B8", "vllm::kU8", "vllm::kU8B128",
+    "vllm::kFE4M3fn",
     "vllm::kFE2M1f"
 ]
 THREAD_CONFIGS = [(128, 128, 256), (64, 256, 256), (64, 128, 128),

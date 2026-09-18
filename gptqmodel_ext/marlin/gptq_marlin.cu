@@ -637,6 +637,7 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
       if (false) {
       }
       COMMON_GET_IF(vllm::kU4, 2)
+      COMMON_GET_IF(vllm::kU8, 2)
       COMMON_GET_IF(vllm::kU4B8, 2)
       COMMON_GET_IF(vllm::kU8B128, 2)
 
@@ -653,6 +654,7 @@ MarlinFuncPtr get_marlin_kernel(const vllm::ScalarType q_type,
     if (false) {
     }
     COMMON_GET_IF(vllm::kU4, pipe_stages)
+    COMMON_GET_IF(vllm::kU8, pipe_stages)
     COMMON_GET_IF(vllm::kU4B8, pipe_stages)
     COMMON_GET_IF(vllm::kU8B128, pipe_stages)
 

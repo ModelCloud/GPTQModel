@@ -433,6 +433,10 @@ def test_awq_marlin_quant_linear_validation_accepts_packable_tile_tails(monkeypa
     assert "enabled only for 4-bit weights" in str(err)
 
 
+def test_awq_marlin_8bit_uses_marlin_u8_type():
+    assert marlin_awq_qlinear_module.AwqMarlinLinear.TYPE_MAP[8] == scalar_types.uint8
+
+
 def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
     monkeypatch.setattr(marlin_awq_qlinear_module, "marlin_import_exception", None)
     kwargs = {
