@@ -31,7 +31,7 @@ in `QVQConfig.__post_init__`.
 ### Mode semantics
 
 - **`auto`** reproduces today's automatic behavior exactly. Eligible
-  unconstrained, unweighted, FP16-codebook W2.5/W3 two-bank/four-bank grid
+  unconstrained or constrained, unweighted, FP16-codebook W2.5/W3/W3.5 two-bank/four-bank grid
   calls use the norm band; everything else uses the exact baseline recurrence.
 - **`off`** deterministically suppresses norm-band dispatch. Every call uses
   the baseline recurrence.
@@ -60,13 +60,13 @@ The four legal combinations map one-to-one onto the native policy codes in
 The eligible set is grid-parallel, non-cooperative, non-midpoint-only,
 unweighted, FP16 codebooks, `bank_count` 2 with
 `segment_steps` 16 or `bank_count` 4 with `segment_steps` 32, and
-`transition_bits` 5 (W2.5) or 6 (W3). Exact family-batched B2-P32 calls are
+`transition_bits` 5 (W2.5), 6 (W3), or 7 (W3.5). Exact family-batched B2-P32 calls are
 also eligible: the kernel derives a physical codebook bank from the sequence's
 family while preserving the original logical-bank frontier and traceback
 layout. Both the unconstrained provisional pass and constrained final
 tail-biting pass are eligible. The final pass initializes the skewed frontier
 with zero only at its required overlap and infinity elsewhere, exactly matching
-the reference state mask. W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
+the reference state mask. W1.5/W2 stay on the baseline under `auto` and are rejected under
 `required` and under `auto` + `fallback="error"`.
 
 Family-grid direct-distance calls remain ineligible because they deliberately
@@ -94,7 +94,7 @@ This avoids attributing another worker's overlapping CUDA work to the wrong modu
 
 Candidate reduction is a performance/work metric, not a correctness proof. Correctness is
 verified separately by the CUDA A/B suite, which forces the pristine recurrence and requires
-states, segment selectors, and squared errors to match bit-for-bit for every supported W2.5/W3
+states, segment selectors, and squared errors to match bit-for-bit for every supported W2.5/W3/W3.5
 two-bank/four-bank cell. Each saved V2B2/V2B4 module additionally performs an exact packed-payload
 round trip, recorded as `packed_roundtrip_verifications`.
 
@@ -191,9 +191,9 @@ Because `required` must never fall back silently, it rejects any call that
 cannot use the band, including calls that are structurally ineligible on the
 current path rather than "unsupported" in a user-visible sense:
 
-- The second pass of the two-pass tail-biting recurrence is always
-  constrained (it is given the wrap-around overlap), so it is never band
-  eligible.
+- The second pass of the two-pass tail-biting recurrence is constrained by
+  the wrap-around overlap. W2.5/W3/W3.5 constrained calls are band eligible;
+  other rates and shapes retain the baseline.
 - Direct-distance, midpoint-only, weighted, FP32-codebook, and unsupported-rate
   calls remain ineligible even when their surrounding schedule is
   family-batched.
