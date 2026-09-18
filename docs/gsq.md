@@ -206,6 +206,18 @@ held-out losses were bit-for-bit equal. Median Q/K fit time improved from
 time improved 1.025x and 1.020x, respectively. Use
 `--no-sparse-qk-candidate-bank` only for comparison with the dense decode path.
 
+P32 overlap maps are now built directly from the three consecutive edited
+trellis states instead of sorting all six scalar entries from every candidate.
+The direct kernel preserves the generic map's candidate accumulation order and
+uses a fixed three-entry overlap per scalar. Across three alternating paired
+H100 runs per geometry, all Q/K guards, losses, changed-tile counts, and 14
+state tensors were bit-for-bit equal. Median candidate wall time improved from
+0.3760s to 0.2849s (1.320x) at 32/8/32 x 512 tokens and from 0.3782s to
+0.2797s (1.352x) at 64/16/64 x 256 tokens. Candidate-build-plus-fit-plus-final
+time improved 1.058x and 1.030x, respectively. Held-out gains remained exactly
+15.0000% and 29.2717%. Use `--no-fast-p32-position-map` only for comparison
+with the generic radix-sort path.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

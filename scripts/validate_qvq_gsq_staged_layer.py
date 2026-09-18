@@ -245,6 +245,12 @@ def parse_args():
         help="Reuse exact sparse P32 values instead of decoding a dense Q/K candidate bank",
     )
     parser.add_argument(
+        "--fast-p32-position-map",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Build P32 overlap maps directly without generic radix sorting",
+    )
+    parser.add_argument(
         "--direct-qk-pair-guard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -487,6 +493,7 @@ def main():
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
+                fast_position_map=args.fast_p32_position_map,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -495,6 +502,7 @@ def main():
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
+                fast_position_map=args.fast_p32_position_map,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -673,6 +681,7 @@ def main():
             output_metric_hadamard_diagonal=fisher_scales.square(),
             hard_dense_verify_topk=args.qk_hard_dense_verify_topk,
             cuda_graph_updates_per_replay=args.qk_cuda_graph_updates_per_replay,
+            fast_position_map=args.fast_p32_position_map,
             capture_barrier=qk_capture_barrier,
             seed=args.seed,
         )
@@ -1235,6 +1244,7 @@ def main():
         "parallel_candidate_build": args.parallel_candidate_build,
         "fast_identity_candidate_metric": args.fast_identity_candidate_metric,
         "sparse_qk_candidate_bank": args.sparse_qk_candidate_bank,
+        "fast_p32_position_map": args.fast_p32_position_map,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (

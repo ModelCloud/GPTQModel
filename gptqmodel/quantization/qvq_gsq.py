@@ -155,6 +155,7 @@ def refine_trellis_candidates(
     output_metric_hadamard_diagonal: torch.Tensor | None = None,
     hard_dense_verify_topk: int = 4,
     cuda_graph_updates_per_replay: int = 1,
+    fast_position_map: bool = True,
     capture_barrier: threading.Barrier | None = None,
     seed: int = 0,
     progress: Callable[[int, float], None] | None = None,
@@ -450,6 +451,7 @@ def refine_trellis_candidates(
     if fused_sparse_relaxation:
         from .qvq_gsq_triton import (
             build_compact_position_map,
+            build_p32_dense_position_map,
             compact_position_error,
             scheduled_grouped_gumbel_softmax,
             scheduled_grouped_sparse_lion,
@@ -478,11 +480,21 @@ def refine_trellis_candidates(
             * step / max(steps - 1, 1) for step in range(steps)
         ], device=logits.device)
         graph_step = torch.zeros((), dtype=torch.int32, device=logits.device)
-        position_indices, position_choices, position_deltas = build_compact_position_map(
-            sparse_indices_by_tile, sparse_deltas_by_tile,
+        use_fast_position_map = bool(
+            fast_position_map and layout == "p32_window"
+            and sparse_indices_by_tile.shape[2] == 6
+        )
+        position_indices, position_choices, position_deltas = (
+            build_p32_dense_position_map(
+                sparse_indices_by_tile, sparse_deltas_by_tile,
+            ) if use_fast_position_map else
+            build_compact_position_map(
+                sparse_indices_by_tile, sparse_deltas_by_tile,
+            )
         )
         packed_sparse_indices_by_tile = sparse_indices_by_tile.to(torch.uint8)
     else:
+        use_fast_position_map = False
         from .gsq_training import GSQLion
         optimizer = GSQLion([logits], lr=learning_rate, weight_decay=weight_decay)
     generator = torch.Generator(device=candidates.device).manual_seed(seed)
@@ -897,6 +909,7 @@ def refine_trellis_candidates(
         "sparse_accumulation_dtype": "float32" if fused_sparse_relaxation else None,
         "sparse_index_dtype": "uint8" if fused_sparse_relaxation else None,
         "compact_positions": int(position_indices.shape[1]) if fused_sparse_relaxation else None,
+        "position_map_backend": "p32_direct" if use_fast_position_map else "generic_sort",
         "updates_are_epochs": False,
         "initial_entropy": None if initial_entropy is None else float(initial_entropy),
         "final_entropy": None if final_entropy is None else float(final_entropy),

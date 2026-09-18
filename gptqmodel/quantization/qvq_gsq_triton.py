@@ -238,6 +238,91 @@ def _build_position_map_kernel(indices, deltas, counters, position_choices,
 
 
 @triton.jit
+def _p32_choice_lookup_kernel(indices, lookup, size,
+                              ALTERNATIVES: tl.constexpr,
+                              WIDTH: tl.constexpr, BLOCK: tl.constexpr):
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offset < size
+    tile = offset // ALTERNATIVES
+    alternative = offset - tile * ALTERNATIVES
+    scalar = tl.load(
+        indices + offset * WIDTH, mask=mask, other=0,
+    ).to(tl.int32)
+    state = scalar // 2
+    tl.store(
+        lookup + tile * 128 + state,
+        alternative + 1,
+        mask=mask,
+    )
+
+
+@triton.jit
+def _p32_dense_position_map_kernel(
+        lookup, deltas, position_indices, position_choices, position_deltas,
+        ALTERNATIVES: tl.constexpr, WIDTH: tl.constexpr):
+    tile = tl.program_id(0)
+    scalar = tl.arange(0, 256)
+    state = scalar // 2
+    parity = scalar - state * 2
+    choice0 = tl.load(lookup + tile * 128 + state).to(tl.int32)
+    choice1 = tl.load(lookup + tile * 128 + ((state - 1) & 127)).to(tl.int32)
+    choice2 = tl.load(lookup + tile * 128 + ((state - 2) & 127)).to(tl.int32)
+    active0 = choice0 > 0
+    active1 = choice1 > 0
+    active2 = choice2 > 0
+    base = tile * ALTERNATIVES * WIDTH
+    delta0 = tl.load(
+        deltas + base + (choice0 - 1) * WIDTH + parity,
+        mask=active0, other=0.0,
+    )
+    delta1 = tl.load(
+        deltas + base + (choice1 - 1) * WIDTH + 2 + parity,
+        mask=active1, other=0.0,
+    )
+    delta2 = tl.load(
+        deltas + base + (choice2 - 1) * WIDTH + 4 + parity,
+        mask=active2, other=0.0,
+    )
+
+    # Choice order matches the generic map's candidate accumulation order.
+    key0 = tl.where(active0, choice0, 256)
+    key1 = tl.where(active1, choice1, 256)
+    key2 = tl.where(active2, choice2, 256)
+    swap = key1 < key0
+    key0, key1 = tl.where(swap, key1, key0), tl.where(swap, key0, key1)
+    choice0, choice1 = (
+        tl.where(swap, choice1, choice0), tl.where(swap, choice0, choice1)
+    )
+    delta0, delta1 = (
+        tl.where(swap, delta1, delta0), tl.where(swap, delta0, delta1)
+    )
+    swap = key2 < key1
+    key1, key2 = tl.where(swap, key2, key1), tl.where(swap, key1, key2)
+    choice1, choice2 = (
+        tl.where(swap, choice2, choice1), tl.where(swap, choice1, choice2)
+    )
+    delta1, delta2 = (
+        tl.where(swap, delta2, delta1), tl.where(swap, delta1, delta2)
+    )
+    swap = key1 < key0
+    choice0, choice1 = (
+        tl.where(swap, choice1, choice0), tl.where(swap, choice0, choice1)
+    )
+    delta0, delta1 = (
+        tl.where(swap, delta1, delta0), tl.where(swap, delta0, delta1)
+    )
+
+    position_offset = (tile * 256 + scalar) * 3
+    tl.store(position_indices + tile * 256 + scalar, scalar)
+    tl.store(position_choices + position_offset, choice0)
+    tl.store(position_choices + position_offset + 1, choice1)
+    tl.store(position_choices + position_offset + 2, choice2)
+    tl.store(position_deltas + position_offset, delta0)
+    tl.store(position_deltas + position_offset + 1, delta1)
+    tl.store(position_deltas + position_offset + 2, delta2)
+
+
+@triton.jit
 def _candidate_probability_gradient_kernel(grad_matrix, matrix_indices,
                                            sparse_deltas, output,
                                            TILE_COUNT,
@@ -688,6 +773,57 @@ def lion_update(parameter, gradient, momentum, *, learning_rate: float,
         beta1, 1.0 - beta1, beta2, 1.0 - beta2,
         learning_rate, 1.0 - learning_rate * weight_decay,
         BLOCK=block, num_warps=4,
+    )
+
+
+def build_p32_dense_position_map(indices, deltas):
+    """Build the exact W3/P32 overlap map without sorting sparse entries."""
+    if (indices.ndim != 3 or indices.shape[2] != 6
+            or indices.dtype != torch.int64 or not indices.is_cuda
+            or not indices.is_contiguous() or not deltas.is_cuda
+            or not deltas.is_contiguous() or deltas.shape != indices.shape):
+        raise ValueError(
+            "fast P32 position maps require contiguous CUDA [tiles,alternatives,6] metadata"
+        )
+    tile_count, alternatives, width = indices.shape
+    if alternatives > 254:
+        raise ValueError("fast P32 position maps support at most 254 alternatives")
+    lookup = torch.zeros(
+        (tile_count, 128), dtype=torch.uint8, device=indices.device,
+    )
+    size = tile_count * alternatives
+    block = 256
+    _p32_choice_lookup_kernel[(triton.cdiv(size, block),)](
+        indices, lookup, size, ALTERNATIVES=alternatives, WIDTH=width,
+        BLOCK=block, num_warps=4,
+    )
+    position_indices = torch.empty(
+        (tile_count, 256), dtype=torch.uint8, device=indices.device,
+    )
+    position_choices = torch.empty(
+        (tile_count, 256, 3), dtype=torch.uint8, device=indices.device,
+    )
+    position_deltas = torch.empty(
+        (tile_count, 256, 3), dtype=deltas.dtype, device=deltas.device,
+    )
+    _p32_dense_position_map_kernel[(tile_count,)](
+        lookup, deltas, position_indices, position_choices, position_deltas,
+        ALTERNATIVES=alternatives, WIDTH=width, num_warps=8,
+    )
+    return position_indices, position_choices, position_deltas
+
+
+def transpose_p32_dense_position_map(indices, choices, deltas):
+    """Order the fixed 256-position P32 map for coalesced transpose stores."""
+    if indices.shape[1:] != (256,) or choices.shape[1:] != (256, 3):
+        raise ValueError("dense P32 position map has invalid dimensions")
+    position = torch.arange(256, device=indices.device)
+    order = (position % 16) * 16 + position // 16
+    gather = order[None, :, None].expand_as(choices)
+    return (
+        indices.gather(1, order[None].expand_as(indices)),
+        choices.gather(1, gather),
+        deltas.gather(1, gather),
     )
 
 

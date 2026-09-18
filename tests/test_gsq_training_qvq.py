@@ -206,6 +206,33 @@ def test_matrix_layout_sparse_mixture_is_bitwise_exact_for_real_p32_metadata():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_direct_p32_position_map_matches_generic_sorted_map():
+    module, _, _ = _training_module("cuda", candidates=33)
+    from gptqmodel.quantization.qvq_gsq_triton import (
+        build_compact_position_map,
+        build_p32_dense_position_map,
+    )
+
+    compact = build_compact_position_map(
+        module.sparse_indices, module.sparse_deltas,
+        module.matrix_sparse_indices,
+    )
+    direct = build_p32_dense_position_map(
+        module.sparse_indices, module.sparse_deltas,
+    )
+    compact_choices = torch.zeros_like(direct[1])
+    compact_deltas = torch.zeros_like(direct[2])
+    gather = compact[0].long().unsqueeze(-1).expand_as(compact[1])
+    compact_choices.scatter_(1, gather, compact[1])
+    compact_deltas.scatter_(1, gather, compact[2])
+
+    assert torch.equal(direct[0], torch.arange(256, device="cuda", dtype=torch.uint8)[None])
+    assert torch.equal(direct[1], compact_choices)
+    assert torch.equal(direct[2], compact_deltas)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_compact_mixture_writes_bfloat16_directly_without_changing_gradients():
     module, _, _ = _training_module("cuda", candidates=33)
     from gptqmodel.quantization.qvq_gsq_triton import build_compact_position_map
