@@ -60,7 +60,7 @@ from gptqmodel.quantization.qvq import (
     rht_preprocess_weight,
     rht_reconstruct_weight,
 )
-from gptqmodel.quantization.qvq_gsq import refine_trellis_candidates
+from gptqmodel.quantization.qvq_gsq import TrellisCandidateAdapter, refine_trellis_candidates
 from gptqmodel.utils.hadamard import hadamard_transform
 from scripts.validate_qvq_gsq_staged_mlp import projection_payload
 from scripts.validate_qvq_gsq_staged_projection import digest, fineweb_chunks
@@ -237,6 +237,12 @@ def parse_args():
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Replay Q/K held-out pairs by swapping weights on the teacher layer",
+    )
+    parser.add_argument(
+        "--direct-state-materialization",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Decode accepted P32 states without constructing throwaway candidate banks",
     )
     parser.add_argument(
         "--fused-qk-fisher",
@@ -905,17 +911,16 @@ def main():
 
     def materialize_state(name, state):
         _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
-        if name in qk_quantizers:
-            quantizer = qk_quantizers[name]
-            inner = quantizer.adapter.inner(
-                state["words"], teacher_weight.shape[1], teacher_weight.shape[0],
-                bank_ids, bank_alt_id,
-            )
-            return rht_reconstruct_weight(inner, SU, state["SV"])
-        return p32_training_module_from_words(
-            state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
-            candidates=2, seed=args.seed,
-        ).hard_weight()
+        if not args.direct_state_materialization and name not in qk_quantizers:
+            return p32_training_module_from_words(
+                state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
+                candidates=2, seed=args.seed,
+            ).hard_weight()
+        inner = TrellisCandidateAdapter("p32_window", 3).inner(
+            state["words"], teacher_weight.shape[1], teacher_weight.shape[0],
+            bank_ids, bank_alt_id,
+        )
+        return rht_reconstruct_weight(inner, SU, state["SV"])
 
     qk_pair_guard_seconds = 0.
     if len(qk_alternatives) == 2:
@@ -1092,18 +1097,16 @@ def main():
 
     final_weights = {}
     state_tensors = dict(prefix_tensors)
+    final_materialization_started = time.perf_counter()
     for name, state in accepted_states.items():
-        _, SU, bank_ids, bank_alt_id, teacher_weight = constants[name]
-        quantizer = p32_training_module_from_words(
-            state["words"], SU, state["SV"], bank_ids, bank_alt_id, teacher_weight,
-            candidates=2, seed=args.seed,
-        )
-        final_weights[f"{name}.weight"] = quantizer.hard_weight()
+        final_weights[f"{name}.weight"] = materialize_state(name, state)
         full_name = f"{layer_prefix}.{name}"
         state_tensors[f"{full_name}.trellis"] = repack_p32_window_to_planar(
             state["words"], bits=3,
         ).cpu()
         state_tensors[f"{full_name}.SV"] = state["SV"].cpu()
+    torch.cuda.current_stream().synchronize()
+    final_materialization_seconds = time.perf_counter() - final_materialization_started
 
     def full_block_objective(batch, weights):
         hidden, kwargs, mask = batch
@@ -1210,6 +1213,7 @@ def main():
         "offload_capture": args.offload_capture,
         "parallel_candidate_build": args.parallel_candidate_build,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
+        "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (
             _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
         ),
@@ -1218,6 +1222,7 @@ def main():
         "candidate_seconds": candidate_seconds,
         "candidate_wall_seconds": candidate_wall_seconds,
         "fit_seconds": fit_seconds,
+        "final_materialization_seconds": final_materialization_seconds,
         "fit_stage_seconds": {
             "qk": qk_fit_seconds,
             "attention": sum(

@@ -158,6 +158,19 @@ Across three paired H100 runs, all guard losses, selected alternatives, and
 0.2590s (1.008x) at 64/16/64 x 256 tokens. Use
 `--no-direct-qk-pair-guard` for the prior functional-call diagnostic path.
 
+Accepted P32 states are materialized by directly decoding their legal window
+words and applying the exact RHT reconstruction. Constructing a new two-choice
+training module for this read-only operation repeated Fisher candidate
+screening even though the accepted words and scales were already fixed. Nsight
+showed these throwaway screens in both the post-MLP Q/K guard and final export.
+Direct decode is now the default; `--no-direct-state-materialization` retains
+the prior diagnostic path. Across three paired runs per geometry, every guard
+measurement and all 14 state tensors were bit-for-bit equal. At 32/8/32 x 512
+tokens, guard materialization improved 2.56x, final materialization improved
+3.96x, and measured candidate-build-plus-fit-plus-final time improved 1.167x.
+At 64/16/64 x 256 tokens the corresponding gains were 2.46x, 4.03x, and
+1.130x. Held-out gains remained 15.0000% and 29.2717%, respectively.
+
 The default single-round Q/K path now transforms the same quadratic objective
 into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
 solves the independent output scales in closed form and uses only the disjoint
