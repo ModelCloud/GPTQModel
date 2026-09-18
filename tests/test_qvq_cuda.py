@@ -5711,8 +5711,9 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, 
 
 @pytest.mark.parametrize("bits", (2.5, 3.0))
 @pytest.mark.parametrize("families,batch", ((2, 7), (3, 64)))
+@pytest.mark.parametrize("constrained", (False, True))
 def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
-    monkeypatch, bits, families, batch
+    monkeypatch, bits, families, batch, constrained
 ):
     generator = torch.Generator(device="cuda").manual_seed(
         20260921 + families + batch + int(bits * 10)
@@ -5732,14 +5733,26 @@ def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
         )
     ).to(device="cuda", dtype=torch.float16)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
+    overlap = (
+        torch.randint(
+            0,
+            1 << (16 - transition_bits),
+            (families, batch),
+            generator=generator,
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
+    )
     op = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
 
     monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", raising=False)
     monkeypatch.setenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "1")
-    expected = op(sequences, codebooks, transition_bits, 16, None, None)
+    expected = op(sequences, codebooks, transition_bits, 16, overlap, None)
     before = _norm_rank_dispatch_count()
     monkeypatch.setenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "0")
-    actual = op(sequences, codebooks, transition_bits, 16, None, None)
+    actual = op(sequences, codebooks, transition_bits, 16, overlap, None)
 
     assert _norm_rank_dispatch_count() == before + 1
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
@@ -5750,7 +5763,6 @@ def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
     (
         (2.0, 2, 16, False, False, torch.float16),   # shift 4: candidate list too short to pay for banding
         (3.5, 2, 16, False, False, torch.float16),   # shift 7: unsupported rate
-        (2.5, 2, 16, True, False, torch.float16),    # constrained keeps the exact fallback
         (2.5, 2, 16, False, True, torch.float16),    # weighted keeps the exact fallback
         (3.0, 4, 32, True, True, torch.float16),
         (3.0, 2, 16, False, False, torch.float32),   # fp32 codebooks keep the reference path
@@ -6027,7 +6039,10 @@ def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(mon
 
 @pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32)))
 @pytest.mark.parametrize("pattern", ("ties", "tiny", "large"))
-def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(bits, bank_count, segment_steps, pattern):
+@pytest.mark.parametrize("constrained", (False, True))
+def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(
+    bits, bank_count, segment_steps, pattern, constrained
+):
     """Adversarial inputs for the directed-rounding band derivation: massive
     exact value ties (the lowest original prefix must win), denormal-scale
     sequences, and large sequences near the finite-accumulation contract."""
@@ -6047,10 +6062,24 @@ def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(bits,
     else:
         # Just inside the finite FP32 squared-distance contract of the op.
         sequences, codebooks = _norm_rank_case(20260835, 5, bits, bank_count, sequence_scale=1e15)
-    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
-        sequences, codebooks, transition_bits, segment_steps, None, None
+    overlap = (
+        torch.randint(
+            0,
+            1 << (16 - transition_bits),
+            (sequences.shape[0],),
+            generator=torch.Generator(device="cuda").manual_seed(20260924),
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
     )
-    expected = qvq_cuda_viterbi_v2_segment_banked(sequences, codebooks, bits, segment_steps, None, None)
+    actual = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, transition_bits, segment_steps, overlap, None
+    )
+    expected = qvq_cuda_viterbi_v2_segment_banked(
+        sequences, codebooks, bits, segment_steps, overlap, None
+    )
     assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
@@ -6067,22 +6096,37 @@ def _pruning_code(**kwargs):
 
 @pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
 @pytest.mark.parametrize("mode", ("auto", "required"))
-def test_qvq_pruning_policy_dispatches_eligible_cells(bits, bank_count, segment_steps, mode):
+@pytest.mark.parametrize("constrained", (False, True))
+def test_qvq_pruning_policy_dispatches_eligible_cells(
+    bits, bank_count, segment_steps, mode, constrained
+):
     """`auto` and `required` both norm-band dispatch every eligible cell and
     stay bit-exact against the unmodified reference."""
 
     sequences, codebooks = _norm_rank_case(20260901 + bank_count, 9, bits, bank_count)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
+    overlap = (
+        torch.randint(
+            0,
+            1 << (16 - transition_bits),
+            (sequences.shape[0],),
+            generator=torch.Generator(device="cuda").manual_seed(20260925),
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
+    )
     op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
     # The oracle explicitly forces the pristine baseline recurrence with
     # `mode="off"`; a default-`auto` reference could itself take the norm-band
     # path and the comparison would prove nothing.
     reference = qvq_cuda_viterbi_v2_segment_banked(
-        sequences, codebooks, bits, segment_steps, None, None, _pruning_code(mode="off")
+        sequences, codebooks, bits, segment_steps, overlap, None, _pruning_code(mode="off")
     )
     before = _norm_rank_dispatch_count()
     actual = op(
-        sequences, codebooks, transition_bits, segment_steps, None, None, _pruning_code(mode=mode)
+        sequences, codebooks, transition_bits, segment_steps, overlap, None, _pruning_code(mode=mode)
     )
     assert _norm_rank_dispatch_count() == before + 1
     assert all(torch.equal(e, a) for e, a in zip(reference, actual))
@@ -6112,13 +6156,12 @@ def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(bits, bank_count, s
 
 
 # W1.5/W2/W3.5 stay outside the benchmark-supported W2.5/W3 set, and fp32
-# codebooks, constrained calls, and weighted calls keep the exact baseline.
+# codebooks and weighted calls keep the exact baseline.
 _UNSUPPORTED_PRUNING_CELLS = (
     pytest.param(2.0, 2, 16, False, False, torch.float16, "transition_bits=4", id="w2-rate"),
     pytest.param(1.5, 2, 16, False, False, torch.float16, "transition_bits=3", id="w1p5-rate"),
     pytest.param(3.5, 2, 16, False, False, torch.float16, "transition_bits=7", id="w3p5-rate"),
     pytest.param(3.0, 2, 16, False, False, torch.float32, "float16 codebooks", id="fp32-codebooks"),
-    pytest.param(2.5, 2, 16, True, False, torch.float16, "constrained", id="constrained"),
     pytest.param(3.0, 4, 32, False, True, torch.float16, "weighted", id="weighted"),
 )
 

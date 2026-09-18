@@ -1893,6 +1893,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     const uint64_t* __restrict__ sorted_records,
     const typename NormRankPrefixPack<ChunkWidth>::type* __restrict__ chunk_prefixes,
     const float* __restrict__ chunk_low_norms,
+    const int64_t* __restrict__ overlap,
     const float* __restrict__ g_input_all,
     float* __restrict__ g_output_all,
     uint8_t* __restrict__ backpointers,
@@ -1900,6 +1901,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     int batch,
     int family_batch,
     int segment_index,
+    bool constrained,
     bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
   constexpr int shift = Shift;
@@ -1970,15 +1972,19 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   }
   __syncthreads();
   if (segment_index == 0) {
-    // Step 0 has no predecessor.  A zero frontier makes __fadd_rn(0, e) == e
-    // for the non-negative emission e, so the shared step body below is
-    // bit-identical to the baseline's emission-only prologue, and a zero floor
-    // is trivially a valid lower bound.
+    // Step 0 has no predecessor. A zero frontier makes __fadd_rn(0, e) == e
+    // for the non-negative emission e, so the shared step body is bit-identical
+    // to the baseline's emission-only prologue. Tail-biting's constrained pass
+    // admits exactly the predecessor suffix named by overlap[sequence]; all
+    // other prefixes begin at infinity, matching the baseline state mask.
+    const int required_overlap = constrained ? static_cast<int>(overlap[sequence]) : 0;
     for (int x = thread; x < suffix_count; x += kThreads) {
-      g_previous[x + (x >> group_shift)] = 0.0f;
+      g_previous[x + (x >> group_shift)] =
+          !constrained || x == required_overlap ? 0.0f : CUDART_INF_F;
     }
     if (thread < group_count) {
-      group_min[thread] = 0u;
+      group_min[thread] =
+          !constrained || thread == (required_overlap & (group_count - 1)) ? 0u : kInfBits;
     }
   } else {
     const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
@@ -3482,12 +3488,14 @@ void launch_qvq_v2_segment_norm_rank_segments(
     const float* sequences,
     const uint64_t* baseline_records,
     const NormRankTables& tables,
+    const int64_t* overlap,
     float* frontier_a,
     float* frontier_b,
     uint8_t* backpointers,
     uint8_t* boundary_banks,
     int batch,
     int family_batch,
+    bool constrained,
     cudaStream_t stream,
     bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
@@ -3510,14 +3518,16 @@ void launch_qvq_v2_segment_norm_rank_segments(
       reinterpret_cast<const PackType*>(tables.prefixes.const_data_ptr<uint8_t>());
   const float* low_norms = tables.low_norms.const_data_ptr<float>();
   kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
-      sequences, baseline_records, records, prefixes, low_norms, nullptr,
-      frontier_a, backpointers, boundary_banks, batch, family_batch, 0, collect_telemetry);
+      sequences, baseline_records, records, prefixes, low_norms, overlap, nullptr,
+      frontier_a, backpointers, boundary_banks, batch, family_batch, 0,
+      constrained, collect_telemetry);
   for (int segment = 1; segment < segments; ++segment) {
     const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
     float* output = segment % 2 == 1 ? frontier_b : frontier_a;
     kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
-        sequences, baseline_records, records, prefixes, low_norms, input, output,
-        backpointers, boundary_banks, batch, family_batch, segment, collect_telemetry);
+        sequences, baseline_records, records, prefixes, low_norms, overlap, input, output,
+        backpointers, boundary_banks, batch, family_batch, segment,
+        constrained, collect_telemetry);
   }
 }
 
@@ -3746,7 +3756,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         (!constrained || family_batch >= 64)));
   const bool norm_rank_eligible =
       grid_parallel && !midpoint_only && !cooperative &&
-      !constrained && !weighted && !direct_family_distance &&
+      !weighted && !direct_family_distance &&
       codebooks.scalar_type() == at::kHalf &&
       (bank_count == 2 || bank_count == 4) &&
       segment_steps == (bank_count == 2 ? 16 : 32) &&
@@ -3758,8 +3768,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     std::ostringstream reason;
     if (pruning_env_disabled) {
       reason << "the deprecated GPTQMODEL_QVQ_DISABLE_OCTET_GRID escape hatch disabled it";
-    } else if (constrained) {
-      reason << "constrained (overlap) calls keep the exact baseline recurrence";
     } else if (weighted) {
       reason << "weighted (step_weights) calls keep the exact baseline recurrence";
     } else if (direct_family_distance) {
@@ -4000,9 +4008,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       }                                                                                                 \
     }                                                                                                  \
   } while (0)
-  // Exact norm-rank contiguous-band fast path for the unconstrained,
-  // unweighted, half-codebook grid recurrence at W2.5/W3 only.  Every other
-  // configuration (constrained, weighted, direct-distance, cooperative,
+  // Exact norm-rank contiguous-band fast path for the unweighted,
+  // half-codebook grid recurrence at W2.5/W3 only. Every other configuration
+  // (weighted, direct-distance, cooperative,
   // midpoint-only, fp32 codebooks, other rates) falls through to the
   // unmodified baseline below, which remains the exact reference. Family
   // batches use physical-bank table addressing while retaining logical-bank
@@ -4015,10 +4023,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     launch_qvq_v2_segment_norm_rank_segments<BITS, BANKS, SEGMENT_STEPS, WIDTH>(                   \
         sequences.const_data_ptr<float>(),                                                         \
         reinterpret_cast<const uint64_t*>(codebook_norm.const_data_ptr<float>()),                  \
-        qvq_norm_rank_tables,                                                                      \
+        qvq_norm_rank_tables, overlap_ptr,                                                         \
         costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
         backpointers.mutable_data_ptr<uint8_t>(), boundary_banks.mutable_data_ptr<uint8_t>(),      \
-        batch, family_batch, stream, collect_pruning_telemetry);                                   \
+        batch, family_batch, constrained, stream, collect_pruning_telemetry);                      \
     qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
         <<<batch, kThreads, 0, stream>>>(                                                          \
             sequences.const_data_ptr<float>(),                                                     \

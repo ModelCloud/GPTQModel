@@ -58,12 +58,15 @@ The four legal combinations map one-to-one onto the native policy codes in
 ### Eligibility
 
 The eligible set is grid-parallel, non-cooperative, non-midpoint-only,
-unconstrained, unweighted, FP16 codebooks, `bank_count` 2 with
+unweighted, FP16 codebooks, `bank_count` 2 with
 `segment_steps` 16 or `bank_count` 4 with `segment_steps` 32, and
 `transition_bits` 5 (W2.5) or 6 (W3). Exact family-batched B2-P32 calls are
 also eligible: the kernel derives a physical codebook bank from the sequence's
 family while preserving the original logical-bank frontier and traceback
-layout. W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
+layout. Both the unconstrained provisional pass and constrained final
+tail-biting pass are eligible. The final pass initializes the skewed frontier
+with zero only at its required overlap and infinity elsewhere, exactly matching
+the reference state mask. W1.5/W2/W3.5 stay on the baseline under `auto` and are rejected under
 `required` and under `auto` + `fallback="error"`.
 
 Family-grid direct-distance calls remain ineligible because they deliberately

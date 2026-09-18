@@ -352,3 +352,34 @@ disjoint held-out results carry through without rerunning inference.
 An inference-tensor cache experiment raised retained norm-rank table entries
 from zero to seven but moved W3 from 27.693 to 27.744 seconds. It was rejected
 to avoid persistent GPU memory with no measured speed benefit.
+
+### Exact norm-band pruning for the constrained final pass
+
+The final tail-biting recurrence differs from its provisional pass only at
+step zero: it permits states whose shifted index equals the provisional
+overlap. In the norm-band kernel's skewed predecessor frontier this is exactly
+one zero-cost suffix and infinity everywhere else. Initializing that frontier
+directly preserves the baseline FP32 candidate expression, ascending-prefix
+tie order, bank selection, backpointers, and traceback while allowing every
+later step to use the same proven norm interval.
+
+On real Llama 3.2 1B tiles, the constrained kernel improved W3 by 2.5--3.1x
+over family-batch widths 1--256. W2.5 improved by 1.3--1.6x above the existing
+small-batch cooperative region. Matched one-layer exact-profile runs found:
+
+| Rate | Previous process quantization | Constrained norm-band | Speedup | Prepare + quantize speedup |
+|---|---:|---:|---:|---:|
+| W2.5 | 24.230 s | 23.917 s | 1.013x | 29.408 s -> 28.740 s (1.023x) |
+| W3 | 27.693 s | 26.441 s | 1.047x | 32.845 s -> 31.390 s (1.046x) |
+| W3.5 | unchanged | ineligible | 1.000x | unchanged |
+
+Eligible exact norm-band dispatches doubled from 2,712 to 5,424 at W2.5 and
+from 2,752 to 5,504 at W3 because each tail-biting solve can now accelerate
+both passes. Small cooperative W2.5 calls remain on their faster specialized
+kernel.
+
+All 17 serialized checkpoint shards are SHA-256 identical to the merged
+family-pruning checkpoints at both W2.5 and W3. Every per-module FP32 and FP64
+Fisher oracle value is therefore unchanged, as are the carried-forward
+strictly disjoint GSM8K Platinum held-out results. Calibration rows `[0,32)`
+and YAQA rows `[64,96)` remained disjoint in both matched runs.
