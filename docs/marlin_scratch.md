@@ -33,7 +33,7 @@ also means ordinary module forwards must not be assumed safe across streams.
 ## Opt-in eager reuse
 
 ```python
-from gptqmodel.utils.marlin import MarlinScratchContext
+from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 
 scratch = MarlinScratchContext("cuda:0", max_cached_bytes=64 << 20)
 with scratch:

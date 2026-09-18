@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from gptqmodel.utils import marlin as marlin_utils
+from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from scripts.marlin_scratch_fixture import gemm_arguments, make_layer
 
 pytestmark = [pytest.mark.cuda, pytest.mark.skipif(
@@ -183,7 +184,7 @@ def test_context_layers_growth_clear_and_state_dict(method):
     first, dense, bias = make_layer(method, torch.float16)
     second, dense2, bias2 = make_layer(method, torch.float16, k=288, n=200)
     keys = set(first.state_dict())
-    with marlin_utils.MarlinScratchContext("cuda:0") as context:
+    with MarlinScratchContext("cuda:0") as context:
         for m in (1, 17, 64, 2, 128, 8):
             for layer, weight, offset in ((first, dense, bias), (second, dense2, bias2)):
                 x = torch.randn(2, m, layer.in_features, device="cuda", dtype=torch.float16) / 16

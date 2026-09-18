@@ -6,7 +6,10 @@ import pytest
 import torch
 
 from gptqmodel.utils import marlin
-from gptqmodel.utils.marlin_scratch import active_marlin_scratch_context
+from gptqmodel.utils.marlin_scratch import (
+    MarlinScratchContext,
+    active_marlin_scratch_context,
+)
 from test_marlin_scratch_context import _gemm_args, _patch_ops
 
 
@@ -31,7 +34,7 @@ def test_allocator_hits_growth_and_smaller_rows(monkeypatch):
         allocations.append(result)
         return result
     monkeypatch.setattr(torch, "empty", empty)
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=256) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=256) as context:
         marlin.gptq_marlin_gemm(**inputs[1])
         first = (context.c_tmp, context.a_tmp, context.workspace)
         count = len(allocations)
@@ -52,7 +55,7 @@ def test_budget_counts_inactive_retained_capacity(monkeypatch):
     _patch_ops(monkeypatch, lambda a, m, *_: (10, 0) if m == 1 else (0, 40))
     first = _gemm_args(torch.ones(1, 8, dtype=torch.float16))
     second = ordered_args(2, fp32=False)
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=100) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=100) as context:
         marlin.gptq_marlin_gemm(**first)
         old = context.c_tmp
         marlin.gptq_marlin_gemm(**second)
@@ -63,7 +66,7 @@ def test_budget_counts_inactive_retained_capacity(monkeypatch):
 
 def test_oversized_permutation_preserves_reduction_hit(monkeypatch):
     _, calls = _patch_ops(monkeypatch, lambda a, m, *_: (5, 4) if m == 1 else (5, 1000))
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=64) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=64) as context:
         marlin.gptq_marlin_gemm(**ordered_args(1))
         old = context.c_tmp
         marlin.gptq_marlin_gemm(**ordered_args(2))
@@ -75,7 +78,7 @@ def test_oversized_permutation_preserves_reduction_hit(monkeypatch):
 def test_tiny_budget_uses_private_transient_locks(monkeypatch, budget):
     _, calls = _patch_ops(monkeypatch, (5, 10))
     args = ordered_args(1)
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=budget) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=budget) as context:
         marlin.gptq_marlin_gemm(**args)
         assert calls[-1][9] is not args["workspace"]
         assert calls[-1][9].dtype == torch.int32
@@ -90,7 +93,7 @@ def test_loader_failure_returns_lease(monkeypatch):
         if op_name != "marlin_scratch_sizes":
             raise RuntimeError("loader failed")
         return good(dtype=dtype, op_name=op_name)
-    with marlin.MarlinScratchContext("cpu") as context:
+    with MarlinScratchContext("cpu") as context:
         monkeypatch.setattr(marlin, "_marlin_resolve_op", fail)
         with pytest.raises(RuntimeError, match="loader failed"):
             marlin.gptq_marlin_gemm(**ordered_args(1))
@@ -109,7 +112,7 @@ def cuda_controls(monkeypatch):
 
 def test_context_reentry_keeps_stream_affinity(monkeypatch):
     state = cuda_controls(monkeypatch)
-    context = marlin.MarlinScratchContext("cuda:0")
+    context = MarlinScratchContext("cuda:0")
     with context:
         pass
     state["stream"] = object()
@@ -120,7 +123,7 @@ def test_context_reentry_keeps_stream_affinity(monkeypatch):
 
 def test_failed_exit_resets_active_context(monkeypatch):
     state = cuda_controls(monkeypatch)
-    context = marlin.MarlinScratchContext("cuda:0")
+    context = MarlinScratchContext("cuda:0")
     context.__enter__()
     state["stream"] = object()
     with pytest.raises(RuntimeError, match="stream"):
@@ -130,7 +133,7 @@ def test_failed_exit_resets_active_context(monkeypatch):
 
 def test_capture_started_after_context_entry_is_rejected(monkeypatch):
     state = cuda_controls(monkeypatch)
-    context = marlin.MarlinScratchContext("cuda:0")
+    context = MarlinScratchContext("cuda:0")
     with context:
         state["capture"] = True
         try:
@@ -144,7 +147,7 @@ def test_capture_started_after_context_entry_is_rejected(monkeypatch):
 
 def test_other_thread_cannot_clear_inactive_cache(monkeypatch):
     _patch_ops(monkeypatch, (5, 10))
-    context = marlin.MarlinScratchContext("cpu")
+    context = MarlinScratchContext("cpu")
     with context:
         marlin.gptq_marlin_gemm(**ordered_args(1))
     old = context.c_tmp
@@ -164,7 +167,7 @@ def test_other_thread_cannot_clear_inactive_cache(monkeypatch):
 
 def test_metadata_capacity_is_bounded(monkeypatch):
     _patch_ops(monkeypatch, (5, 10))
-    with marlin.MarlinScratchContext("cpu") as context:
+    with MarlinScratchContext("cpu") as context:
         for m in range(1, 80):
             marlin.gptq_marlin_gemm(**ordered_args(m))
         assert context.metadata_cache_size <= 64
@@ -172,7 +175,7 @@ def test_metadata_capacity_is_bounded(monkeypatch):
 
 def test_direct_empty_lease_can_be_released(monkeypatch):
     queries, _ = _patch_ops(monkeypatch, (1000, 1000))
-    with marlin.MarlinScratchContext("cpu") as context:
+    with MarlinScratchContext("cpu") as context:
         c_tmp, a_tmp, _ = context.acquire(torch.empty(0, 8, dtype=torch.float16),
                                          size_m=0, size_k=8,
                                          use_fp32_reduce=True, has_act_order=True)

@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from gptqmodel.utils import marlin
+from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
@@ -76,7 +77,7 @@ def test_context_cache_hit_uses_padded_shape_and_owns_workspace(monkeypatch):
     args = _gemm_args(torch.ones((2, 16), dtype=torch.float16), fp32=True)
     module_workspace = args["workspace"]
 
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=64) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=64) as context:
         # size_k deliberately differs from the actual post-padding A shape.
         args["size_k"] = 8
         marlin.gptq_marlin_gemm(**args)
@@ -96,7 +97,7 @@ def test_context_disabled_flags_skips_temp_buffers_but_keeps_owned_locks(monkeyp
     args["g_idx"] = torch.empty(0, dtype=torch.int32)
     args["perm"] = torch.empty(0, dtype=torch.int32)
 
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=64) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=64) as context:
         marlin.gptq_marlin_gemm(**args)
         assert len(queries) == 1
         assert len(calls[-1]) == 18
@@ -115,7 +116,7 @@ def test_context_budget_falls_back_and_retains_bounded_cache(monkeypatch):
 
     # Lock workspace is four bytes in CPU test mode; the first request costs
     # 12 bytes, while the larger request cannot fit in the retained budget.
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=16) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=16) as context:
         marlin.gptq_marlin_gemm(**first)
         old_c, old_a = context.c_tmp, context.a_tmp
         marlin.gptq_marlin_gemm(**second)
@@ -128,7 +129,7 @@ def test_context_budget_falls_back_and_retains_bounded_cache(monkeypatch):
 def test_context_clear_releases_cache_and_requeries(monkeypatch):
     queries, _ = _patch_ops(monkeypatch, (2, 2))
     args = _gemm_args(torch.ones((1, 8), dtype=torch.float16))
-    context = marlin.MarlinScratchContext("cpu", max_cached_bytes=32)
+    context = MarlinScratchContext("cpu", max_cached_bytes=32)
     with context:
         marlin.gptq_marlin_gemm(**args)
         assert context.c_tmp is not None
@@ -143,7 +144,7 @@ def test_context_clear_releases_cache_and_requeries(monkeypatch):
 
 def test_context_dtype_change_replaces_both_temporaries(monkeypatch):
     _patch_ops(monkeypatch, (2, 2))
-    context = marlin.MarlinScratchContext("cpu", max_cached_bytes=32)
+    context = MarlinScratchContext("cpu", max_cached_bytes=32)
     with context:
         first = _gemm_args(
             torch.ones((1, 8), dtype=torch.float16),
@@ -186,7 +187,7 @@ def test_context_releases_borrow_on_backend_exception(monkeypatch):
         "_marlin_resolve_op",
         lambda *, dtype, op_name: fake_query if op_name == "marlin_scratch_sizes" else resolver(dtype=dtype, op_name=op_name),
     )
-    context = marlin.MarlinScratchContext("cpu", max_cached_bytes=32)
+    context = MarlinScratchContext("cpu", max_cached_bytes=32)
     with context:
         with pytest.raises(RuntimeError, match="backend failure"):
             marlin.gptq_marlin_gemm(**args)
@@ -199,7 +200,7 @@ def test_context_releases_borrow_on_backend_exception(monkeypatch):
 def test_context_rejects_mixing_explicit_scratch(monkeypatch):
     _patch_ops(monkeypatch, (2, 2))
     args = _gemm_args(torch.ones((1, 8), dtype=torch.float16))
-    with marlin.MarlinScratchContext("cpu"):
+    with MarlinScratchContext("cpu"):
         with pytest.raises(ValueError, match="mixed"):
             marlin.gptq_marlin_gemm(**args, c_tmp=torch.empty(2, dtype=torch.float32))
 
@@ -208,7 +209,7 @@ def test_m0_does_not_query_or_allocate_manager_scratch(monkeypatch):
     queries, calls = _patch_ops(monkeypatch, (500, 700))
     args = _gemm_args(torch.empty((0, 8), dtype=torch.float16))
     module_workspace = args["workspace"]
-    with marlin.MarlinScratchContext("cpu", max_cached_bytes=0) as context:
+    with MarlinScratchContext("cpu", max_cached_bytes=0) as context:
         marlin.gptq_marlin_gemm(**args)
         assert queries == []
         assert len(calls[-1]) == 18
@@ -218,7 +219,7 @@ def test_m0_does_not_query_or_allocate_manager_scratch(monkeypatch):
 
 def test_context_nested_and_reused_entries_are_controlled(monkeypatch):
     _patch_ops(monkeypatch, (1, 1))
-    context = marlin.MarlinScratchContext("cpu")
+    context = MarlinScratchContext("cpu")
     with context:
         with pytest.raises(RuntimeError, match="nested|re-entered"):
             with context:
@@ -229,7 +230,7 @@ def test_context_nested_and_reused_entries_are_controlled(monkeypatch):
 
 def test_context_rejects_other_thread_and_concurrent_borrow(monkeypatch):
     _patch_ops(monkeypatch, (1, 1))
-    context = marlin.MarlinScratchContext("cpu")
+    context = MarlinScratchContext("cpu")
     errors = []
     with context:
         worker = threading.Thread(
@@ -259,7 +260,7 @@ def test_cuda_affinity_and_capture_checks_are_eager(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: current["device"])
     monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: current["stream"])
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: current["capture"])
-    context = marlin.MarlinScratchContext("cuda:0")
+    context = MarlinScratchContext("cuda:0")
     context.__enter__()
     try:
         current["capture"] = True

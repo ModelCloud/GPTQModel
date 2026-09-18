@@ -26,10 +26,7 @@ from .cpp import (
     is_nvcc_compatible,
 )
 from .marlin_scalar_type import ScalarType
-from .marlin_scratch import (
-    MarlinScratchContext,  # noqa: F401 - public utility export
-    active_marlin_scratch_context,
-)
+from .marlin_scratch import active_marlin_scratch_context
 from .rocm import IS_ROCM
 
 
