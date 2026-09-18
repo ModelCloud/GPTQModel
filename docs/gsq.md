@@ -320,6 +320,22 @@ counts, and held-out losses; strict split disjointness passed and gains remained
 exactly 15.0000% and 29.2717%. The staged driver enables this path by default;
 use `--no-cuda-graph-attention-updates` for eager comparison.
 
+MLP hard checkpoints now convert each reconstructed FP32 gate/up/down weight
+to the decoder's BF16 parameter dtype once, before replaying the checkpoint
+over multiple held-out microbatches. The previous path repeated the same large
+FP32-to-BF16 conversion inside every functional call. The fitter also retains
+the selected MLP checkpoint's detached BF16 weights for the final training-loss
+pass instead of reconstructing that exact state again. Validation losses,
+checkpoint selection, optimizer arithmetic, and serialized FP32 scales and P32
+words are unchanged. Across three alternating H100 pairs, median MLP fitting
+improved from 0.4268s to 0.4247s (1.005x) at 32/8/32 x 512 tokens and from
+0.6687s to 0.6632s (1.008x) at 64/16/64 x 256 tokens. Every matched 14-tensor
+state and held-out loss was bit-for-bit equal, and strict split disjointness
+passed. The optimization is deliberately limited to MLP: applying the same
+retained-weight policy to graphed attention did not produce a stable stage
+gain. Use `--no-precast-mlp-hard-weights` and
+`--no-reuse-best-mlp-hard-weights` for the prior control path.
+
 Candidate metadata produced by the staged driver is already legal by
 construction: the initial words come from the loaded QVQ payload, composed
 rounds come from `hard_state()`, and sparse values come from the candidate

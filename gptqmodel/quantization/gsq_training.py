@@ -515,9 +515,9 @@ class _CUDAGraphedStageUpdates:
 
 
 @torch.no_grad()
-def _hard_stage_weights(quantizers):
+def _hard_stage_weights(quantizers, *, dtype=None):
     """Materialize one reusable set of deterministic hard stage weights."""
-    return {
+    weights = {
         name: (
             quantizer.hard_weight_for_evaluation()
             if hasattr(quantizer, "hard_weight_for_evaluation")
@@ -525,6 +525,10 @@ def _hard_stage_weights(quantizers):
         )
         for name, quantizer in quantizers.items()
     }
+    return (
+        weights if dtype is None else
+        {name: value.to(dtype) for name, value in weights.items()}
+    )
 
 
 @torch.no_grad()
@@ -620,7 +624,9 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              min_lr=0., decay='linear', optimizer='lion',
                              validation_batches=None, restore_best=False,
                              fp32_tail_epochs=0, validation_start_epoch=0,
-                             export_weights=True, cuda_graph_updates=False):
+                             export_weights=True, cuda_graph_updates=False,
+                             reuse_best_hard_weights=False,
+                             hard_weight_dtype=None):
     """Train one stage with an optional held-out guard and hard-weight export.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
@@ -650,12 +656,18 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         raise ValueError('GSQ export_weights must be boolean')
     if not isinstance(cuda_graph_updates, bool):
         raise TypeError('GSQ CUDA graph update control must be boolean')
+    if not isinstance(reuse_best_hard_weights, bool):
+        raise TypeError('GSQ best hard-weight reuse control must be boolean')
+    if hard_weight_dtype is not None and not isinstance(hard_weight_dtype, torch.dtype):
+        raise TypeError('GSQ hard-weight dtype must be a torch dtype or None')
     if cuda_graph_updates and fp32_tail_epochs:
         raise ValueError('GSQ CUDA graph updates require a fixed training dtype')
     import time
 
     started = time.perf_counter()
-    initial_hard_weights = _hard_stage_weights(quantizers)
+    initial_hard_weights = _hard_stage_weights(
+        quantizers, dtype=hard_weight_dtype,
+    )
     hard_loss_before = evaluate_hard_stage(
         quantizers, batches, objective, weights=initial_hard_weights,
     )
@@ -666,7 +678,12 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         )
         if validation_batches else None
     )
-    del initial_hard_weights
+    best_hard_weights = (
+        initial_hard_weights
+        if restore_best and reuse_best_hard_weights else None
+    )
+    if best_hard_weights is None:
+        del initial_hard_weights
 
     def parameter_snapshot():
         return {
@@ -743,13 +760,26 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 'learning_rates': learning_rates,
             })
         if validation_batches and epoch >= validation_start_epoch:
-            validation_loss = evaluate_hard_stage(quantizers, validation_batches, objective)
+            materialize_checkpoint_weights = (
+                hard_weight_dtype is not None
+                or (restore_best and reuse_best_hard_weights)
+            )
+            checkpoint_weights = (
+                _hard_stage_weights(quantizers, dtype=hard_weight_dtype)
+                if materialize_checkpoint_weights else None
+            )
+            validation_loss = evaluate_hard_stage(
+                quantizers, validation_batches, objective,
+                weights=checkpoint_weights,
+            )
             validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
             if validation_loss < best_validation_loss:
                 best_validation_loss = validation_loss
                 best_epoch = epoch
                 if restore_best:
                     best_parameters = parameter_snapshot()
+                    if reuse_best_hard_weights:
+                        best_hard_weights = checkpoint_weights
     # Preserve the public CPU-scalar history with one device transfer instead
     # of one synchronizing scalar conversion per optimizer update.
     history_losses = torch.stack([entry['loss'] for entry in history]).cpu().tolist()
@@ -768,7 +798,11 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                   ),
                   scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
                   history=history, hard_loss_before=hard_loss_before)
-    final_hard_weights = _hard_stage_weights(quantizers)
+    final_hard_weights = (
+        best_hard_weights
+        if restore_best and reuse_best_hard_weights else
+        _hard_stage_weights(quantizers, dtype=hard_weight_dtype)
+    )
     result['hard_loss_after'] = evaluate_hard_stage(
         quantizers, batches, objective, weights=final_hard_weights,
     )

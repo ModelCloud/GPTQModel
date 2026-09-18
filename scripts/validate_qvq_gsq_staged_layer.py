@@ -299,6 +299,18 @@ def parse_args():
         help="Decode accepted P32 states without constructing throwaway candidate banks",
     )
     parser.add_argument(
+        "--reuse-best-mlp-hard-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse selected MLP checkpoint weights for final stage-loss reporting",
+    )
+    parser.add_argument(
+        "--precast-mlp-hard-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cast each hard MLP checkpoint to the BF16 Llama parameter dtype only once",
+    )
+    parser.add_argument(
         "--trust-generated-candidate-inputs",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1100,6 +1112,14 @@ def main():
                 options["cuda_graph_updates"] = bool(
                     stage_name == "attention" and args.cuda_graph_attention_updates
                 )
+                options["reuse_best_hard_weights"] = bool(
+                    stage_name == "mlp" and args.reuse_best_mlp_hard_weights
+                )
+                options["hard_weight_dtype"] = (
+                    torch.bfloat16
+                    if stage_name == "mlp" and args.precast_mlp_hard_weights
+                    else None
+                )
                 result = fit_reconstruction_stage(
                     quantizers,
                     stage_train_batches,
@@ -1312,6 +1332,8 @@ def main():
         "inline_p32_overlap": args.inline_p32_overlap,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
+        "reuse_best_mlp_hard_weights": args.reuse_best_mlp_hard_weights,
+        "precast_mlp_hard_weights": args.precast_mlp_hard_weights,
         "trust_generated_candidate_inputs": args.trust_generated_candidate_inputs,
         "gpu_idle_preflight": (
             _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
