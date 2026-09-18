@@ -6296,6 +6296,60 @@ def test_qvq_pruning_telemetry_reports_candidate_reduction(monkeypatch):
     assert possible - evaluated > 0
 
 
+@pytest.mark.parametrize("bank_count,segment_steps", ((2, 16), (4, 32)))
+@pytest.mark.parametrize("constrained", (False, True))
+def test_qvq_shift7_norm_rank_multiwave_geometry_is_bit_exact(
+    bank_count, segment_steps, constrained
+):
+    """The 256-thread Shift-7 geometry selected at a full SM wave must remain
+    bit-exact against the pristine recurrence."""
+
+    properties = torch.cuda.get_device_properties(0)
+    batch = (properties.multi_processor_count + bank_count - 1) // bank_count
+    sequences, codebooks = _norm_rank_case(20260918 + bank_count, batch, 3.5, bank_count)
+    overlap = (
+        torch.randint(
+            0,
+            1 << (16 - 7),
+            (batch,),
+            generator=torch.Generator(device="cuda").manual_seed(20260919),
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
+    )
+    op = _qvq_cuda_viterbi_v2_segment_grid_trusted_op()
+    reference = op(
+        sequences, codebooks, 7, segment_steps, overlap, None, _pruning_code(mode="off")
+    )
+    actual = op(
+        sequences, codebooks, 7, segment_steps, overlap, None, _pruning_code(mode="required")
+    )
+    assert all(torch.equal(expected, observed) for expected, observed in zip(reference, actual))
+
+
+def test_qvq_shift7_multiwave_telemetry_totals_are_exact(monkeypatch):
+    """The 256-thread CTA's eight-warp reduction must count every candidate."""
+
+    monkeypatch.setenv("GPTQMODEL_QVQ_TELEMETRY", "1")
+    bank_count = 2
+    properties = torch.cuda.get_device_properties(0)
+    batch = (properties.multi_processor_count + bank_count - 1) // bank_count
+    sequences, codebooks = _norm_rank_case(20260920, batch, 3.5, bank_count)
+    snapshot = torch.ops.gptqmodel_qvq.norm_rank_telemetry_snapshot
+    before = tuple(int(value) for value in snapshot())
+    _qvq_cuda_viterbi_v2_segment_grid_trusted_op()(
+        sequences, codebooks, 7, 16, None, None, _pruning_code(mode="required")
+    )
+    after = tuple(int(value) for value in snapshot())
+
+    evaluated = after[2] - before[2]
+    possible = after[3] - before[3]
+    assert possible == batch * bank_count * 127 * (1 << 16)
+    assert 0 < evaluated < possible
+
+
 @pytest.mark.parametrize(
     "mode,fallback,env,expected",
     (

@@ -3496,8 +3496,8 @@ bool norm_rank_telemetry_enabled() {
 // Segment loop for the norm-rank contiguous-band recurrence.  Launch geometry,
 // frontier ping-pong, and the final frontier parity all match
 // QVQ_V2_SEGMENT_GRID_LAUNCH, so the shared finalize kernel is reused verbatim.
-template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
-void launch_qvq_v2_segment_norm_rank_segments(
+template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth, int BlockThreads>
+void launch_qvq_v2_segment_norm_rank_segments_block(
     const float* sequences,
     const uint64_t* baseline_records,
     const NormRankTables& tables,
@@ -3516,16 +3516,15 @@ void launch_qvq_v2_segment_norm_rank_segments(
   constexpr int suffix_count = 1 << (16 - Shift);
   constexpr int group_count = 1 << (16 - 2 * Shift);
   constexpr int segments = 128 / SegmentSteps;
-  constexpr int block_threads = Shift == 7 ? 512 : kThreads;
   constexpr size_t recurrence_shared_bytes =
       2 * static_cast<size_t>(suffix_count + prefix_count) * sizeof(float) +
       3 * static_cast<size_t>(group_count) * sizeof(unsigned);
   const size_t shared_bytes = collect_telemetry
       ? std::max(recurrence_shared_bytes,
-                 2 * static_cast<size_t>(block_threads / 32) * sizeof(unsigned long long))
+                 2 * static_cast<size_t>(BlockThreads / 32) * sizeof(unsigned long long))
       : recurrence_shared_bytes;
   auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<
-      Shift, BankCount, SegmentSteps, ChunkWidth, block_threads>;
+      Shift, BankCount, SegmentSteps, ChunkWidth, BlockThreads>;
   C10_CUDA_CHECK(cudaFuncSetAttribute(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)));
   const uint64_t* records =
@@ -3533,17 +3532,61 @@ void launch_qvq_v2_segment_norm_rank_segments(
   const PackType* prefixes =
       reinterpret_cast<const PackType*>(tables.prefixes.const_data_ptr<uint8_t>());
   const float* low_norms = tables.low_norms.const_data_ptr<float>();
-  kernel<<<batch * BankCount, block_threads, shared_bytes, stream>>>(
+  kernel<<<batch * BankCount, BlockThreads, shared_bytes, stream>>>(
       sequences, baseline_records, records, prefixes, low_norms, overlap, nullptr,
       frontier_a, backpointers, boundary_banks, batch, family_batch, 0,
       constrained, collect_telemetry);
   for (int segment = 1; segment < segments; ++segment) {
     const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
     float* output = segment % 2 == 1 ? frontier_b : frontier_a;
-    kernel<<<batch * BankCount, block_threads, shared_bytes, stream>>>(
+    kernel<<<batch * BankCount, BlockThreads, shared_bytes, stream>>>(
         sequences, baseline_records, records, prefixes, low_norms, overlap, input, output,
         backpointers, boundary_banks, batch, family_batch, segment,
         constrained, collect_telemetry);
+  }
+}
+
+template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
+void launch_qvq_v2_segment_norm_rank_segments(
+    const float* sequences,
+    const uint64_t* baseline_records,
+    const NormRankTables& tables,
+    const int64_t* overlap,
+    float* frontier_a,
+    float* frontier_b,
+    uint8_t* backpointers,
+    uint8_t* boundary_banks,
+    int batch,
+    int family_batch,
+    bool constrained,
+    cudaStream_t stream,
+    bool collect_telemetry,
+    int multiprocessor_count) {
+  // Shift-7 has two suffix columns per thread at 256 threads.  The extra
+  // instruction-level work loses on an underfilled grid, but wins once the
+  // 512-thread launch reaches a full SM wave because the smaller CTA permits
+  // more resident work.  Select from grid geometry, not a model-specific
+  // batch constant, so B2/P32 and B4/P64 share the same policy.
+  if constexpr (Shift == 7) {
+    if (batch * BankCount >= multiprocessor_count) {
+      launch_qvq_v2_segment_norm_rank_segments_block<
+          Shift, BankCount, SegmentSteps, ChunkWidth, 256>(
+          sequences, baseline_records, tables, overlap, frontier_a, frontier_b,
+          backpointers, boundary_banks, batch, family_batch, constrained, stream,
+          collect_telemetry);
+      return;
+    }
+    launch_qvq_v2_segment_norm_rank_segments_block<
+        Shift, BankCount, SegmentSteps, ChunkWidth, 512>(
+        sequences, baseline_records, tables, overlap, frontier_a, frontier_b,
+        backpointers, boundary_banks, batch, family_batch, constrained, stream,
+        collect_telemetry);
+  } else {
+    launch_qvq_v2_segment_norm_rank_segments_block<
+        Shift, BankCount, SegmentSteps, ChunkWidth, kThreads>(
+        sequences, baseline_records, tables, overlap, frontier_a, frontier_b,
+        backpointers, boundary_banks, batch, family_batch, constrained, stream,
+        collect_telemetry);
   }
 }
 
@@ -4042,7 +4085,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         qvq_norm_rank_tables, overlap_ptr,                                                         \
         costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
         backpointers.mutable_data_ptr<uint8_t>(), boundary_banks.mutable_data_ptr<uint8_t>(),      \
-        batch, family_batch, constrained, stream, collect_pruning_telemetry);                      \
+        batch, family_batch, constrained, stream, collect_pruning_telemetry,                       \
+        properties.multiProcessorCount);                                                           \
     qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
         <<<batch, kThreads, 0, stream>>>(                                                          \
             sequences.const_data_ptr<float>(),                                                     \
