@@ -359,12 +359,23 @@ __device__ __forceinline__ void qvq_p32_window_state_pair(
   const int shift = bit_position & 31;
   const int first_next_word = first_word + 1 == kWordsPerP32Tile ? 0 : first_word + 1;
   const int second_word = first_word - kKPairWordDistance;
-  const uint64_t first_window = static_cast<uint64_t>(window_words[first_word]) |
-      (static_cast<uint64_t>(window_words[first_next_word]) << 32);
-  const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
-      (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
-  first = static_cast<uint32_t>(first_window >> shift);
-  second = static_cast<uint32_t>(second_window >> shift);
+  if constexpr (TransitionBits == 7) {
+    // Shift-7 only needs the low 16 bits of each circular window. Express the
+    // existing low-word result directly as a 32-bit funnel shift so ptxas
+    // does not retain the unused high half of four 64-bit shifts in the hot
+    // decode loop.
+    first = __funnelshift_r(
+        window_words[first_word], window_words[first_next_word], shift);
+    second = __funnelshift_r(
+        window_words[second_word], window_words[second_word + 1], shift);
+  } else {
+    const uint64_t first_window = static_cast<uint64_t>(window_words[first_word]) |
+        (static_cast<uint64_t>(window_words[first_next_word]) << 32);
+    const uint64_t second_window = static_cast<uint64_t>(window_words[second_word]) |
+        (static_cast<uint64_t>(window_words[second_word + 1]) << 32);
+    first = static_cast<uint32_t>(first_window >> shift);
+    second = static_cast<uint32_t>(second_window >> shift);
+  }
 }
 
 // W2.5, W3, and W3.5 cross enough word boundaries for the lane geometry
