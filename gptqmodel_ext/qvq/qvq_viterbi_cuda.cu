@@ -1857,9 +1857,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 //
 //   slack  = max(U*(1+eps)[ru] - floor, 0)          >= (U - floor)(1 + c1*u)
 //   radius = sqrt_approx(slack*(1+eps)[ru] + tn*eps[ru])*(1+eps)[ru]
-//   root   = sqrt_rn(tn)
-//   root_lo/root_hi = adjacent FP32 values below/above root
-//   band   = [ (root_lo - radius)^2_rd , (root_hi*(1+eps)[ru] + radius)^2_ru ]
+//   root_lo/root_hi = outward enclosure of sqrt(tn), then root_hi *= 1+eps
+//   band   = [ (root_lo - radius)^2_rd , (root_hi + radius)^2_ru ]
 //
 // The eps*slack term inside the square root covers every multiplicative error
 // (32u versus the required < 5u) and the eps*tn term covers every additive
@@ -1869,9 +1868,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // O(sqrt(u)) sliver that admits essentially no extra survivors.  Nothing here
 // needs directed-rounding square roots.  PTX bounds sqrt.approx.f32 relative
 // error by 2^-23 = 2u, so the radius's 1+32u outward scale remains a strict
-// upper bound.  The correctly rounded target sqrt_rn lies within its two
-// adjacent representable FP32 values, so those neighbors exactly enclose the
-// real target square root while requiring only one correctly rounded sqrt.
+// upper bound.  W2.5 and resident-two-CTA W3.5 similarly enclose the target's
+// approximate square root with 1 +/- 2^-22 = 1 +/- 4u before applying the
+// original 1+32u upper expansion.  That correction is twice PTX's worst-case
+// 2u error.  W3 and underfilled W3.5 retain adjacent values around sqrt_rn,
+// which benchmark faster for their cheaper candidate scans.
 // Nothing here relies on the FP32 bound being monotone in nu: the band is contiguous
 // because the *table* is sorted by the very same cached FP32 norms, and every
 // rounding decision above only widens the interval.  Non-finite targets or
@@ -1886,6 +1887,8 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 // ---------------------------------------------------------------------------
 constexpr float kNormRankEps = 1.9073486328125e-06f;         // 2^-19, exact in FP32
 constexpr float kNormRankRelax = 1.0000019073486328125f;     // 1 + 2^-19, exact in FP32
+constexpr float kNormRankApproxContract = 0.9999997615814208984375f;  // 1 - 2^-22
+constexpr float kNormRankApproxRelax = 1.0000002384185791015625f;     // 1 + 2^-22
 
 __device__ __forceinline__ float qvq_sqrt_approx(float value) {
   float result;
@@ -2046,11 +2049,20 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     const float tx = target[0];
     const float ty = target[1];
     const float tn = __fadd_rn(__fmul_rn(tx, tx), __fmul_rn(ty, ty));
-    const float root = __fsqrt_rn(tn);
-    const unsigned root_bits = __float_as_uint(root);
-    const float root_low = root_bits == 0u ? 0.0f : __uint_as_float(root_bits - 1u);
-    const float root_upper = __uint_as_float(root_bits + 1u);
-    const float root_high = __fmul_ru(root_upper, kNormRankRelax);
+    float root_low;
+    float root_high;
+    if constexpr (Shift == 5 || (Shift == 7 && BlockThreads == 256)) {
+      const float root = qvq_sqrt_approx(tn);
+      root_low = __fmul_rd(root, kNormRankApproxContract);
+      const float root_upper = __fmul_ru(root, kNormRankApproxRelax);
+      root_high = __fmul_ru(root_upper, kNormRankRelax);
+    } else {
+      const float root = __fsqrt_rn(tn);
+      const unsigned root_bits = __float_as_uint(root);
+      root_low = root_bits == 0u ? 0.0f : __uint_as_float(root_bits - 1u);
+      const float root_upper = __uint_as_float(root_bits + 1u);
+      root_high = __fmul_ru(root_upper, kNormRankRelax);
+    }
     const float target_slack = __fmul_ru(tn, kNormRankEps);
     const int64_t step_pointer_base =
         pointer_base + static_cast<int64_t>(step) * bank_suffix_count;
