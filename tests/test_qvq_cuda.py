@@ -3976,9 +3976,25 @@ def test_qvq_v2b2_w3_family_batch_uses_exact_midpoint_only_provisional_pass():
     assert counters.get("viterbi_provisional_selectors_discarded", 0) == 0
 
 
-def test_qvq_v2b2_family_batch_reports_provisional_direct_distance(monkeypatch):
+def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(monkeypatch):
     monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional")
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", "1")
     generator = torch.Generator(device="cuda").manual_seed(20260922)
+
+    source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
+    left = torch.randn((2, 32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    output_feedback = torch.tril(
+        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01,
+        diagonal=-1,
+    )
+    fast_feedback = _qvq_cuda_yaqa_feedback_op()(
+        source, left, right, output_feedback, 0, 3, 2, None
+    )
+    repeated_feedback = _qvq_cuda_yaqa_feedback_op()(
+        source, left, right, output_feedback, 0, 3, 2, None
+    )
+
     weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
     hessian = torch.eye(32, device="cuda", dtype=torch.float32)
     pair_stacks = torch.stack(
@@ -4003,6 +4019,8 @@ def test_qvq_v2b2_family_batch_reports_provisional_direct_distance(monkeypatch):
     )
     counters = telemetry.finalize()["counters"]
 
+    assert torch.equal(fast_feedback, repeated_feedback)
+    assert torch.isfinite(fast_feedback).all()
     assert torch.isfinite(quantized).all()
     assert states.shape[-1] == 128
     assert selectors.dtype == torch.uint8
