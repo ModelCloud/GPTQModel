@@ -16,6 +16,8 @@ def main() -> None:
         (2.5, 4, 32),
         (3.0, 2, 16),
         (3.0, 4, 32),
+        (3.5, 2, 16),
+        (3.5, 4, 32),
     ):
         generator = torch.Generator(device="cuda").manual_seed(
             20260840 + int(bits * 2) * 10 + bank_count

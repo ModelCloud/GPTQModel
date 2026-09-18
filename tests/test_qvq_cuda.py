@@ -5685,7 +5685,17 @@ def _norm_rank_dispatch_count():
     return int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
 
 
-@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps",
+    (
+        (2.5, 2, 16),
+        (2.5, 4, 32),
+        (3.0, 2, 16),
+        (3.0, 4, 32),
+        (3.5, 2, 16),
+        (3.5, 4, 32),
+    ),
+)
 def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, bank_count, segment_steps):
     """The norm-rank band path must actually dispatch for supported configs and
     agree bit-for-bit with the segmented banked reference."""
@@ -5709,7 +5719,7 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, 
     assert torch.equal(actual[2], eager.segment_bank_ids)
 
 
-@pytest.mark.parametrize("bits", (2.5, 3.0))
+@pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
 @pytest.mark.parametrize("families,batch", ((2, 7), (3, 64)))
 @pytest.mark.parametrize("constrained", (False, True))
 def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
@@ -5762,7 +5772,6 @@ def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
     "bits,bank_count,segment_steps,constrained,weighted,codebook_dtype",
     (
         (2.0, 2, 16, False, False, torch.float16),   # shift 4: candidate list too short to pay for banding
-        (3.5, 2, 16, False, False, torch.float16),   # shift 7: unsupported rate
         (2.5, 2, 16, False, True, torch.float16),    # weighted keeps the exact fallback
         (3.0, 4, 32, True, True, torch.float16),
         (3.0, 2, 16, False, False, torch.float32),   # fp32 codebooks keep the reference path
@@ -6037,7 +6046,10 @@ def test_qvq_cuda_norm_rank_w25_bank4_nextafter_chunk_boundary_matches_eager(mon
     assert torch.equal(actual[2], eager.segment_bank_ids)
 
 
-@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32)))
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps",
+    ((2.5, 2, 16), (3.0, 2, 16), (3.0, 4, 32), (3.5, 2, 16), (3.5, 4, 32)),
+)
 @pytest.mark.parametrize("pattern", ("ties", "tiny", "large"))
 @pytest.mark.parametrize("constrained", (False, True))
 def test_qvq_cuda_norm_rank_rounding_edges_and_ties_match_banked_reference(
@@ -6094,7 +6106,17 @@ def _pruning_code(**kwargs):
     return viterbi_pruning_dispatch_code(ViterbiPruningConfig(**kwargs))
 
 
-@pytest.mark.parametrize("bits,bank_count,segment_steps", ((2.5, 2, 16), (2.5, 4, 32), (3.0, 2, 16), (3.0, 4, 32)))
+@pytest.mark.parametrize(
+    "bits,bank_count,segment_steps",
+    (
+        (2.5, 2, 16),
+        (2.5, 4, 32),
+        (3.0, 2, 16),
+        (3.0, 4, 32),
+        (3.5, 2, 16),
+        (3.5, 4, 32),
+    ),
+)
 @pytest.mark.parametrize("mode", ("auto", "required"))
 @pytest.mark.parametrize("constrained", (False, True))
 def test_qvq_pruning_policy_dispatches_eligible_cells(
@@ -6155,12 +6177,11 @@ def test_qvq_pruning_policy_off_suppresses_eligible_dispatch(bits, bank_count, s
     assert all(torch.equal(d, s) for d, s in zip(dispatched, suppressed))
 
 
-# W1.5/W2/W3.5 stay outside the benchmark-supported W2.5/W3 set, and fp32
+# W1.5/W2 stay outside the benchmark-supported W2.5--W3.5 set, and fp32
 # codebooks and weighted calls keep the exact baseline.
 _UNSUPPORTED_PRUNING_CELLS = (
     pytest.param(2.0, 2, 16, False, False, torch.float16, "transition_bits=4", id="w2-rate"),
     pytest.param(1.5, 2, 16, False, False, torch.float16, "transition_bits=3", id="w1p5-rate"),
-    pytest.param(3.5, 2, 16, False, False, torch.float16, "transition_bits=7", id="w3p5-rate"),
     pytest.param(3.0, 2, 16, False, False, torch.float32, "float16 codebooks", id="fp32-codebooks"),
     pytest.param(3.0, 4, 32, False, True, torch.float16, "weighted", id="weighted"),
 )

@@ -473,6 +473,7 @@ struct NormRankPrefixPack<8> {
 // choices are the fastest of the 2/4/8 sweep recorded in OPTIMIZATION_LOG.md.
 constexpr int kNormRankChunkWidthW25 = 4;
 constexpr int kNormRankChunkWidthW3 = 4;
+constexpr int kNormRankChunkWidthW35 = 4;
 
 // Rank of each state inside its own suffix column, ordered by (norm, original
 // prefix).  One thread per state, prefix_count comparisons each; runs once per
@@ -1885,8 +1886,8 @@ constexpr float kNormRankRelax = 1.0000019073486328125f;     // 1 + 2^-19, exact
 __device__ unsigned long long g_norm_rank_candidates_evaluated = 0;
 __device__ unsigned long long g_norm_rank_candidates_possible = 0;
 
-template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth>
-__global__ __launch_bounds__(kThreads, Shift >= 6 ? 1 : 2)
+template <int Shift, int BankCount, int SegmentSteps, int ChunkWidth, int BlockThreads>
+__global__ __launch_bounds__(BlockThreads, Shift >= 6 ? 1 : 2)
 void qvq_v2_segment_grid_norm_rank_kernel(
     const float* __restrict__ sequences,
     const uint64_t* __restrict__ baseline_records,
@@ -1912,7 +1913,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   constexpr int segment_count = 128 / segment_steps;
   constexpr int bank_suffix_count = bank_count * suffix_count;
   constexpr int chunk_count = prefix_count / ChunkWidth;
-  constexpr int column_iterations = suffix_count / kThreads;
+  constexpr int column_iterations = suffix_count / BlockThreads;
   // Predecessor of state h * suffix_count + x is h * group_count + (x >> shift):
   // exactly the suffixes congruent to (x >> shift) modulo group_count.
   constexpr int group_shift = 16 - 2 * shift;
@@ -1927,7 +1928,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   static_assert(group_count * prefix_count == suffix_count, "group decomposition");
   static_assert(prefix_count % ChunkWidth == 0, "chunk width must divide the prefix count");
   static_assert(ChunkWidth % 2 == 0, "chunk records are loaded in aligned 16-byte pairs");
-  static_assert(suffix_count % kThreads == 0, "warps must stay fully populated");
+  static_assert(suffix_count % BlockThreads == 0, "warps must stay fully populated");
 
   const int flat_block = static_cast<int>(blockIdx.x);
   const int sequence = flat_block / bank_count;
@@ -1967,7 +1968,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   const float* bank_low = chunk_low_norms +
       static_cast<int64_t>(physical_bank) * chunk_count * suffix_count;
 
-  for (int slot = thread; slot < 3 * group_count; slot += kThreads) {
+  for (int slot = thread; slot < 3 * group_count; slot += BlockThreads) {
     group_min_all[slot] = kInfBits;
   }
   __syncthreads();
@@ -1978,7 +1979,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     // admits exactly the predecessor suffix named by overlap[sequence]; all
     // other prefixes begin at infinity, matching the baseline state mask.
     const int required_overlap = constrained ? static_cast<int>(overlap[sequence]) : 0;
-    for (int x = thread; x < suffix_count; x += kThreads) {
+    for (int x = thread; x < suffix_count; x += BlockThreads) {
       g_previous[x + (x >> group_shift)] =
           !constrained || x == required_overlap ? 0.0f : CUDART_INF_F;
     }
@@ -1988,7 +1989,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     }
   } else {
     const int64_t input_base = static_cast<int64_t>(sequence) * bank_suffix_count;
-    for (int x = thread; x < suffix_count; x += kThreads) {
+    for (int x = thread; x < suffix_count; x += BlockThreads) {
       float best = g_input_all[input_base + x];
       int best_bank = 0;
       #pragma unroll
@@ -2023,7 +2024,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
 
   const int recurrence_start = segment_index == 0 ? 0 : first_step;
   for (int step = recurrence_start; step < end_step; ++step) {
-    for (int slot = thread; slot < group_count; slot += kThreads) {
+    for (int slot = thread; slot < group_count; slot += BlockThreads) {
       group_min_spare[slot] = kInfBits;
     }
     const bool reseed = step == recurrence_start;
@@ -2042,7 +2043,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
       if (collect_telemetry) {
         candidates_possible += prefix_count;
       }
-      const int x = thread + column * kThreads;
+      const int x = thread + column * BlockThreads;
       const int group = x >> shift;
       const float floor_cost = __uint_as_float(group_min[group]);
 
@@ -2189,7 +2190,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     group_min_next = group_min_spare;
     group_min_spare = rotate;
   }
-  for (int x = thread; x < suffix_count; x += kThreads) {
+  for (int x = thread; x < suffix_count; x += BlockThreads) {
     g_output_all[g_base + x] = g_previous[x + (x >> group_shift)];
   }
   if (collect_telemetry) {
@@ -2199,18 +2200,18 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     // telemetry when the recurrence's normal workspace is smaller.
     auto* reduction = reinterpret_cast<unsigned long long*>(shared_frontiers);
     reduction[thread] = candidates_evaluated;
-    reduction[kThreads + thread] = candidates_possible;
+    reduction[BlockThreads + thread] = candidates_possible;
     __syncthreads();
-    for (int stride = kThreads / 2; stride > 0; stride >>= 1) {
+    for (int stride = BlockThreads / 2; stride > 0; stride >>= 1) {
       if (thread < stride) {
         reduction[thread] += reduction[thread + stride];
-        reduction[kThreads + thread] += reduction[kThreads + thread + stride];
+        reduction[BlockThreads + thread] += reduction[BlockThreads + thread + stride];
       }
       __syncthreads();
     }
     if (thread == 0) {
       atomicAdd(&g_norm_rank_candidates_evaluated, reduction[0]);
-      atomicAdd(&g_norm_rank_candidates_possible, reduction[kThreads]);
+      atomicAdd(&g_norm_rank_candidates_possible, reduction[BlockThreads]);
     }
   }
 }
@@ -3503,13 +3504,16 @@ void launch_qvq_v2_segment_norm_rank_segments(
   constexpr int suffix_count = 1 << (16 - Shift);
   constexpr int group_count = 1 << (16 - 2 * Shift);
   constexpr int segments = 128 / SegmentSteps;
+  constexpr int block_threads = Shift == 7 ? 512 : kThreads;
   constexpr size_t recurrence_shared_bytes =
       2 * static_cast<size_t>(suffix_count + prefix_count) * sizeof(float) +
       3 * static_cast<size_t>(group_count) * sizeof(unsigned);
   const size_t shared_bytes = collect_telemetry
-      ? std::max(recurrence_shared_bytes, 2 * static_cast<size_t>(kThreads) * sizeof(unsigned long long))
+      ? std::max(recurrence_shared_bytes,
+                 2 * static_cast<size_t>(block_threads) * sizeof(unsigned long long))
       : recurrence_shared_bytes;
-  auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<Shift, BankCount, SegmentSteps, ChunkWidth>;
+  auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<
+      Shift, BankCount, SegmentSteps, ChunkWidth, block_threads>;
   C10_CUDA_CHECK(cudaFuncSetAttribute(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_bytes)));
   const uint64_t* records =
@@ -3517,14 +3521,14 @@ void launch_qvq_v2_segment_norm_rank_segments(
   const PackType* prefixes =
       reinterpret_cast<const PackType*>(tables.prefixes.const_data_ptr<uint8_t>());
   const float* low_norms = tables.low_norms.const_data_ptr<float>();
-  kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
+  kernel<<<batch * BankCount, block_threads, shared_bytes, stream>>>(
       sequences, baseline_records, records, prefixes, low_norms, overlap, nullptr,
       frontier_a, backpointers, boundary_banks, batch, family_batch, 0,
       constrained, collect_telemetry);
   for (int segment = 1; segment < segments; ++segment) {
     const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
     float* output = segment % 2 == 1 ? frontier_b : frontier_a;
-    kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
+    kernel<<<batch * BankCount, block_threads, shared_bytes, stream>>>(
         sequences, baseline_records, records, prefixes, low_norms, overlap, input, output,
         backpointers, boundary_banks, batch, family_batch, segment,
         constrained, collect_telemetry);
@@ -3760,7 +3764,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       codebooks.scalar_type() == at::kHalf &&
       (bank_count == 2 || bank_count == 4) &&
       segment_steps == (bank_count == 2 ? 16 : 32) &&
-      (transition_bits == 5 || transition_bits == 6);
+      (transition_bits == 5 || transition_bits == 6 || transition_bits == 7);
   // Refuse before any kernel selection so `required` and `fallback="error"`
   // can never be satisfied by a silent fallback -- including the fused
   // family-grid and cooperative launches that return early below.
@@ -3779,8 +3783,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
              << bank_count << ")";
     } else if (segment_steps != (bank_count == 2 ? 16 : 32)) {
       reason << "segment_steps=" << segment_steps << " does not match bank_count=" << bank_count;
-    } else if (transition_bits != 5 && transition_bits != 6) {
-      reason << "only the benchmark-supported W2.5/W3 rates (transition_bits 5 or 6) are supported "
+    } else if (transition_bits != 5 && transition_bits != 6 && transition_bits != 7) {
+      reason << "only the benchmark-supported W2.5/W3/W3.5 rates (transition_bits 5, 6, or 7) are supported "
                 "(got transition_bits=" << transition_bits << ")";
     } else if (midpoint_only) {
       reason << "midpoint-only traceback is not a norm-band shape";
@@ -4009,7 +4013,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     }                                                                                                  \
   } while (0)
   // Exact norm-rank contiguous-band fast path for the unweighted,
-  // half-codebook grid recurrence at W2.5/W3 only. Every other configuration
+  // half-codebook grid recurrence at W2.5/W3/W3.5. Every other configuration
   // (weighted, direct-distance, cooperative,
   // midpoint-only, fp32 codebooks, other rates) falls through to the
   // unmodified baseline below, which remains the exact reference. Family
@@ -4046,21 +4050,25 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     g_norm_rank_grid_dispatches.fetch_add(1, std::memory_order_relaxed);                            \
     return {states, squared_error, segment_bank_ids};                                              \
   } while (0)
-  // W2.5 and W3.0 only: at shift 4 the 16-entry candidate list is too short
+  // W2.5 through W3.5: at shift 4 the 16-entry candidate list is too short
   // for the band overhead to pay for itself (measured 0.88-1.15x on real
   // tiles), so W2.0 keeps the pristine grid recurrence unconditionally.
   if (pruning_requested && norm_rank_eligible) {
     if (bank_count == 2) {
       if (transition_bits == 5) {
         QVQ_V2_NORM_RANK_DISPATCH(5, 2, 16, kNormRankChunkWidthW25);
-      } else {
+      } else if (transition_bits == 6) {
         QVQ_V2_NORM_RANK_DISPATCH(6, 2, 16, kNormRankChunkWidthW3);
+      } else {
+        QVQ_V2_NORM_RANK_DISPATCH(7, 2, 16, kNormRankChunkWidthW35);
       }
     } else {
       if (transition_bits == 5) {
         QVQ_V2_NORM_RANK_DISPATCH(5, 4, 32, kNormRankChunkWidthW25);
-      } else {
+      } else if (transition_bits == 6) {
         QVQ_V2_NORM_RANK_DISPATCH(6, 4, 32, kNormRankChunkWidthW3);
+      } else {
+        QVQ_V2_NORM_RANK_DISPATCH(7, 4, 32, kNormRankChunkWidthW35);
       }
     }
   }

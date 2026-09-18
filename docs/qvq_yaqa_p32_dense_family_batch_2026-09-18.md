@@ -383,3 +383,38 @@ family-pruning checkpoints at both W2.5 and W3. Every per-module FP32 and FP64
 Fisher oracle value is therefore unchanged, as are the carried-forward
 strictly disjoint GSM8K Platinum held-out results. Calibration rows `[0,32)`
 and YAQA rows `[64,96)` remained disjoint in both matched runs.
+
+### Exact Shift-7 norm-band pruning for W3.5
+
+“Shift 7” is the W3.5 V2 trellis transition width (`2 * 3.5`), not a 7-bit
+weight format. The 16-bit trellis state partitions into 128 predecessor
+prefixes and 512 suffix/frontier states. Quantization scores those 128
+predecessors for every frontier state at each step, while P32 selects the
+codebook bank for each contiguous 32-weight window.
+
+The exact W3.5 specialization uses one CUDA thread per suffix instead of two,
+512 threads per CTA, sorted codebook-norm chunks of four candidates, and exact
+norm bounds. This doubles CTA residency while retaining the baseline FP32
+expanded-distance expression, ascending-prefix tie order, state and selector
+payloads, backpointers, and traceback. Both unconstrained and constrained
+passes are eligible for B2/P32 and B4/P64 family grids.
+
+On real Llama 3.2 1B tiles, the constrained recurrence improved by
+3.25--3.45x over family-batch widths 1--256. The matched one-layer W3.5 run
+measured:
+
+| Metric | Pristine | Shift-7 norm band | Speedup |
+|---|---:|---:|---:|
+| Process quantization | 26.811 s | 25.844 s | 1.037x |
+| Prepare + quantize | 31.713 s | 30.684 s | 1.034x |
+
+All 17 serialized checkpoint shards have identical SHA-256 hashes. Every
+per-module FP32 and FP64 Fisher oracle value is identical, so the
+carried-forward strictly disjoint held-out result is unchanged. The matched
+run used calibration rows `[0,32)` and YAQA rows `[64,96)`.
+
+This optimization is quantization-only. Post-quant inference reads the
+already-selected trellis states and P32 selectors; it does not execute the
+128-way predecessor search. The checkpoint layout and inference kernels are
+unchanged. Inference-side work should instead target fused state/selector
+decode, codebook lookup, and quantized GEMM.
