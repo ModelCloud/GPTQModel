@@ -145,8 +145,10 @@ def refine_trellis_candidates(
     hard_eval_interval: int = 10,
     relaxation_patience: int = 10,
     decoded_candidates: torch.Tensor | None = None,
+    decoded_baseline: torch.Tensor | None = None,
     sparse_candidate_indices: torch.Tensor | None = None,
     sparse_candidate_deltas: torch.Tensor | None = None,
+    sparse_candidate_values: torch.Tensor | None = None,
     sparse_candidate_shifts: torch.Tensor | None = None,
     input_metric: torch.Tensor | None = None,
     output_metric: torch.Tensor | None = None,
@@ -224,17 +226,34 @@ def refine_trellis_candidates(
                                  ("relaxation_patience", relaxation_patience, 0)):
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise ValueError(f"{name} must be an integer >= {minimum}")
+    sparse_relaxation = sparse_candidate_indices is not None or sparse_candidate_deltas is not None
+    sparse_baseline_only = bool(
+        sparse_relaxation
+        and decoded_baseline is not None
+        and sparse_candidate_values is not None
+        and input_metric is not None
+        and output_metric is not None
+        and coordinate_sweeps == 0
+    )
     with _nvtx_range("gsq.decode_candidate_bank", candidates):
-        if decoded_candidates is None:
+        if sparse_baseline_only:
+            expected = (candidates.shape[1], 256)
+            if (decoded_baseline.numel() != candidates.shape[1] * 256
+                    or decoded_baseline.device != candidates.device):
+                raise ValueError(f"decoded_baseline must contain {expected} values on the candidate device")
+            baseline_tiles = decoded_baseline.detach().reshape(expected).contiguous()
+            decoded = None
+        elif decoded_candidates is None:
             decoded = torch.stack([
                 adapter.decode(c, bank_ids, bank_alt_id) for c in candidates
             ]).detach().transpose(0, 1).contiguous()  # [tile, choice, 256]
+            baseline_tiles = decoded[:, 0]
         else:
             expected = (candidates.shape[0], candidates.shape[1], 16, 16)
             if decoded_candidates.shape != expected or decoded_candidates.device != candidates.device:
                 raise ValueError(f"decoded_candidates must have shape {expected} on the candidate device")
             decoded = decoded_candidates.detach().reshape(*expected[:2], 256).transpose(0, 1).contiguous()
-    sparse_relaxation = sparse_candidate_indices is not None or sparse_candidate_deltas is not None
+            baseline_tiles = decoded[:, 0]
     if sparse_relaxation:
         expected_prefix = (candidates.shape[0] - 1, candidates.shape[1])
         if (sparse_candidate_indices is None or sparse_candidate_deltas is None
@@ -249,6 +268,13 @@ def refine_trellis_candidates(
             )
         if not sparse_candidate_deltas.is_floating_point():
             raise ValueError("sparse candidate deltas must be floating point")
+        if (sparse_candidate_values is not None
+                and (sparse_candidate_values.shape != sparse_candidate_indices.shape
+                     or sparse_candidate_values.device != candidates.device
+                     or not sparse_candidate_values.is_floating_point())):
+            raise ValueError(
+                "sparse candidate values must match floating-point sparse candidate metadata"
+            )
         if (sparse_candidate_shifts is not None
                 and (sparse_candidate_shifts.shape != expected_prefix
                      or sparse_candidate_shifts.device != candidates.device
@@ -256,6 +282,13 @@ def refine_trellis_candidates(
             raise ValueError("sparse candidate shifts must match int64 [choices-1,tiles]")
         if bool(((sparse_candidate_indices < 0) | (sparse_candidate_indices >= 256)).any()):
             raise ValueError("sparse candidate indices must be in [0,256)")
+        sparse_indices_hard_by_tile = sparse_candidate_indices.permute(1, 0, 2).contiguous()
+        sparse_values_hard_by_tile = (
+            None if sparse_candidate_values is None else
+            sparse_candidate_values.permute(1, 0, 2).contiguous()
+        )
+    else:
+        sparse_indices_hard_by_tile = sparse_values_hard_by_tile = None
     fisher_objective = input_metric is not None and output_metric is not None
     x = inputs.detach().float()
     if fisher_objective:
@@ -296,8 +329,8 @@ def refine_trellis_candidates(
             # P32 local-path relaxation. W3 has six changed values per choice,
             # versus reading all 256 values in the dense candidate bank.
             decoded_relax = None
-            baseline_relax = decoded[:, 0].to(relaxation_dtype)
-            sparse_indices_by_tile = sparse_candidate_indices.permute(1, 0, 2).contiguous()
+            baseline_relax = baseline_tiles.to(relaxation_dtype)
+            sparse_indices_by_tile = sparse_indices_hard_by_tile
             sparse_deltas_by_tile = sparse_candidate_deltas.permute(1, 0, 2).to(
                 relaxation_dtype).contiguous()
             sparse_indices_flat = sparse_indices_by_tile.flatten(1)
@@ -337,8 +370,25 @@ def refine_trellis_candidates(
         return ((prediction - teacher).square().mean() / normalizer)
 
     tile_ids = torch.arange(candidates.shape[1], device=candidates.device)
+
+    def hard_candidate_tiles(choices):
+        if decoded is not None:
+            return decoded[tile_ids, choices]
+        if sparse_indices_hard_by_tile is None or sparse_values_hard_by_tile is None:
+            raise RuntimeError("sparse hard candidate materialization requires exact candidate values")
+        alternative = (choices - 1).clamp_min(0)
+        selected_indices = sparse_indices_hard_by_tile[tile_ids, alternative]
+        selected_values = sparse_values_hard_by_tile[tile_ids, alternative]
+        tiles = baseline_tiles.clone()
+        baseline_values = tiles.gather(1, selected_indices)
+        selected_values = torch.where(
+            (choices > 0)[:, None], selected_values, baseline_values,
+        )
+        tiles.scatter_(1, selected_indices, selected_values)
+        return tiles
+
     best_choices = torch.zeros_like(tile_ids)
-    before = float(loss(decoded[:, 0]))
+    before = float(loss(baseline_tiles))
     if not math.isfinite(before):
         raise ValueError("non-finite calibration objective")
     best = before
@@ -389,7 +439,7 @@ def refine_trellis_candidates(
         initialization = "paper_local_shift_gaussian"
     else:
         logits = torch.zeros(
-            decoded.shape[:2], device=candidates.device,
+            (candidates.shape[1], candidates.shape[0]), device=candidates.device,
             requires_grad=not fused_sparse_relaxation,
         )
         # Legacy adapters do not expose a local-shift coordinate. Keep a small
@@ -738,7 +788,7 @@ def refine_trellis_candidates(
                 if evaluate_hard:
                     choices = logits.argmax(-1)
                     hard_loss_tensor = loss(
-                        decoded[tile_ids, choices],
+                        hard_candidate_tiles(choices),
                         structured_output=structured_hard_oracle,
                     )
                     if structured_hard_oracle:
@@ -794,7 +844,7 @@ def refine_trellis_candidates(
             )[:verify_count].sort().values
             for checkpoint_index in verify_indices.unbind():
                 choices = hard_checkpoint_choices[checkpoint_index].long()
-                hard_loss_tensor = loss(decoded[tile_ids, choices])
+                hard_loss_tensor = loss(hard_candidate_tiles(choices))
                 torch._assert_async(
                     torch.isfinite(hard_loss_tensor),
                     "non-finite dense verification objective",
@@ -838,6 +888,7 @@ def refine_trellis_candidates(
         "relaxation_patience": relaxation_patience,
         "optimization_regime": "exact_full_fisher" if fisher_objective else "activation_reconstruction",
         "sparse_relaxation": sparse_relaxation,
+        "sparse_hard_candidate_bank": sparse_baseline_only,
         "fused_sparse_relaxation": fused_sparse_relaxation,
         "cuda_graph_relaxation": relaxation_graph is not None,
         "cuda_graph_updates_per_replay": graph_updates_per_replay,
