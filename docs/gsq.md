@@ -130,6 +130,23 @@ independent Q and K projections on separate CUDA streams while preserving each
 projection's exact RNG and update order. GIL-enabled execution remains correct
 but serializes enough host dispatch to lose roughly 8% on that oracle path.
 
+Independent P32 candidate banks are also built concurrently by default. Each
+projection keeps its own seeded generator and CUDA stream, so candidate words,
+the selected model state, and held-out loss remain unchanged. Three-pair H100
+serial/parallel comparisons produced these medians:
+
+| Sequence geometry | Held-out gain | Candidate build | Candidate + fit |
+| --- | ---: | ---: | ---: |
+| 64/16/64 x 256 tokens | 29.2717% | 0.5077s -> 0.4048s (1.254x) | 2.6221s -> 2.5384s (1.033x) |
+| 32/8/32 x 512 tokens | 15.0000% | 0.5134s -> 0.4058s (1.265x) | 2.1142s -> 2.0103s (1.052x) |
+
+The rows have equal train, held-out, and Q/K token totals, but different
+sequence boundaries and token hashes; their held-out percentages must not be
+compared as an accuracy change. Within each geometry, all three parallel runs
+were bit-for-bit equal to their matched serial model states. Result JSON and
+state metadata record sequence length and split sample counts. Use
+`--no-parallel-candidate-build` only for serial diagnostics.
+
 The default single-round Q/K path now transforms the same quadratic objective
 into P32 inner coordinates and runs the fused sparse Fisher optimizer.  It then
 solves the independent output scales in closed form and uses only the disjoint
