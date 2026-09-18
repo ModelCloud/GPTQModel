@@ -29,11 +29,27 @@ def main() -> None:
                 for bank in range(bank_count)
             )
         ).to(device="cuda", dtype=torch.float16)
-        before = int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
-        op(sequences, codebooks, int(bits * 2), segment_steps, None, None)
-        torch.cuda.synchronize()
-        assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == before + 1
-        print(f"RACECHECK-LAUNCH W{bits:g} b{bank_count} seg{segment_steps}")
+        for constrained in (False, True):
+            overlap = (
+                torch.randint(
+                    0,
+                    1 << (16 - int(bits * 2)),
+                    (sequences.shape[0],),
+                    generator=generator,
+                    device="cuda",
+                    dtype=torch.int64,
+                )
+                if constrained
+                else None
+            )
+            before = int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count())
+            op(sequences, codebooks, int(bits * 2), segment_steps, overlap, None)
+            torch.cuda.synchronize()
+            assert int(torch.ops.gptqmodel_qvq.norm_rank_grid_dispatch_count()) == before + 1
+            print(
+                f"RACECHECK-LAUNCH W{bits:g} b{bank_count} seg{segment_steps} "
+                f"constrained={constrained}"
+            )
 
 
 if __name__ == "__main__":
