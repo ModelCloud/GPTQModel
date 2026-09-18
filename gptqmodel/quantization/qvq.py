@@ -3545,7 +3545,11 @@ def _qvq_cuda_family_tail_biting_overlaps(
     )
     family_sequences = sequences.shape[0] * sequences.shape[1]
     direct_distance_mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
-    provisional_direct = direct_distance_mode not in {"", "0", "final"}
+    provisional_direct = _qvq_family_provisional_direct_distance_enabled(
+        transition_bits,
+        sequences.shape[1],
+        mode=direct_distance_mode,
+    )
     if telemetry is not None and provisional_direct:
         telemetry.count("viterbi_provisional_direct_distance", family_sequences)
     pruning_escape = os.environ.get("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "")
@@ -3582,6 +3586,29 @@ def _qvq_cuda_family_tail_biting_overlaps(
         )
     overlap_mask = (1 << (16 - transition_bits)) - 1
     return (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+
+
+def _qvq_family_provisional_direct_distance_enabled(
+    transition_bits: int,
+    family_batch: int,
+    *,
+    mode: str | None = None,
+) -> bool:
+    """Select direct distance only beyond its rate-specific H100 crossover.
+
+    ``1``/``true`` remain explicit all-size diagnostic modes.  The recommended
+    provisional profiles avoid replacing the newer exact norm-band recurrence
+    where the older direct full scan or midpoint kernel is slower.
+    """
+
+    if mode is None:
+        mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
+    if mode in {"", "0", "final"}:
+        return False
+    if mode not in {"provisional", "provisional_large_final"}:
+        return True
+    minimum_batch = {5: 1, 6: 64, 7: 16}.get(transition_bits, 1)
+    return family_batch >= minimum_batch
 
 
 def _qvq_family_final_direct_distance_enabled(family_batch: int) -> bool:
