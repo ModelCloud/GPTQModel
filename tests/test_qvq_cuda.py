@@ -3557,6 +3557,27 @@ def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_st
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
 
 
+def test_qvq_cuda_factored_yaqa_tf32_feedback_is_deterministic_and_bounded(monkeypatch):
+    generator = torch.Generator(device="cuda").manual_seed(20260921)
+    source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
+    left = torch.randn((2, 32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    output_feedback = torch.tril(
+        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01,
+        diagonal=-1,
+    )
+
+    monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", raising=False)
+    reference = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, None)
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", "1")
+    actual = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, None)
+    repeated = _qvq_cuda_yaqa_feedback_op()(source, left, right, output_feedback, 0, 3, 2, None)
+
+    assert torch.equal(actual, repeated)
+    assert not torch.equal(actual, reference)
+    torch.testing.assert_close(actual, reference, rtol=2e-4, atol=2e-6)
+
+
 def test_qvq_cuda_factored_yaqa_feedback_rejects_invalid_geometry():
     source = torch.zeros((32, 32), device="cuda", dtype=torch.float32)
     output_feedback = torch.zeros((32, 32), device="cuda", dtype=torch.float32)

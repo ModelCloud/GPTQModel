@@ -4653,6 +4653,11 @@ def yaqa_inner(
     elif incremental_cuda_factored_feedback or incremental_cpu_factored_feedback:
         if telemetry is not None:
             telemetry.count("yaqa_factored_feedback_calls")
+            if (
+                incremental_cuda_factored_feedback
+                and os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_TF32", "0") == "1"
+            ):
+                telemetry.count("yaqa_fast_tf32_feedback_calls")
         left_transformed_error = torch.empty_like(source)
         right_transformed_error = torch.empty_like(source)
         torch.mm(input_feedback.transpose(0, 1), error, out=left_transformed_error)

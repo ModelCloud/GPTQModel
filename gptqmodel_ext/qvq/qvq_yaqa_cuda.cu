@@ -10,6 +10,7 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
+#include <cstdlib>
 #include <vector>
 
 namespace {
@@ -17,6 +18,11 @@ namespace {
 constexpr int kTile = 16;
 constexpr int kThreads = kTile * kTile;
 static_assert(sizeof(float*) == sizeof(int64_t), "YAQA grouped pointers require 64-bit device addresses");
+
+bool qvq_yaqa_fast_tf32_enabled() {
+  const char* value = std::getenv("GPTQMODEL_QVQ_YAQA_FAST_TF32");
+  return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
 
 __global__ void qvq_yaqa_grouped_pointers_kernel(
     const float* left,
@@ -36,8 +42,10 @@ __global__ void qvq_yaqa_grouped_pointers_kernel(
   if (item >= total) {
     return;
   }
-  const int family = item / count;
-  const int tile = item - family * count;
+  // Keep equal-geometry family matrices adjacent so cuBLAS can process one
+  // group per tile instead of one singleton group per family/tile pair.
+  const int tile = item / families;
+  const int family = item - tile * families;
   const int input_start = (first_input_block + tile) * kTile;
   const int output_start = (first_output_block - tile) * kTile;
   const int64_t matrix_stride = static_cast<int64_t>(in_features) * out_features;
@@ -47,7 +55,7 @@ __global__ void qvq_yaqa_grouped_pointers_kernel(
       left + family_offset + static_cast<int64_t>(input_start) * out_features + output_start);
   a_array[item] = const_cast<float*>(
       output_feedback + static_cast<int64_t>(output_start) * out_features + output_start);
-  c_array[item] = cross + static_cast<int64_t>(item) * kThreads;
+  c_array[item] = cross + static_cast<int64_t>(family * count + tile) * kThreads;
 }
 
 __global__ void qvq_yaqa_update_grouped_pointers_kernel(
@@ -191,7 +199,7 @@ at::Tensor qvq_yaqa_feedback_cuda(
       static_cast<int>(families));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
-  const int group_count = static_cast<int>(total);
+  const int group_count = static_cast<int>(count);
   std::vector<cublasOperation_t> operations(group_count, CUBLAS_OP_N);
   std::vector<int> m(group_count, kTile);
   std::vector<int> n(group_count, kTile);
@@ -199,21 +207,27 @@ at::Tensor qvq_yaqa_feedback_cuda(
   std::vector<int> lda(group_count, static_cast<int>(source.size(1)));
   std::vector<int> ldb(group_count, static_cast<int>(source.size(1)));
   std::vector<int> ldc(group_count, kTile);
-  std::vector<int> group_sizes(group_count, 1);
+  std::vector<int> group_sizes(group_count, static_cast<int>(families));
   std::vector<float> alpha(group_count, 1.0f);
   std::vector<float> beta(group_count, 0.0f);
-  for (int item = 0; item < group_count; ++item) {
-    const int tile = item % static_cast<int>(count);
-    k[item] = static_cast<int>(source.size(1)) -
+  for (int tile = 0; tile < group_count; ++tile) {
+    k[tile] = static_cast<int>(source.size(1)) -
         (static_cast<int>(first_output_block) - tile) * kTile;
   }
   cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
   cublasPointerMode_t previous_pointer_mode;
+  cublasMath_t previous_math_mode;
   TORCH_CHECK(cublasGetPointerMode(handle, &previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
               "failed to read YAQA cuBLAS pointer mode");
+  TORCH_CHECK(cublasGetMathMode(handle, &previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to read YAQA cuBLAS math mode");
   TORCH_CHECK(cublasSetStream(handle, stream) == CUBLAS_STATUS_SUCCESS, "failed to bind YAQA cuBLAS stream");
   TORCH_CHECK(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) == CUBLAS_STATUS_SUCCESS,
               "failed to set YAQA cuBLAS pointer mode");
+  if (qvq_yaqa_fast_tf32_enabled()) {
+    TORCH_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH) == CUBLAS_STATUS_SUCCESS,
+                "failed to enable YAQA TF32 math mode");
+  }
   const cublasStatus_t grouped_status = cublasSgemmGroupedBatched(
       handle,
       operations.data(),
@@ -233,6 +247,8 @@ at::Tensor qvq_yaqa_feedback_cuda(
       group_sizes.data());
   TORCH_CHECK(cublasSetPointerMode(handle, previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
               "failed to restore YAQA cuBLAS pointer mode");
+  TORCH_CHECK(cublasSetMathMode(handle, previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to restore YAQA cuBLAS math mode");
   TORCH_CHECK(grouped_status == CUBLAS_STATUS_SUCCESS, "YAQA grouped FP32 GEMM failed");
 
   qvq_yaqa_feedback_epilogue_kernel<<<static_cast<unsigned int>(total), kThreads, 0, stream>>>(
@@ -322,12 +338,19 @@ void qvq_yaqa_feedback_update_cuda(
   const float beta = 1.0f;
   cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
   cublasPointerMode_t previous_pointer_mode;
+  cublasMath_t previous_math_mode;
   TORCH_CHECK(cublasGetPointerMode(handle, &previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
               "failed to read YAQA update cuBLAS pointer mode");
+  TORCH_CHECK(cublasGetMathMode(handle, &previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to read YAQA update cuBLAS math mode");
   TORCH_CHECK(cublasSetStream(handle, stream) == CUBLAS_STATUS_SUCCESS,
               "failed to bind YAQA update cuBLAS stream");
   TORCH_CHECK(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) == CUBLAS_STATUS_SUCCESS,
               "failed to set YAQA update cuBLAS pointer mode");
+  if (qvq_yaqa_fast_tf32_enabled()) {
+    TORCH_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH) == CUBLAS_STATUS_SUCCESS,
+                "failed to enable YAQA update TF32 math mode");
+  }
   const cublasStatus_t left_status = cublasSgemmBatched(
       handle,
       CUBLAS_OP_N,
@@ -362,6 +385,8 @@ void qvq_yaqa_feedback_update_cuda(
       matrix_count);
   TORCH_CHECK(cublasSetPointerMode(handle, previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
               "failed to restore YAQA update cuBLAS pointer mode");
+  TORCH_CHECK(cublasSetMathMode(handle, previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to restore YAQA update cuBLAS math mode");
   TORCH_CHECK(left_status == CUBLAS_STATUS_SUCCESS && right_status == CUBLAS_STATUS_SUCCESS,
               "YAQA batched FP32 cache update failed");
 }
