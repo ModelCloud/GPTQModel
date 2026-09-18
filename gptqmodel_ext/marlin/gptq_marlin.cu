@@ -1082,6 +1082,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   auto options = torch::TensorOptions().dtype(a.dtype()).device(a.device());
   torch::Tensor c;
   if (c_or_none.has_value()) {
+    // Keep caller-owned output storage; the returned tensor aliases this c.
     c = c_or_none.value();
     TORCH_CHECK(c.device().is_cuda(), "c is not on GPU");
     TORCH_CHECK(c.device() == a.device(), "c must be on the same device as A");

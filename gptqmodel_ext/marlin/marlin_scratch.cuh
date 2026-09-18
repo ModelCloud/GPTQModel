@@ -53,6 +53,8 @@ inline std::tuple<int64_t, int64_t> marlin_scratch_sizes_checked(
 
   int64_t c_tmp_elements = 0;
   if (use_fp32_reduce) {
+    // Split-M launches use a tile of at most 64 rows, so size reduction
+    // scratch for that maximum tile on every SM.
     const int64_t rounded_m =
         checked_scratch_ceil_multiple(size_m, 16, "Marlin M capacity");
     const int64_t max_m_block_size = std::min<int64_t>(rounded_m, 64);
@@ -63,6 +65,7 @@ inline std::tuple<int64_t, int64_t> marlin_scratch_sizes_checked(
 
   int64_t a_tmp_elements = 0;
   if (has_act_order) {
+    // Activation-order permutation needs a full contiguous M x K staging copy.
     a_tmp_elements =
         checked_scratch_mul(size_m, size_k, "Marlin A scratch capacity");
   }

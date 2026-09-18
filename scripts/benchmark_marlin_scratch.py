@@ -135,13 +135,17 @@ def graph_trial(layer, x, buffers, torch, utils, args, trace_path):
                     resident_process_bytes=torch.cuda.memory_allocated(x.device),
                     peak_process_bytes=torch.cuda.max_memory_allocated(x.device),
                     explicit_scratch_bytes=sum(b.numel() * b.element_size() for b in buffers) if buffers else 0)
-        # Owners remain alive until queued replay finishes; no concurrently replayed graphs.
+        # Graph trials run sequentially; hold buffers and locks until queued
+        # replays finish before releasing their owners.
         torch.cuda.synchronize(x.device)
         return data
 
 
 def run_case(case, torch, utils, args, artifact):
     from scripts.marlin_scratch_fixture import gemm_arguments, make_layer
+    # Keep this import local so --list-cases does not import torch or Marlin.
+    from gptqmodel.utils.marlin_scratch import MarlinScratchContext
+
     dtype = torch.float16 if case["dtype"] == "fp16" else torch.bfloat16
     device = torch.device(args.device)
     major, minor = torch.cuda.get_device_capability(device)
@@ -157,7 +161,7 @@ def run_case(case, torch, utils, args, artifact):
     expected = x @ dense
     torch.testing.assert_close(layer(x), expected, rtol=.05, atol=.05)
     del expected, dense, bias
-    context = utils.MarlinScratchContext(device, max_cached_bytes=args.cache_bytes)
+    context = MarlinScratchContext(device, max_cached_bytes=args.cache_bytes)
     samples = {"temporary": [], "context": []}
     # Capture compilation separately; first/growth costs below exclude JIT.
     for _ in range(args.warmup):
@@ -194,6 +198,8 @@ def run_case(case, torch, utils, args, artifact):
               for a, b in zip(samples["temporary"], samples["context"])]
     torch.cuda.synchronize(device)
     before = torch.cuda.memory_allocated(device)
+    # Remove retained context storage before reporting the temporary variant's
+    # resident bytes, so the comparison excludes inactive cache capacity.
     context.clear()
     cache_resident = before - torch.cuda.memory_allocated(device)
     audit["temporary"].update(

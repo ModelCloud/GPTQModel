@@ -99,7 +99,7 @@ context. Affinity remains fixed across repeated entries into the same context.
 python -m pytest -q tests/test_marlin_jit.py tests/test_marlin_permute.py \
     tests/test_marlin_scratch_capacity.py tests/test_marlin_scratch_interface.py \
     tests/test_marlin_scratch_context.py tests/test_marlin_scratch_regressions.py \
-    tests/test_marlin_scratch_cuda.py
+    tests/test_marlin_scratch_benchmark.py tests/test_marlin_scratch_cuda.py
 python scripts/benchmark_marlin_scratch.py --list-cases
 python scripts/benchmark_marlin_scratch.py --graph --output /tmp/marlin-scratch-ab
 ```
@@ -137,7 +137,7 @@ CPU-only run are `not_run`; there is no measured speedup to report.
 
 ## Validation record (2026-09-17)
 
-The combined command above produced **88 passed, 87 skipped** in 10.45 seconds
+The initial acceptance run produced **88 passed, 87 skipped** in 10.45 seconds
 with Torch 2.13.0+cu130 and no available CUDA device. Skips are GPU tests. The
 capacity test compiles and executes the actual shared C++ helper, including
 counts greater than 32 bits and overflow failures. CPU tests verify dispatch,
@@ -161,3 +161,21 @@ test/compile record and all **198 individual A/B case statuses**, including
 source revision and hashes. Every performance case is `not_run` because CUDA
 is unavailable. Profiler/allocator reductions and latency improvements remain
 unmeasured, so reuse remains opt-in.
+
+## Follow-up review (2026-09-18)
+
+The updated command above produced **90 passed, 87 skipped** in 13.86 seconds.
+A new CPU integration test runs the paired benchmark orchestration and caught
+a stale context import after the public module changed. The benchmark now
+imports `MarlinScratchContext` from `gptqmodel.utils.marlin_scratch`.
+Comments clarify ownership, retained-byte accounting and alias annotations.
+The CPU test stubs GPU timing and allocator measurements; it provides no GPU
+performance evidence. Re-running the benchmark still emitted **198 `not_run`
+cases** because CUDA is unavailable. The JSON linked above retains the original
+validation snapshot and its source hashes, rather than representing this new
+review as a GPU-validated revision.
+
+Separate GPU benchmark results for commit `36aa3a5f` are recorded in
+[PR #3092](https://github.com/ModelCloud/GPTQModel/pull/3092). This local CPU
+rerun does not replace those measurements or revalidate them after the latest
+import fix.

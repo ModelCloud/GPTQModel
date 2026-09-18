@@ -104,6 +104,8 @@ class MarlinScratchContext:
         self.device = torch.device(device)
         self.max_cached_bytes = int(max_cached_bytes)
 
+        # Metadata is an LRU by shape and execution flags; bound its keys
+        # separately from the byte budget that controls retained tensors.
         self._metadata: "OrderedDict[tuple[Any, ...], tuple[int, int]]" = OrderedDict()
         self._c_tmp: Optional[torch.Tensor] = None
         self._a_tmp: Optional[torch.Tensor] = None
@@ -119,6 +121,8 @@ class MarlinScratchContext:
         self._owner_stream: Any = None
         self._active_token: Optional[Token] = None
         self._borrowed = False
+        # A context exposes one shared scratch lease, so concurrent callers
+        # must fail instead of racing over the same temporary tensors.
         self._lock = threading.Lock()
 
     @property
@@ -294,6 +298,8 @@ class MarlinScratchContext:
             workspace = self._workspace_for_call()
             return c_tmp, a_tmp, workspace
         except BaseException:
+            # Roll back the lease on sizing or allocation failure so a retry
+            # cannot inherit a permanently busy context.
             self._borrowed = False
             raise
 
@@ -389,9 +395,8 @@ class MarlinScratchContext:
         a_bytes = max(a_count, a_capacity) * _dtype_itemsize(dtype)
         required_bytes = c_bytes + a_bytes
         lock_bytes = self._workspace_bytes or self._lock_workspace_bytes()
-        # Lock storage is always part of the cache budget calculation.  For a
-        # zero/tiny budget it is transient, but it still prevents caching the
-        # other temporaries beyond the configured bound.
+        # Budget retained capacity and locks, even when a feature is disabled.
+        # Tiny budgets use transient locks and leave other scratch uncached.
         if lock_bytes + required_bytes > self.max_cached_bytes:
             # Retain the bounded cache on an over-budget growth request and
             # still use whichever existing allocation already covers this

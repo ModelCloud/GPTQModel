@@ -66,6 +66,8 @@ torch::Tensor awq_marlin_repack_dispatch(torch::Tensor b_q_weight,
 }  // namespace
 
 TORCH_LIBRARY(gptqmodel_marlin_bf16, m) {
+  // Alias annotations tell the dispatcher which arguments may be mutated and
+  // that the optional output aliases the returned tensor.
   m.def(
       "gptq_marlin_gemm_bf16(Tensor a, Tensor(a!)? c, Tensor b_q_weight, Tensor? b_bias, Tensor b_scales, "
       "Tensor? global_scale, Tensor? b_zeros, Tensor? g_idx, Tensor? perm, Tensor(b!) workspace, int b_q_type_id, "
