@@ -183,18 +183,13 @@ class MarlinScratchContext:
         if self._active_token is None:
             raise RuntimeError("MarlinScratchContext is not active")
         token = self._active_token
-        error: Optional[BaseException] = None
         try:
             self._check_owner()
             if self._borrowed:
                 raise RuntimeError("MarlinScratchContext cannot exit while scratch is borrowed")
-        except BaseException as exc:
-            error = exc
         finally:
             self._active_token = None
             _ACTIVE_CONTEXT.reset(token)
-        if error is not None:
-            raise error
 
     def clear(self) -> None:
         """Release cached tensors after recording their last-use streams.
