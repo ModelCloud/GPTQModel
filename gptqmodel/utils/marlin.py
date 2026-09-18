@@ -873,7 +873,6 @@ def gptq_marlin_gemm(a: torch.Tensor,
         # also avoids capacity queries and manager allocations for M == 0.
         if a.ndim < 2 or a.shape[0] == 0 or a.shape[1] == 0:
             context._check_owner()
-            context_workspace = workspace
             use_owned_scratch = False
         else:
             has_act_order = bool(
