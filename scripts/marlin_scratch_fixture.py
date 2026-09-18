@@ -40,7 +40,8 @@ def make_layer(method, dtype, k=256, n=128, *, act_order=False, bits=4,
         cls, backend = AwqMarlinLinear, BACKEND.AWQ_MARLIN
     layer = cls(bits=bits, group_size=group, desc_act=act_order,
                 sym=method == "gptq", in_features=k, out_features=n,
-                bias=bias, dtype=dtype, backend=backend).to(device)
+                bias=bias, dtype=dtype, backend=backend,
+                register_buffers=method == "awq").to(device)
     bias_value = (torch.randn(n, generator=gen) * .01).to(dtype) if bias else None
     with torch.no_grad():
         layer.qweight.copy_(weight.to(device))
