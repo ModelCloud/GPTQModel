@@ -1898,6 +1898,7 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     uint8_t* __restrict__ backpointers,
     uint8_t* __restrict__ boundary_banks,
     int batch,
+    int family_batch,
     int segment_index,
     bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
@@ -1955,11 +1956,14 @@ void qvq_v2_segment_grid_norm_rank_kernel(
   unsigned* group_min_next = group_min_all + group_count;
   unsigned* group_min_spare = group_min_all + 2 * group_count;
 
-  const uint64_t* bank_baseline = baseline_records + static_cast<int64_t>(bank) * kStateCount;
-  const uint64_t* bank_records = sorted_records + static_cast<int64_t>(bank) * kStateCount;
+  const int family = family_batch == 0 ? 0 : sequence / family_batch;
+  const int physical_bank = family * bank_count + bank;
+  const uint64_t* bank_baseline = baseline_records + static_cast<int64_t>(physical_bank) * kStateCount;
+  const uint64_t* bank_records = sorted_records + static_cast<int64_t>(physical_bank) * kStateCount;
   const PackType* bank_prefixes =
-      chunk_prefixes + static_cast<int64_t>(bank) * chunk_count * suffix_count;
-  const float* bank_low = chunk_low_norms + static_cast<int64_t>(bank) * chunk_count * suffix_count;
+      chunk_prefixes + static_cast<int64_t>(physical_bank) * chunk_count * suffix_count;
+  const float* bank_low = chunk_low_norms +
+      static_cast<int64_t>(physical_bank) * chunk_count * suffix_count;
 
   for (int slot = thread; slot < 3 * group_count; slot += kThreads) {
     group_min_all[slot] = kInfBits;
@@ -3483,6 +3487,7 @@ void launch_qvq_v2_segment_norm_rank_segments(
     uint8_t* backpointers,
     uint8_t* boundary_banks,
     int batch,
+    int family_batch,
     cudaStream_t stream,
     bool collect_telemetry) {
   using PackType = typename NormRankPrefixPack<ChunkWidth>::type;
@@ -3506,13 +3511,13 @@ void launch_qvq_v2_segment_norm_rank_segments(
   const float* low_norms = tables.low_norms.const_data_ptr<float>();
   kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
       sequences, baseline_records, records, prefixes, low_norms, nullptr,
-      frontier_a, backpointers, boundary_banks, batch, 0, collect_telemetry);
+      frontier_a, backpointers, boundary_banks, batch, family_batch, 0, collect_telemetry);
   for (int segment = 1; segment < segments; ++segment) {
     const float* input = segment % 2 == 1 ? frontier_a : frontier_b;
     float* output = segment % 2 == 1 ? frontier_b : frontier_a;
     kernel<<<batch * BankCount, kThreads, shared_bytes, stream>>>(
         sequences, baseline_records, records, prefixes, low_norms, input, output,
-        backpointers, boundary_banks, batch, segment, collect_telemetry);
+        backpointers, boundary_banks, batch, family_batch, segment, collect_telemetry);
   }
 }
 
@@ -3731,9 +3736,17 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       pruning_policy == kViterbiPruningAuto || pruning_policy == kViterbiPruningAutoError;
   const bool pruning_env_disabled = pruning_env_honored && norm_rank_grid_disabled();
   const bool pruning_requested = pruning_policy != kViterbiPruningOff && !pruning_env_disabled;
+  const FamilyGridDirectDistanceMode direct_distance_mode = family_grid_direct_distance_mode();
+  const bool direct_family_distance = family_batch > 0 && codebooks.scalar_type() == at::kHalf &&
+      transition_bits >= 5 && transition_bits <= 7 &&
+      (direct_distance_mode == FamilyGridDirectDistanceMode::kAll ||
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisional && !constrained) ||
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kFinal && constrained) ||
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisionalLargeFinal &&
+        (!constrained || family_batch >= 64)));
   const bool norm_rank_eligible =
       grid_parallel && !midpoint_only && !cooperative &&
-      !constrained && !weighted && family_batch == 0 &&
+      !constrained && !weighted && !direct_family_distance &&
       codebooks.scalar_type() == at::kHalf &&
       (bank_count == 2 || bank_count == 4) &&
       segment_steps == (bank_count == 2 ? 16 : 32) &&
@@ -3749,8 +3762,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       reason << "constrained (overlap) calls keep the exact baseline recurrence";
     } else if (weighted) {
       reason << "weighted (step_weights) calls keep the exact baseline recurrence";
-    } else if (family_batch != 0) {
-      reason << "family-batched calls keep the exact baseline recurrence";
+    } else if (direct_family_distance) {
+      reason << "direct-distance calls use a different FP32 arithmetic order";
     } else if (codebooks.scalar_type() != at::kHalf) {
       reason << "only float16 codebooks are supported (got " << codebooks.scalar_type() << ")";
     } else if (bank_count != 2 && bank_count != 4) {
@@ -3781,14 +3794,6 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   }
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(sequences.get_device());
   const bool collect_pruning_telemetry = norm_rank_telemetry_enabled();
-  const FamilyGridDirectDistanceMode direct_distance_mode = family_grid_direct_distance_mode();
-  const bool direct_family_distance = family_batch > 0 && codebooks.scalar_type() == at::kHalf &&
-      transition_bits >= 5 && transition_bits <= 7 &&
-      (direct_distance_mode == FamilyGridDirectDistanceMode::kAll ||
-       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisional && !constrained) ||
-       (direct_distance_mode == FamilyGridDirectDistanceMode::kFinal && constrained) ||
-       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisionalLargeFinal &&
-        (!constrained || family_batch >= 64)));
   // Below ~40 sequences both paths are bound by the serial 127-step chain of a
   // single sequence and the reference layout (one CTA per bank) has twice the
   // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
@@ -3997,21 +4002,23 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   } while (0)
   // Exact norm-rank contiguous-band fast path for the unconstrained,
   // unweighted, half-codebook grid recurrence at W2.5/W3 only.  Every other
-  // configuration (constrained, weighted, family-batched, cooperative,
+  // configuration (constrained, weighted, direct-distance, cooperative,
   // midpoint-only, fp32 codebooks, other rates) falls through to the
-  // unmodified baseline below, which remains the exact reference.
+  // unmodified baseline below, which remains the exact reference. Family
+  // batches use physical-bank table addressing while retaining logical-bank
+  // recurrence and traceback layouts.
 #define QVQ_V2_NORM_RANK_DISPATCH(BITS, BANKS, SEGMENT_STEPS, WIDTH)                              \
   do {                                                                                             \
     const NormRankTables qvq_norm_rank_tables =                                                    \
         cached_norm_rank_tables<BITS, WIDTH>(                                                      \
-            codebooks, codebook_norm, bank_count, stream);                                         \
+            codebooks, codebook_norm, static_cast<int>(codebooks.size(0)), stream);                 \
     launch_qvq_v2_segment_norm_rank_segments<BITS, BANKS, SEGMENT_STEPS, WIDTH>(                   \
         sequences.const_data_ptr<float>(),                                                         \
         reinterpret_cast<const uint64_t*>(codebook_norm.const_data_ptr<float>()),                  \
         qvq_norm_rank_tables,                                                                      \
         costs_a.mutable_data_ptr<float>(), costs_b.mutable_data_ptr<float>(),                      \
-        backpointers.mutable_data_ptr<uint8_t>(),                                                  \
-        boundary_banks.mutable_data_ptr<uint8_t>(), batch, stream, collect_pruning_telemetry);     \
+        backpointers.mutable_data_ptr<uint8_t>(), boundary_banks.mutable_data_ptr<uint8_t>(),      \
+        batch, family_batch, stream, collect_pruning_telemetry);                                   \
     qvq_v2_segment_grid_finalize_kernel<BITS, BANKS, SEGMENT_STEPS, false, half, uint8_t>          \
         <<<batch, kThreads, 0, stream>>>(                                                          \
             sequences.const_data_ptr<float>(),                                                     \
@@ -4023,7 +4030,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
             boundary_banks.const_data_ptr<uint8_t>(),                                              \
             states.mutable_data_ptr<int64_t>(),                                                    \
             segment_bank_ids.mutable_data_ptr<uint8_t>(),                                          \
-            squared_error.mutable_data_ptr<float>(), batch, /*family_batch=*/0,                    \
+            squared_error.mutable_data_ptr<float>(), batch, family_batch,                          \
             constrained, weighted);                                                                \
     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                \
     record_norm_cache_use(codebooks, codebook_norm, stream);                                       \

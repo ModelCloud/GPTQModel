@@ -4009,8 +4009,52 @@ def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
     )
 
 
-def test_qvq_v2b2_w3_family_batch_uses_exact_midpoint_only_provisional_pass():
+def test_qvq_v2b2_w3_family_batch_uses_exact_norm_band_provisional_pass(
+    monkeypatch,
+):
+    monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", raising=False)
+    monkeypatch.delenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", raising=False)
     generator = torch.Generator(device="cuda").manual_seed(20260918)
+    weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
+    hessian = torch.eye(32, device="cuda", dtype=torch.float32)
+    pair_stacks = torch.stack(
+        _canonical_qvq_v2b2_pair_stacks(
+            device=weight.device,
+            bits=3.0,
+            codebook_version=PGC16_CODEBOOK_VERSION,
+            dtype=torch.float16,
+        )
+    ).contiguous()
+    telemetry = QVQQuantizationTelemetry()
+
+    dispatches_before = _norm_rank_dispatch_count()
+    _yaqa_inner_v2b2_family_batch_cuda(
+        weight,
+        hessian,
+        hessian,
+        pair_stacks,
+        bits=3.0,
+        factorization=None,
+        rounding_bias=None,
+        telemetry=telemetry,
+    )
+    counters = telemetry.finalize()["counters"]
+
+    assert _norm_rank_dispatch_count() > dispatches_before
+    assert counters.get("viterbi_provisional_midpoint_only", 0) == 0
+    assert counters["viterbi_provisional_states_produced"] == (
+        counters["viterbi_provisional_states_consumed"] * 128
+    )
+    assert counters["viterbi_provisional_losses_discarded"] > 0
+    assert counters["viterbi_provisional_selectors_discarded"] > 0
+
+
+def test_qvq_v2b2_w3_family_batch_pruning_escape_preserves_midpoint_ordering(
+    monkeypatch,
+):
+    monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "1")
+    generator = torch.Generator(device="cuda").manual_seed(20260919)
     weight = torch.randn((32, 32), generator=generator, device="cuda", dtype=torch.float16)
     hessian = torch.eye(32, device="cuda", dtype=torch.float32)
     pair_stacks = torch.stack(
@@ -4043,8 +4087,11 @@ def test_qvq_v2b2_w3_family_batch_uses_exact_midpoint_only_provisional_pass():
     assert counters.get("viterbi_provisional_selectors_discarded", 0) == 0
 
 
-def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional")
+@pytest.mark.parametrize("direct_mode", ("provisional", "true"))
+def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(
+    monkeypatch, direct_mode
+):
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", direct_mode)
     monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", "1")
     generator = torch.Generator(device="cuda").manual_seed(20260922)
 
@@ -4092,6 +4139,10 @@ def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(monkeypatch):
     assert states.shape[-1] == 128
     assert selectors.dtype == torch.uint8
     assert counters["viterbi_provisional_direct_distance"] > 0
+    assert counters["viterbi_provisional_midpoint_only"] > 0
+    assert counters["viterbi_provisional_states_produced"] == counters[
+        "viterbi_provisional_states_consumed"
+    ]
     assert counters.get("viterbi_final_direct_distance", 0) == 0
 
 
@@ -5656,6 +5707,42 @@ def test_qvq_cuda_norm_rank_grid_dispatches_and_is_bit_exact(monkeypatch, bits, 
     assert torch.equal(actual[0], eager.states)
     assert torch.equal(actual[1], eager.squared_error)
     assert torch.equal(actual[2], eager.segment_bank_ids)
+
+
+@pytest.mark.parametrize("bits", (2.5, 3.0))
+@pytest.mark.parametrize("families,batch", ((2, 7), (3, 64)))
+def test_qvq_cuda_norm_rank_family_grid_dispatches_and_is_bit_exact(
+    monkeypatch, bits, families, batch
+):
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260921 + families + batch + int(bits * 10)
+    )
+    sequences = torch.randn(
+        (families, batch, 128, 2), generator=generator, device="cuda"
+    )
+    codebooks = torch.stack(
+        tuple(
+            torch.stack(
+                (
+                    pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+                    pgc16_codebook_v2_bank(family % 3 + 1, bits=bits, dtype=torch.float32),
+                )
+            )
+            for family in range(families)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    op = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+
+    monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", raising=False)
+    monkeypatch.setenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "1")
+    expected = op(sequences, codebooks, transition_bits, 16, None, None)
+    before = _norm_rank_dispatch_count()
+    monkeypatch.setenv("GPTQMODEL_QVQ_DISABLE_OCTET_GRID", "0")
+    actual = op(sequences, codebooks, transition_bits, 16, None, None)
+
+    assert _norm_rank_dispatch_count() == before + 1
+    assert all(torch.equal(e, a) for e, a in zip(expected, actual))
 
 
 @pytest.mark.parametrize(
