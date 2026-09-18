@@ -159,3 +159,42 @@ aggressive diagnostic mode, not the recommended configuration: at W3 it was
 1.080x faster end-to-end but increased held-out MSE by 0.0987%. The
 provisional-only mitigation retained most of the layer speedup while reducing
 that drift by 4.85x. `final` is also available for controlled A/B experiments.
+
+## Recommended H100 fast-quality profile
+
+The two independently gated rounding optimizations can be enabled together:
+
+```bash
+GPTQMODEL_QVQ_YAQA_FAST_TF32=1 \
+GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE=provisional \
+python scripts/qvq_quantize.py ...
+```
+
+This is the recommended opt-in H100 profile for QVQ + YAQA + contiguous P32.
+It keeps the final constrained Viterbi solve exact, uses direct FP32 distance
+only to choose the provisional tail-biting state, and uses TF32 only for the
+wide factored-feedback GEMMs. Defaults remain exact and both switches remain
+independent so deployments can gate them separately.
+
+The interaction was measured end to end rather than inferred by adding the
+individual results. The two rounding changes partially cancel harmful payload
+drift at W2.5 and W3.5:
+
+| Rate | Exact layer | Paired profile | Speedup | Per-module FP64 Fisher delta | Disjoint held-out MSE delta |
+|---|---:|---:|---:|---:|---:|
+| W2.5 | 25.001 s | 21.946 s | 1.139x | -1.084% to +0.415% | -0.01297% |
+| W3 | 29.257 s | 26.089 s | 1.121x | -0.477% to +0.056% | +0.00744% |
+| W3.5 | 27.344 s | 24.146 s | 1.132x | -0.747% to +0.336% | -0.11730% |
+
+Negative held-out deltas improve quality. FP32 and FP64 Fisher deltas agree
+closely for every projection. The held-out gate uses the same strictly
+disjoint 256-question GSM8K Platinum set and 352,926,720 projection elements
+as the independent gates. W2.5 and W3.5 are speed/quality double wins; W3
+accepts a bounded 0.00744% held-out change for a 1.121x layer speedup.
+
+Do not substitute the aggressive all-pass direct-distance mode: its W3
+held-out drift is materially larger. Also do not predict the paired profile
+from isolated microbenchmarks—the selected P32 payload depends on interactions
+between both rounding boundaries. Re-run the dual FP32/FP64 Fisher gate and a
+strictly disjoint held-out gate when changing model, architecture, calibration
+data, CUDA/PyTorch stack, or GPU generation.
