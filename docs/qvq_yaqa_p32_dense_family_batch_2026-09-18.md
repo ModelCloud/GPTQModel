@@ -455,3 +455,47 @@ multiwave launch improved isolated batches 128--256 by about 1.15x, but its
 first pipeline measurement was invalidated by an unrelated orphan GPU workload.
 Without a clean end-to-end promotion result, the isolated result was not treated
 as production evidence. Neither rejected candidate remains in the source.
+
+### Adaptive Shift-7 CTA geometry
+
+The clean follow-up retained both exact Shift-7 kernels and selects their CTA
+shape from launch occupancy. SASS resource metadata reports 96 registers per
+thread for the 512-thread kernel and 110 for the 256-thread kernel. On H100,
+that permits one 512-thread CTA or two 256-thread CTAs per SM. The 512-thread
+form therefore remains selected while the grid is smaller than one SM wave;
+at `batch * bank_count >= multiprocessor_count`, the 256-thread form processes
+two suffix columns per thread and exposes the second resident CTA.
+
+Warm real Llama 3.2 1B tile medians on the 132-SM H100 were:
+
+| Shape | Batch | 512 threads | Adaptive | Speedup |
+|---|---:|---:|---:|---:|
+| B2/P32 | 72 | 440.7 us | 384.0 us | 1.148x |
+| B2/P32 | 128 | 453.2 us | 396.7 us | 1.142x |
+| B2/P32 | 256 | 835.2 us | 711.1 us | 1.175x |
+| B4/P64 | 64 | 461.3 us | 407.4 us | 1.132x |
+| B4/P64 | 128 | 821.2 us | 697.8 us | 1.177x |
+| B4/P64 | 256 | 1570.9 us | 1407.2 us | 1.116x |
+
+Underfilled B2/P32 batches 32 and 64 retain the 512-thread kernel and remain
+within 1.4% of the control. The same geometry rule applies to unconstrained and
+tail-biting passes and leaves W2.5/W3 dispatch unchanged.
+
+A matched one-layer run reduced exact segmented-Viterbi GPU time from 16.957 s
+to 16.437 s (1.032x). Inclusive projection quantization moved from 25.867 s to
+25.778 s; the recurrence gain is intentionally reported separately because
+other layer phases dominate the small wall-time difference.
+
+Quality was gated on a frozen 2048x2048 Q-projection solver input so CUDA
+factor-capture allocation differences could not contaminate the A/B. The
+baseline and adaptive branches produced identical reconstructed inner weights,
+trellis states, and P32 selectors (matching SHA-256 hashes for all three), so
+the independent FP32 and FP64 Fisher objective deltas are exactly zero. Large
+grid B2/P32 and B4/P64 tests additionally compare both constrained and
+unconstrained results bit-for-bit with the pristine recurrence.
+
+This occupancy switch does not transfer directly to inference. The SM90 P32
+inference path is warp-specialized around fixed WGMMA tile geometry rather than
+one CTA per trellis suffix grid; changing its CTA width would change the MMA
+mapping instead of merely assigning another suffix column to each thread. No
+inference code or checkpoint layout changes in this phase.
