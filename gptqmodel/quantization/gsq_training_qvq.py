@@ -595,6 +595,7 @@ def p32_training_module_from_payload(
     training_dtype=torch.float32,
     fast_identity_metric=True,
     fast_position_map=True,
+    compact_sparse_candidates=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -617,6 +618,7 @@ def p32_training_module_from_payload(
         training_dtype=training_dtype,
         fast_identity_metric=fast_identity_metric,
         fast_position_map=fast_position_map,
+        compact_sparse_candidates=compact_sparse_candidates,
     )
 
 
@@ -638,6 +640,7 @@ def p32_training_module_from_words(
     training_dtype=torch.float32,
     fast_identity_metric=True,
     fast_position_map=True,
+    compact_sparse_candidates=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -685,15 +688,20 @@ def p32_training_module_from_words(
         return_decoded=True,
         return_sparse=True,
         return_shifts=True,
+        compact_sparse=compact_sparse_candidates,
         identity_metric=identity_metric,
     )
-    candidate_words, decoded, indices, deltas, shifts = values
-    sparse_values = decoded[1:].reshape(len(decoded) - 1, len(baseline), 256).gather(
-        2, indices,
-    )
+    if compact_sparse_candidates:
+        candidate_words, baseline_tiles, indices, deltas, shifts, sparse_values = values
+    else:
+        candidate_words, decoded, indices, deltas, shifts = values
+        baseline_tiles = decoded[0]
+        sparse_values = decoded[1:].reshape(
+            len(decoded) - 1, len(baseline), 256,
+        ).gather(2, indices)
     return GSQP32TrainingModule(
         candidate_words,
-        decoded[0],
+        baseline_tiles,
         indices,
         deltas,
         sparse_values,
