@@ -275,6 +275,12 @@ def parse_args():
         help="Write FP32-trained attention reconstruction directly as BF16",
     )
     parser.add_argument(
+        "--cuda-graph-attention-updates",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Replay fixed-shape attention optimizer updates through CUDA graphs",
+    )
+    parser.add_argument(
         "--inline-p32-overlap",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1073,20 +1079,24 @@ def main():
                 )
             torch.cuda.nvtx.range_push(f"gsq.stage.{stage_name}.round_{round_index + 1}")
             try:
+                options = fitting_options(
+                    args,
+                    epochs=args.epochs,
+                    seed=args.seed + round_index,
+                    validation_batches=stage_validation_batches,
+                    fp32_tail_epochs=(
+                        args.mlp_fp32_tail_epochs if stage_name == "mlp" else 0
+                    ),
+                    validation_start_epoch=validation_start_epoch,
+                )
+                options["cuda_graph_updates"] = bool(
+                    stage_name == "attention" and args.cuda_graph_attention_updates
+                )
                 result = fit_reconstruction_stage(
                     quantizers,
                     stage_train_batches,
                     objective,
-                    **fitting_options(
-                        args,
-                        epochs=args.epochs,
-                        seed=args.seed + round_index,
-                        validation_batches=stage_validation_batches,
-                        fp32_tail_epochs=(
-                            args.mlp_fp32_tail_epochs if stage_name == "mlp" else 0
-                        ),
-                        validation_start_epoch=validation_start_epoch,
-                    ),
+                    **options,
                 )
             finally:
                 torch.cuda.nvtx.range_pop()
@@ -1106,6 +1116,7 @@ def main():
                 "teacher_cache_seconds": cache_seconds if round_index == 0 else 0.,
                 "fp32_tail_epochs": result["fp32_tail_epochs"],
                 "validation_start_epoch": result["validation_start_epoch"],
+                "cuda_graph_updates": result["cuda_graph_updates"],
                 "changed_tiles": {
                     name: int((state["choices"] != 0).sum()) for name, state in states.items()
                 },
@@ -1289,6 +1300,7 @@ def main():
         "compact_sparse_candidates": args.compact_sparse_candidates,
         "compact_attention_forward": args.compact_attention_forward,
         "direct_bf16_attention_output": args.direct_bf16_attention_output,
+        "cuda_graph_attention_updates": args.cuda_graph_attention_updates,
         "inline_p32_overlap": args.inline_p32_overlap,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,

@@ -199,6 +199,39 @@ def _lion_update_kernel(parameter, gradient, momentum, size,
 
 
 @triton.jit
+def _lion_update_scheduled_kernel(parameter, gradient, momentum, size,
+                                  beta1, beta1_complement, beta2, beta2_complement,
+                                  learning_rate_pointer, decay_pointer,
+                                  BLOCK: tl.constexpr):
+    learning_rate = tl.load(learning_rate_pointer).to(tl.float32)
+    decay = tl.load(decay_pointer).to(tl.float32)
+    offset = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offset < size
+    value = tl.load(parameter + offset, mask=mask, other=0.0).to(tl.float32)
+    grad = tl.load(gradient + offset, mask=mask, other=0.0).to(tl.float32)
+    old_momentum = tl.load(momentum + offset, mask=mask, other=0.0).to(tl.float32)
+
+    direction_value = _fp32_fma(
+        grad, beta1_complement,
+        _fp32_multiply(old_momentum, beta1),
+    )
+    direction = tl.where(
+        direction_value > 0.0, 1.0,
+        tl.where(direction_value < 0.0, -1.0, 0.0),
+    )
+    value = _fp32_fma(
+        direction, -learning_rate,
+        _fp32_multiply(value, decay),
+    )
+    updated_momentum = _fp32_fma(
+        grad, beta2_complement,
+        _fp32_multiply(old_momentum, beta2),
+    )
+    tl.store(parameter + offset, value, mask=mask)
+    tl.store(momentum + offset, updated_momentum, mask=mask)
+
+
+@triton.jit
 def _candidate_gradient_product(grad_matrix, matrix_indices, sparse_deltas,
                                 tile, tile_mask, choice,
                                 CHOICES: tl.constexpr,
@@ -1009,7 +1042,7 @@ def build_position_map(indices, deltas):
 
 
 def lion_update(parameter, gradient, momentum, *, learning_rate: float,
-                beta1: float, beta2: float, weight_decay: float):
+                beta1: float, beta2: float, weight_decay: float, decay=None):
     """Apply one FP32 Lion update without intermediate tensor launches."""
     if any(value.dtype != torch.float32 or not value.is_cuda
            or not value.is_contiguous()
@@ -1019,12 +1052,26 @@ def lion_update(parameter, gradient, momentum, *, learning_rate: float,
         raise ValueError("fused GSQ Lion tensors must have identical shapes")
     size = parameter.numel()
     block = 256
-    _lion_update_kernel[(triton.cdiv(size, block),)](
-        parameter, gradient, momentum, size,
-        beta1, 1.0 - beta1, beta2, 1.0 - beta2,
-        learning_rate, 1.0 - learning_rate * weight_decay,
-        BLOCK=block, num_warps=4,
-    )
+    if isinstance(learning_rate, torch.Tensor):
+        if (learning_rate.shape or learning_rate.dtype != torch.float32
+                or learning_rate.device != parameter.device):
+            raise ValueError("scheduled GSQ Lion learning rate must be a CUDA FP32 scalar")
+        if (not isinstance(decay, torch.Tensor) or decay.shape
+                or decay.dtype != torch.float32 or decay.device != parameter.device):
+            raise ValueError("scheduled GSQ Lion decay must be a CUDA FP32 scalar")
+        _lion_update_scheduled_kernel[(triton.cdiv(size, block),)](
+            parameter, gradient, momentum, size,
+            beta1, 1.0 - beta1, beta2, 1.0 - beta2,
+            learning_rate, decay,
+            BLOCK=block, num_warps=4,
+        )
+    else:
+        _lion_update_kernel[(triton.cdiv(size, block),)](
+            parameter, gradient, momentum, size,
+            beta1, 1.0 - beta1, beta2, 1.0 - beta2,
+            learning_rate, 1.0 - learning_rate * weight_decay,
+            BLOCK=block, num_warps=4,
+        )
 
 
 def screen_p32_w3_identity_shifts(baseline, positions, bank_ids, bank_alt_id,

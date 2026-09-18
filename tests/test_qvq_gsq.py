@@ -90,6 +90,26 @@ def test_gumbel_math_and_gradient(temperature):
     assert torch.equal(_candidate_probabilities(logits.float(), uniform.float(), temperature), old)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_live_inverse_temperature_preserves_candidate_probabilities():
+    generator = torch.Generator(device="cuda").manual_seed(29)
+    logits = torch.randn((8192, 33), device="cuda", generator=generator)
+    uniform = torch.rand(logits.shape, device="cuda", generator=generator)
+
+    for temperature, multiplier in (
+        (2., 100.), (1.753164556962, 150.6329113924), (.05, 500.),
+    ):
+        eager = _candidate_probabilities(
+            logits, uniform, temperature, multiplier,
+        )
+        live = _candidate_probabilities(
+            logits, uniform,
+            torch.tensor(1. / temperature, device="cuda"),
+            torch.tensor(multiplier, device="cuda"),
+        )
+        assert torch.equal(live, eager)
+
+
 @pytest.mark.parametrize("explicit", [False, True])
 def test_disabled_preserves_payload_without_fitting(monkeypatch, explicit):
     def forbidden(*args, **kwargs):
