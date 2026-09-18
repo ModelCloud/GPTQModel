@@ -575,6 +575,45 @@ def test_p32_staged_rejects_inconsistent_sparse_metadata():
         )
 
 
+def test_trusted_generated_metadata_reuses_buffers_without_weakening_default_checks():
+    source, candidates, decoded = _training_module()
+    indices = source.sparse_indices.permute(1, 0, 2)
+    deltas = source.sparse_deltas.permute(1, 0, 2)
+    values = source.sparse_values.permute(1, 0, 2)
+    shifts = source.sparse_shifts.T
+    options = {
+        "bits": 3,
+        "bank_ids": source.bank_ids,
+        "bank_alt_id": source.bank_alt_id,
+        "in_features": 16,
+        "out_features": 16,
+        "SU": source.SU,
+        "SV": source.scales.detach(),
+    }
+    invalid_baseline = decoded[0].clone()
+    invalid_baseline[0, 0, 0] = torch.nan
+    with pytest.raises(ValueError, match="finite"):
+        GSQP32TrainingModule(
+            candidates, invalid_baseline, indices, deltas, values, shifts, **options,
+        )
+
+    trusted = GSQP32TrainingModule(
+        candidates,
+        decoded[0],
+        indices,
+        deltas,
+        values,
+        shifts,
+        trusted_generated_metadata=True,
+        **options,
+    )
+    assert trusted.candidates.data_ptr() == candidates.data_ptr()
+    assert trusted.baseline_tiles.data_ptr() == decoded[0].data_ptr()
+    assert trusted.bank_ids.data_ptr() == source.bank_ids.data_ptr()
+    assert trusted.bank_alt_id.data_ptr() == source.bank_alt_id.data_ptr()
+    assert trusted.SU.data_ptr() == source.SU.data_ptr()
+
+
 def test_p32_next_round_uses_prior_hard_words_and_scales_as_baseline():
     first, _, _ = _training_module()
     with torch.no_grad():
