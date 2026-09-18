@@ -580,6 +580,7 @@ def p32_training_module_from_payload(
     output_hadamard=True,
     fast_hadamard=True,
     training_dtype=torch.float32,
+    fast_identity_metric=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -600,6 +601,7 @@ def p32_training_module_from_payload(
         output_hadamard=output_hadamard,
         fast_hadamard=fast_hadamard,
         training_dtype=training_dtype,
+        fast_identity_metric=fast_identity_metric,
     )
 
 
@@ -619,6 +621,7 @@ def p32_training_module_from_words(
     output_hadamard=True,
     fast_hadamard=True,
     training_dtype=torch.float32,
+    fast_identity_metric=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -644,10 +647,14 @@ def p32_training_module_from_words(
         input_hadamard=input_hadamard,
         output_hadamard=output_hadamard,
     ).float()
-    if input_metric is None:
-        input_metric = torch.eye(in_features, device=baseline.device)
-    if output_metric is None:
-        output_metric = torch.eye(out_features, device=baseline.device)
+    identity_metric = (
+        fast_identity_metric and input_metric is None and output_metric is None
+    )
+    if not identity_metric:
+        if input_metric is None:
+            input_metric = torch.eye(in_features, device=baseline.device)
+        if output_metric is None:
+            output_metric = torch.eye(out_features, device=baseline.device)
     values = fisher_screened_trellis_candidates(
         baseline,
         count=candidates,
@@ -662,6 +669,7 @@ def p32_training_module_from_words(
         return_decoded=True,
         return_sparse=True,
         return_shifts=True,
+        identity_metric=identity_metric,
     )
     candidate_words, decoded, indices, deltas, shifts = values
     sparse_values = decoded[1:].reshape(len(decoded) - 1, len(baseline), 256).gather(
