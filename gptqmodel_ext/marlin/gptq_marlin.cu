@@ -27,6 +27,10 @@
   #define MARLIN_GEMM_EXPORT_NAME gptq_marlin_gemm
 #endif
 
+#ifndef MARLIN_SCRATCH_SIZES_EXPORT_NAME
+  #define MARLIN_SCRATCH_SIZES_EXPORT_NAME gptq_marlin_scratch_sizes
+#endif
+
 #ifndef MARLIN_ENABLE_FP16
   #define MARLIN_ENABLE_FP16 1
 #endif
@@ -44,7 +48,11 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/types.h>
+#include <climits>
+#include <cstdint>
+#include <limits>
 #include <mutex>
+#include <tuple>
 #include <vector>
 
 #ifndef MARLIN_SHARED_MEM_GUARD_BYTES
@@ -69,6 +77,7 @@ struct is_valid_value { static constexpr bool value = true; };
 #endif
 
 #include "kernel.h"
+#include "marlin_scratch.cuh"
 
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
@@ -94,12 +103,14 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     torch::Tensor& a, std::optional<torch::Tensor> c_or_none,
     torch::Tensor& b_q_weight,
     std::optional<torch::Tensor> const& b_bias_or_none, torch::Tensor& b_scales,
+    std::optional<torch::Tensor> const& global_scale_or_none,
     std::optional<torch::Tensor> const& b_zeros_or_none,
     std::optional<torch::Tensor> const& g_idx_or_none,
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
+    std::optional<torch::Tensor> a_tmp_or_none) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
                               "marlin_gemm(..) requires CUDA_ARCH >= 7.5");
   return torch::empty({1, 1});
@@ -254,6 +265,12 @@ marlin_device_info_t get_marlin_device_info(int device) {
     info = query_marlin_device_info(device);
   }
   return info;
+}
+
+int checked_kernel_dim(int64_t value, const char* name) {
+  TORCH_CHECK(value >= 0 && value <= std::numeric_limits<int>::max(), name,
+              " must fit in the Marlin int kernel ABI (got ", value, ")");
+  return static_cast<int>(value);
 }
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -961,8 +978,8 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
         use_fp32_reduce, max_shared_mem_new);
     // clang-format on
 
-    A_ptr += prob_m_split * (lda / 8);
-    C_ptr += prob_m_split * (prob_n / 8);
+    A_ptr += static_cast<int64_t>(prob_m_split) * (lda / 8);
+    C_ptr += static_cast<int64_t>(prob_m_split) * (prob_n / 8);
     rest_m -= prob_m_split;
   }
 }
@@ -979,21 +996,33 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     std::optional<torch::Tensor> const& perm_or_none, torch::Tensor& workspace,
     vllm::ScalarTypeId const& b_q_type_id, int64_t size_m, int64_t size_n,
     int64_t size_k, bool is_k_full, bool use_atomic_add, bool use_fp32_reduce,
-    bool is_zp_float) {
+    bool is_zp_float, std::optional<torch::Tensor> c_tmp_or_none,
+    std::optional<torch::Tensor> a_tmp_or_none) {
+  const int kernel_size_m = marlin::checked_kernel_dim(size_m, "size_m");
+  const int kernel_size_n = marlin::checked_kernel_dim(size_n, "size_n");
+  const int kernel_size_k = marlin::checked_kernel_dim(size_k, "size_k");
   vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   int pack_factor = 32 / b_q_type.size_bits();
 
   // Verify A
+  TORCH_CHECK(a.dim() == 2, "A must be a rank-2 tensor");
   TORCH_CHECK(a.size(0) == size_m, "Shape mismatch: a.size(0) = ", a.size(0),
               ", size_m = ", size_m);
   TORCH_CHECK(a.size(1) == size_k, "Shape mismatch: a.size(1) = ", a.size(1),
               ", size_k = ", size_k);
 
   // Verify B
+  TORCH_CHECK(b_q_weight.dim() == 2,
+              "b_q_weight must be a rank-2 tensor");
+  const int b_q_weight_size_0 =
+      marlin::checked_kernel_dim(b_q_weight.size(0), "b_q_weight.size(0)");
+  const int b_q_weight_size_1 =
+      marlin::checked_kernel_dim(b_q_weight.size(1), "b_q_weight.size(1)");
   TORCH_CHECK(
       size_k % MARLIN_NAMESPACE_NAME::tile_size == 0, "size_k = ", size_k,
       " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
-  TORCH_CHECK((size_k / MARLIN_NAMESPACE_NAME::tile_size) == b_q_weight.size(0),
+  TORCH_CHECK((kernel_size_k / MARLIN_NAMESPACE_NAME::tile_size) ==
+                  b_q_weight_size_0,
               "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
               ", size_k = ", size_k,
               ", tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
@@ -1001,17 +1030,35 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       b_q_weight.size(1) % MARLIN_NAMESPACE_NAME::tile_size == 0,
       "b_q_weight.size(1) = ", b_q_weight.size(1),
       " is not divisible by tile_size = ", MARLIN_NAMESPACE_NAME::tile_size);
-  int actual_size_n =
-      (b_q_weight.size(1) / MARLIN_NAMESPACE_NAME::tile_size) * pack_factor;
-  TORCH_CHECK(size_n == actual_size_n, "size_n = ", size_n,
+  const int64_t actual_size_n_i64 = marlin::checked_scratch_mul(
+      b_q_weight_size_1 / MARLIN_NAMESPACE_NAME::tile_size, pack_factor,
+      "b_q_weight derived size_n");
+  const int actual_size_n =
+      marlin::checked_kernel_dim(actual_size_n_i64,
+                                 "b_q_weight derived size_n");
+  TORCH_CHECK(kernel_size_n == actual_size_n, "size_n = ", size_n,
               ", actual_size_n = ", actual_size_n);
 
   // Verify device and strides
   TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
   TORCH_CHECK(a.stride(1) == 1, "A.stride(1) is not 1");
+  TORCH_CHECK(a.stride(0) >= 0, "A.stride(0) must be non-negative");
+  const int kernel_lda =
+      marlin::checked_kernel_dim(a.stride(0), "A.stride(0)");
   // We use int4 (16 bytes) to load A, so A must aligned to 16 bytes
-  TORCH_CHECK(a.stride(0) % 8 == 0, "A.stride(0) must divisible by 8");
+  TORCH_CHECK(kernel_lda % 8 == 0, "A.stride(0) must divisible by 8");
   TORCH_CHECK(((uint64_t)a.data_ptr()) % 16 == 0, "A must aligned to 16 bytes");
+  marlin::checked_scratch_mul(a.stride(0), a.element_size(),
+                              "A.stride(0) byte size");
+  if (size_m > 0 && size_k > 0) {
+    const int64_t last_a_element = marlin::checked_scratch_add(
+        marlin::checked_scratch_mul(size_m - 1, a.stride(0),
+                                    "A byte extent"),
+        size_k - 1, "A byte extent");
+    marlin::checked_scratch_mul(
+        marlin::checked_scratch_add(last_a_element, 1, "A byte extent"),
+        a.element_size(), "A byte extent");
+  }
 
   TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
   TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
@@ -1035,29 +1082,20 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   if (c_or_none.has_value()) {
     c = c_or_none.value();
     TORCH_CHECK(c.device().is_cuda(), "c is not on GPU");
+    TORCH_CHECK(c.device() == a.device(), "c must be on the same device as A");
     TORCH_CHECK(c.is_contiguous(), "c is not contiguous");
+    TORCH_CHECK(c.scalar_type() == a.scalar_type(),
+                "c must have the same dtype as A");
     TORCH_CHECK(c.size(0) == size_m, "Shape mismatch: c.size(0) = ", c.size(0),
                 ", size_m = ", size_m);
     TORCH_CHECK(c.size(1) == size_n, "Shape mismatch: c.size(1) = ", c.size(1),
                 ", size_n = ", size_n);
+    TORCH_CHECK(((uint64_t)c.data_ptr()) % 16 == 0,
+                "c must aligned to 16 bytes");
   } else {
     c = torch::empty({size_m, size_n}, options);
   }
   if (size_m == 0) return c;
-
-  // Alloc C tmp buffer that is going to be used for the global reduce
-  torch::Tensor c_tmp;
-  auto options_fp32 =
-      torch::TensorOptions().dtype(at::kFloat).device(a.device());
-  if (use_fp32_reduce) {
-    int max_m_block_size = (size_m + 16 - 1) / 16 * 16;
-    max_m_block_size = min(max_m_block_size, 64);
-    int max_c_tmp_size =
-        sms * max_m_block_size * MARLIN_NAMESPACE_NAME::max_thread_n;
-    c_tmp = torch::empty({max_c_tmp_size}, options_fp32);
-  } else {
-    c_tmp = torch::empty({0}, options_fp32);
-  }
 
   // Detect groupsize and act_order
   int num_groups = -1;
@@ -1067,9 +1105,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   TORCH_CHECK(rank == 2, "b_scales rank = ", rank, " is not 2");
   TORCH_CHECK(b_scales.size(1) == size_n, "b_scales dim 1 = ", b_scales.size(1),
               " is not size_n = ", size_n);
-  num_groups = b_scales.size(0);
+  num_groups =
+      marlin::checked_kernel_dim(b_scales.size(0), "b_scales.size(0)");
 
-  torch::Tensor g_idx, perm, a_tmp;
+  torch::Tensor g_idx, perm;
   if (g_idx_or_none.has_value() && perm_or_none.has_value()) {
     g_idx = g_idx_or_none.value();
     perm = perm_or_none.value();
@@ -1088,12 +1127,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   } else {
     g_idx = torch::empty({0}, options);
     perm = torch::empty({0}, options);
-    a_tmp = torch::empty({0}, options);
   }
   bool has_act_order = g_idx.size(-1) > 0 && perm.size(-1) > 0;
 
   if (has_act_order) {
-    a_tmp = torch::empty({size_m, size_k}, options);
     if (is_k_full) {
       TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
       TORCH_CHECK(size_k % num_groups == 0, "size_k = ", size_k,
@@ -1104,7 +1141,6 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     }
 
   } else {
-    a_tmp = torch::empty({0}, options);
     if (num_groups > 1) {
       TORCH_CHECK(
           size_k % num_groups == 0, "size_k = ", size_k,
@@ -1113,6 +1149,110 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
     } else {
       group_size = -1;
     }
+  }
+
+  // Use the same checked capacities for internal allocations and for caller
+  // supplied scratch.  The latter is checked below even when the corresponding
+  // path is disabled, so malformed buffers cannot be silently accepted.
+  auto scratch_sizes = marlin::marlin_scratch_sizes_checked(
+      size_m, size_k, sms, MARLIN_NAMESPACE_NAME::max_thread_n,
+      use_fp32_reduce, has_act_order);
+  const int64_t required_c_tmp = std::get<0>(scratch_sizes);
+  const int64_t required_a_tmp = std::get<1>(scratch_sizes);
+  marlin::checked_scratch_mul(required_c_tmp, sizeof(float),
+                              "c_tmp byte capacity");
+  marlin::checked_scratch_mul(required_a_tmp, a.element_size(),
+                              "a_tmp byte capacity");
+  auto options_fp32 =
+      torch::TensorOptions().dtype(at::kFloat).device(a.device());
+
+  torch::Tensor c_tmp;
+  if (c_tmp_or_none.has_value()) {
+    c_tmp = c_tmp_or_none.value();
+  } else if (use_fp32_reduce) {
+    c_tmp = torch::empty({required_c_tmp}, options_fp32);
+  } else {
+    c_tmp = torch::empty({0}, options_fp32);
+  }
+
+  torch::Tensor a_tmp;
+  if (a_tmp_or_none.has_value()) {
+    a_tmp = a_tmp_or_none.value();
+  } else if (has_act_order) {
+    a_tmp = torch::empty({required_a_tmp}, options);
+  } else {
+    a_tmp = torch::empty({0}, options);
+  }
+
+  auto check_scratch = [&](torch::Tensor const& scratch,
+                           const char* scratch_name, at::ScalarType dtype,
+                           int64_t required_elements) {
+    TORCH_CHECK(scratch.defined(), scratch_name, " must be defined");
+    TORCH_CHECK(scratch.device().is_cuda(), scratch_name, " is not on GPU");
+    TORCH_CHECK(scratch.device() == a.device(), scratch_name,
+                " must be on the same device as A");
+    TORCH_CHECK(scratch.scalar_type() == dtype, scratch_name,
+                " has dtype ", scratch.scalar_type(), ", expected ", dtype);
+    TORCH_CHECK(scratch.is_contiguous(), scratch_name,
+                " must be contiguous");
+    TORCH_CHECK(scratch.numel() >= required_elements, scratch_name,
+                ".numel = ", scratch.numel(), " is below required capacity ",
+                required_elements);
+    TORCH_CHECK((reinterpret_cast<uintptr_t>(scratch.data_ptr()) % 16) == 0,
+                scratch_name, " must be aligned to 16 bytes");
+    // Validate the byte count even when no kernel currently consumes this
+    // buffer.  This keeps all capacity and pointer arithmetic checked.
+    marlin::checked_scratch_mul(scratch.numel(), scratch.element_size(),
+                                scratch_name);
+  };
+
+  auto check_no_alias = [&](torch::Tensor const& scratch,
+                            const char* scratch_name,
+                            torch::Tensor const& other,
+                            const char* other_name) {
+    if (other.defined()) {
+      TORCH_CHECK(!scratch.is_alias_of(other), scratch_name,
+                  " must not alias ", other_name);
+    }
+  };
+
+  auto check_scratch_aliases = [&](torch::Tensor const& scratch,
+                                   const char* scratch_name,
+                                   bool check_c_tmp, bool check_a_tmp) {
+    check_no_alias(scratch, scratch_name, a, "a");
+    check_no_alias(scratch, scratch_name, c, "c");
+    check_no_alias(scratch, scratch_name, b_q_weight, "b_q_weight");
+    check_no_alias(scratch, scratch_name, b_scales, "b_scales");
+    check_no_alias(scratch, scratch_name, workspace, "workspace");
+    check_no_alias(scratch, scratch_name, g_idx, "g_idx");
+    check_no_alias(scratch, scratch_name, perm, "perm");
+    if (check_c_tmp)
+      check_no_alias(scratch, scratch_name, c_tmp, "c_tmp");
+    if (check_a_tmp)
+      check_no_alias(scratch, scratch_name, a_tmp, "a_tmp");
+    if (b_bias_or_none.has_value())
+      check_no_alias(scratch, scratch_name, b_bias_or_none.value(), "b_bias");
+    if (global_scale_or_none.has_value())
+      check_no_alias(scratch, scratch_name, global_scale_or_none.value(),
+                     "global_scale");
+    if (b_zeros_or_none.has_value())
+      check_no_alias(scratch, scratch_name, b_zeros_or_none.value(),
+                     "b_zeros");
+    // The dispatch arguments are part of the alias contract even if only one
+    // of g_idx/perm was supplied and the legacy path ignores it.
+    if (g_idx_or_none.has_value())
+      check_no_alias(scratch, scratch_name, g_idx_or_none.value(), "g_idx");
+    if (perm_or_none.has_value())
+      check_no_alias(scratch, scratch_name, perm_or_none.value(), "perm");
+  };
+
+  if (c_tmp_or_none.has_value()) {
+    check_scratch(c_tmp, "c_tmp", at::kFloat, required_c_tmp);
+    check_scratch_aliases(c_tmp, "c_tmp", false, true);
+  }
+  if (a_tmp_or_none.has_value()) {
+    check_scratch(a_tmp, "a_tmp", a.scalar_type(), required_a_tmp);
+    check_scratch_aliases(a_tmp, "a_tmp", true, false);
   }
 
   torch::Tensor global_scale;
@@ -1201,6 +1341,13 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   int dev = a.get_device();
   TORCH_CHECK(global_scale.scalar_type() == at::ScalarType::Float,
               "scalar type of global_scale must be float");
+  const auto stream = at::cuda::getCurrentCUDAStream(dev);
+  // Explicit caller-owned workspaces can otherwise be returned to the caching
+  // allocator before this asynchronous launch completes on a non-current
+  // stream.  Recording the stream preserves their lifetime without a sync.
+  if (c_or_none.has_value()) c.record_stream(stream);
+  if (c_tmp_or_none.has_value()) c_tmp.record_stream(stream);
+  if (a_tmp_or_none.has_value()) a_tmp.record_stream(stream);
   #if MARLIN_ENABLE_FP16
   if (a.scalar_type() == at::ScalarType::Half) {
     void* scales_ptr;
@@ -1224,6 +1371,7 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
       TORCH_CHECK(false, "float8_e4m3fn with float8_e8m0fnu scales requires "
                          "bfloat16 compute (MXFP8).");
 #endif
+
     } else {
       scales_ptr = b_scales.data_ptr<at::Half>();
     }
@@ -1232,10 +1380,11 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         a.data_ptr<at::Half>(), b_q_weight.data_ptr(), c.data_ptr<at::Half>(),
         c_tmp.data_ptr<float>(), b_bias.data_ptr<at::Half>(), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(), g_idx.data_ptr(),
-        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
-        a.stride(0), workspace.data_ptr(), b_q_type, has_bias, has_act_order,
+        perm.data_ptr(), a_tmp.data_ptr<at::Half>(), kernel_size_m,
+        kernel_size_n, kernel_size_k, kernel_lda, workspace.data_ptr(),
+        b_q_type, has_bias, has_act_order,
         is_k_full, has_zp, num_groups, group_size, dev,
-        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        stream, thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }
@@ -1276,9 +1425,10 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
         b_bias.data_ptr<at::BFloat16>(), scales_ptr,
         global_scale.data_ptr<float>(), b_zeros.data_ptr(),
         g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(),
-        size_m, size_n, size_k, a.stride(0), workspace.data_ptr(), b_q_type,
+        kernel_size_m, kernel_size_n, kernel_size_k, kernel_lda,
+        workspace.data_ptr(), b_q_type,
         has_bias, has_act_order, is_k_full, has_zp, num_groups, group_size, dev,
-        at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms,
+        stream, thread_k, thread_n, sms,
         use_atomic_add, use_fp32_reduce, is_zp_float);
     return c;
   }
@@ -1293,6 +1443,23 @@ torch::Tensor MARLIN_GEMM_EXPORT_NAME(
   #endif
 
   return c;
+}
+
+std::tuple<int64_t, int64_t> MARLIN_SCRATCH_SIZES_EXPORT_NAME(
+    torch::Tensor& a, int64_t size_m, int64_t size_k, bool use_fp32_reduce,
+    bool has_act_order) {
+  TORCH_CHECK(a.device().is_cuda(), "A is not on GPU");
+  marlin::checked_kernel_dim(size_m, "size_m");
+  marlin::checked_kernel_dim(size_k, "size_k");
+  const auto device_info = marlin::get_marlin_device_info(a.get_device());
+  auto sizes = marlin::marlin_scratch_sizes_checked(
+      size_m, size_k, device_info.sms, MARLIN_NAMESPACE_NAME::max_thread_n,
+      use_fp32_reduce, has_act_order);
+  marlin::checked_scratch_mul(std::get<0>(sizes), sizeof(float),
+                              "c_tmp byte capacity");
+  marlin::checked_scratch_mul(std::get<1>(sizes), a.element_size(),
+                              "a_tmp byte capacity");
+  return sizes;
 }
 
 #endif
