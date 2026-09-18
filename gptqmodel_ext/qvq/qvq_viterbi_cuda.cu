@@ -2194,24 +2194,36 @@ void qvq_v2_segment_grid_norm_rank_kernel(
     g_output_all[g_base + x] = g_previous[x + (x >> group_shift)];
   }
   if (collect_telemetry) {
-    __syncthreads();
-    // The recurrence no longer needs shared frontier storage. Reuse its first
-    // 16 KiB for two block reductions; the launcher reserves that minimum for
-    // telemetry when the recurrence's normal workspace is smaller.
-    auto* reduction = reinterpret_cast<unsigned long long*>(shared_frontiers);
-    reduction[thread] = candidates_evaluated;
-    reduction[BlockThreads + thread] = candidates_possible;
-    __syncthreads();
-    for (int stride = BlockThreads / 2; stride > 0; stride >>= 1) {
-      if (thread < stride) {
-        reduction[thread] += reduction[thread + stride];
-        reduction[BlockThreads + thread] += reduction[BlockThreads + thread + stride];
-      }
-      __syncthreads();
+    // The recurrence no longer needs shared frontier storage.  Reduce within
+    // each warp in registers, then let warp zero reduce the warp totals.  This
+    // preserves the exact uint64 totals and two atomics per CTA while replacing
+    // the former log2(BlockThreads) barrier tree with one block barrier.
+    constexpr int warp_count = BlockThreads / 32;
+    const int lane = thread & 31;
+    const int warp = thread >> 5;
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      candidates_evaluated += __shfl_down_sync(kFullMask, candidates_evaluated, offset);
+      candidates_possible += __shfl_down_sync(kFullMask, candidates_possible, offset);
     }
-    if (thread == 0) {
-      atomicAdd(&g_norm_rank_candidates_evaluated, reduction[0]);
-      atomicAdd(&g_norm_rank_candidates_possible, reduction[BlockThreads]);
+    auto* reduction = reinterpret_cast<unsigned long long*>(shared_frontiers);
+    if (lane == 0) {
+      reduction[warp] = candidates_evaluated;
+      reduction[warp_count + warp] = candidates_possible;
+    }
+    __syncthreads();
+    if (warp == 0) {
+      unsigned long long block_evaluated = lane < warp_count ? reduction[lane] : 0;
+      unsigned long long block_possible = lane < warp_count ? reduction[warp_count + lane] : 0;
+      #pragma unroll
+      for (int offset = 16; offset > 0; offset >>= 1) {
+        block_evaluated += __shfl_down_sync(kFullMask, block_evaluated, offset);
+        block_possible += __shfl_down_sync(kFullMask, block_possible, offset);
+      }
+      if (lane == 0) {
+        atomicAdd(&g_norm_rank_candidates_evaluated, block_evaluated);
+        atomicAdd(&g_norm_rank_candidates_possible, block_possible);
+      }
     }
   }
 }
@@ -3510,7 +3522,7 @@ void launch_qvq_v2_segment_norm_rank_segments(
       3 * static_cast<size_t>(group_count) * sizeof(unsigned);
   const size_t shared_bytes = collect_telemetry
       ? std::max(recurrence_shared_bytes,
-                 2 * static_cast<size_t>(block_threads) * sizeof(unsigned long long))
+                 2 * static_cast<size_t>(block_threads / 32) * sizeof(unsigned long long))
       : recurrence_shared_bytes;
   auto* kernel = qvq_v2_segment_grid_norm_rank_kernel<
       Shift, BankCount, SegmentSteps, ChunkWidth, block_threads>;

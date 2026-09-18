@@ -418,3 +418,40 @@ already-selected trellis states and P32 selectors; it does not execute the
 128-way predecessor search. The checkpoint layout and inference kernels are
 unchanged. Inference-side work should instead target fused state/selector
 decode, codebook lookup, and quantized GEMM.
+
+### Low-overhead exact pruning telemetry
+
+An SM90 Nsight Systems capture of the matched W3.5 layer found that the exact
+Shift-7 recurrence accounted for 67.1% of GPU kernel time (22.794 s across
+43,920 segment launches). Norm-table sorting and bounds construction together
+accounted for only 0.55%, ruling out table construction as the next bottleneck.
+
+Production telemetry formerly reduced two uint64 candidate counters through a
+full shared-memory block tree after every segment. The replacement performs
+register shuffle reductions within each warp, writes one pair per warp, and
+uses warp zero for the final reduction. It retains the same two global atomics
+per CTA and bit-exact counter totals, while reducing the telemetry workspace
+from `2 * block_threads * 8` bytes to `2 * warps * 8` bytes and replacing the
+logarithmic barrier tree with one block barrier.
+
+Warm real-tile H100 medians with telemetry enabled improved across every target
+rate and measured batch:
+
+| Rate | Batch range | Previous | Warp reduction | Speedup |
+|---|---:|---:|---:|---:|
+| W2.5 | 32--256 | 0.640--2.049 ms | 0.630--2.030 ms | 1.009--1.021x |
+| W3 | 32--256 | 0.396--1.351 ms | 0.393--1.336 ms | 1.008--1.014x |
+| W3.5 | 32--256 | 0.278--0.856 ms | 0.275--0.843 ms | 1.008--1.016x |
+
+The exact telemetry test still reports the analytical possible-candidate count
+and the measured evaluated-candidate count, and unconstrained/constrained
+family-grid payloads remain bit-for-bit identical to the pristine recurrence.
+This is quantization-only observer work and has no inference-side analogue.
+
+Two alternatives were rejected during this phase. A per-chunk predecessor
+floor was mathematically exact but added shared-frontier loads and control flow,
+regressing real W3.5 microbenchmarks by 12.9--15.7%. A 256-thread Shift-7
+multiwave launch improved isolated batches 128--256 by about 1.15x, but its
+first pipeline measurement was invalidated by an unrelated orphan GPU workload.
+Without a clean end-to-end promotion result, the isolated result was not treated
+as production evidence. Neither rejected candidate remains in the source.
