@@ -12,7 +12,11 @@ from gptqmodel.quantization.gsq_training_qvq import (
     _TransposeView,
     p32_training_module_from_words,
 )
-from gptqmodel.quantization.qvq import rht_preprocess_weight, rht_reconstruct_weight
+from gptqmodel.quantization.qvq import (
+    pack_qvq_binary_bank_ids,
+    rht_preprocess_weight,
+    rht_reconstruct_weight,
+)
 from gptqmodel.quantization.qvq_gsq import (
     TrellisCandidateAdapter,
     fisher_screened_trellis_candidates,
@@ -106,6 +110,62 @@ def test_identity_metric_candidate_screen_is_bitwise_exact(device):
         **options,
     )
     assert all(torch.equal(actual, expected) for actual, expected in zip(specialized, dense))
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("alt_id", [1, 2, 3])
+def test_fused_identity_screen_matches_random_banks(packed, alt_id):
+    tile_count = 16
+    generator = torch.Generator(device="cuda").manual_seed(53)
+    baseline = torch.randint(
+        -(2 ** 31), 2 ** 31, (tile_count, 24), dtype=torch.int32,
+        device="cuda", generator=generator,
+    )
+    binary_banks = torch.randint(
+        0, 2, (tile_count * 8,), dtype=torch.uint8,
+        device="cuda", generator=generator,
+    )
+    bank = pack_qvq_binary_bank_ids(binary_banks) if packed else binary_banks
+    alt = torch.tensor([alt_id], dtype=torch.uint8, device="cuda")
+    adapter = TrellisCandidateAdapter("p32_window", 3)
+    teacher = adapter.inner(baseline, 16, tile_count * 16, bank, alt)
+    target = teacher + torch.randn(
+        teacher.shape, device="cuda", generator=generator,
+    )
+    options = {
+        "count": 33,
+        "seed": 7,
+        "bits": 3,
+        "layout": "p32_window",
+        "target": target,
+        "input_hessian": None,
+        "output_hessian": None,
+        "bank_ids": bank,
+        "bank_alt_id": alt,
+        "return_decoded": True,
+        "return_sparse": True,
+        "return_shifts": True,
+        "compact_sparse": True,
+        "identity_metric": True,
+    }
+    eager = fisher_screened_trellis_candidates(
+        baseline, fused_identity_screen=False, **options,
+    )
+    fused = fisher_screened_trellis_candidates(
+        baseline, fused_identity_screen=True, **options,
+    )
+    for index, name in (
+        (1, "baseline"), (2, "indices"), (4, "shifts"),
+        (5, "values"), (3, "deltas"), (0, "words"),
+    ):
+        actual, expected = fused[index], eager[index]
+        assert torch.equal(actual, expected), (
+            name,
+            int((actual != expected).sum()),
+            (actual - expected).abs().max() if actual.is_floating_point() else None,
+        )
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param(

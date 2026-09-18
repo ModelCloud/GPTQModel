@@ -665,6 +665,7 @@ def p32_training_module_from_payload(
     fast_hadamard=True,
     training_dtype=torch.float32,
     fast_identity_metric=True,
+    fused_identity_screen=True,
     fast_position_map=True,
     compact_sparse_candidates=True,
     compact_attention_forward=True,
@@ -690,6 +691,7 @@ def p32_training_module_from_payload(
         fast_hadamard=fast_hadamard,
         training_dtype=training_dtype,
         fast_identity_metric=fast_identity_metric,
+        fused_identity_screen=fused_identity_screen,
         fast_position_map=fast_position_map,
         compact_sparse_candidates=compact_sparse_candidates,
         compact_attention_forward=compact_attention_forward,
@@ -714,6 +716,7 @@ def p32_training_module_from_words(
     fast_hadamard=True,
     training_dtype=torch.float32,
     fast_identity_metric=True,
+    fused_identity_screen=True,
     fast_position_map=True,
     compact_sparse_candidates=True,
     compact_attention_forward=True,
@@ -767,6 +770,7 @@ def p32_training_module_from_words(
         return_shifts=True,
         compact_sparse=compact_sparse_candidates,
         identity_metric=identity_metric,
+        fused_identity_screen=fused_identity_screen,
     )
     if compact_sparse_candidates:
         candidate_words, baseline_tiles, indices, deltas, shifts, sparse_values = values

@@ -239,6 +239,12 @@ def parse_args():
         help="Specialize first-round candidate screening for identity Fisher metrics",
     )
     parser.add_argument(
+        "--fused-p32-identity-screen",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fuse exact W3/P32 identity-Fisher shift decoding and scoring on CUDA",
+    )
+    parser.add_argument(
         "--sparse-qk-candidate-bank",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -511,6 +517,7 @@ def main():
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
+                fused_identity_screen=args.fused_p32_identity_screen,
                 fast_position_map=args.fast_p32_position_map,
                 compact_sparse_candidates=args.compact_sparse_candidates,
                 compact_attention_forward=args.compact_attention_forward,
@@ -523,6 +530,7 @@ def main():
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
                 fast_identity_metric=args.fast_identity_candidate_metric,
+                fused_identity_screen=args.fused_p32_identity_screen,
                 fast_position_map=args.fast_p32_position_map,
                 compact_sparse_candidates=args.compact_sparse_candidates,
                 compact_attention_forward=args.compact_attention_forward,
@@ -1267,6 +1275,7 @@ def main():
         "offload_capture": args.offload_capture,
         "parallel_candidate_build": args.parallel_candidate_build,
         "fast_identity_candidate_metric": args.fast_identity_candidate_metric,
+        "fused_p32_identity_screen": args.fused_p32_identity_screen,
         "sparse_qk_candidate_bank": args.sparse_qk_candidate_bank,
         "fast_p32_position_map": args.fast_p32_position_map,
         "compact_sparse_candidates": args.compact_sparse_candidates,
