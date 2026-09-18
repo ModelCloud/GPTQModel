@@ -320,6 +320,24 @@ counts, and held-out losses; strict split disjointness passed and gains remained
 exactly 15.0000% and 29.2717%. The staged driver enables this path by default;
 use `--no-cuda-graph-attention-updates` for eager comparison.
 
+Candidate metadata produced by the staged driver is already legal by
+construction: the initial words come from the loaded QVQ payload, composed
+rounds come from `hard_state()`, and sparse values come from the candidate
+screen. The driver therefore reuses those immutable buffers in the training
+modules and skips a repeated unpack/repack legality check, five device-to-host
+finite-check synchronizations per projection, and unnecessary copies of
+immutable payload buffers. Public constructors still validate and copy
+caller-owned inputs by default. Use
+`--no-trust-generated-candidate-inputs` to exercise that public control path.
+On matched H100 runs, candidate wall time improved from 0.2057s to 0.1521s
+(1.353x) at 32/8/32 x 512 tokens and from 0.2134s to 0.1548s (1.379x) at
+64/16/64 x 256 tokens. Aggregate candidate work improved 1.417x and 1.479x.
+Both pairs produced bit-for-bit equal 14-tensor states and identical held-out
+losses; strict train/validation/QK disjointness passed. Because these checks
+used a newly streamed FineWeb-Edu snapshot rather than the archived canonical
+token cache, their absolute held-out percentages are not compared with older
+15.0000% and 29.2717% runs.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

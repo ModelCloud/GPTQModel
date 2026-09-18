@@ -299,6 +299,12 @@ def parse_args():
         help="Decode accepted P32 states without constructing throwaway candidate banks",
     )
     parser.add_argument(
+        "--trust-generated-candidate-inputs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reuse candidate inputs already generated and validated by the staged pipeline",
+    )
+    parser.add_argument(
         "--fused-qk-fisher",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -535,6 +541,7 @@ def main():
                 compact_attention_forward=args.compact_attention_forward,
                 inline_p32_overlap=args.inline_p32_overlap,
                 direct_bf16_output=args.direct_bf16_attention_output,
+                trusted_generated_inputs=args.trust_generated_candidate_inputs,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -549,6 +556,7 @@ def main():
                 compact_attention_forward=args.compact_attention_forward,
                 inline_p32_overlap=args.inline_p32_overlap,
                 direct_bf16_output=args.direct_bf16_attention_output,
+                trusted_generated_inputs=args.trust_generated_candidate_inputs,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -1304,6 +1312,7 @@ def main():
         "inline_p32_overlap": args.inline_p32_overlap,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
+        "trust_generated_candidate_inputs": args.trust_generated_candidate_inputs,
         "gpu_idle_preflight": (
             _GPU_IDLE_PREFLIGHT.as_dict() if _GPU_IDLE_PREFLIGHT is not None else None
         ),

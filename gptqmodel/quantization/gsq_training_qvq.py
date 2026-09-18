@@ -286,8 +286,11 @@ class GSQP32TrainingModule(torch.nn.Module):
         compact_attention_forward=True,
         inline_p32_overlap=True,
         direct_bf16_output=False,
+        trusted_generated_metadata=False,
     ):
         super().__init__()
+        if not isinstance(trusted_generated_metadata, bool):
+            raise TypeError("trusted generated metadata control must be boolean")
         choices, tile_count, _ = candidates.shape
         expected_tiles = (in_features // 16) * (out_features // 16)
         expected_sparse = (choices - 1, tile_count)
@@ -332,9 +335,10 @@ class GSQP32TrainingModule(torch.nn.Module):
         )
         if any(value.device != candidates.device for value in tensors):
             raise ValueError("P32 GSQ training tensors must share one device")
-        if not all(torch.isfinite(value).all() for value in (
-            baseline_tiles, sparse_deltas, sparse_values, SU, SV,
-        )):
+        if not trusted_generated_metadata and not all(
+            torch.isfinite(value).all()
+            for value in (baseline_tiles, sparse_deltas, sparse_values, SU, SV)
+        ):
             raise ValueError("P32 GSQ training tensors must be finite")
         if not math.isfinite(std) or std <= 0 or not math.isfinite(strength) or strength < 0:
             raise ValueError("P32 GSQ initialization controls are invalid")
@@ -387,8 +391,16 @@ class GSQP32TrainingModule(torch.nn.Module):
             self.compact_forward and inline_p32_overlap
         )
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
-        self.register_buffer("candidates", candidates.detach().clone().contiguous())
-        self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
+
+        def registered_buffer(value):
+            value = value.detach().contiguous()
+            return value if trusted_generated_metadata else value.clone()
+
+        self.register_buffer("candidates", registered_buffer(candidates))
+        self.register_buffer(
+            "baseline_tiles",
+            registered_buffer(baseline_tiles.reshape(tile_count, 256)),
+        )
         # Candidate metadata is tile-major; matrix indices below remove the
         # tile-layout permutation from every differentiable reconstruction.
         self.register_buffer("sparse_indices", sparse_indices.permute(1, 0, 2).contiguous())
@@ -509,9 +521,9 @@ class GSQP32TrainingModule(torch.nn.Module):
         )
         self.register_buffer("baseline_matrix", baseline_matrix)
         self.register_buffer("sparse_shifts", sparse_shifts.T.contiguous())
-        self.register_buffer("bank_ids", bank_ids.detach().clone().contiguous())
-        self.register_buffer("bank_alt_id", bank_alt_id.detach().clone().contiguous())
-        self.register_buffer("SU", SU.detach().clone().contiguous())
+        self.register_buffer("bank_ids", registered_buffer(bank_ids))
+        self.register_buffer("bank_alt_id", registered_buffer(bank_alt_id))
+        self.register_buffer("SU", registered_buffer(SU))
         self.scales = torch.nn.Parameter(SV.detach().float().clone().contiguous())
 
         shifts = torch.nn.functional.pad(self.sparse_shifts, (1, 0)).float()
@@ -690,6 +702,7 @@ def p32_training_module_from_payload(
     compact_attention_forward=True,
     inline_p32_overlap=True,
     direct_bf16_output=True,
+    trusted_generated_inputs=False,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -717,6 +730,7 @@ def p32_training_module_from_payload(
         compact_attention_forward=compact_attention_forward,
         inline_p32_overlap=inline_p32_overlap,
         direct_bf16_output=direct_bf16_output,
+        trusted_generated_inputs=trusted_generated_inputs,
     )
 
 
@@ -743,19 +757,27 @@ def p32_training_module_from_words(
     compact_attention_forward=True,
     inline_p32_overlap=True,
     direct_bf16_output=True,
+    trusted_generated_inputs=False,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
     ``baseline`` must be the exact hard state accepted by the preceding round.
     Choice zero therefore means no additional edit, which lets held-out
     checkpoint restoration reject a whole round without undoing earlier gains.
+    ``trusted_generated_inputs`` is an internal ownership contract: all inputs
+    must come from this staged pipeline and remain immutable after registration.
     """
+    if not isinstance(trusted_generated_inputs, bool):
+        raise TypeError("trusted generated inputs control must be boolean")
     if teacher_weight.ndim != 2 or teacher_weight.device != baseline.device:
         raise ValueError("P32 staged teacher weight must be rank-2 on the payload device")
     if baseline.dtype != torch.int32 or baseline.ndim != 2:
         raise ValueError("P32 staged baseline must be rank-2 int32 window words")
     adapter = TrellisCandidateAdapter("p32_window", 3)
-    if not torch.equal(adapter.pack(adapter.unpack(baseline)), baseline):
+    if (
+        not trusted_generated_inputs
+        and not torch.equal(adapter.pack(adapter.unpack(baseline)), baseline)
+    ):
         raise ValueError("P32 staged baseline must round-trip as legal window words")
     out_features, in_features = teacher_weight.shape
     expected_tiles = (in_features // 16) * (out_features // 16)
@@ -825,6 +847,7 @@ def p32_training_module_from_words(
         compact_attention_forward=compact_attention_forward,
         inline_p32_overlap=inline_p32_overlap,
         direct_bf16_output=direct_bf16_output,
+        trusted_generated_metadata=trusted_generated_inputs,
     )
 
 
