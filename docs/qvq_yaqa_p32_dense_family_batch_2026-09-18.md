@@ -236,3 +236,44 @@ changed solves must improve quality. At W3.5 it retained a 1.041x additional
 speedup but worsened held-out drift to +0.20708%; it was rejected. Payload
 selection is non-monotonic across anti-diagonals, so threshold changes require
 fresh end-to-end dual-oracle and held-out gates.
+
+### Optional W3 wide-family unification
+
+Wide MLP projections normally run canonical YAQA and the sampled complementary
+families concurrently on separate CUDA streams. The W3-only opt-in below puts
+the canonical family and both diversity-selected alternatives into one
+factored-feedback schedule:
+
+```bash
+GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES=1 \
+GPTQMODEL_QVQ_YAQA_FAST_TF32=1 \
+GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE=provisional_large_final \
+python scripts/qvq_quantize.py ...
+```
+
+This shares the initial factor products, anti-diagonal dispatch, and feedback
+updates. It also changes FP32 operation ordering and serializes a larger
+family-grid Viterbi batch, so it is deliberately restricted to W3. The switch
+does nothing at W2.5 and W3.5.
+
+Matched one-layer H100 validation against the large-final profile found:
+
+| Rate | Concurrent schedule | Unified schedule | Speedup | Decision |
+|---|---:|---:|---:|---|
+| W2.5 | 20.673 s | 21.009 s | 0.984x | reject; retain concurrent |
+| W3 | 25.424 s | 24.185 s | 1.051x | accept as opt-in |
+| W3.5 | 22.834 s | 23.665 s | 0.965x | reject; retain concurrent |
+
+At W3, all four attention projections are tensor-identical. Eight of 37 saved
+layer tensors change, all in the three MLP projections. FP32 and FP64 Fisher
+movements agree: gate improves by 0.000126%/0.000059%, up regresses by
+0.081396%/0.081393%, and down improves by 0.499124%/0.498878%. On the same
+strictly disjoint 256-question GSM8K Platinum gate, aggregate projection MSE
+changes by +0.010259% over 352,926,720 elements. The candidate checkpoint is
+bit-identical with and without FP64 diagnostic scoring.
+
+The rejected cross-rate trials still provide a useful scheduling result.
+Unified W2.5 improved all three MLP Fisher objectives but was 1.6% slower;
+unified W3.5 improved up and down but was 3.5% slower and slightly regressed
+gate. Saved arithmetic is not sufficient when the larger family-grid batch
+loses overlap, so do not broaden this gate based on objective movement alone.

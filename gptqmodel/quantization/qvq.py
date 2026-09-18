@@ -5766,7 +5766,18 @@ def yaqa_inner_v2b2_p32(
         and kwargs.get("_incremental_cuda_feedback", False)
         and len(alternative_ids) >= 1
     )
-    unified_family_batch = unified_amd_families or unified_dense_cuda_families
+    unified_factored_cuda_families = (
+        parallel_families
+        and torch.version.hip is None
+        and kwargs.get("_incremental_cuda_factored_feedback", False)
+        and kwargs["bits"] == 3.0
+        and os.environ.get("GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES", "0") == "1"
+    )
+    unified_family_batch = (
+        unified_amd_families
+        or unified_dense_cuda_families
+        or unified_factored_cuda_families
+    )
     current_stream = None
     canonical_completion = None
     canonical_diagnostics: dict[str, object] = {}
@@ -5828,11 +5839,19 @@ def yaqa_inner_v2b2_p32(
         if telemetry is not None:
             telemetry.count("yaqa_v2b2_family_candidates", len(alternative_ids))
             telemetry.count("yaqa_v2b2_candidate_batches")
+            telemetry.count(
+                "yaqa_v2b2_wide_unified_family_batches",
+                int(unified_factored_cuda_families),
+            )
         with _qvq_phase(telemetry, "yaqa_v2b2_family_candidate", inner_weight.device):
             family_batch = (
                 _yaqa_inner_v2b2_family_batch_amd
                 if unified_amd_families
-                else _yaqa_inner_v2b2_family_batch_dense_cuda
+                else (
+                    _yaqa_inner_v2b2_family_batch_cuda
+                    if unified_factored_cuda_families
+                    else _yaqa_inner_v2b2_family_batch_dense_cuda
+                )
             )
             all_weights, all_states, all_selectors, invalid = family_batch(
                 inner_weight,
