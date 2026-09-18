@@ -614,6 +614,116 @@ def _sparse_mixture_compact_kernel(probabilities, baseline, position_indices,
 
 
 @triton.jit
+def _sparse_mixture_p32_inline_kernel(
+        probabilities, baseline, lookup, deltas, output,
+        TILE_COUNT: tl.constexpr,
+        IN_FEATURES: tl.constexpr,
+        OUT_FEATURES: tl.constexpr,
+        OUTPUT_TILES: tl.constexpr,
+        CHOICES: tl.constexpr,
+        ALTERNATIVES: tl.constexpr,
+        WIDTH: tl.constexpr,
+        TRANSPOSED: tl.constexpr,
+        BLOCK: tl.constexpr):
+    """Materialize P32 while deriving its three legal overlaps in registers."""
+    tile = tl.program_id(0)
+    lane = tl.arange(0, BLOCK)
+    mask = (tile < TILE_COUNT) & (lane < 256)
+    if TRANSPOSED:
+        row = lane % 16
+        column = lane // 16
+    else:
+        row = lane // 16
+        column = lane - row * 16
+    scalar = row * 16 + column
+    state = scalar // 2
+    parity = scalar - state * 2
+
+    choice0 = tl.load(lookup + tile * 128 + state).to(tl.int32)
+    choice1 = tl.load(lookup + tile * 128 + ((state - 1) & 127)).to(tl.int32)
+    choice2 = tl.load(lookup + tile * 128 + ((state - 2) & 127)).to(tl.int32)
+    active0 = mask & (choice0 > 0)
+    active1 = mask & (choice1 > 0)
+    active2 = mask & (choice2 > 0)
+    base = tile * ALTERNATIVES * WIDTH
+    delta0 = tl.load(
+        deltas + base + (choice0 - 1) * WIDTH + parity,
+        mask=active0, other=0.0,
+    ).to(tl.float32)
+    delta1 = tl.load(
+        deltas + base + (choice1 - 1) * WIDTH + 2 + parity,
+        mask=active1, other=0.0,
+    ).to(tl.float32)
+    delta2 = tl.load(
+        deltas + base + (choice2 - 1) * WIDTH + 4 + parity,
+        mask=active2, other=0.0,
+    ).to(tl.float32)
+
+    # Preserve deterministic scatter_add's candidate-ID reduction order.
+    key0 = tl.where(active0, choice0, 256)
+    key1 = tl.where(active1, choice1, 256)
+    key2 = tl.where(active2, choice2, 256)
+    swap = key1 < key0
+    key0, key1 = tl.where(swap, key1, key0), tl.where(swap, key0, key1)
+    choice0, choice1 = (
+        tl.where(swap, choice1, choice0), tl.where(swap, choice0, choice1)
+    )
+    delta0, delta1 = (
+        tl.where(swap, delta1, delta0), tl.where(swap, delta0, delta1)
+    )
+    swap = key2 < key1
+    key1, key2 = tl.where(swap, key2, key1), tl.where(swap, key1, key2)
+    choice1, choice2 = (
+        tl.where(swap, choice2, choice1), tl.where(swap, choice1, choice2)
+    )
+    delta1, delta2 = (
+        tl.where(swap, delta2, delta1), tl.where(swap, delta1, delta2)
+    )
+    swap = key1 < key0
+    choice0, choice1 = (
+        tl.where(swap, choice1, choice0), tl.where(swap, choice0, choice1)
+    )
+    delta0, delta1 = (
+        tl.where(swap, delta1, delta0), tl.where(swap, delta0, delta1)
+    )
+
+    probability0 = tl.load(
+        probabilities + tile * CHOICES + choice0,
+        mask=mask & (choice0 > 0), other=0.0,
+    ).to(tl.float32)
+    probability1 = tl.load(
+        probabilities + tile * CHOICES + choice1,
+        mask=mask & (choice1 > 0), other=0.0,
+    ).to(tl.float32)
+    probability2 = tl.load(
+        probabilities + tile * CHOICES + choice2,
+        mask=mask & (choice2 > 0), other=0.0,
+    ).to(tl.float32)
+    contribution = _fp32_add(
+        _fp32_add(
+            _fp32_multiply(probability0, delta0),
+            _fp32_multiply(probability1, delta1),
+        ),
+        _fp32_multiply(probability2, delta2),
+    )
+    value = tl.load(
+        baseline + tile * 256 + scalar, mask=mask, other=0.0,
+    ).to(tl.float32)
+    value = _fp32_add(value, contribution)
+    tile_row = tile // OUTPUT_TILES
+    tile_col = tile - tile_row * OUTPUT_TILES
+    if TRANSPOSED:
+        weight_offset = (
+            (tile_col * 16 + column) * IN_FEATURES + tile_row * 16 + row
+        )
+    else:
+        weight_offset = (
+            (tile_row * 16 + row) * OUT_FEATURES + tile_col * 16 + column
+        )
+    tl.store(output + weight_offset, value, mask=mask)
+
+
+@triton.jit
 def _scheduled_sparse_lion_grouped_kernel(
         probabilities, metric_error, indices, deltas, denominator, logits,
         momentum, norm_square, temperature_schedule, kappa_schedule,
@@ -778,18 +888,17 @@ def lion_update(parameter, gradient, momentum, *, learning_rate: float,
     )
 
 
-def build_p32_dense_position_map(indices, deltas, *, transposed=False):
-    """Build the exact W3/P32 overlap map without sorting sparse entries."""
+def build_p32_choice_lookup(indices):
+    """Map each legal P32 start state to its one-based candidate ID."""
     if (indices.ndim != 3 or indices.shape[2] != 6
             or indices.dtype != torch.int64 or not indices.is_cuda
-            or not indices.is_contiguous() or not deltas.is_cuda
-            or not deltas.is_contiguous() or deltas.shape != indices.shape):
+            or not indices.is_contiguous()):
         raise ValueError(
-            "fast P32 position maps require contiguous CUDA [tiles,alternatives,6] metadata"
+            "fast P32 lookup requires contiguous CUDA int64 [tiles,alternatives,6] indices"
         )
     tile_count, alternatives, width = indices.shape
     if alternatives > 254:
-        raise ValueError("fast P32 position maps support at most 254 alternatives")
+        raise ValueError("fast P32 lookup supports at most 254 alternatives")
     lookup = torch.zeros(
         (tile_count, 128), dtype=torch.uint8, device=indices.device,
     )
@@ -799,6 +908,18 @@ def build_p32_dense_position_map(indices, deltas, *, transposed=False):
         indices, lookup, size, ALTERNATIVES=alternatives, WIDTH=width,
         BLOCK=block, num_warps=4,
     )
+    return lookup
+
+
+def build_p32_dense_position_map(indices, deltas, *, transposed=False):
+    """Build the exact W3/P32 overlap map without sorting sparse entries."""
+    if (not deltas.is_cuda or not deltas.is_contiguous()
+            or deltas.shape != indices.shape):
+        raise ValueError(
+            "fast P32 position maps require matching contiguous CUDA deltas"
+        )
+    tile_count, alternatives, width = indices.shape
+    lookup = build_p32_choice_lookup(indices)
     position_indices = torch.empty(
         (tile_count, 256), dtype=torch.uint8, device=indices.device,
     )
@@ -960,6 +1081,32 @@ def compact_sparse_mixture(probabilities, baseline, position_indices,
         OUT_FEATURES=out_features, OUTPUT_TILES=out_features // 16,
         CHOICES=choices, POSITIONS=positions, OVERLAP=overlap,
         TRANSPOSED=transposed, BLOCK=256, num_warps=2,
+    )
+
+
+def inline_p32_sparse_mixture(probabilities, baseline, lookup, deltas, output,
+                              *, in_features=None, out_features=None,
+                              transposed=False):
+    """Materialize P32 from its compact start lookup and sparse deltas."""
+    tile_count, choices = probabilities.shape
+    alternatives, width = deltas.shape[1:]
+    if choices != alternatives + 1 or width != 6:
+        raise ValueError("inline P32 mixture metadata is invalid")
+    if lookup.shape != (tile_count, 128) or lookup.dtype != torch.uint8:
+        raise ValueError("inline P32 mixture lookup is invalid")
+    if in_features is None or out_features is None:
+        in_features, out_features = output.shape
+    expected = ((out_features, in_features) if transposed
+                else (in_features, out_features))
+    if output.shape != expected:
+        raise ValueError("inline P32 mixture output shape is invalid")
+    _sparse_mixture_p32_inline_kernel[(tile_count,)](
+        probabilities, baseline, lookup, deltas, output,
+        TILE_COUNT=tile_count, IN_FEATURES=in_features,
+        OUT_FEATURES=out_features, OUTPUT_TILES=out_features // 16,
+        CHOICES=choices, ALTERNATIVES=alternatives, WIDTH=width,
+        TRANSPOSED=transposed, BLOCK=256,
+        num_warps=4 if tile_count > 16384 else 2,
     )
 
 

@@ -246,6 +246,21 @@ cost and breaks even after roughly eight fitted layers. Held-out gains remained
 exactly 15.0000% and 29.2717%. Use `--no-compact-attention-forward` only for
 comparison with deterministic scatter materialization.
 
+The fused materializer now keeps only a 128-byte P32 start-choice lookup per
+tile and derives each scalar's three legal overlaps from starts `s`, `s-1`, and
+`s-2` inside the kernel. It applies the same candidate-ID sort and FP32
+multiply/add order as the dense overlap map, so this is an exact metadata
+compression rather than an arithmetic shortcut. A 65,536-tile MLP projection
+now uses an 8 MiB lookup instead of a 256 MiB dense map. Across a Llama 3.2 1B
+layer this removes 899 MiB of map allocation volume, including 744 MiB from
+the three-module MLP stage. SM90 launches use two warps for attention and four
+for the larger MLP projections. On the final warm H100 checks, MLP fitting
+improved 1.038x at 32/8/32 x 512 tokens and 1.054x at 64/16/64 x 256 tokens;
+total fitting improved 1.011x and 1.009x. All matched state tensors, Q/K guards,
+changed-tile counts, and held-out losses remained bit-for-bit equal, strict
+split disjointness passed, and gains remained exactly 15.0000% and 29.2717%.
+Use `--no-inline-p32-overlap` to compare against the dense overlap-map path.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant
