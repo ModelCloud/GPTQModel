@@ -147,6 +147,17 @@ were bit-for-bit equal to their matched serial model states. Result JSON and
 state metadata record sequence length and split sample counts. Use
 `--no-parallel-candidate-build` only for serial diagnostics.
 
+First-round P32 candidate screening also specializes its known identity Fisher
+metrics. It skips dense identity tensors, identity GEMMs, and block gathers,
+while retaining the original FP32 quadratic multiply-and-reduce order. Across
+three paired H100 runs per geometry, candidate words, sparse metadata, all 14
+state tensors, guard diagnostics, and held-out loss were bit-for-bit equal. The
+median candidate wall time improved from 0.4037s to 0.3716s (1.087x) at
+32/8/32 x 512 tokens and from 0.4046s to 0.3777s (1.071x) at 64/16/64 x 256
+tokens. Held-out gains remained 15.0000% and 29.2717%, respectively. Use
+`--no-fast-identity-candidate-metric` only to compare against the dense
+identity-matrix path.
+
 The two whole-block Q/K pair guards also replay alternatives directly on the
 teacher layer by default. The driver caches dense held-out outputs first,
 temporarily installs each BF16 Q/K pair plus the stage's fixed downstream

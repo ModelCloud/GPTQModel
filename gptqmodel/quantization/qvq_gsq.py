@@ -1040,6 +1040,7 @@ def _p32_sparse_shift_screen(
     h_tiles,
     g_tiles,
     codebook_version,
+    identity_metric=False,
 ):
     """Exactly score local P32 edits using only decoder states they change.
 
@@ -1103,13 +1104,19 @@ def _p32_sparse_shift_screen(
 
     # Exact sparse form of tr(delta.T H delta G).  The largest W1 case has
     # only 16 changed scalars, while W3 has six.
-    h_pairs = h_tiles[
-        tile_ids[None, :, None, None], rows[:, :, :, None], rows[:, :, None, :]
-    ]
-    g_pairs = g_tiles[
-        tile_ids[None, :, None, None], columns[:, :, :, None], columns[:, :, None, :]
-    ]
-    pair_metric = h_pairs * g_pairs
+    if identity_metric:
+        pair_metric = (
+            (rows[:, :, :, None] == rows[:, :, None, :])
+            & (columns[:, :, :, None] == columns[:, :, None, :])
+        ).float()
+    else:
+        h_pairs = h_tiles[
+            tile_ids[None, :, None, None], rows[:, :, :, None], rows[:, :, None, :]
+        ]
+        g_pairs = g_tiles[
+            tile_ids[None, :, None, None], columns[:, :, :, None], columns[:, :, None, :]
+        ]
+        pair_metric = h_pairs * g_pairs
     cost += (
         delta[..., :, None] * delta[..., None, :] * pair_metric[:, None]
     ).sum((-1, -2))
@@ -1189,6 +1196,7 @@ def fisher_screened_trellis_candidates(
     return_decoded=False,
     return_sparse=False,
     return_shifts=False,
+    identity_metric=False,
 ):
     """Screen four paper-local shifts at each candidate transition.
 
@@ -1199,9 +1207,13 @@ def fisher_screened_trellis_candidates(
     covers four times as many path coordinates as grouping four output choices
     per position, while the later coupled search remains authoritative.
     """
-    if target.ndim != 2 or input_hessian.shape != (target.shape[0], target.shape[0]):
+    if target.ndim != 2:
+        raise ValueError("GSQ Fisher candidate screen requires a rank-two target")
+    if identity_metric and layout != "p32_window":
+        raise ValueError("identity candidate screening currently requires P32 window layout")
+    if not identity_metric and input_hessian.shape != (target.shape[0], target.shape[0]):
         raise ValueError("GSQ Fisher candidate screen requires a matching target and input Hessian")
-    if output_hessian.shape != (target.shape[1], target.shape[1]):
+    if not identity_metric and output_hessian.shape != (target.shape[1], target.shape[1]):
         raise ValueError("GSQ Fisher candidate screen requires a matching output Hessian")
     adapter = TrellisCandidateAdapter(layout, bits, codebook_version)
     transition_bits = round(normalize_qvq_rate(bits) * 2)
@@ -1216,15 +1228,22 @@ def fisher_screened_trellis_candidates(
                 codebook_version=codebook_version)
     k, n = target.shape
     input_tiles, output_tiles = k // 16, n // 16
-    h, g = input_hessian.float(), output_hessian.float()
     current = adapter.inner(baseline, k, n, bank_ids, bank_alt_id).float()
     with _nvtx_range("gsq.candidates.metric_error", baseline):
-        metric_error = h @ (current - target.float()) @ g
+        metric_error = (
+            current - target.float()
+            if identity_metric else
+            input_hessian.float() @ (current - target.float()) @ output_hessian.float()
+        )
     metric_tiles = metric_error.reshape(input_tiles, 16, output_tiles, 16).permute(0, 2, 1, 3).reshape(-1, 16, 16)
-    h_blocks = torch.stack([h[16*i:16*(i+1), 16*i:16*(i+1)] for i in range(input_tiles)])
-    g_blocks = torch.stack([g[16*j:16*(j+1), 16*j:16*(j+1)] for j in range(output_tiles)])
-    h_tiles = h_blocks.repeat_interleave(output_tiles, 0)
-    g_tiles = g_blocks.repeat(input_tiles, 1, 1)
+    if identity_metric:
+        h_tiles = g_tiles = None
+    else:
+        h, g = input_hessian.float(), output_hessian.float()
+        h_blocks = torch.stack([h[16*i:16*(i+1), 16*i:16*(i+1)] for i in range(input_tiles)])
+        g_blocks = torch.stack([g[16*j:16*(j+1), 16*j:16*(j+1)] for j in range(output_tiles)])
+        h_tiles = h_blocks.repeat_interleave(output_tiles, 0)
+        g_tiles = g_blocks.repeat(input_tiles, 1, 1)
     baseline_tiles = adapter.decode(baseline, bank_ids, bank_alt_id).reshape(-1, 16, 16).float()
     tile_ids = torch.arange(len(baseline), device=baseline.device)
     screened = [baseline.detach().clone()]
@@ -1263,6 +1282,7 @@ def fisher_screened_trellis_candidates(
                     h_tiles=h_tiles,
                     g_tiles=g_tiles,
                     codebook_version=codebook_version,
+                    identity_metric=identity_metric,
                 )
                 screened.extend(selected_words.unbind(0))
                 screened_values.extend(selected_values.unbind(0))

@@ -66,6 +66,48 @@ def _training_module(device="cpu", candidates=5):
     return module, candidates, decoded
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param(
+    "cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required"),
+)])
+def test_identity_metric_candidate_screen_is_bitwise_exact(device):
+    bits = 3
+    baseline = torch.zeros((1, 24), dtype=torch.int32, device=device)
+    bank = torch.zeros(1, dtype=torch.uint8, device=device)
+    alt = torch.ones(1, dtype=torch.uint8, device=device)
+    adapter = TrellisCandidateAdapter("p32_window", bits)
+    teacher = adapter.inner(baseline, 16, 16, bank, alt)
+    generator = torch.Generator(device=device).manual_seed(13)
+    target = teacher + torch.randn(
+        teacher.shape, device=device, generator=generator,
+    )
+    options = {
+        "count": 33,
+        "seed": 7,
+        "bits": bits,
+        "layout": "p32_window",
+        "target": target,
+        "bank_ids": bank,
+        "bank_alt_id": alt,
+        "return_decoded": True,
+        "return_sparse": True,
+        "return_shifts": True,
+    }
+    dense = fisher_screened_trellis_candidates(
+        baseline,
+        input_hessian=torch.eye(16, device=device),
+        output_hessian=torch.eye(16, device=device),
+        **options,
+    )
+    specialized = fisher_screened_trellis_candidates(
+        baseline,
+        input_hessian=None,
+        output_hessian=None,
+        identity_metric=True,
+        **options,
+    )
+    assert all(torch.equal(actual, expected) for actual, expected in zip(specialized, dense))
+
+
 def test_p32_staged_soft_weight_has_assignment_and_scale_gradients():
     module, _, decoded = _training_module()
     assert torch.equal(module.logits.argmax(-1), torch.zeros(len(module.logits), dtype=torch.long))

@@ -233,6 +233,12 @@ def parse_args():
         help="Build independent projection candidate banks on concurrent CUDA streams",
     )
     parser.add_argument(
+        "--fast-identity-candidate-metric",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Specialize first-round candidate screening for identity Fisher metrics",
+    )
+    parser.add_argument(
         "--direct-qk-pair-guard",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -474,6 +480,7 @@ def main():
                 candidates=args.candidates, seed=args.seed + round_index,
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
+                fast_identity_metric=args.fast_identity_candidate_metric,
             )
         else:
             quantizer = p32_training_module_from_words(
@@ -481,6 +488,7 @@ def main():
                 candidates=args.candidates, seed=args.seed + round_index,
                 fast_hadamard=not args.disable_fast_training_hadamard,
                 training_dtype=getattr(torch, training_dtype),
+                fast_identity_metric=args.fast_identity_candidate_metric,
             )
         with quantizer_metadata_lock:
             training_hadamard_backends.add(quantizer.training_hadamard_backend)
@@ -1212,6 +1220,7 @@ def main():
         "cublas_workspace_config": os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
         "offload_capture": args.offload_capture,
         "parallel_candidate_build": args.parallel_candidate_build,
+        "fast_identity_candidate_metric": args.fast_identity_candidate_metric,
         "direct_qk_pair_guard": args.direct_qk_pair_guard,
         "direct_state_materialization": args.direct_state_materialization,
         "gpu_idle_preflight": (
