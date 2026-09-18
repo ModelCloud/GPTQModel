@@ -271,6 +271,22 @@ def test_yaqa_cuda_activation_checkpointing_is_bit_exact_and_deterministic(seed)
         accumulator_device=torch.device("cpu"),
     )
 
+    retained_input, retained_output, retained_stats = capture_yaqa_sketch_b(
+        checkpointed_model,
+        batches,
+        {"proj": checkpointed_model.model.layers[0].proj},
+        device=torch.device("cuda"),
+        seed=seed,
+        accumulator_device=torch.device("cuda"),
+        retain_accumulator_device=True,
+    )
+    assert retained_input["proj"].device.type == "cuda"
+    assert retained_output["proj"].device.type == "cuda"
+    assert torch.equal(retained_input["proj"].cpu(), baseline_input["proj"])
+    assert torch.equal(retained_output["proj"].cpu(), baseline_output["proj"])
+    assert retained_stats["factor_device"] == "cuda"
+    assert retained_stats["retained_device_factors"] is True
+
     for _ in range(10):
         layers = checkpointed_model.model.layers
         actual_input, actual_output, stats = capture_yaqa_sketch_b(
