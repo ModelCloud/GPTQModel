@@ -78,3 +78,48 @@ Kronecker-Fisher objective also matches exactly, so no held-out rerun is needed.
 Telemetry reports midpoint-only production directly: one provisional state is
 produced and consumed per family sequence, with no discarded provisional loss
 or selector payload. W2.5 and W3.5 retain the previous full provisional solve.
+
+## Wide-MLP grouped feedback and opt-in TF32
+
+Wide projections form YAQA's corrected tiles with grouped FP32 GEMMs. The
+exact path now groups the two equal-geometry family matrices together for each
+tile instead of submitting two singleton cuBLAS groups. This changes only the
+submission layout and preserves the FP32 result and payload exactly. On the
+production `2048x8192`, two-family, 128-tile feedback case it improves the
+operator from `1.331 ms` to `1.258 ms` (1.058x).
+
+H100 can optionally execute those factored-feedback GEMMs in TF32 tensor-core
+mode while retaining FP32 cache/output storage:
+
+```bash
+GPTQMODEL_QVQ_YAQA_FAST_TF32=1 python scripts/qvq_quantize.py ...
+```
+
+The switch applies only to the wide CUDA factored-feedback path and is off by
+default because it deliberately changes rounding and may change the selected
+P32 payload. The representative corrected-tile operator measured `1.266 ms`
+in exact FP32 and `0.309 ms` in TF32 (4.10x). Use
+`scripts/benchmark_qvq_yaqa_feedback.py` to reproduce the operator gate.
+
+Matched layer-0 Llama 3.2 1B results use the same 32-sequence/11,992-token
+Sketch-B factors and the same strict disjointness manifest as above:
+
+| Rate | Exact quantization | TF32 quantization | Speedup | FP64 Fisher delta | Disjoint held-out MSE delta |
+|---|---:|---:|---:|---:|---:|
+| W2.5 | 25.001 s | 23.516 s | 1.063x | +0.03001% | -0.04381% |
+| W3 | 29.162 s | 27.745 s | 1.051x | -0.00392% | +0.02369% |
+| W3.5 | 27.344 s | 26.069 s | 1.049x | -0.05206% | +0.01186% |
+
+Negative deltas improve the metric. FP32 and FP64 Fisher deltas agree to the
+reported precision. The held-out gate contains 256 GSM8K Platinum questions
+and 352,926,720 projection elements; it is disjoint from ordinary calibration
+rows `[0,32)` and YAQA rows `[64,96)`. W2.5 is a speed/held-out-quality double
+win despite a small Fisher-proxy regression. W3 and W3.5 improve aggregate
+Fisher while accepting bounded held-out changes of 0.024% and 0.012%.
+
+TF32 changed only the three MLP payloads; all four attention payloads remained
+bit-identical. Running only the corrected-tile GEMM in TF32 while retaining
+FP32 cache updates was tested as a mitigation, but worsened W3 held-out drift
+from `+0.02369%` to `+0.05951%` with no speed benefit. The paired TF32 mode is
+therefore the validated option. Telemetry records
+`yaqa_fast_tf32_feedback_calls` when it is active.
