@@ -198,3 +198,41 @@ from isolated microbenchmarks—the selected P32 payload depends on interactions
 between both rounding boundaries. Re-run the dual FP32/FP64 Fisher gate and a
 strictly disjoint held-out gate when changing model, architecture, calibration
 data, CUDA/PyTorch stack, or GPU generation.
+
+### Optional large-final extension
+
+An additional H100 speed/quality point applies direct FP32 distance to the
+constrained final solve only when one family contains at least 64 tiles:
+
+```bash
+GPTQMODEL_QVQ_YAQA_FAST_TF32=1 \
+GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE=provisional_large_final \
+python scripts/qvq_quantize.py ...
+```
+
+Provisional solves still use direct distance at every size. Final solves below
+64 tiles retain the expanded FP32 expression. This shape gate avoids the
+small-batch region where direct final distance is neutral or slower and limits
+its changed rounding boundary to large anti-diagonals. It is a more aggressive
+opt-in than `provisional`, not the default fast-quality profile.
+
+Matched Llama 3.2 1B layer-0 results compare this extension with the paired
+profile above. The dual-oracle ranges are candidate-versus-paired-profile:
+
+| Rate | Paired profile | Large-final | Additional speedup | Cumulative vs exact | FP64 Fisher range | Disjoint held-out MSE delta |
+|---|---:|---:|---:|---:|---:|---:|
+| W2.5 | 21.946 s | 20.673 s | 1.062x | 1.209x | -0.0848% to +0.1136% | +0.02436% |
+| W3 | 26.089 s | 25.424 s | 1.026x | 1.151x | -0.1526% to +0.4942% | +0.05815% |
+| W3.5 | 24.146 s | 22.834 s | 1.057x | 1.198x | -0.1256% to +0.6462% | +0.16256% |
+
+FP32 and FP64 Fisher movements agree closely for every projection. Held-out
+validation again covers 256 strictly disjoint GSM8K Platinum questions and
+352,926,720 projection elements. The changes are bounded but not zero, so use
+this mode only when those rate-specific quality movements meet the deployment
+budget.
+
+A 96-tile mitigation was also evaluated rather than assuming that fewer
+changed solves must improve quality. At W3.5 it retained a 1.041x additional
+speedup but worsened held-out drift to +0.20708%; it was rejected. Payload
+selection is non-monotonic across anti-diagonals, so threshold changes require
+fresh end-to-end dual-oracle and held-out gates.

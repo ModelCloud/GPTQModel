@@ -3545,7 +3545,9 @@ def _qvq_cuda_family_tail_biting_overlaps(
     )
     family_sequences = sequences.shape[0] * sequences.shape[1]
     direct_distance_mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
-    if telemetry is not None and direct_distance_mode in {"1", "provisional"}:
+    if telemetry is not None and direct_distance_mode in {
+        "1", "provisional", "provisional_large_final"
+    }:
         telemetry.count("viterbi_provisional_direct_distance", family_sequences)
     if transition_bits == 6:
         overlaps = _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op()(
@@ -3579,6 +3581,13 @@ def _qvq_cuda_family_tail_biting_overlaps(
         )
     overlap_mask = (1 << (16 - transition_bits)) - 1
     return (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
+
+
+def _qvq_family_final_direct_distance_enabled(family_batch: int) -> bool:
+    mode = os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
+    return mode in {"1", "final"} or (
+        mode == "provisional_large_final" and family_batch >= 64
+    )
 
 
 def _block_ldlq_v2b2_family_batch_cuda(
@@ -3657,7 +3666,7 @@ def _block_ldlq_v2b2_family_batch_cuda(
                 )
                 if telemetry is not None:
                     family_sequences = families * chunk_count
-                    if os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0") in {"1", "final"}:
+                    if _qvq_family_final_direct_distance_enabled(chunk_count):
                         telemetry.count("viterbi_final_direct_distance", family_sequences)
                     telemetry.count("viterbi_family_grid_calls", 2)
                     telemetry.count("viterbi_logical_solve_ids", 2)
@@ -5235,6 +5244,8 @@ def _yaqa_inner_v2b2_family_batch_cuda(
             )
             if telemetry is not None:
                 family_sequences = families * count
+                if _qvq_family_final_direct_distance_enabled(count):
+                    telemetry.count("viterbi_final_direct_distance", family_sequences)
                 telemetry.count("viterbi_family_grid_calls", 2)
                 telemetry.count("viterbi_logical_solve_ids", 2)
                 telemetry.count("viterbi_unique_logical_solve_ids", 2)
@@ -5349,6 +5360,8 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
                 transition_bits,
                 telemetry=telemetry,
             )
+            if telemetry is not None and _qvq_family_final_direct_distance_enabled(count):
+                telemetry.count("viterbi_final_direct_distance", families * count)
             states, _, segment_ids = family_viterbi(
                 sequences,
                 family_stacks,
@@ -5631,6 +5644,10 @@ def yaqa_inner_v2b2_p32(
                 )
                 if telemetry is not None:
                     family_sequences_count = 3 * sample_count
+                    if _qvq_family_final_direct_distance_enabled(sample_count):
+                        telemetry.count(
+                            "viterbi_final_direct_distance", family_sequences_count
+                        )
                     telemetry.count("viterbi_family_grid_calls", 2)
                     telemetry.count("viterbi_logical_solve_ids", 2)
                     telemetry.count("viterbi_unique_logical_solve_ids", 2)

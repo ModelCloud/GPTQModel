@@ -3375,7 +3375,13 @@ bool fused_w2_family_grid_supported(const cudaDeviceProp& properties) {
       !fused_w2_family_grid_disabled();
 }
 
-enum class FamilyGridDirectDistanceMode { kOff, kAll, kProvisional, kFinal };
+enum class FamilyGridDirectDistanceMode {
+  kOff,
+  kAll,
+  kProvisional,
+  kFinal,
+  kProvisionalLargeFinal,
+};
 
 FamilyGridDirectDistanceMode family_grid_direct_distance_mode() {
   const char* value = std::getenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE");
@@ -3387,6 +3393,9 @@ FamilyGridDirectDistanceMode family_grid_direct_distance_mode() {
   }
   if (std::strcmp(value, "final") == 0) {
     return FamilyGridDirectDistanceMode::kFinal;
+  }
+  if (std::strcmp(value, "provisional_large_final") == 0) {
+    return FamilyGridDirectDistanceMode::kProvisionalLargeFinal;
   }
   return FamilyGridDirectDistanceMode::kAll;
 }
@@ -3777,7 +3786,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       transition_bits >= 5 && transition_bits <= 7 &&
       (direct_distance_mode == FamilyGridDirectDistanceMode::kAll ||
        (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisional && !constrained) ||
-       (direct_distance_mode == FamilyGridDirectDistanceMode::kFinal && constrained));
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kFinal && constrained) ||
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisionalLargeFinal &&
+        (!constrained || family_batch >= 64)));
   // Below ~40 sequences both paths are bound by the serial 127-step chain of a
   // single sequence and the reference layout (one CTA per bank) has twice the
   // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
