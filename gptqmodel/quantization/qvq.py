@@ -5345,6 +5345,7 @@ def yaqa_inner_v2b2_p32(
     block_family_id: int | None = None,
     diagnostics: dict[str, object] | None = None,
     _parallel_candidates: bool = True,
+    _collect_block_family_diagnostics: bool = True,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Select one complementary V2 family per module under YAQA's full proxy."""
@@ -5372,6 +5373,8 @@ def yaqa_inner_v2b2_p32(
         raise ValueError("YAQA V2B2-P32 pair stacks must contain three [2, 65536, 2] tensors.")
     if family_mode not in {"fixed_block_ldlq", "reselect"}:
         raise ValueError("YAQA V2B2-P32 family mode must be `fixed_block_ldlq` or `reselect`.")
+    if not isinstance(_collect_block_family_diagnostics, bool):
+        raise TypeError("YAQA block-family diagnostic collection flag must be bool.")
     if sample_strategy not in QVQ_YAQA_SAMPLE_TILE_COUNTS:
         raise ValueError(
             "YAQA sample strategy must be `full`, `32_16x16`, `64_16x16`, `96_16x16`, `128_16x16`, "
@@ -5503,8 +5506,8 @@ def yaqa_inner_v2b2_p32(
             telemetry.count("yaqa_v2b2_sampled_family_tiles", sample_count)
             telemetry.count(f"yaqa_v2b2_sample_strategy_{sample_strategy}")
             telemetry.count(f"yaqa_v2b2_sampled_family_{block_alt_id}")
-    elif block_family_id is None and not (
-        family_mode == "reselect" and sample_strategy == "full" and diagnostics is None
+    elif block_family_id is None and (
+        family_mode != "reselect" or _collect_block_family_diagnostics
     ):
         with _qvq_phase(telemetry, "yaqa_v2b2_block_family_selection", inner_weight.device):
             _, _, block_selectors, block_alt_id_tensor = block_ldlq_inner_v2b2_p32(
@@ -5527,6 +5530,8 @@ def yaqa_inner_v2b2_p32(
         # computing it here cannot affect any returned quantization tensor.
         block_alt_id = 1
         block_selectors = None
+        if telemetry is not None:
+            telemetry.count("yaqa_v2b2_block_family_diagnostics_skipped")
     else:
         if isinstance(block_family_id, bool) or not isinstance(block_family_id, int) or block_family_id not in (1, 2, 3):
             raise ValueError("YAQA V2B2-P32 cached Block-LDLQ family ID must be 1, 2, or 3.")
@@ -5666,10 +5671,11 @@ def yaqa_inner_v2b2_p32(
                 diagnostics["selector_churn"] = float(
                     (all_selectors[winner_index] != block_selectors).to(torch.float32).mean().item()
                 )
-            diagnostics["family_changed"] = bool(
-                selected_banked_candidate and best_alt_id != block_alt_id
-            )
-            diagnostics["block_family_id"] = block_alt_id
+            if block_family_id is not None or family_mode != "reselect" or _collect_block_family_diagnostics:
+                diagnostics["family_changed"] = bool(
+                    selected_banked_candidate and best_alt_id != block_alt_id
+                )
+                diagnostics["block_family_id"] = block_alt_id
             diagnostics["family_candidates"] = family_diagnostics
         return (
             all_weights[winner],
@@ -5855,8 +5861,9 @@ def yaqa_inner_v2b2_p32(
             diagnostics["selector_churn"] = float(
                 (best_selectors != block_selectors).to(torch.float32).mean().item()
             )
-        diagnostics["family_changed"] = bool(selected_banked_candidate and best_alt_id != block_alt_id)
-        diagnostics["block_family_id"] = block_alt_id
+        if block_family_id is not None or family_mode != "reselect" or _collect_block_family_diagnostics:
+            diagnostics["family_changed"] = bool(selected_banked_candidate and best_alt_id != block_alt_id)
+            diagnostics["block_family_id"] = block_alt_id
         diagnostics["family_candidates"] = family_diagnostics
     return (
         best_weight,
@@ -7992,6 +7999,13 @@ def quantize_qvq_linear(
                     sample_strategy=yaqa_sample_strategy,
                     block_family_id=yaqa_v2b2_fixed_family_id,
                     diagnostics=yaqa_bank_diagnostics,
+                    # Full reselect already scores canonical plus all three
+                    # complementary families under the authoritative YAQA
+                    # proxy. The preliminary Block-LDLQ family is reporting
+                    # only unless a later spectral stage consumes it.
+                    _collect_block_family_diagnostics=(
+                        yaqa_spectral_refinement or yaqa_spectral_push
+                    ),
                     factorization=prepared_yaqa_factorization,
                     bank_codebook_pair_stacks=bank_codebook_pair_stacks,
                     telemetry=telemetry,

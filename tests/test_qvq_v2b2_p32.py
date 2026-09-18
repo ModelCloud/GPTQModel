@@ -2825,9 +2825,13 @@ def test_qvq_v2b2_p32_yaqa_pack_reload_and_full_proxy_cannot_regress_v2_yaqa():
     assert banked.bank_ids is not None and banked.bank_ids.numel() == 8
     assert banked.bank_alt_id is not None
     assert isinstance(banked.yaqa_bank_fallback_to_v2, bool)
-    assert banked.yaqa_selector_churn is not None and 0.0 <= banked.yaqa_selector_churn <= 1.0
-    assert isinstance(banked.yaqa_family_changed, bool)
-    assert banked.yaqa_block_family_id in {1, 2, 3}
+    # Full reselect scores every legal family under YAQA's authoritative proxy.
+    # Block-LDLQ comparison fields are intentionally absent because computing
+    # them cannot alter the selected payload unless spectral refinement needs
+    # that baseline.
+    assert banked.yaqa_selector_churn is None
+    assert banked.yaqa_family_changed is None
+    assert banked.yaqa_block_family_id is None
     decoded = reconstruct_qvq_inner_weight(
         banked.trellis,
         bits=2,
@@ -3635,6 +3639,51 @@ def test_qvq_v2b2_p32_yaqa_fixed_and_reselected_family_objectives(
             "pre_fallback_selector_churn": None,
             "pre_fallback_state_churn": None,
         }
+
+
+def test_qvq_v2b2_p32_full_reselect_skips_reporting_only_block_family_search():
+    weight = torch.zeros((16, 16))
+    hessian = torch.eye(16)
+    states = torch.zeros((1, 128), dtype=torch.long)
+    codebooks = tuple(torch.full((1,), family_id, dtype=torch.float32) for family_id in range(4))
+
+    def fake_yaqa(*args, bank_codebooks=None, **kwargs):
+        del args, kwargs
+        if bank_codebooks is None:
+            return torch.ones_like(weight), states
+        family_id = int(bank_codebooks[1].item())
+        candidate = torch.full_like(weight, {1: 0.3, 2: 0.2, 3: 0.1}[family_id])
+        selectors = torch.full((8,), family_id & 1, dtype=torch.uint8)
+        return candidate, states, selectors
+
+    diagnostics = {}
+    telemetry = QVQQuantizationTelemetry()
+    with (
+        patch("gptqmodel.quantization.qvq.block_ldlq_inner_v2b2_p32") as block_family_search,
+        patch("gptqmodel.quantization.qvq.yaqa_inner", side_effect=fake_yaqa),
+    ):
+        selected_weight, _, _, family = yaqa_inner_v2b2_p32(
+            weight,
+            hessian,
+            hessian,
+            codebooks,
+            bits=3,
+            family_mode="reselect",
+            diagnostics=diagnostics,
+            telemetry=telemetry,
+            _collect_block_family_diagnostics=False,
+        )
+
+    measured = telemetry.finalize()
+    block_family_search.assert_not_called()
+    assert int(family.item()) == 3
+    torch.testing.assert_close(selected_weight, torch.full_like(weight, 0.1), rtol=0, atol=0)
+    assert diagnostics["fallback_to_v2"] is False
+    assert "block_family_id" not in diagnostics
+    assert "family_changed" not in diagnostics
+    assert set(diagnostics["family_candidates"]) == {"1", "2", "3"}
+    assert measured["counters"]["yaqa_v2b2_block_family_diagnostics_skipped"] == 1
+    assert "yaqa_v2b2_block_family_selection" not in measured["phases"]
 
 
 @pytest.mark.parametrize("sample_strategy", ("32_16x16", "64_16x16", "96_16x16", "128_16x16", "256_16x16"))
