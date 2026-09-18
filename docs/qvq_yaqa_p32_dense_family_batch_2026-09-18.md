@@ -581,3 +581,64 @@ batches. None of those experiments remains in production source.
 This change is quantization-only. Inference consumes the selected states and
 P32 selectors and never constructs this pruning radius, so there is no safe
 inference-side transplant and no checkpoint-format change.
+
+### Rate-aware approximate target-root enclosure
+
+An SM90 Nsight Compute sample of the 256-thread Shift-7 recurrence measured
+55.1% SM throughput, 0.2% DRAM throughput, and a 95.6% L1 hit rate. Warp issue
+stalls were led by fixed-latency dependencies (26.18%) and long scoreboards
+(14.0%), so additional global-memory packing was not indicated. SASS showed
+that `sqrt_rn` for the target-root enclosure expanded into reciprocal-square-
+root and correction instructions, whereas the already-proven
+`sqrt.approx.f32` radius uses one MUFU instruction.
+
+PTX bounds `sqrt.approx.f32` to `2^-23 = 2u` relative error. For W2.5 and the
+256-thread W3.5 specialization, the target estimate is contracted and expanded
+with directed rounding by `1 - 2^-22` and `1 + 2^-22`: a 4u correction, twice
+the maximum approximation error. The upper endpoint then receives the original
+`1 + 2^-19` proof expansion. These endpoints therefore enclose the true target
+root before the unchanged norm-band derivation. Candidate-score arithmetic,
+prefix order, ties, backpointers, and traceback remain untouched.
+
+The optimization is intentionally rate and geometry aware. W3 and 512-thread
+W3.5 retain the correctly rounded target root because their cheaper candidate
+scans could not amortize the slightly wider approximate enclosure. Matched,
+sequential H100 B2/P32 medians were:
+
+| Pass | Rate/geometry | Batch range | Merged main | Candidate | Speedup |
+|---|---|---:|---:|---:|---:|
+| Unconstrained | W2.5 | 32--256 | 0.617--1.978 ms | 0.606--1.957 ms | 1.008--1.012x |
+| Unconstrained | W3.5, 256 threads | 128--256 | 0.386--0.701 ms | 0.383--0.692 ms | 1.008--1.013x |
+| Constrained | W2.5 | 32--256 | 0.651--2.130 ms | 0.644--2.115 ms | 1.007--1.015x |
+| Constrained | W3.5, 256 threads | 128--256 | 0.567--1.039 ms | 0.563--1.030 ms | 1.006--1.009x |
+
+W3 and 512-thread W3.5 compile to the merged-main path. SASS resource usage is
+unchanged: W2.5 uses 32 registers, W3 uses 64, and Shift-7 uses 96 registers at
+512 threads and 110 at 256 threads, with no local or shared spilling.
+
+A clean matched W2.5 layer rerun reduced segmented-Viterbi GPU time from
+14.6092 s to 14.5352 s (1.005x) and prepare plus quantize from 28.6264 s to
+28.5440 s (1.003x). Inclusive process-quantization accounting moved from
+23.517 s to 23.730 s, so no process-level speedup is claimed. An earlier
+candidate arm incurred an isolated 104-second sampled-family stall and was
+discarded rather than included in the timing comparison. Both clean arms used
+calibration rows `[0,32)` and disjoint YAQA rows `[64,96)`. Selected families
+and both FP32 and FP64 oracle values were identical for all seven modules; all
+174 serialized checkpoint tensors also had identical shapes, dtypes, and
+SHA-256 payload hashes.
+
+Frozen 2048x2048 solver A/Bs were payload-identical at both promoted rates.
+W2.5 selected family 1 with FP32/FP64 objectives `1.2377052307128906` and
+`1.2377053068101906`; W3.5 selected family 2 with objectives
+`0.22860166430473328` and `0.22860163687284052`. Reconstructed weights,
+trellis states, P32 selectors, and family IDs had matching SHA-256 hashes.
+All 113 norm-rank/pruning-policy tests passed.
+
+Two SASS-guided alternatives were rejected. Pairwise Shift-7 argmin shortened
+the winner dependency chain but raised live state and regressed 0.4--1.0%.
+Replacing the fully unrolled reseed rank with a 3--5-load binary lift reduced
+loads and registers but exposed dependent-load latency, regressing 1--2%.
+Neither experiment remains in source.
+
+This is quantization-only. Post-quant inference does not evaluate target-root
+norm bands, so there is no inference-side kernel or checkpoint-format change.
