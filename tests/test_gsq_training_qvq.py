@@ -869,6 +869,107 @@ def test_fused_gsq_lion_is_bitwise_exact():
 
 @pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_scheduled_gsq_lion_is_bitwise_exact():
+    from gptqmodel.quantization.qvq_gsq_triton import lion_update
+
+    generator = torch.Generator(device="cuda").manual_seed(53)
+    parameter = torch.randn(12345, device="cuda", generator=generator)
+    gradient = torch.randn(parameter.shape, device="cuda", generator=generator)
+    momentum = torch.randn(parameter.shape, device="cuda", generator=generator)
+    scheduled_parameter = parameter.clone()
+    scheduled_momentum = momentum.clone()
+    learning_rate = 7.123456789e-5
+    weight_decay = .37
+
+    lion_update(
+        parameter, gradient, momentum, learning_rate=learning_rate,
+        beta1=.9, beta2=.95, weight_decay=weight_decay,
+    )
+    lion_update(
+        scheduled_parameter, gradient, scheduled_momentum,
+        learning_rate=torch.tensor(learning_rate, device="cuda"),
+        beta1=.9, beta2=.95, weight_decay=weight_decay,
+        decay=torch.tensor(1. - learning_rate * weight_decay, device="cuda"),
+    )
+
+    assert torch.equal(scheduled_parameter, parameter)
+    assert torch.equal(scheduled_momentum, momentum)
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_graphed_qvq_stage_updates_preserve_eager_state():
+    from gptqmodel.quantization.gsq_training import fit_reconstruction_stage
+    from gptqmodel.quantization.qvq_gsq import _candidate_probabilities
+
+    class TinyQVQQuantizer(torch.nn.Module):
+        adapter = object()
+
+        def __init__(self):
+            super().__init__()
+            self.logits = torch.nn.Parameter(torch.tensor(
+                [[.2, -.1, .05], [.1, .3, -.2],
+                 [-.1, .2, .4], [.3, -.2, .1]],
+                device="cuda",
+            ))
+            self.scales = torch.nn.Parameter(torch.ones(1, device="cuda"))
+            self.register_buffer(
+                "values", torch.tensor([-1., 0., 1.], device="cuda"),
+            )
+
+        def forward(self, *, uniform, temperature, multiplier):
+            probabilities = _candidate_probabilities(
+                self.logits, uniform, temperature, multiplier,
+            )
+            return (probabilities * self.values).sum(-1) * self.scales
+
+        def hard_weight(self):
+            return self.values[self.logits.argmax(-1)] * self.scales
+
+        def optimizer_groups(self, *, assignment_lr, scale_lr, weight_decay):
+            return [
+                {"params": [self.logits], "lr": assignment_lr,
+                 "weight_decay": weight_decay},
+                {"params": [self.scales], "lr": scale_lr,
+                 "weight_decay": 0.},
+            ]
+
+    batches = [
+        [
+            (torch.tensor([.5, -.25, .75, -.5], device="cuda"), 4),
+            (torch.tensor([-.1, .2, -.3, .4], device="cuda"), 4),
+        ],
+        [
+            (torch.tensor([-.5, .25, -.75, .5], device="cuda"), 4),
+            (torch.tensor([.3, -.4, .1, -.2], device="cuda"), 4),
+        ],
+    ]
+
+    def fit(graphed):
+        quantizer = TinyQVQQuantizer()
+        result = fit_reconstruction_stage(
+            {"weight": quantizer}, batches,
+            lambda target, weights: (
+                weights["weight"] - target
+            ).square().mean(),
+            epochs=4, seed=17, assignment_lr=1e-4, scale_lr=5e-5,
+            weight_decay=1., betas=(.9, .95), temperature=(2., .05),
+            multiplier=(100., 500.), min_lr=.1, decay="cosine",
+            cuda_graph_updates=graphed,
+        )
+        return quantizer, result
+
+    eager, eager_result = fit(False)
+    graphed, graphed_result = fit(True)
+
+    assert torch.equal(graphed.logits, eager.logits)
+    assert torch.equal(graphed.scales, eager.scales)
+    assert graphed_result["history"] == eager_result["history"]
+    assert graphed_result["hard_loss_after"] == eager_result["hard_loss_after"]
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_grouped_sparse_lion_eight_tiles_preserves_optimizer_state():
     from gptqmodel.quantization.qvq_gsq_triton import (
         _scheduled_sparse_lion_grouped_kernel,

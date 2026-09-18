@@ -303,6 +303,23 @@ remained exactly 15.0000% and 29.2717%. The optimization is enabled by default
 in the staged driver and can be isolated with
 `--no-direct-bf16-attention-output`.
 
+Fixed-shape attention optimizer updates are replayed through one CUDA graph.
+The graph receives fresh private-generator Gumbel draws and live FP32
+temperature, multiplier, learning-rate, and decay values before every replay;
+it therefore preserves the GSQ schedule instead of freezing capture-time
+constants. Reciprocal-temperature multiplication retains the eager
+Python-scalar division order exactly, and warm-up/capture mutations are
+restored before training begins. On H100, 32/8/32 x 512-token attention fitting
+improved from 0.3489s to 0.2089s (1.67x), reducing total fitting from 1.4035s
+to 1.2842s (1.093x). Nsight measured 9,533 eager kernel-launch API calls
+inside the attention range versus 2,281 kernel/graph launch calls (4.18x fewer).
+At 64/16/64 x 256 tokens, attention improved from 0.5721s
+to 0.2522s (2.27x) and total fitting from 1.8595s to 1.5988s (1.163x). Both
+matched runs produced bit-for-bit equal 14-tensor states, guards, changed-tile
+counts, and held-out losses; strict split disjointness passed and gains remained
+exactly 15.0000% and 29.2717%. The staged driver enables this path by default;
+use `--no-cuda-graph-attention-updates` for eager comparison.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant

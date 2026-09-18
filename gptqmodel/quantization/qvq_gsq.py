@@ -114,7 +114,15 @@ def _candidate_probabilities(logits: torch.Tensor, uniform: torch.Tensor, temper
     fitting. Clamp the uniform endpoints before this function, not the logits.
     """
     gumbel = -(-uniform.log()).log()
-    return ((kappa * logits + gumbel) / temperature).softmax(-1)
+    numerator = kappa * logits + gumbel
+    # Graphed staged updates supply a live reciprocal-temperature tensor.
+    # Multiplication preserves eager Python-scalar division byte-for-byte,
+    # whereas CUDA tensor division uses a different FP32 rounding path.
+    normalized = (
+        numerator * temperature
+        if isinstance(temperature, torch.Tensor) else numerator / temperature
+    )
+    return normalized.softmax(-1)
 
 
 def refine_trellis_candidates(

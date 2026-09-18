@@ -115,6 +115,7 @@ class GSQLion(torch.optim.Optimizer):
                         parameter, gradient, momentum,
                         learning_rate=group['lr'], beta1=beta1, beta2=beta2,
                         weight_decay=group['weight_decay'],
+                        decay=group.get('_gsq_decay'),
                     )
                     continue
                 direction = momentum.clone().mul_(beta1).add(gradient, alpha=1-beta1).sign_()
@@ -274,7 +275,7 @@ def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
 
 
 def train_stage_update(quantizers, optimizer, microbatches, objective, *, generator,
-                       temperature, multiplier):
+                       temperature, multiplier, uniforms=None, static_gradients=False):
     """One accumulated staged update; objective(batch, weights) returns mean MSE.
 
     Microbatches are (batch, element_count) pairs. Counts describe reconstructed
@@ -286,16 +287,19 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
                               for _, count in microbatches):
         raise ValueError('GSQ accumulation requires positive output element counts')
     total = sum(count for _, count in microbatches)
-    optimizer.zero_grad(set_to_none=True)
+    optimizer.zero_grad(set_to_none=not static_gradients)
     reported = None
     finite = torch.ones((), dtype=torch.bool, device=next(iter(quantizers.values())).logits.device)
     try:
-        for batch, count in microbatches:
+        for microbatch_index, (batch, count) in enumerate(microbatches):
             weights = {}
             for name, quantizer in quantizers.items():
-                uniform = torch.rand(
-                    quantizer.logits.shape, dtype=quantizer.logits.dtype,
-                    device=quantizer.logits.device, generator=generator,
+                uniform = (
+                    uniforms[microbatch_index][name]
+                    if uniforms is not None else torch.rand(
+                        quantizer.logits.shape, dtype=quantizer.logits.dtype,
+                        device=quantizer.logits.device, generator=generator,
+                    )
                 )
                 weights[name] = quantizer(
                     uniform=uniform, temperature=temperature,
@@ -347,6 +351,167 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
         optimizer.zero_grad(set_to_none=True)
         raise
     return reported
+
+
+class _CUDAGraphedStageUpdates:
+    """Replay fixed-shape stage updates with live GSQ schedule and noise inputs."""
+
+    def __init__(self, quantizers, optimizer, batches, objective):
+        if not torch.cuda.is_available():
+            raise ValueError("graphed GSQ updates require CUDA")
+        if any(not hasattr(quantizer, "adapter") for quantizer in quantizers.values()):
+            raise ValueError("graphed GSQ updates currently require QVQ quantizers")
+        self.quantizers = quantizers
+        self.optimizer = optimizer
+        self.batches = batches
+        device = next(iter(quantizers.values())).logits.device
+        self.temperature = torch.empty((), dtype=torch.float32, device=device)
+        self.multiplier = torch.empty((), dtype=torch.float32, device=device)
+        self.learning_rates = [
+            torch.empty((), dtype=torch.float32, device=device)
+            for _ in optimizer.param_groups
+        ]
+        self.decays = [
+            torch.empty((), dtype=torch.float32, device=device)
+            for _ in optimizer.param_groups
+        ]
+        parameters = [
+            parameter
+            for group in optimizer.param_groups
+            for parameter in group["params"]
+        ]
+        self.parameters = parameters
+        for parameter in parameters:
+            parameter.grad = torch.zeros_like(parameter)
+            state = optimizer.state[parameter]
+            if "exp_avg" not in state:
+                state["exp_avg"] = torch.zeros_like(parameter)
+        for group, learning_rate, decay in zip(
+            optimizer.param_groups, self.learning_rates, self.decays,
+        ):
+            group["lr"] = learning_rate
+            group["_gsq_decay"] = decay
+
+        def static_clone(value):
+            if isinstance(value, torch.Tensor):
+                return value.detach().clone()
+            if isinstance(value, dict):
+                return {key: static_clone(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return tuple(static_clone(item) for item in value)
+            if isinstance(value, list):
+                return [static_clone(item) for item in value]
+            return value
+
+        def geometry(value):
+            if isinstance(value, torch.Tensor):
+                return ("tensor", tuple(value.shape), value.dtype, value.device)
+            if isinstance(value, dict):
+                return ("dict", tuple(
+                    (key, geometry(item)) for key, item in value.items()
+                ))
+            if isinstance(value, tuple):
+                return ("tuple", tuple(geometry(item) for item in value))
+            if isinstance(value, list):
+                return ("list", tuple(geometry(item) for item in value))
+            return (type(value), value)
+
+        self.batch_geometries = [geometry(batch) for batch in batches]
+        representatives = {}
+        for index, batch_geometry in enumerate(self.batch_geometries):
+            representatives.setdefault(batch_geometry, index)
+        self.static_batches = {
+            batch_geometry: static_clone(batches[index])
+            for batch_geometry, index in representatives.items()
+        }
+        self.uniforms = {
+            batch_geometry: [
+                {
+                    name: torch.empty_like(quantizer.logits)
+                    for name, quantizer in quantizers.items()
+                }
+                for _ in static_batch
+            ]
+            for batch_geometry, static_batch in self.static_batches.items()
+        }
+
+        snapshots = [parameter.detach().clone() for parameter in parameters]
+        warm_generator = torch.Generator(device=device).manual_seed(0)
+        warm_geometry = next(iter(self.static_batches))
+        self._fill_inputs(
+            warm_generator, 1., 1., [1e-4] * len(self.learning_rates),
+            warm_geometry,
+        )
+        train_stage_update(
+            quantizers, optimizer, self.static_batches[warm_geometry], objective,
+            generator=None, temperature=self.temperature,
+            multiplier=self.multiplier, uniforms=self.uniforms[warm_geometry],
+            static_gradients=True,
+        )
+        torch.cuda.current_stream(device).synchronize()
+        with torch.no_grad():
+            for parameter, snapshot in zip(parameters, snapshots):
+                parameter.copy_(snapshot)
+                parameter.grad.zero_()
+                optimizer.state[parameter]["exp_avg"].zero_()
+
+        self.graphs = {}
+        self.losses = {}
+        for batch_geometry, static_batch in self.static_batches.items():
+            self._fill_inputs(
+                warm_generator, 1., 1., [1e-4] * len(self.learning_rates),
+                batch_geometry,
+            )
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, capture_error_mode="thread_local"):
+                loss = train_stage_update(
+                    quantizers, optimizer, static_batch, objective,
+                    generator=None, temperature=self.temperature,
+                    multiplier=self.multiplier,
+                    uniforms=self.uniforms[batch_geometry],
+                    static_gradients=True,
+                )
+            self.graphs[batch_geometry] = graph
+            self.losses[batch_geometry] = loss
+            torch.cuda.current_stream(device).synchronize()
+            with torch.no_grad():
+                for parameter, snapshot in zip(parameters, snapshots):
+                    parameter.copy_(snapshot)
+                    parameter.grad.zero_()
+                    optimizer.state[parameter]["exp_avg"].zero_()
+
+    def _fill_inputs(self, generator, temperature, multiplier, learning_rates,
+                     batch_geometry):
+        for microbatch_uniforms in self.uniforms[batch_geometry]:
+            for uniform in microbatch_uniforms.values():
+                uniform.uniform_(generator=generator)
+        self.temperature.fill_(1. / temperature)
+        self.multiplier.fill_(multiplier)
+        for destination, value in zip(self.learning_rates, learning_rates):
+            destination.fill_(value)
+        for destination, value, group in zip(
+            self.decays, learning_rates, self.optimizer.param_groups,
+        ):
+            destination.fill_(1. - value * group["weight_decay"])
+
+    def _copy_batch(self, destination, source):
+        if isinstance(destination, torch.Tensor):
+            destination.copy_(source)
+        elif isinstance(destination, dict):
+            for key in destination:
+                self._copy_batch(destination[key], source[key])
+        elif isinstance(destination, (tuple, list)):
+            for destination_item, source_item in zip(destination, source):
+                self._copy_batch(destination_item, source_item)
+
+    def replay(self, index, *, generator, temperature, multiplier, learning_rates):
+        batch_geometry = self.batch_geometries[index]
+        self._fill_inputs(
+            generator, temperature, multiplier, learning_rates, batch_geometry,
+        )
+        self._copy_batch(self.static_batches[batch_geometry], self.batches[index])
+        self.graphs[batch_geometry].replay()
+        return self.losses[batch_geometry]
 
 
 @torch.no_grad()
@@ -455,7 +620,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              min_lr=0., decay='linear', optimizer='lion',
                              validation_batches=None, restore_best=False,
                              fp32_tail_epochs=0, validation_start_epoch=0,
-                             export_weights=True):
+                             export_weights=True, cuda_graph_updates=False):
     """Train one stage with an optional held-out guard and hard-weight export.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
@@ -483,6 +648,10 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         raise ValueError('GSQ validation start epoch must be an integer in [0, epochs)')
     if not isinstance(export_weights, bool):
         raise ValueError('GSQ export_weights must be boolean')
+    if not isinstance(cuda_graph_updates, bool):
+        raise TypeError('GSQ CUDA graph update control must be boolean')
+    if cuda_graph_updates and fp32_tail_epochs:
+        raise ValueError('GSQ CUDA graph updates require a fixed training dtype')
     import time
 
     started = time.perf_counter()
@@ -524,6 +693,14 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     sampling_rng = torch.Generator(device=device).manual_seed(seed)
     shuffle_rng = torch.Generator().manual_seed(seed)
     total_steps = epochs*len(batches)
+    graph_updates = (
+        _CUDAGraphedStageUpdates(quantizers, optimizer, batches, objective)
+        if cuda_graph_updates else None
+    )
+    graph_losses = (
+        torch.empty(total_steps, dtype=torch.float32, device=device)
+        if graph_updates is not None else None
+    )
     history = []
     validation_history = []
     progress_at = time.monotonic()+60
@@ -534,18 +711,37 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         for index in torch.randperm(len(batches), generator=shuffle_rng).tolist():
             step = len(history)
             tau, kappa = sampling_schedule(step, total_steps, temperature=temperature, multiplier=multiplier)
-            for group, base_lr in zip(optimizer.param_groups, initial_lrs):
-                group['lr'] = stage_learning_rate(step, total_steps, base_lr=base_lr, warmup_steps=warmup_steps,
-                                                  min_lr=min_lr, decay=decay)
-            loss = train_stage_update(quantizers, optimizer, batches[index], objective, generator=sampling_rng,
-                                      temperature=tau, multiplier=kappa)
+            learning_rates = [
+                stage_learning_rate(
+                    step, total_steps, base_lr=base_lr,
+                    warmup_steps=warmup_steps, min_lr=min_lr, decay=decay,
+                )
+                for base_lr in initial_lrs
+            ]
+            if graph_updates is None:
+                for group, learning_rate in zip(optimizer.param_groups, learning_rates):
+                    group['lr'] = learning_rate
+                loss = train_stage_update(
+                    quantizers, optimizer, batches[index], objective,
+                    generator=sampling_rng, temperature=tau, multiplier=kappa,
+                )
+            else:
+                loss = graph_updates.replay(
+                    index, generator=sampling_rng, temperature=tau,
+                    multiplier=kappa, learning_rates=learning_rates,
+                )
+                graph_losses[step].copy_(loss)
             if step == 0 or (step+1) % 100 == 0 or step+1 == total_steps or time.monotonic() >= progress_at:
                 import logging
 
                 logging.getLogger(__name__).info("GSQ stage update %d/%d loss=%g", step+1, total_steps, loss)
                 progress_at = time.monotonic()+60
-            history.append(dict(epoch=epoch, step=step, batch=index, loss=loss, temperature=tau,
-                                multiplier=kappa, learning_rates=[group['lr'] for group in optimizer.param_groups]))
+            history.append({
+                'epoch': epoch, 'step': step, 'batch': index,
+                'loss': graph_losses[step] if graph_losses is not None else loss,
+                'temperature': tau, 'multiplier': kappa,
+                'learning_rates': learning_rates,
+            })
         if validation_batches and epoch >= validation_start_epoch:
             validation_loss = evaluate_hard_stage(quantizers, validation_batches, objective)
             validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
@@ -594,6 +790,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     result['restored_best_validation_checkpoint'] = bool(restore_best)
     result['fp32_tail_epochs'] = fp32_tail_epochs
     result['validation_start_epoch'] = validation_start_epoch
+    result['cuda_graph_updates'] = graph_updates is not None
     if device.type == 'cuda':
         torch.cuda.synchronize(device)
     result['elapsed_seconds'] = time.perf_counter()-started
