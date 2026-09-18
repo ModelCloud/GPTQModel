@@ -249,6 +249,7 @@ def test_direct_p32_position_map_matches_generic_sorted_map():
     from gptqmodel.quantization.qvq_gsq_triton import (
         build_compact_position_map,
         build_p32_dense_position_map,
+        transpose_p32_dense_position_map,
     )
 
     compact = build_compact_position_map(
@@ -258,6 +259,10 @@ def test_direct_p32_position_map_matches_generic_sorted_map():
     direct = build_p32_dense_position_map(
         module.sparse_indices, module.sparse_deltas,
     )
+    transposed = build_p32_dense_position_map(
+        module.sparse_indices, module.sparse_deltas, transposed=True,
+    )
+    expected_transposed = transpose_p32_dense_position_map(*direct)
     compact_choices = torch.zeros_like(direct[1])
     compact_deltas = torch.zeros_like(direct[2])
     gather = compact[0].long().unsqueeze(-1).expand_as(compact[1])
@@ -267,6 +272,58 @@ def test_direct_p32_position_map_matches_generic_sorted_map():
     assert torch.equal(direct[0], torch.arange(256, device="cuda", dtype=torch.uint8)[None])
     assert torch.equal(direct[1], compact_choices)
     assert torch.equal(direct[2], compact_deltas)
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(transposed, expected_transposed)
+    )
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_compact_attention_materializer_matches_deterministic_scatter():
+    width = 2048
+    tile_count = (width // 16) ** 2
+    candidates = torch.zeros((2, tile_count, 24), dtype=torch.int32, device="cuda")
+    baseline = torch.zeros((tile_count, 16, 16), device="cuda")
+    indices = torch.arange(6, device="cuda", dtype=torch.int64)[None, None].expand(
+        1, tile_count, -1,
+    ).contiguous()
+    deltas = torch.linspace(-.25, .25, 6, device="cuda")[None, None].expand_as(
+        indices,
+    ).contiguous()
+    values = deltas.clone()
+    shifts = torch.ones((1, tile_count), dtype=torch.int64, device="cuda")
+    common = {
+        "bits": 3,
+        "bank_ids": torch.zeros(1, dtype=torch.uint8, device="cuda"),
+        "bank_alt_id": torch.ones(1, dtype=torch.uint8, device="cuda"),
+        "in_features": width,
+        "out_features": width,
+        "SU": torch.ones(width, device="cuda"),
+        "SV": torch.ones(width, device="cuda"),
+        "input_hadamard": False,
+        "output_hadamard": False,
+    }
+    scatter = GSQP32TrainingModule(
+        candidates, baseline, indices, deltas, values, shifts,
+        compact_attention_forward=False, **common,
+    )
+    compact = GSQP32TrainingModule(
+        candidates, baseline, indices, deltas, values, shifts,
+        compact_attention_forward=True, **common,
+    )
+    uniform = torch.full_like(scatter.logits, .5)
+    scatter_weight = scatter(uniform=uniform, temperature=2., multiplier=10.)
+    compact_weight = compact(uniform=uniform, temperature=2., multiplier=10.)
+    assert not scatter.compact_forward
+    assert compact.compact_forward
+    assert torch.equal(compact_weight, scatter_weight)
+
+    upstream = torch.linspace(-1., 1., width * width, device="cuda").reshape(width, width)
+    (scatter_weight * upstream).sum().backward()
+    (compact_weight * upstream).sum().backward()
+    assert torch.equal(compact.logits.grad, scatter.logits.grad)
+    assert torch.equal(compact.scales.grad, scatter.scales.grad)
 
 
 @pytest.mark.cuda

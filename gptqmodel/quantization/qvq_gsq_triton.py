@@ -259,9 +259,11 @@ def _p32_choice_lookup_kernel(indices, lookup, size,
 @triton.jit
 def _p32_dense_position_map_kernel(
         lookup, deltas, position_indices, position_choices, position_deltas,
-        ALTERNATIVES: tl.constexpr, WIDTH: tl.constexpr):
+        ALTERNATIVES: tl.constexpr, WIDTH: tl.constexpr,
+        TRANSPOSED: tl.constexpr):
     tile = tl.program_id(0)
-    scalar = tl.arange(0, 256)
+    lane = tl.arange(0, 256)
+    scalar = (lane % 16) * 16 + lane // 16 if TRANSPOSED else lane
     state = scalar // 2
     parity = scalar - state * 2
     choice0 = tl.load(lookup + tile * 128 + state).to(tl.int32)
@@ -312,8 +314,8 @@ def _p32_dense_position_map_kernel(
         tl.where(swap, delta1, delta0), tl.where(swap, delta0, delta1)
     )
 
-    position_offset = (tile * 256 + scalar) * 3
-    tl.store(position_indices + tile * 256 + scalar, scalar)
+    position_offset = (tile * 256 + lane) * 3
+    tl.store(position_indices + tile * 256 + lane, scalar)
     tl.store(position_choices + position_offset, choice0)
     tl.store(position_choices + position_offset + 1, choice1)
     tl.store(position_choices + position_offset + 2, choice2)
@@ -776,7 +778,7 @@ def lion_update(parameter, gradient, momentum, *, learning_rate: float,
     )
 
 
-def build_p32_dense_position_map(indices, deltas):
+def build_p32_dense_position_map(indices, deltas, *, transposed=False):
     """Build the exact W3/P32 overlap map without sorting sparse entries."""
     if (indices.ndim != 3 or indices.shape[2] != 6
             or indices.dtype != torch.int64 or not indices.is_cuda
@@ -808,7 +810,8 @@ def build_p32_dense_position_map(indices, deltas):
     )
     _p32_dense_position_map_kernel[(tile_count,)](
         lookup, deltas, position_indices, position_choices, position_deltas,
-        ALTERNATIVES=alternatives, WIDTH=width, num_warps=8,
+        ALTERNATIVES=alternatives, WIDTH=width, TRANSPOSED=transposed,
+        num_warps=8,
     )
     return position_indices, position_choices, position_deltas
 

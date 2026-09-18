@@ -259,6 +259,7 @@ class GSQP32TrainingModule(torch.nn.Module):
         fast_hadamard=True,
         training_dtype=torch.float32,
         fast_position_map=True,
+        compact_attention_forward=True,
     ):
         super().__init__()
         choices, tile_count, _ = candidates.shape
@@ -342,7 +343,14 @@ class GSQP32TrainingModule(torch.nn.Module):
         self.training_hadamard_backend = (
             "fused_cuda_exact" if self.fast_hadamard else "eager"
         )
-        self.compact_forward = max(in_features, out_features) > 2048
+        maximum_width = max(in_features, out_features)
+        self.compact_forward = bool(
+            candidates.device.type == "cuda"
+            and (
+                maximum_width > 2048
+                or compact_attention_forward and maximum_width == 2048
+            )
+        )
         self.adapter = TrellisCandidateAdapter("p32_window", bits)
         self.register_buffer("candidates", candidates.detach().clone().contiguous())
         self.register_buffer("baseline_tiles", baseline_tiles.detach().reshape(tile_count, 256).clone())
@@ -375,26 +383,44 @@ class GSQP32TrainingModule(torch.nn.Module):
                 build_compact_position_map,
                 build_p32_dense_position_map,
                 transpose_compact_position_map,
-                transpose_p32_dense_position_map,
             )
 
-            position_indices, position_choices, position_deltas = (
-                build_p32_dense_position_map(
+            transposed_mixture = input_hadamard and self.fast_hadamard
+            if fast_position_map:
+                direct_map = build_p32_dense_position_map(
                     self.sparse_indices, self.sparse_deltas,
-                ) if fast_position_map else
-                build_compact_position_map(
+                    transposed=transposed_mixture,
+                )
+                empty_indices = torch.empty(
+                    (0, 0), dtype=torch.uint8, device=candidates.device,
+                )
+                empty_choices = torch.empty(
+                    (0, 0, 0), dtype=torch.uint8, device=candidates.device,
+                )
+                empty_deltas = torch.empty(
+                    (0, 0, 0), dtype=self.sparse_deltas.dtype,
+                    device=candidates.device,
+                )
+                if transposed_mixture:
+                    position_indices, position_choices, position_deltas = (
+                        empty_indices, empty_choices, empty_deltas,
+                    )
+                    (transposed_position_indices, transposed_position_choices,
+                     transposed_position_deltas) = direct_map
+                else:
+                    position_indices, position_choices, position_deltas = direct_map
+                    (transposed_position_indices, transposed_position_choices,
+                     transposed_position_deltas) = (
+                        empty_indices, empty_choices, empty_deltas,
+                    )
+            else:
+                position_indices, position_choices, position_deltas = build_compact_position_map(
                     self.sparse_indices, self.sparse_deltas, matrix_indices,
                 )
-            )
-            (transposed_position_indices, transposed_position_choices,
-             transposed_position_deltas) = (
-                transpose_p32_dense_position_map(
-                    position_indices, position_choices, position_deltas,
-                ) if fast_position_map else
-                transpose_compact_position_map(
+                (transposed_position_indices, transposed_position_choices,
+                 transposed_position_deltas) = transpose_compact_position_map(
                     position_indices, position_choices, position_deltas,
                 )
-            )
         else:
             position_indices = torch.empty(
                 (0, 0), dtype=torch.uint8, device=candidates.device,
@@ -596,6 +622,7 @@ def p32_training_module_from_payload(
     fast_identity_metric=True,
     fast_position_map=True,
     compact_sparse_candidates=True,
+    compact_attention_forward=True,
 ):
     """Build a staged module from one serialized W3/P32 QVQ projection."""
     if teacher_weight.ndim != 2 or teacher_weight.device != trellis.device:
@@ -619,6 +646,7 @@ def p32_training_module_from_payload(
         fast_identity_metric=fast_identity_metric,
         fast_position_map=fast_position_map,
         compact_sparse_candidates=compact_sparse_candidates,
+        compact_attention_forward=compact_attention_forward,
     )
 
 
@@ -641,6 +669,7 @@ def p32_training_module_from_words(
     fast_identity_metric=True,
     fast_position_map=True,
     compact_sparse_candidates=True,
+    compact_attention_forward=True,
 ):
     """Build the next legal staged round from accepted P32 window words.
 
@@ -719,6 +748,7 @@ def p32_training_module_from_words(
         fast_hadamard=fast_hadamard,
         training_dtype=training_dtype,
         fast_position_map=fast_position_map,
+        compact_attention_forward=compact_attention_forward,
     )
 
 

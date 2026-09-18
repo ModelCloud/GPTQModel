@@ -231,6 +231,21 @@ bit-for-bit equal. Median candidate wall time improved from 0.2833s to 0.2498s
 29.2717%. Use `--no-compact-sparse-candidates` only to compare against the
 dense decoded-bank path.
 
+The fused sparse mixture materializer is also used for the 2,048-wide V/O
+attention projections. This avoids deterministic `scatter_add` sorting of
+3.15 million sparse entries on every update. The direct P32 map kernel emits
+the transposed orientation consumed by the fused Hadamard path, so training
+does not build and permute an unused normal-orientation map. Across three
+warm-cache paired H100 runs per geometry, all guards, losses, changed-tile
+counts, and 14 state tensors were bit-for-bit equal. Median attention fitting
+improved from 0.3443s to 0.3321s (1.037x) at 32/8/32 x 512 tokens and from
+0.6048s to 0.5737s (1.054x) at 64/16/64 x 256 tokens. Total fitting improved
+1.011x and 1.025x; candidate-build-plus-fit-plus-final improved 1.005x and
+1.017x. The new 2,048-square Triton specialization has a one-time compilation
+cost and breaks even after roughly eight fitted layers. Held-out gains remained
+exactly 15.0000% and 29.2717%. Use `--no-compact-attention-forward` only for
+comparison with deterministic scatter materialization.
+
 For the 2,000-update staged Q/K schedule, checkpoint the structured hard
 oracle every 100 updates. This still evaluates 20 points along the relaxation
 trajectory plus the exact dense top-k verification, while avoiding redundant
