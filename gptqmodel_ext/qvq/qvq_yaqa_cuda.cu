@@ -7,12 +7,14 @@
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cublas_v2.h>
+#include <cuda_fp16.h>
 #include <torch/library.h>
 #include <torch/types.h>
 
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -102,6 +104,84 @@ __global__ void qvq_yaqa_update_grouped_pointers_kernel(
       output_feedback + static_cast<int64_t>(output_start) * out_features);
   b_array[right_index] = const_cast<float*>(tile_reconstruction);
   c_array[right_index] = right + family_offset + static_cast<int64_t>(input_start) * out_features;
+}
+
+template <typename ReconstructionScalar>
+__global__ __launch_bounds__(kThreads) void qvq_yaqa_update_commit_kernel(
+    float* __restrict__ left,
+    float* __restrict__ right,
+    const float* __restrict__ input_feedback,
+    const float* __restrict__ output_feedback,
+    const ReconstructionScalar* __restrict__ reconstructed,
+    const int64_t* __restrict__ selected_states,
+    const uint8_t* __restrict__ selected_banks,
+    float* __restrict__ reconstructed_fp32,
+    float* __restrict__ quantized,
+    int64_t* __restrict__ tile_states,
+    uint8_t* __restrict__ selectors,
+    float** a_array,
+    float** b_array,
+    float** c_array,
+    int first_input_block,
+    int first_output_block,
+    int in_features,
+    int out_features,
+    int count,
+    int families) {
+  const int item = static_cast<int>(blockIdx.x);
+  const int family = item / count;
+  const int tile = item - family * count;
+  const int lane = static_cast<int>(threadIdx.x);
+  const int input_block = first_input_block + tile;
+  const int output_block = first_output_block - tile;
+  const int input_start = input_block * kTile;
+  const int output_start = output_block * kTile;
+  const int64_t matrix_stride = static_cast<int64_t>(in_features) * out_features;
+  const int64_t family_offset = static_cast<int64_t>(family) * matrix_stride;
+  const int64_t item_base = static_cast<int64_t>(item) * kThreads;
+
+  float value;
+  if constexpr (std::is_same_v<ReconstructionScalar, half>) {
+    value = __half2float(reconstructed[item_base + lane]);
+  } else {
+    value = reconstructed[item_base + lane];
+  }
+  if constexpr (std::is_same_v<ReconstructionScalar, half>) {
+    reconstructed_fp32[item_base + lane] = value;
+  }
+  const int row = lane / kTile;
+  const int col = lane % kTile;
+  quantized[family_offset + static_cast<int64_t>(input_start + row) * out_features +
+            output_start + col] = value;
+  if (lane < 128) {
+    const int64_t state_offset =
+        ((static_cast<int64_t>(family) * (in_features / kTile) + input_block) *
+             (out_features / kTile) +
+         output_block) * 128;
+    tile_states[state_offset + lane] =
+        selected_states[static_cast<int64_t>(item) * 128 + lane];
+  }
+  if (lane < 8) {
+    const int64_t selector_offset =
+        (static_cast<int64_t>(family) * (in_features / kTile) * (out_features / kTile) +
+         static_cast<int64_t>(input_block) * (out_features / kTile) + output_block) * 8;
+    selectors[selector_offset + lane] =
+        selected_banks[static_cast<int64_t>(item) * 8 + lane];
+  }
+
+  if (lane == 0) {
+    float* tile_reconstruction = reconstructed_fp32 + item_base;
+    a_array[item] = tile_reconstruction;
+    b_array[item] = const_cast<float*>(
+        input_feedback + static_cast<int64_t>(input_start) * in_features);
+    c_array[item] = left + family_offset + output_start;
+    const int right_index = families * count + item;
+    a_array[right_index] = const_cast<float*>(
+        output_feedback + static_cast<int64_t>(output_start) * out_features);
+    b_array[right_index] = tile_reconstruction;
+    c_array[right_index] =
+        right + family_offset + static_cast<int64_t>(input_start) * out_features;
+  }
 }
 
 __global__ __launch_bounds__(kThreads) void qvq_yaqa_feedback_epilogue_kernel(
@@ -440,6 +520,132 @@ void qvq_yaqa_feedback_update_cuda(
               "YAQA batched FP32 cache update failed");
 }
 
+void qvq_yaqa_feedback_update_commit_cuda(
+    at::Tensor& left,
+    at::Tensor& right,
+    const at::Tensor& input_feedback,
+    const at::Tensor& output_feedback,
+    const at::Tensor& reconstructed,
+    at::Tensor& quantized,
+    const at::Tensor& selected_states,
+    at::Tensor& tile_states,
+    const at::Tensor& selected_banks,
+    at::Tensor& selectors,
+    int64_t first_input_block,
+    int64_t first_output_block,
+    int64_t count) {
+  TORCH_CHECK(left.is_cuda() && left.scalar_type() == at::kFloat && left.dim() == 3 &&
+                  left.is_contiguous(),
+              "YAQA fused commit requires contiguous CUDA FP32 left [family, input, output]");
+  TORCH_CHECK(right.device() == left.device() && right.scalar_type() == at::kFloat &&
+                  right.sizes() == left.sizes() && right.is_contiguous(),
+              "YAQA fused commit right cache must match left");
+  const int64_t families = left.size(0);
+  const int64_t in_features = left.size(1);
+  const int64_t out_features = left.size(2);
+  TORCH_CHECK(input_feedback.device() == left.device() && input_feedback.scalar_type() == at::kFloat &&
+                  input_feedback.sizes() == at::IntArrayRef({in_features, in_features}) &&
+                  input_feedback.is_contiguous(),
+              "YAQA fused commit input feedback must be contiguous FP32 [input, input]");
+  TORCH_CHECK(output_feedback.device() == left.device() && output_feedback.scalar_type() == at::kFloat &&
+                  output_feedback.sizes() == at::IntArrayRef({out_features, out_features}) &&
+                  output_feedback.is_contiguous(),
+              "YAQA fused commit output feedback must be contiguous FP32 [output, output]");
+  TORCH_CHECK(reconstructed.device() == left.device() &&
+                  (reconstructed.scalar_type() == at::kHalf || reconstructed.scalar_type() == at::kFloat) &&
+                  reconstructed.sizes() == at::IntArrayRef({families, count, kTile, kTile}) &&
+                  reconstructed.is_contiguous(),
+              "YAQA fused commit reconstruction must be contiguous FP16/FP32 [family, count, 16, 16]");
+  TORCH_CHECK(quantized.device() == left.device() && quantized.scalar_type() == at::kFloat &&
+                  quantized.sizes() == left.sizes() && quantized.is_contiguous(),
+              "YAQA fused commit quantized output must match the FP32 cache shape");
+  TORCH_CHECK(selected_states.device() == left.device() && selected_states.scalar_type() == at::kLong &&
+                  selected_states.sizes() == at::IntArrayRef({families, count, 128}) &&
+                  selected_states.is_contiguous(),
+              "YAQA fused commit selected states must be contiguous int64 [family, count, 128]");
+  TORCH_CHECK(tile_states.device() == left.device() && tile_states.scalar_type() == at::kLong &&
+                  tile_states.sizes() == at::IntArrayRef(
+                      {families, in_features / kTile, out_features / kTile, 128}) &&
+                  tile_states.is_contiguous(),
+              "YAQA fused commit state output has an invalid shape or dtype");
+  TORCH_CHECK(selected_banks.device() == left.device() && selected_banks.scalar_type() == at::kByte &&
+                  selected_banks.sizes() == at::IntArrayRef({families, count, 8}) &&
+                  selected_banks.is_contiguous(),
+              "YAQA fused commit selected banks must be contiguous uint8 [family, count, 8]");
+  TORCH_CHECK(selectors.device() == left.device() && selectors.scalar_type() == at::kByte &&
+                  selectors.sizes() == at::IntArrayRef(
+                      {families, (in_features / kTile) * (out_features / kTile), 8}) &&
+                  selectors.is_contiguous(),
+              "YAQA fused commit selector output has an invalid shape or dtype");
+  TORCH_CHECK(count >= 1 && first_input_block >= 0 && first_output_block >= count - 1 &&
+                  first_input_block + count <= in_features / kTile &&
+                  first_output_block < out_features / kTile,
+              "YAQA fused commit anti-diagonal geometry is invalid");
+
+  const c10::cuda::CUDAGuard device_guard(left.device());
+  const int64_t total = families * count;
+  at::Tensor reconstructed_fp32 = reconstructed.scalar_type() == at::kFloat
+      ? reconstructed
+      : at::empty({families, count, kTile, kTile}, left.options());
+  at::Tensor pointer_storage = at::empty({6, total}, left.options().dtype(at::kLong));
+  auto pointers = reinterpret_cast<float**>(pointer_storage.mutable_data_ptr<int64_t>());
+  auto a_array = pointers;
+  auto b_array = pointers + 2 * total;
+  auto c_array = pointers + 4 * total;
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(left.get_device());
+#define QVQ_YAQA_UPDATE_COMMIT_LAUNCH(SCALAR, POINTER)                                      \
+  qvq_yaqa_update_commit_kernel<SCALAR><<<static_cast<unsigned int>(total), kThreads, 0, stream>>>( \
+      left.mutable_data_ptr<float>(), right.mutable_data_ptr<float>(),                       \
+      input_feedback.const_data_ptr<float>(), output_feedback.const_data_ptr<float>(),       \
+      POINTER, selected_states.const_data_ptr<int64_t>(), selected_banks.const_data_ptr<uint8_t>(), \
+      reconstructed_fp32.mutable_data_ptr<float>(), quantized.mutable_data_ptr<float>(),     \
+      tile_states.mutable_data_ptr<int64_t>(), selectors.mutable_data_ptr<uint8_t>(),        \
+      a_array, b_array, c_array, static_cast<int>(first_input_block),                        \
+      static_cast<int>(first_output_block), static_cast<int>(in_features),                   \
+      static_cast<int>(out_features), static_cast<int>(count), static_cast<int>(families))
+  if (reconstructed.scalar_type() == at::kHalf) {
+    QVQ_YAQA_UPDATE_COMMIT_LAUNCH(
+        half, reinterpret_cast<const half*>(reconstructed.const_data_ptr()));
+  } else {
+    QVQ_YAQA_UPDATE_COMMIT_LAUNCH(float, reconstructed.const_data_ptr<float>());
+  }
+#undef QVQ_YAQA_UPDATE_COMMIT_LAUNCH
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  const int matrix_count = static_cast<int>(total);
+  const float alpha = -1.0f;
+  const float beta = 1.0f;
+  cublasHandle_t handle = at::cuda::getCurrentCUDABlasHandle();
+  cublasPointerMode_t previous_pointer_mode;
+  cublasMath_t previous_math_mode;
+  TORCH_CHECK(cublasGetPointerMode(handle, &previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to read YAQA fused commit cuBLAS pointer mode");
+  TORCH_CHECK(cublasGetMathMode(handle, &previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to read YAQA fused commit cuBLAS math mode");
+  TORCH_CHECK(cublasSetStream(handle, stream) == CUBLAS_STATUS_SUCCESS,
+              "failed to bind YAQA fused commit cuBLAS stream");
+  TORCH_CHECK(cublasSetPointerMode(handle, CUBLAS_POINTER_MODE_HOST) == CUBLAS_STATUS_SUCCESS,
+              "failed to set YAQA fused commit cuBLAS pointer mode");
+  if (qvq_yaqa_fast_tf32_enabled()) {
+    TORCH_CHECK(cublasSetMathMode(handle, CUBLAS_TF32_TENSOR_OP_MATH) == CUBLAS_STATUS_SUCCESS,
+                "failed to enable YAQA fused commit TF32 math mode");
+  }
+  const cublasStatus_t left_status = cublasSgemmBatched(
+      handle, CUBLAS_OP_N, CUBLAS_OP_T, kTile, static_cast<int>(in_features), kTile,
+      &alpha, a_array, kTile, b_array, static_cast<int>(in_features), &beta, c_array,
+      static_cast<int>(out_features), matrix_count);
+  const cublasStatus_t right_status = cublasSgemmBatched(
+      handle, CUBLAS_OP_N, CUBLAS_OP_N, static_cast<int>(out_features), kTile, kTile,
+      &alpha, a_array + total, static_cast<int>(out_features), b_array + total, kTile,
+      &beta, c_array + total, static_cast<int>(out_features), matrix_count);
+  TORCH_CHECK(cublasSetPointerMode(handle, previous_pointer_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to restore YAQA fused commit cuBLAS pointer mode");
+  TORCH_CHECK(cublasSetMathMode(handle, previous_math_mode) == CUBLAS_STATUS_SUCCESS,
+              "failed to restore YAQA fused commit cuBLAS math mode");
+  TORCH_CHECK(left_status == CUBLAS_STATUS_SUCCESS && right_status == CUBLAS_STATUS_SUCCESS,
+              "YAQA fused commit batched FP32 cache update failed");
+}
+
 }  // namespace
 
 
@@ -474,10 +680,15 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "Tensor output_feedback, Tensor reconstructed, int first_input_block, "
         "int first_output_block, int count) -> ()");
 });
+  m.def("yaqa_feedback_update_commit_(Tensor(a!) left, Tensor(b!) right, Tensor input_feedback, "
+      "Tensor output_feedback, Tensor reconstructed, Tensor(c!) quantized, Tensor selected_states, "
+      "Tensor(d!) tile_states, Tensor selected_banks, Tensor(e!) selectors, int first_input_block, "
+      "int first_output_block, int count) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("yaqa_feedback", &qvq_yaqa_feedback_cuda);
   m.impl("yaqa_feedback_checked", &qvq_yaqa_feedback_checked_cuda);
   m.impl("yaqa_feedback_update_", &qvq_yaqa_feedback_update_cuda);
+  m.impl("yaqa_feedback_update_commit_", &qvq_yaqa_feedback_update_commit_cuda);
 }
