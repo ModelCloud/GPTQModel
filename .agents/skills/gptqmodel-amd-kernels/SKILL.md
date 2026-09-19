@@ -73,3 +73,107 @@ per-layer VRAM, and preserve stream and graph-capture semantics.
 
 Store compact certification and profile summaries under `artifacts/`; keep raw profiler databases and large compiler
 dumps untracked unless explicitly requested. Log rejected experiments so later work does not repeat them.
+
+## CDNA instruction scheduling is a first-class kernel concern
+
+On CDNA GPUs, instruction scheduling can be one of the hardest parts of writing a
+high-performance kernel. In regions that need a balanced mix of VALU and matrix
+(MFMA) work, source order is only a request: the compiler may reschedule,
+cluster, or otherwise transform instructions in ways that destroy the intended
+latency hiding and pipeline balance.
+
+- Delimit performance-critical scheduling regions conceptually and define the
+  intended VALU/MFMA overlap, dependency chains, and latency-hiding strategy
+  before tuning source syntax.
+- Never assume a source-level interleave survived compilation. Inspect the
+  generated AMDGCN ISA for the exact production specialization and verify the
+  actual VALU/MFMA ordering, waits, dependencies, register pressure, spills,
+  occupancy, and stalls.
+- Treat the compiler scheduler as an optimization participant that must be
+  measured, not as an authority whose schedule is automatically better. A
+  rewrite is useful only if the emitted schedule and end-to-end timing improve.
+- When repeated high-level rewrites cannot make the compiler preserve a required
+  schedule, prefer the smallest possible lower-level escape hatch for the hot
+  region: inline assembly, an ISA-oriented generator/DSL, or effectively
+  assembler with syntactic sugar. Keep surrounding control flow, dispatch, and
+  portability at a higher level and retain a tested fallback.
+- Do not optimize instruction counts in isolation. A visually cleaner schedule
+  can still lose through longer dependency chains, extra waits, VGPR/AGPR
+  pressure, spills, reduced occupancy, or worse memory overlap.
+
+For CDNA tuning, emitted ISA and measured hardware behavior are the ground truth;
+source appearance is not.
+
+## Reference: lessons from local-inference-lab/b12x
+
+Use [local-inference-lab/b12x](https://github.com/local-inference-lab/b12x) as a
+design reference when working on latency-sensitive GPU kernels. It targets
+SM120/SM121 rather than CDNA, so copy principles and validation discipline, not
+architecture-specific instructions.
+
+Highlights worth carrying into QVQ/Inference-Ultra work:
+
+- **Plan -> prepare -> bind/run.** b12x separates declaration and tuning from
+  execution. Compilation, autotuning, scratch sizing, materialization, and
+  specialization happen before serving; after preparation/freeze, execution is
+  not allowed to discover a new kernel. Follow the same principle for CDNA:
+  no compilation, hidden autotuning, allocation, or policy discovery in a hot
+  request or captured graph.
+- **Compile-time specialization instead of runtime branches.** b12x uses
+  constexpr-style specialization so one logical kernel family can support
+  multiple modes while dead paths disappear from emitted code. For AMD kernels,
+  prefer compile-time specialization for layout, dtype, correction, and pipeline
+  modes when it avoids divergent control flow or unnecessary register pressure.
+  Verify the supposedly dead code is actually absent in AMDGCN ISA.
+- **Emitted code is the contract.** b12x validates PTX/SASS, and in some ports
+  explicitly compares instruction classes and hot-path code against a known
+  implementation. Apply the same discipline on CDNA with LLVM/AMDGCN ISA and
+  rocprof counters: source resemblance is not evidence of equivalent scheduling
+  or cost.
+- **Launch geometry can dominate kernel math.** Its SM120 work found large wins
+  from tile choice, split-K/wave balancing, and occupancy-aware launch decisions
+  without changing arithmetic. Before rewriting a CDNA mainloop, sweep tile,
+  wave, split, work-queue, and residency choices and prove whether the limiter
+  is instruction throughput, latency hiding, occupancy, or memory.
+- **Reuse proven synchronization protocols.** b12x's attention work scaled a
+  known-good producer/consumer and barrier protocol rather than re-deriving a
+  larger pipeline from scratch. For CDNA LDS/pipeline work, preserve a proven
+  wait/barrier protocol when increasing stages or worker groups; change one
+  concurrency dimension at a time and test for deadlock and ordering failures.
+- **Separate work scheduling from arithmetic.** Its MoE designs distinguish
+  persistent arithmetic domains, materialized queues, and readiness-aware queues
+  based on when work becomes knowable and how variable its cost is. Use the same
+  reasoning for AMD MoE/grouped GEMM: choose static grid ownership versus atomic
+  work stealing from measured task variance and readiness, not from dtype alone.
+- **Graph-safe frozen execution.** Prepared scratch and persistent state are
+  caller-owned or plan-owned, and graph replay must not allocate, compile, or
+  perform host-dependent policy checks. Preserve this model for HIP graphs and
+  external runtimes.
+- **Numerical truth and performance truth are separate gates.** b12x uses
+  operation-specific numerical oracles, graph-replay checks, and representative
+  timing rather than accepting a speedup because output merely “looks right.”
+  Keep QVQ's existing numerical contract authoritative and treat PTX/ISA parity,
+  graph safety, and latency as independent evidence.
+- **Regime hints beat live-shape policy in frozen serving.** b12x often selects
+  tiles from a declared decode/prefill regime while allowing multiple live sizes
+  to reuse the same prepared kernel. For CDNA, prefer an explicit prepared
+  regime/capacity key over per-request tuning or shape-sensitive compiler work.
+- **Gate architecture assumptions early.** Before a large port, b12x first
+  proves critical mechanisms on real hardware (for example async-copy/barrier
+  behavior or dynamic shared-memory feasibility). Do the AMD equivalent with
+  tiny hardware probes for required MFMA forms, LDS footprint, wave behavior,
+  async/global-to-LDS mechanisms, and compiler scheduling before committing to
+  a full kernel architecture.
+
+Specific b12x patterns to study include its sparse-MLA warp-specialized
+producer/consumer pipeline, wave-balanced split-K launch planning, dense GEMM
+tile-regime selection, persistent/dynamic MoE work sources, startup preparation
+and tuning cache, frozen graph-safe execution, and independent numerical-oracle
+qualification.
+
+Do not cargo-cult SM120 mechanisms such as TMA, mbarrier, or NVIDIA MMA forms
+onto AMD. Translate the underlying intent—overlap, bounded synchronization,
+compile-time specialization, occupancy, and deterministic prepared execution—
+into the native CDNA/ROCm mechanism, then verify the generated ISA and measured
+behavior.
+
