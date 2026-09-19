@@ -73,3 +73,34 @@ per-layer VRAM, and preserve stream and graph-capture semantics.
 
 Store compact certification and profile summaries under `artifacts/`; keep raw profiler databases and large compiler
 dumps untracked unless explicitly requested. Log rejected experiments so later work does not repeat them.
+
+## CDNA instruction scheduling is a first-class kernel concern
+
+On CDNA GPUs, instruction scheduling can be one of the hardest parts of writing a
+high-performance kernel. In regions that need a balanced mix of VALU and matrix
+(MFMA) work, source order is only a request: the compiler may reschedule,
+cluster, or otherwise transform instructions in ways that destroy the intended
+latency hiding and pipeline balance.
+
+- Delimit performance-critical scheduling regions conceptually and define the
+  intended VALU/MFMA overlap, dependency chains, and latency-hiding strategy
+  before tuning source syntax.
+- Never assume a source-level interleave survived compilation. Inspect the
+  generated AMDGCN ISA for the exact production specialization and verify the
+  actual VALU/MFMA ordering, waits, dependencies, register pressure, spills,
+  occupancy, and stalls.
+- Treat the compiler scheduler as an optimization participant that must be
+  measured, not as an authority whose schedule is automatically better. A
+  rewrite is useful only if the emitted schedule and end-to-end timing improve.
+- When repeated high-level rewrites cannot make the compiler preserve a required
+  schedule, prefer the smallest possible lower-level escape hatch for the hot
+  region: inline assembly, an ISA-oriented generator/DSL, or effectively
+  assembler with syntactic sugar. Keep surrounding control flow, dispatch, and
+  portability at a higher level and retain a tested fallback.
+- Do not optimize instruction counts in isolation. A visually cleaner schedule
+  can still lose through longer dependency chains, extra waits, VGPR/AGPR
+  pressure, spills, reduced occupancy, or worse memory overlap.
+
+For CDNA tuning, emitted ISA and measured hardware behavior are the ground truth;
+source appearance is not.
+
