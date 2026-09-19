@@ -237,15 +237,14 @@ speedup but worsened held-out drift to +0.20708%; it was rejected. Payload
 selection is non-monotonic across anti-diagonals, so threshold changes require
 fresh end-to-end dual-oracle and held-out gates.
 
-### Optional W3 wide-family unification
+### W3 wide-family unification in fast-TF32 mode
 
 Wide MLP projections normally run canonical YAQA and the sampled complementary
-families concurrently on separate CUDA streams. The W3-only opt-in below puts
+families concurrently on separate CUDA streams. In fast-TF32 mode, W3 puts
 the canonical family and both diversity-selected alternatives into one
 factored-feedback schedule:
 
 ```bash
-GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES=1 \
 GPTQMODEL_QVQ_YAQA_FAST_TF32=1 \
 GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE=provisional_large_final \
 python scripts/qvq_quantize.py ...
@@ -254,7 +253,9 @@ python scripts/qvq_quantize.py ...
 This shares the initial factor products, anti-diagonal dispatch, and feedback
 updates. It also changes FP32 operation ordering and serializes a larger
 family-grid Viterbi batch, so it is deliberately restricted to W3. The switch
-does nothing at W2.5 and W3.5.
+does nothing at W2.5 and W3.5. Strict mode remains unchanged. Set
+`GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES=0` to opt out during paired W3
+comparisons, or set it to `1` to request the schedule without fast TF32.
 
 Matched one-layer H100 validation against the large-final profile found:
 
@@ -277,6 +278,23 @@ Unified W2.5 improved all three MLP Fisher objectives but was 1.6% slower;
 unified W3.5 improved up and down but was 3.5% slower and slightly regressed
 gate. Saved arithmetic is not sufficient when the larger family-grid batch
 loses overlap, so do not broaden this gate based on objective movement alone.
+
+The schedule was re-profiled after the later family-grid, traceback, and
+update/commit kernel work. Two paired H100 runs measured W3 quantization-stage
+speedups of 1.056x and 1.076x (23.680 to 22.425 seconds and 23.864 to 22.184
+seconds). The unified path halves wide-family feedback and commit dispatches.
+It is therefore the default when `GPTQMODEL_QVQ_YAQA_FAST_TF32=1`; strict mode
+and both neighboring rates remain unchanged.
+
+The fresh dual-oracle run agreed in FP32 and FP64. Summed over gate, up, and
+down projections, the Kronecker-Fisher proxy improved by 0.12380% in FP32 and
+0.12371% in FP64. Gate alone moved by +0.09418%, while up and down improved by
+0.33315% and 0.11371%. This is an accepted bounded ordering trade rather than
+a claim of bitwise parity. A separate paired serialization check changed only
+the `trellis` and `bank_ids` tensors of those three MLP projections (6 of 174
+saved tensors); every attention payload and all remaining tensors were exact.
+The calibration rows `[0, 32)` and YAQA rows `[64, 96)` were disjoint, with 32
+YAQA sequences and 11,992 valid tokens.
 
 ### Optional device-resident Sketch-B factors
 

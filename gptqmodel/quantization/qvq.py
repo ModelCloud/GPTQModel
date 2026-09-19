@@ -5810,12 +5810,20 @@ def yaqa_inner_v2b2_p32(
         and kwargs.get("_incremental_cuda_feedback", False)
         and len(alternative_ids) >= 1
     )
+    # Fast TF32 already opts into bounded FP32 operation-order movement.  On
+    # W3, sharing the canonical and complementary-family recurrence now wins
+    # end-to-end after the family-grid kernel improvements.  Keep strict mode
+    # unchanged and retain an explicit escape hatch for paired comparisons.
+    unified_w3_setting = os.environ.get(
+        "GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES",
+        os.environ.get("GPTQMODEL_QVQ_YAQA_FAST_TF32", "0"),
+    )
     unified_factored_cuda_families = (
         parallel_families
         and torch.version.hip is None
         and kwargs.get("_incremental_cuda_factored_feedback", False)
         and kwargs["bits"] == 3.0
-        and os.environ.get("GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES", "0") == "1"
+        and unified_w3_setting == "1"
     )
     unified_family_batch = (
         unified_amd_families
