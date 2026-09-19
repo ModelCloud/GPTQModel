@@ -3938,6 +3938,86 @@ def test_qvq_cuda_w3_unified_factored_families_is_rate_gated(
     assert counters.get("yaqa_v2b2_wide_unified_family_batches", 0) == int(expected_unified)
 
 
+def test_qvq_cuda_w3_unified_factored_families_follows_fast_tf32_by_default(monkeypatch):
+    monkeypatch.delenv("GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES", raising=False)
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", "1")
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260925)
+    banks = _canonical_qvq_v2b4_banks(
+        device=weight.device,
+        bits=3.0,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    pairs = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=3.0,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    telemetry = QVQQuantizationTelemetry()
+    with patch(
+        "gptqmodel.quantization.qvq._yaqa_inner_v2b2_family_batch_cuda",
+        wraps=_yaqa_inner_v2b2_family_batch_cuda,
+    ) as family_batch:
+        yaqa_inner_v2b2_p32(
+            weight,
+            input_hessian,
+            output_hessian,
+            banks,
+            bits=3.0,
+            family_mode="reselect",
+            sample_strategy="256_16x16",
+            bank_codebook_pair_stacks=pairs,
+            trellis_batch_size=1,
+            _incremental_cuda_factored_feedback=True,
+            _sampled_family_candidates=2,
+            _sampled_family_selection="diversity",
+            _parallel_candidates=True,
+            telemetry=telemetry,
+        )
+
+    family_batch.assert_called_once()
+    assert family_batch.call_args.args[3].shape[0] == 3
+    assert telemetry.finalize()["counters"]["yaqa_v2b2_wide_unified_family_batches"] == 1
+
+
+def test_qvq_cuda_w3_unified_factored_families_explicit_opt_out(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_TF32", "1")
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_W3_UNIFIED_FAMILIES", "0")
+    weight, input_hessian, output_hessian = _nontrivial_yaqa_fixture(20260926)
+    banks = _canonical_qvq_v2b4_banks(
+        device=weight.device,
+        bits=3.0,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    pairs = _canonical_qvq_v2b2_pair_stacks(
+        device=weight.device,
+        bits=3.0,
+        codebook_version=PGC16_CODEBOOK_VERSION,
+        dtype=torch.float32,
+    )
+    telemetry = QVQQuantizationTelemetry()
+    yaqa_inner_v2b2_p32(
+        weight,
+        input_hessian,
+        output_hessian,
+        banks,
+        bits=3.0,
+        family_mode="reselect",
+        sample_strategy="256_16x16",
+        bank_codebook_pair_stacks=pairs,
+        trellis_batch_size=1,
+        _incremental_cuda_factored_feedback=True,
+        _sampled_family_candidates=2,
+        _sampled_family_selection="diversity",
+        _parallel_candidates=True,
+        telemetry=telemetry,
+    )
+
+    assert telemetry.finalize()["counters"].get("yaqa_v2b2_wide_unified_family_batches", 0) == 0
+
+
 @pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
 def test_qvq_cuda_b2_yaqa_dense_family_batch_is_bit_exact(bits):
     generator = torch.Generator(device="cuda").manual_seed(20260918 + int(bits * 10))
