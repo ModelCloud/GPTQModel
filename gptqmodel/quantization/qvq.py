@@ -5241,7 +5241,6 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     left = left_base.unsqueeze(0).expand(families, -1, -1).clone()
     right = right_base.unsqueeze(0).expand(families, -1, -1).clone()
     quantized = torch.zeros((families, in_features, out_features), device=source.device, dtype=torch.float32)
-    quantized_blocks = quantized.view(families, input_blocks, tile_rows, output_blocks, tile_cols).permute(0, 1, 3, 2, 4)
     tile_states = torch.empty(
         (families, input_blocks, output_blocks, steps), device=source.device, dtype=torch.long
     )
@@ -5258,12 +5257,12 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     from ..utils.qvq_cuda import (
         _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
         _qvq_cuda_yaqa_feedback_checked_op,
-        _qvq_cuda_yaqa_feedback_update_op,
+        _qvq_cuda_yaqa_feedback_update_commit_op,
     )
 
     family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()
     schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
-    for coordinates, input_indices, output_indices, flat_indices, _, _ in schedule:
+    for coordinates, _, _, _, _, _ in schedule:
         count = len(coordinates)
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
             corrected = _qvq_cuda_yaqa_feedback_checked_op()(
@@ -5309,24 +5308,27 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 overlaps,
                 None,
             )
-        reconstructed = reconstructed.reshape(families, count, 16, 16).to(torch.float32)
+        reconstructed = reconstructed.reshape(families, count, 16, 16)
         if telemetry is not None:
             telemetry.count("viterbi_family_fused_reconstruct_calls")
-        with _qvq_phase(telemetry, "yaqa_commit", source.device):
-            quantized_blocks[:, input_indices, output_indices] = reconstructed
-            tile_states[:, input_indices, output_indices] = states
-            selectors[:, flat_indices] = segment_ids
         with _qvq_phase(telemetry, "yaqa_feedback_update", source.device):
-            _qvq_cuda_yaqa_feedback_update_op()(
+            _qvq_cuda_yaqa_feedback_update_commit_op()(
                 left,
                 right,
                 input_feedback,
                 output_feedback,
-                reconstructed.contiguous(),
+                reconstructed,
+                quantized,
+                states,
+                tile_states,
+                segment_ids,
+                selectors,
                 coordinates[0][0],
                 coordinates[0][1],
                 count,
             )
+            if telemetry is not None:
+                telemetry.count("yaqa_fused_update_commit_calls")
     return (
         quantized.to(inner_weight.dtype),
         tile_states.reshape(families, -1, steps),

@@ -74,6 +74,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
     _qvq_cuda_yaqa_feedback_checked_op,
     _qvq_cuda_yaqa_feedback_op,
+    _qvq_cuda_yaqa_feedback_update_commit_op,
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_folded_swiglu_precondition_fp32,
     qvq_cuda_folded_swiglu_precondition_ordered_fp32,
@@ -2514,7 +2515,8 @@ def test_qvq_cuda_family_grid_values_match_separate_exact_reconstruction(bits, d
     assert torch.equal(actual[0], reference[0])
     assert torch.equal(actual[1], reference[1])
     assert torch.equal(actual[2], reference[2])
-    assert torch.equal(actual[3], expected_values)
+    assert actual[3].dtype == torch.float32
+    assert torch.equal(actual[3], expected_values.float())
 
 
 def test_qvq_cuda_family_midpoint_matches_weighted_full_provisional_traceback():
@@ -3731,6 +3733,61 @@ def test_qvq_cuda_factored_yaqa_cache_update_matches_fp32_reference_on_nondefaul
     assert torch.equal(actual_right, repeated_right)
     torch.testing.assert_close(actual_left, expected_left, rtol=0.0, atol=1e-6)
     torch.testing.assert_close(actual_right, expected_right, rtol=0.0, atol=1e-6)
+
+
+@pytest.mark.parametrize("reconstructed_dtype", (torch.float16, torch.float32))
+def test_qvq_cuda_factored_yaqa_fused_update_commit_matches_separate_path(reconstructed_dtype):
+    generator = torch.Generator(device="cuda").manual_seed(20260922)
+    families, count, in_features, out_features = 2, 2, 32, 64
+    left = torch.randn(
+        (families, in_features, out_features), generator=generator, device="cuda"
+    ) * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    input_feedback = torch.randn(
+        (in_features, in_features), generator=generator, device="cuda"
+    ) * 0.01
+    output_feedback = torch.randn(
+        (out_features, out_features), generator=generator, device="cuda"
+    ) * 0.01
+    reconstructed = torch.randn(
+        (families, count, 16, 16), generator=generator, device="cuda", dtype=reconstructed_dtype
+    )
+    selected_states = torch.randint(
+        0, 1 << 16, (families, count, 128), generator=generator, device="cuda"
+    )
+    selected_banks = torch.randint(
+        0, 2, (families, count, 8), generator=generator, device="cuda", dtype=torch.uint8
+    )
+
+    expected_left, expected_right = left.clone(), right.clone()
+    expected_quantized = torch.zeros_like(left)
+    expected_states = torch.empty((families, 2, 4, 128), device="cuda", dtype=torch.long)
+    expected_selectors = torch.empty((families, 8, 8), device="cuda", dtype=torch.uint8)
+    reconstructed_fp32 = reconstructed.float()
+    expected_quantized_blocks = expected_quantized.view(families, 2, 16, 4, 16).permute(0, 1, 3, 2, 4)
+    expected_quantized_blocks[:, (0, 1), (3, 2)] = reconstructed_fp32
+    expected_states[:, (0, 1), (3, 2)] = selected_states
+    expected_selectors[:, (3, 6)] = selected_banks
+    _qvq_cuda_yaqa_feedback_update_op()(
+        expected_left, expected_right, input_feedback, output_feedback,
+        reconstructed_fp32, 0, 3, count
+    )
+
+    actual_left, actual_right = left.clone(), right.clone()
+    actual_quantized = torch.zeros_like(left)
+    actual_states = torch.empty_like(expected_states)
+    actual_selectors = torch.empty_like(expected_selectors)
+    _qvq_cuda_yaqa_feedback_update_commit_op()(
+        actual_left, actual_right, input_feedback, output_feedback, reconstructed,
+        actual_quantized, selected_states, actual_states, selected_banks, actual_selectors,
+        0, 3, count
+    )
+
+    assert torch.equal(actual_left, expected_left)
+    assert torch.equal(actual_right, expected_right)
+    assert torch.equal(actual_quantized, expected_quantized)
+    assert torch.equal(actual_states[:, (0, 1), (3, 2)], selected_states)
+    assert torch.equal(actual_selectors[:, (3, 6)], selected_banks)
 
 
 def test_qvq_cuda_factored_yaqa_family_batch_matches_independent_candidates():

@@ -818,3 +818,38 @@ identical under a zero-regression gate: FP32 `0.03627968207001686` and FP64
 
 This remains a quantization-stage launch fusion. It changes neither checkpoint
 format nor post-quant inference.
+
+### FP32 traceback return and fused YAQA update commit
+
+Family-grid traceback now promotes selected FP16 codebook values to FP32 while
+they are gathered. This is exact (FP16 is represented losslessly in FP32) and
+matches the precision required by YAQA feedback. It removes the separate
+promotion operation from all family-batched consumers. For factored wide-MLP
+YAQA, a fused setup kernel also commits quantized tiles, states, and P32
+selectors while constructing the two batched-GEMM pointer arrays. cuBLAS still
+receives the same FP32 tiles with the same GEMM dimensions, ordering, and math
+mode. Telemetry reports `yaqa_fused_update_commit_calls`.
+
+The complete old handoff (promotion, three indexed commits, pointer setup, and
+two cache-update GEMMs) was compared with the fused operation on the H100 at
+the production `2048x8192` geometry. Across three families, median speedups
+were `2.166x`, `1.570x`, `1.193x`, `1.096x`, and `1.049x` for anti-diagonal
+counts 1, 8, 32, 64, and 128 respectively. Both FP16-input and direct-FP32
+paths match the old FP32 cache updates and committed payloads bit-for-bit.
+
+A matched W2.5 Llama 3.2 1B layer run fused 1,917 update/commit sequences.
+Process quantization improved from `20.680 s` to `20.615 s` (`1.0032x`) and
+prepare plus quantize from `25.525 s` to `25.504 s`. The family-candidate phase
+moved from `14.9630 s` to `14.9192 s` (`1.0029x`). An earlier prototype that
+copied through a second FP32 scratch regressed by about 0.10 s and was rejected;
+it does not remain in source.
+
+Calibration rows `[0,32)` and YAQA rows `[64,96)` remained disjoint, using 32
+independent sequences and 11,992 valid tokens. All 174 serialized tensors were
+bit-identical. The independent zero-regression oracle was unchanged: FP32
+`0.03627968207001686` and FP64 `0.036279682270234585` in both arms. Native
+tests cover W2.5, W3, and W3.5, both codebook storage types, both fused-update
+input types, and full recurrent candidate parity.
+
+This optimization is confined to quantization and does not alter the P32
+checkpoint format or post-quant inference.

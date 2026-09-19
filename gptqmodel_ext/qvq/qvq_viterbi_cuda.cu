@@ -2425,7 +2425,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
     int64_t* __restrict__ states,
     uint8_t* __restrict__ segment_bank_ids,
     float* __restrict__ squared_error,
-    CodebookScalar* __restrict__ reconstructed,
+    float* __restrict__ reconstructed,
     int batch,
     int family_batch,
     bool constrained,
@@ -2531,7 +2531,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
         const int64_t codebook_index =
             ((static_cast<int64_t>(family) * bank_count + bank) * kStateCount + state) * 2 +
             coordinate;
-        reconstructed[sequence_base + scalar] = codebooks[codebook_index];
+        if constexpr (std::is_same_v<CodebookScalar, half>) {
+          reconstructed[sequence_base + scalar] = __half2float(codebooks[codebook_index]);
+        } else {
+          reconstructed[sequence_base + scalar] = codebooks[codebook_index];
+        }
       }
     }
   }
@@ -3994,9 +3998,9 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
               "fused family reconstruction requires a full family-grid traceback");
   TORCH_CHECK(reconstructed_out == nullptr ||
                   (reconstructed_out->is_cuda() && reconstructed_out->device() == codebooks.device() &&
-                   reconstructed_out->scalar_type() == codebooks.scalar_type() &&
+                   reconstructed_out->scalar_type() == at::kFloat &&
                    reconstructed_out->is_contiguous() && reconstructed_out->numel() == batch * steps * 2),
-              "fused family reconstruction output must be contiguous, match the codebook dtype/device, "
+              "fused family reconstruction output must be contiguous FP32 on the codebook device "
               "and contain batch * 128 * 2 values");
 
   if (cooperative) {
@@ -4016,7 +4020,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
               squared_error.mutable_data_ptr<float>(),                                               \
               reconstructed_out == nullptr                                                           \
                   ? nullptr                                                                           \
-                  : reinterpret_cast<CODEBOOK_TYPE*>(reconstructed_out->mutable_data_ptr()),         \
+                  : reconstructed_out->mutable_data_ptr<float>(),                                    \
               batch, family_batch, constrained, weighted);                                           \
     } while (0)
     if (codebooks.scalar_type() == at::kHalf) {
@@ -4115,7 +4119,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         squared_error.mutable_data_ptr<float>(),                                                       \
         reconstructed_out == nullptr                                                                   \
             ? nullptr                                                                                   \
-            : reinterpret_cast<CODEBOOK_TYPE*>(reconstructed_out->mutable_data_ptr()),                 \
+            : reconstructed_out->mutable_data_ptr<float>(),                                            \
         batch, family_batch, constrained, weighted);                                                   \
   } while (0)
 #define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
@@ -4225,7 +4229,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
             squared_error.mutable_data_ptr<float>(),                                              \
             reconstructed_out == nullptr                                                         \
                 ? nullptr                                                                         \
-                : reinterpret_cast<half*>(reconstructed_out->mutable_data_ptr()),                 \
+                : reconstructed_out->mutable_data_ptr<float>(),                                  \
             batch, family_batch,                                                                  \
             constrained, weighted);                                                                \
     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                \
@@ -4477,7 +4481,7 @@ qvq_viterbi_v2_segment_family_grid_values_trusted_cuda(
     flat_weights = step_weights->view({families * family_batch, 128});
   }
   at::Tensor reconstructed = at::empty(
-      {families * family_batch, 128, 2}, codebooks.options());
+      {families * family_batch, 128, 2}, sequences.options().dtype(at::kFloat));
   auto result = qvq_viterbi_v2_segment_banked_cuda_impl(
       flat_sequences,
       flat_codebooks,
