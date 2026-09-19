@@ -3633,7 +3633,10 @@ def _block_ldlq_v2b2_family_batch_cuda(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run three independent B2 Block-LDLQ histories in one CUDA work grid."""
 
-    from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+    from ..utils.qvq_cuda import (
+        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    )
 
     families = family_stacks.shape[0]
     in_features, out_features = inner_weight.shape
@@ -3649,7 +3652,7 @@ def _block_ldlq_v2b2_family_batch_cuda(
     selectors = torch.empty((families, input_tiles, output_tiles, 8), device=source.device, dtype=torch.uint8)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
     family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
-    family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
+    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
     # Six CTAs are generated per logical tile (three families x two banks).
     # A 128-tile window amortizes segment barriers and won at every W1--W3.5
     # rate on the local 124-SM device. Explicit larger caller batches survive.
@@ -3713,10 +3716,9 @@ def _block_ldlq_v2b2_family_batch_cuda(
                     overlaps,
                     chunk_weights,
                 )
-                path_banks = chunk_selectors.to(torch.long).repeat_interleave(
-                    QVQ_V2B2_P32_STEPS_PER_SEGMENT, dim=2
-                )
-                block_values.append(family_stacks[family_indices, path_banks, chunk_states])
+                block_values.append(family_reconstruct(chunk_states, chunk_selectors, family_stacks))
+                if telemetry is not None:
+                    telemetry.count("viterbi_family_reconstruct_calls")
                 block_states.append(chunk_states)
                 block_selectors.append(chunk_selectors)
                 if telemetry is not None:
@@ -5256,14 +5258,15 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     transition_bits = qvq_transition_bits(bits, vector_size=2)
 
     from ..utils.qvq_cuda import (
+        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
         _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
         _qvq_cuda_yaqa_feedback_checked_op,
         _qvq_cuda_yaqa_feedback_update_op,
     )
 
     family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
     schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
-    family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
     for coordinates, input_indices, output_indices, flat_indices, _, _ in schedule:
         count = len(coordinates)
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
@@ -5310,8 +5313,11 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 overlaps,
                 None,
             )
-        path_banks = segment_ids.to(torch.long).repeat_interleave(QVQ_V2B2_P32_STEPS_PER_SEGMENT, dim=2)
-        reconstructed = family_stacks[family_indices, path_banks, states].reshape(families, count, 16, 16).to(torch.float32)
+        reconstructed = family_reconstruct(states, segment_ids, family_stacks).reshape(
+            families, count, 16, 16
+        ).to(torch.float32)
+        if telemetry is not None:
+            telemetry.count("viterbi_family_reconstruct_calls")
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
             quantized_blocks[:, input_indices, output_indices] = reconstructed
             tile_states[:, input_indices, output_indices] = states
@@ -5379,11 +5385,14 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
     if rounding_bias is not None:
         bias_blocks = rounding_bias.to(torch.float32).view(input_blocks, tile, output_blocks, tile).permute(0, 2, 1, 3)
 
-    from ..utils.qvq_cuda import _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op
+    from ..utils.qvq_cuda import (
+        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    )
 
     family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
     schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
-    family_indices = torch.arange(families, device=source.device).view(families, 1, 1)
     for coordinates, input_indices, output_indices, flat_indices, input_rows, output_rows in schedule:
         count = len(coordinates)
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
@@ -5417,13 +5426,11 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
                 overlaps,
                 None,
             )
-        path_banks = segment_ids.to(torch.long).repeat_interleave(
-            QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-            dim=2,
-        )
-        reconstructed = family_stacks[family_indices, path_banks, states].reshape(
+        reconstructed = family_reconstruct(states, segment_ids, family_stacks).reshape(
             families, count, tile, tile
         ).to(torch.float32)
+        if telemetry is not None:
+            telemetry.count("viterbi_family_reconstruct_calls")
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
             quantized_blocks[:, input_indices, output_indices] = reconstructed
             tile_states[:, input_indices, output_indices] = states
@@ -5672,6 +5679,7 @@ def yaqa_inner_v2b2_p32(
                 and kwargs.get("tail_biting_candidates", 1) == 1
             ):
                 from ..utils.qvq_cuda import (
+                    _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
                     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
                 )
 
@@ -5710,12 +5718,11 @@ def yaqa_inner_v2b2_p32(
                     overlaps,
                     None,
                 )
-                path_banks = family_selectors.to(torch.long).repeat_interleave(
-                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                    dim=2,
+                family_values = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()(
+                    family_states, family_selectors, family_codebooks
                 )
-                family_indices = torch.arange(3, device=inner_weight.device).view(3, 1, 1)
-                family_values = family_codebooks[family_indices, path_banks, family_states]
+                if telemetry is not None:
+                    telemetry.count("viterbi_family_reconstruct_calls")
                 for family_index in range(3):
                     error = (
                         family_values[family_index]
