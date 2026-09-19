@@ -676,3 +676,47 @@ the two bank CTAs as an SM90 cluster across all eight P32 segments was 4--5x
 slower because it prevented wave-level rescheduling. Halving the direct W3 and
 W3.5 CTAs increased each thread's serial candidate chain and regressed every
 measured cell. Neither experiment remains in source.
+
+### Native crossover enforcement and direct-unweighted specialization
+
+The rate-aware crossover must be enforced inside the native family-grid
+operator, not only by its Python caller. The operator previously reread the
+provisional-distance environment setting and could therefore re-enable direct
+distance after Python had selected the exact small-batch fallback. Payload-only
+tests did not expose this because the sampled winners happened to agree. Native
+dispatch counters are now part of the fallback test: W3 batches below 64 and
+W3.5 batches below 16 provably execute the exact norm-rank path, while W2.5 and
+larger production batches retain direct distance.
+
+The production direct-distance kernel is also specialized for the common
+unweighted case. A compile-time branch removes the runtime weight selection and
+the redundant `distance * 1.0f`; weighted YAQA and non-direct paths preserve
+their original arithmetic. The specialization is exact: constrained and
+unconstrained tests at W2.5, W3, and W3.5 match the original unit-weight path
+bit-for-bit.
+
+Matched H100 two-family P32 overlap medians for the specialized production
+region were:
+
+| Rate | Family batch | Merged main | Candidate | Speedup |
+|---|---:|---:|---:|---:|
+| W2.5 | 8--128 | 0.779--2.894 ms | 0.752--2.797 ms | 1.029--1.037x |
+| W3 | 64--128 | 1.726--3.274 ms | 1.545--2.962 ms | 1.105--1.105x |
+| W3.5 | 16--128 | 0.958--3.395 ms | 0.931--3.303 ms | 1.028--1.029x |
+
+The corrected small-batch routing is neutral against the exact path and avoids
+the known direct-distance regression. W3 batches 1--32 measured
+`0.787--0.915 ms`; W3.5 batches 1--8 measured `0.866--0.942 ms`.
+
+A matched W2.5 Llama 3.2 1B layer run used calibration rows `[0,32)` and
+disjoint YAQA rows `[64,96)` (32 independent sequences and 11,992 valid Fisher
+tokens). Segmented-Viterbi GPU time fell from 13.7435 s to 13.5096 s (1.017x),
+process quantization from 21.201 s to 21.147 s, and prepare plus quantize from
+26.1329 s to 26.0537 s. All 174 serialized tensors matched in shape, dtype, and
+payload. The independent q-projection oracle was also identical: FP32
+`0.03627968207001686` and FP64 `0.036279682270234585` in both arms, with zero
+regression allowance. The focused native dispatch and parity suite passed all
+18 tests.
+
+This remains a quantization-stage optimization. It changes neither the P32
+checkpoint representation nor post-quant inference.

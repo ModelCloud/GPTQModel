@@ -144,7 +144,7 @@ __device__ __forceinline__ float emission(
   return __fmul_rn(fmaxf(distance, 0.0f), step_weight);
 }
 
-template <bool DirectDistance, typename CodebookScalar>
+template <bool DirectDistance, bool DirectUnweighted, typename CodebookScalar>
 __device__ __forceinline__ float grid_emission_v2(
     const float* __restrict__ target,
     const CodebookScalar* __restrict__ codebook,
@@ -157,6 +157,9 @@ __device__ __forceinline__ float grid_emission_v2(
     const float d0 = __fsub_rn(target[0], code.x);
     const float d1 = __fsub_rn(target[1], code.y);
     const float distance = __fmaf_rn(d1, d1, __fmul_rn(d0, d0));
+    if constexpr (DirectUnweighted) {
+      return distance;
+    }
     return __fmul_rn(distance, step_weight);
   } else {
     return emission<2, CodebookScalar>(
@@ -1549,6 +1552,7 @@ template <
     bool FuseBoundary,
     bool MidpointOnly,
     bool DirectDistance,
+    bool DirectUnweighted,
     typename CodebookScalar,
     typename BackpointerScalar>
 __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
@@ -1607,7 +1611,9 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
 
   if (segment_index == 0) {
     const float* target = sequences + sequence_base;
-    const float weight = weighted ? step_weights[static_cast<int64_t>(sequence) * 128] : 1.0f;
+    const float weight = DirectUnweighted
+        ? 1.0f
+        : (weighted ? step_weights[static_cast<int64_t>(sequence) * 128] : 1.0f);
     const float target_norm = __fadd_rn(
         __fmul_rn(target[0], target[0]),
         __fmul_rn(target[1], target[1]));
@@ -1618,7 +1624,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
       int best_h = first_h;
       for (int h = first_h; h < prefix_count; h += 2) {
         const int state = h * suffix_count + x;
-        float candidate = grid_emission_v2<DirectDistance, CodebookScalar>(
+        float candidate = grid_emission_v2<DirectDistance, DirectUnweighted, CodebookScalar>(
             target, bank_codebook, bank_norm, state, weight, target_norm);
         if (constrained && (state >> shift) != required_overlap) {
           candidate = CUDART_INF_F;
@@ -1651,7 +1657,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
         int best_h = 0;
         for (int h = 0; h < prefix_count; ++h) {
           const int state = h * suffix_count + x;
-          float candidate = grid_emission_v2<DirectDistance, CodebookScalar>(
+          float candidate = grid_emission_v2<DirectDistance, DirectUnweighted, CodebookScalar>(
               target, bank_codebook, bank_norm, state, weight, target_norm);
           if (constrained && (state >> shift) != required_overlap) {
             candidate = CUDART_INF_F;
@@ -1704,9 +1710,11 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
     const bool boundary = !FuseBoundary && step == first_step && segment_index != 0;
     const int boundary_index = segment_index - 1;
     const float* target = sequences + sequence_base + static_cast<int64_t>(step) * 2;
-    const float weight = weighted
-        ? step_weights[static_cast<int64_t>(sequence) * 128 + step]
-        : 1.0f;
+    const float weight = DirectUnweighted
+        ? 1.0f
+        : (weighted
+               ? step_weights[static_cast<int64_t>(sequence) * 128 + step]
+               : 1.0f);
     const float target_norm = __fadd_rn(
         __fmul_rn(target[0], target[0]),
         __fmul_rn(target[1], target[1]));
@@ -1734,7 +1742,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
         }
         const float candidate = __fadd_rn(
             predecessor_cost,
-            grid_emission_v2<DirectDistance, CodebookScalar>(
+            grid_emission_v2<DirectDistance, DirectUnweighted, CodebookScalar>(
                 target, bank_codebook, bank_norm, state, weight, target_norm));
         if (lower_pair(candidate, h, best, best_h)) {
           best = candidate;
@@ -1784,7 +1792,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_kernel(
           }
           const float candidate = __fadd_rn(
               predecessor_cost,
-              grid_emission_v2<DirectDistance, CodebookScalar>(
+              grid_emission_v2<DirectDistance, DirectUnweighted, CodebookScalar>(
                   target, bank_codebook, bank_norm, state, weight, target_norm));
           if (lower_pair(candidate, h, best, best_h)) {
             best = candidate;
@@ -3452,6 +3460,11 @@ FamilyGridDirectDistanceMode family_grid_direct_distance_mode() {
   return FamilyGridDirectDistanceMode::kAll;
 }
 
+bool family_grid_provisional_direct_enabled(int transition_bits, int family_batch) {
+  const int minimum_batch = transition_bits == 6 ? 64 : (transition_bits == 7 ? 16 : 1);
+  return family_batch >= minimum_batch;
+}
+
 // Number of times the norm-rank contiguous-band recurrence was dispatched in
 // this process; exposed as gptqmodel_qvq.norm_rank_grid_dispatch_count() so
 // tests can assert which path produced a result.
@@ -3838,10 +3851,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   const bool direct_family_distance = family_batch > 0 && codebooks.scalar_type() == at::kHalf &&
       transition_bits >= 5 && transition_bits <= 7 &&
       (direct_distance_mode == FamilyGridDirectDistanceMode::kAll ||
-       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisional && !constrained) ||
+       (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisional && !constrained &&
+        family_grid_provisional_direct_enabled(transition_bits, family_batch)) ||
        (direct_distance_mode == FamilyGridDirectDistanceMode::kFinal && constrained) ||
        (direct_distance_mode == FamilyGridDirectDistanceMode::kProvisionalLargeFinal &&
-        (!constrained || family_batch >= 64)));
+        ((!constrained && family_grid_provisional_direct_enabled(transition_bits, family_batch)) ||
+         (constrained && family_batch >= 64))));
   const bool norm_rank_eligible =
       grid_parallel && !midpoint_only && !cooperative &&
       !weighted && !direct_family_distance &&
@@ -3995,8 +4010,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
           BITS, 4, 32, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                 \
     }                                                                                                  \
   } while (0)
-#define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
-    BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE) \
+#define QVQ_V2_SEGMENT_GRID_LAUNCH_MODE(                                                             \
+    BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, DIRECT_UNWEIGHTED, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE) \
   do {                                                                                                \
     constexpr bool qvq_fuse_boundary =                                                               \
         (BANKS == 2 && BITS != 7) || (BANKS == 4 && BITS >= 3 && BITS <= 6);                         \
@@ -4005,12 +4020,12 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         (BITS == 7 ? kThreads * (sizeof(float) + sizeof(int)) : 0);                                  \
     C10_CUDA_CHECK(cudaFuncSetAttribute(                                                              \
         qvq_v2_segment_grid_kernel<                                                                   \
-            BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, POINTER_TYPE>, \
+            BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, DIRECT_UNWEIGHTED, CODEBOOK_TYPE, POINTER_TYPE>, \
         cudaFuncAttributeMaxDynamicSharedMemorySize, qvq_segment_shared_bytes));                      \
     float* qvq_frontier_a = costs_a.mutable_data_ptr<float>();                                        \
     float* qvq_frontier_b = costs_b.mutable_data_ptr<float>();                                        \
     qvq_v2_segment_grid_kernel<                                                                       \
-        BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, POINTER_TYPE><<< \
+        BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, DIRECT_UNWEIGHTED, CODEBOOK_TYPE, POINTER_TYPE><<< \
         batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                                 \
         sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(),   \
         overlap_ptr, weight_ptr, qvq_frontier_b, qvq_frontier_a,                                     \
@@ -4025,7 +4040,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
             batch, segment - 1);                                                                      \
       }                                                                                               \
       qvq_v2_segment_grid_kernel<                                                                     \
-          BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, POINTER_TYPE><<< \
+          BITS, BANKS, SEGMENT_STEPS, qvq_fuse_boundary, MIDPOINT_ONLY, DIRECT_DISTANCE, DIRECT_UNWEIGHTED, CODEBOOK_TYPE, POINTER_TYPE><<< \
           batch * BANKS, kThreads, qvq_segment_shared_bytes, stream>>>(                               \
           sequences.const_data_ptr<float>(), CODEBOOK_POINTER, codebook_norm.const_data_ptr<float>(), \
           overlap_ptr, weight_ptr, qvq_segment_input, qvq_segment_output,                             \
@@ -4041,6 +4056,25 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         backpointers.const_data_ptr<POINTER_TYPE>(), boundary_banks.const_data_ptr<uint8_t>(),         \
         states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),              \
         squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);          \
+  } while (0)
+#define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
+    BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE) \
+  do {                                                                                                \
+    if constexpr (DIRECT_DISTANCE) {                                                                  \
+      if (weighted) {                                                                                 \
+        QVQ_V2_SEGMENT_GRID_LAUNCH_MODE(                                                              \
+            BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, false,                       \
+            CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                          \
+      } else {                                                                                        \
+        QVQ_V2_SEGMENT_GRID_LAUNCH_MODE(                                                              \
+            BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, true,                        \
+            CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                          \
+      }                                                                                               \
+    } else {                                                                                          \
+      QVQ_V2_SEGMENT_GRID_LAUNCH_MODE(                                                                \
+          BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, false,                         \
+          CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE);                                            \
+    }                                                                                                 \
   } while (0)
 #define QVQ_V2_SEGMENT_GRID_DISPATCH(                                                                 \
     BITS, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE)              \
