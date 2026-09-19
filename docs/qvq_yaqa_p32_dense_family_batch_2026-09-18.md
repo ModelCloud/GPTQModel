@@ -720,3 +720,35 @@ regression allowance. The focused native dispatch and parity suite passed all
 
 This remains a quantization-stage optimization. It changes neither the P32
 checkpoint representation nor post-quant inference.
+
+### Fused wide-YAQA range validation
+
+Factored wide-MLP YAQA previously validated every corrected anti-diagonal with
+separate finite, absolute-value, maximum, comparison, and flag-merge tensor
+operations. Those checks are necessary: a non-finite or over-range corrected
+target must fail closed before its FP32 squared-distance recurrence. They do
+not, however, require separate reductions. The corrected-tile CUDA epilogue
+now performs the same per-value test while its value is already in a register
+and atomically accumulates a persistent per-family failure flag. Canonical and
+sampled-family schedules synchronize and inspect that flag at the same point
+as before. Telemetry reports `yaqa_fused_range_validation_calls`.
+
+On the H100 production two-family `2048x8192`, 128-tile feedback shape, the
+checked operation improved from 0.3046 ms to 0.2684 ms (1.135x). A fresh
+matched W2.5 layer run moved prepare plus quantize from 25.9624 s to 25.7895 s
+(1.007x); inclusive process quantization was neutral at 20.887 s versus
+20.894 s, so no process-level speedup is claimed. The run used calibration
+rows `[0,32)` and disjoint YAQA rows `[64,96)`, with 32 independent sequences
+and 11,992 valid Fisher tokens.
+
+All 174 serialized tensors were bit-identical. The independent q-projection
+oracle was unchanged with zero regression allowance: FP32
+`0.03627968207001686` and FP64 `0.036279682270234585` in both arms. Dedicated
+tests also inject a range failure and verify that the fused flag remains
+fail-closed.
+
+A Hopper shared-codebook experiment was rejected in this phase. Staging the
+128 KiB direct-distance codebook once per segment reduced repeated codebook
+loads but forced one large-shared-memory CTA per SM. H100 L2 already served the
+small family set effectively, so W2.5 was neutral and W3 regressed up to 1.6%;
+the prototype does not remain in source.

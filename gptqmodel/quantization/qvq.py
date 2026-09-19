@@ -4750,15 +4750,21 @@ def yaqa_inner(
         # YAQA's corrected targets are produced on-device. Accumulate a
         # device-side failure flag across anti-diagonals and synchronize once
         # after the recurrence instead of stalling before every tail pass.
-        yaqa_cuda_invalid = torch.zeros((), dtype=torch.bool, device=source.device)
+        yaqa_cuda_invalid = torch.zeros(
+            (1,) if incremental_cuda_factored_feedback else (),
+            dtype=torch.int32 if incremental_cuda_factored_feedback else torch.bool,
+            device=source.device,
+        )
         yaqa_cuda_safe_bound = math.sqrt(torch.finfo(torch.float32).max / steps_per_tile) / (
             2.0 * math.sqrt(codebook.shape[1])
         )
         validation_codebooks = segmented_bank_stack if segmented_v2 else codebook
         assert validation_codebooks is not None
-        yaqa_cuda_invalid.logical_or_(
-            validation_codebooks.detach().abs().amax() > yaqa_cuda_safe_bound
-        )
+        initial_invalid = validation_codebooks.detach().abs().amax() > yaqa_cuda_safe_bound
+        if incremental_cuda_factored_feedback:
+            yaqa_cuda_invalid.copy_(initial_invalid.to(torch.int32).reshape(1))
+        else:
+            yaqa_cuda_invalid.logical_or_(initial_invalid)
     # Apple feedback stays on the CPU, but segmented trellis search still uses
     # the exact MLX Metal recurrence.  Only one compact anti-diagonal batch and
     # its traceback cross the shared-memory runtime boundary at a time.
@@ -4791,9 +4797,10 @@ def yaqa_inner(
                     corrected_tile_stack = corrected_tile_stack + bias_blocks[input_indices, output_indices]
             elif incremental_cuda_factored_feedback:
                 assert left_transformed_error is not None and right_transformed_error is not None
-                from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_op
+                assert yaqa_cuda_invalid is not None and yaqa_cuda_safe_bound is not None
+                from ..utils.qvq_cuda import _qvq_cuda_yaqa_feedback_checked_op
 
-                corrected_tile_stack = _qvq_cuda_yaqa_feedback_op()(
+                corrected_tile_stack = _qvq_cuda_yaqa_feedback_checked_op()(
                     source,
                     left_transformed_error,
                     right_transformed_error,
@@ -4802,7 +4809,11 @@ def yaqa_inner(
                     coordinates[0][1],
                     len(coordinates),
                     rounding_bias,
+                    yaqa_cuda_invalid,
+                    yaqa_cuda_safe_bound,
                 )
+                if telemetry is not None:
+                    telemetry.count("yaqa_fused_range_validation_calls")
             elif incremental_cpu_factored_feedback:
                 assert left_transformed_error is not None and right_transformed_error is not None
                 from ..utils.qvq_cpu import qvq_cpu_yaqa_feedback
@@ -4846,7 +4857,7 @@ def yaqa_inner(
         sequences = corrected_tile_stack.reshape(len(coordinates), steps_per_tile, codebook.shape[1])
         logical_batch_size = sequences.shape[0]
         cuda_values_prevalidated = sequences.device.type == "cuda"
-        if cuda_values_prevalidated:
+        if cuda_values_prevalidated and not incremental_cuda_factored_feedback:
             assert yaqa_cuda_invalid is not None and yaqa_cuda_safe_bound is not None
             yaqa_cuda_invalid.logical_or_(
                 torch.logical_or(
@@ -5104,7 +5115,7 @@ def yaqa_inner(
     if (
         yaqa_cuda_invalid is not None
         and not _defer_segmented_cuda_checks
-        and bool(yaqa_cuda_invalid)
+        and bool(yaqa_cuda_invalid.any())
     ):
         raise ValueError(
             "YAQA corrected segmented-V2 tiles exceeded finite FP32 squared-distance range."
@@ -5142,7 +5153,7 @@ def yaqa_inner(
         if _diagnostics is not None:
             _diagnostics["fallback_to_bank0"] = bool(fallback_to_bank0)
     elif _diagnostics is not None and yaqa_cuda_invalid is not None:
-        _diagnostics["_segmented_cuda_invalid"] = yaqa_cuda_invalid
+        _diagnostics["_segmented_cuda_invalid"] = yaqa_cuda_invalid.reshape(-1)[0]
     result = (
         quantized.to(device=quantization_device, dtype=inner_weight.dtype),
         tile_states.reshape(-1, steps_per_tile).to(quantization_device),
@@ -5239,14 +5250,14 @@ def _yaqa_inner_v2b2_family_batch_cuda(
         device=source.device,
         dtype=torch.uint8,
     )
-    invalid = torch.zeros((families,), device=source.device, dtype=torch.bool)
+    invalid = torch.zeros((families,), device=source.device, dtype=torch.int32)
     safe_bound = math.sqrt(torch.finfo(torch.float32).max / steps) / (2.0 * math.sqrt(2.0))
-    invalid.logical_or_(family_stacks.detach().abs().amax(dim=(1, 2, 3)) > safe_bound)
+    invalid.copy_((family_stacks.detach().abs().amax(dim=(1, 2, 3)) > safe_bound).to(torch.int32))
     transition_bits = qvq_transition_bits(bits, vector_size=2)
 
     from ..utils.qvq_cuda import (
         _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
-        _qvq_cuda_yaqa_feedback_op,
+        _qvq_cuda_yaqa_feedback_checked_op,
         _qvq_cuda_yaqa_feedback_update_op,
     )
 
@@ -5256,13 +5267,21 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     for coordinates, input_indices, output_indices, flat_indices, _, _ in schedule:
         count = len(coordinates)
         with _qvq_phase(telemetry, "yaqa_feedback", source.device):
-            corrected = _qvq_cuda_yaqa_feedback_op()(
-                source, left, right, output_feedback, coordinates[0][0], coordinates[0][1], count, bias
+            corrected = _qvq_cuda_yaqa_feedback_checked_op()(
+                source,
+                left,
+                right,
+                output_feedback,
+                coordinates[0][0],
+                coordinates[0][1],
+                count,
+                bias,
+                invalid,
+                safe_bound,
             )
+            if telemetry is not None:
+                telemetry.count("yaqa_fused_range_validation_calls")
         sequences = corrected.reshape(families, count, steps, 2)
-        invalid.logical_or_(
-            torch.logical_or(~torch.isfinite(sequences).all(dim=(1, 2, 3)), sequences.abs().amax(dim=(1, 2, 3)) > safe_bound)
-        )
         with _qvq_phase(telemetry, "yaqa_segmented_viterbi", source.device):
             overlaps = _qvq_cuda_family_tail_biting_overlaps(
                 sequences,
