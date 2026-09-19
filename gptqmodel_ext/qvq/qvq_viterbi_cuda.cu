@@ -2425,6 +2425,7 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
     int64_t* __restrict__ states,
     uint8_t* __restrict__ segment_bank_ids,
     float* __restrict__ squared_error,
+    CodebookScalar* __restrict__ reconstructed,
     int batch,
     int family_batch,
     bool constrained,
@@ -2511,6 +2512,27 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
     }
     if constexpr (MidpointOnly) {
       states[sequence] = current_state & overlap_mask;
+    }
+  }
+  if constexpr (!MidpointOnly) {
+    // Traceback is serial, but reconstruction is a flat 256-value gather.
+    // Reuse this CTA after traceback so family callers avoid allocating and
+    // launching a second kernel while preserving the exact selected payload.
+    if (reconstructed != nullptr) {
+      __syncthreads();
+      const int family = family_batch == 0 ? 0 : sequence / family_batch;
+      constexpr int scalar_count = 128 * 2;
+      for (int scalar = thread; scalar < scalar_count; scalar += kThreads) {
+        const int step = scalar >> 1;
+        const int coordinate = scalar & 1;
+        const int bank = static_cast<int>(
+            segment_bank_ids[selector_base + step / segment_steps]);
+        const int64_t state = states[state_base + step];
+        const int64_t codebook_index =
+            ((static_cast<int64_t>(family) * bank_count + bank) * kStateCount + state) * 2 +
+            coordinate;
+        reconstructed[sequence_base + scalar] = codebooks[codebook_index];
+      }
     }
   }
 }
@@ -3740,7 +3762,8 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
     // Exact survivor-pruning policy from `ViterbiPruningConfig`. Zero is the
     // historical automatic behavior, so every direct low-level caller that
     // omits it keeps the pre-policy dispatch exactly.
-    int64_t pruning_policy = kViterbiPruningAuto) {
+    int64_t pruning_policy = kViterbiPruningAuto,
+    at::Tensor* reconstructed_out = nullptr) {
   const bool g_only = kernel_mode != 0;
   bool cooperative = false;
   int cooperative_threads = 0;
@@ -3931,6 +3954,7 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
   // per-sequence parallelism; measured crossover on the 124-SM sm_80 device.
   constexpr int fused_minimum_batch = 40;
   if (grid_parallel && !midpoint_only && family_batch > 0 && batch >= fused_minimum_batch &&
+      reconstructed_out == nullptr &&
       transition_bits == 4 && bank_count == 2 && segment_steps == 16 &&
       codebooks.scalar_type() == at::kHalf && fused_w2_family_grid_supported(properties)) {
     return qvq_fused_w2_family_grid_launch(
@@ -3966,6 +3990,14 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
       : cached_banked_codebook_norm<2, float>(codebooks, stream);
   const int64_t* overlap_ptr = constrained ? overlap_tensor.const_data_ptr<int64_t>() : nullptr;
   const float* weight_ptr = weighted ? step_weights_tensor.const_data_ptr<float>() : nullptr;
+  TORCH_CHECK(reconstructed_out == nullptr || (!midpoint_only && family_batch > 0),
+              "fused family reconstruction requires a full family-grid traceback");
+  TORCH_CHECK(reconstructed_out == nullptr ||
+                  (reconstructed_out->is_cuda() && reconstructed_out->device() == codebooks.device() &&
+                   reconstructed_out->scalar_type() == codebooks.scalar_type() &&
+                   reconstructed_out->is_contiguous() && reconstructed_out->numel() == batch * steps * 2),
+              "fused family reconstruction output must be contiguous, match the codebook dtype/device, "
+              "and contain batch * 128 * 2 values");
 
   if (cooperative) {
 #define QVQ_V2_SEGMENT_COOPERATIVE_LAUNCH(THREADS, CODEBOOK_TYPE, CODEBOOK_POINTER)                   \
@@ -3981,7 +4013,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
               overlap_ptr, weight_ptr, costs_a.const_data_ptr<float>(),                              \
               backpointers.const_data_ptr<uint8_t>(), boundary_banks.const_data_ptr<uint8_t>(),      \
               states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),      \
-              squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);  \
+              squared_error.mutable_data_ptr<float>(),                                               \
+              reconstructed_out == nullptr                                                           \
+                  ? nullptr                                                                           \
+                  : reinterpret_cast<CODEBOOK_TYPE*>(reconstructed_out->mutable_data_ptr()),         \
+              batch, family_batch, constrained, weighted);                                           \
     } while (0)
     if (codebooks.scalar_type() == at::kHalf) {
       if (cooperative_threads == 256) {
@@ -4076,7 +4112,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
         overlap_ptr, weight_ptr, qvq_final_frontier,                                                  \
         backpointers.const_data_ptr<POINTER_TYPE>(), boundary_banks.const_data_ptr<uint8_t>(),         \
         states.mutable_data_ptr<int64_t>(), segment_bank_ids.mutable_data_ptr<uint8_t>(),              \
-        squared_error.mutable_data_ptr<float>(), batch, family_batch, constrained, weighted);          \
+        squared_error.mutable_data_ptr<float>(),                                                       \
+        reconstructed_out == nullptr                                                                   \
+            ? nullptr                                                                                   \
+            : reinterpret_cast<CODEBOOK_TYPE*>(reconstructed_out->mutable_data_ptr()),                 \
+        batch, family_batch, constrained, weighted);                                                   \
   } while (0)
 #define QVQ_V2_SEGMENT_GRID_LAUNCH(                                                                  \
     BITS, BANKS, SEGMENT_STEPS, MIDPOINT_ONLY, DIRECT_DISTANCE, CODEBOOK_TYPE, CODEBOOK_POINTER, POINTER_TYPE) \
@@ -4182,7 +4222,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_banked_cud
             boundary_banks.const_data_ptr<uint8_t>(),                                              \
             states.mutable_data_ptr<int64_t>(),                                                    \
             segment_bank_ids.mutable_data_ptr<uint8_t>(),                                          \
-            squared_error.mutable_data_ptr<float>(), batch, family_batch,                          \
+            squared_error.mutable_data_ptr<float>(),                                              \
+            reconstructed_out == nullptr                                                         \
+                ? nullptr                                                                         \
+                : reinterpret_cast<half*>(reconstructed_out->mutable_data_ptr()),                 \
+            batch, family_batch,                                                                  \
             constrained, weighted);                                                                \
     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                \
     record_norm_cache_use(codebooks, codebook_norm, stream);                                       \
@@ -4402,6 +4446,60 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> qvq_viterbi_v2_segment_family_gri
   };
 }
 
+std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor>
+qvq_viterbi_v2_segment_family_grid_values_trusted_cuda(
+    const at::Tensor& sequences,
+    const at::Tensor& codebooks,
+    int64_t transition_bits,
+    int64_t segment_steps,
+    const c10::optional<at::Tensor>& overlap,
+    const c10::optional<at::Tensor>& step_weights,
+    int64_t pruning_policy) {
+  TORCH_CHECK(sequences.dim() == 4 && sequences.size(2) == 128 && sequences.size(3) == 2,
+              "family-batched segmented V2 sequences must have shape [families, batch, 128, 2]");
+  TORCH_CHECK(codebooks.dim() == 4 && codebooks.size(0) == sequences.size(0) && codebooks.size(1) == 2 &&
+                  codebooks.size(2) == kStateCount && codebooks.size(3) == 2,
+              "family-batched segmented V2 codebooks must have shape [families, 2, 65536, 2]");
+  const int64_t families = sequences.size(0);
+  const int64_t family_batch = sequences.size(1);
+  const at::Tensor flat_sequences = sequences.view({families * family_batch, 128, 2});
+  const at::Tensor flat_codebooks = codebooks.view({families * 2, kStateCount, 2});
+  c10::optional<at::Tensor> flat_overlap = c10::nullopt;
+  if (overlap.has_value()) {
+    TORCH_CHECK(overlap->sizes() == at::IntArrayRef({families, family_batch}),
+                "family-batched segmented V2 overlap must have shape [families, batch]");
+    flat_overlap = overlap->view({families * family_batch});
+  }
+  c10::optional<at::Tensor> flat_weights = c10::nullopt;
+  if (step_weights.has_value()) {
+    TORCH_CHECK(step_weights->sizes() == at::IntArrayRef({families, family_batch, 128}),
+                "family-batched segmented V2 weights must have shape [families, batch, 128]");
+    flat_weights = step_weights->view({families * family_batch, 128});
+  }
+  at::Tensor reconstructed = at::empty(
+      {families * family_batch, 128, 2}, codebooks.options());
+  auto result = qvq_viterbi_v2_segment_banked_cuda_impl(
+      flat_sequences,
+      flat_codebooks,
+      transition_bits,
+      segment_steps,
+      flat_overlap,
+      flat_weights,
+      2,
+      false,
+      static_cast<int>(family_batch),
+      2,
+      false,
+      pruning_policy,
+      &reconstructed);
+  return {
+      std::get<0>(result).view({families, family_batch, 128}),
+      std::get<1>(result).view({families, family_batch}),
+      std::get<2>(result).view({families, family_batch, 8}),
+      reconstructed.view({families, family_batch, 128, 2}),
+  };
+}
+
 at::Tensor qvq_viterbi_v2_segment_family_midpoint_trusted_cuda(
     const at::Tensor& sequences,
     const at::Tensor& codebooks,
@@ -4510,6 +4608,9 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("viterbi_v2_segment_family_grid_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
         "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) "
         "-> (Tensor, Tensor, Tensor)");
+  m.def("viterbi_v2_segment_family_grid_values_trusted(Tensor sequences, Tensor codebooks, int transition_bits, "
+        "int segment_steps, Tensor? overlap=None, Tensor? step_weights=None, int pruning_policy=0) "
+        "-> (Tensor, Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_family_midpoint_trusted(Tensor sequences, Tensor codebooks, "
         "int transition_bits, int segment_steps, Tensor? step_weights=None) -> Tensor");
   m.def("viterbi_v2_family_reconstruct_trusted(Tensor states, Tensor segment_bank_ids, "
@@ -4535,6 +4636,8 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_tail_trusted", &qvq_viterbi_v2_segment_tail_trusted_cuda);
   m.impl("viterbi_v2_segment_midpoint_trusted", &qvq_viterbi_v2_segment_midpoint_trusted_cuda);
   m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
+  m.impl("viterbi_v2_segment_family_grid_values_trusted",
+         &qvq_viterbi_v2_segment_family_grid_values_trusted_cuda);
   m.impl("viterbi_v2_segment_family_midpoint_trusted", &qvq_viterbi_v2_segment_family_midpoint_trusted_cuda);
   m.impl("viterbi_v2_family_reconstruct_trusted", &qvq_viterbi_v2_family_reconstruct_trusted_cuda);
 }

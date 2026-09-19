@@ -3634,8 +3634,7 @@ def _block_ldlq_v2b2_family_batch_cuda(
     """Run three independent B2 Block-LDLQ histories in one CUDA work grid."""
 
     from ..utils.qvq_cuda import (
-        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
-        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
     )
 
     families = family_stacks.shape[0]
@@ -3651,8 +3650,7 @@ def _block_ldlq_v2b2_family_batch_cuda(
     states = torch.empty((families, input_tiles, output_tiles, 128), device=source.device, dtype=torch.long)
     selectors = torch.empty((families, input_tiles, output_tiles, 8), device=source.device, dtype=torch.uint8)
     transition_bits = qvq_transition_bits(bits, vector_size=2)
-    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
-    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
+    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()
     # Six CTAs are generated per logical tile (three families x two banks).
     # A 128-tile window amortizes segment barriers and won at every W1--W3.5
     # rate on the local 124-SM device. Explicit larger caller batches survive.
@@ -3708,7 +3706,7 @@ def _block_ldlq_v2b2_family_batch_cuda(
                     # before the next block, so no call has identical inputs.
                     telemetry.count("viterbi_exact_reuse_candidates", 0)
                     telemetry.count("viterbi_reselection_revisits", 0)
-                chunk_states, _, chunk_selectors = family_viterbi(
+                chunk_states, _, chunk_selectors, chunk_values = family_viterbi(
                     chunk,
                     family_stacks,
                     transition_bits,
@@ -3716,9 +3714,9 @@ def _block_ldlq_v2b2_family_batch_cuda(
                     overlaps,
                     chunk_weights,
                 )
-                block_values.append(family_reconstruct(chunk_states, chunk_selectors, family_stacks))
+                block_values.append(chunk_values)
                 if telemetry is not None:
-                    telemetry.count("viterbi_family_reconstruct_calls")
+                    telemetry.count("viterbi_family_fused_reconstruct_calls")
                 block_states.append(chunk_states)
                 block_selectors.append(chunk_selectors)
                 if telemetry is not None:
@@ -5258,14 +5256,12 @@ def _yaqa_inner_v2b2_family_batch_cuda(
     transition_bits = qvq_transition_bits(bits, vector_size=2)
 
     from ..utils.qvq_cuda import (
-        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
-        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
         _qvq_cuda_yaqa_feedback_checked_op,
         _qvq_cuda_yaqa_feedback_update_op,
     )
 
-    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
-    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
+    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()
     schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
     for coordinates, input_indices, output_indices, flat_indices, _, _ in schedule:
         count = len(coordinates)
@@ -5305,7 +5301,7 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 # tensors mutate after every commit; exact reuse is impossible.
                 telemetry.count("viterbi_exact_reuse_candidates", 0)
                 telemetry.count("viterbi_reselection_revisits", 0)
-            states, _, segment_ids = family_viterbi(
+            states, _, segment_ids, reconstructed = family_viterbi(
                 sequences,
                 family_stacks,
                 transition_bits,
@@ -5313,11 +5309,9 @@ def _yaqa_inner_v2b2_family_batch_cuda(
                 overlaps,
                 None,
             )
-        reconstructed = family_reconstruct(states, segment_ids, family_stacks).reshape(
-            families, count, 16, 16
-        ).to(torch.float32)
+        reconstructed = reconstructed.reshape(families, count, 16, 16).to(torch.float32)
         if telemetry is not None:
-            telemetry.count("viterbi_family_reconstruct_calls")
+            telemetry.count("viterbi_family_fused_reconstruct_calls")
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
             quantized_blocks[:, input_indices, output_indices] = reconstructed
             tile_states[:, input_indices, output_indices] = states
@@ -5386,12 +5380,10 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
         bias_blocks = rounding_bias.to(torch.float32).view(input_blocks, tile, output_blocks, tile).permute(0, 2, 1, 3)
 
     from ..utils.qvq_cuda import (
-        _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
-        _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+        _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
     )
 
-    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
-    family_reconstruct = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()
+    family_viterbi = _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()
     schedule = _yaqa_anti_diagonal_schedule(source.device, input_blocks, output_blocks)
     for coordinates, input_indices, output_indices, flat_indices, input_rows, output_rows in schedule:
         count = len(coordinates)
@@ -5418,7 +5410,7 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
             )
             if telemetry is not None and _qvq_family_final_direct_distance_enabled(count):
                 telemetry.count("viterbi_final_direct_distance", families * count)
-            states, _, segment_ids = family_viterbi(
+            states, _, segment_ids, reconstructed = family_viterbi(
                 sequences,
                 family_stacks,
                 transition_bits,
@@ -5426,11 +5418,9 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
                 overlaps,
                 None,
             )
-        reconstructed = family_reconstruct(states, segment_ids, family_stacks).reshape(
-            families, count, tile, tile
-        ).to(torch.float32)
+        reconstructed = reconstructed.reshape(families, count, tile, tile).to(torch.float32)
         if telemetry is not None:
-            telemetry.count("viterbi_family_reconstruct_calls")
+            telemetry.count("viterbi_family_fused_reconstruct_calls")
         with _qvq_phase(telemetry, "yaqa_commit", source.device):
             quantized_blocks[:, input_indices, output_indices] = reconstructed
             tile_states[:, input_indices, output_indices] = states
@@ -5679,8 +5669,7 @@ def yaqa_inner_v2b2_p32(
                 and kwargs.get("tail_biting_candidates", 1) == 1
             ):
                 from ..utils.qvq_cuda import (
-                    _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
-                    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+                    _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
                 )
 
                 family_codebooks = torch.stack(pair_stacks).contiguous()
@@ -5710,19 +5699,18 @@ def yaqa_inner_v2b2_p32(
                     telemetry.count("viterbi_family_state_steps", family_sequences_count * 128 * 2)
                     telemetry.count("viterbi_exact_reuse_candidates", 0)
                     telemetry.count("viterbi_reselection_revisits", 0)
-                family_states, _, family_selectors = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
-                    family_sequences,
-                    family_codebooks,
-                    transition_bits,
-                    QVQ_V2B2_P32_STEPS_PER_SEGMENT,
-                    overlaps,
-                    None,
-                )
-                family_values = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()(
-                    family_states, family_selectors, family_codebooks
+                _, _, _, family_values = (
+                    _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()(
+                        family_sequences,
+                        family_codebooks,
+                        transition_bits,
+                        QVQ_V2B2_P32_STEPS_PER_SEGMENT,
+                        overlaps,
+                        None,
+                    )
                 )
                 if telemetry is not None:
-                    telemetry.count("viterbi_family_reconstruct_calls")
+                    telemetry.count("viterbi_family_fused_reconstruct_calls")
                 for family_index in range(3):
                     error = (
                         family_values[family_index]

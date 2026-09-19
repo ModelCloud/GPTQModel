@@ -64,9 +64,10 @@ from gptqmodel.utils.qvq_cuda import (
     QVQ_CUDA_BITS,
     _qvq_cuda_viterbi_tail_trusted_op,
     _qvq_cuda_viterbi_trusted,
-    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
-    _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
+    _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
@@ -2477,6 +2478,43 @@ def test_qvq_cuda_family_reconstruction_matches_selector_gather(dtype):
     )
 
     assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
+@pytest.mark.parametrize("dtype", (torch.float16, torch.float32))
+def test_qvq_cuda_family_grid_values_match_separate_exact_reconstruction(bits, dtype):
+    generator = torch.Generator(device="cuda").manual_seed(20260921)
+    families, batch = 2, 3
+    sequences = torch.randn(
+        (families, batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
+    )
+    codebooks = torch.stack(
+        tuple(
+            torch.stack(
+                (
+                    pgc16_codebook_v2_bank(0, bits=bits, dtype=torch.float32),
+                    pgc16_codebook_v2_bank(family, bits=bits, dtype=torch.float32),
+                )
+            )
+            for family in (1, 3)
+        )
+    ).to(device="cuda", dtype=dtype)
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+
+    reference = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()(
+        sequences, codebooks, transition_bits, 16, None, None
+    )
+    expected_values = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()(
+        reference[0], reference[2], codebooks
+    )
+    actual = _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op()(
+        sequences, codebooks, transition_bits, 16, None, None
+    )
+
+    assert torch.equal(actual[0], reference[0])
+    assert torch.equal(actual[1], reference[1])
+    assert torch.equal(actual[2], reference[2])
+    assert torch.equal(actual[3], expected_values)
 
 
 def test_qvq_cuda_family_midpoint_matches_weighted_full_provisional_traceback():

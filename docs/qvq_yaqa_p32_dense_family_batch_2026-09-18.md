@@ -783,3 +783,38 @@ call-site coverage passed 23 focused CUDA tests across FP16/FP32 reconstruction,
 sampled selection, dense and factored YAQA, Block-LDLQ, and the fast-quality
 profile. Because the deployed payload is unchanged, the existing disjoint
 held-out result carries over exactly.
+
+### Traceback-fused P32 family reconstruction
+
+The family-grid Viterbi finalizer now optionally emits reconstructed values in
+the same CTA that writes the selected states and P32 bank IDs. Traceback and
+winner selection are unchanged: thread zero completes the original serial
+traceback, then the CTA performs a parallel 256-value gather from those exact
+states and selectors. This removes the separate reconstruction launch and its
+intermediate handoff at all four production family-batched call sites. The
+standalone native reconstruction operator remains available as an independent
+reference. Telemetry reports `viterbi_family_fused_reconstruct_calls`.
+
+The combined Viterbi-plus-reconstruction microbenchmark was deliberately used
+as the speed gate. Across W2.5, W3, and W3.5, family batches 8 and 32 improved
+by approximately `1.001--1.003x`; batch 128 was noise-level neutral. The fused
+path is bit-exact against the two-kernel path for states, squared error,
+selectors, and reconstructed FP16/FP32 values at all three rates.
+
+A fresh matched W2.5 Llama 3.2 1B layer run removed 2,752 standalone kernel
+launches. Segmented-Viterbi GPU time fell from `13.5910 s` to `13.5618 s`
+(`1.0022x`), the inclusive family-candidate phase fell from `15.0023 s` to
+`14.9577 s` (`1.0030x`), and prepare plus quantize moved from `25.6584 s` to
+`25.5911 s` (`1.0026x`). Process quantization was effectively neutral at
+`20.8072 s` versus `20.8050 s`, so this phase claims launch reduction and a
+small affected-region gain rather than a material end-to-end speedup.
+
+Calibration rows `[0,32)` and YAQA rows `[64,96)` were strictly disjoint; YAQA
+used 32 independent sequences and 11,992 valid tokens. All 174 serialized
+tensors were bit-identical. The independent q-projection oracle was also
+identical under a zero-regression gate: FP32 `0.03627968207001686` and FP64
+`0.036279682270234585` in both arms. Eight dedicated reconstruction tests and
+21 production call-site tests passed.
+
+This remains a quantization-stage launch fusion. It changes neither checkpoint
+format nor post-quant inference.
