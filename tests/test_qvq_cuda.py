@@ -4152,6 +4152,58 @@ def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(
     assert counters.get("viterbi_final_direct_distance", 0) == 0
 
 
+@pytest.mark.parametrize("bits", (2.5, 3.0, 3.5))
+@pytest.mark.parametrize("constrained", (False, True))
+def test_qvq_direct_unweighted_specialization_matches_unit_weights(
+    monkeypatch, bits, constrained
+):
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "1")
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    batch = 9
+    generator = torch.Generator(device="cuda").manual_seed(
+        20260919 + int(bits * 10) + int(constrained)
+    )
+    sequences = torch.randn(
+        (2, batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
+    )
+    banks = torch.stack(
+        tuple(
+            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
+            for bank in range(2)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    family_stacks = torch.stack((banks, banks)).contiguous()
+    overlaps = (
+        torch.randint(
+            0,
+            1 << (16 - transition_bits),
+            (2, batch),
+            generator=generator,
+            device="cuda",
+            dtype=torch.int64,
+        )
+        if constrained
+        else None
+    )
+    op = _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op()
+    specialized = op(
+        sequences, family_stacks, transition_bits, 16, overlaps, None
+    )
+    unit_weighted = op(
+        sequences,
+        family_stacks,
+        transition_bits,
+        16,
+        overlaps,
+        torch.ones((2, batch, 128), device="cuda", dtype=torch.float32),
+    )
+
+    assert all(
+        torch.equal(actual, expected)
+        for actual, expected in zip(specialized, unit_weighted, strict=True)
+    )
+
+
 def test_qvq_yaqa_large_final_distance_has_a_frozen_family_batch_gate(monkeypatch):
     monkeypatch.setenv(
         "GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional_large_final"
@@ -4202,9 +4254,11 @@ def test_qvq_yaqa_provisional_small_batch_fallback_is_exact(
     family_stacks = torch.stack((banks, banks)).contiguous()
 
     monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
+    dispatches_before = _norm_rank_dispatch_count()
     expected = _qvq_cuda_family_tail_biting_overlaps(
         sequences, family_stacks, transition_bits, telemetry=None
     )
+    dispatches_after_exact = _norm_rank_dispatch_count()
     monkeypatch.setenv(
         "GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional"
     )
@@ -4212,6 +4266,8 @@ def test_qvq_yaqa_provisional_small_batch_fallback_is_exact(
         sequences, family_stacks, transition_bits, telemetry=None
     )
 
+    assert dispatches_after_exact == dispatches_before + 1
+    assert _norm_rank_dispatch_count() == dispatches_after_exact + 1
     assert torch.equal(actual, expected)
 
 
