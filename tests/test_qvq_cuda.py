@@ -70,6 +70,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
     _qvq_cuda_viterbi_v2_segment_tail_trusted_op,
+    _qvq_cuda_yaqa_feedback_checked_op,
     _qvq_cuda_yaqa_feedback_op,
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_folded_swiglu_precondition_fp32,
@@ -3576,6 +3577,32 @@ def test_qvq_cuda_factored_yaqa_feedback_matches_fp32_reference_on_nondefault_st
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=1e-6)
 
 
+def test_qvq_cuda_checked_feedback_preserves_values_and_accumulates_range_failures():
+    generator = torch.Generator(device="cuda").manual_seed(20260919)
+    source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
+    left = torch.randn((2, 32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01
+    right = torch.randn_like(left, generator=generator) * 0.01
+    output_feedback = torch.tril(
+        torch.randn((64, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.01,
+        diagonal=-1,
+    )
+    expected = _qvq_cuda_yaqa_feedback_op()(
+        source, left, right, output_feedback, 0, 3, 2, None
+    )
+    invalid = torch.zeros((2,), device="cuda", dtype=torch.int32)
+    actual = _qvq_cuda_yaqa_feedback_checked_op()(
+        source, left, right, output_feedback, 0, 3, 2, None, invalid, 1.0e10
+    )
+
+    assert torch.equal(actual, expected)
+    assert invalid.tolist() == [0, 0]
+
+    _qvq_cuda_yaqa_feedback_checked_op()(
+        source, left, right, output_feedback, 0, 3, 2, None, invalid, 0.0 + 1.0e-9
+    )
+    assert invalid.tolist() == [1, 1]
+
+
 def test_qvq_cuda_factored_yaqa_tf32_feedback_is_deterministic_and_bounded(monkeypatch):
     generator = torch.Generator(device="cuda").manual_seed(20260921)
     source = torch.randn((32, 64), generator=generator, device="cuda", dtype=torch.float32) * 0.05
@@ -4002,6 +4029,7 @@ def test_qvq_v2b2_family_batch_telemetry_reports_phase1_reuse_and_consumption():
     counters = telemetry.finalize()["counters"]
 
     assert counters["viterbi_family_grid_calls"] > 0
+    assert counters["yaqa_fused_range_validation_calls"] > 0
     assert counters["viterbi_family_state_steps"] > 0
     assert counters["viterbi_exact_reuse_candidates"] == 0
     assert counters["viterbi_reselection_revisits"] == 0

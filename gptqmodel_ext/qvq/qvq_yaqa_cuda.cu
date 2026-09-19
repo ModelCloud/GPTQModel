@@ -10,7 +10,9 @@
 #include <torch/library.h>
 #include <torch/types.h>
 
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -109,6 +111,8 @@ __global__ __launch_bounds__(kThreads) void qvq_yaqa_feedback_epilogue_kernel(
     const float* __restrict__ cross,
     const float* __restrict__ bias,
     float* __restrict__ corrected,
+    int* __restrict__ invalid,
+    float safe_bound,
     int first_input_block,
     int first_output_block,
     int in_features,
@@ -134,9 +138,12 @@ __global__ __launch_bounds__(kThreads) void qvq_yaqa_feedback_epilogue_kernel(
   value += left[family_offset + matrix_index];
   value += right[family_offset + matrix_index];
   corrected[static_cast<int64_t>(item) * kThreads + lane] = value;
+  if (invalid != nullptr && (!isfinite(value) || fabsf(value) > safe_bound)) {
+    atomicExch(invalid + family, 1);
+  }
 }
 
-at::Tensor qvq_yaqa_feedback_cuda(
+at::Tensor qvq_yaqa_feedback_cuda_impl(
     const at::Tensor& source,
     const at::Tensor& left,
     const at::Tensor& right,
@@ -144,7 +151,9 @@ at::Tensor qvq_yaqa_feedback_cuda(
     int64_t first_input_block,
     int64_t first_output_block,
     int64_t count,
-    const c10::optional<at::Tensor>& bias) {
+    const c10::optional<at::Tensor>& bias,
+    const c10::optional<at::Tensor>& invalid,
+    double safe_bound) {
   TORCH_CHECK(source.is_cuda(), "YAQA source must be CUDA");
   TORCH_CHECK(source.scalar_type() == at::kFloat && source.dim() == 2 && source.is_contiguous(),
               "YAQA source must be contiguous FP32 [input, output]");
@@ -169,6 +178,14 @@ at::Tensor qvq_yaqa_feedback_cuda(
     TORCH_CHECK(bias->device() == source.device() && bias->scalar_type() == at::kFloat &&
                     bias->sizes() == source.sizes() && bias->is_contiguous(),
                 "YAQA bias must match the contiguous FP32 source");
+  }
+  if (invalid.has_value()) {
+    const int64_t families = left.dim() == 3 ? left.size(0) : 1;
+    TORCH_CHECK(invalid->device() == source.device() && invalid->scalar_type() == at::kInt &&
+                    invalid->dim() == 1 && invalid->size(0) == families && invalid->is_contiguous(),
+                "YAQA invalid flags must be contiguous int32 [family] on the source device");
+    TORCH_CHECK(std::isfinite(safe_bound) && safe_bound > 0.0,
+                "YAQA corrected-value safety bound must be finite and positive");
   }
 
   const c10::cuda::CUDAGuard device_guard(source.device());
@@ -258,6 +275,8 @@ at::Tensor qvq_yaqa_feedback_cuda(
       cross.const_data_ptr<float>(),
       bias.has_value() ? bias->const_data_ptr<float>() : nullptr,
       corrected.mutable_data_ptr<float>(),
+      invalid.has_value() ? invalid->mutable_data_ptr<int>() : nullptr,
+      static_cast<float>(safe_bound),
       static_cast<int>(first_input_block),
       static_cast<int>(first_output_block),
       static_cast<int>(source.size(0)),
@@ -265,6 +284,36 @@ at::Tensor qvq_yaqa_feedback_cuda(
       static_cast<int>(count));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return corrected;
+}
+
+at::Tensor qvq_yaqa_feedback_cuda(
+    const at::Tensor& source,
+    const at::Tensor& left,
+    const at::Tensor& right,
+    const at::Tensor& output_feedback,
+    int64_t first_input_block,
+    int64_t first_output_block,
+    int64_t count,
+    const c10::optional<at::Tensor>& bias) {
+  return qvq_yaqa_feedback_cuda_impl(
+      source, left, right, output_feedback, first_input_block, first_output_block, count,
+      bias, c10::nullopt, std::numeric_limits<float>::max());
+}
+
+at::Tensor qvq_yaqa_feedback_checked_cuda(
+    const at::Tensor& source,
+    const at::Tensor& left,
+    const at::Tensor& right,
+    const at::Tensor& output_feedback,
+    int64_t first_input_block,
+    int64_t first_output_block,
+    int64_t count,
+    const c10::optional<at::Tensor>& bias,
+    const at::Tensor& invalid,
+    double safe_bound) {
+  return qvq_yaqa_feedback_cuda_impl(
+      source, left, right, output_feedback, first_input_block, first_output_block, count,
+      bias, invalid, safe_bound);
 }
 
 void qvq_yaqa_feedback_update_cuda(
@@ -417,6 +466,9 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
     m.def("yaqa_feedback(Tensor source, Tensor left, Tensor right, Tensor output_feedback, "
         "int first_input_block, int first_output_block, int count, Tensor? bias) -> Tensor");
 });
+  m.def("yaqa_feedback_checked(Tensor source, Tensor left, Tensor right, Tensor output_feedback, "
+      "int first_input_block, int first_output_block, int count, Tensor? bias, "
+      "Tensor(a!) invalid, float safe_bound) -> Tensor");
   qvq_def_shared_schema([&] {
     m.def("yaqa_feedback_update_(Tensor(a!) left, Tensor(b!) right, Tensor input_feedback, "
         "Tensor output_feedback, Tensor reconstructed, int first_input_block, "
@@ -426,5 +478,6 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("yaqa_feedback", &qvq_yaqa_feedback_cuda);
+  m.impl("yaqa_feedback_checked", &qvq_yaqa_feedback_checked_cuda);
   m.impl("yaqa_feedback_update_", &qvq_yaqa_feedback_update_cuda);
 }

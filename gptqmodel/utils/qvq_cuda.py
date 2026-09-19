@@ -86,6 +86,7 @@ _QVQ_CUDA_QWEN_COMPOSITE_INPUT_FP16_PADDED_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PRECONDITION_MULTIBLOCK_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_OP: Callable | None = None
+_QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP: Callable | None = None
 _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP: Callable | None = None
 _QVQ_CUDA_SWIGLU_PROXY_SCALES_OP: Callable | None = None
 _QVQ_CUDA_OP_LOCK = threading.Lock()
@@ -163,6 +164,7 @@ _QVQ_CUDA_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
         "swiglu_precondition",
         "swiglu_precondition_multiblock",
         "yaqa_feedback",
+        "yaqa_feedback_checked",
         "yaqa_feedback_update_",
         "norm_rank_telemetry_snapshot",
         "norm_rank_cache_size",
@@ -539,6 +541,20 @@ def _qvq_cuda_yaqa_feedback_update_op() -> Callable:
                     "qvq_cuda", "yaqa_feedback_update_"
                 )
     return _QVQ_CUDA_YAQA_FEEDBACK_UPDATE_OP
+
+
+def _qvq_cuda_yaqa_feedback_checked_op() -> Callable:
+    """Resolve fused factored-YAQA feedback with in-epilogue range validation."""
+
+    global _QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP
+    _require_qvq_cuda_op_warm(_QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP, "yaqa_feedback_checked")
+    if _QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP is None:
+        with _QVQ_CUDA_OP_LOCK:
+            if _QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP is None:
+                _QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP = _extension_api().op(
+                    "qvq_cuda", "yaqa_feedback_checked"
+                )
+    return _QVQ_CUDA_YAQA_FEEDBACK_CHECKED_OP
 
 
 def qvq_cuda_swiglu_proxy_scales(
