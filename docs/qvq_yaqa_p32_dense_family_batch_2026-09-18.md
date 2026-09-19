@@ -642,3 +642,37 @@ Neither experiment remains in source.
 
 This is quantization-only. Post-quant inference does not evaluate target-root
 norm bands, so there is no inference-side kernel or checkpoint-format change.
+
+### Rate-aware provisional-distance crossover
+
+The recommended `provisional` and `provisional_large_final` profiles now
+compare the older direct-distance recurrence with the newer exact norm-band
+path by rate and family batch size. Direct distance is retained only at and
+above the measured H100 crossover: batch 1 for W2.5, batch 64 for W3, and
+batch 16 for W3.5. Explicit all-direct diagnostic modes (`1` and `true`) keep
+their historical behavior.
+
+Matched two-family P32 overlap medians on H100 were:
+
+| Rate | Batch region | Exact norm-band | Direct distance | Selected path |
+|---|---:|---:|---:|---|
+| W2.5 | 1 | 428.75 us | 428.65 us | Direct (neutral) |
+| W2.5 | 8--128 | 0.802--3.424 ms | 0.782--2.917 ms | Direct, 1.026--1.173x |
+| W3 | 1--32 | 0.787--0.916 ms | 0.942--0.976 ms | Exact, 1.066--1.198x |
+| W3 | 64--128 | 1.784--3.566 ms | 1.726--3.274 ms | Direct, 1.034--1.089x |
+| W3.5 | 1--8 | 0.864--0.940 ms | 0.940--0.956 ms | Exact, 1.017--1.088x |
+| W3.5 | 16--128 | 0.970--3.704 ms | 0.958--3.395 ms | Direct, 1.013--1.214x |
+
+Below a crossover, the provisional profile now executes the exact default
+path and therefore produces the same overlap and downstream payload as exact
+quantization; this is a speed and rounding-quality mitigation, not a new
+approximation. Native tests compare those fallback overlaps bit-for-bit at W3
+and W3.5. Production-size batches remain on the previously dual-FP32/FP64 and
+disjoint-held-out-gated direct path, so their payload and quality result do not
+change.
+
+Two structural CUDA alternatives were rejected during this phase. Persisting
+the two bank CTAs as an SM90 cluster across all eight P32 segments was 4--5x
+slower because it prevented wave-level rescheduling. Halving the direct W3 and
+W3.5 CTAs increased each thread's serial candidate chain and regressed every
+measured cell. Neither experiment remains in source.

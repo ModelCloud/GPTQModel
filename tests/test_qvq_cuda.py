@@ -22,7 +22,9 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v2b4_bank_stack,
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
+    _qvq_cuda_family_tail_biting_overlaps,
     _qvq_family_final_direct_distance_enabled,
+    _qvq_family_provisional_direct_distance_enabled,
     _yaqa_inner_v2b2_family_batch_cuda,
     _yaqa_inner_v2b2_family_batch_dense_cuda,
     batched_viterbi_quantize,
@@ -4138,11 +4140,15 @@ def test_qvq_yaqa_fast_quality_profile_keeps_both_opt_ins_active(
     assert torch.isfinite(quantized).all()
     assert states.shape[-1] == 128
     assert selectors.dtype == torch.uint8
-    assert counters["viterbi_provisional_direct_distance"] > 0
-    assert counters["viterbi_provisional_midpoint_only"] > 0
-    assert counters["viterbi_provisional_states_produced"] == counters[
-        "viterbi_provisional_states_consumed"
-    ]
+    if direct_mode == "true":
+        assert counters["viterbi_provisional_direct_distance"] > 0
+        assert counters["viterbi_provisional_midpoint_only"] > 0
+        assert counters["viterbi_provisional_states_produced"] == counters[
+            "viterbi_provisional_states_consumed"
+        ]
+    else:
+        assert counters.get("viterbi_provisional_direct_distance", 0) == 0
+        assert counters.get("viterbi_provisional_midpoint_only", 0) == 0
     assert counters.get("viterbi_final_direct_distance", 0) == 0
 
 
@@ -4154,6 +4160,59 @@ def test_qvq_yaqa_large_final_distance_has_a_frozen_family_batch_gate(monkeypatc
     assert not _qvq_family_final_direct_distance_enabled(63)
     assert _qvq_family_final_direct_distance_enabled(64)
     assert _qvq_family_final_direct_distance_enabled(128)
+
+
+@pytest.mark.parametrize(
+    "transition_bits,batch,expected",
+    (
+        (5, 1, True),
+        (6, 63, False),
+        (6, 64, True),
+        (7, 15, False),
+        (7, 16, True),
+    ),
+)
+def test_qvq_yaqa_provisional_distance_uses_rate_specific_crossover(
+    transition_bits, batch, expected
+):
+    assert _qvq_family_provisional_direct_distance_enabled(
+        transition_bits, batch, mode="provisional"
+    ) is expected
+    # Explicit diagnostic mode retains the historical all-size behavior.
+    assert _qvq_family_provisional_direct_distance_enabled(
+        transition_bits, batch, mode="true"
+    )
+
+
+@pytest.mark.parametrize("bits,batch", ((3.0, 32), (3.5, 8)))
+def test_qvq_yaqa_provisional_small_batch_fallback_is_exact(
+    monkeypatch, bits, batch
+):
+    transition_bits = qvq_transition_bits(bits, vector_size=2)
+    generator = torch.Generator(device="cuda").manual_seed(20260926 + batch)
+    sequences = torch.randn(
+        (2, batch, 128, 2), generator=generator, device="cuda", dtype=torch.float32
+    )
+    banks = torch.stack(
+        tuple(
+            pgc16_codebook_v2_bank(bank, bits=bits, dtype=torch.float32)
+            for bank in range(2)
+        )
+    ).to(device="cuda", dtype=torch.float16)
+    family_stacks = torch.stack((banks, banks)).contiguous()
+
+    monkeypatch.setenv("GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "0")
+    expected = _qvq_cuda_family_tail_biting_overlaps(
+        sequences, family_stacks, transition_bits, telemetry=None
+    )
+    monkeypatch.setenv(
+        "GPTQMODEL_QVQ_YAQA_FAST_VITERBI_DISTANCE", "provisional"
+    )
+    actual = _qvq_cuda_family_tail_biting_overlaps(
+        sequences, family_stacks, transition_bits, telemetry=None
+    )
+
+    assert torch.equal(actual, expected)
 
 
 @pytest.mark.parametrize(("batch", "reference_mode"), ((63, "provisional"), (64, "1")))
