@@ -752,3 +752,34 @@ A Hopper shared-codebook experiment was rejected in this phase. Staging the
 loads but forced one large-shared-memory CTA per SM. H100 L2 already served the
 small family set effectively, so W2.5 was neutral and W3 regressed up to 1.6%;
 the prototype does not remain in source.
+
+### Native P32 family reconstruction
+
+Every family-batched Viterbi result previously returned compact uint8 P32
+selectors and int64 states, then reconstructed values through three generic
+PyTorch operations: selector widening, `repeat_interleave(16)`, and advanced
+codebook indexing. A native CUDA reconstruction kernel now consumes the
+compact selectors directly and gathers both coordinates of all 128 states in
+one launch. It is used by sampled family selection, Block-LDLQ family batches,
+dense attention YAQA, and factored wide-MLP YAQA. Telemetry reports
+`viterbi_family_reconstruct_calls`.
+
+Matched H100 medians over family batches 1--256 were `24.73--25.07 us` for the
+generic sequence and `4.80--4.91 us` for the native kernel, a
+`5.07--5.18x` operation speedup. The kernel supports both FP16 and FP32
+codebooks and avoids the temporary 128-element int64 bank map per sequence.
+
+A fresh matched W2.5 Llama 3.2 1B layer run invoked the kernel 2,752 times.
+Process quantization improved from 20.877 s to 20.719 s (1.008x), baseline
+encoding from 20.4199 s to 20.2772 s (1.007x), and prepare plus quantize from
+25.9108 s to 25.6295 s (1.011x). Calibration rows `[0,32)` and YAQA rows
+`[64,96)` remained strictly disjoint; the Fisher capture used 32 independent
+sequences and 11,992 valid tokens.
+
+All 174 serialized tensors were bit-identical. The independent q-projection
+oracle also remained identical with zero regression allowance: FP32
+`0.03627968207001686` and FP64 `0.036279682270234585` in both arms. Exact
+call-site coverage passed 23 focused CUDA tests across FP16/FP32 reconstruction,
+sampled selection, dense and factored YAQA, Block-LDLQ, and the fast-quality
+profile. Because the deployed payload is unchanged, the existing disjoint
+held-out result carries over exactly.

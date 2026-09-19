@@ -66,6 +66,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_viterbi_trusted,
     _qvq_cuda_viterbi_v2_segment_family_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_family_midpoint_trusted_op,
+    _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op,
     _qvq_cuda_viterbi_v2_segment_g_op,
     _qvq_cuda_viterbi_v2_segment_grid_trusted_op,
     _qvq_cuda_viterbi_v2_segment_midpoint_trusted_op,
@@ -2449,6 +2450,30 @@ def test_qvq_cuda_family_midpoint_matches_full_provisional_traceback(bits, batch
         transition_bits,
         16,
         None,
+    )
+
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.float32))
+def test_qvq_cuda_family_reconstruction_matches_selector_gather(dtype):
+    generator = torch.Generator(device="cuda").manual_seed(20260919)
+    families, batch = 3, 17
+    states = torch.randint(
+        0, 1 << 16, (families, batch, 128), generator=generator, device="cuda", dtype=torch.int64
+    )
+    selectors = torch.randint(
+        0, 2, (families, batch, 8), generator=generator, device="cuda", dtype=torch.uint8
+    )
+    codebooks = torch.randn(
+        (families, 2, 1 << 16, 2), generator=generator, device="cuda", dtype=dtype
+    )
+    path_banks = selectors.to(torch.long).repeat_interleave(16, dim=2)
+    family_indices = torch.arange(families, device="cuda").view(families, 1, 1)
+    expected = codebooks[family_indices, path_banks, states]
+
+    actual = _qvq_cuda_viterbi_v2_family_reconstruct_trusted_op()(
+        states, selectors, codebooks
     )
 
     assert torch.equal(actual, expected)

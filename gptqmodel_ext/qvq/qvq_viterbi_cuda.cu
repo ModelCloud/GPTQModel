@@ -2515,6 +2515,27 @@ __global__ __launch_bounds__(kThreads) void qvq_v2_segment_grid_finalize_kernel(
   }
 }
 
+template <typename CodebookScalar>
+__global__ void qvq_v2_family_reconstruct_kernel(
+    const int64_t* __restrict__ states,
+    const uint8_t* __restrict__ segment_bank_ids,
+    const CodebookScalar* __restrict__ codebooks,
+    CodebookScalar* __restrict__ reconstructed,
+    int family_batch) {
+  const int sequence = static_cast<int>(blockIdx.x);
+  const int family = sequence / family_batch;
+  constexpr int scalar_count = 128 * 2;
+  for (int scalar = static_cast<int>(threadIdx.x); scalar < scalar_count; scalar += blockDim.x) {
+    const int step = scalar >> 1;
+    const int coordinate = scalar & 1;
+    const int bank = static_cast<int>(segment_bank_ids[static_cast<int64_t>(sequence) * 8 + step / 16]);
+    const int64_t state = states[static_cast<int64_t>(sequence) * 128 + step];
+    const int64_t codebook_index =
+        ((static_cast<int64_t>(family) * 2 + bank) * kStateCount + state) * 2 + coordinate;
+    reconstructed[static_cast<int64_t>(sequence) * scalar_count + scalar] = codebooks[codebook_index];
+  }
+}
+
 template <int VectorSize>
 std::tuple<at::Tensor, at::Tensor> qvq_viterbi_cuda_impl(
     const at::Tensor& sequences,
@@ -4417,6 +4438,48 @@ at::Tensor qvq_viterbi_v2_segment_family_midpoint_trusted_cuda(
   return std::get<0>(result).view({families, family_batch});
 }
 
+at::Tensor qvq_viterbi_v2_family_reconstruct_trusted_cuda(
+    const at::Tensor& states,
+    const at::Tensor& segment_bank_ids,
+    const at::Tensor& codebooks) {
+  TORCH_CHECK(states.is_cuda() && segment_bank_ids.is_cuda() && codebooks.is_cuda(),
+              "family reconstruction tensors must be CUDA tensors");
+  TORCH_CHECK(states.dim() == 3 && states.size(2) == 128 && states.scalar_type() == at::kLong &&
+                  states.is_contiguous(),
+              "family reconstruction states must be contiguous int64 [families, batch, 128]");
+  TORCH_CHECK(segment_bank_ids.dim() == 3 && segment_bank_ids.size(0) == states.size(0) &&
+                  segment_bank_ids.size(1) == states.size(1) && segment_bank_ids.size(2) == 8 &&
+                  segment_bank_ids.scalar_type() == at::kByte && segment_bank_ids.is_contiguous(),
+              "family reconstruction selectors must be contiguous uint8 [families, batch, 8]");
+  TORCH_CHECK(codebooks.dim() == 4 && codebooks.size(0) == states.size(0) && codebooks.size(1) == 2 &&
+                  codebooks.size(2) == kStateCount && codebooks.size(3) == 2 && codebooks.is_contiguous() &&
+                  (codebooks.scalar_type() == at::kHalf || codebooks.scalar_type() == at::kFloat),
+              "family reconstruction codebooks must be contiguous FP16/FP32 [families, 2, 65536, 2]");
+  TORCH_CHECK(states.device() == segment_bank_ids.device() && states.device() == codebooks.device(),
+              "family reconstruction tensors must share one CUDA device");
+  const int64_t families = states.size(0);
+  const int64_t family_batch = states.size(1);
+  TORCH_CHECK(families > 0 && family_batch > 0,
+              "family reconstruction requires non-empty family and batch dimensions");
+  at::Tensor reconstructed = at::empty({families, family_batch, 128, 2}, codebooks.options());
+  const c10::cuda::CUDAGuard device_guard(states.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream(states.get_device());
+  const unsigned int blocks = static_cast<unsigned int>(families * family_batch);
+  if (codebooks.scalar_type() == at::kHalf) {
+    qvq_v2_family_reconstruct_kernel<half><<<blocks, 256, 0, stream>>>(
+        states.const_data_ptr<int64_t>(), segment_bank_ids.const_data_ptr<uint8_t>(),
+        reinterpret_cast<const half*>(codebooks.const_data_ptr()),
+        reinterpret_cast<half*>(reconstructed.mutable_data_ptr()), static_cast<int>(family_batch));
+  } else {
+    qvq_v2_family_reconstruct_kernel<float><<<blocks, 256, 0, stream>>>(
+        states.const_data_ptr<int64_t>(), segment_bank_ids.const_data_ptr<uint8_t>(),
+        codebooks.const_data_ptr<float>(), reconstructed.mutable_data_ptr<float>(),
+        static_cast<int>(family_batch));
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return reconstructed;
+}
+
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
@@ -4449,6 +4512,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
         "-> (Tensor, Tensor, Tensor)");
   m.def("viterbi_v2_segment_family_midpoint_trusted(Tensor sequences, Tensor codebooks, "
         "int transition_bits, int segment_steps, Tensor? step_weights=None) -> Tensor");
+  m.def("viterbi_v2_family_reconstruct_trusted(Tensor states, Tensor segment_bank_ids, "
+        "Tensor codebooks) -> Tensor");
   // No tensor arguments, so this is a catch-all (dispatch-key-free) kernel.
   m.def("fused_family_grid_dispatch_count() -> int", &qvq_fused_family_grid_dispatch_count);
   m.def("norm_rank_grid_dispatch_count() -> int", &qvq_norm_rank_grid_dispatch_count);
@@ -4471,4 +4536,5 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq, CUDA, m) {
   m.impl("viterbi_v2_segment_midpoint_trusted", &qvq_viterbi_v2_segment_midpoint_trusted_cuda);
   m.impl("viterbi_v2_segment_family_grid_trusted", &qvq_viterbi_v2_segment_family_grid_trusted_cuda);
   m.impl("viterbi_v2_segment_family_midpoint_trusted", &qvq_viterbi_v2_segment_family_midpoint_trusted_cuda);
+  m.impl("viterbi_v2_family_reconstruct_trusted", &qvq_viterbi_v2_family_reconstruct_trusted_cuda);
 }
