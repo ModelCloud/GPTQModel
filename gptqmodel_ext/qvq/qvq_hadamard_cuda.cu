@@ -47,6 +47,7 @@ struct QvqHadamardTraits<float> {
 };
 
 constexpr int kHadamardThreads = 1024;
+constexpr int kFlashNextCompositeThreads = 640;
 constexpr int kFp8QuantizeThreads = 256;
 constexpr int kHadamardPairMultiblockN = 8192;
 constexpr int kHadamardPairMultiblockTile = 256;
@@ -1503,72 +1504,170 @@ __global__ void qvq_qwen_composite_recovery_high_kernel(
 }
 
 // Exact shared Qwen3.8 input transform.  The historical composite path first
-// rounds x*SU to FP16, divides by FP16(sqrt(5120)) and rounds again, performs
-// H128 with an FP16 boundary after every butterfly, then rounds the H40 base
-// result once.  One kernel preserves that order and writes the WGMMA M16 zero
-// tail without a separate allocation/fill/copy sequence.
+// narrows BF16 when applicable, rounds x*SU to FP16, divides by
+// FP16(sqrt(N)) and rounds again, performs H64/H128 with an FP16 boundary
+// after every butterfly, then rounds the H40 base result once.  One kernel
+// preserves that order; the N=5120 form also writes the WGMMA M16 zero tail.
+template <typename InputScalar, int CompositeN>
 __global__ void __launch_bounds__(kHadamardThreads)
 qvq_qwen_composite_input_fp16_padded_kernel(
-    const half* __restrict__ input,
+    const InputScalar* __restrict__ input,
     const half* __restrict__ base,
     const half* __restrict__ pre_scale,
     half* __restrict__ output,
     int logical_rows) {
   const int row = static_cast<int>(blockIdx.x);
   if (row >= logical_rows) {
-    for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
+    for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
          column += static_cast<int>(blockDim.x)) {
-      output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
+      output[static_cast<int64_t>(row) * CompositeN + column] =
           __float2half_rn(0.0f);
     }
     return;
   }
 
+  constexpr int CompositeBase = 40;
+  constexpr int CompositeLowN = CompositeN / CompositeBase;
   extern __shared__ float low[];
   const float divisor = __half2float(
-      __float2half_rn(sqrtf(static_cast<float>(kQwenCompositeN))));
-  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
-       column += static_cast<int>(blockDim.x)) {
-    const int64_t offset =
-        static_cast<int64_t>(row) * kQwenCompositeN + column;
-    const half scaled = __float2half_rn(
-        __fmul_rn(__half2float(input[offset]), __half2float(pre_scale[column])));
-    low[column] = __half2float(
-        __float2half_rn(__half2float(scaled) / divisor));
-  }
-  __syncthreads();
-
+      __float2half_rn(sqrtf(static_cast<float>(CompositeN))));
+  if constexpr (CompositeLowN == 64) {
+    // Each H64 is independent.  Keep its complete ascending FP16 butterfly
+    // tree in one warp, with one value from each 32-wide half in every lane.
+    // This removes six block barriers and all intermediate shared-memory
+    // traffic without changing an arithmetic operation or rounding boundary.
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int warps = static_cast<int>(blockDim.x) >> 5;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
 #pragma unroll
-  for (int bit = 1; bit < kQwenCompositeLowN; bit <<= 1) {
-    for (int column = static_cast<int>(threadIdx.x);
-         column < kQwenCompositeN;
-         column += static_cast<int>(blockDim.x)) {
-      const int local = column & (kQwenCompositeLowN - 1);
-      const int peer = column ^ bit;
-      if (local < (local ^ bit)) {
-        const float a = low[column];
-        const float b = low[peer];
-        low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
-        low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+    for (int group_pass = 0; group_pass < 2; ++group_pass) {
+      const int source = warp + group_pass * warps;
+      if (source < CompositeBase) {
+        const int column0 = source * 64 + lane;
+        const int column1 = column0 + 32;
+        const int64_t row_offset = static_cast<int64_t>(row) * CompositeN;
+        const half scaled0 = __float2half_rn(__fmul_rn(
+            QvqHadamardTraits<InputScalar>::to_float(
+                input[row_offset + column0]),
+            __half2float(pre_scale[column0])));
+        const half scaled1 = __float2half_rn(__fmul_rn(
+            QvqHadamardTraits<InputScalar>::to_float(
+                input[row_offset + column1]),
+            __half2float(pre_scale[column1])));
+        float value0 = __half2float(
+            __float2half_rn(__half2float(scaled0) / divisor));
+        float value1 = __half2float(
+            __float2half_rn(__half2float(scaled1) / divisor));
+#pragma unroll
+        for (int bit = 1; bit < 32; bit <<= 1) {
+          const float peer0 = __shfl_xor_sync(0xffffffffu, value0, bit);
+          const float peer1 = __shfl_xor_sync(0xffffffffu, value1, bit);
+          value0 = __half2float(__float2half_rn(
+              (lane & bit) == 0 ? __fadd_rn(value0, peer0)
+                                : __fsub_rn(peer0, value0)));
+          value1 = __half2float(__float2half_rn(
+              (lane & bit) == 0 ? __fadd_rn(value1, peer1)
+                                : __fsub_rn(peer1, value1)));
+        }
+        const float lower = value0;
+        const float upper = value1;
+        low[column0] =
+            __half2float(__float2half_rn(__fadd_rn(lower, upper)));
+        low[column1] =
+            __half2float(__float2half_rn(__fsub_rn(lower, upper)));
       }
     }
     __syncthreads();
+  } else {
+    for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int64_t offset =
+          static_cast<int64_t>(row) * CompositeN + column;
+      const half scaled = __float2half_rn(
+          __fmul_rn(
+              QvqHadamardTraits<InputScalar>::to_float(input[offset]),
+              __half2float(pre_scale[column])));
+      low[column] = __half2float(
+          __float2half_rn(__half2float(scaled) / divisor));
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int bit = 1; bit < CompositeLowN; bit <<= 1) {
+      for (int column = static_cast<int>(threadIdx.x);
+           column < CompositeN;
+           column += static_cast<int>(blockDim.x)) {
+        const int local = column & (CompositeLowN - 1);
+        const int peer = column ^ bit;
+        if (local < (local ^ bit)) {
+          const float a = low[column];
+          const float b = low[peer];
+          low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
+          low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+        }
+      }
+      __syncthreads();
+    }
   }
 
-  for (int column = static_cast<int>(threadIdx.x); column < kQwenCompositeN;
-       column += static_cast<int>(blockDim.x)) {
-    const int base_row = column / kQwenCompositeLowN;
-    const int local = column & (kQwenCompositeLowN - 1);
-    float value = 0.0f;
+  if constexpr (CompositeLowN == 64) {
+    // The 640-thread launch owns exactly four outputs per thread.  Interleave
+    // their independent H40 chains to hide FP32 FMA latency while retaining
+    // ascending source order independently for every output.
+    const int column0 = static_cast<int>(threadIdx.x);
+    const int column1 = column0 + kFlashNextCompositeThreads;
+    const int column2 = column1 + kFlashNextCompositeThreads;
+    const int column3 = column2 + kFlashNextCompositeThreads;
+    const int base_row0 = column0 / CompositeLowN;
+    const int base_row1 = column1 / CompositeLowN;
+    const int base_row2 = column2 / CompositeLowN;
+    const int base_row3 = column3 / CompositeLowN;
+    const int local = column0 & (CompositeLowN - 1);
+    float value0 = 0.0f;
+    float value1 = 0.0f;
+    float value2 = 0.0f;
+    float value3 = 0.0f;
 #pragma unroll
-    for (int source = 0; source < kQwenCompositeBase; ++source) {
-      value = __fmaf_rn(
-          __half2float(base[base_row * kQwenCompositeBase + source]),
-          low[source * kQwenCompositeLowN + local],
-          value);
+    for (int source = 0; source < CompositeBase; ++source) {
+      const float low_value = low[source * CompositeLowN + local];
+      value0 = __fmaf_rn(
+          __half2float(base[base_row0 * CompositeBase + source]),
+          low_value,
+          value0);
+      value1 = __fmaf_rn(
+          __half2float(base[base_row1 * CompositeBase + source]),
+          low_value,
+          value1);
+      value2 = __fmaf_rn(
+          __half2float(base[base_row2 * CompositeBase + source]),
+          low_value,
+          value2);
+      value3 = __fmaf_rn(
+          __half2float(base[base_row3 * CompositeBase + source]),
+          low_value,
+          value3);
     }
-    output[static_cast<int64_t>(row) * kQwenCompositeN + column] =
-        __float2half_rn(value);
+    const int64_t output_offset = static_cast<int64_t>(row) * CompositeN;
+    output[output_offset + column0] = __float2half_rn(value0);
+    output[output_offset + column1] = __float2half_rn(value1);
+    output[output_offset + column2] = __float2half_rn(value2);
+    output[output_offset + column3] = __float2half_rn(value3);
+  } else {
+    for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int base_row = column / CompositeLowN;
+      const int local = column & (CompositeLowN - 1);
+      float value = 0.0f;
+#pragma unroll
+      for (int source = 0; source < CompositeBase; ++source) {
+        value = __fmaf_rn(
+            __half2float(base[base_row * CompositeBase + source]),
+            low[source * CompositeLowN + local],
+            value);
+      }
+      output[static_cast<int64_t>(row) * CompositeN + column] =
+          __float2half_rn(value);
+    }
   }
 }
 
@@ -3354,18 +3453,25 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
       input.device() == base.device() && input.device() == pre_scale.device(),
       "Qwen composite input tensors must share a device");
   TORCH_CHECK(
-      input.scalar_type() == at::kHalf && input.dim() == 2 &&
+      input.dim() == 2 &&
           input.size(0) >= 1 && input.size(0) <= 16 &&
-          input.size(1) == kQwenCompositeN && input.is_contiguous(),
-      "Qwen composite input must be contiguous FP16 [1..16, 5120]");
+          ((input.size(1) == kQwenCompositeN &&
+            input.scalar_type() == at::kHalf) ||
+           (input.size(1) == 2560 &&
+            (input.scalar_type() == at::kHalf ||
+             input.scalar_type() == at::kBFloat16))) &&
+          input.is_contiguous(),
+      "Qwen composite input must be contiguous FP16 [1..16, 5120] or "
+      "FP16/BF16 [1..16, 2560]");
+  const int64_t composite_n = input.size(1);
   TORCH_CHECK(
       base.scalar_type() == at::kHalf && base.is_contiguous() &&
           base.numel() == kQwenCompositeBase * kQwenCompositeBase,
       "Qwen composite input base must be contiguous FP16 [40, 40]");
   TORCH_CHECK(
       pre_scale.scalar_type() == at::kHalf && pre_scale.is_contiguous() &&
-          pre_scale.numel() == kQwenCompositeN,
-      "Qwen composite input scale must be contiguous FP16 [5120]");
+          pre_scale.numel() == composite_n,
+      "Qwen composite input scale must be contiguous FP16 [N]");
 
   const c10::cuda::CUDAGuard device_guard(input.device());
   cudaDeviceProp properties{};
@@ -3374,24 +3480,58 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
       properties.major == 9 && properties.minor == 0 &&
           std::strcmp(properties.name, "NVIDIA H100") == 0,
       "Qwen composite input requires the measured physical H100");
-  const size_t smem_bytes = kQwenCompositeN * sizeof(float);
+  const size_t smem_bytes = composite_n * sizeof(float);
+  const bool flash_next = composite_n == 2560;
+  const int64_t output_rows = flash_next ? input.size(0) : 16;
   auto output = at::empty(
-      {16, kQwenCompositeN}, input.options().dtype(at::kHalf));
+      {output_rows, composite_n}, input.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  C10_CUDA_CHECK(cudaFuncSetAttribute(
-      qvq_qwen_composite_input_fp16_padded_kernel,
-      cudaFuncAttributeMaxDynamicSharedMemorySize,
-      static_cast<int>(smem_bytes)));
-  qvq_qwen_composite_input_fp16_padded_kernel<<<
-      16,
-      kHadamardThreads,
-      smem_bytes,
-      stream>>>(
-      reinterpret_cast<const half*>(input.const_data_ptr()),
-      reinterpret_cast<const half*>(base.const_data_ptr()),
-      reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
-      reinterpret_cast<half*>(output.mutable_data_ptr()),
-      static_cast<int>(input.size(0)));
+  if (flash_next && input.scalar_type() == at::kBFloat16) {
+    auto kernel =
+        qvq_qwen_composite_input_fp16_padded_kernel<nv_bfloat16, 2560>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes)));
+    kernel<<<
+        static_cast<unsigned>(output_rows),
+        kFlashNextCompositeThreads,
+        smem_bytes,
+        stream>>>(
+        reinterpret_cast<const nv_bfloat16*>(input.const_data_ptr()),
+        reinterpret_cast<const half*>(base.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(output.mutable_data_ptr()),
+        static_cast<int>(input.size(0)));
+  } else if (flash_next) {
+    auto kernel = qvq_qwen_composite_input_fp16_padded_kernel<half, 2560>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes)));
+    kernel<<<
+        static_cast<unsigned>(output_rows),
+        kFlashNextCompositeThreads,
+        smem_bytes,
+        stream>>>(
+        reinterpret_cast<const half*>(input.const_data_ptr()),
+        reinterpret_cast<const half*>(base.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(output.mutable_data_ptr()),
+        static_cast<int>(input.size(0)));
+  } else {
+    auto kernel = qvq_qwen_composite_input_fp16_padded_kernel<half, 5120>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes)));
+    kernel<<<16, kHadamardThreads, smem_bytes, stream>>>(
+        reinterpret_cast<const half*>(input.const_data_ptr()),
+        reinterpret_cast<const half*>(base.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(output.mutable_data_ptr()),
+        static_cast<int>(input.size(0)));
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }

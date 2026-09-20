@@ -1066,6 +1066,14 @@ class QVQHopperGroupedRuntime:
             # Decode-sized M1/M2/M4 retains the lower-latency staged path.
             and rows >= 8
         )
+        use_flash_next_composite_input = (
+            self._h100_flash_next_expert_group_enabled
+            and x.dtype in (torch.float16, torch.bfloat16)
+            and children[0].activation is None
+            and children[0].input_hadamard
+            and children[0].in_features == 2560
+            and rows <= 16
+        )
         rank8_hiddens = {}
         producer_children = tuple(
             child for child in children
@@ -1095,6 +1103,24 @@ class QVQHopperGroupedRuntime:
             )
             rank8_hiddens = {id(child): hidden for child, hidden in zip(producer_children, hiddens, strict=True)}
             padded = torch.nn.functional.pad(transformed, (0, 0, 0, padded_rows - rows))
+        elif use_flash_next_composite_input:
+            from ..quantization.rotation.hadamard_utils import _get_hadK_on
+            from ..utils.qvq_cuda import (
+                qvq_cuda_flash_next_composite_input_to_fp16,
+            )
+
+            input_scale = children[0]._cached_cast("SU", torch.float16)
+            base, base_width = _get_hadK_on(input_scale, False)
+            if base is None or base_width != 40:
+                raise _R0Fallback(
+                    "Flash-Next 2560 input requires its canonical H40 base"
+                )
+            padded = qvq_cuda_flash_next_composite_input_to_fp16(
+                x_2d.contiguous(),
+                base=base,
+                pre_scale=input_scale,
+            )
+            self.telemetry.h100_qwen_composite_input_launches += 1
         elif use_qwen_composite_input:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
             from ..utils.qvq_cuda import qvq_cuda_qwen_composite_input_fp16_padded
