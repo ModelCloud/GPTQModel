@@ -292,7 +292,8 @@ def test_grouped_dispatch_is_one_native_call_with_resolved_plans(monkeypatch):
     )
 
     assert len(calls) == 1
-    assert calls[0][4:] == (7, [64, 32], [3, 1], [2, 4])
+    assert calls[0][4:8] == (7, [64, 32], [3, 1], [2, 4])
+    assert calls[0][-1] is False
     assert [tuple(output.shape) for output in outputs] == [(1, 64), (1, 32)]
 
 

@@ -4415,7 +4415,8 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     at::IntArrayRef split_counts,
     const c10::optional<at::Tensor>& rank8_a = c10::nullopt,
     const c10::optional<at::Tensor>& rank8_b = c10::nullopt,
-    at::ArrayRef<double> rank8_scales = {}) {
+    at::ArrayRef<double> rank8_scales = {},
+    bool return_ordered_partials = false) {
   constexpr int kWordsPerTile = 4 * TransitionBits;
   const int64_t segment_count = static_cast<int64_t>(out_features.size());
   TORCH_CHECK(
@@ -4428,6 +4429,9 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   TORCH_CHECK(
       rank8_a.has_value() == rank8_b.has_value(),
       "rank8_a and rank8_b must be provided together for grouped P32");
+  TORCH_CHECK(
+      !return_ordered_partials || !rank8_a.has_value(),
+      "ordered grouped partial output does not support rank-8 correction");
   TORCH_CHECK(
       rank8_scales.empty() ||
           static_cast<int64_t>(rank8_scales.size()) == segment_count,
@@ -4864,6 +4868,13 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
+  if (return_ordered_partials) {
+    TORCH_CHECK(
+        needs_reduction && partial_values > 0,
+        "ordered grouped partial output requires split decoding");
+    return partial_output;
+  }
+
   if (rank8_a.has_value()) {
     auto rank8_down = at::mm(input, *rank8_a, at::kFloat);
     constexpr int kReductionThreads = 256;
@@ -5233,24 +5244,25 @@ at::Tensor p32_window_ampere_grouped_fused(
     at::IntArrayRef split_counts,
     const c10::optional<at::Tensor>& rank8_a,
     const c10::optional<at::Tensor>& rank8_b,
-    at::ArrayRef<double> rank8_scales) {
+    at::ArrayRef<double> rank8_scales,
+    bool return_ordered_partials) {
   switch (transition_bits) {
     case 4:
       return p32_window_ampere_grouped_fused_impl<4>(
           input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
-          rank8_a, rank8_b, rank8_scales);
+          rank8_a, rank8_b, rank8_scales, return_ordered_partials);
     case 5:
       return p32_window_ampere_grouped_fused_impl<5>(
           input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
-          rank8_a, rank8_b, rank8_scales);
+          rank8_a, rank8_b, rank8_scales, return_ordered_partials);
     case 6:
       return p32_window_ampere_grouped_fused_impl<6>(
           input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
-          rank8_a, rank8_b, rank8_scales);
+          rank8_a, rank8_b, rank8_scales, return_ordered_partials);
     case 7:
       return p32_window_ampere_grouped_fused_impl<7>(
           input, trellis, levels, bank_ids, out_features, bank_alt_ids, split_counts,
-          rank8_a, rank8_b, rank8_scales);
+          rank8_a, rank8_b, rank8_scales, return_ordered_partials);
     default:
       TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
   }
@@ -5327,7 +5339,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_ampere, m) {
   m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1, Tensor? rank8_a=None, Tensor? rank8_b=None, float rank8_scale=1.0, Tensor? rank8_down=None, bool return_ordered_partials=False) -> Tensor");
   m.def("rank8_project(Tensor input, Tensor rank8_a) -> Tensor");
   m.def("p32_window_grouped(Tensor input, Tensor[] trellises, Tensor levels, Tensor[] bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor[]");
-  m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, Tensor? rank8_a=None, Tensor? rank8_b=None, float[] rank8_scales=[]) -> Tensor");
+  m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, Tensor? rank8_a=None, Tensor? rank8_b=None, float[] rank8_scales=[], bool return_ordered_partials=False) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_qvq_ampere, CUDA, m) {

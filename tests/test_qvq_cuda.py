@@ -1731,17 +1731,20 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(
 
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
-@pytest.mark.parametrize("split_count", (5, 10))
+@pytest.mark.parametrize(
+    ("n", "split_count", "compact_rows"),
+    ((17408, 5, False), (17408, 10, False), (640, 32, True)),
+)
 @pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
 def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
-    m, with_bias, split_count, model_dtype
+    m, with_bias, n, split_count, compact_rows, model_dtype
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("ordered folded SwiGLU precondition requires Hopper")
-    n = 17408
     generator = torch.Generator(device="cuda").manual_seed(20260960 + m)
+    partial_rows = m if compact_rows else 16
     partials = torch.randn(
-        (2, split_count, 16, n), generator=generator, device="cuda"
+        (2, split_count, partial_rows, n), generator=generator, device="cuda"
     ) * 0.02
     gate_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
     up_scale_half = torch.randn((n,), generator=generator, device="cuda", dtype=torch.float16)
@@ -1753,7 +1756,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
 
     reduced = []
     for child in range(2):
-        value = torch.zeros((16, n), device="cuda")
+        value = torch.zeros((partial_rows, n), device="cuda")
         for split in range(split_count):
             value = value + partials[child, split]
         reduced.append(value)
