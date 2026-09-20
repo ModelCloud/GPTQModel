@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from transformers import AutoModelForImageTextToText
+from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
@@ -72,4 +72,27 @@ class Qwen4ExpQModel(BaseQModel):
     ]
 
 
-__all__ = ["Qwen4ExpQModel"]
+class Qwen4ExpTextQModel(Qwen4ExpQModel):
+    """Qwen4-Exp text-only checkpoints with the standalone decoder layout."""
+
+    loader = AutoModelForCausalLM
+    require_load_processor = False
+
+    # The text model stores its decoder directly under ``model`` rather than
+    # under the multimodal wrapper's ``model.language_model``.
+    pre_lm_head_norm_module = "model.hyper_connection_mixer"
+    rotary_embedding = "model.rotary_emb"
+
+    # The text checkpoint already uses this model type, so conversion mapping
+    # inference can read it directly from the target model's config.
+    hf_conversion_model_type_alias = None
+
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        Qwen4ExpQModel.module_tree[-1],
+    ]
+
+
+__all__ = ["Qwen4ExpQModel", "Qwen4ExpTextQModel"]

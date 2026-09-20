@@ -204,7 +204,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
 | PanGu-α | `gpt_pangu` |
 | Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
-| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
+| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp`, `qwen4_exp_text` |
 | Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
 | Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
 | Qwen-Drive 1.0 | `qwen_drive` |
@@ -224,6 +224,8 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Zamba / Zamba2 | `zamba`, `zamba2` |
 | ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
+
+`qwen4_exp` covers the multimodal wrapper, while `qwen4_exp_text` covers standalone causal-LM checkpoints such as [Whittle-Next-27B-A3B](https://huggingface.co/logic65/Whittle-Next-27B-A3B).
 
 Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
 
