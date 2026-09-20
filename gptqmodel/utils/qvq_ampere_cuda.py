@@ -880,6 +880,7 @@ def qvq_p32_window_ampere(
     rank8_b: torch.Tensor | None = None,
     rank8_scale: float = 1.0,
     rank8_down: torch.Tensor | None = None,
+    return_ordered_partials: bool = False,
 ) -> torch.Tensor:
     """Run exact continuous-window P32 with an optional additive rank-8 update.
 
@@ -908,6 +909,10 @@ def qvq_p32_window_ampere(
         _device_sm_count(input.device)
     if rank8_down is not None and rank8_a is not None:
         raise ValueError("rank8_a and rank8_down are mutually exclusive")
+    if return_ordered_partials and (
+        rank8_a is not None or rank8_b is not None or rank8_down is not None
+    ):
+        raise ValueError("ordered partial output does not support rank-8 correction")
     if rank8_down is not None and rank8_b is None:
         raise ValueError("rank8_down requires rank8_b")
     if rank8_down is None and (rank8_a is None) != (rank8_b is None):
@@ -1237,6 +1242,11 @@ def qvq_p32_window_ampere(
                 out_features,
                 bank_alt_id,
                 down_split,
+                None,
+                None,
+                1.0,
+                None,
+                return_ordered_partials,
             )
     if (
         split_count == 0
@@ -1433,6 +1443,11 @@ def qvq_p32_window_ampere(
         out_features,
         bank_alt_id,
         split_count,
+        None,
+        None,
+        1.0,
+        None,
+        return_ordered_partials,
     )
 
 

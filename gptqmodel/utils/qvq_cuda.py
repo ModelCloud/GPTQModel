@@ -1524,18 +1524,24 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
     logical_rows: int,
     bias: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Reduce ordered Qwen down partials directly through H40 x H128."""
+    """Reduce ordered Qwen down partials through their H40 composite."""
 
+    n = post_scale.numel()
+    valid_splits = (16, 24, 40) if n == 2560 else (17, 34)
     if (
         partials.device.type != "cuda"
         or partials.dtype != torch.float32
         or not partials.is_contiguous()
-        or split_count not in (17, 34)
-        or partials.numel() != split_count * 16 * 5120
+        or n not in (2560, 5120)
+        or split_count not in valid_splits
+        or partials.numel() % (split_count * n) != 0
     ):
-        raise ValueError("Qwen ordered composite partials must be FP32 split-major M16x5120")
+        raise ValueError("Qwen ordered composite partial layout is invalid")
     if not 0 < logical_rows <= 16:
         raise ValueError("Qwen ordered composite logical rows must be in [1, 16]")
+    partial_rows = partials.numel() // (split_count * n)
+    if not logical_rows <= partial_rows <= 16:
+        raise ValueError("Qwen ordered composite partial rows are invalid")
     if (
         base.device != partials.device
         or base.dtype != torch.float16
@@ -1551,10 +1557,10 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
         if (
             tensor.device != partials.device
             or tensor.dtype != torch.float32
-            or tensor.numel() != 5120
+            or tensor.numel() != n
             or not tensor.is_contiguous()
         ):
-            raise ValueError(f"{name} must be contiguous CUDA FP32 [5120]")
+            raise ValueError(f"{name} must be contiguous CUDA FP32 [{n}]")
     properties = torch.cuda.get_device_properties(partials.device)
     if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         raise RuntimeError("Qwen ordered composite recovery requires the measured physical H100")

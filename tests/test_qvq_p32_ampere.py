@@ -119,7 +119,7 @@ def test_p32_ampere_dispatches_flash_next_gate_up_shape_policy(
         bank_alt_id=1,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == expected_split
+    assert calls[0][7] == expected_split
 
     # A bridge-selected split remains authoritative over the native policy.
     qvq_ampere_cuda.qvq_p32_window_ampere(
@@ -133,7 +133,78 @@ def test_p32_ampere_dispatches_flash_next_gate_up_shape_policy(
         split_count=7,
     )
     assert len(calls) == 2
-    assert calls[-1][-1] == 7
+    assert calls[-1][7] == 7
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+@pytest.mark.parametrize(
+    ("size_m", "split_count"), ((1, 24), (4, 40), (16, 16))
+)
+def test_p32_ampere_flash_next_down_ordered_partials_match_reducer(
+    size_m, split_count
+):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (
+        properties.major,
+        properties.minor,
+    ) != (9, 0):
+        pytest.skip("Flash-Next ordered down partials require the physical H100")
+
+    bits = 3.0
+    in_features = 640
+    out_features = 2560
+    tile_count = (in_features // 16) * (out_features // 16)
+    generator = torch.Generator(device="cuda").manual_seed(20261240 + size_m)
+    planar = torch.randint(
+        0,
+        1 << 32,
+        (tile_count, qvq_words_per_tile(bits, weight_count=256, vector_size=2)),
+        generator=generator,
+        device="cuda",
+        dtype=torch.int64,
+    ).to(torch.int32)
+    window = repack_p32_planar_to_window(planar, bits=bits)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    levels = pgc16_levels_for_version(PGC16_CODEBOOK_VERSION).contiguous().cuda()
+    input = (
+        torch.randn((size_m, in_features), generator=generator, device="cuda")
+        * 0.1
+    ).half()
+
+    complete = qvq_p32_window_ampere(
+        input,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        split_count=split_count,
+    )
+    partials = qvq_p32_window_ampere(
+        input,
+        window,
+        levels,
+        bank_ids,
+        bits,
+        out_features=out_features,
+        split_count=split_count,
+        return_ordered_partials=True,
+    )
+    reduced = torch.zeros_like(complete)
+    for split in range(split_count):
+        reduced = reduced + partials[split]
+
+    assert partials.shape == (split_count, size_m, out_features)
+    assert torch.equal(reduced, complete)
 
 
 @pytest.mark.parametrize(
@@ -158,7 +229,21 @@ def test_p32_ampere_dispatches_flash_next_down_shape_policy(
         bank_alt_id=2,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == expected_split
+    assert calls[0][7] == expected_split
+
+    qvq_ampere_cuda.qvq_p32_window_ampere(
+        input,
+        input,
+        input,
+        input,
+        3,
+        out_features=2560,
+        bank_alt_id=2,
+        return_ordered_partials=True,
+    )
+    assert len(calls) == 2
+    assert calls[1][7] == expected_split
+    assert calls[1][-1] is True
 
 
 @pytest.mark.parametrize(
@@ -183,7 +268,7 @@ def test_p32_ampere_dispatches_flash_next_o_shape_policy(
         bank_alt_id=2,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == expected_split
+    assert calls[0][7] == expected_split
 
     # A bridge-selected split is authoritative and must not be replaced by
     # the native shape policy.
@@ -198,7 +283,7 @@ def test_p32_ampere_dispatches_flash_next_o_shape_policy(
         split_count=7,
     )
     assert len(calls) == 2
-    assert calls[-1][-1] == 7
+    assert calls[-1][7] == 7
 
 
 @pytest.mark.parametrize(
@@ -223,7 +308,7 @@ def test_p32_ampere_dispatches_flash_next_q_shape_policy(
         bank_alt_id=2,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == expected_split
+    assert calls[0][7] == expected_split
 
     qvq_ampere_cuda.qvq_p32_window_ampere(
         input,
@@ -236,7 +321,7 @@ def test_p32_ampere_dispatches_flash_next_q_shape_policy(
         split_count=8,
     )
     assert len(calls) == 2
-    assert calls[-1][-1] == 8
+    assert calls[-1][7] == 8
 
 
 @pytest.mark.parametrize(
@@ -393,7 +478,7 @@ def test_p32_ampere_large_m_uses_single_k_wave(monkeypatch):
         split_count=1,
     )
     assert len(calls) == 1
-    assert calls[0][-1] == 1
+    assert calls[0][7] == 1
 
 
 @pytest.mark.parametrize("rate", (2, 2.5, 3, 3.5))

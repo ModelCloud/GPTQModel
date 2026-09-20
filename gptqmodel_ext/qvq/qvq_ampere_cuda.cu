@@ -2668,7 +2668,8 @@ at::Tensor p32_window_ampere_impl(
     const c10::optional<at::Tensor>& rank8_a = c10::nullopt,
     const c10::optional<at::Tensor>& rank8_b = c10::nullopt,
     double rank8_scale = 1.0,
-    const c10::optional<at::Tensor>& rank8_down = c10::nullopt) {
+    const c10::optional<at::Tensor>& rank8_down = c10::nullopt,
+    bool return_ordered_partials = false) {
   constexpr int kWordsPerTile = 4 * TransitionBits;
   TORCH_CHECK(input.is_cuda(), "QVQ P32 Ampere input must be CUDA");
   TORCH_CHECK(
@@ -2705,6 +2706,11 @@ at::Tensor p32_window_ampere_impl(
   TORCH_CHECK(
       !(rank8_a.has_value() && rank8_down.has_value()),
       "rank8_a and rank8_down are mutually exclusive");
+  TORCH_CHECK(
+      !return_ordered_partials ||
+          (!rank8_a.has_value() && !rank8_b.has_value() &&
+           !rank8_down.has_value() && split_count > 1),
+      "ordered partial output requires an uncorrected split window decode");
   if (rank8_a.has_value()) {
     const at::Tensor& projection_a = *rank8_a;
     const at::Tensor& projection_b = *rank8_b;
@@ -4078,6 +4084,10 @@ at::Tensor p32_window_ampere_impl(
     return output;
   }
 
+  if (return_ordered_partials) {
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return partial_output;
+  }
   if (split_count > 1) {
     constexpr int kReductionThreads = 256;
     const int output_values = size_m * size_n;
@@ -4350,24 +4360,25 @@ at::Tensor p32_window_ampere(
     const c10::optional<at::Tensor>& rank8_a,
     const c10::optional<at::Tensor>& rank8_b,
     double rank8_scale,
-    const c10::optional<at::Tensor>& rank8_down) {
+    const c10::optional<at::Tensor>& rank8_down,
+    bool return_ordered_partials) {
   switch (transition_bits) {
     case 4:
       return p32_window_ampere_impl<4>(
           input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
-          rank8_a, rank8_b, rank8_scale, rank8_down);
+          rank8_a, rank8_b, rank8_scale, rank8_down, return_ordered_partials);
     case 5:
       return p32_window_ampere_impl<5>(
           input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
-          rank8_a, rank8_b, rank8_scale, rank8_down);
+          rank8_a, rank8_b, rank8_scale, rank8_down, return_ordered_partials);
     case 6:
       return p32_window_ampere_impl<6>(
           input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
-          rank8_a, rank8_b, rank8_scale, rank8_down);
+          rank8_a, rank8_b, rank8_scale, rank8_down, return_ordered_partials);
     case 7:
       return p32_window_ampere_impl<7>(
           input, trellis, levels, bank_ids, out_features, bank_alt_id, split_count,
-          rank8_a, rank8_b, rank8_scale, rank8_down);
+          rank8_a, rank8_b, rank8_scale, rank8_down, return_ordered_partials);
     default:
       TORCH_CHECK(false, "QVQ P32 Ampere transition bits must be in [4, 7]");
   }
@@ -5313,7 +5324,7 @@ std::vector<at::Tensor> p32_window_ampere_grouped(
 }  // namespace
 
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_ampere, m) {
-  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1, Tensor? rank8_a=None, Tensor? rank8_b=None, float rank8_scale=1.0, Tensor? rank8_down=None) -> Tensor");
+  m.def("p32_window(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int out_features, int bank_alt_id=3, int split_count=1, Tensor? rank8_a=None, Tensor? rank8_b=None, float rank8_scale=1.0, Tensor? rank8_down=None, bool return_ordered_partials=False) -> Tensor");
   m.def("rank8_project(Tensor input, Tensor rank8_a) -> Tensor");
   m.def("p32_window_grouped(Tensor input, Tensor[] trellises, Tensor levels, Tensor[] bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts) -> Tensor[]");
   m.def("p32_window_grouped_fused(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int transition_bits, int[] out_features, int[] bank_alt_ids, int[] split_counts, Tensor? rank8_a=None, Tensor? rank8_b=None, float[] rank8_scales=[]) -> Tensor");

@@ -1313,7 +1313,8 @@ qvq_qwen_composite_recovery_fp32_to_fp16_kernel(
     const half* __restrict__ base,
     const float* __restrict__ post_scale,
     const float* __restrict__ bias,
-    half* __restrict__ output) {
+    half* __restrict__ output,
+    int64_t partial_plane_values) {
   constexpr int CompositeLowN = CompositeN / CompositeBase;
   extern __shared__ float shared[];
   float* low = shared;
@@ -1332,7 +1333,7 @@ qvq_qwen_composite_recovery_fp32_to_fp16_kernel(
         value = __fadd_rn(
             value,
             input[
-                static_cast<int64_t>(split) * 16 * CompositeN +
+                static_cast<int64_t>(split) * partial_plane_values +
                 static_cast<int64_t>(row) * CompositeN + column]);
       }
     }
@@ -3470,7 +3471,8 @@ at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
         reinterpret_cast<const half*>(base.const_data_ptr()),                 \
         post_scale.const_data_ptr<float>(),                                   \
         bias.has_value() ? bias->const_data_ptr<float>() : nullptr,           \
-        reinterpret_cast<half*>(output.mutable_data_ptr()));                  \
+        reinterpret_cast<half*>(output.mutable_data_ptr()),                   \
+        input.numel());                                                       \
   }
   if (composite_n == 2560 && bias.has_value()) {
     QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(true, 2560, 40)
@@ -3498,27 +3500,39 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
   TORCH_CHECK(
       partials.device() == base.device() && partials.device() == post_scale.device(),
       "Qwen ordered composite recovery tensors must share a device");
+  const int64_t composite_n = post_scale.numel();
+  TORCH_CHECK(composite_n == 2560 || composite_n == kQwenCompositeN,
+              "Qwen ordered composite recovery requires N=2560 or N=5120");
+  TORCH_CHECK(
+      (composite_n == 2560 &&
+       (split_count == 16 || split_count == 24 || split_count == 40)) ||
+          (composite_n == kQwenCompositeN &&
+           (split_count == 17 || split_count == 34)),
+      "Qwen ordered composite split count is unsupported for this width");
   TORCH_CHECK(
       partials.scalar_type() == at::kFloat && partials.is_contiguous() &&
-          (split_count == 17 || split_count == 34) &&
-          partials.numel() == split_count * 16 * kQwenCompositeN,
-      "Qwen ordered composite partials must be contiguous FP32 split-major M16x5120");
+          partials.numel() % (split_count * composite_n) == 0,
+      "Qwen ordered composite partials must be contiguous split-major FP32");
+  const int64_t partial_rows =
+      partials.numel() / (split_count * composite_n);
   TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
               "Qwen ordered composite recovery requires one through sixteen rows");
+  TORCH_CHECK(partial_rows >= logical_rows && partial_rows <= 16,
+              "Qwen ordered composite partial rows must cover the logical rows");
   TORCH_CHECK(
       base.scalar_type() == at::kHalf && base.is_contiguous() &&
           base.numel() == kQwenCompositeBase * kQwenCompositeBase,
       "Qwen ordered composite recovery base must be contiguous FP16 [40, 40]");
   TORCH_CHECK(
       post_scale.scalar_type() == at::kFloat && post_scale.is_contiguous() &&
-          post_scale.numel() == kQwenCompositeN,
-      "Qwen ordered composite recovery scale must be contiguous FP32 [5120]");
+      post_scale.numel() == composite_n,
+      "Qwen ordered composite recovery scale has the wrong width");
   if (bias.has_value()) {
     TORCH_CHECK(
         bias->is_cuda() && bias->device() == partials.device() &&
             bias->scalar_type() == at::kFloat && bias->is_contiguous() &&
-            bias->numel() == kQwenCompositeN,
-        "Qwen ordered composite recovery bias must be contiguous FP32 [5120]");
+            bias->numel() == composite_n,
+        "Qwen ordered composite recovery bias has the wrong width");
   }
 
   const c10::cuda::CUDAGuard device_guard(partials.device());
@@ -3528,14 +3542,15 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
       properties.major == 9 && properties.minor == 0 &&
           std::strcmp(properties.name, "NVIDIA H100") == 0,
       "Qwen ordered composite recovery requires the measured physical H100");
-  const size_t smem_bytes = kQwenCompositeN * sizeof(float);
+  const size_t smem_bytes = composite_n * sizeof(float);
   auto output = at::empty(
-      {logical_rows, kQwenCompositeN}, partials.options().dtype(at::kHalf));
+      {logical_rows, composite_n}, partials.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
-#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(HAS_BIAS, SPLIT_COUNT)      \
+#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(                            \
+    HAS_BIAS, SPLIT_COUNT, N)                                                   \
   {                                                                            \
     auto kernel = qvq_qwen_composite_recovery_fp32_to_fp16_kernel<             \
-        HAS_BIAS, SPLIT_COUNT>;                                                 \
+        HAS_BIAS, SPLIT_COUNT, N, 40>;                                          \
     C10_CUDA_CHECK(cudaFuncSetAttribute(                                        \
         kernel,                                                                \
         cudaFuncAttributeMaxDynamicSharedMemorySize,                           \
@@ -3549,18 +3564,31 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
         reinterpret_cast<const half*>(base.const_data_ptr()),                  \
         post_scale.const_data_ptr<float>(),                                    \
         bias.has_value() ? bias->const_data_ptr<float>() : nullptr,            \
-        reinterpret_cast<half*>(output.mutable_data_ptr()));                   \
+        reinterpret_cast<half*>(output.mutable_data_ptr()),                    \
+        partial_rows * composite_n);                                            \
   }
-  if (split_count == 17) {
+  if (composite_n == 2560 && split_count == 16 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 16, 2560)
+  } else if (composite_n == 2560 && split_count == 16) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 16, 2560)
+  } else if (composite_n == 2560 && split_count == 24 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 24, 2560)
+  } else if (composite_n == 2560 && split_count == 24) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 24, 2560)
+  } else if (composite_n == 2560 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 40, 2560)
+  } else if (composite_n == 2560) {
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 40, 2560)
+  } else if (split_count == 17) {
     if (bias.has_value()) {
-      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 17)
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 17, 5120)
     } else {
-      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 17)
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 17, 5120)
     }
   } else if (bias.has_value()) {
-    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 34)
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(true, 34, 5120)
   } else {
-    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 34)
+    QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(false, 34, 5120)
   }
 #undef QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY
   C10_CUDA_KERNEL_LAUNCH_CHECK();
