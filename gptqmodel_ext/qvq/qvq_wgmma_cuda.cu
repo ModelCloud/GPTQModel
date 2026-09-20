@@ -1,16 +1,26 @@
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0
 
+#ifndef QVQ_WGMMA_DEVICE_ONLY
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <torch/library.h>
+#include <torch/types.h>
+#else
+#include <cutlass/numeric_types.h>
+namespace c10 {
+using Float8_e4m3fn = cutlass::float_e4m3_t;
+using Float8_e5m2 = cutlass::float_e5m2_t;
+}  // namespace c10
+#endif
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
-#include <torch/library.h>
-#include <torch/types.h>
 
+#ifndef QVQ_WGMMA_DEVICE_ONLY
 #include <c10/util/Float8_e5m2.h>
+#endif
 
 #include <cute/algorithm/gemm.hpp>
 #include <cute/tensor.hpp>
@@ -114,6 +124,9 @@ struct HopperGroupedP32LaunchParams {
   int work_item_start[kMaxGroupedP32Segments];
   int64_t output_offset[kMaxGroupedP32Segments];
   int64_t partial_output_offset[kMaxGroupedP32Segments];
+  // Optional device scalar used by framework-neutral callers. Torch callers
+  // leave this null and retain the launch-time scalar ABI.
+  const uint8_t* launch_bank_alt_ids;
 };
 
 struct HopperGroupedP32DecodeParams {
@@ -1624,6 +1637,11 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   int size_n = launch_size_n;
   int split_count = launch_split_count;
   int bank_alt_id = launch_bank_alt_id;
+  if constexpr (!Grouped) {
+    if (grouped_params.launch_bank_alt_ids != nullptr) {
+      bank_alt_id = grouped_params.launch_bank_alt_ids[0];
+    }
+  }
   int64_t output_offset = 0;
   int64_t partial_output_offset = 0;
   int trellis_block_global = n64_block_global;
@@ -2581,6 +2599,7 @@ __global__ void qvq_fp16_to_fp8_e5m2_clamped_generic_kernel(
   }
 }
 
+#ifndef QVQ_WGMMA_DEVICE_ONLY
 at::Tensor qvq_fp16_to_fp8_e5m2_clamped(const at::Tensor& input) {
   TORCH_CHECK(input.is_cuda(), "FP8 prefill conversion requires CUDA input");
   TORCH_CHECK(input.scalar_type() == at::kHalf, "FP8 prefill conversion requires FP16 input");
@@ -4564,8 +4583,11 @@ at::Tensor qvq_p32_window_prepare_grouped_fp8_half_fold(
 #undef QVQ_PREPARE_GROUPED_FP8_HALF
 }
 
+#endif  // QVQ_WGMMA_DEVICE_ONLY
+
 }  // namespace
 
+#ifndef QVQ_WGMMA_DEVICE_ONLY
 TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq_wgmma, m) {
   m.def("fp16_to_fp8_e5m2_clamped(Tensor input) -> Tensor");
   m.def("p32_window_w3_m16(Tensor input, Tensor trellis, Tensor levels, Tensor bank_ids, int out_features, int bank_alt_id=3, int split_count=1) -> Tensor");
@@ -4613,3 +4635,4 @@ TORCH_LIBRARY_IMPL(gptqmodel_qvq_wgmma, CUDA, m) {
   m.impl("p32_window_prepare_grouped_fp8", qvq_p32_window_prepare_grouped_fp8);
   m.impl("p32_window_prepare_grouped_fp8_half_fold", qvq_p32_window_prepare_grouped_fp8_half_fold);
 }
+#endif  // QVQ_WGMMA_DEVICE_ONLY
