@@ -1661,7 +1661,10 @@ def test_qvq_cuda_swiglu_precondition_graph_stream_overflow_and_guards():
 
 @pytest.mark.parametrize("m", (1, 2, 4, 8, 16, 32, 128))
 @pytest.mark.parametrize("with_bias", (False, True))
-def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, with_bias):
+@pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
+def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(
+    m, with_bias, model_dtype
+):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("folded SwiGLU precondition requires Hopper")
     n = 17408
@@ -1687,8 +1690,11 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
     if with_bias:
         recovered_gate = recovered_gate + gate_bias
         recovered_up = recovered_up + up_bias
-    reference = torch.nn.functional.silu(recovered_gate.half()) * recovered_up.half()
-    reference = reference * down_scale
+    reference = (
+        torch.nn.functional.silu(recovered_gate.to(model_dtype))
+        * recovered_up.to(model_dtype)
+    )
+    reference = reference.half() * down_scale
 
     actual = qvq_cuda_folded_swiglu_precondition_fp32(
         gate,
@@ -1698,10 +1704,12 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
         gate_bias=gate_bias,
         up_bias=up_bias,
         down_scale=down_scale,
+        bf16_model_rounding=model_dtype == torch.bfloat16,
     )
-    assert actual.shape == (max(16, m), n)
+    expected_rows = m if model_dtype == torch.bfloat16 else max(16, m)
+    assert actual.shape == (expected_rows, n)
     assert torch.equal(actual[:m].view(torch.int16), reference.view(torch.int16))
-    if m < 16:
+    if model_dtype == torch.float16 and m < 16:
         assert torch.count_nonzero(actual[m:]) == 0
 
     graph = torch.cuda.CUDAGraph()
@@ -1714,6 +1722,7 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
             gate_bias=gate_bias,
             up_bias=up_bias,
             down_scale=down_scale,
+            bf16_model_rounding=model_dtype == torch.bfloat16,
         )
     graph.replay()
     torch.cuda.synchronize()
@@ -1723,8 +1732,9 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(m, w
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
 @pytest.mark.parametrize("split_count", (5, 10))
+@pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
 def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
-    m, with_bias, split_count
+    m, with_bias, split_count, model_dtype
 ):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("ordered folded SwiGLU precondition requires Hopper")
@@ -1755,6 +1765,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
         gate_bias=gate_bias,
         up_bias=up_bias,
         down_scale=down_scale,
+        bf16_model_rounding=model_dtype == torch.bfloat16,
     )
     actual = qvq_cuda_folded_swiglu_precondition_ordered_fp32(
         partials.reshape(-1),
@@ -1765,6 +1776,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
         down_scale=down_scale,
         split_count=split_count,
         logical_rows=m,
+        bf16_model_rounding=model_dtype == torch.bfloat16,
     )
     assert torch.equal(actual.view(torch.int16), expected.view(torch.int16))
 
@@ -1779,6 +1791,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
             down_scale=down_scale,
             split_count=split_count,
             logical_rows=m,
+            bf16_model_rounding=model_dtype == torch.bfloat16,
         )
     graph.replay()
     torch.cuda.synchronize()

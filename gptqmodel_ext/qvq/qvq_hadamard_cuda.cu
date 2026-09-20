@@ -1175,17 +1175,27 @@ __device__ __forceinline__ half qvq_silu_fp16(half gate) {
   return __float2half_rn(value / (1.0f + expf(-value)));
 }
 
+// PyTorch applies the same FP32 division form for BF16 SiLU, then rounds the
+// activation to BF16 before the separately rounded BF16 gate/up product.
+__device__ __forceinline__ nv_bfloat16 qvq_silu_bf16(nv_bfloat16 gate) {
+  const float value = __bfloat162float(gate);
+  return __float2bfloat16_rn(value / (1.0f + expf(-value)));
+}
+
 // Qwen3.8's 17*1024 intermediate axis deliberately folds both surrounding
 // Hadamards.  Consume the two FP32 P32 results without materializing the
 // recovered gate/up, SiLU output, product, or scaled down input.  Explicit
 // round-to-nearest operations preserve the separate PyTorch-kernel contract:
 //
 //   fp32 inner * fp16-rounded SV [+ fp16-rounded bias]
-//     -> fp16 -> fp16 SiLU -> fp16 product -> fp16 down-SU product.
+//     -> model dtype -> model-dtype SiLU -> model-dtype product
+//     -> fp16 -> fp16 down-SU product.
 //
-// The M16-padded output is cleared by the launcher before logical rows are
-// written, so the operation remains directly consumable by Hopper P32.
-template <bool HasGateBias, bool HasUpBias>
+// FP16 decode retains the established M16-padded contract. BF16 keeps its
+// logical row count so the following P32 decode uses the same M1/M2/M4/M8
+// accumulation schedule as the unfused model; forcing M16 can perturb final
+// BF16 recovery by one quantum even when this intermediate is bitwise exact.
+template <bool HasGateBias, bool HasUpBias, bool Bf16ModelRounding>
 __global__ void qvq_folded_swiglu_precondition_fp32_kernel(
     const float* __restrict__ gate,
     const float* __restrict__ up,
@@ -1210,17 +1220,27 @@ __global__ void qvq_folded_swiglu_precondition_fp32_kernel(
     if constexpr (HasUpBias) {
       up_value = __fadd_rn(up_value, up_bias[column]);
     }
-    const half gate_half = __float2half_rn(gate_value);
-    const half up_half = __float2half_rn(up_value);
-    const half activated_gate = qvq_silu_fp16(gate_half);
-    const half product = __float2half_rn(
-        __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    half product;
+    if constexpr (Bf16ModelRounding) {
+      const nv_bfloat16 gate_bf16 = __float2bfloat16_rn(gate_value);
+      const nv_bfloat16 up_bf16 = __float2bfloat16_rn(up_value);
+      const nv_bfloat16 activated_gate = qvq_silu_bf16(gate_bf16);
+      const nv_bfloat16 product_bf16 = __float2bfloat16_rn(__fmul_rn(
+          __bfloat162float(activated_gate), __bfloat162float(up_bf16)));
+      product = __float2half_rn(__bfloat162float(product_bf16));
+    } else {
+      const half gate_half = __float2half_rn(gate_value);
+      const half up_half = __float2half_rn(up_value);
+      const half activated_gate = qvq_silu_fp16(gate_half);
+      product = __float2half_rn(
+          __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    }
     output[index] = __float2half_rn(
         __fmul_rn(__half2float(product), __half2float(down_scale[column])));
   }
 }
 
-template <int SplitCount, bool HasGateBias, bool HasUpBias>
+template <int SplitCount, bool HasGateBias, bool HasUpBias, bool Bf16ModelRounding>
 __global__ void qvq_folded_swiglu_precondition_ordered_fp32_kernel(
     const float* __restrict__ partials,
     const float* __restrict__ gate_scale,
@@ -1256,10 +1276,20 @@ __global__ void qvq_folded_swiglu_precondition_ordered_fp32_kernel(
     if constexpr (HasUpBias) {
       up_value = __fadd_rn(up_value, up_bias[column]);
     }
-    const half activated_gate = qvq_silu_fp16(__float2half_rn(gate_value));
-    const half up_half = __float2half_rn(up_value);
-    const half product = __float2half_rn(
-        __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    half product;
+    if constexpr (Bf16ModelRounding) {
+      const nv_bfloat16 activated_gate =
+          qvq_silu_bf16(__float2bfloat16_rn(gate_value));
+      const nv_bfloat16 up_bf16 = __float2bfloat16_rn(up_value);
+      const nv_bfloat16 product_bf16 = __float2bfloat16_rn(__fmul_rn(
+          __bfloat162float(activated_gate), __bfloat162float(up_bf16)));
+      product = __float2half_rn(__bfloat162float(product_bf16));
+    } else {
+      const half activated_gate = qvq_silu_fp16(__float2half_rn(gate_value));
+      const half up_half = __float2half_rn(up_value);
+      product = __float2half_rn(
+          __fmul_rn(__half2float(activated_gate), __half2float(up_half)));
+    }
     output[index] = __float2half_rn(
         __fmul_rn(__half2float(product), __half2float(down_scale[column])));
   }
@@ -3544,7 +3574,8 @@ at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
     const at::Tensor& up_scale,
     const std::optional<at::Tensor>& gate_bias,
     const std::optional<at::Tensor>& up_bias,
-    const at::Tensor& down_scale) {
+    const at::Tensor& down_scale,
+    bool bf16_model_rounding) {
   TORCH_CHECK(gate.is_cuda() && up.is_cuda(),
               "folded SwiGLU inputs must be CUDA tensors");
   TORCH_CHECK(
@@ -3592,10 +3623,11 @@ at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
               "folded SwiGLU precondition requires Hopper SM90");
 
   const int n = static_cast<int>(n64);
-  const int64_t output_rows = std::max<int64_t>(16, rows);
+  const int64_t output_rows =
+      bf16_model_rounding ? rows : std::max<int64_t>(16, rows);
   auto output = at::empty({output_rows, n64}, gate.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(gate.get_device());
-  if (rows < 16) {
+  if (!bf16_model_rounding && rows < 16) {
     C10_CUDA_CHECK(cudaMemsetAsync(
         output.mutable_data_ptr<at::Half>(),
         0,
@@ -3611,8 +3643,10 @@ at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
   const float* up_bias_ptr = up_bias.has_value()
       ? up_bias->const_data_ptr<float>()
       : nullptr;
-#define QVQ_LAUNCH_FOLDED_SWIGLU(HAS_GATE_BIAS, HAS_UP_BIAS)                    \
-  qvq_folded_swiglu_precondition_fp32_kernel<HAS_GATE_BIAS, HAS_UP_BIAS>       \
+#define QVQ_LAUNCH_FOLDED_SWIGLU_MODE(                                         \
+    HAS_GATE_BIAS, HAS_UP_BIAS, BF16_MODEL_ROUNDING)                           \
+  qvq_folded_swiglu_precondition_fp32_kernel<                                  \
+      HAS_GATE_BIAS, HAS_UP_BIAS, BF16_MODEL_ROUNDING>                         \
       <<<blocks, kThreads, 0, stream>>>(                                        \
           gate.const_data_ptr<float>(),                                         \
           up.const_data_ptr<float>(),                                           \
@@ -3624,6 +3658,14 @@ at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
           reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),         \
           logical_values,                                                       \
           n)
+#define QVQ_LAUNCH_FOLDED_SWIGLU(HAS_GATE_BIAS, HAS_UP_BIAS)                   \
+  do {                                                                          \
+    if (bf16_model_rounding) {                                                   \
+      QVQ_LAUNCH_FOLDED_SWIGLU_MODE(HAS_GATE_BIAS, HAS_UP_BIAS, true);          \
+    } else {                                                                     \
+      QVQ_LAUNCH_FOLDED_SWIGLU_MODE(HAS_GATE_BIAS, HAS_UP_BIAS, false);         \
+    }                                                                            \
+  } while (false)
   if (gate_bias.has_value() && up_bias.has_value()) {
     QVQ_LAUNCH_FOLDED_SWIGLU(true, true);
   } else if (gate_bias.has_value()) {
@@ -3634,6 +3676,7 @@ at::Tensor qvq_folded_swiglu_precondition_fp32_cuda(
     QVQ_LAUNCH_FOLDED_SWIGLU(false, false);
   }
 #undef QVQ_LAUNCH_FOLDED_SWIGLU
+#undef QVQ_LAUNCH_FOLDED_SWIGLU_MODE
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
@@ -3646,7 +3689,8 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
     const std::optional<at::Tensor>& up_bias,
     const at::Tensor& down_scale,
     int64_t split_count,
-    int64_t logical_rows) {
+    int64_t logical_rows,
+    bool bf16_model_rounding) {
   TORCH_CHECK(partials.is_cuda() && partials.scalar_type() == at::kFloat &&
                   partials.is_contiguous(),
               "ordered folded SwiGLU partials must be contiguous CUDA float32");
@@ -3692,9 +3736,11 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   TORCH_CHECK(properties.major == 9,
               "ordered folded SwiGLU precondition requires Hopper SM90");
   const int n = static_cast<int>(n64);
-  auto output = at::empty({16, n64}, partials.options().dtype(at::kHalf));
+  const int64_t output_rows = bf16_model_rounding ? logical_rows : 16;
+  auto output =
+      at::empty({output_rows, n64}, partials.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
-  if (logical_rows < 16) {
+  if (!bf16_model_rounding && logical_rows < 16) {
     C10_CUDA_CHECK(cudaMemsetAsync(
         output.mutable_data_ptr<at::Half>(),
         0,
@@ -3710,10 +3756,11 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   const float* up_bias_ptr = up_bias.has_value()
       ? up_bias->const_data_ptr<float>()
       : nullptr;
-#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(                               \
-    SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS)                                  \
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT_MODE(                            \
+    SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS, BF16_MODEL_ROUNDING)               \
   qvq_folded_swiglu_precondition_ordered_fp32_kernel<                           \
-      SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS><<<blocks, kThreads, 0, stream>>>(\
+      SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS, BF16_MODEL_ROUNDING>             \
+      <<<blocks, kThreads, 0, stream>>>(                                        \
       partials.const_data_ptr<float>(),                                         \
       gate_scale.const_data_ptr<float>(),                                       \
       up_scale.const_data_ptr<float>(),                                         \
@@ -3723,6 +3770,17 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
       reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),             \
       logical_values,                                                           \
       n)
+#define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(                                \
+    SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS)                                    \
+  do {                                                                           \
+    if (bf16_model_rounding) {                                                    \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT_MODE(                              \
+          SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS, true);                       \
+    } else {                                                                      \
+      QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT_MODE(                              \
+          SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS, false);                      \
+    }                                                                             \
+  } while (false)
 #define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(SPLIT_COUNT)                         \
   do {                                                                          \
     if (gate_bias.has_value() && up_bias.has_value()) {                         \
@@ -3742,6 +3800,7 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   }
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT
+#undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT_MODE
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }
@@ -3970,8 +4029,8 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("hadamard_ordered_split16_fp32_to_fp16(Tensor partial_input, Tensor post_scale, Tensor? bias, int scale_mode, int logical_rows, bool multiblock=False) -> Tensor");
   m.def("hadamard_pair_fp32_to_fp16_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, int scale_mode, bool warp_low=False) -> (Tensor, Tensor)");
   m.def("hadamard_pair_swiglu_precondition_multiblock(Tensor input0, Tensor input1, Tensor post_scale0, Tensor post_scale1, Tensor? bias0, Tensor? bias1, Tensor pre_scale, int scale_mode, bool pad_to_16=False, bool pair_tiles=False, bool bounded_rounding=False, bool packed_gate_up=False) -> Tensor");
-  m.def("folded_swiglu_precondition_fp32(Tensor gate, Tensor up, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale) -> Tensor");
-  m.def("folded_swiglu_precondition_ordered_fp32(Tensor partials, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, int split_count, int logical_rows) -> Tensor");
+  m.def("folded_swiglu_precondition_fp32(Tensor gate, Tensor up, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, bool bf16_model_rounding=False) -> Tensor");
+  m.def("folded_swiglu_precondition_ordered_fp32(Tensor partials, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, int split_count, int logical_rows, bool bf16_model_rounding=False) -> Tensor");
   m.def("qwen_composite_recovery_fp32_to_fp16(Tensor input, Tensor base, Tensor post_scale, Tensor? bias) -> Tensor");
   m.def("qwen_composite_ordered_recovery_fp32_to_fp16(Tensor partials, Tensor base, Tensor post_scale, Tensor? bias, int split_count, int logical_rows) -> Tensor");
   m.def("qwen_composite_input_fp16_padded(Tensor input, Tensor base, Tensor pre_scale) -> Tensor");
