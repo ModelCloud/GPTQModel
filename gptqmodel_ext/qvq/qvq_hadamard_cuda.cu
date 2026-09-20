@@ -1530,34 +1530,82 @@ qvq_qwen_composite_input_fp16_padded_kernel(
   extern __shared__ float low[];
   const float divisor = __half2float(
       __float2half_rn(sqrtf(static_cast<float>(CompositeN))));
-  for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
-       column += static_cast<int>(blockDim.x)) {
-    const int64_t offset =
-        static_cast<int64_t>(row) * CompositeN + column;
-    const half scaled = __float2half_rn(
-        __fmul_rn(
-            QvqHadamardTraits<InputScalar>::to_float(input[offset]),
-            __half2float(pre_scale[column])));
-    low[column] = __half2float(
-        __float2half_rn(__half2float(scaled) / divisor));
-  }
-  __syncthreads();
-
+  if constexpr (CompositeLowN == 64) {
+    // Each H64 is independent.  Keep its complete ascending FP16 butterfly
+    // tree in one warp, with one value from each 32-wide half in every lane.
+    // This removes six block barriers and all intermediate shared-memory
+    // traffic without changing an arithmetic operation or rounding boundary.
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int lane = static_cast<int>(threadIdx.x) & 31;
 #pragma unroll
-  for (int bit = 1; bit < CompositeLowN; bit <<= 1) {
-    for (int column = static_cast<int>(threadIdx.x);
-         column < CompositeN;
-         column += static_cast<int>(blockDim.x)) {
-      const int local = column & (CompositeLowN - 1);
-      const int peer = column ^ bit;
-      if (local < (local ^ bit)) {
-        const float a = low[column];
-        const float b = low[peer];
-        low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
-        low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+    for (int group_pass = 0; group_pass < 2; ++group_pass) {
+      const int source = warp + group_pass * 32;
+      if (source < CompositeBase) {
+        const int column0 = source * 64 + lane;
+        const int column1 = column0 + 32;
+        const int64_t row_offset = static_cast<int64_t>(row) * CompositeN;
+        const half scaled0 = __float2half_rn(__fmul_rn(
+            QvqHadamardTraits<InputScalar>::to_float(
+                input[row_offset + column0]),
+            __half2float(pre_scale[column0])));
+        const half scaled1 = __float2half_rn(__fmul_rn(
+            QvqHadamardTraits<InputScalar>::to_float(
+                input[row_offset + column1]),
+            __half2float(pre_scale[column1])));
+        float value0 = __half2float(
+            __float2half_rn(__half2float(scaled0) / divisor));
+        float value1 = __half2float(
+            __float2half_rn(__half2float(scaled1) / divisor));
+#pragma unroll
+        for (int bit = 1; bit < 32; bit <<= 1) {
+          const float peer0 = __shfl_xor_sync(0xffffffffu, value0, bit);
+          const float peer1 = __shfl_xor_sync(0xffffffffu, value1, bit);
+          value0 = __half2float(__float2half_rn(
+              (lane & bit) == 0 ? __fadd_rn(value0, peer0)
+                                : __fsub_rn(peer0, value0)));
+          value1 = __half2float(__float2half_rn(
+              (lane & bit) == 0 ? __fadd_rn(value1, peer1)
+                                : __fsub_rn(peer1, value1)));
+        }
+        const float lower = value0;
+        const float upper = value1;
+        low[column0] =
+            __half2float(__float2half_rn(__fadd_rn(lower, upper)));
+        low[column1] =
+            __half2float(__float2half_rn(__fsub_rn(lower, upper)));
       }
     }
     __syncthreads();
+  } else {
+    for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int64_t offset =
+          static_cast<int64_t>(row) * CompositeN + column;
+      const half scaled = __float2half_rn(
+          __fmul_rn(
+              QvqHadamardTraits<InputScalar>::to_float(input[offset]),
+              __half2float(pre_scale[column])));
+      low[column] = __half2float(
+          __float2half_rn(__half2float(scaled) / divisor));
+    }
+    __syncthreads();
+
+#pragma unroll
+    for (int bit = 1; bit < CompositeLowN; bit <<= 1) {
+      for (int column = static_cast<int>(threadIdx.x);
+           column < CompositeN;
+           column += static_cast<int>(blockDim.x)) {
+        const int local = column & (CompositeLowN - 1);
+        const int peer = column ^ bit;
+        if (local < (local ^ bit)) {
+          const float a = low[column];
+          const float b = low[peer];
+          low[column] = __half2float(__float2half_rn(__fadd_rn(a, b)));
+          low[peer] = __half2float(__float2half_rn(__fsub_rn(a, b)));
+        }
+      }
+      __syncthreads();
+    }
   }
 
   for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
