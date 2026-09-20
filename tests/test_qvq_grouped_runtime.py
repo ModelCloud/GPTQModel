@@ -1092,6 +1092,12 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
         (
             ("q_proj", "k_proj", "v_proj"),
             (12288, 512, 512),
+            2.0,
+            (1, 1, 1),
+        ),
+        (
+            ("q_proj", "k_proj", "v_proj"),
+            (12288, 512, 512),
             3.0,
             (1, 1, 1),
         ),
