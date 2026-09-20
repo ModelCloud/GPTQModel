@@ -1890,12 +1890,15 @@ def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
 )
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
+@pytest.mark.parametrize("output_bf16", (False, True))
 def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
-    n, split_count, m, with_bias
+    n, split_count, m, with_bias, output_bf16
 ):
     properties = torch.cuda.get_device_properties(0)
     if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen ordered composite recovery requires the physical H100")
+    if output_bf16 and n != 2560:
+        pytest.skip("direct BF16 recovery is validated for Flash-Next N=2560")
     generator = torch.Generator(device="cuda").manual_seed(
         20261000 + n + split_count + m
     )
@@ -1923,6 +1926,8 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
         post_scale=post_scale,
         bias=bias,
     )
+    if output_bf16:
+        reference = reference.to(torch.bfloat16)
     actual = qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
         partials,
         base=base,
@@ -1930,6 +1935,7 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
         bias=bias,
         split_count=split_count,
         logical_rows=m,
+        output_bf16=output_bf16,
     )
     assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
 
@@ -1942,6 +1948,7 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
             bias=bias,
             split_count=split_count,
             logical_rows=m,
+            output_bf16=output_bf16,
         )
     graph.replay()
     torch.cuda.synchronize()

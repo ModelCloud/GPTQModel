@@ -2703,6 +2703,7 @@ class QVQHopperGroupedRuntime:
                 bias=down._cached_cast("bias", torch.float16, torch.float32),
                 split_count=split_count,
                 logical_rows=rows,
+                output_bf16=x.dtype == torch.bfloat16,
             )
             self.telemetry.h100_qwen_composite_down_recovery_launches += 1
             self.telemetry.h100_qwen_ordered_composite_down_recovery_launches += 1
