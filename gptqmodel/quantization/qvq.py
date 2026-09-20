@@ -3588,6 +3588,23 @@ def _qvq_cuda_family_tail_biting_overlaps(
     return (provisional[:, :, midpoint - 1] & overlap_mask).contiguous()
 
 
+def _qvq_cuda_cacheable_family_stacks(family_stacks: torch.Tensor) -> torch.Tensor:
+    """Materialize immutable quantization codebooks with a version counter.
+
+    Model quantization commonly runs under inference mode, which marks newly
+    stacked codebooks as inference tensors. The native norm-rank cache must not
+    retain arbitrary inference tensors because their contents can mutate
+    without a version bump. Family-batch codebooks, however, are immutable for
+    the complete solver invocation. Recreate that one tensor outside inference
+    mode so every anti-diagonal can safely reuse its sorted norm-rank tables.
+    """
+
+    if not family_stacks.is_inference():
+        return family_stacks
+    with torch.inference_mode(False):
+        return family_stacks.clone()
+
+
 def _qvq_family_provisional_direct_distance_enabled(
     transition_bits: int,
     family_batch: int,
@@ -3632,6 +3649,8 @@ def _block_ldlq_v2b2_family_batch_cuda(
     telemetry: QVQQuantizationTelemetry | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run three independent B2 Block-LDLQ histories in one CUDA work grid."""
+
+    family_stacks = _qvq_cuda_cacheable_family_stacks(family_stacks)
 
     from ..utils.qvq_cuda import (
         _qvq_cuda_viterbi_v2_segment_family_grid_values_trusted_op,
@@ -5218,6 +5237,8 @@ def _yaqa_inner_v2b2_family_batch_cuda(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run independent B2 YAQA histories through one candidate-batched CUDA schedule."""
 
+    family_stacks = _qvq_cuda_cacheable_family_stacks(family_stacks)
+
     families, in_features, out_features = family_stacks.shape[0], *inner_weight.shape
     tile_rows = tile_cols = 16
     input_blocks, output_blocks = in_features // tile_rows, out_features // tile_cols
@@ -5349,6 +5370,8 @@ def _yaqa_inner_v2b2_family_batch_dense_cuda(
     telemetry: QVQQuantizationTelemetry | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Run canonical and B2 YAQA histories in one dense-feedback CUDA schedule."""
+
+    family_stacks = _qvq_cuda_cacheable_family_stacks(family_stacks)
 
     families, in_features, out_features = family_stacks.shape[0], *inner_weight.shape
     tile = 16
