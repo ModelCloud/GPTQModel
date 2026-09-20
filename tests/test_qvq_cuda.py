@@ -79,6 +79,7 @@ from gptqmodel.utils.qvq_cuda import (
     _qvq_cuda_yaqa_feedback_update_op,
     qvq_cuda_folded_swiglu_precondition_fp32,
     qvq_cuda_folded_swiglu_precondition_ordered_fp32,
+    qvq_cuda_flash_next_composite_input_bf16_to_fp16,
     qvq_cuda_gemv,
     qvq_cuda_hadamard,
     qvq_cuda_hadamard_fp32_to_fp16_multiblock,
@@ -1875,6 +1876,43 @@ def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = qvq_cuda_qwen_composite_input_fp16_padded(
+            input,
+            base=base,
+            pre_scale=pre_scale,
+        )
+    graph.replay()
+    torch.cuda.synchronize()
+    assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
+
+
+@pytest.mark.parametrize("m", (1, 2, 4, 8, 16))
+def test_qvq_cuda_flash_next_bf16_composite_input_is_exact_and_graph_safe(m):
+    properties = torch.cuda.get_device_properties(0)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        pytest.skip("Flash-Next composite input requires the physical H100")
+    n = 2560
+    generator = torch.Generator(device="cuda").manual_seed(20261040 + m)
+    input = torch.randn(
+        (m, n), generator=generator, device="cuda", dtype=torch.bfloat16
+    ) * 0.25
+    pre_scale = torch.randn(
+        (n,), generator=generator, device="cuda", dtype=torch.float16
+    )
+    base, base_n = get_hadK(n)
+    assert base_n == 40 and base is not None
+    base = base.to(device="cuda", dtype=torch.float16).contiguous()
+    reference = matmul_hadU_stable(input.to(torch.float16) * pre_scale)
+    actual = qvq_cuda_flash_next_composite_input_bf16_to_fp16(
+        input,
+        base=base,
+        pre_scale=pre_scale,
+    )
+    assert actual.shape == (m, n)
+    assert torch.equal(actual.view(torch.int16), reference.view(torch.int16))
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = qvq_cuda_flash_next_composite_input_bf16_to_fp16(
             input,
             base=base,
             pre_scale=pre_scale,

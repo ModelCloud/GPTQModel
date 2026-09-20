@@ -1463,6 +1463,44 @@ def qvq_cuda_qwen_composite_input_fp16_padded(
     )
 
 
+def qvq_cuda_flash_next_composite_input_bf16_to_fp16(
+    input: torch.Tensor,
+    *,
+    base: torch.Tensor,
+    pre_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Apply exact Flash-Next H40 x H64 after BF16-to-FP16 narrowing."""
+
+    if (
+        input.device.type != "cuda"
+        or input.dtype != torch.bfloat16
+        or input.ndim != 2
+        or not 0 < input.shape[0] <= 16
+        or input.shape[1] != 2560
+        or not input.is_contiguous()
+    ):
+        raise ValueError("Flash-Next composite input must be CUDA BF16 [1..16, 2560]")
+    for name, tensor, count in (
+        ("base", base, 1600),
+        ("pre_scale", pre_scale, 2560),
+    ):
+        if (
+            tensor.device != input.device
+            or tensor.dtype != torch.float16
+            or tensor.numel() != count
+            or not tensor.is_contiguous()
+        ):
+            raise ValueError(f"{name} must be contiguous CUDA FP16 with {count} values")
+    properties = torch.cuda.get_device_properties(input.device)
+    if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
+        raise RuntimeError("Flash-Next composite input requires the measured physical H100")
+    return _qvq_cuda_qwen_composite_input_fp16_padded_op()(
+        input,
+        base.reshape(40, 40),
+        pre_scale,
+    )
+
+
 def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
     input: torch.Tensor,
     *,
@@ -2119,6 +2157,7 @@ __all__ = [
     "qvq_cuda_hadamard_fp32_to_fp16_multiblock",
     "qvq_cuda_quantize_fp8_per_row",
     "qvq_cuda_qwen_composite_input_fp16_padded",
+    "qvq_cuda_flash_next_composite_input_bf16_to_fp16",
     "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
     "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
     "qvq_cuda_supported",
