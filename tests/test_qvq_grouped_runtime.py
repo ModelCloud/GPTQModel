@@ -1019,7 +1019,7 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
                 seed=20260933,
                 device=device,
                 input_hadamard=False,
-                output_hadamard=False,
+                output_hadamard=True,
             )
             self.act_fn = nn.SiLU()
 
@@ -1063,6 +1063,10 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
     # the recorded CUDA work and therefore do not increment host telemetry.
     assert telemetry[0]["h100_flash_next_expert_grouped_launches"] >= 2
     assert telemetry[0]["fused_mlp_launches"] >= 2
+    assert telemetry[0]["h100_qwen_composite_down_recovery_launches"] >= 2
+    assert telemetry[0]["h100_folded_qwen_fused_precondition_launches"] == (
+        0 if model_dtype == torch.bfloat16 else 2
+    )
     assert telemetry[0]["plain_fallbacks"] == 0
 
 

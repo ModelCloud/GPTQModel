@@ -1785,7 +1785,7 @@ def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(
     assert torch.equal(captured.view(torch.int16), expected.view(torch.int16))
 
 
-@pytest.mark.parametrize("n", (5120, 6144, 10240))
+@pytest.mark.parametrize("n", (2560, 5120, 6144, 10240))
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_qwen_composite_recovery_is_exact_and_graph_safe(n, m, with_bias):

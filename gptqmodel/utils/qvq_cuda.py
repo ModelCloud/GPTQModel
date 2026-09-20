@@ -1465,7 +1465,7 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
 ) -> torch.Tensor:
     """Recover one supported H100 Qwen composite FP32 inner output."""
 
-    supported = {5120: 40, 6144: 12, 10240: 40}
+    supported = {2560: 40, 5120: 40, 6144: 12, 10240: 40}
     n = input.shape[1] if input.ndim == 2 else -1
     if (
         input.device.type != "cuda"
@@ -1477,7 +1477,7 @@ def qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
     ):
         raise ValueError(
             "Qwen composite recovery input must be CUDA FP32 [1..16, N] "
-            "with N in {5120, 6144, 10240}"
+            "with N in {2560, 5120, 6144, 10240}"
         )
     base_width = supported[n]
     if (
