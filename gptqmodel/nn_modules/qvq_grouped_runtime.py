@@ -473,6 +473,7 @@ class QVQHopperGroupedRuntime:
         self.category = str(category)
         self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
         self._payload: QVQHopperGroupedP32Payload | QVQAmpereGroupedP32Payload | None = None
+        self._h100_flash_next_small_m_payload: QVQAmpereGroupedP32Payload | None = None
         self._h100_qwen_large_m_unsplit_payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
@@ -531,6 +532,7 @@ class QVQHopperGroupedRuntime:
                         )
             self.telemetry.payload_drops += 1
         self._payload = None
+        self._h100_flash_next_small_m_payload = None
         self._h100_qwen_large_m_unsplit_payload = None
         self._payload_source_key = None
         self._h100_multiblock_intermediate_enabled = False
@@ -784,6 +786,30 @@ class QVQHopperGroupedRuntime:
                 selectors,
                 plan,
             )
+            small_m_splits = qvq_h100_flash_next_expert_group_split_counts(
+                device_name=properties.name,
+                compute_capability=(properties.major, properties.minor),
+                m=4,
+                k=children[0].in_features,
+                widths=tuple(child.out_features for child in children),
+                transition_bits=transition_bits,
+            )
+            if small_m_splits is None:
+                raise _R0Fallback("missing Flash-Next small-M expert schedule")
+            small_m_plan = qvq_p32_window_ampere_group_plan(
+                placeholder,
+                child_windows,
+                _pgc16_levels(device, children[0].codebook_version),
+                selectors,
+                children[0].bits,
+                out_features=tuple(child.out_features for child in children),
+                bank_alt_ids=alt_ids,
+                split_counts=small_m_splits,
+            )
+            self._h100_flash_next_small_m_payload = replace(
+                payload,
+                plan=small_m_plan,
+            )
             grouped_window = payload.trellis
             grouped_selectors = payload.bank_ids
         else:
@@ -1003,6 +1029,12 @@ class QVQHopperGroupedRuntime:
         # Native FP8 dispatch returns through independent child kernels and
         # must not build a grouped P32 window it cannot consume.
         payload = None if native_fp8_children else self._ensure_payload()
+        if (
+            payload is not None
+            and rows <= 4
+            and self._h100_flash_next_small_m_payload is not None
+        ):
+            payload = self._h100_flash_next_small_m_payload
         if (
             payload is not None
             and rows >= 128
@@ -2390,6 +2422,8 @@ class QVQHopperGroupedRuntime:
             # transform is commuted through the nonlinearity, and every
             # operation is CUDA Graph capturable.
             payload = self._ensure_payload()
+            if rows <= 4 and self._h100_flash_next_small_m_payload is not None:
+                payload = self._h100_flash_next_small_m_payload
             use_h100_folded_fusion = (
                 self._h100_fp16_recovery_store_enabled
                 and (
@@ -2416,7 +2450,7 @@ class QVQHopperGroupedRuntime:
             use_ordered_reduction_fusion = (
                 use_h100_folded_fusion
                 and len({segment.split_count for segment in payload.plan.segments}) == 1
-                and payload.plan.segments[0].split_count in (5, 10, 32)
+                and payload.plan.segments[0].split_count in (5, 10, 32, 40)
             )
             if use_ordered_reduction_fusion:
                 gate_up_split_count = payload.plan.segments[0].split_count

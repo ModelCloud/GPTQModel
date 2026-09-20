@@ -1378,8 +1378,10 @@ def qvq_cuda_folded_swiglu_precondition_ordered_fp32(
         raise TypeError("ordered folded QVQ SwiGLU partials must be CUDA float32")
     if not partials.is_contiguous():
         raise ValueError("ordered folded QVQ SwiGLU partials must be contiguous")
-    if split_count not in (5, 10, 32):
-        raise ValueError("ordered folded QVQ SwiGLU requires split count five, ten, or thirty-two")
+    if split_count not in (5, 10, 32, 40):
+        raise ValueError(
+            "ordered folded QVQ SwiGLU requires split count five, ten, thirty-two, or forty"
+        )
     if not 0 < logical_rows <= 16:
         raise ValueError("ordered folded QVQ SwiGLU logical rows must be in [1, 16]")
     n = gate_scale.numel()

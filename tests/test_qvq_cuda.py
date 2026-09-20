@@ -1733,7 +1733,7 @@ def test_qvq_cuda_folded_swiglu_precondition_is_exact_padded_and_graph_safe(
 @pytest.mark.parametrize("with_bias", (False, True))
 @pytest.mark.parametrize(
     ("n", "split_count", "compact_rows"),
-    ((17408, 5, False), (17408, 10, False), (640, 32, True)),
+    ((17408, 5, False), (17408, 10, False), (640, 32, True), (640, 40, True)),
 )
 @pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
 def test_qvq_cuda_folded_ordered_reduction_is_exact_and_graph_safe(

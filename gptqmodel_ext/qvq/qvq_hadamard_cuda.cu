@@ -3773,8 +3773,9 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   TORCH_CHECK(partials.is_cuda() && partials.scalar_type() == at::kFloat &&
                   partials.is_contiguous(),
               "ordered folded SwiGLU partials must be contiguous CUDA float32");
-  TORCH_CHECK(split_count == 5 || split_count == 10 || split_count == 32,
-              "ordered folded SwiGLU requires split count five, ten, or thirty-two");
+  TORCH_CHECK(split_count == 5 || split_count == 10 || split_count == 32 ||
+                  split_count == 40,
+              "ordered folded SwiGLU requires split count five, ten, thirty-two, or forty");
   TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
               "ordered folded SwiGLU requires one through sixteen logical rows");
   const int64_t n64 = gate_scale.numel();
@@ -3881,8 +3882,10 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
     QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(5);
   } else if (split_count == 10) {
     QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(10);
-  } else {
+  } else if (split_count == 32) {
     QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(32);
+  } else {
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(40);
   }
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT

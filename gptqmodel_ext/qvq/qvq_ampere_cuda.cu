@@ -4523,7 +4523,8 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
        size_m == kRows) &&
       size_k == 2560 && segment_count == 2 &&
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40 &&
-      params.split_count[0] == 32 && params.split_count[1] == 32;
+      params.split_count[0] == params.split_count[1] &&
+      (params.split_count[0] == 32 || params.split_count[0] == 40);
   TORCH_CHECK(
       p32_window_execution_capability_supported(
           capability, validated_narrow_hopper_shape),
@@ -4532,6 +4533,11 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       capability / 10,
       ".",
       capability % 10);
+  if (capability == 90) {
+    // The SM80 compact/wide split-40 layouts reorder the second child when
+    // compiled for SM90. Keep the exact generic segmented layout on H100.
+    use_flash_next_gate_up_wide = false;
+  }
   if (use_flash_next_gate_up_wide) {
     // Flash-Next gate/up has two aligned 640-column children.  Let each warp
     // consume both N16 tiles so one CTA covers eight tiles instead of four.
@@ -4628,7 +4634,8 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       params.n_tiles[0] == 40 && params.n_tiles[1] == 40;
   const bool use_flash_next_gate_up_scalar_shape =
       use_flash_next_gate_up_shape && size_k == 2560 &&
-      params.split_count[0] == 40 && params.split_count[1] == 40;
+      params.split_count[0] == 40 && params.split_count[1] == 40 &&
+      capability != 90;
   const bool use_flash_next_gate_up_compact_scalar_shape =
       use_flash_next_gate_up_scalar_shape &&
       (size_m == 1 || size_m == 2 || size_m == 4);
