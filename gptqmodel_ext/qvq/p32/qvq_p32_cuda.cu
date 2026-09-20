@@ -3523,31 +3523,34 @@ __global__ __launch_bounds__(256) void p32_rank8_project_kernel(
     int size_k) {
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
   constexpr int kRanksPerBlock = 8;
-  const int row = static_cast<int>(blockIdx.y);
-  if (row >= size_m) return;
-
   const int local_rank = static_cast<int>(threadIdx.x) >> 5;
   const int rank = static_cast<int>(blockIdx.x) * kRanksPerBlock + local_rank;
   const int lane = static_cast<int>(threadIdx.x) & 31;
-  float accumulator = 0.0f;
+  // grid.y is limited to 65,535 on CUDA. Grid-stride rows preserve the exact
+  // per-row reduction order while admitting full-context B1 prefill.
+  for (int row = static_cast<int>(blockIdx.y); row < size_m;
+       row += static_cast<int>(gridDim.y)) {
+    float accumulator = 0.0f;
 
-  // One warp owns one recovery rank. Directly walk K in lane-strided chunks;
-  // this keeps the reduction order deterministic and avoids a shared-memory
-  // rank tile whose layout is needlessly expensive for R <= 24.
-  for (int k = lane; k < size_k; k += 32) {
-    accumulator = fmaf(
-        input[static_cast<int64_t>(row) * size_k + k],
-        __half2float(rank8_a[static_cast<int64_t>(k) * RankCount + rank]),
-        accumulator);
-  }
+    // One warp owns one recovery rank. Directly walk K in lane-strided
+    // chunks; this keeps the reduction order deterministic and avoids a
+    // shared-memory rank tile whose layout is needlessly expensive for
+    // R <= 24.
+    for (int k = lane; k < size_k; k += 32) {
+      accumulator = fmaf(
+          input[static_cast<int64_t>(row) * size_k + k],
+          __half2float(rank8_a[static_cast<int64_t>(k) * RankCount + rank]),
+          accumulator);
+    }
 
 #pragma unroll
-  for (int offset = 16; offset > 0; offset >>= 1) {
-    accumulator += __shfl_down_sync(0xffffffffu, accumulator, offset);
-  }
-  if (lane == 0) {
-    hidden[static_cast<int64_t>(row) * RankCount + rank] =
-        __float2half_rn(accumulator);
+    for (int offset = 16; offset > 0; offset >>= 1) {
+      accumulator += __shfl_down_sync(0xffffffffu, accumulator, offset);
+    }
+    if (lane == 0) {
+      hidden[static_cast<int64_t>(row) * RankCount + rank] =
+          __float2half_rn(accumulator);
+    }
   }
 }
 
@@ -3698,7 +3701,7 @@ extern "C" int qvq_p32_rank8_project(
   }
   const dim3 grid(
       static_cast<unsigned>((rank_count + 7) / 8),
-      static_cast<unsigned>(size_m),
+      static_cast<unsigned>(std::min(size_m, 65535)),
       1);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   switch (rank_count) {

@@ -514,6 +514,47 @@ bool test_rank8_project() {
   return true;
 }
 
+bool test_rank8_project_full_context_rows() {
+  constexpr int kM = 131070;
+  constexpr int kK = 1;
+  constexpr int kRankCount = 8;
+  cudaStream_t stream = nullptr;
+  float* input = nullptr;
+  half* rank8_a = nullptr;
+  half* hidden = nullptr;
+  bool ok = check_cuda(cudaStreamCreate(&stream), "create full-context rank8 stream") &&
+      check_cuda(cudaMalloc(&input, kM * sizeof(float)),
+                 "allocate full-context rank8 input") &&
+      check_cuda(cudaMalloc(&rank8_a, kRankCount * sizeof(half)),
+                 "allocate full-context rank8 A") &&
+      check_cuda(cudaMalloc(&hidden, kM * kRankCount * sizeof(half)),
+                 "allocate full-context rank8 hidden") &&
+      check_cuda(cudaMemsetAsync(input, 0, kM * sizeof(float), stream),
+                 "clear full-context rank8 input") &&
+      check_cuda(cudaMemsetAsync(rank8_a, 0, kRankCount * sizeof(half), stream),
+                 "clear full-context rank8 A");
+  if (ok) {
+    ok = qvq_p32_rank8_project(
+             input, rank8_a, hidden, kM, kK, kRankCount, stream) == 0 &&
+        check_cuda(cudaStreamSynchronize(stream),
+                   "sync full-context rank8 projection");
+  }
+  half last{};
+  if (ok) {
+    ok = check_cuda(cudaMemcpy(
+        &last, hidden + (kM - 1) * kRankCount + (kRankCount - 1),
+        sizeof(last), cudaMemcpyDeviceToHost),
+        "copy full-context rank8 last row") &&
+        __half2float(last) == 0.0f;
+  }
+  cudaFree(hidden);
+  cudaFree(rank8_a);
+  cudaFree(input);
+  if (stream != nullptr) cudaStreamDestroy(stream);
+  if (ok) std::printf("qvq_p32_rank8_project_full_context=PASS M=%d\n", kM);
+  return ok;
+}
+
 }  // namespace
 
 int test_standard_partials(int rows, int transition_bits = 4,
@@ -693,7 +734,7 @@ int main(int argc, char** argv) {
     return test_rank8_epilogue() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--rank8-project") == 0) {
-    return test_rank8_project() ? 0 : 1;
+    return test_rank8_project() && test_rank8_project_full_context_rows() ? 0 : 1;
   }
   for (int bits : {4, 5, 6, 7}) {
     for (int stage : {1, 2, 3, 4}) {
