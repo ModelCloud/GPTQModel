@@ -1803,6 +1803,45 @@ class QVQLinear(BaseQuantLinear):
                         )
                 return self._reference_inner_forward(x)
 
+            # Qwen3.8-Flash-Next experts use 2560->640 gate/up and 640->2560
+            # down projections.  Their K/N dimensions satisfy the canonical
+            # P32 K16/N16 contract but not Hopper TMA/WGMMA's stricter
+            # K256/N256 geometry.  Reuse the natively compiled WMMA fallback
+            # for these measured narrow shapes instead of materializing the
+            # planar payload consumed by the generic CUDA decoder.
+            if (
+                self.v2b2_p32
+                and self.vector_size == 2
+                and x.dtype == torch.float16
+                and x.shape[0] in (1, 2, 4, 8, 16)
+                and (self.in_features, self.out_features)
+                in ((2560, 640), (640, 2560))
+                and qvq_transition_bits(self.bits, vector_size=2) in (4, 5, 6, 7)
+            ):
+                properties = torch.cuda.get_device_properties(x.device)
+                if (
+                    properties.name == "NVIDIA H100"
+                    and (properties.major, properties.minor) == (9, 0)
+                ):
+                    from ...utils.qvq_ampere_cuda import qvq_p32_window_ampere
+                    from ...utils.qvq_cuda import _pgc16_levels
+
+                    with self._qvq_cuda_bank_cache_lock:
+                        window = self._prepare_hopper_p32_window(x.device)
+                    return qvq_p32_window_ampere(
+                        x.contiguous(),
+                        window,
+                        _pgc16_levels(x.device, self.codebook_version),
+                        cuda_bank_ids,
+                        self.bits,
+                        out_features=self.out_features,
+                        bank_alt_id=cuda_bank_alt_id,
+                        # Gate/up split 32 selects the validated generic
+                        # segmented path; down retains its measured shape
+                        # policy through split_count=0.
+                        split_count=32 if self.out_features == 640 else 0,
+                    )
+
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous
             # P32 window layout.  Keep checkpoints in canonical planar form,
             # lazily repack once per module. H100 additionally uses the native

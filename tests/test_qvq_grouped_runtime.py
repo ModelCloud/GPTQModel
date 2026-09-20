@@ -35,6 +35,9 @@ from gptqmodel.quantization.qvq_rank8 import (
     window_kernel_candidates,
 )
 from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+from gptqmodel.utils.qvq_ampere_cuda import (
+    qvq_h100_flash_next_expert_group_split_counts,
+)
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_fp16_to_fp8_e5m2_clamped,
     qvq_h100_grouped_ordered_split_counts,
@@ -450,6 +453,46 @@ def test_qwen38_flash_next_h100_grouped_schedules_preserve_child_reductions(
             in_features=2560,
             out_features=shapes[0],
             transition_bits=transition_bits,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
+@pytest.mark.parametrize("size_m", (1, 2, 4, 8, 16))
+def test_flash_next_h100_expert_group_uses_safe_uniform_wave(
+    transition_bits, size_m
+):
+    assert qvq_h100_flash_next_expert_group_split_counts(
+        device_name="NVIDIA H100",
+        compute_capability=(9, 0),
+        m=size_m,
+        k=2560,
+        widths=(640, 640),
+        transition_bits=transition_bits,
+    ) == (32, 32)
+    assert (
+        qvq_h100_flash_next_expert_group_split_counts(
+            device_name="NVIDIA H200",
+            compute_capability=(9, 0),
+            m=size_m,
+            k=2560,
+            widths=(640, 640),
+            transition_bits=transition_bits,
+        )
+        is None
+    )
+
+
+def test_flash_next_h100_expert_group_rejects_unmeasured_rows():
+    assert (
+        qvq_h100_flash_next_expert_group_split_counts(
+            device_name="NVIDIA H100",
+            compute_capability=(9, 0),
+            m=3,
+            k=2560,
+            widths=(640, 640),
+            transition_bits=6,
         )
         is None
     )
@@ -927,6 +970,95 @@ def _h100_device() -> torch.device | None:
     if (properties.major, properties.minor) == (9, 0) and "H100" in properties.name:
         return torch.device("cuda", 0)
     return None
+
+
+def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
+    monkeypatch,
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    monkeypatch.delenv("QVQ_AMPERE_ALLOW_SM90_VALIDATION", raising=False)
+
+    class FlashNextExpertMLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            shared = torch.ones(2560, device=device)
+            self.gate_proj = _child(
+                "gate_proj",
+                in_features=2560,
+                out_features=640,
+                bits=3,
+                su=shared,
+                alt_id=3,
+                seed=20260931,
+                device=device,
+                input_hadamard=False,
+                output_hadamard=False,
+            )
+            self.up_proj = _child(
+                "up_proj",
+                in_features=2560,
+                out_features=640,
+                bits=3,
+                su=shared,
+                alt_id=3,
+                seed=20260932,
+                device=device,
+                input_hadamard=False,
+                output_hadamard=False,
+            )
+            self.down_proj = _child(
+                "down_proj",
+                in_features=640,
+                out_features=2560,
+                bits=3,
+                alt_id=3,
+                seed=20260933,
+                device=device,
+                input_hadamard=False,
+                output_hadamard=False,
+            )
+            self.act_fn = nn.SiLU()
+
+        def forward(self, value):
+            return self.down_proj(
+                self.act_fn(self.gate_proj(value)) * self.up_proj(value)
+            )
+
+    mlp = FlashNextExpertMLP().eval()
+    with torch.no_grad():
+        for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    value = (
+        torch.randn((4, 2560), device=device, dtype=torch.float16) * 0.02
+    )
+    with torch.inference_mode():
+        expected = mlp(value)
+
+    assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
+    assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
+    with torch.inference_mode():
+        eager = mlp(value)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = mlp(value)
+        graph.replay()
+        torch.cuda.synchronize()
+        replayed = captured.clone()
+        graph.replay()
+        torch.cuda.synchronize()
+
+    torch.testing.assert_close(eager, expected, rtol=0, atol=2e-3)
+    assert torch.equal(replayed, captured)
+    telemetry = qvq_grouped_runtime_telemetry(mlp)
+    assert len(telemetry) == 1
+    # Eager plus capture execute Python dispatch; graph replays execute only
+    # the recorded CUDA work and therefore do not increment host telemetry.
+    assert telemetry[0]["h100_flash_next_expert_grouped_launches"] >= 2
+    assert telemetry[0]["fused_mlp_launches"] >= 2
+    assert telemetry[0]["plain_fallbacks"] == 0
 
 
 def _independent_ordered_qkv_reference(
