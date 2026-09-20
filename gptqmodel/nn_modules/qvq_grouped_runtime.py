@@ -2386,9 +2386,14 @@ class QVQHopperGroupedRuntime:
             use_h100_folded_fusion = (
                 self._h100_fp16_recovery_store_enabled
                 and x.dtype == torch.float16
-                and children[0].in_features == 5120
-                and down.in_features == 17408
-                and down.out_features == 5120
+                and (
+                    (
+                        children[0].in_features,
+                        down.in_features,
+                        down.out_features,
+                    )
+                    in ((5120, 17408, 5120), (2560, 640, 2560))
+                )
             )
             use_ordered_reduction_fusion = (
                 use_h100_folded_fusion
@@ -2657,7 +2662,8 @@ class QVQHopperGroupedRuntime:
             self._h100_fp16_recovery_store_enabled
             and down.output_hadamard
             and inner.dtype == torch.float32
-            and (down.in_features, down.out_features) == (17408, 5120)
+            and (down.in_features, down.out_features)
+            in ((17408, 5120), (640, 2560))
         )
         if use_qwen_composite_recovery:
             from ..quantization.rotation.hadamard_utils import _get_hadK_on
@@ -2669,7 +2675,9 @@ class QVQHopperGroupedRuntime:
                 down._cached_cast("SV", torch.float16), False
             )
             if base is None or base_width != 40:
-                raise _R0Fallback("Qwen 5120 output requires its canonical H40 base")
+                raise _R0Fallback(
+                    "Qwen composite output requires its canonical H40 base"
+                )
             recovered = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(
                 inner[:rows].contiguous(),
                 base=base,

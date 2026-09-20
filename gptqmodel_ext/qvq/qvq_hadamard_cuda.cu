@@ -3358,11 +3358,11 @@ at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
           input.is_contiguous(),
       "Qwen composite recovery input must be contiguous FP32 [1..16, N]");
   const int64_t composite_n = input.size(1);
-  const int64_t composite_base =
-      composite_n == 6144 ? 12 : 40;
+  const int64_t composite_base = composite_n == 6144 ? 12 : 40;
   TORCH_CHECK(
-      composite_n == 5120 || composite_n == 6144 || composite_n == 10240,
-      "Qwen composite recovery supports N=5120, 6144, or 10240");
+      composite_n == 2560 || composite_n == 5120 || composite_n == 6144 ||
+          composite_n == 10240,
+      "Qwen composite recovery supports N=2560, 5120, 6144, or 10240");
   TORCH_CHECK(
       base.scalar_type() == at::kHalf && base.is_contiguous() &&
           base.numel() == composite_base * composite_base,
@@ -3418,7 +3418,7 @@ at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
   }
 #undef QVQ_LAUNCH_QWEN_COMPOSITE_MULTIBLOCK
 
-  if (composite_n != 5120) {
+  if (composite_n != 2560 && composite_n != 5120) {
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return output;
   }
@@ -3442,7 +3442,11 @@ at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
         bias.has_value() ? bias->const_data_ptr<float>() : nullptr,           \
         reinterpret_cast<half*>(output.mutable_data_ptr()));                  \
   }
-  if (bias.has_value()) {
+  if (composite_n == 2560 && bias.has_value()) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(true, 2560, 40)
+  } else if (composite_n == 2560) {
+    QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(false, 2560, 40)
+  } else if (bias.has_value()) {
     QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(true, 5120, 40)
   } else {
     QVQ_LAUNCH_QWEN_COMPOSITE_RECOVERY(false, 5120, 40)
