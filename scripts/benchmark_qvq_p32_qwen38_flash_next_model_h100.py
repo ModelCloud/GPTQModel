@@ -166,12 +166,22 @@ def _oracle_metrics(
         local = _metrics(candidate, baseline)
         if local["mean_abs"] > 4e-3 or local["max_abs"] > 0.046875:
             raise RuntimeError(f"local accuracy gate failed: {local}")
+        baseline_fp64 = _metrics(baseline[:, selected], fp64)
+        candidate_fp64 = _metrics(candidate[:, selected], fp64)
+        fp32_fp64 = _metrics(fp32, fp64)
+        for label, metrics in (
+            ("baseline_vs_fp64", baseline_fp64),
+            ("candidate_vs_fp64", candidate_fp64),
+            ("fp32_vs_fp64", fp32_fp64),
+        ):
+            if metrics["mean_abs"] > 4e-3 or metrics["max_abs"] > 0.046875:
+                raise RuntimeError(f"{label} accuracy gate failed: {metrics}")
         local_rows.append(
             {
                 "candidate_vs_baseline": local,
-                "baseline_vs_fp64": _metrics(baseline[:, selected], fp64),
-                "candidate_vs_fp64": _metrics(candidate[:, selected], fp64),
-                "fp32_vs_fp64": _metrics(fp32, fp64),
+                "baseline_vs_fp64": baseline_fp64,
+                "candidate_vs_fp64": candidate_fp64,
+                "fp32_vs_fp64": fp32_fp64,
             }
         )
     return local_rows

@@ -33,26 +33,26 @@ The benchmark uses candidate/control/candidate CUDA Graph timing on an idle
 
 | Rate | M1 | M2 | M4 | M8 | M16 |
 |---|---:|---:|---:|---:|---:|
-| W2 | 3.347x | 4.291x | 4.080x | 3.738x | 12.488x |
-| W2.5 | 7.212x | 13.842x | 12.996x | 12.574x | 12.455x |
-| W3 | 13.134x | 13.847x | 13.018x | 12.668x | 12.550x |
-| W3.5 | 12.440x | 12.965x | 12.945x | 12.539x | 12.394x |
+| W2 | 3.357x | 4.245x | 4.084x | 3.685x | 12.386x |
+| W2.5 | 7.127x | 13.862x | 13.002x | 12.542x | 12.378x |
+| W3 | 12.959x | 13.742x | 12.967x | 12.671x | 12.533x |
+| W3.5 | 12.556x | 13.181x | 13.118x | 12.642x | 12.556x |
 
-The text-model projection-stack geometric mean is **9.808x**. The minimum is
-**3.347x** at W2/M1 and the maximum is **13.847x** at W3/M2. Full-attention
-layers have a **9.149x** geometric mean and linear-attention layers have a
-**10.031x** geometric mean.
+The text-model projection-stack geometric mean is **9.801x**. The minimum is
+**3.357x** at W2/M1 and the maximum is **13.862x** at W2.5/M2. Full-attention
+layers have a **9.143x** geometric mean and linear-attention layers have a
+**10.025x** geometric mean.
 
-The attention-only weighted stack has a **23.150x** geometric mean and ranges
-from **5.911x** to **33.743x**. Per-site results are:
+The attention-only weighted stack has a **23.149x** geometric mean and ranges
+from **5.908x** to **33.601x**. Per-site results are:
 
 | Site | Geometric mean | Minimum | Maximum |
 |---|---:|---:|---:|
-| Full Q/K/V group | 20.043x | 4.696x | 30.842x |
-| Linear QKV/Z group | 28.795x | 7.041x | 40.080x |
-| Attention output | 17.103x | 5.123x | 29.625x |
-| Expert gate/up | 6.770x | 2.901x | 9.615x |
-| Expert down | 5.968x | 2.293x | 8.409x |
+| Full Q/K/V group | 20.033x | 4.665x | 30.912x |
+| Linear QKV/Z group | 28.796x | 7.042x | 40.025x |
+| Attention output | 17.107x | 5.129x | 29.389x |
+| Expert gate/up | 6.769x | 2.918x | 9.549x |
+| Expert down | 5.956x | 2.298x | 8.467x |
 
 Thus every constituent projection family independently clears 2x; the weighted
 result is not hiding a regressing site behind expert multiplicity.
@@ -88,4 +88,6 @@ CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=<H100-UUID> \
 
 The benchmark records a SHA-256 fingerprint over every production CUDA/Python
 source that controls the measured routes, so an uncommitted or later-modified
-kernel cannot silently inherit these results.
+kernel cannot silently inherit these results. The authoritative run records
+commit `2ee51a8e0edf1f9909d1c9f86696b2f63ec3a94a` and source fingerprint
+`04b97f107e5c8534dd54be43e5f95d34c9a02e2c6a43a6f7f4936dcfe1b4fcd9`.
