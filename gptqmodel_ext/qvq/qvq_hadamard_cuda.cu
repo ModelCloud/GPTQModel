@@ -47,6 +47,7 @@ struct QvqHadamardTraits<float> {
 };
 
 constexpr int kHadamardThreads = 1024;
+constexpr int kFlashNextCompositeThreads = 640;
 constexpr int kFp8QuantizeThreads = 256;
 constexpr int kHadamardPairMultiblockN = 8192;
 constexpr int kHadamardPairMultiblockTile = 256;
@@ -1536,10 +1537,11 @@ qvq_qwen_composite_input_fp16_padded_kernel(
     // This removes six block barriers and all intermediate shared-memory
     // traffic without changing an arithmetic operation or rounding boundary.
     const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int warps = static_cast<int>(blockDim.x) >> 5;
     const int lane = static_cast<int>(threadIdx.x) & 31;
 #pragma unroll
     for (int group_pass = 0; group_pass < 2; ++group_pass) {
-      const int source = warp + group_pass * 32;
+      const int source = warp + group_pass * warps;
       if (source < CompositeBase) {
         const int column0 = source * 64 + lane;
         const int column1 = column0 + 32;
@@ -1608,20 +1610,64 @@ qvq_qwen_composite_input_fp16_padded_kernel(
     }
   }
 
-  for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
-       column += static_cast<int>(blockDim.x)) {
-    const int base_row = column / CompositeLowN;
-    const int local = column & (CompositeLowN - 1);
-    float value = 0.0f;
+  if constexpr (CompositeLowN == 64) {
+    // The 640-thread launch owns exactly four outputs per thread.  Interleave
+    // their independent H40 chains to hide FP32 FMA latency while retaining
+    // ascending source order independently for every output.
+    const int column0 = static_cast<int>(threadIdx.x);
+    const int column1 = column0 + kFlashNextCompositeThreads;
+    const int column2 = column1 + kFlashNextCompositeThreads;
+    const int column3 = column2 + kFlashNextCompositeThreads;
+    const int base_row0 = column0 / CompositeLowN;
+    const int base_row1 = column1 / CompositeLowN;
+    const int base_row2 = column2 / CompositeLowN;
+    const int base_row3 = column3 / CompositeLowN;
+    const int local = column0 & (CompositeLowN - 1);
+    float value0 = 0.0f;
+    float value1 = 0.0f;
+    float value2 = 0.0f;
+    float value3 = 0.0f;
 #pragma unroll
     for (int source = 0; source < CompositeBase; ++source) {
-      value = __fmaf_rn(
-          __half2float(base[base_row * CompositeBase + source]),
-          low[source * CompositeLowN + local],
-          value);
+      const float low_value = low[source * CompositeLowN + local];
+      value0 = __fmaf_rn(
+          __half2float(base[base_row0 * CompositeBase + source]),
+          low_value,
+          value0);
+      value1 = __fmaf_rn(
+          __half2float(base[base_row1 * CompositeBase + source]),
+          low_value,
+          value1);
+      value2 = __fmaf_rn(
+          __half2float(base[base_row2 * CompositeBase + source]),
+          low_value,
+          value2);
+      value3 = __fmaf_rn(
+          __half2float(base[base_row3 * CompositeBase + source]),
+          low_value,
+          value3);
     }
-    output[static_cast<int64_t>(row) * CompositeN + column] =
-        __float2half_rn(value);
+    const int64_t output_offset = static_cast<int64_t>(row) * CompositeN;
+    output[output_offset + column0] = __float2half_rn(value0);
+    output[output_offset + column1] = __float2half_rn(value1);
+    output[output_offset + column2] = __float2half_rn(value2);
+    output[output_offset + column3] = __float2half_rn(value3);
+  } else {
+    for (int column = static_cast<int>(threadIdx.x); column < CompositeN;
+         column += static_cast<int>(blockDim.x)) {
+      const int base_row = column / CompositeLowN;
+      const int local = column & (CompositeLowN - 1);
+      float value = 0.0f;
+#pragma unroll
+      for (int source = 0; source < CompositeBase; ++source) {
+        value = __fmaf_rn(
+            __half2float(base[base_row * CompositeBase + source]),
+            low[source * CompositeLowN + local],
+            value);
+      }
+      output[static_cast<int64_t>(row) * CompositeN + column] =
+          __float2half_rn(value);
+    }
   }
 }
 
@@ -3449,7 +3495,7 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
         static_cast<int>(smem_bytes)));
     kernel<<<
         static_cast<unsigned>(output_rows),
-        kHadamardThreads,
+        kFlashNextCompositeThreads,
         smem_bytes,
         stream>>>(
         reinterpret_cast<const nv_bfloat16*>(input.const_data_ptr()),
@@ -3465,7 +3511,7 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
         static_cast<int>(smem_bytes)));
     kernel<<<
         static_cast<unsigned>(output_rows),
-        kHadamardThreads,
+        kFlashNextCompositeThreads,
         smem_bytes,
         stream>>>(
         reinterpret_cast<const half*>(input.const_data_ptr()),
