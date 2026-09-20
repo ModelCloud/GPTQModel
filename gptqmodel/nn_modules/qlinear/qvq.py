@@ -1887,22 +1887,20 @@ class QVQLinear(BaseQuantLinear):
                     wgmma_input = x.contiguous()
                     logical_rows = int(wgmma_input.shape[0])
                     large_m_hopper = logical_rows > 16
-                    padded_rows = (
-                        16
-                        if logical_rows <= 16
-                        else 32
-                        if logical_rows <= 32
-                        else ((logical_rows + 63) // 64) * 64
-                    )
-                    if wgmma_input.shape[0] != padded_rows:
-                        padded = torch.zeros(
-                            (padded_rows, self.in_features),
-                            dtype=wgmma_input.dtype,
-                            device=wgmma_input.device,
-                        )
-                        padded[: wgmma_input.shape[0]].copy_(wgmma_input)
-                        wgmma_input = padded
                     if large_m_hopper:
+                        padded_rows = (
+                            32
+                            if logical_rows <= 32
+                            else ((logical_rows + 63) // 64) * 64
+                        )
+                        if wgmma_input.shape[0] != padded_rows:
+                            padded = torch.zeros(
+                                (padded_rows, self.in_features),
+                                dtype=wgmma_input.dtype,
+                                device=wgmma_input.device,
+                            )
+                            padded[: wgmma_input.shape[0]].copy_(wgmma_input)
+                            wgmma_input = padded
                         large_m_split = qvq_h100_large_m_ordered_split_count(
                             device_name=properties.name,
                             compute_capability=(properties.major, properties.minor),
@@ -1952,6 +1950,22 @@ class QVQLinear(BaseQuantLinear):
                     kernel_kwargs = (
                         {"split_count": ordered_split} if ordered_split else {}
                     )
+                    # SM90 TMA zero-fills logical M1..M15 rows outside its
+                    # input descriptor.  Non-partial ordered output can pass
+                    # logical M directly and avoid a fill plus D2D copy;
+                    # ordinary accumulation and ordered partials retain their
+                    # explicit M16 storage contract.
+                    if (
+                        (not ordered_split or return_ordered_partials)
+                        and logical_rows != 16
+                    ):
+                        padded = torch.zeros(
+                            (16, self.in_features),
+                            dtype=wgmma_input.dtype,
+                            device=wgmma_input.device,
+                        )
+                        padded[:logical_rows].copy_(wgmma_input)
+                        wgmma_input = padded
                     output = kernel(
                         wgmma_input,
                         window,

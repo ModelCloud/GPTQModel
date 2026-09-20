@@ -521,6 +521,18 @@ def qvq_p32_window_wgmma_m16_tma_ordered_split(
         split_count=int(split_count),
     )
     native_op = _qvq_wgmma_op("p32_window_m16_tma_ordered_split")
+    if input.dim() == 2 and 0 < input.shape[0] <= _P32_WGMMA_NATIVE_ROWS:
+        logical_rows = int(input.shape[0])
+        return native_op(
+            input,
+            trellis,
+            levels,
+            bank_ids,
+            transition_bits,
+            out_features,
+            bank_alt_id,
+            split_count,
+        )[:logical_rows]
     return _run_p32_wgmma_m16_tiles(
         input,
         lambda tile: native_op(

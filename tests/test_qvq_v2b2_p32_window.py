@@ -135,6 +135,39 @@ def test_p32_window_tma_wgmma_auto_tiles_logical_m(monkeypatch):
     assert torch.count_nonzero(calls[-1][3:]) == 0
 
 
+def test_p32_window_ordered_tma_passes_small_logical_m_directly(monkeypatch):
+    calls = []
+
+    def fake_op(name):
+        assert name == "p32_window_m16_tma_ordered_split"
+
+        def run(input, *args):
+            del args
+            calls.append(input.clone())
+            return torch.zeros((16, 256), dtype=torch.float32)
+
+        return run
+
+    monkeypatch.setattr(qvq_wgmma_cuda._QVQ_WGMMA_EXTENSION, "op", fake_op)
+    input = torch.randn(
+        (3, 256), generator=torch.Generator().manual_seed(20260920)
+    ).half()
+
+    actual = qvq_p32_window_wgmma_m16_tma_ordered_split(
+        input,
+        torch.empty(1),
+        torch.empty(1),
+        torch.empty(1),
+        3.0,
+        out_features=256,
+        split_count=2,
+    )
+
+    assert tuple(actual.shape) == (3, 256)
+    assert len(calls) == 1
+    assert torch.equal(calls[0], input)
+
+
 @pytest.mark.parametrize("transition_bits", (4, 5, 6, 7))
 @pytest.mark.parametrize("logical_rows", (1, 2, 4, 8, 16))
 def test_h100_llama_down_uses_measured_ordered_split(transition_bits, logical_rows):
@@ -602,6 +635,23 @@ def test_p32_window_tma_wgmma_ordered_split_is_repeatable(bits, logical_rows):
 
     actual = run()
     torch.cuda.synchronize()
+    if logical_rows <= 16:
+        padded = torch.zeros(
+            (16, in_features), dtype=torch.float16, device="cuda"
+        )
+        padded[:logical_rows].copy_(x)
+        padded_reference = qvq_p32_window_wgmma_m16_tma_ordered_split(
+            padded,
+            window,
+            levels,
+            bank_ids,
+            bits,
+            out_features=out_features,
+            bank_alt_id=3,
+            split_count=split_count,
+        )[:logical_rows]
+        torch.cuda.synchronize()
+        assert torch.equal(actual, padded_reference)
     for _ in range(5):
         assert torch.equal(run(), actual)
     torch.cuda.synchronize()
@@ -664,6 +714,74 @@ def test_qvq_linear_hopper_p32_dispatch_reuses_window_cache(logical_rows):
     layer._inner_forward(x)
     torch.cuda.synchronize()
     assert layer._qvq_cuda_window_cache[3] is cached_window
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_qvq_linear_ordered_dispatch_preserves_logical_m(monkeypatch):
+    properties = torch.cuda.get_device_properties(0)
+    if (properties.major, properties.minor) != (9, 0) or "H100" not in properties.name:
+        pytest.skip("logical-M ordered dispatch requires the physical H100")
+    bits = 3.0
+    in_features, out_features = 512, 256
+    tile_count = (in_features // 16) * (out_features // 16)
+    planar = _random_planar_words(bits, tiles=tile_count, device="cuda")
+    generator = torch.Generator(device="cuda").manual_seed(20260920)
+    bank_ids = pack_qvq_binary_bank_ids(
+        torch.randint(
+            0,
+            2,
+            (tile_count * 8,),
+            generator=generator,
+            device="cuda",
+            dtype=torch.uint8,
+        )
+    )
+    bank_alt_id = torch.tensor([3], dtype=torch.uint8, device="cuda")
+    layer = QVQLinear(
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        tensors={
+            "trellis": planar,
+            "SU": torch.ones(in_features, device="cuda"),
+            "SV": torch.ones(out_features, device="cuda"),
+            "bank_ids": bank_ids,
+            "bank_alt_id": bank_alt_id,
+        },
+        bank_count=2,
+        v2b2_p32=True,
+    ).eval()
+    x = torch.randn(
+        (3, in_features), generator=generator, device="cuda", dtype=torch.float16
+    )
+    dense = reconstruct_qvq_inner_weight(
+        planar,
+        bits=bits,
+        in_features=in_features,
+        out_features=out_features,
+        bank_ids=bank_ids,
+        v2b2_p32=True,
+        bank_alt_id=bank_alt_id,
+    )
+    original = qvq_wgmma_cuda.qvq_p32_window_wgmma_m16_tma_ordered_split
+    input_shapes = []
+
+    def recorded(input, *args, **kwargs):
+        input_shapes.append(tuple(input.shape))
+        return original(input, *args, **kwargs)
+
+    monkeypatch.setattr(qvq_wgmma_cuda, "qvq_h100_ordered_split_count", lambda **_: 2)
+    monkeypatch.setattr(
+        qvq_wgmma_cuda,
+        "qvq_p32_window_wgmma_m16_tma_ordered_split",
+        recorded,
+    )
+
+    actual = layer._inner_forward(x)
+    torch.cuda.synchronize()
+
+    assert input_shapes == [(3, in_features)]
+    torch.testing.assert_close(actual, x.float() @ dense, atol=2e-3, rtol=0.0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
