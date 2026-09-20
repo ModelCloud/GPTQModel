@@ -418,6 +418,43 @@ def test_qwen38_h100_grouped_schedules_preserve_child_split_policies(
     )
 
 
+@pytest.mark.parametrize(
+    ("transition_bits", "expected"),
+    (
+        (4, ((1, 1, 1), (1, 1))),
+        (5, ((5, 10, 10), (1, 1))),
+        (6, ((1, 1, 1), (2, 2))),
+        (7, ((2, 10, 10), (2, 2))),
+    ),
+)
+def test_qwen38_flash_next_h100_grouped_schedules_preserve_child_reductions(
+    transition_bits, expected
+):
+    shapes = ((12288, 512, 512), (10240, 6144))
+
+    actual = tuple(
+        qvq_h100_grouped_ordered_split_counts(
+            device_name="NVIDIA H100",
+            compute_capability=(9, 0),
+            in_features=2560,
+            out_features=shape,
+            transition_bits=transition_bits,
+        )
+        for shape in shapes
+    )
+    assert actual == expected
+    assert (
+        qvq_h100_grouped_ordered_split_counts(
+            device_name="NVIDIA H200",
+            compute_capability=(9, 0),
+            in_features=2560,
+            out_features=shapes[0],
+            transition_bits=transition_bits,
+        )
+        is None
+    )
+
+
 def test_h100_large_m_chunk_candidates_are_bounded_and_configurable(monkeypatch):
     monkeypatch.delenv("QVQ_HOPPER_LARGE_M_CHUNK_CANDIDATES", raising=False)
     assert QVQHopperGroupedRuntime._large_m_chunk_candidates() == (

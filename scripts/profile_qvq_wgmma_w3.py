@@ -13,7 +13,6 @@ from pathlib import Path
 
 import torch
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
@@ -22,11 +21,15 @@ from gptqmodel.quantization.qvq import (
     pack_qvq_binary_bank_ids,
     repack_p32_planar_to_window,
 )
-from gptqmodel.quantization.qvq_codecs import PGC16_CODEBOOK_VERSION, pgc16_levels_for_version
+from gptqmodel.quantization.qvq_codecs import (
+    PGC16_CODEBOOK_VERSION,
+    pgc16_levels_for_version,
+)
 from gptqmodel.quantization.qvq_rates import qvq_transition_bits
 from gptqmodel.utils.planar_packing import planar_pack_rows
 from gptqmodel.utils.qvq_wgmma_cuda import (
     qvq_p32_window_wgmma_m16_tma,
+    qvq_p32_window_wgmma_m16_tma_ordered_split,
     qvq_p32_window_wgmma_w3_m16,
 )
 
@@ -48,6 +51,11 @@ QWEN38_27B_SHAPES = (
     ShapeCase("qwen38_linear_z", 5120, 6144),
     ShapeCase("qwen38_mlp_gate_up", 5120, 17408),
     ShapeCase("qwen38_mlp_down", 17408, 5120),
+    ShapeCase("qwen38_flash_next_full_q", 2560, 12288),
+    ShapeCase("qwen38_flash_next_full_kv", 2560, 512),
+    ShapeCase("qwen38_flash_next_attn_out", 6144, 2560),
+    ShapeCase("qwen38_flash_next_linear_qkv", 2560, 10240),
+    ShapeCase("qwen38_flash_next_linear_z", 2560, 6144),
 )
 
 
@@ -55,7 +63,7 @@ def _args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--kernel",
-        choices=("p32_wgmma", "p32_tma_wgmma"),
+        choices=("p32_wgmma", "p32_tma_wgmma", "p32_tma_wgmma_ordered"),
         required=True,
     )
     parser.add_argument(
@@ -88,8 +96,13 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
     properties = torch.cuda.get_device_properties(0)
-    if (properties.major, properties.minor) != (9, 0) or "H200" not in properties.name:
-        raise RuntimeError(f"H200 is required, got {properties.name} CC {properties.major}.{properties.minor}")
+    if (properties.major, properties.minor) != (9, 0) or not (
+        "H100" in properties.name or "H200" in properties.name
+    ):
+        raise RuntimeError(
+            f"an H100/H200 SM90 GPU is required, got {properties.name} "
+            f"CC {properties.major}.{properties.minor}"
+        )
 
     case = next(case for case in QWEN38_27B_SHAPES if case.name == args.shape)
     generator = torch.Generator().manual_seed(20260830)
@@ -121,9 +134,21 @@ def main() -> None:
                 bank_alt_id=3,
                 split_count=args.split,
             )
-    else:
+    elif args.kernel == "p32_tma_wgmma":
         def call():
             return qvq_p32_window_wgmma_m16_tma(
+                x,
+                trellis,
+                levels,
+                bank_ids,
+                args.bits,
+                out_features=case.out_features,
+                bank_alt_id=3,
+                split_count=args.split,
+            )
+    else:
+        def call():
+            return qvq_p32_window_wgmma_m16_tma_ordered_split(
                 x,
                 trellis,
                 levels,
