@@ -2607,8 +2607,14 @@ void qvq_wgmma_launch_ordered_split_reduction(
     case 4:
       QVQ_LAUNCH_FIXED_REDUCER(4);
       break;
+    case 5:
+      QVQ_LAUNCH_FIXED_REDUCER(5);
+      break;
     case 8:
       QVQ_LAUNCH_FIXED_REDUCER(8);
+      break;
+    case 10:
+      QVQ_LAUNCH_FIXED_REDUCER(10);
       break;
     case 16:
       QVQ_LAUNCH_FIXED_REDUCER(16);
