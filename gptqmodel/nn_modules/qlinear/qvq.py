@@ -1577,6 +1577,9 @@ class QVQLinear(BaseQuantLinear):
             ) or (
                 (self.in_features, self.out_features) == (17408, 5120)
                 and ordered_split_count in (17, 34)
+            ) or (
+                (self.in_features, self.out_features) == (640, 2560)
+                and ordered_split_count is None
             )
             if (
                 x.device.type != "cuda"
@@ -1840,6 +1843,7 @@ class QVQLinear(BaseQuantLinear):
                         # segmented path; down retains its measured shape
                         # policy through split_count=0.
                         split_count=32 if self.out_features == 640 else 0,
+                        return_ordered_partials=return_ordered_partials,
                     )
 
             # Hopper's RS-WGMMA path consumes the storage-neutral continuous

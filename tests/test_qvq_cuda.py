@@ -1881,21 +1881,24 @@ def test_qvq_cuda_qwen_composite_input_is_exact_padded_and_graph_safe(m):
     assert torch.equal(captured.view(torch.int16), actual.view(torch.int16))
 
 
-@pytest.mark.parametrize("split_count", (17, 34))
+@pytest.mark.parametrize(
+    ("n", "split_count"),
+    ((5120, 17), (5120, 34), (2560, 16), (2560, 24), (2560, 40)),
+)
 @pytest.mark.parametrize("m", (1, 16))
 @pytest.mark.parametrize("with_bias", (False, True))
 def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
-    split_count, m, with_bias
+    n, split_count, m, with_bias
 ):
     properties = torch.cuda.get_device_properties(0)
     if properties.name != "NVIDIA H100" or (properties.major, properties.minor) != (9, 0):
         pytest.skip("Qwen ordered composite recovery requires the physical H100")
-    n = 5120
     generator = torch.Generator(device="cuda").manual_seed(
-        20261000 + split_count + m
+        20261000 + n + split_count + m
     )
+    partial_rows = 16 if n == 5120 else m
     partials = torch.randn(
-        (split_count, 16, n), generator=generator, device="cuda"
+        (split_count, partial_rows, n), generator=generator, device="cuda"
     ) * 0.02
     post_scale = torch.randn(
         (n,), generator=generator, device="cuda", dtype=torch.float16
@@ -1908,7 +1911,7 @@ def test_qvq_cuda_qwen_ordered_composite_recovery_is_exact_and_graph_safe(
     base, base_n = get_hadK(n)
     assert base_n == 40 and base is not None
     base = base.to(device="cuda", dtype=torch.float16).contiguous()
-    reduced = torch.zeros((16, n), device="cuda")
+    reduced = torch.zeros((partial_rows, n), device="cuda")
     for split in range(split_count):
         reduced = reduced + partials[split]
     reference = qvq_cuda_qwen_composite_recovery_fp32_to_fp16(

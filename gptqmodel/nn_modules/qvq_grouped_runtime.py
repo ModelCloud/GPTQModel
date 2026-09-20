@@ -2622,6 +2622,53 @@ class QVQHopperGroupedRuntime:
             self.telemetry.h100_fp16_recovery_store_launches += 1
             return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
 
+        use_flash_next_ordered_composite_recovery = (
+            rows <= 16
+            and self._h100_fp16_recovery_store_enabled
+            and down.output_hadamard
+            and (down.in_features, down.out_features) == (640, 2560)
+            and (
+                x.dtype == torch.float16
+                or (x.dtype == torch.bfloat16 and rows in (1, 8, 16))
+            )
+            and not rank8_down_enabled
+        )
+        if use_flash_next_ordered_composite_recovery:
+            from ..quantization.rotation.hadamard_utils import _get_hadK_on
+            from ..utils.qvq_cuda import (
+                qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16,
+            )
+
+            partials = down._inner_forward(
+                transformed,
+                return_ordered_partials=True,
+            )
+            partial_rows = int(transformed.shape[0])
+            split_count = partials.numel() // (
+                partial_rows * down.out_features
+            )
+            base, base_width = _get_hadK_on(
+                down._cached_cast("SV", torch.float16), False
+            )
+            if base is None or base_width != 40:
+                raise _R0Fallback(
+                    "Flash-Next 2560 output requires its canonical H40 base"
+                )
+            recovered = qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
+                partials,
+                base=base,
+                post_scale=down._cached_cast(
+                    "SV", torch.float16, torch.float32
+                ),
+                bias=down._cached_cast("bias", torch.float16, torch.float32),
+                split_count=split_count,
+                logical_rows=rows,
+            )
+            self.telemetry.h100_qwen_composite_down_recovery_launches += 1
+            self.telemetry.h100_qwen_ordered_composite_down_recovery_launches += 1
+            self.telemetry.h100_fp16_recovery_store_launches += 1
+            return recovered.reshape(*x.shape[:-1], down.out_features).to(x.dtype)
+
         inner = down._inner_forward(transformed)
         down_policy = getattr(down, "_p32_window_config", None)
         if (
