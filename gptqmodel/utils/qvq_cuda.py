@@ -1528,10 +1528,15 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
     split_count: int,
     logical_rows: int,
     bias: torch.Tensor | None = None,
+    output_bf16: bool = False,
 ) -> torch.Tensor:
     """Reduce ordered Qwen down partials through their H40 composite."""
 
     n = post_scale.numel()
+    if not isinstance(output_bf16, bool):
+        raise TypeError("output_bf16 must be a bool")
+    if output_bf16 and n != 2560:
+        raise ValueError("BF16 ordered composite output requires Flash-Next N=2560")
     valid_splits = (16, 24, 40) if n == 2560 else (17, 34)
     if (
         partials.device.type != "cuda"
@@ -1576,6 +1581,7 @@ def qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16(
         bias,
         split_count,
         logical_rows,
+        output_bf16,
     )
 
 

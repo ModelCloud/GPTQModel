@@ -1456,13 +1456,17 @@ __global__ void qvq_qwen_composite_recovery_low_kernel(
   }
 }
 
-template <bool HasBias, int CompositeN, int CompositeBase>
+template <
+    bool HasBias,
+    int CompositeN,
+    int CompositeBase,
+    bool OutputBFloat = false>
 __global__ void qvq_qwen_composite_recovery_high_kernel(
     const float* __restrict__ workspace,
     const half* __restrict__ base,
     const float* __restrict__ post_scale,
     const float* __restrict__ bias,
-    half* __restrict__ output) {
+    void* __restrict__ output) {
   constexpr int CompositeLowN = CompositeN / CompositeBase;
   const int base_row = static_cast<int>(blockIdx.x);
   const int row = static_cast<int>(blockIdx.y);
@@ -1486,8 +1490,15 @@ __global__ void qvq_qwen_composite_recovery_high_kernel(
       const float bias_value = __half2float(__float2half_rn(bias[column]));
       value = round_fp16_unless_overflow(__fadd_rn(value, bias_value));
     }
-    output[static_cast<int64_t>(row) * CompositeN + column] =
-        __float2half_rn(value);
+    const int64_t output_offset =
+        static_cast<int64_t>(row) * CompositeN + column;
+    const half rounded = __float2half_rn(value);
+    if constexpr (OutputBFloat) {
+      reinterpret_cast<nv_bfloat16*>(output)[output_offset] =
+          __float2bfloat16_rn(__half2float(rounded));
+    } else {
+      reinterpret_cast<half*>(output)[output_offset] = rounded;
+    }
   }
 }
 
@@ -3507,7 +3518,8 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
     const at::Tensor& post_scale,
     const std::optional<at::Tensor>& bias,
     int64_t split_count,
-    int64_t logical_rows) {
+    int64_t logical_rows,
+    bool output_bf16) {
   TORCH_CHECK(partials.is_cuda() && base.is_cuda() && post_scale.is_cuda(),
               "Qwen ordered composite recovery tensors must be CUDA tensors");
   TORCH_CHECK(
@@ -3516,6 +3528,9 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
   const int64_t composite_n = post_scale.numel();
   TORCH_CHECK(composite_n == 2560 || composite_n == kQwenCompositeN,
               "Qwen ordered composite recovery requires N=2560 or N=5120");
+  TORCH_CHECK(
+      !output_bf16 || composite_n == 2560,
+      "BF16 ordered composite output is validated only for Flash-Next N=2560");
   TORCH_CHECK(
       (composite_n == 2560 &&
        (split_count == 16 || split_count == 24 || split_count == 40)) ||
@@ -3557,10 +3572,11 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
       "Qwen ordered composite recovery requires the measured physical H100");
   const size_t smem_bytes = composite_n * sizeof(float);
   auto output = at::empty(
-      {logical_rows, composite_n}, partials.options().dtype(at::kHalf));
+      {logical_rows, composite_n},
+      partials.options().dtype(output_bf16 ? at::kBFloat16 : at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
-#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(                         \
-    HAS_BIAS, SPLIT_COUNT)                                                     \
+#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK_MODE(                    \
+    HAS_BIAS, SPLIT_COUNT, OUTPUT_BFLOAT)                                      \
   {                                                                            \
     auto workspace = at::empty(                                                \
         {logical_rows, composite_n}, partials.options().dtype(at::kFloat));    \
@@ -3571,14 +3587,26 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
         partials.const_data_ptr<float>(),                                      \
         workspace.mutable_data_ptr<float>(),                                   \
         partial_rows * composite_n);                                           \
-    qvq_qwen_composite_recovery_high_kernel<HAS_BIAS, 2560, 40><<<            \
+    qvq_qwen_composite_recovery_high_kernel<                                   \
+        HAS_BIAS, 2560, 40, OUTPUT_BFLOAT><<<                                  \
         grid, low_n, 0, stream>>>(                                             \
         workspace.const_data_ptr<float>(),                                     \
         reinterpret_cast<const half*>(base.const_data_ptr()),                  \
         post_scale.const_data_ptr<float>(),                                    \
         bias.has_value() ? bias->const_data_ptr<float>() : nullptr,            \
-        reinterpret_cast<half*>(output.mutable_data_ptr()));                   \
+        output.mutable_data_ptr());                                            \
   }
+#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(                         \
+    HAS_BIAS, SPLIT_COUNT)                                                     \
+  do {                                                                         \
+    if (output_bf16) {                                                         \
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK_MODE(                      \
+          HAS_BIAS, SPLIT_COUNT, true)                                         \
+    } else {                                                                   \
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK_MODE(                      \
+          HAS_BIAS, SPLIT_COUNT, false)                                        \
+    }                                                                          \
+  } while (false);
   if (composite_n == 2560 && logical_rows <= 16) {
     if (split_count == 16 && bias.has_value()) {
       QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(true, 16)
@@ -3597,6 +3625,7 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
     return output;
   }
 #undef QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK
+#undef QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK_MODE
 #define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(                            \
     HAS_BIAS, SPLIT_COUNT, N)                                                   \
   {                                                                            \
@@ -4121,7 +4150,7 @@ TORCH_LIBRARY_FRAGMENT(gptqmodel_qvq, m) {
   m.def("folded_swiglu_precondition_fp32(Tensor gate, Tensor up, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, bool bf16_model_rounding=False) -> Tensor");
   m.def("folded_swiglu_precondition_ordered_fp32(Tensor partials, Tensor gate_scale, Tensor up_scale, Tensor? gate_bias, Tensor? up_bias, Tensor down_scale, int split_count, int logical_rows, bool bf16_model_rounding=False) -> Tensor");
   m.def("qwen_composite_recovery_fp32_to_fp16(Tensor input, Tensor base, Tensor post_scale, Tensor? bias) -> Tensor");
-  m.def("qwen_composite_ordered_recovery_fp32_to_fp16(Tensor partials, Tensor base, Tensor post_scale, Tensor? bias, int split_count, int logical_rows) -> Tensor");
+  m.def("qwen_composite_ordered_recovery_fp32_to_fp16(Tensor partials, Tensor base, Tensor post_scale, Tensor? bias, int split_count, int logical_rows, bool output_bf16=False) -> Tensor");
   m.def("qwen_composite_input_fp16_padded(Tensor input, Tensor base, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition(Tensor activated_gate, Tensor up, Tensor pre_scale) -> Tensor");
   m.def("swiglu_precondition_multiblock(Tensor activated_gate, Tensor up, Tensor pre_scale, bool half2_high=False, bool fuse_silu=False, bool half2_low=False, bool pad_to_16=False) -> Tensor");
