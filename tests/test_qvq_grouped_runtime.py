@@ -972,8 +972,10 @@ def _h100_device() -> torch.device | None:
     return None
 
 
+@pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
 def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
     monkeypatch,
+    model_dtype,
 ):
     device = _h100_device()
     if device is None:
@@ -1031,9 +1033,7 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
         for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
             child.SV.fill_(0.002)
             child.bias.zero_()
-    value = (
-        torch.randn((4, 2560), device=device, dtype=torch.float16) * 0.02
-    )
+    value = torch.randn((4, 2560), device=device, dtype=model_dtype) * 0.02
     with torch.inference_mode():
         expected = mlp(value)
 
@@ -1059,6 +1059,81 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
     assert telemetry[0]["h100_flash_next_expert_grouped_launches"] >= 2
     assert telemetry[0]["fused_mlp_launches"] >= 2
     assert telemetry[0]["plain_fallbacks"] == 0
+
+
+@pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
+@pytest.mark.parametrize(
+    ("names", "widths", "expected_splits"),
+    (
+        (
+            ("q_proj", "k_proj", "v_proj"),
+            (12288, 512, 512),
+            (1, 1, 1),
+        ),
+        (
+            ("in_proj_qkv", "in_proj_z"),
+            (10240, 6144),
+            (2, 2),
+        ),
+    ),
+)
+def test_flash_next_h100_attention_groups_accept_model_dtype_and_replay_graph(
+    model_dtype,
+    names,
+    widths,
+    expected_splits,
+):
+    device = _h100_device()
+    if device is None:
+        pytest.skip("requires the exclusive H100 validation device")
+    shared = torch.ones(2560, device=device)
+    children = tuple(
+        _child(
+            name,
+            in_features=2560,
+            out_features=width,
+            bits=3,
+            su=shared,
+            alt_id=3,
+            seed=20260940 + index,
+            device=device,
+            input_hadamard=False,
+            output_hadamard=False,
+        )
+        for index, (name, width) in enumerate(zip(names, widths, strict=True))
+    )
+    parent = nn.Module()
+    for name, child in zip(names, children, strict=True):
+        setattr(parent, name, child)
+    with torch.no_grad():
+        for child in children:
+            child.SV.fill_(0.002)
+            child.bias.zero_()
+    value = torch.randn((4, 2560), device=device, dtype=model_dtype) * 0.02
+    with torch.inference_mode():
+        expected = tuple(child(value).clone() for child in children)
+
+    assert install_qvq_hopper_groups(
+        parent,
+        qkv_candidates=(names,),
+        qkv=True,
+        gate_up=False,
+    ) == {"qkv": 1}
+    with torch.inference_mode():
+        eager = tuple(getattr(parent, name)(value) for name in names)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = tuple(getattr(parent, name)(value) for name in names)
+        graph.replay()
+        torch.cuda.synchronize(device)
+
+    for actual, replayed, reference in zip(eager, captured, expected, strict=True):
+        assert torch.equal(replayed, actual)
+        torch.testing.assert_close(actual, reference, rtol=0, atol=2e-3)
+    telemetry = qvq_grouped_runtime_telemetry(parent)[0]
+    assert telemetry["active_split_counts"] == expected_splits
+    assert telemetry["grouped_launches"] == 2
+    assert telemetry["plain_fallbacks"] == 0
 
 
 def _independent_ordered_qkv_reference(
