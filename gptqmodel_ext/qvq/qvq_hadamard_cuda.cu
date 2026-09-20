@@ -1400,10 +1400,11 @@ qvq_qwen_composite_recovery_fp32_to_fp16_kernel(
 // per output base row and retains the canonical source-ascending H_B fused
 // multiply-add order.  This changes scheduling only; every R() boundary is
 // identical to qvq_qwen_composite_recovery_fp32_to_fp16_kernel.
-template <int CompositeN, int CompositeBase>
+template <int CompositeN, int CompositeBase, int SplitCount = 1>
 __global__ void qvq_qwen_composite_recovery_low_kernel(
     const float* __restrict__ input,
-    float* __restrict__ workspace) {
+    float* __restrict__ workspace,
+    int64_t partial_plane_values) {
   constexpr int CompositeLowN = CompositeN / CompositeBase;
   __shared__ float values[CompositeLowN];
   const int base_slice = static_cast<int>(blockIdx.x);
@@ -1414,8 +1415,19 @@ __global__ void qvq_qwen_composite_recovery_low_kernel(
 
   for (int local = static_cast<int>(threadIdx.x); local < CompositeLowN;
        local += static_cast<int>(blockDim.x)) {
-    float value = input[
-        static_cast<int64_t>(row) * CompositeN + slice_begin + local];
+    const int64_t offset =
+        static_cast<int64_t>(row) * CompositeN + slice_begin + local;
+    float value = 0.0f;
+    if constexpr (SplitCount == 1) {
+      value = input[offset];
+    } else {
+#pragma unroll
+      for (int split = 0; split < SplitCount; ++split) {
+        value = __fadd_rn(
+            value,
+            input[static_cast<int64_t>(split) * partial_plane_values + offset]);
+      }
+    }
     value = round_fp16_unless_overflow(value);
     values[local] = round_fp16_unless_overflow(value / divisor);
   }
@@ -3429,7 +3441,8 @@ at::Tensor qvq_qwen_composite_recovery_fp32_to_fp16_cuda(
     qvq_qwen_composite_recovery_low_kernel<N, BASE><<<                          \
         grid, threads, 0, stream>>>(                                            \
         input.const_data_ptr<float>(),                                         \
-        workspace.mutable_data_ptr<float>());                                  \
+        workspace.mutable_data_ptr<float>(),                                  \
+        input.numel());                                                        \
     qvq_qwen_composite_recovery_high_kernel<HAS_BIAS, N, BASE><<<              \
         grid, threads, 0, stream>>>(                                            \
         workspace.const_data_ptr<float>(),                                     \
@@ -3546,6 +3559,44 @@ at::Tensor qvq_qwen_composite_ordered_recovery_fp32_to_fp16_cuda(
   auto output = at::empty(
       {logical_rows, composite_n}, partials.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(partials.get_device());
+#define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(                         \
+    HAS_BIAS, SPLIT_COUNT)                                                     \
+  {                                                                            \
+    auto workspace = at::empty(                                                \
+        {logical_rows, composite_n}, partials.options().dtype(at::kFloat));    \
+    constexpr int low_n = 2560 / 40;                                           \
+    const dim3 grid(40, static_cast<unsigned>(logical_rows));                  \
+    qvq_qwen_composite_recovery_low_kernel<2560, 40, SPLIT_COUNT><<<           \
+        grid, low_n, 0, stream>>>(                                             \
+        partials.const_data_ptr<float>(),                                      \
+        workspace.mutable_data_ptr<float>(),                                   \
+        partial_rows * composite_n);                                           \
+    qvq_qwen_composite_recovery_high_kernel<HAS_BIAS, 2560, 40><<<            \
+        grid, low_n, 0, stream>>>(                                             \
+        workspace.const_data_ptr<float>(),                                     \
+        reinterpret_cast<const half*>(base.const_data_ptr()),                  \
+        post_scale.const_data_ptr<float>(),                                    \
+        bias.has_value() ? bias->const_data_ptr<float>() : nullptr,            \
+        reinterpret_cast<half*>(output.mutable_data_ptr()));                   \
+  }
+  if (composite_n == 2560 && logical_rows <= 16) {
+    if (split_count == 16 && bias.has_value()) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(true, 16)
+    } else if (split_count == 16) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(false, 16)
+    } else if (split_count == 24 && bias.has_value()) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(true, 24)
+    } else if (split_count == 24) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(false, 24)
+    } else if (bias.has_value()) {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(true, 40)
+    } else {
+      QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK(false, 40)
+    }
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return output;
+  }
+#undef QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_MULTIBLOCK
 #define QVQ_LAUNCH_QWEN_ORDERED_COMPOSITE_RECOVERY(                            \
     HAS_BIAS, SPLIT_COUNT, N)                                                   \
   {                                                                            \

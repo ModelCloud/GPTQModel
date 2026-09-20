@@ -2629,7 +2629,7 @@ class QVQHopperGroupedRuntime:
             and (down.in_features, down.out_features) == (640, 2560)
             and (
                 x.dtype == torch.float16
-                or (x.dtype == torch.bfloat16 and rows in (1, 8, 16))
+                or (x.dtype == torch.bfloat16 and rows in (1, 2, 4, 8, 16))
             )
             and not rank8_down_enabled
         )
