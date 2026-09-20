@@ -2704,8 +2704,12 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   TORCH_CHECK(input.is_contiguous() && trellis.is_contiguous() && levels.is_contiguous() &&
                   bank_ids.is_contiguous(),
               "QVQ P32 TMA WGMMA tensors must be contiguous");
-  TORCH_CHECK(input.dim() == 2 && input.size(0) == kRows,
-              "QVQ P32 TMA WGMMA prototype requires M=16");
+  TORCH_CHECK(
+      input.dim() == 2 &&
+          (input.size(0) == kRows ||
+           (OrderedSplit && !ReturnPartials && input.size(0) > 0 &&
+            input.size(0) < kRows)),
+      "QVQ P32 TMA WGMMA requires M=16, or logical M1..M15 for ordered output");
   TORCH_CHECK(out_features > 0 && out_features % 256 == 0,
               "QVQ P32 TMA WGMMA output features must be a positive multiple of 256");
   TORCH_CHECK(input.size(1) > 0 && input.size(1) % kKPerStage == 0,
@@ -2722,6 +2726,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
 
   const int size_k = static_cast<int>(input.size(1));
   const int size_n = static_cast<int>(out_features);
+  const int logical_size_m = static_cast<int>(input.size(0));
   const int k_tiles = size_k / kP32TileRows;
   const int n_tiles = size_n / kP32TileColumns;
   TORCH_CHECK(k_tiles % split_count == 0 &&
@@ -2740,7 +2745,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_impl(
   const auto* trellis_ptr = reinterpret_cast<const uint32_t*>(trellis.data_ptr<int32_t>());
   auto input_tensor = cute::make_tensor(
       input_ptr,
-      cute::make_shape(kRows, size_k),
+      cute::make_shape(logical_size_m, size_k),
       cute::make_stride(static_cast<int64_t>(size_k), cute::_1{}));
   auto trellis_tensor = cute::make_tensor(
       trellis_ptr,
