@@ -509,11 +509,26 @@ class QVQHopperGroupedRuntime:
         self._outputs = None
         self._next_index = 0
 
-    def invalidate(self) -> None:
+    def invalidate(self, *, prepare_fallback: bool = True) -> None:
         """Release all transient state after source/device ownership changes."""
 
         self._clear_cycle()
         if self._payload is not None:
+            # An explicitly invalidated warmed group falls back to its original
+            # children. Prepare that capture-safe route before dropping the
+            # grouped payload; ordinary installed groups retain no duplicate
+            # planar storage while their payload remains valid.
+            if prepare_fallback and not torch.cuda.is_current_stream_capturing():
+                for child in self._children():
+                    if _child_window_source(child).device.type == "cuda":
+                        child._prepare_cuda_graph_auxiliary_caches()
+                        child._inner_forward(
+                            torch.zeros(
+                                (1, child.in_features),
+                                device=_child_window_source(child).device,
+                                dtype=torch.float16,
+                            )
+                        )
             self.telemetry.payload_drops += 1
         self._payload = None
         self._h100_qwen_large_m_unsplit_payload = None
@@ -914,7 +929,7 @@ class QVQHopperGroupedRuntime:
             raise _R0Fallback(
                 "grouped P32 payload must be successfully warmed before CUDA Graph capture"
             )
-        self.invalidate()
+        self.invalidate(prepare_fallback=False)
         payload = self._build_payload(children, source_key)
         self._payload = payload
         self._payload_source_key = source_key
@@ -2796,6 +2811,21 @@ def _maybe_install_qvq_mlp_fusion(
     if (properties.major, properties.minor) != (9, 0):
         return False
 
+    # Fused execution can retain the ordinary down module for unsupported row
+    # buckets. Prepare its capture-only rescue constants while installation is
+    # still eager; a graph must never allocate a planar BF16 fallback.
+    down_device = _child_window_source(down).device
+    down._prepare_hopper_p32_window(down_device)
+    if not (
+        _is_exact_silu_activation(act_fn)
+        and not children[0].output_hadamard
+        and not children[1].output_hadamard
+        and not down.input_hadamard
+    ):
+        # Generic large-M fusion may retain the ordinary down path. Qwen's
+        # folded contract always uses a pretransformed direct-down route and
+        # therefore needs no duplicate planar rescue payload.
+        down._prepare_cuda_graph_auxiliary_caches()
     runtime._configure_mlp_fusion(parent, down, act_fn)
     sample = torch.linspace(
         -0.01,
@@ -2811,7 +2841,7 @@ def _maybe_install_qvq_mlp_fusion(
         exact = torch.equal(actual, expected)
     except (AttributeError, RuntimeError, TypeError, ValueError, _R0Fallback):
         exact = False
-    runtime.invalidate()
+    runtime.invalidate(prepare_fallback=False)
     runtime.telemetry = QVQGroupedRuntimeTelemetry(
         runtime.category, runtime.member_names
     )
@@ -2842,11 +2872,33 @@ def _install_candidates(
                 children = _validate_static_group(members)
             except (AttributeError, TypeError, ValueError, _R0Fallback):
                 continue
+            # Eval modules transfer canonical ownership from planar trellis to
+            # lossless window_words on first direct-window preparation. Make
+            # that individually validated transition at installation, before
+            # any grouped/fused source fingerprint is captured. A cold MLP
+            # install must not mistake this intentional identity change for a
+            # concurrent checkpoint mutation and silently disable fusion.
+            device = _child_window_source(children[0]).device
+            if device.type == "cuda":
+                try:
+                    from ..utils.qvq_cuda import prewarm_qvq_cuda
+
+                    if not prewarm_qvq_cuda():
+                        continue
+                    for child in children:
+                        child._prepare_hopper_p32_window(device)
+                except RuntimeError:
+                    continue
             runtime = QVQHopperGroupedRuntime(
                 children,
                 member_names,
                 category=category,
             )
+            if device.type == "cuda":
+                try:
+                    runtime._ensure_payload()
+                except (RuntimeError, ValueError, _R0Fallback):
+                    continue
             for index, child in enumerate(children):
                 child._gptqmodel_qvq_grouped_runtime = runtime
                 child._gptqmodel_qvq_grouped_index = index
