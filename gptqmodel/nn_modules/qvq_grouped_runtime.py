@@ -33,6 +33,13 @@ from ..quantization.qvq import (
 )
 from ..quantization.qvq_activation import quantize_qvq_fp8_activation
 from ..quantization.qvq_rates import qvq_transition_bits, qvq_words_per_tile
+from ..utils.qvq_ampere_cuda import (
+    QVQAmpereGroupedP32Payload,
+    qvq_h100_flash_next_expert_group_split_counts,
+    qvq_p32_window_ampere_group_plan,
+    qvq_p32_window_ampere_grouped_packed,
+    qvq_pack_p32_window_ampere_group,
+)
 from ..utils.qvq_wgmma_cuda import (
     QVQHopperGroupedP32Payload,
     qvq_fp16_to_fp8_e5m2_clamped,
@@ -136,6 +143,27 @@ def _same_tensor_bits(left: torch.Tensor, right: torch.Tensor) -> bool:
     )
 
 
+def _is_h100_flash_next_expert_group(
+    children: Sequence[QVQLinear],
+) -> bool:
+    """Recognize the exact narrow expert gate/up group accepted on H100."""
+
+    if (
+        len(children) != 2
+        or children[0].in_features != 2560
+        or tuple(child.out_features for child in children) != (640, 640)
+    ):
+        return False
+    device = _child_window_source(children[0]).device
+    if device.type != "cuda":
+        return False
+    properties = torch.cuda.get_device_properties(device)
+    return properties.name == "NVIDIA H100" and (
+        properties.major,
+        properties.minor,
+    ) == (9, 0)
+
+
 def _source_key(children: Sequence[QVQLinear]) -> tuple[Any, ...]:
     key: list[Any] = []
     for child in children:
@@ -220,7 +248,10 @@ def _validate_static_group(
         raise _R0Fallback("children disagree on K, rate, codebook, or device")
     if first.in_features <= 0 or first.in_features % 256:
         raise _R0Fallback("grouped Hopper requires K divisible by 256")
-    if any(child.out_features <= 0 or child.out_features % 256 for child in resolved):
+    if any(child.out_features <= 0 for child in resolved) or (
+        any(child.out_features % 256 for child in resolved)
+        and not _is_h100_flash_next_expert_group(resolved)
+    ):
         raise _R0Fallback("grouped Hopper requires every child N divisible by 256")
     if any(
         _child_window_source(child).device.type == "meta"
@@ -315,6 +346,7 @@ class QVQGroupedRuntimeTelemetry:
     h100_qwen_large_m_direct_down_launches: int = 0
     h100_qwen_m32_fused_tiles: int = 0
     h100_qwen_large_m_unsplit_gate_up_launches: int = 0
+    h100_flash_next_expert_grouped_launches: int = 0
     independent_recovery_children: int = 0
     fused_mlp_launches: int = 0
     fused_mlp_fallbacks: int = 0
@@ -414,6 +446,9 @@ class QVQGroupedRuntimeTelemetry:
             "h100_qwen_large_m_direct_down_launches": self.h100_qwen_large_m_direct_down_launches,
             "h100_qwen_m32_fused_tiles": self.h100_qwen_m32_fused_tiles,
             "h100_qwen_large_m_unsplit_gate_up_launches": self.h100_qwen_large_m_unsplit_gate_up_launches,
+            "h100_flash_next_expert_grouped_launches": (
+                self.h100_flash_next_expert_grouped_launches
+            ),
             "independent_recovery_children": self.independent_recovery_children,
             "fused_mlp_launches": self.fused_mlp_launches,
             "fused_mlp_fallbacks": self.fused_mlp_fallbacks,
@@ -437,7 +472,7 @@ class QVQHopperGroupedRuntime:
         self.member_names = tuple(member_names)
         self.category = str(category)
         self.telemetry = QVQGroupedRuntimeTelemetry(self.category, self.member_names)
-        self._payload: QVQHopperGroupedP32Payload | None = None
+        self._payload: QVQHopperGroupedP32Payload | QVQAmpereGroupedP32Payload | None = None
         self._h100_qwen_large_m_unsplit_payload: QVQHopperGroupedP32Payload | None = None
         self._payload_source_key: tuple[Any, ...] | None = None
         self._h100_multiblock_intermediate_enabled = False
@@ -447,6 +482,7 @@ class QVQHopperGroupedRuntime:
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
         self._h100_packed_gate_up_recovery_enabled = False
+        self._h100_flash_next_expert_group_enabled = False
         self._large_m_chunk_cache: dict[tuple[Any, ...], int] = {}
         self._large_m_chunk_cache_lock = RLock()
         self._h100_fp8_prefill_payload: _H100FP8PrefillPayload | None = None
@@ -489,6 +525,7 @@ class QVQHopperGroupedRuntime:
         self._h100_w25_n128_gate_up_enabled = False
         self._h100_bounded_recovery_rounding_enabled = False
         self._h100_packed_gate_up_recovery_enabled = False
+        self._h100_flash_next_expert_group_enabled = False
         with self._large_m_chunk_cache_lock:
             self._large_m_chunk_cache.clear()
         self._h100_fp8_prefill_payload = None
@@ -627,6 +664,8 @@ class QVQHopperGroupedRuntime:
         properties = torch.cuda.get_device_properties(x.device)
         if (properties.major, properties.minor) != (9, 0):
             return "grouped runtime requires Hopper SM90"
+        if _is_h100_flash_next_expert_group(children) and rows not in (1, 2, 4, 8, 16):
+            return "Flash-Next narrow expert grouping requires M1/M2/M4/M8/M16"
         if rows > 4096 and properties.name != "NVIDIA H100":
             return "row multiplexing above 4096 is measured only on H100"
         return None
@@ -641,7 +680,7 @@ class QVQHopperGroupedRuntime:
         self,
         children: tuple[QVQLinear, ...],
         source_key: tuple[Any, ...],
-    ) -> QVQHopperGroupedP32Payload:
+    ) -> QVQHopperGroupedP32Payload | QVQAmpereGroupedP32Payload:
         # Re-run R0 only when a canonical source identity/version changed.  The
         # equality check may synchronize and therefore never occurs in the
         # warmed CUDA-graph capture path.
@@ -695,75 +734,121 @@ class QVQHopperGroupedRuntime:
         self._h100_packed_gate_up_recovery_enabled = (
             self._h100_multiblock_intermediate_enabled
         )
-        measured_splits = qvq_h100_grouped_ordered_split_counts(
-            device_name=properties.name,
-            compute_capability=(properties.major, properties.minor),
-            in_features=children[0].in_features,
-            out_features=tuple(child.out_features for child in children),
-            transition_bits=qvq_transition_bits(
-                children[0].bits, vector_size=children[0].vector_size
-            ),
+        transition_bits = qvq_transition_bits(
+            children[0].bits, vector_size=children[0].vector_size
         )
-        explicit_hopper = all(
-            getattr(getattr(child, "_p32_window_config", None), "algorithm", "auto")
-            == "hopper_m16"
-            for child in children
-        )
-        if explicit_hopper:
-            measured_splits = tuple(
-                int(child._p32_window_config.split_k) for child in children
-            )
-
         child_windows = tuple(
             child._prepare_hopper_p32_window(device) for child in children
         )
-        plan = qvq_p32_window_wgmma_group_plan(
-            placeholder,
-            child_windows,
-            _pgc16_levels(device, children[0].codebook_version),
-            selectors,
-            children[0].bits,
-            out_features=tuple(child.out_features for child in children),
-            bank_alt_ids=alt_ids,
-            split_counts=measured_splits,
+        self._h100_flash_next_expert_group_enabled = (
+            _is_h100_flash_next_expert_group(children)
         )
-        if measured_splits is None and any(
-            segment.split_count != 1 for segment in plan.segments
-        ):
-            raise _R0Fallback(
-                "a child requires an unvalidated grouped split-K schedule"
+        if self._h100_flash_next_expert_group_enabled:
+            measured_splits = qvq_h100_flash_next_expert_group_split_counts(
+                device_name=properties.name,
+                compute_capability=(properties.major, properties.minor),
+                m=16,
+                k=children[0].in_features,
+                widths=tuple(child.out_features for child in children),
+                transition_bits=transition_bits,
             )
-
-        k_tiles = children[0].in_features // 16
-        words_per_tile = qvq_words_per_tile(
-            children[0].bits, weight_count=256, vector_size=2
-        )
-        grouped_window = torch.cat(
-            tuple(
-                window.reshape(k_tiles, child.out_features // 16, words_per_tile)
-                for child, window in zip(children, child_windows, strict=True)
-            ),
-            dim=1,
-        ).reshape(-1, words_per_tile).contiguous()
-        grouped_selectors = (
-            torch.cat(
+            if measured_splits is None:
+                raise _R0Fallback("missing Flash-Next narrow expert schedule")
+            plan = qvq_p32_window_ampere_group_plan(
+                placeholder,
+                child_windows,
+                _pgc16_levels(device, children[0].codebook_version),
+                selectors,
+                children[0].bits,
+                out_features=tuple(child.out_features for child in children),
+                bank_alt_ids=alt_ids,
+                split_counts=measured_splits,
+            )
+            payload = qvq_pack_p32_window_ampere_group(
+                child_windows,
+                selectors,
+                plan,
+            )
+            grouped_window = payload.trellis
+            grouped_selectors = payload.bank_ids
+        else:
+            measured_splits = qvq_h100_grouped_ordered_split_counts(
+                device_name=properties.name,
+                compute_capability=(properties.major, properties.minor),
+                in_features=children[0].in_features,
+                out_features=tuple(child.out_features for child in children),
+                transition_bits=transition_bits,
+            )
+            explicit_hopper = all(
+                getattr(
+                    getattr(child, "_p32_window_config", None),
+                    "algorithm",
+                    "auto",
+                )
+                == "hopper_m16"
+                for child in children
+            )
+            if explicit_hopper:
+                measured_splits = tuple(
+                    int(child._p32_window_config.split_k) for child in children
+                )
+            plan = qvq_p32_window_wgmma_group_plan(
+                placeholder,
+                child_windows,
+                _pgc16_levels(device, children[0].codebook_version),
+                selectors,
+                children[0].bits,
+                out_features=tuple(child.out_features for child in children),
+                bank_alt_ids=alt_ids,
+                split_counts=measured_splits,
+            )
+            if measured_splits is None and any(
+                segment.split_count != 1 for segment in plan.segments
+            ):
+                raise _R0Fallback(
+                    "a child requires an unvalidated grouped split-K schedule"
+                )
+            k_tiles = children[0].in_features // 16
+            words_per_tile = qvq_words_per_tile(
+                children[0].bits, weight_count=256, vector_size=2
+            )
+            grouped_window = torch.cat(
                 tuple(
-                    child_selectors.reshape(k_tiles, child.out_features // 16)
-                    for child, child_selectors in zip(children, selectors, strict=True)
+                    window.reshape(
+                        k_tiles,
+                        child.out_features // 16,
+                        words_per_tile,
+                    )
+                    for child, window in zip(children, child_windows, strict=True)
                 ),
                 dim=1,
+            ).reshape(-1, words_per_tile).contiguous()
+            grouped_selectors = (
+                torch.cat(
+                    tuple(
+                        child_selectors.reshape(
+                            k_tiles,
+                            child.out_features // 16,
+                        )
+                        for child, child_selectors in zip(
+                            children,
+                            selectors,
+                            strict=True,
+                        )
+                    ),
+                    dim=1,
+                )
+                .reshape(-1)
+                .contiguous()
             )
-            .reshape(-1)
-            .contiguous()
-        )
+            payload = QVQHopperGroupedP32Payload(
+                trellis=grouped_window,
+                bank_ids=grouped_selectors,
+                plan=plan,
+            )
         current_key = _source_key(children)
         if source_key != current_key:
             raise RuntimeError("QVQ grouped canonical payload changed during repack")
-        payload = QVQHopperGroupedP32Payload(
-            trellis=grouped_window,
-            bank_ids=grouped_selectors,
-            plan=plan,
-        )
         if (
             properties.name == "NVIDIA H100"
             and (properties.major, properties.minor) == (9, 0)
@@ -811,7 +896,9 @@ class QVQHopperGroupedRuntime:
         )
         return payload
 
-    def _ensure_payload(self) -> QVQHopperGroupedP32Payload:
+    def _ensure_payload(
+        self,
+    ) -> QVQHopperGroupedP32Payload | QVQAmpereGroupedP32Payload:
         children = self._children()
         source_key = _source_key(children)
         if self._payload is not None and source_key == self._payload_source_key:
@@ -1093,6 +1180,10 @@ class QVQHopperGroupedRuntime:
         from ..utils.qvq_cuda import _pgc16_levels
 
         if return_ordered_partials:
+            if self._h100_flash_next_expert_group_enabled:
+                raise _R0Fallback(
+                    "Flash-Next narrow expert grouping does not expose split partials"
+                )
             partials = qvq_p32_window_wgmma_grouped_ordered_partials_packed(
                 padded,
                 payload,
@@ -1145,7 +1236,13 @@ class QVQHopperGroupedRuntime:
                 or use_qwen_large_m_reuse
             )
         )
-        if requested_block_m == 32:
+        use_flash_next_expert_group = (
+            self._h100_flash_next_expert_group_enabled
+            and isinstance(payload, QVQAmpereGroupedP32Payload)
+        )
+        if use_flash_next_expert_group:
+            grouped_inner = qvq_p32_window_ampere_grouped_packed
+        elif requested_block_m == 32:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse2_packed
         elif requested_block_m == 64:
             grouped_inner = qvq_p32_window_wgmma_grouped_reuse4_packed
@@ -1165,7 +1262,14 @@ class QVQHopperGroupedRuntime:
                 if any(segment.split_count != 1 for segment in payload.plan.segments)
                 else qvq_p32_window_wgmma_grouped_packed
             )
-        if requested_block_n:
+        if use_flash_next_expert_group:
+            inner_outputs = grouped_inner(
+                padded[:rows].contiguous(),
+                payload,
+                _pgc16_levels(x.device, children[0].codebook_version),
+            )
+            self.telemetry.h100_flash_next_expert_grouped_launches += 1
+        elif requested_block_n:
             inner_outputs = grouped_inner(
                 padded,
                 payload,

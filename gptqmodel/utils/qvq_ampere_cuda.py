@@ -29,6 +29,11 @@ _QVQ_AMPERE_NAMESPACE = "gptqmodel_qvq_ampere"
 _SM80_FLAGS = (
     "-gencode=arch=compute_80,code=sm_80",
     "-gencode=arch=compute_80,code=compute_80",
+    # Flash-Next's 640-wide expert projections cannot use the Hopper
+    # TMA/WGMMA kernel's N/K=256 contract.  Compile the same exact WMMA
+    # implementation natively for the measured narrow SM90 fallback instead
+    # of relying on driver JIT of compute_80 PTX.
+    "-gencode=arch=compute_90,code=sm_90",
 )
 _TORCH_NVCC_UNDEFINES = (
     "-U__CUDA_NO_HALF_OPERATORS__",
@@ -551,6 +556,36 @@ def _flash_next_group_split_counts(
         and tuple(widths) == (640, 640)
     ):
         return (40, 40)
+    return None
+
+
+def qvq_h100_flash_next_expert_group_split_counts(
+    *,
+    device_name: str,
+    compute_capability: tuple[int, int],
+    m: int,
+    k: int,
+    widths: Sequence[int],
+    transition_bits: int,
+) -> tuple[int, ...] | None:
+    """Return the validated narrow-expert schedule for physical H100.
+
+    Split 32 intentionally bypasses the SM80 W3 split-40 compact
+    specialization.  That specialization changes the second child's payload
+    ordering when compiled for SM90; the generic segmented kernel is exact,
+    graph safe, and faster than the planar fallback at every accepted rate and
+    row count.
+    """
+
+    if (
+        device_name == "NVIDIA H100"
+        and compute_capability == (9, 0)
+        and m in (1, 2, 4, 8, 16)
+        and k == 2560
+        and tuple(widths) == (640, 640)
+        and transition_bits in (4, 5, 6, 7)
+    ):
+        return (32, 32)
     return None
 
 
@@ -1791,6 +1826,7 @@ __all__ = [
     "clear_qvq_ampere_autotune_cache",
     "prewarm_qvq_ampere",
     "prewarm_qvq_ampere_grouped",
+    "qvq_h100_flash_next_expert_group_split_counts",
     "qvq_p32_rank8_project",
     "qvq_p32_window_ampere",
     "qvq_p32_window_ampere_group_plan",

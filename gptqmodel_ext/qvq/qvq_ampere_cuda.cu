@@ -73,6 +73,14 @@ bool ampere_execution_capability_supported(int capability) {
       allow_sm90[1] == '\0';
 }
 
+bool p32_window_execution_capability_supported(
+    int capability, bool validated_narrow_hopper_shape) {
+  if (capability == 90 && validated_narrow_hopper_shape) {
+    return true;
+  }
+  return ampere_execution_capability_supported(capability);
+}
+
 __device__ __forceinline__ uint32_t pgc16_mix(uint32_t state) {
   uint32_t mixed = state ^ (state >> 8);
   mixed = (mixed * kPgc16Multiplier + kPgc16Increment) & 0xffffu;
@@ -428,7 +436,7 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
     int output_stride,
     int64_t partial_segment_offset,
     int64_t partial_split_stride = 0) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 1000
   constexpr int kWordsPerTile = 4 * TransitionBits;
   // The wide specialization follows Marlin's output-reuse principle: each
   // warp owns two adjacent N16 tiles and reuses one ldmatrix A fragment for
@@ -980,7 +988,7 @@ __device__ __forceinline__ void p32_window_ampere_m1_kernel_body(
     int output_n_offset,
     int output_stride,
     int64_t partial_segment_offset) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 900
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 1000
   constexpr int kWordsPerTile = 4 * TransitionBits;
   static_assert(Rows >= 1 && Rows <= 8);
   __shared__ __align__(32) half input_tile[2][Rows * StageKTiles * kTileRows];
@@ -2731,18 +2739,25 @@ at::Tensor p32_window_ampere_impl(
         "QVQ P32 Ampere rank8_down must be FP32 [M, 8] with unit column stride");
   }
 
+  const int size_m = static_cast<int>(input.size(0));
+  const int size_k = static_cast<int>(input.size(1));
+  const int size_n = static_cast<int>(out_features);
   const c10::cuda::CUDAGuard device_guard(input.device());
   const int capability = cached_device_capability(input.get_device());
+  const bool validated_narrow_hopper_shape =
+      (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+       size_m == kRows) &&
+      ((size_k == 2560 && size_n == 640) ||
+       (size_k == 640 && size_n == 2560));
   TORCH_CHECK(
-      ampere_execution_capability_supported(capability),
-      "QVQ P32 Ampere WMMA requires compute capability 8.0, got ",
+      p32_window_execution_capability_supported(
+          capability, validated_narrow_hopper_shape),
+      "QVQ P32 WMMA requires compute capability 8.0 or a validated narrow "
+      "Flash-Next shape on 9.0, got ",
       capability / 10,
       ".",
       capability % 10);
 
-  const int size_m = static_cast<int>(input.size(0));
-  const int size_k = static_cast<int>(input.size(1));
-  const int size_n = static_cast<int>(out_features);
   const int k_tiles = size_k / kTileRows;
   const int n_tiles = size_n / kTileColumns;
   TORCH_CHECK(split_count <= k_tiles, "QVQ P32 Ampere split count cannot exceed the K16 tile count");
@@ -4428,15 +4443,6 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
       "QVQ P32 Ampere K must be positive and divisible by 16");
   TORCH_CHECK(levels.numel() == kLevels, "QVQ P32 Ampere requires 256 PGC16 levels");
 
-  const c10::cuda::CUDAGuard device_guard(input.device());
-  const int capability = cached_device_capability(input.get_device());
-  TORCH_CHECK(
-      ampere_execution_capability_supported(capability),
-      "QVQ P32 Ampere WMMA requires compute capability 8.0, got ",
-      capability / 10,
-      ".",
-      capability % 10);
-
   const int size_m = static_cast<int>(input.size(0));
   const int size_k = static_cast<int>(input.size(1));
   const int k_tiles = size_k / kTileRows;
@@ -4495,6 +4501,22 @@ at::Tensor p32_window_ampere_grouped_fused_impl(
     active_wmma_blocks +=
         ((n_tiles + kTilesPerBlock - 1) / kTilesPerBlock) * split_count;
   }
+  const c10::cuda::CUDAGuard device_guard(input.device());
+  const int capability = cached_device_capability(input.get_device());
+  const bool validated_narrow_hopper_shape =
+      (size_m == 1 || size_m == 2 || size_m == 4 || size_m == 8 ||
+       size_m == kRows) &&
+      size_k == 2560 && segment_count == 2 &&
+      params.n_tiles[0] == 40 && params.n_tiles[1] == 40 &&
+      params.split_count[0] == 32 && params.split_count[1] == 32;
+  TORCH_CHECK(
+      p32_window_execution_capability_supported(
+          capability, validated_narrow_hopper_shape),
+      "QVQ P32 grouped WMMA requires compute capability 8.0 or the validated "
+      "Flash-Next expert shape on 9.0, got ",
+      capability / 10,
+      ".",
+      capability % 10);
   if (use_flash_next_gate_up_wide) {
     // Flash-Next gate/up has two aligned 640-column children.  Let each warp
     // consume both N16 tiles so one CTA covers eight tiles instead of four.
