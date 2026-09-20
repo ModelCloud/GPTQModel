@@ -188,6 +188,32 @@ def test_h100_llama_qkv_uses_measured_grouped_ordered_splits(transition_bits):
 
 
 @pytest.mark.parametrize(
+    ("bits", "expected_split"),
+    ((2.0, 12), (2.5, 6), (3.0, 12), (3.5, 24)),
+)
+def test_qwen38_flash_next_attention_output_uses_measured_split(bits, expected_split):
+    assert qvq_h100_ordered_split_count(
+        device_name="NVIDIA H100",
+        compute_capability=(9, 0),
+        logical_rows=16,
+        in_features=6144,
+        out_features=2560,
+        transition_bits={2.0: 4, 2.5: 5, 3.0: 6, 3.5: 7}[bits],
+    ) == expected_split
+
+
+def test_qwen38_flash_next_attention_output_split_fails_closed_off_h100():
+    assert qvq_h100_ordered_split_count(
+        device_name="NVIDIA H200",
+        compute_capability=(9, 0),
+        logical_rows=16,
+        in_features=6144,
+        out_features=2560,
+        transition_bits=6,
+    ) == 0
+
+
+@pytest.mark.parametrize(
     "overrides",
     (
         {"device_name": "NVIDIA H200"},

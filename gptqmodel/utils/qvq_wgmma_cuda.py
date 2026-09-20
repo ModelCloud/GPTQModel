@@ -281,10 +281,15 @@ def qvq_h100_ordered_split_count(
         "H100" in device_name
         and compute_capability == (9, 0)
         and logical_rows in (1, 2, 4, 8, 16)
-        and (in_features, out_features) == (8192, 2048)
         and transition_bits in (4, 5, 6, 7)
     ):
-        return 16
+        if (in_features, out_features) == (8192, 2048):
+            return 16
+        if (in_features, out_features) == (6144, 2560):
+            # Qwen3.8-Flash-Next full-attention output.  Ordered split-K
+            # exposes enough CTAs to fill the 132-SM H100 while retaining a
+            # deterministic left-to-right FP32 reduction.
+            return {4: 12, 5: 6, 6: 12, 7: 24}[transition_bits]
     return 0
 
 
@@ -340,6 +345,30 @@ def qvq_h100_grouped_ordered_split_counts(
         and int(transition_bits) in (4, 5, 6, 7)
     ):
         return (8, 8, 8)
+    if (
+        "H100" in device_name
+        and compute_capability == (9, 0)
+        and int(in_features) == 2560
+        and int(transition_bits) in (4, 5, 6, 7)
+    ):
+        # Qwen3.8-Flash-Next hybrid-attention geometry measured on the
+        # physical 132-SM H100.  Keep each child's ordered FP32 reduction
+        # independent; the tuple is not derived from the concatenated width.
+        flash_next_splits = {
+            (12288, 512, 512): {
+                4: (1, 1, 1),
+                5: (5, 10, 10),
+                6: (1, 1, 1),
+                7: (2, 10, 10),
+            },
+            (10240, 6144): {
+                4: (1, 1),
+                5: (1, 1),
+                6: (2, 2),
+                7: (2, 2),
+            },
+        }
+        return flash_next_splits.get(widths, {}).get(int(transition_bits))
     if (
         "H100" in device_name
         and compute_capability == (9, 0)
