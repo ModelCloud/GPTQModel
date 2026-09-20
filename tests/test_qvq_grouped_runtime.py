@@ -1028,15 +1028,20 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
                 self.act_fn(self.gate_proj(value)) * self.up_proj(value)
             )
 
+    reference = FlashNextExpertMLP().eval()
     mlp = FlashNextExpertMLP().eval()
     with torch.no_grad():
-        for child in (mlp.gate_proj, mlp.up_proj, mlp.down_proj):
-            child.SV.fill_(0.002)
-            child.bias.zero_()
+        for model in (reference, mlp):
+            for child in (model.gate_proj, model.up_proj, model.down_proj):
+                child.SV.fill_(0.002)
+                child.bias.zero_()
     value = torch.randn((4, 2560), device=device, dtype=model_dtype) * 0.02
     with torch.inference_mode():
-        expected = mlp(value)
+        expected = reference(value)
 
+    # Install on a genuinely cold candidate. Direct-window preparation moves
+    # eval ownership from planar trellis to window_words during this call.
+    assert not mlp.gate_proj.window_only
     assert install_qvq_hopper_groups(mlp, qkv=False) == {"gate_up": 1}
     assert hasattr(mlp, "_gptqmodel_qvq_fused_mlp_runtime")
     with torch.inference_mode():
