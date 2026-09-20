@@ -1087,16 +1087,24 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
 
 @pytest.mark.parametrize("model_dtype", (torch.float16, torch.bfloat16))
 @pytest.mark.parametrize(
-    ("names", "widths", "expected_splits"),
+    ("names", "widths", "bits", "expected_splits"),
     (
         (
             ("q_proj", "k_proj", "v_proj"),
             (12288, 512, 512),
+            3.0,
             (1, 1, 1),
         ),
         (
             ("in_proj_qkv", "in_proj_z"),
             (10240, 6144),
+            3.0,
+            (2, 2),
+        ),
+        (
+            ("in_proj_qkv", "in_proj_z"),
+            (10240, 6144),
+            3.5,
             (2, 2),
         ),
     ),
@@ -1105,6 +1113,7 @@ def test_flash_next_h100_attention_groups_accept_model_dtype_and_replay_graph(
     model_dtype,
     names,
     widths,
+    bits,
     expected_splits,
 ):
     device = _h100_device()
@@ -1116,7 +1125,7 @@ def test_flash_next_h100_attention_groups_accept_model_dtype_and_replay_graph(
             name,
             in_features=2560,
             out_features=width,
-            bits=3,
+            bits=bits,
             su=shared,
             alt_id=3,
             seed=20260940 + index,
