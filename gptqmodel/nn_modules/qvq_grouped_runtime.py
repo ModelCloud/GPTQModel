@@ -2379,13 +2379,25 @@ class QVQHopperGroupedRuntime:
             # composite Hadamard base exists.  Its model definition therefore
             # quantizes gate/up without output H and down without input H.
             # Preserve the ordinary module boundary exactly: recover each
-            # FP32 child, round it to the model FP16 dtype, execute SiLU and
-            # product, then apply down.SU.  No transform is commuted through
-            # the nonlinearity, and every operation is CUDA Graph capturable.
+            # FP32 child, round it to the FP16/BF16 model dtype, execute SiLU
+            # and product there, then narrow to FP16 and apply down.SU. No
+            # transform is commuted through the nonlinearity, and every
+            # operation is CUDA Graph capturable.
             payload = self._ensure_payload()
             use_h100_folded_fusion = (
                 self._h100_fp16_recovery_store_enabled
-                and x.dtype == torch.float16
+                and (
+                    x.dtype == torch.float16
+                    or (
+                        x.dtype == torch.bfloat16
+                        and (
+                            children[0].in_features,
+                            down.in_features,
+                            down.out_features,
+                        )
+                        == (2560, 640, 2560)
+                    )
+                )
                 and (
                     (
                         children[0].in_features,
@@ -2416,6 +2428,7 @@ class QVQHopperGroupedRuntime:
                     down_scale=down._cached_cast("SU", torch.float16),
                     split_count=gate_up_split_count,
                     logical_rows=rows,
+                    bf16_model_rounding=x.dtype == torch.bfloat16,
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
                 self.telemetry.h100_folded_qwen_fused_ordered_reduction_launches += 1
@@ -2434,6 +2447,7 @@ class QVQHopperGroupedRuntime:
                     gate_bias=children[0]._cached_cast("bias", torch.float16, torch.float32),
                     up_bias=children[1]._cached_cast("bias", torch.float16, torch.float32),
                     down_scale=down._cached_cast("SU", torch.float16),
+                    bf16_model_rounding=x.dtype == torch.bfloat16,
                 )
                 self.telemetry.h100_folded_qwen_fused_precondition_launches += 1
             else:

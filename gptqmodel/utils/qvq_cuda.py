@@ -1370,8 +1370,9 @@ def qvq_cuda_folded_swiglu_precondition_ordered_fp32(
     logical_rows: int,
     gate_bias: torch.Tensor | None = None,
     up_bias: torch.Tensor | None = None,
+    bf16_model_rounding: bool = False,
 ) -> torch.Tensor:
-    """Fuse two child-major ordered reductions through the padded down input."""
+    """Fuse child-major reductions through model rounding and down scaling."""
 
     if partials.device.type != "cuda" or partials.dtype != torch.float32:
         raise TypeError("ordered folded QVQ SwiGLU partials must be CUDA float32")
@@ -1415,6 +1416,7 @@ def qvq_cuda_folded_swiglu_precondition_ordered_fp32(
         down_scale,
         split_count,
         logical_rows,
+        bf16_model_rounding,
     )
 
 
@@ -1575,12 +1577,13 @@ def qvq_cuda_folded_swiglu_precondition_fp32(
     down_scale: torch.Tensor,
     gate_bias: torch.Tensor | None = None,
     up_bias: torch.Tensor | None = None,
+    bf16_model_rounding: bool = False,
 ) -> torch.Tensor:
     """Fuse folded-axis FP32 recovery through the padded down input.
 
-    Hopper P32 consumes an M16 tile for decode-sized inputs, so inputs below
-    M16 are zero-padded.  Native large-M inputs retain their logical row
-    count.
+    FP16 decode preserves the established M16-padded contract. BF16 retains
+    its logical row count so the following P32 projection preserves its
+    model-facing accumulation schedule.
     """
 
     if gate.device.type != "cuda" or up.device.type != "cuda":
@@ -1630,6 +1633,7 @@ def qvq_cuda_folded_swiglu_precondition_fp32(
         gate_bias,
         up_bias,
         down_scale,
+        bf16_model_rounding,
     )
 
 
