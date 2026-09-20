@@ -3563,27 +3563,31 @@ __global__ __launch_bounds__(128) void p32_rank8_epilogue_kernel(
     int size_m,
     int size_n) {
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
-  const int row = static_cast<int>(blockIdx.y);
-  if (row >= size_m) return;
-
   __shared__ half hidden_row[RankCount];
-  for (int rank = static_cast<int>(threadIdx.x); rank < RankCount;
-       rank += blockDim.x) {
-    hidden_row[rank] = hidden[static_cast<int64_t>(row) * RankCount + rank];
-  }
-  __syncthreads();
-
   const int column = static_cast<int>(blockIdx.x) * blockDim.x +
       static_cast<int>(threadIdx.x);
-  if (column >= size_n) return;
-  const int64_t index = static_cast<int64_t>(row) * size_n + column;
-  float correction = 0.0f;
+  // Keep every thread participating in both barriers, including an N-tail.
+  // This admits M > CUDA's 65,535 grid.y limit without changing arithmetic.
+  for (int row = static_cast<int>(blockIdx.y); row < size_m;
+       row += static_cast<int>(gridDim.y)) {
+    for (int rank = static_cast<int>(threadIdx.x); rank < RankCount;
+         rank += blockDim.x) {
+      hidden_row[rank] = hidden[static_cast<int64_t>(row) * RankCount + rank];
+    }
+    __syncthreads();
+
+    if (column < size_n) {
+      const int64_t index = static_cast<int64_t>(row) * size_n + column;
+      float correction = 0.0f;
 #pragma unroll
-  for (int rank = 0; rank < RankCount; ++rank) {
-    correction += __half2float(hidden_row[rank]) *
-        rank8_b[static_cast<int64_t>(rank) * size_n + column];
+      for (int rank = 0; rank < RankCount; ++rank) {
+        correction += __half2float(hidden_row[rank]) *
+            rank8_b[static_cast<int64_t>(rank) * size_n + column];
+      }
+      output[index] = base_output[index] + correction;
+    }
+    __syncthreads();
   }
-  output[index] = base_output[index] + correction;
 }
 
 }  // namespace
@@ -3653,7 +3657,7 @@ extern "C" int qvq_p32_rank8_epilogue(
   }
   const dim3 grid(
       static_cast<unsigned>((size_n + 127) / 128),
-      static_cast<unsigned>(size_m),
+      static_cast<unsigned>(std::min(size_m, 65535)),
       1);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   switch (rank_count) {

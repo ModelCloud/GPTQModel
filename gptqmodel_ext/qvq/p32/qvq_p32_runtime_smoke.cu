@@ -522,6 +522,8 @@ bool test_rank8_project_full_context_rows() {
   float* input = nullptr;
   half* rank8_a = nullptr;
   half* hidden = nullptr;
+  float* base = nullptr;
+  float* rank8_b = nullptr;
   bool ok = check_cuda(cudaStreamCreate(&stream), "create full-context rank8 stream") &&
       check_cuda(cudaMalloc(&input, kM * sizeof(float)),
                  "allocate full-context rank8 input") &&
@@ -529,29 +531,45 @@ bool test_rank8_project_full_context_rows() {
                  "allocate full-context rank8 A") &&
       check_cuda(cudaMalloc(&hidden, kM * kRankCount * sizeof(half)),
                  "allocate full-context rank8 hidden") &&
+      check_cuda(cudaMalloc(&base, kM * sizeof(float)),
+                 "allocate full-context rank8 base") &&
+      check_cuda(cudaMalloc(&rank8_b, kRankCount * sizeof(float)),
+                 "allocate full-context rank8 B") &&
       check_cuda(cudaMemsetAsync(input, 0, kM * sizeof(float), stream),
                  "clear full-context rank8 input") &&
       check_cuda(cudaMemsetAsync(rank8_a, 0, kRankCount * sizeof(half), stream),
-                 "clear full-context rank8 A");
+                 "clear full-context rank8 A") &&
+      check_cuda(cudaMemsetAsync(base, 0, kM * sizeof(float), stream),
+                 "clear full-context rank8 base") &&
+      check_cuda(cudaMemsetAsync(rank8_b, 0, kRankCount * sizeof(float), stream),
+                 "clear full-context rank8 B");
   if (ok) {
     ok = qvq_p32_rank8_project(
              input, rank8_a, hidden, kM, kK, kRankCount, stream) == 0 &&
+        qvq_p32_rank8_epilogue(
+             base, hidden, rank8_b, base, kM, 1, kRankCount, stream) == 0 &&
         check_cuda(cudaStreamSynchronize(stream),
-                   "sync full-context rank8 projection");
+                   "sync full-context rank8 recovery");
   }
   half last{};
   if (ok) {
+    float last_base = 1.0f;
     ok = check_cuda(cudaMemcpy(
-        &last, hidden + (kM - 1) * kRankCount + (kRankCount - 1),
-        sizeof(last), cudaMemcpyDeviceToHost),
-        "copy full-context rank8 last row") &&
-        __half2float(last) == 0.0f;
+             &last, hidden + (kM - 1) * kRankCount + (kRankCount - 1),
+             sizeof(last), cudaMemcpyDeviceToHost),
+             "copy full-context rank8 project last row") &&
+        check_cuda(cudaMemcpy(&last_base, base + kM - 1, sizeof(last_base),
+                              cudaMemcpyDeviceToHost),
+                   "copy full-context rank8 epilogue last row") &&
+        __half2float(last) == 0.0f && last_base == 0.0f;
   }
+  cudaFree(rank8_b);
+  cudaFree(base);
   cudaFree(hidden);
   cudaFree(rank8_a);
   cudaFree(input);
   if (stream != nullptr) cudaStreamDestroy(stream);
-  if (ok) std::printf("qvq_p32_rank8_project_full_context=PASS M=%d\n", kM);
+  if (ok) std::printf("qvq_p32_rank8_full_context=PASS M=%d project+epilogue\n", kM);
   return ok;
 }
 
