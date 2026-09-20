@@ -463,6 +463,7 @@ def test_qwen38_flash_next_h100_grouped_schedules_preserve_child_reductions(
 def test_flash_next_h100_expert_group_uses_safe_uniform_wave(
     transition_bits, size_m
 ):
+    expected_split = 40 if size_m <= 4 else 32
     assert qvq_h100_flash_next_expert_group_split_counts(
         device_name="NVIDIA H100",
         compute_capability=(9, 0),
@@ -470,7 +471,7 @@ def test_flash_next_h100_expert_group_uses_safe_uniform_wave(
         k=2560,
         widths=(640, 640),
         transition_bits=transition_bits,
-    ) == (32, 32)
+    ) == (expected_split, expected_split)
     assert (
         qvq_h100_flash_next_expert_group_split_counts(
             device_name="NVIDIA H200",
@@ -1055,6 +1056,19 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
         graph.replay()
         torch.cuda.synchronize()
 
+    runtime = mlp.gate_proj._gptqmodel_qvq_grouped_runtime
+    assert tuple(segment.split_count for segment in runtime._payload.plan.segments) == (
+        32,
+        32,
+    )
+    small_m_payload = runtime._h100_flash_next_small_m_payload
+    assert small_m_payload is not None
+    assert tuple(segment.split_count for segment in small_m_payload.plan.segments) == (
+        40,
+        40,
+    )
+    assert small_m_payload.trellis.data_ptr() == runtime._payload.trellis.data_ptr()
+    assert small_m_payload.bank_ids.data_ptr() == runtime._payload.bank_ids.data_ptr()
     torch.testing.assert_close(eager, expected, rtol=0, atol=2e-3)
     assert torch.equal(replayed, captured)
     telemetry = qvq_grouped_runtime_telemetry(mlp)

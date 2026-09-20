@@ -570,11 +570,10 @@ def qvq_h100_flash_next_expert_group_split_counts(
 ) -> tuple[int, ...] | None:
     """Return the validated narrow-expert schedule for physical H100.
 
-    Split 32 intentionally bypasses the SM80 W3 split-40 compact
-    specialization.  That specialization changes the second child's payload
-    ordering when compiled for SM90; the generic segmented kernel is exact,
-    graph safe, and faster than the planar fallback at every accepted rate and
-    row count.
+    Split 40 divides the 160 K tiles evenly and supplies enough generic
+    segmented CTAs to cover the physical H100 for M1/M2/M4.  M8/M16 retain
+    split 32 because their additional row work already fills the machine and
+    the fifth K tile per partition is cheaper than the extra partials.
     """
 
     if (
@@ -585,7 +584,8 @@ def qvq_h100_flash_next_expert_group_split_counts(
         and tuple(widths) == (640, 640)
         and transition_bits in (4, 5, 6, 7)
     ):
-        return (32, 32)
+        split_count = 40 if m <= 4 else 32
+        return (split_count, split_count)
     return None
 
 
