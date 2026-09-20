@@ -228,6 +228,11 @@ class BaseQModel(nn.Module):
 
     # a tree node of all the roots that contain quantizable modules
     module_tree: List[str] = None
+    # Optional non-decoder layer containers.  These are flattened after the
+    # ordinary decoder containers and are quantized as independent units.  A
+    # model definition keeps the containers in ``module_tree`` so LazyTurtle
+    # sees their canonical checkpoint paths as well.
+    auxiliary_layer_nodes: tuple[str, ...] = ()
     # Override module_tree according to different QUANT_METHOD
     module_tree_overrides: dict[METHOD, List[str]] = None
 
@@ -295,6 +300,11 @@ class BaseQModel(nn.Module):
 
     # some models have broken attention mask codes so we need to only use batch 1 with no masks
     support_batch_quantize = True
+
+    # Some models expose shared stateful auxiliary units whose input hooks are
+    # tied to the owning decoder replay.  Such definitions can request serial
+    # replay when replica workers would otherwise lose that association.
+    force_serial_layer_replay = False
 
     # Whether this model should publish a layer's KV tuple into the shared
     # replay cache even when that same layer does not consume `kv_last_layer`.
@@ -469,6 +479,9 @@ class BaseQModel(nn.Module):
             for path in cls._expand_module_tree_prefixes(tree):
                 if path not in paths:
                     paths.append(path)
+        for path in getattr(cls, "auxiliary_layer_nodes", ()) or ():
+            if path and path not in paths:
+                paths.append(path)
         return paths
 
     @classmethod
@@ -2200,6 +2213,43 @@ class BaseQModel(nn.Module):
         """Allow model definitions to persist cross-layer replay state from one layer output."""
 
         return layer_input_kwargs
+
+    def before_layer_forward(
+        self,
+        layer: nn.Module,
+        layer_index: int,
+        batch_index: int,
+        processor: Any,
+        layer_input: List[torch.Tensor],
+        additional_inputs: Dict[str, Any],
+        target_device: torch.device,
+    ) -> None:
+        """Notify a model definition immediately before cached layer replay.
+
+        Auxiliary units whose forward calls are nested inside a decoder layer
+        can use this callback to associate their input hooks with the current
+        decoder/batch.  The default is intentionally a no-op so existing model
+        definitions and lightweight test doubles keep the old contract.
+        """
+
+        del layer, layer_index, batch_index, processor, layer_input, additional_inputs, target_device
+
+    def begin_auxiliary_input_capture(self, processor: Any = None) -> None:
+        """Start optional capture of inputs for non-sequential auxiliary units."""
+
+    def finalize_auxiliary_input_capture(self, processor: Any = None):
+        """Return ``{canonical_layer_name: InputCache}`` captured during replay."""
+
+        return {}
+
+    def close_auxiliary_input_capture(self) -> None:
+        """Release optional auxiliary capture hooks after the layer loop."""
+
+    def resolve_auxiliary_layer_name(self, layer_name: str | None) -> str | None:
+        """Return the canonical auxiliary unit represented by ``layer_name``."""
+
+        del layer_name
+        return None
 
     def lm_head_pre_quantize_generate_hook(self, inputs: List[List[torch.tensor]]) -> List[List[torch.tensor]]:
         if self.pre_lm_head_norm_module:

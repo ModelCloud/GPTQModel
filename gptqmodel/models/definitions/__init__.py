@@ -59,6 +59,7 @@ from .instella import InstellaQModel
 from .inkling import InklingMMQModel
 from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
+from .intern_s2_mobius import InternS2MobiusQModel
 from .intern_s2_preview import InternS2PreviewQModel
 from .interns1 import InternS1QModel
 from .internvl_chat import InternVLChatQModel

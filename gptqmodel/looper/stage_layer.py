@@ -440,6 +440,7 @@ def run_layer_stage(
         if enabled and name
     }
     layer_index_offset = 1 if quant_input_embeddings else 0
+    decoder_final_inputs: Dict[int, List[List[torch.Tensor]]] = {}
 
     extensions = getattr(looper, "extensions", None)
     for layer_index in pb:
@@ -587,11 +588,47 @@ def run_layer_stage(
                 layer_inputs = processor.inputs_cache.src_inputs
             else:
                 layer_inputs = processor.inputs_cache.layer_inputs
+            # Auxiliary units (for example globally shared MoE blocks) are
+            # invoked from decoder replay but are not part of the decoder
+            # activation stream.  Use the independent cache captured for the
+            # canonical unit and never feed one auxiliary output into the next.
+            resolve_auxiliary_name = getattr(looper.gptq_model, "resolve_auxiliary_layer_name", None)
+            auxiliary_name = (
+                resolve_auxiliary_name(layer_name)
+                if callable(resolve_auxiliary_name) and not is_embeddings_module
+                else None
+            )
+            if auxiliary_name and id(processor) not in decoder_final_inputs:
+                # Preserve the stream emitted by the last real decoder layer;
+                # auxiliary units are independent calibration targets and must
+                # never become the lm_head input stream.
+                decoder_final_inputs[id(processor)] = processor.inputs_cache.layer_inputs
+            if auxiliary_name:
+                finalize_aux_capture = getattr(
+                    looper.gptq_model,
+                    "finalize_auxiliary_input_capture",
+                    None,
+                )
+                if callable(finalize_aux_capture):
+                    captured_auxiliary = finalize_aux_capture(processor=processor)
+                    if captured_auxiliary:
+                        setattr(processor.inputs_cache, "auxiliary_layer_inputs", captured_auxiliary)
+            auxiliary_cache = getattr(processor.inputs_cache, "auxiliary_layer_inputs", None)
+            if auxiliary_name and isinstance(auxiliary_cache, dict):
+                cached_unit = auxiliary_cache.get(auxiliary_name)
+                if cached_unit is not None:
+                    layer_inputs = cached_unit.layer_inputs
+                    layer_input_kwargs = cached_unit.layer_input_kwargs
+                    position_ids = cached_unit.position_ids
+                    attention_masks = cached_unit.attention_masks
+            if not auxiliary_name or not isinstance(auxiliary_cache, dict) or auxiliary_cache.get(auxiliary_name) is None:
+                layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
+                position_ids = processor.inputs_cache.position_ids
+                attention_masks = processor.inputs_cache.attention_masks
+            if is_embeddings_module and id(processor) in decoder_final_inputs:
+                layer_inputs = decoder_final_inputs[id(processor)]
             if (is_output_embeddings_module or is_lm_head_module) and layer_inputs:
                 layer_inputs = looper.gptq_model.lm_head_pre_quantize_generate_hook(layer_inputs)
-            layer_input_kwargs = processor.inputs_cache.layer_input_kwargs
-            position_ids = processor.inputs_cache.position_ids
-            attention_masks = processor.inputs_cache.attention_masks
 
             processed_subset: Dict[str, NamedModule] = {}
             last_subset_plan: Optional[SubsetPlan] = None
@@ -725,6 +762,7 @@ def run_layer_stage(
             # layer so the next layer receives the correct activations.
             replay_skipped_layer = (
                 not is_last_module
+                and not auxiliary_name
                 and not subset_plans
                 and execution_config.require_fwd
                 and execution_config.fwd_replay_after_process
@@ -735,6 +773,7 @@ def run_layer_stage(
             # metadata already computed by the final subset plan.
             replay_after_process = (
                 not is_last_module
+                and not auxiliary_name
                 and replay_plan is not None
                 and replay_plan.replay_after_process
             )
@@ -788,8 +827,15 @@ def run_layer_stage(
 
             if execution_config.fwd_replay_after_process:
                 processor.clear_cache_data()
-                processor.receive_layer_inputs(layer_outputs)
-                layer_inputs = processor.inputs_cache.layer_inputs
+                if auxiliary_name:
+                    # Independent auxiliary units do not form an activation
+                    # stream. The next unit selects its own captured cache at
+                    # the top of the loop, so do not publish this unit's output
+                    # as a synthetic next-layer input.
+                    layer_inputs = []
+                else:
+                    processor.receive_layer_inputs(layer_outputs)
+                    layer_inputs = processor.inputs_cache.layer_inputs
                 pb.title(layer_title).subtitle("").draw()
 
             if p_index == len(looper.processors) - 1:

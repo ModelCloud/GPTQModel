@@ -38,6 +38,17 @@ def _contains_expert_collection(model_cls, node) -> bool:
     return False
 
 
+def _contains_expert_placeholder(node) -> bool:
+    if isinstance(node, dict):
+        return any(
+            key == EXPERT_INDEX_PLACEHOLDER or _contains_expert_placeholder(value)
+            for key, value in node.items()
+        )
+    if isinstance(node, (list, tuple)):
+        return any(_contains_expert_placeholder(item) for item in node)
+    return False
+
+
 def _registered_moe_model_classes():
     model_types_by_class = defaultdict(list)
     for model_type, model_cls in MODEL_MAP.items():
@@ -74,6 +85,15 @@ def test_registered_moe_model_tree_marks_dynamic_expert_root(model_cls, model_ty
     for tree in model_cls._iter_module_tree_variants():
         mapping = _layer_mapping(tree)
         assert mapping is not None, f"{model_types}: missing layer mapping"
+
+        # A model can expose dense decoder layers and globally shared MoE
+        # blocks as separate layer-container variants. Only the variant that
+        # actually owns an expert collection needs a top-level MoE root.
+        if not _contains_expert_collection(model_cls, mapping) or (
+            getattr(model_cls, "auxiliary_layer_nodes", ())
+            and not _contains_expert_placeholder(mapping)
+        ):
+            continue
 
         marked_roots = [
             model_cls._parse_module_flags(key)[0]

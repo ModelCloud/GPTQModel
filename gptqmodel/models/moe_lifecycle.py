@@ -223,8 +223,14 @@ class MoELifecycleHooks:
             return []
 
         order = []
-        expert_prefix = f"{moe_block_prefix}.{experts_attr_name}." if experts_attr_name else None
-        shared_prefix = f"{moe_block_prefix}.{shared_expert_attr_name}." if shared_expert_attr_name else None
+        expert_prefix = (
+            f"{'.'.join(part for part in (moe_block_prefix, experts_attr_name) if part)}."
+            if experts_attr_name else None
+        )
+        shared_prefix = (
+            f"{'.'.join(part for part in (moe_block_prefix, shared_expert_attr_name) if part)}."
+            if shared_expert_attr_name else None
+        )
 
         for key in ordered_module_names:
             if shared_prefix and key.startswith(shared_prefix):
@@ -349,8 +355,14 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         for key in subset.keys():
             if experts_attr_name and f".{experts_attr_name}." in key:
                 return key.split(f".{experts_attr_name}.")[0]
+            if experts_attr_name and key.startswith(f"{experts_attr_name}."):
+                # Auxiliary units can be replayed as the layer itself, so
+                # their relative subset names have no outer MoE prefix.
+                return ""
             if shared_expert_attr_name and f".{shared_expert_attr_name}." in key:
                 return key.split(f".{shared_expert_attr_name}.")[0]
+            if shared_expert_attr_name and key.startswith(f"{shared_expert_attr_name}."):
+                return ""
 
         return None
 
@@ -429,6 +441,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
             subset_module = subset.get(key)
             return subset_module
 
+        def join_path(*parts: Optional[str]) -> str:
+            return ".".join(part.strip(".") for part in parts if part)
+
         # Get experts modules and shared expert attribute name
         experts_module = self.get_experts_module(moe_block, model_class)
         shared_experts_module = self.get_shared_experts_module(moe_block, model_class)
@@ -438,10 +453,10 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
 
         # Check which shared_expert projections are in subset using detected attribute name
         has_shared_experts = False
-        if shared_experts_module is not None and shared_expert_attr_name and moe_block_prefix:
+        if shared_experts_module is not None and shared_expert_attr_name and moe_block_prefix is not None:
             # Use the attribute name we already detected (e.g., "shared_experts" or "shared_expert")
             for name in proj_names:
-                key = f"{moe_block_prefix}.{shared_expert_attr_name}.{name}"
+                key = join_path(moe_block_prefix, shared_expert_attr_name, name)
                 if key in subset:
                     has_shared_experts = True
                     break
@@ -451,9 +466,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
         # so we need to check all subset keys instead of just the first expert
         has_expert_projs = False
         if experts_module is not None and hasattr(experts_module, '__iter__') and len(
-                experts_module) > 0 and experts_attr_name and moe_block_prefix:
+                experts_module) > 0 and experts_attr_name and moe_block_prefix is not None:
             # Check all subset keys for any expert projections
-            expert_prefix = f"{moe_block_prefix}.{experts_attr_name}."
+            expert_prefix = f"{join_path(moe_block_prefix, experts_attr_name)}."
             for key in subset.keys():
                 if key.startswith(expert_prefix):
                     # Extract the expert index and projection name from the key
@@ -485,9 +500,9 @@ class ExpertProjectionMoELifecycleHooks(MoELifecycleHooks):
                 hidden_states_2d = hidden_states
 
             for expert_idx, expert in enumerate(experts_module):
-                gate_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.gate_proj_name}"
-                up_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.up_proj_name}"
-                down_key = f"{moe_block_prefix}.{experts_attr_name}.{expert_idx}.{self.down_proj_name}"
+                gate_key = join_path(moe_block_prefix, experts_attr_name, str(expert_idx), self.gate_proj_name)
+                up_key = join_path(moe_block_prefix, experts_attr_name, str(expert_idx), self.up_proj_name)
+                down_key = join_path(moe_block_prefix, experts_attr_name, str(expert_idx), self.down_proj_name)
 
                 if gate_key not in subset and up_key not in subset and down_key not in subset:
                     continue

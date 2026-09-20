@@ -121,6 +121,7 @@ class StageInputsCapture:
         use_cache: bool,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
         layer_names: Optional[List[str]] = None,
+        processor: Any = None,
     ) -> InputCache:
         """Runs a short forward over calibration data and caches first-layer inputs."""
 
@@ -167,6 +168,10 @@ class StageInputsCapture:
             module_path = None
             capture_source = "cache_inputs"
         start_time = time.perf_counter() if timer else None
+
+        begin_aux_capture = getattr(self.gptq_model, "begin_auxiliary_input_capture", None)
+        if callable(begin_aux_capture):
+            begin_aux_capture(processor=processor)
 
         try:
             calibration_batches = len(calibration_data)  # type: ignore[arg-type]

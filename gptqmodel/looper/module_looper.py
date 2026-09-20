@@ -1475,7 +1475,7 @@ class ModuleLooper(DeviceAssignmentState):
 
         return pre_hook
 
-    def cache_inputs(self, layers, calibration_data, use_cache, layer_names=None):
+    def cache_inputs(self, layers, calibration_data, use_cache, layer_names=None, processor=None):
         """Capture and cache per-layer calibration inputs for later replay."""
 
         capture_stage = StageInputsCapture(self, logger=log)
@@ -1485,6 +1485,7 @@ class ModuleLooper(DeviceAssignmentState):
             use_cache=use_cache,
             embed_quant_mode=self.embed_quant_mode,
             layer_names=layer_names,
+            processor=processor,
         )
 
     def loop(self, fallback=None, **kwargs):
@@ -1581,7 +1582,8 @@ class ModuleLooper(DeviceAssignmentState):
             input_cache = self.cache_inputs(layers=layers,
                                             layer_names=layer_names,
                                             calibration_data=processor.calibration_dataset,
-                                            use_cache=False)
+                                            use_cache=False,
+                                            processor=processor)
             processor.receive_input_cache(input_cache)
 
         # release calibration_dataset
@@ -1680,22 +1682,31 @@ class ModuleLooper(DeviceAssignmentState):
                     parent = getattr(parent, part)
                 setattr(parent, module_path[-1], hooked_lm_head)
 
-        run_layer_stage(
-            self,
-            layers=layers,
-            layer_modules=layer_modules,
-            planning_layer_modules=planning_layer_modules,
-            layer_names=layer_names,
-            fallback=fallback,
-            shared_kv_cache_dict=shared_kv_cache_dict,
-            pb=pb,
-            layer_count=layer_count,
-            region_timer=region_timer,
-            finalize_progress_cls=FinalizeProgressInfo,
-            embed_quant_mode=self.embed_quant_mode,
-            embed_only=self.embed_only,
-            logger=log,
-        )
+        try:
+            run_layer_stage(
+                self,
+                layers=layers,
+                layer_modules=layer_modules,
+                planning_layer_modules=planning_layer_modules,
+                layer_names=layer_names,
+                fallback=fallback,
+                shared_kv_cache_dict=shared_kv_cache_dict,
+                pb=pb,
+                layer_count=layer_count,
+                region_timer=region_timer,
+                finalize_progress_cls=FinalizeProgressInfo,
+                embed_quant_mode=self.embed_quant_mode,
+                embed_only=self.embed_only,
+                logger=log,
+            )
+        finally:
+            # Auxiliary pre-hooks span first-layer capture and the complete
+            # decoder replay.  Always remove them, including on an aborted
+            # quantization run, so a subsequent run cannot capture stale
+            # activations or retain a large shared MoE block.
+            close_aux_capture = getattr(self.gptq_model, "close_auxiliary_input_capture", None)
+            if callable(close_aux_capture):
+                close_aux_capture()
 
         # LifeCycle: All sub-modules have finalized meaning quantization work is complete
         self._check_loop_stop()

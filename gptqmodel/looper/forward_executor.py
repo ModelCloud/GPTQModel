@@ -132,6 +132,8 @@ class ForwardExecutor:
             quant_config = getattr(self.looper.gptq_model, "quantize_config", None)
             if quant_config is not None and not getattr(quant_config, "auto_forward_data_parallel", True):
                 force_serial = True
+        if getattr(self.looper.gptq_model, "force_serial_layer_replay", False):
+            force_serial = True
 
         if force_serial:
             return self.run_single(
@@ -296,6 +298,18 @@ class ForwardExecutor:
                     additional_inputs=additional_inputs,
                     target_device=exec_device,
                 )
+
+                before_layer_forward = getattr(self.looper.gptq_model, "before_layer_forward", None)
+                if callable(before_layer_forward):
+                    before_layer_forward(
+                        layer=module,
+                        layer_index=layer_index,
+                        batch_index=batch_idx,
+                        processor=processor,
+                        layer_input=layer_input,
+                        additional_inputs=additional_inputs,
+                        target_device=exec_device,
+                    )
 
                 if not preserve_module_devices:
                     rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)

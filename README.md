@@ -170,7 +170,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Hymba | `hymba` |
 | Inkling | `inkling_mm_model` |
 | Instella | `instella` |
-| Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
+| Intern S1 / S2 Preview / S2 Mobius | `interns1`, `intern_s2_preview`, `interns2_mobius` |
 | InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
 | InternVL Chat | `internvl_chat` |
 | K2-Horizon (Dense / MoVA) |
@@ -226,6 +226,8 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 <!-- model-types:end -->
 
 Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
+
+Intern-S2-Mobius support quantizes both the per-layer Reasoner projections and the four globally shared Memory MoE blocks. Calibration inputs for each Memory block are aggregated from every decoder depth that reuses it, while the blocks remain independent quantization units rather than being replayed as a synthetic sequential stack. Loading the official checkpoint requires `trust_remote_code=True`.
 
 Xing4.0 loads the model repository's custom implementation and therefore requires `trust_remote_code=True`. Run its GPU model test in full mode against a freshly measured dense baseline before checking quantized evaluation: `GPTQMODEL_MODEL_TEST_MODE=slow pytest -q tests/models/test_xing4_0.py`.
 
