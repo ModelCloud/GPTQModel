@@ -1551,7 +1551,7 @@ template <
     bool FixedGateUp = false,
     bool PrefetchDecodedLevels = false,
     int N64BlocksPerCta = 1,
-    bool FixedQwenLinear = false,
+    int FixedQwenLinear = 0,
     int RowTilesPerCta = 1,
     class InputTma,
     class TrellisTma,
@@ -1573,6 +1573,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     int launch_bank_alt_id) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   static_assert(!FixedGateUp || Grouped);
+  static_assert(
+      FixedQwenLinear == 0 || FixedQwenLinear == 1 || FixedQwenLinear == 2);
   static_assert(!FixedQwenLinear || (Grouped && OrderedSplit && !FixedGateUp));
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
   static_assert(N64BlocksPerCta == 1 || Grouped);
@@ -1661,8 +1663,15 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     // descriptors and dividing by runtime widths in every thread.
     constexpr int kQkvN64Blocks = kFixedQwenLinearQkvN / kOutputColumns;
     constexpr int kZN64Blocks = kFixedQwenLinearZN / kOutputColumns;
-    constexpr int kQkvSplit = TransitionBits <= 5 ? 10 : 4;
-    constexpr int kZSplit = 20;
+    // The original Qwen3-Next schedule uses K=5120 and asymmetric 10/20
+    // (W2/W2.5) or 4/20 (W3) splits.  Flash-Next keeps the same two output
+    // widths but halves K and uses the measured 2/2 schedule.  Both layouts
+    // preserve child-local ordered reduction, so share the direct mapping
+    // while selecting the boundary from the launch's fixed geometry.
+    constexpr bool kIsFlashNext = FixedQwenLinear == 2;
+    constexpr int kQkvSplit =
+        kIsFlashNext ? 2 : (TransitionBits <= 5 ? 10 : 4);
+    constexpr int kZSplit = kIsFlashNext ? 2 : 20;
     constexpr int kQkvWorkItems = kQkvN64Blocks * kQkvSplit;
     row_tile = static_cast<int>(blockIdx.y);
     const int work_item = static_cast<int>(blockIdx.x);
@@ -3172,13 +3181,20 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
       split_counts[0] == kFixedQwenGateUpSplit &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
   const int qwen_linear_qkv_split = TransitionBits <= 5 ? 10 : 4;
-  const bool use_h100_qwen_linear_fixed =
+  const bool use_h100_qwen_linear_legacy =
       OrderedSplit && size_k == 5120 && segment_count == 2 &&
       out_features[0] == kFixedQwenLinearQkvN &&
       out_features[1] == kFixedQwenLinearZN &&
       split_counts[0] == qwen_linear_qkv_split &&
       split_counts[1] == 20 &&
       TransitionBits <= kW3TransitionBits &&
+      std::strcmp(properties.name, "NVIDIA H100") == 0;
+  const bool use_h100_flash_next_linear_fixed =
+      OrderedSplit && size_k == 2560 && segment_count == 2 &&
+      out_features[0] == kFixedQwenLinearQkvN &&
+      out_features[1] == kFixedQwenLinearZN &&
+      split_counts[0] == 2 && split_counts[1] == 2 &&
+      TransitionBits >= kW3TransitionBits &&
       std::strcmp(properties.name, "NVIDIA H100") == 0;
   if constexpr (RowTilesPerCta > 1) {
     // At M>=128 the physical H100 benefits from two independent N64
@@ -3381,7 +3397,7 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
             2 * kFixedQwenGateUpN,
             kFixedQwenGateUpSplit,
             0);
-  } else if (use_h100_qwen_linear_fixed) {
+  } else if (use_h100_qwen_linear_legacy) {
     qvq_p32_window_wgmma_m16_tma_kernel<
         TransitionBits,
         true,
@@ -3390,6 +3406,26 @@ at::Tensor qvq_p32_window_wgmma_m16_tma_grouped_impl(
         TransitionBits != 5,
         1,
         true><<<grid, kTmaThreads, 0, stream>>>(
+            input_tma,
+            trellis_tma,
+            bank_tma,
+            reinterpret_cast<const Element*>(levels.data_ptr<at::Half>()),
+            partial_output.data_ptr<float>(),
+            grouped_params,
+            size_m,
+            size_k,
+            static_cast<int>(total_n),
+            1,
+            0);
+  } else if (use_h100_flash_next_linear_fixed) {
+    qvq_p32_window_wgmma_m16_tma_kernel<
+        TransitionBits,
+        true,
+        true,
+        false,
+        true,
+        1,
+        2><<<grid, kTmaThreads, 0, stream>>>(
             input_tma,
             trellis_tma,
             bank_tma,
