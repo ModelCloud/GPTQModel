@@ -1463,23 +1463,25 @@ def qvq_cuda_qwen_composite_input_fp16_padded(
     )
 
 
-def qvq_cuda_flash_next_composite_input_bf16_to_fp16(
+def qvq_cuda_flash_next_composite_input_to_fp16(
     input: torch.Tensor,
     *,
     base: torch.Tensor,
     pre_scale: torch.Tensor,
 ) -> torch.Tensor:
-    """Apply exact Flash-Next H40 x H64 after BF16-to-FP16 narrowing."""
+    """Apply exact Flash-Next H40 x H64 with an FP16 compute contract."""
 
     if (
         input.device.type != "cuda"
-        or input.dtype != torch.bfloat16
+        or input.dtype not in (torch.float16, torch.bfloat16)
         or input.ndim != 2
         or not 0 < input.shape[0] <= 16
         or input.shape[1] != 2560
         or not input.is_contiguous()
     ):
-        raise ValueError("Flash-Next composite input must be CUDA BF16 [1..16, 2560]")
+        raise ValueError(
+            "Flash-Next composite input must be CUDA FP16/BF16 [1..16, 2560]"
+        )
     for name, tensor, count in (
         ("base", base, 1600),
         ("pre_scale", pre_scale, 2560),
@@ -1498,6 +1500,23 @@ def qvq_cuda_flash_next_composite_input_bf16_to_fp16(
         input,
         base.reshape(40, 40),
         pre_scale,
+    )
+
+
+def qvq_cuda_flash_next_composite_input_bf16_to_fp16(
+    input: torch.Tensor,
+    *,
+    base: torch.Tensor,
+    pre_scale: torch.Tensor,
+) -> torch.Tensor:
+    """Compatibility wrapper for the original BF16-only specialization."""
+
+    if input.dtype != torch.bfloat16:
+        raise TypeError("BF16 Flash-Next composite input requires torch.bfloat16")
+    return qvq_cuda_flash_next_composite_input_to_fp16(
+        input,
+        base=base,
+        pre_scale=pre_scale,
     )
 
 
@@ -2158,6 +2177,7 @@ __all__ = [
     "qvq_cuda_quantize_fp8_per_row",
     "qvq_cuda_qwen_composite_input_fp16_padded",
     "qvq_cuda_flash_next_composite_input_bf16_to_fp16",
+    "qvq_cuda_flash_next_composite_input_to_fp16",
     "qvq_cuda_qwen_composite_ordered_recovery_fp32_to_fp16",
     "qvq_cuda_qwen_composite_recovery_fp32_to_fp16",
     "qvq_cuda_supported",
