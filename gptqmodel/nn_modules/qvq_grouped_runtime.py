@@ -1196,9 +1196,15 @@ class QVQHopperGroupedRuntime:
 
         if return_ordered_partials:
             if self._h100_flash_next_expert_group_enabled:
-                raise _R0Fallback(
-                    "Flash-Next narrow expert grouping does not expose split partials"
+                partials = qvq_p32_window_ampere_grouped_packed(
+                    padded[:rows].contiguous(),
+                    payload,
+                    _pgc16_levels(x.device, children[0].codebook_version),
+                    return_ordered_partials=True,
                 )
+                self.telemetry.ordered_split_launches += 1
+                self.telemetry.h100_flash_next_expert_grouped_launches += 1
+                return partials
             partials = qvq_p32_window_wgmma_grouped_ordered_partials_packed(
                 padded,
                 payload,
@@ -2410,7 +2416,7 @@ class QVQHopperGroupedRuntime:
             use_ordered_reduction_fusion = (
                 use_h100_folded_fusion
                 and len({segment.split_count for segment in payload.plan.segments}) == 1
-                and payload.plan.segments[0].split_count in (5, 10)
+                and payload.plan.segments[0].split_count in (5, 10, 32)
             )
             if use_ordered_reduction_fusion:
                 gate_up_split_count = payload.plan.segments[0].split_count

@@ -1250,8 +1250,8 @@ __global__ void qvq_folded_swiglu_precondition_ordered_fp32_kernel(
     const half* __restrict__ down_scale,
     half* __restrict__ output,
     int64_t logical_values,
-    int n) {
-  const int64_t plane_values = static_cast<int64_t>(16) * n;
+    int n,
+    int64_t plane_values) {
   const float* gate_partials = partials;
   const float* up_partials = partials + SplitCount * plane_values;
   for (int64_t index =
@@ -3773,16 +3773,20 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   TORCH_CHECK(partials.is_cuda() && partials.scalar_type() == at::kFloat &&
                   partials.is_contiguous(),
               "ordered folded SwiGLU partials must be contiguous CUDA float32");
-  TORCH_CHECK(split_count == 5 || split_count == 10,
-              "ordered folded SwiGLU requires split count five or ten");
+  TORCH_CHECK(split_count == 5 || split_count == 10 || split_count == 32,
+              "ordered folded SwiGLU requires split count five, ten, or thirty-two");
   TORCH_CHECK(logical_rows >= 1 && logical_rows <= 16,
               "ordered folded SwiGLU requires one through sixteen logical rows");
   const int64_t n64 = gate_scale.numel();
   TORCH_CHECK(n64 > 0 && n64 <= std::numeric_limits<int>::max(),
               "ordered folded SwiGLU width exceeds int32 range");
   TORCH_CHECK(
-      partials.numel() == 2 * split_count * 16 * n64,
-      "ordered folded SwiGLU partial layout must contain two child-major split planes");
+      partials.numel() % (2 * split_count * n64) == 0,
+      "ordered folded SwiGLU partial layout is not child-major split planes");
+  const int64_t partial_rows = partials.numel() / (2 * split_count * n64);
+  TORCH_CHECK(
+      partial_rows >= logical_rows && partial_rows <= 16,
+      "ordered folded SwiGLU partial rows must cover the logical rows");
   for (const auto& named : {
            std::pair<const char*, const at::Tensor&>{"gate_scale", gate_scale},
            {"up_scale", up_scale}}) {
@@ -3848,7 +3852,8 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
       reinterpret_cast<const half*>(down_scale.const_data_ptr<at::Half>()),     \
       reinterpret_cast<half*>(output.mutable_data_ptr<at::Half>()),             \
       logical_values,                                                           \
-      n)
+      n,                                                                        \
+      partial_rows * n64)
 #define QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT(                                \
     SPLIT_COUNT, HAS_GATE_BIAS, HAS_UP_BIAS)                                    \
   do {                                                                           \
@@ -3874,8 +3879,10 @@ at::Tensor qvq_folded_swiglu_precondition_ordered_fp32_cuda(
   } while (false)
   if (split_count == 5) {
     QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(5);
-  } else {
+  } else if (split_count == 10) {
     QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(10);
+  } else {
+    QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU(32);
   }
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU
 #undef QVQ_LAUNCH_ORDERED_FOLDED_SWIGLU_SPLIT

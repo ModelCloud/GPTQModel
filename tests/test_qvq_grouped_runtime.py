@@ -1066,6 +1066,8 @@ def test_flash_next_h100_expert_mlp_uses_narrow_group_and_direct_down(
     assert telemetry[0]["h100_qwen_composite_down_recovery_launches"] >= 2
     assert telemetry[0]["h100_qwen_ordered_composite_down_recovery_launches"] == 2
     assert telemetry[0]["h100_folded_qwen_fused_precondition_launches"] == 2
+    assert telemetry[0]["h100_folded_qwen_fused_ordered_reduction_launches"] == 2
+    assert telemetry[0]["ordered_split_launches"] == 2
     assert telemetry[0]["plain_fallbacks"] == 0
 
 

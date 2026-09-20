@@ -1617,7 +1617,8 @@ def qvq_p32_window_ampere_grouped_packed(
     rank8_scales: Sequence[float] | None = None,
     rank8_packed_a: torch.Tensor | None = None,
     rank8_packed_b: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, ...]:
+    return_ordered_partials: bool = False,
+) -> tuple[torch.Tensor, ...] | torch.Tensor:
     """Execute a cached grouped payload with one segmented main launch.
 
     ``rank8_as``/``rank8_bs`` are the child-local factors.  The A factors are
@@ -1631,6 +1632,8 @@ def qvq_p32_window_ampere_grouped_packed(
     widths = [segment.out_features for segment in plan.segments]
     alt_ids = [segment.bank_alt_id for segment in plan.segments]
     split_counts = [segment.split_count for segment in plan.segments]
+    if return_ordered_partials and (rank8_as is not None or rank8_bs is not None):
+        raise ValueError("ordered grouped partial output does not support rank-8 correction")
     # The plain kernel uses a warp-parallel reducer for these two KV cases.
     # Its tree order cannot be represented by the generic segmented reducer,
     # so fail closed to the exact child dispatcher rather than changing bits.
@@ -1643,6 +1646,8 @@ def qvq_p32_window_ampere_grouped_packed(
         for segment in plan.segments
     )
     if len(plan.segments) > 3 or plan.in_features > 6144 or uses_warp_reducer:
+        if return_ordered_partials:
+            raise ValueError("ordered grouped partial output requires the fused operator")
         if rank8_as is not None or rank8_bs is not None:
             raise ValueError(
                 "grouped Ampere rank8 requires supported child window shapes"
@@ -1772,7 +1777,13 @@ def qvq_p32_window_ampere_grouped_packed(
         widths,
         alt_ids,
         split_counts,
+        None,
+        None,
+        [],
+        return_ordered_partials,
     )
+    if return_ordered_partials:
+        return grouped_output
     row_count = int(input.shape[0])
     return tuple(
         child.reshape(row_count, width)
