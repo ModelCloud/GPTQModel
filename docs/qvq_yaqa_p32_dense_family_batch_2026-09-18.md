@@ -871,3 +871,40 @@ input types, and full recurrent candidate parity.
 
 This optimization is confined to quantization and does not alter the P32
 checkpoint format or post-quant inference.
+
+### Rate-specific exact norm-band chunk width
+
+The exact norm-band recurrence stores candidates in short, norm-sorted chunks.
+Production W3.5 YAQA tiles evaluate roughly 96--99% of the legal candidates,
+so four-wide chunks spend too much time on chunk bounds, ballots, and metadata.
+W3.5 now evaluates eight candidates per straight-line chunk. Candidate FP32
+arithmetic, original-prefix tie precedence, the conservative norm bound, and
+traceback are unchanged. W2.5 and W3 remain four-wide: W2.5 was slower with
+eight-wide chunks, while W3's small speed gain failed the independent oracle.
+
+On H100, W3.5 constrained family-grid calls improved by approximately 8--13%
+across family batches 1--128. In a matched Llama 3.2 1B one-layer run,
+segmented-Viterbi time fell from `15.4726 s` to `15.0336 s` (`1.0292x`) and
+inclusive process quantization fell from `22.7871 s` to `22.3273 s`
+(`1.0206x`). The calibration and YAQA sets remained rows `[0,32)` and
+`[64,96)` respectively, with 32 independent YAQA sequences and 11,992 valid
+tokens.
+
+The changed operation ordering can select a different score-near-equivalent
+payload, so this phase used both quality gates instead of requiring bytewise
+identity. The frozen q-projection Fisher objective improved by `0.2179%` in
+both independent FP32 and FP64 evaluation. On 256 strictly disjoint
+GSM8K-Platinum samples, aggregate projection MSE changed by `+0.0904%`; MLP
+down-projection improved by `0.2329%` and MLP up-projection improved slightly.
+This small aggregate drift is accepted because the dual oracle improves and
+the affected-region speedup is material. Fifty-two exact CUDA tests passed,
+covering reference parity, rounding and tie edges, family batches, P32/P64,
+and multi-wave shift-7 geometry.
+
+An eight-wide W3 branch was rejected and removed. It improved total layer
+quantization by only `0.39%` but regressed the q-projection Fisher objective by
+`2.20%` in both FP32 and FP64. This rate-specific result is why chunk width is
+not widened globally.
+
+This is a quantization-stage optimization only; serialized format and
+post-quant inference kernels are unchanged.

@@ -470,13 +470,12 @@ struct NormRankPrefixPack<8> {
   using type = uint64_t;
 };
 
-// Width of the straight-line evaluation block, per rate.  Four keeps the
-// unrolled body inside the 32-register budget that holds two 1024-thread CTAs
-// per SM and loads one lane's chunk in two 16-byte transactions; the per-rate
-// choices are the fastest of the 2/4/8 sweep recorded in OPTIMIZATION_LOG.md.
+// Width of the straight-line evaluation block, per rate. Real YAQA tiles keep
+// almost the whole exact norm band at W3.5, so it benefits from halving
+// chunk-control work. W2.5/W3 retain width four for oracle stability.
 constexpr int kNormRankChunkWidthW25 = 4;
 constexpr int kNormRankChunkWidthW3 = 4;
-constexpr int kNormRankChunkWidthW35 = 4;
+constexpr int kNormRankChunkWidthW35 = 8;
 
 // Rank of each state inside its own suffix column, ordered by (norm, original
 // prefix).  One thread per state, prefix_count comparisons each; runs once per
