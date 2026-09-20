@@ -3364,10 +3364,11 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
           ((input.size(1) == kQwenCompositeN &&
             input.scalar_type() == at::kHalf) ||
            (input.size(1) == 2560 &&
-            input.scalar_type() == at::kBFloat16)) &&
+            (input.scalar_type() == at::kHalf ||
+             input.scalar_type() == at::kBFloat16))) &&
           input.is_contiguous(),
       "Qwen composite input must be contiguous FP16 [1..16, 5120] or "
-      "BF16 [1..16, 2560]");
+      "FP16/BF16 [1..16, 2560]");
   const int64_t composite_n = input.size(1);
   TORCH_CHECK(
       base.scalar_type() == at::kHalf && base.is_contiguous() &&
@@ -3386,12 +3387,12 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
           std::strcmp(properties.name, "NVIDIA H100") == 0,
       "Qwen composite input requires the measured physical H100");
   const size_t smem_bytes = composite_n * sizeof(float);
-  const bool flash_next_bf16 = composite_n == 2560;
-  const int64_t output_rows = flash_next_bf16 ? input.size(0) : 16;
+  const bool flash_next = composite_n == 2560;
+  const int64_t output_rows = flash_next ? input.size(0) : 16;
   auto output = at::empty(
       {output_rows, composite_n}, input.options().dtype(at::kHalf));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream(input.get_device());
-  if (flash_next_bf16) {
+  if (flash_next && input.scalar_type() == at::kBFloat16) {
     auto kernel =
         qvq_qwen_composite_input_fp16_padded_kernel<nv_bfloat16, 2560>;
     C10_CUDA_CHECK(cudaFuncSetAttribute(
@@ -3404,6 +3405,22 @@ at::Tensor qvq_qwen_composite_input_fp16_padded_cuda(
         smem_bytes,
         stream>>>(
         reinterpret_cast<const nv_bfloat16*>(input.const_data_ptr()),
+        reinterpret_cast<const half*>(base.const_data_ptr()),
+        reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
+        reinterpret_cast<half*>(output.mutable_data_ptr()),
+        static_cast<int>(input.size(0)));
+  } else if (flash_next) {
+    auto kernel = qvq_qwen_composite_input_fp16_padded_kernel<half, 2560>;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(
+        kernel,
+        cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(smem_bytes)));
+    kernel<<<
+        static_cast<unsigned>(output_rows),
+        kHadamardThreads,
+        smem_bytes,
+        stream>>>(
+        reinterpret_cast<const half*>(input.const_data_ptr()),
         reinterpret_cast<const half*>(base.const_data_ptr()),
         reinterpret_cast<const half*>(pre_scale.const_data_ptr()),
         reinterpret_cast<half*>(output.mutable_data_ptr()),
