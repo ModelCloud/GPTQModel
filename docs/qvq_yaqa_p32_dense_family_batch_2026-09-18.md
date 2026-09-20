@@ -908,3 +908,42 @@ not widened globally.
 
 This is a quantization-stage optimization only; serialized format and
 post-quant inference kernels are unchanged.
+
+### Reusable norm-rank tables under inference-mode quantization
+
+The native exact norm-rank cache intentionally refuses arbitrary inference
+tensors because they can be mutated without a version-counter bump. Full-model
+quantization creates its immutable family codebook stacks under inference mode,
+so the safe low-level rule previously forced every anti-diagonal to rebuild the
+same sorted records, prefix map, and chunk bounds. Family-batched Block-LDLQ,
+dense YAQA, and factored YAQA now make one value-identical regular-tensor copy
+at the solver boundary. That copy has a version counter and remains immutable
+for the invocation, allowing all later anti-diagonals to reuse one cached table.
+The low-level behavior for arbitrary inference tensors is unchanged and its
+mutation-safety test remains in place.
+
+Repeated constrained family-grid calls improved by `1.016--1.046x` across
+W2.5, W3, and W3.5 in the H100 microbenchmark. Full layer results were:
+
+- W2.5 segmented Viterbi: `13.5173 s` to `13.4656 s` (`1.0038x`). Total
+  process time was noisy and no end-to-end W2.5 gain is claimed. The frozen
+  Q-projection payload, FP32 objective, and FP64 objective were identical.
+- W3 segmented Viterbi: `19.4998 s` to `19.3694 s` (`1.0067x`); total process
+  quantization improved from `22.5635 s` to `22.3559 s` (`1.0093x`). Strict
+  disjoint held-out projection MSE improved by `0.0476%`. The frozen
+  Q-projection Fisher objective moved by `+0.627%` in both FP32 and FP64.
+- W3.5 segmented Viterbi: `15.0336 s` to `14.9098 s` (`1.0083x`); total
+  process quantization improved from `22.3273 s` to `22.2227 s` (`1.0047x`).
+  Strict disjoint held-out projection MSE improved by `0.1719%`. The frozen
+  Q-projection Fisher objective moved by `+0.214%` in FP32 and FP64.
+
+The W3/W3.5 payloads are accepted under the balanced quality policy: held-out
+aggregate error improves, the Fisher movement is below one percent, and both
+independent precisions agree on its magnitude. A mitigation experiment that
+cached only wide-MLP tables produced the same W3 Q-projection payload and
+oracle delta while reducing the speed gain to `1.0052x`; it was rejected.
+
+All runs used calibration rows `[0,32)`, disjoint YAQA rows `[64,96)`, 32 YAQA
+sequences, and 11,992 valid tokens. Held-out evaluation used the disjoint
+GSM8K-Platinum test rows `[0,256)`. This optimization changes neither the
+checkpoint format nor post-quant inference.

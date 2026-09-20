@@ -22,6 +22,7 @@ from gptqmodel.quantization.qvq import (
     _canonical_qvq_v2b4_bank_stack,
     _canonical_qvq_v2b4_banks,
     _canonical_qvq_v4_banks,
+    _qvq_cuda_cacheable_family_stacks,
     _qvq_cuda_family_tail_biting_overlaps,
     _qvq_family_final_direct_distance_enabled,
     _qvq_family_provisional_direct_distance_enabled,
@@ -6224,6 +6225,25 @@ def test_qvq_cuda_norm_rank_inference_mode_codebook_mutation_is_not_stale():
         fresh = op(sequences, codebooks.clone(), 5, 16, None, None)
     torch.cuda.synchronize()
     assert all(torch.equal(m, f) for m, f in zip(mutated, fresh))
+
+
+def test_qvq_cuda_family_stacks_leave_inference_mode_for_safe_table_reuse():
+    _, source = _norm_rank_case(20260921, 4, 3.5, 2)
+    with torch.inference_mode():
+        inference_stacks = source.reshape(1, 2, 65536, 2).clone()
+    cacheable = _qvq_cuda_cacheable_family_stacks(inference_stacks)
+    assert inference_stacks.is_inference()
+    assert not cacheable.is_inference()
+    assert cacheable.is_contiguous()
+    assert cacheable.data_ptr() != inference_stacks.data_ptr()
+    assert torch.equal(cacheable, inference_stacks)
+
+
+def test_qvq_cuda_family_stacks_do_not_copy_versioned_tensors():
+    _, source = _norm_rank_case(20260922, 4, 3.5, 2)
+    family_stacks = source.reshape(1, 2, 65536, 2)
+    assert not family_stacks.is_inference()
+    assert _qvq_cuda_cacheable_family_stacks(family_stacks) is family_stacks
 
 
 def test_qvq_cuda_norm_rank_grid_uses_current_non_default_stream():
