@@ -47,7 +47,7 @@ def _raw_library():
         ctypes.c_uint64,
     ]
     library.qvq_p32_wgmma_raw_launch.restype = ctypes.c_int
-    assert library.qvq_p32_wgmma_raw_abi_version() == 2
+    assert library.qvq_p32_wgmma_raw_abi_version() == 3
     return library
 
 
@@ -90,7 +90,7 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     alt_ids = torch.tensor([alt_id], device=x.device, dtype=torch.uint8)
     output = torch.empty((m, n), device=x.device, dtype=torch.float32)
     config = RawConfig(
-        2, ctypes.sizeof(RawConfig), m, k, n, round(2 * bits), split_count,
+        3, ctypes.sizeof(RawConfig), m, k, n, round(2 * bits), split_count,
         1, 0, 0,
     )
     workspace_bytes = library.qvq_p32_wgmma_raw_workspace_bytes(ctypes.byref(config))
@@ -132,17 +132,20 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     graph.reset()
 
 
+@pytest.mark.parametrize("m,algorithm", [(64, 2), (128, 3)])
 @pytest.mark.parametrize("bits", [2, 2.5, 3, 3.5])
-def test_raw_abi_direct_m64_matches_public_wgmma_and_needs_no_workspace(bits):
+def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
+    bits, m, algorithm
+):
     from test_qvq_grouped_runtime import _child
 
     from gptqmodel.utils.qvq_cuda import _pgc16_levels
     from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_tuned
 
     library = _raw_library()
-    m, k, n = 64, 2048, 256
+    k, n = 2048, 256
     layer = _child(
-        "raw_m64", in_features=k, out_features=n, bits=bits,
+        f"raw_m{m}", in_features=k, out_features=n, bits=bits,
         device="cuda", input_hadamard=False, output_hadamard=False,
     ).eval()
     x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.01
@@ -151,8 +154,8 @@ def test_raw_abi_direct_m64_matches_public_wgmma_and_needs_no_workspace(bits):
     alt_ids = torch.tensor([alt_id], device=x.device, dtype=torch.uint8)
     output = torch.empty((m, n), device=x.device, dtype=torch.float32)
     config = RawConfig(
-        2, ctypes.sizeof(RawConfig), m, k, n, round(2 * bits), 1,
-        2, 64, 64,
+        3, ctypes.sizeof(RawConfig), m, k, n, round(2 * bits), 1,
+        algorithm, m, 64,
     )
     assert library.qvq_p32_wgmma_raw_workspace_bytes(ctypes.byref(config)) == 0
     stream = torch.cuda.Stream()
@@ -170,7 +173,7 @@ def test_raw_abi_direct_m64_matches_public_wgmma_and_needs_no_workspace(bits):
     with torch.cuda.stream(stream), torch.no_grad():
         expected = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=64, block_n=64,
+            bank_alt_id=alt_id, block_m=m, block_n=64,
         )
         launch()
     stream.synchronize()
@@ -183,7 +186,7 @@ def test_raw_abi_direct_m64_matches_public_wgmma_and_needs_no_workspace(bits):
         x.normal_().mul_(0.02)
         expected_changed = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=64, block_n=64,
+            bank_alt_id=alt_id, block_m=m, block_n=64,
         )
     stream.synchronize()
     graph.replay()

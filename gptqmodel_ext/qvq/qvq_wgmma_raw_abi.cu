@@ -73,20 +73,19 @@ cudaError_t launch_ordered(
   return cudaGetLastError();
 }
 
-template <int TransitionBits>
-cudaError_t launch_direct_m64(
+template <int TransitionBits, int Rows, int RowTiles>
+cudaError_t launch_direct_rows(
     const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
     const Element* levels, const uint8_t* bank_alt_id, float* output,
     int k, int n, cudaStream_t stream) {
   constexpr int kWords = 4 * TransitionBits;
-  constexpr int kRowTiles = 4;
   using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
   using SharedStorage =
-      P32WgmmaTmaSharedStorageFor<TransitionBits, 1, kRowTiles>;
+      P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTiles>;
   const int k_tiles = k / kP32TileRows;
   const int n_tiles = n / kP32TileColumns;
   auto input_tensor = cute::make_tensor(
-      input, cute::make_shape(64, k),
+      input, cute::make_shape(Rows, k),
       cute::make_stride(static_cast<int64_t>(k), cute::_1{}));
   auto trellis_tensor = cute::make_tensor(
       trellis, cute::make_shape(kWords, n_tiles, k_tiles),
@@ -112,7 +111,7 @@ cudaError_t launch_direct_m64(
   HopperGroupedP32LaunchParams grouped{};
   grouped.launch_bank_alt_ids = bank_alt_id;
   auto kernel = qvq_p32_window_wgmma_m16_tma_kernel<
-      TransitionBits, false, false, false, true, 1, 0, kRowTiles,
+      TransitionBits, false, false, false, true, 1, 0, RowTiles,
       decltype(input_tma), decltype(trellis_tma), decltype(bank_tma),
       HopperGroupedP32LaunchParams>;
   cudaError_t status = cudaFuncSetAttribute(
@@ -122,8 +121,20 @@ cudaError_t launch_direct_m64(
   const dim3 grid(static_cast<unsigned>(n / kOutputColumns), 1, 1);
   kernel<<<grid, kTmaThreads, sizeof(SharedStorage), stream>>>(
       input_tma, trellis_tma, bank_tma, levels, output, grouped,
-      64, k, n, 1, 0);
+      Rows, k, n, 1, 0);
   return cudaGetLastError();
+}
+
+template <int TransitionBits>
+cudaError_t launch_direct(
+    const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
+    const Element* levels, const uint8_t* bank_alt_id, float* output,
+    int rows, int k, int n, cudaStream_t stream) {
+  return rows == 64
+      ? launch_direct_rows<TransitionBits, 64, 4>(
+            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+      : launch_direct_rows<TransitionBits, 128, 8>(
+            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream);
 }
 
 __global__ void reduce_ordered_rows(
@@ -154,7 +165,7 @@ extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
 extern "C" uint64_t qvq_p32_wgmma_raw_workspace_bytes(
     const QvqP32WgmmaRawConfig* c) {
   if (c == nullptr) return 0;
-  if (c->algorithm == 2) return 0;
+  if (c->algorithm == 2 || c->algorithm == 3) return 0;
   const uint64_t padded_input = align_up(16ull * c->k * sizeof(Element), 256);
   const uint64_t partials =
       static_cast<uint64_t>(c->split_count) * 16ull * c->n * sizeof(float);
@@ -175,7 +186,10 @@ extern "C" int qvq_p32_wgmma_raw_launch(
       c->block_n == 0 && c->m >= 1 && c->m <= 16;
   const bool direct_m64 = c->algorithm == 2 && c->block_m == 64 &&
       c->block_n == 64 && c->m == 64 && c->split_count == 1;
-  if ((!ordered_m16 && !direct_m64) || c->k < 256 || c->k % 256 != 0 ||
+  const bool direct_m128 = c->algorithm == 3 && c->block_m == 128 &&
+      c->block_n == 64 && c->m == 128 && c->split_count == 1;
+  if ((!ordered_m16 && !direct_m64 && !direct_m128) ||
+      c->k < 256 || c->k % 256 != 0 ||
       c->n < 256 || c->n % 256 != 0 || c->transition_bits < 4 ||
       c->transition_bits > 7 || c->split_count < 1 || c->split_count > 64 ||
       (c->k / 16) % c->split_count != 0 ||
@@ -187,38 +201,22 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     return fail(error, error_capacity, "QVQ WGMMA raw workspace is too small");
   }
   auto stream = static_cast<cudaStream_t>(cuda_stream);
-  if (direct_m64) {
+  if (direct_m64 || direct_m128) {
     cudaError_t status = cudaSuccess;
+#define QVQ_LAUNCH_DIRECT(BITS) launch_direct<BITS>(                        \
+    static_cast<const Element*>(activation),                               \
+    static_cast<const uint32_t*>(window),                                  \
+    static_cast<const uint8_t*>(bank_ids),                                 \
+    static_cast<const Element*>(levels),                                   \
+    static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output), \
+    c->m, c->k, c->n, stream)
     switch (c->transition_bits) {
-      case 4: status = launch_direct_m64<4>(
-          static_cast<const Element*>(activation),
-          static_cast<const uint32_t*>(window),
-          static_cast<const uint8_t*>(bank_ids),
-          static_cast<const Element*>(levels),
-          static_cast<const uint8_t*>(bank_alt_id),
-          static_cast<float*>(output), c->k, c->n, stream); break;
-      case 5: status = launch_direct_m64<5>(
-          static_cast<const Element*>(activation),
-          static_cast<const uint32_t*>(window),
-          static_cast<const uint8_t*>(bank_ids),
-          static_cast<const Element*>(levels),
-          static_cast<const uint8_t*>(bank_alt_id),
-          static_cast<float*>(output), c->k, c->n, stream); break;
-      case 6: status = launch_direct_m64<6>(
-          static_cast<const Element*>(activation),
-          static_cast<const uint32_t*>(window),
-          static_cast<const uint8_t*>(bank_ids),
-          static_cast<const Element*>(levels),
-          static_cast<const uint8_t*>(bank_alt_id),
-          static_cast<float*>(output), c->k, c->n, stream); break;
-      case 7: status = launch_direct_m64<7>(
-          static_cast<const Element*>(activation),
-          static_cast<const uint32_t*>(window),
-          static_cast<const uint8_t*>(bank_ids),
-          static_cast<const Element*>(levels),
-          static_cast<const uint8_t*>(bank_alt_id),
-          static_cast<float*>(output), c->k, c->n, stream); break;
+      case 4: status = QVQ_LAUNCH_DIRECT(4); break;
+      case 5: status = QVQ_LAUNCH_DIRECT(5); break;
+      case 6: status = QVQ_LAUNCH_DIRECT(6); break;
+      case 7: status = QVQ_LAUNCH_DIRECT(7); break;
     }
+#undef QVQ_LAUNCH_DIRECT
     return status == cudaSuccess ? 0
         : fail(error, error_capacity, cudaGetErrorString(status));
   }
