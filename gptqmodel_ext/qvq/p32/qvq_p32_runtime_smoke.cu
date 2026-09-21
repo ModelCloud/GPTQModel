@@ -432,6 +432,122 @@ bool test_rank8_epilogue() {
   return true;
 }
 
+float round_half(float value) {
+  return __half2float(__float2half_rn(value));
+}
+
+bool test_rank8_hadamard_epilogue() {
+  constexpr int kM = 2;
+  constexpr int kRank = 8;
+  cudaStream_t stream = nullptr;
+  if (!check_cuda(cudaStreamCreate(&stream), "create rank8 Hadamard stream")) return false;
+  for (const int n : {512, 2048}) {
+    const bool normalize_first = n >= 2048;
+    std::vector<float> base(kM * n);
+    std::vector<half> hidden(kM * kRank);
+    std::vector<float> rank8_b(kRank * n);
+    std::vector<half> scale(n);
+    std::vector<half> expected(kM * n);
+    std::vector<half> actual(kM * n);
+    for (int index = 0; index < base.size(); ++index) {
+      base[index] = (static_cast<float>((index * 7) % 43) - 21.0f) / 64.0f;
+    }
+    for (int index = 0; index < hidden.size(); ++index) {
+      hidden[index] = __float2half_rn(
+          (static_cast<float>((index * 5) % 19) - 9.0f) / 32.0f);
+    }
+    for (int index = 0; index < rank8_b.size(); ++index) {
+      rank8_b[index] = (static_cast<float>((index * 3) % 29) - 14.0f) / 128.0f;
+    }
+    for (int column = 0; column < n; ++column) {
+      scale[column] = __float2half_rn(
+          0.75f + static_cast<float>(column % 17) / 64.0f);
+    }
+    const float sqrt_n = std::sqrt(static_cast<float>(n));
+    const float divisor = round_half(sqrt_n);
+    const float reciprocal = 1.0f / sqrt_n;
+    std::vector<float> row_values(n);
+    for (int row = 0; row < kM; ++row) {
+      for (int column = 0; column < n; ++column) {
+        float correction = 0.0f;
+        for (int rank = 0; rank < kRank; ++rank) {
+          correction += __half2float(hidden[row * kRank + rank]) *
+              rank8_b[rank * n + column];
+        }
+        float value = round_half(base[row * n + column] + correction);
+        if (normalize_first) value = round_half(value / divisor);
+        row_values[column] = value;
+      }
+      for (int bit = 1; bit < n; bit <<= 1) {
+        for (int index = 0; index < n; ++index) {
+          const int peer = index ^ bit;
+          if (index < peer) {
+            const float first = row_values[index];
+            const float second = row_values[peer];
+            row_values[index] = round_half(first + second);
+            row_values[peer] = round_half(first - second);
+          }
+        }
+      }
+      for (int column = 0; column < n; ++column) {
+        float value = row_values[column];
+        if (!normalize_first) value = round_half(value * reciprocal);
+        value = round_half(value * __half2float(scale[column]));
+        expected[row * n + column] = __float2half_rn(value);
+      }
+    }
+
+    float* device_base = nullptr;
+    half* device_hidden = nullptr;
+    float* device_rank8_b = nullptr;
+    half* device_scale = nullptr;
+    half* device_output = nullptr;
+    bool ok = check_cuda(cudaMalloc(&device_base, base.size() * sizeof(float)), "allocate fused base") &&
+        check_cuda(cudaMalloc(&device_hidden, hidden.size() * sizeof(half)), "allocate fused hidden") &&
+        check_cuda(cudaMalloc(&device_rank8_b, rank8_b.size() * sizeof(float)), "allocate fused B") &&
+        check_cuda(cudaMalloc(&device_scale, scale.size() * sizeof(half)), "allocate fused scale") &&
+        check_cuda(cudaMalloc(&device_output, actual.size() * sizeof(half)), "allocate fused output") &&
+        check_cuda(cudaMemcpyAsync(device_base, base.data(), base.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "copy fused base") &&
+        check_cuda(cudaMemcpyAsync(device_hidden, hidden.data(), hidden.size() * sizeof(half), cudaMemcpyHostToDevice, stream), "copy fused hidden") &&
+        check_cuda(cudaMemcpyAsync(device_rank8_b, rank8_b.data(), rank8_b.size() * sizeof(float), cudaMemcpyHostToDevice, stream), "copy fused B") &&
+        check_cuda(cudaMemcpyAsync(device_scale, scale.data(), scale.size() * sizeof(half), cudaMemcpyHostToDevice, stream), "copy fused scale");
+    if (ok) {
+      ok = qvq_p32_rank8_hadamard_epilogue(
+               device_base, device_hidden, device_rank8_b, device_scale,
+               device_output, kM, n, kRank, normalize_first, stream) == 0 &&
+          check_cuda(cudaMemcpyAsync(actual.data(), device_output,
+                                     actual.size() * sizeof(half),
+                                     cudaMemcpyDeviceToHost, stream),
+                     "copy fused result") &&
+          check_cuda(cudaStreamSynchronize(stream), "sync fused rank8 stream");
+    }
+    if (ok) {
+      for (int index = 0; index < actual.size(); ++index) {
+        if (__half_as_ushort(actual[index]) != __half_as_ushort(expected[index])) {
+          std::fprintf(stderr,
+                       "rank8 Hadamard mismatch N=%d index=%d actual=%g expected=%g\n",
+                       n, index, __half2float(actual[index]),
+                       __half2float(expected[index]));
+          ok = false;
+          break;
+        }
+      }
+    }
+    cudaFree(device_output);
+    cudaFree(device_scale);
+    cudaFree(device_rank8_b);
+    cudaFree(device_hidden);
+    cudaFree(device_base);
+    if (!ok) {
+      cudaStreamDestroy(stream);
+      return false;
+    }
+  }
+  cudaStreamDestroy(stream);
+  std::printf("qvq_p32_rank8_hadamard_epilogue=PASS M=%d N=512,2048 bitwise_fp16\n", kM);
+  return true;
+}
+
 bool test_rank8_project() {
   constexpr int kM = 3;
   constexpr int kK = 96;
@@ -749,7 +865,7 @@ int test_standard_partials(int rows, int transition_bits = 4,
 
 int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--rank8") == 0) {
-    return test_rank8_epilogue() ? 0 : 1;
+    return test_rank8_epilogue() && test_rank8_hadamard_epilogue() ? 0 : 1;
   }
   if (argc == 2 && std::strcmp(argv[1], "--rank8-project") == 0) {
     return test_rank8_project() && test_rank8_project_full_context_rows() ? 0 : 1;

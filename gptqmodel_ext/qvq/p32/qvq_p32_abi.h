@@ -212,6 +212,25 @@ int qvq_p32_rank8_epilogue(
     int rank_count,
     void* stream);
 
+// Fuse the rank-8 B correction with QVQ's exact FP16 output Hadamard and SV
+// scaling contract. `scale_v` and `output` are FP16, while the base and B
+// factor retain the same FP32 contract as qvq_p32_rank8_epilogue. N must be a
+// power of two in [16, 16384]. When normalize_first is non-zero, the
+// FP16-rounded sqrt divisor is applied before the ascending butterfly;
+// otherwise the FP32 reciprocal is applied after it. Every compatibility
+// boundary is rounded to FP16 exactly as in the framework graph.
+int qvq_p32_rank8_hadamard_epilogue(
+    const float* base_output,
+    const void* hidden,
+    const void* rank8_b,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_n,
+    int rank_count,
+    int normalize_first,
+    void* stream);
+
 // Native rank-8 recovery projection. `input` is row-major FP32 [M,K],
 // `rank8_a` is row-major FP16 [K,rank_count], and `hidden` is row-major FP16
 // [M,rank_count]. The implementation accumulates in FP32 and rounds once to
