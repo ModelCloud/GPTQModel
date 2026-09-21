@@ -204,7 +204,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
 | PanGu-α | `gpt_pangu` |
 | Phi 1-4 / Phi MoE | `phi`, `phi3`, `phi4mm`, `phimoe` |
-| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp` |
+| Qwen 1-4 / 3.5 / 3.6 / 3.8 / MoE / Next | `qwen`, `qwen2`, `qwen2_moe`, `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_5`, `qwen3_5_text`, `qwen3_5_moe`, `qwen3_5_moe_text`, `qwen4_exp`, `qwen4_exp_text` |
 | Qwen 2 / 2.5 / 3 VL | `qwen2_vl`, `qwen2_vl_text`, `qwen2_5_vl`, `qwen2_5_vl_text`, `qwen3_vl` |
 | Qwen 2.5 / 3 Omni | `qwen2_5_omni`, `qwen3_omni_moe` |
 | Qwen-Drive 1.0 | `qwen_drive` |

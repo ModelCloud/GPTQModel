@@ -1595,7 +1595,42 @@ class LazyTurtle:
         for candidate in initial_candidates:
             apply_chain(candidate, forward_chain)
             apply_chain(candidate, reverse_chain)
+
+        # Some Qwen4 text checkpoints store PLE tensors at the model root even
+        # though the runtime module lives inside its decoder layer.
+        for candidate in tuple(candidates):
+            root_alias = self._qwen4_exp_root_checkpoint_alias(candidate)
+            if root_alias is not None:
+                add(root_alias)
         return candidates
+
+    def _qwen4_exp_root_checkpoint_alias(self, name: str) -> Optional[str]:
+        """Map a layer-local Qwen4 PLE tensor to its root checkpoint key."""
+
+        if getattr(self.config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
+            return None
+
+        parts = name.split(".")
+        for index, part in enumerate(parts[:-3]):
+            if (
+                part != "layers"
+                or index + 4 >= len(parts)
+                or not parts[index + 1].isdigit()
+                or parts[index + 2 : index + 4] != ["ple", "ple_embedding"]
+            ):
+                continue
+
+            suffix = parts[index + 4 :]
+            if suffix and suffix[0] == "ngram_embedding":
+                # N-gram shards use model.ngram_embedding.* at checkpoint root.
+                root_name = "ngram_embedding"
+                suffix = suffix[1:]
+            else:
+                # PLE buffers use model.ple_embedding.* at checkpoint root.
+                root_name = "ple_embedding"
+            return ".".join(parts[:index] + [root_name] + suffix)
+
+        return None
 
     def _converter_direct_alias_candidates(self, name: str) -> list[str]:
         if not name:
@@ -1625,6 +1660,77 @@ class LazyTurtle:
                     if aliased not in candidates:
                         candidates.append(aliased)
         return candidates
+
+    def _is_qwen4_exp_ngram_embedding(self, module_path: str, rel_name: str) -> bool:
+        """Return whether this is the Qwen4 PLE n-gram embedding table."""
+
+        config = self.config
+        model_type = getattr(config, "model_type", None)
+        if model_type not in {"qwen4_exp", "qwen4_exp_text"}:
+            return False
+        return self._join_tensor_name(module_path, rel_name).endswith(
+            ".ple.ple_embedding.ngram_embedding.weight"
+        )
+
+    def _can_zero_pad_qwen4_exp_ngram_embedding(
+        self,
+        module_path: str,
+        rel_name: str,
+        source_shape: tuple[int, ...],
+        target_shape: tuple[int, ...],
+        concat_dim: int,
+    ) -> bool:
+        """Allow a shorter Qwen4 checkpoint table to keep the shell shape."""
+
+        return (
+            concat_dim == 0
+            and self._is_qwen4_exp_ngram_embedding(module_path, rel_name)
+            and len(source_shape) == len(target_shape)
+            and source_shape[1:] == target_shape[1:]
+            and source_shape[0] < target_shape[0]
+        )
+
+    def _append_qwen4_exp_ngram_padding(
+        self,
+        *,
+        module_path: str,
+        rel_name: str,
+        parts: list[torch.Tensor],
+        target_shape: Optional[tuple[int, ...]],
+        concat_dim: int,
+    ) -> bool:
+        """Pad rows unused by checkpoints with fixed per-head vocab sizes.
+
+        Current Transformers derives prime-sized heads, which can make its
+        embedding shell slightly larger than an older fixed-size checkpoint.
+        """
+
+        if not parts or target_shape is None or concat_dim >= parts[0].ndim:
+            return False
+
+        source_shape = list(parts[0].shape)
+        for part in parts[1:]:
+            if part.ndim != len(source_shape) or any(
+                left != right
+                for axis, (left, right) in enumerate(zip(source_shape, part.shape))
+                if axis != concat_dim
+            ):
+                return False
+            source_shape[concat_dim] += part.shape[concat_dim]
+        source_shape = tuple(source_shape)
+        if not self._can_zero_pad_qwen4_exp_ngram_embedding(
+            module_path,
+            rel_name,
+            source_shape,
+            target_shape,
+            concat_dim,
+        ):
+            return False
+
+        padding_shape = list(target_shape)
+        padding_shape[0] -= source_shape[0]
+        parts.append(parts[0].new_zeros(padding_shape))
+        return True
 
     @staticmethod
     def _fused_checkpoint_requests(
@@ -2471,6 +2577,13 @@ class LazyTurtle:
                         with safe_open(shard_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
+                    self._append_qwen4_exp_ngram_padding(
+                        module_path=module_path,
+                        rel_name=rel_name,
+                        parts=parts,
+                        target_shape=expected_shape,
+                        concat_dim=concat_dim,
+                    )
                     try:
                         tensor = torch.cat(parts, dim=concat_dim).contiguous()
                     except Exception as exc:
@@ -2841,6 +2954,13 @@ class LazyTurtle:
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
+                    self._append_qwen4_exp_ngram_padding(
+                        module_path=module_path,
+                        rel_name=name,
+                        parts=parts,
+                        target_shape=tuple(shell_param.shape),
+                        concat_dim=concat_dim,
+                    )
                     try:
                         source_param = torch.cat(parts, dim=concat_dim).contiguous()
                     except Exception as exc:

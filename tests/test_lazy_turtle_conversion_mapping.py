@@ -186,6 +186,33 @@ class _Qwen4NgramShell(nn.Module):
         self.model.language_model.layers = nn.ModuleList([layer])
 
 
+class _Qwen4TextNgramShell(nn.Module):
+    """Small shell with the same layer-local PLE layout as Qwen4 text models."""
+
+    _no_placement_params = ["ple.ple_embedding.ngram_embedding.weight"]
+
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(
+            model_type="qwen4_exp_text",
+            split_ngram_parts=2,
+        )
+        self.model = nn.Module()
+        layer = nn.Module()
+        layer.ple = nn.Module()
+        layer.ple.ple_embedding = nn.Module()
+        layer.ple.ple_embedding.ngram_embedding = nn.Embedding(8, 2, device="meta")
+        layer.ple.ple_embedding.register_buffer(
+            "ngram_heads_offsets",
+            torch.empty(2, dtype=torch.long, device="meta"),
+        )
+        layer.ple.ple_embedding.register_buffer(
+            "ngram_heads_vocab_sizes",
+            torch.empty(2, dtype=torch.long, device="meta"),
+        )
+        self.model.layers = nn.ModuleList([nn.Module(), layer])
+
+
 class _MiniMaxM3SharedExpertsMlpShell(nn.Module):
     def __init__(self, hidden_dim: int = 4, intermediate_dim: int = 3):
         super().__init__()
@@ -1150,6 +1177,78 @@ def test_lazy_turtle_materializes_config_counted_shards_on_cpu_for_no_placement_
     qmodel.turtle_model = turtle
     assert qmodel.has_forward_device_overrides() is True
     assert qmodel.forward_device_for_module(ngram_embedding, torch.device("cuda:0")) == torch.device("cpu")
+
+
+def test_lazy_turtle_pads_qwen4_text_root_ngram_shards_to_shell_shape(tmp_path):
+    reversed_map = LazyTurtle.reverse_hf_conversion_map(
+        [
+            _WeightConverterStub(
+                source_patterns="ngram_embedding.shard_*.weight",
+                target_patterns="ngram_embedding.weight",
+                operations=[Concatenate(dim=0, num_shards_attribute="split_ngram_parts")],
+            ),
+        ]
+    )
+    assert reversed_map is not None
+
+    shards = [
+        torch.arange(0, 6, dtype=torch.float32).reshape(3, 2),
+        torch.arange(6, 12, dtype=torch.float32).reshape(3, 2),
+    ]
+    metadata = {
+        "model.ple_embedding.ngram_heads_offsets": torch.tensor([0, 3], dtype=torch.long),
+        "model.ple_embedding.ngram_heads_vocab_sizes": torch.tensor([3, 3], dtype=torch.long),
+    }
+    shell = _Qwen4TextNgramShell()
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            f"model.ngram_embedding.shard_{index}.weight": shard
+            for index, shard in enumerate(shards)
+        }
+        | metadata,
+        config=shell.config,
+        hf_conversion_map_reversed=reversed_map,
+        target_model=shell,
+    )
+    shell_embedding = shell.model.layers[1].ple.ple_embedding.ngram_embedding
+    assert shell_embedding.weight.is_meta
+    assert tuple(shell_embedding.weight.shape) == (8, 2)
+
+    # The direct path is used when an individual meta module is requested.
+    turtle.materialize_direct_meta_tensors(
+        target_model=shell,
+        target_submodule=shell_embedding,
+        device=torch.device("cpu"),
+    )
+    assert tuple(shell_embedding.weight.shape) == (8, 2)
+    assert torch.equal(shell_embedding.weight[:6], torch.cat(shards, dim=0))
+    assert torch.count_nonzero(shell_embedding.weight[6:]) == 0
+
+    # The recursive path is used when LazyTurtle materializes a decoder layer.
+    layer = shell.model.layers[1]
+    turtle.materialize_submodule(
+        target_model=shell,
+        target_submodule=layer,
+        device=torch.device("cpu"),
+        module_path="model.layers.1",
+        show_progress=False,
+    )
+
+    ngram_embedding = layer.ple.ple_embedding.ngram_embedding
+    assert ngram_embedding.weight.device.type == "cpu"
+    assert tuple(ngram_embedding.weight.shape) == (8, 2)
+    assert ngram_embedding.num_embeddings == 8
+    assert torch.equal(ngram_embedding.weight[:6], torch.cat(shards, dim=0))
+    assert torch.count_nonzero(ngram_embedding.weight[6:]) == 0
+    assert torch.equal(
+        layer.ple.ple_embedding.ngram_heads_offsets,
+        metadata["model.ple_embedding.ngram_heads_offsets"],
+    )
+    assert torch.equal(
+        layer.ple.ple_embedding.ngram_heads_vocab_sizes,
+        metadata["model.ple_embedding.ngram_heads_vocab_sizes"],
+    )
 
 
 def test_lazy_turtle_sync_all_meta_materializes_fused_dense_mlp_from_split_gate_up_checkpoint(tmp_path):

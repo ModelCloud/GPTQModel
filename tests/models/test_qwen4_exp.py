@@ -36,4 +36,33 @@ class TestQwen3_8FlashNext(ModelTest):
         self.quantize_and_evaluate()
 
 
-__all__ = ["TestQwen3_8FlashNext"]
+class TestQwen4ExpText(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Whittle-Next-27B-A3B"  # logic65/Whittle-Next-27B-A3B
+    TRUST_REMOTE_CODE = False
+    USE_FLASH_ATTN = False
+    EVAL_BATCH_SIZE = 16
+    EVAL_SINGLE_GPU = False
+
+    EVAL_TASKS_SLOW = {
+        "arc_challenge": {
+            "acc": {"value": 0.5469, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5656, "floor_pct": 0.04},
+        },
+    }
+    EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
+
+    MODEL_COMPAT_FAST_LAYER_POSITION = "first"
+
+    def _build_quantize_config(self):
+        config = super()._build_quantize_config()
+        # Drain expert pack jobs before replaying the next layer.
+        config.wait_for_submodule_finalizers = True
+        # Release temporary replay buffers after each stage.
+        config.gc_mode = GcMode.ON_STAGE_END
+        return config
+
+    def test_whittle_next_27b_a3b(self):
+        self.quantize_and_evaluate()
+
+
+__all__ = ["TestQwen3_8FlashNext", "TestQwen4ExpText"]

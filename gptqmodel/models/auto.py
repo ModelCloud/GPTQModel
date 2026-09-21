@@ -192,7 +192,7 @@ from .definitions.qwen3_next import Qwen3NextGPTQ  # noqa: E402
 from .definitions.qwen3_omni_moe import Qwen3OmniMoeGPTQ
 from .definitions.qwen3_vl import Qwen3_VLQModel
 from .definitions.qwen_drive import QwenDriveQModel  # noqa: E402
-from .definitions.qwen4_exp import Qwen4ExpQModel  # noqa: E402
+from .definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel  # noqa: E402
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
@@ -332,6 +332,7 @@ MODEL_MAP = {
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
     "qwen4_exp": Qwen4ExpQModel,
+    "qwen4_exp_text": Qwen4ExpTextQModel,
     "dbrx": DbrxQModel,
     "dbrx_converted": DbrxConvertedQModel,
     "deepseek_v2": DeepSeekV2QModel,

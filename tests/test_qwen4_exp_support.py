@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 from gptqmodel.models import auto
-from gptqmodel.models.definitions.qwen4_exp import Qwen4ExpQModel
+from gptqmodel.models.definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel
 from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.utils.model import apply_no_placement_to_device_map, simple_dispatch_model
 from gptqmodel.utils.structure import LazyTurtle
@@ -40,6 +40,14 @@ def test_qwen4_exp_model_type_selects_definition(monkeypatch):
     monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
 
     assert auto.check_and_get_model_definition("/tmp/qwen3.8-flash-next") is Qwen4ExpQModel
+
+
+def test_qwen4_exp_text_model_type_selects_standalone_definition(monkeypatch):
+    fake_config = SimpleNamespace(model_type="qwen4_exp_text")
+    monkeypatch.setattr(auto, "resolve_trust_remote_code", lambda path, trust_remote_code=False: trust_remote_code)
+    monkeypatch.setattr(auto.AutoConfig, "from_pretrained", lambda *args, **kwargs: fake_config)
+
+    assert auto.check_and_get_model_definition("/tmp/whittle-next") is Qwen4ExpTextQModel
 
 
 def test_qwen4_exp_quantized_load_keeps_ple_embedding_on_cpu():
@@ -159,6 +167,22 @@ def test_qwen4_exp_module_tree_quantizes_selected_attention_and_mlp_linears():
         "mlp.shared_expert.up_proj",
         "mlp.shared_expert.down_proj",
     ]
+
+
+def test_qwen4_exp_text_uses_causal_lm_paths_and_same_decoder_tree():
+    modules = Qwen4ExpTextQModel.simple_layer_modules(
+        _outer_config(),
+        SimpleNamespace(dynamic=None),
+    )
+
+    assert Qwen4ExpTextQModel.loader.__name__ == "AutoModelForCausalLM"
+    assert Qwen4ExpTextQModel.require_load_processor is False
+    assert Qwen4ExpQModel.module_tree[-1] == Qwen4ExpTextQModel.module_tree[-1]
+    assert Qwen4ExpTextQModel.extract_layers_node() == ["model.layers"]
+    assert Qwen4ExpTextQModel.pre_lm_head_norm_module == "model.hyper_connection_mixer"
+    assert Qwen4ExpTextQModel.rotary_embedding == "model.rotary_emb"
+    assert modules[0] == ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"]
+    assert modules[-1][-1] == "mlp.experts.2.down_proj"
 
 
 def _tiny_qwen4_exp_text_model():
