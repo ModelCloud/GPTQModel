@@ -94,7 +94,8 @@ void gemm_half_q_half(
     torch::Tensor a,
     int64_t b,
     torch::Tensor& c,
-    bool force_cuda
+    bool force_cuda,
+    int64_t path
 )
 {
     QMatrix* qm = reinterpret_cast<QMatrix*>(static_cast<uintptr_t>(b));
@@ -107,7 +108,7 @@ void gemm_half_q_half(
 
     const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
 
-    gemm_half_q_half_cuda(
+    gemm_half_q_half_cuda_path(
         at::cuda::getCurrentCUDABlasHandle(),
         (const half*) a.data_ptr(),
         qm,
@@ -117,14 +118,15 @@ void gemm_half_q_half(
         a.size(1),
         true,
         NULL,
-        force_cuda
+        force_cuda,
+        static_cast<int>(path)
     );
 }
 
 TORCH_LIBRARY(gptqmodel_exllamav2, m)
 {
     m.def("make_q_matrix(Tensor q_weight, Tensor? q_perm, Tensor? q_invperm, Tensor? q_scale, Tensor? q_scale_max, Tensor? q_groups, Tensor? gptq_qzeros, Tensor? gptq_scales, Tensor? gptq_g_idx, Tensor temp_dq) -> int");
-    m.def("gemm_half_q_half(Tensor a, int b, Tensor(a!) c, bool force_cuda=False) -> ()");
+    m.def("gemm_half_q_half(Tensor a, int b, Tensor(a!) c, bool force_cuda=False, int path=-1) -> ()");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_exllamav2, CUDA, m)

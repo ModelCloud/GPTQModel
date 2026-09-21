@@ -29,7 +29,8 @@ void gemm_half_q_half_cuda_part
     int size_n,
     int size_k,
     int m_count,
-    bool clear
+    bool clear,
+    cudaStream_t stream
 )
 {
     if (!b->is_gptq)
@@ -44,7 +45,7 @@ void gemm_half_q_half_cuda_part
 
         fp_gemm_half_q_half_kernel kernel = pick_gemm_half_q_half_kernel(true, m_count);
 
-        kernel<<<gridDim, blockDim>>>
+        kernel<<<gridDim, blockDim, 0, stream>>>
         (
             a,
             b->cuda_q_weight,
@@ -82,7 +83,7 @@ void gemm_half_q_half_cuda_part
 //         DBGI(b->rows_4);
 //         DBGI(b->height);
 
-        kernel<<<gridDim, blockDim>>>
+        kernel<<<gridDim, blockDim, 0, stream>>>
         (
             a,
             b->cuda_q_weight,
@@ -101,7 +102,7 @@ void gemm_half_q_half_cuda_part
     }
 }
 
-void gemm_half_q_half_cuda
+void gemm_half_q_half_cuda_path
 (
     cublasHandle_t cublas_handle,
     const half* a,
@@ -112,10 +113,23 @@ void gemm_half_q_half_cuda
     int size_k,
     bool clear,
     half* temp_dq,
-    bool force_cuda
+    bool force_cuda,
+    int path
 )
 {
-    if (size_m > MAX_Q_GEMM_ROWS && !force_cuda)
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+
+    // PyTorch normally associates the current cuBLAS handle with this stream.
+    // Set it explicitly so reconstruct, fused kernels, and GEMM share one
+    // ordered execution context without a device-wide synchronization.
+    cublasSetStream(cublas_handle, stream);
+
+    // path: -1 = legacy threshold, 0 = fused, 1 = dense.  force_cuda keeps
+    // its historical priority and always selects the quantized kernel.
+    const bool use_dense = !force_cuda &&
+        (path == 1 || (path < 0 && size_m > MAX_Q_GEMM_ROWS));
+
+    if (use_dense)
     {
         //printf("cublas\n");
 
@@ -170,12 +184,12 @@ void gemm_half_q_half_cuda
 
         if (max_chunks)
         {
-            gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear);
+            gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, stream);
         }
 
         if (last_chunk_size)
         {
-            gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear);
+            gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear, stream);
         }
     }
 }

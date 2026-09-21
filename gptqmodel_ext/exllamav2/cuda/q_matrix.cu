@@ -1,4 +1,5 @@
 #include "q_matrix.cuh"
+#include <ATen/cuda/CUDAContext.h>
 #include "matrix_view.cuh"
 #include "util.cuh"
 
@@ -146,7 +147,8 @@ QMatrix::QMatrix
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
 
-    shuffle_kernel<<<gridDim, blockDim>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
 }
 
 QMatrix::~QMatrix()
@@ -451,6 +453,7 @@ __global__ void reconstruct_kernel
 
 void QMatrix::reconstruct(half* out)
 {
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     dim3 blockDim, gridDim;
     blockDim.x = BLOCK_KN_SIZE;
     blockDim.y = 1;
@@ -459,7 +462,7 @@ void QMatrix::reconstruct(half* out)
     if (!is_gptq)
     {
         gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
-        reconstruct_kernel<<<gridDim, blockDim>>>
+        reconstruct_kernel<<<gridDim, blockDim, 0, stream>>>
         (
             cuda_q_weight,
             cuda_q_perm,
@@ -482,7 +485,7 @@ void QMatrix::reconstruct(half* out)
     else
     {
         gridDim.x = DIVIDE(width, BLOCK_KN_SIZE * 4);
-        reconstruct_gptq_kernel<<<gridDim, blockDim>>>
+        reconstruct_gptq_kernel<<<gridDim, blockDim, 0, stream>>>
         (
             cuda_q_weight,
             cuda_q_perm,
@@ -590,8 +593,9 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
 
     // Move to CUDA
 
-    cudaMemcpyAsync(cuda_q_perm, cpu_x_map16, height * sizeof(uint16_t), cudaMemcpyHostToDevice);
-    cudaMemcpyAsync(cuda_q_invperm, cpu_x_map_inv16, height * sizeof(uint16_t), cudaMemcpyHostToDevice);
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
+    cudaMemcpyAsync(cuda_q_perm, cpu_x_map16, height * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);
+    cudaMemcpyAsync(cuda_q_invperm, cpu_x_map_inv16, height * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);
 
     // Rearrange rows in w
 
@@ -601,7 +605,7 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = height / 8;
 
-    make_sequential_kernel<<<gridDim, blockDim>>>
+    make_sequential_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         cuda_q_weight,
         cuda_new_qweight,
@@ -612,7 +616,7 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
 
     // Replace qweights
 
-    cudaMemcpyAsync(cuda_q_weight, cuda_new_qweight, height / 8 * width * sizeof(uint32_t), cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(cuda_q_weight, cuda_new_qweight, height / 8 * width * sizeof(uint32_t), cudaMemcpyDeviceToDevice, stream);
 
     // Cleanup
 

@@ -15,11 +15,17 @@ from ...nn_modules.qlinear import GPTQQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.exllamav2 import (
+    EXLLAMAV2_PATH_AUTO,
+    EXLLAMAV2_PATH_DENSE,
+    EXLLAMAV2_PATH_FUSED,
+    EXLLAMAV2_PATH_LEGACY,
     ScratchSpace,
     exllamav2_gemm_half_q_half,
     exllamav2_gptq_runtime_available,
     exllamav2_gptq_runtime_error,
     exllamav2_make_q_matrix,
+    _device_metadata,
+    select_exllamav2_path,
 )
 from ...utils.logger import setup_logger
 
@@ -104,6 +110,10 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
         self.q_handle = None
         self.q_tensors = None
+        self.last_exllamav2_path = EXLLAMAV2_PATH_LEGACY
+        self.last_exllamav2_requested_path = EXLLAMAV2_PATH_AUTO
+        self._exllamav2_desc_act = bool(desc_act)
+        self._exllamav2_device_metadata = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -133,6 +143,16 @@ class ExllamaV2Linear(GPTQQuantLinear):
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
+        # The g_idx contents are the runtime layout state consumed by the
+        # ExLlamaV2 GPTQ loader.  Record it once during initialization so the
+        # normal forward path does not synchronize just to inspect metadata.
+        self._exllamav2_desc_act = bool(
+            self.g_idx is not None and not (self.g_idx == 0).all().item()
+        )
+        # Device facts are stable for the module lifetime.  Keeping them next
+        # to the module avoids repeating metadata queries on every forward;
+        # this is not a path/output/device-pointer cache.
+        self._exllamav2_device_metadata = _device_metadata(self.qweight.device)
         temp_dq = scratch_space.get_slice(self.temp_dq_size())
         self.q_handle = self.ext_make_q_matrix(self.q_tensors, temp_dq)
 
@@ -144,7 +164,20 @@ class ExllamaV2Linear(GPTQQuantLinear):
             buf.append(self.q_tensors)
         return buf
 
-    def forward(self, x: torch.Tensor, force_cuda=False):
+    def forward(
+        self,
+        x: torch.Tensor,
+        force_cuda: bool = False,
+        execution_mode: str = EXLLAMAV2_PATH_AUTO,
+    ):
+        """Run the GPTQ ExLlamaV2 matmul.
+
+        ``execution_mode`` is explicit so callers do not need to encode a
+        path using boolean combinations.  The default is ``auto``; it uses
+        only measured rules and otherwise has the same M > 50 fallback.
+        ``legacy`` remains available when exact historical dispatch is
+        required.
+        """
         # TODO FIXME: parent should never call us if there is no data to process
         # check: https://github.com/ModelCloud/GPTQModel/issues/1361
         if self.input_rows(x) == 0:
@@ -164,7 +197,13 @@ class ExllamaV2Linear(GPTQQuantLinear):
         #     x = F.pad(x, self.in_features_padding_shape)
 
 
-        out = self.ext_gemm_half_q_half(x, self.q_handle, self.out_features, force_cuda)
+        out = self.ext_gemm_half_q_half(
+            x,
+            self.q_handle,
+            self.out_features,
+            force_cuda,
+            execution_mode,
+        )
 
         if self.bias is not None:
             out.add_(self.bias)
@@ -183,12 +222,51 @@ class ExllamaV2Linear(GPTQQuantLinear):
     def scratch_space_fixed(self, max_input_len=2048, max_batch_size=8):
         return self.temp_dq_size() + self.temp_fwd_size(max_input_len, max_batch_size)
 
-    def ext_gemm_half_q_half(self, x, q_handle, q4_width, force_cuda):
+    def ext_gemm_half_q_half(
+        self,
+        x,
+        q_handle,
+        q4_width,
+        force_cuda,
+        execution_mode: str = EXLLAMAV2_PATH_AUTO,
+    ):
         """Matrix multiplication, returns x @ q4"""
         output_shape = x.shape[:-1] + (q4_width,)
         x = x.view(-1, x.shape[-1])
         output = torch.empty((x.shape[0], q4_width), dtype=torch.half, device=x.device)
-        exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
+        group_size = self.group_size if self.group_size != -1 else self.in_features
+        selected_path = select_exllamav2_path(
+            path=execution_mode,
+            m=x.shape[0],
+            n=q4_width,
+            k=x.shape[1],
+            device=x.device,
+            group_size=group_size,
+            desc_act=self._exllamav2_desc_act,
+            sym=bool(self.sym),
+            layout=f"gptq4:qzero{self.qzero_format()}",
+            force_cuda=force_cuda,
+            device_metadata=self._exllamav2_device_metadata,
+        )
+        self.last_exllamav2_requested_path = execution_mode
+        self.last_exllamav2_path = selected_path
+
+        # A legacy fallback deliberately uses the old four-argument call so
+        # the extension's historical M > 50 behavior remains the source of
+        # truth.  Explicit fused/dense modes carry the new path code.
+        if execution_mode == EXLLAMAV2_PATH_LEGACY or (
+            execution_mode == EXLLAMAV2_PATH_AUTO
+            and selected_path == (
+                EXLLAMAV2_PATH_DENSE
+                if x.shape[0] > 50
+                else EXLLAMAV2_PATH_FUSED
+            )
+        ):
+            exllamav2_gemm_half_q_half(x, q_handle, output, force_cuda)
+        else:
+            exllamav2_gemm_half_q_half(
+                x, q_handle, output, force_cuda, selected_path
+            )
         return output.view(output_shape)
 
     def ext_make_q_matrix(self, w: dict, temp_dq, key: str = None):

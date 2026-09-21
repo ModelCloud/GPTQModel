@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 import torch
 
@@ -20,6 +21,200 @@ from .cpp import (
 )
 
 
+# These values are deliberately strings at the Python boundary.  Apart from
+# making the public knob readable, this prevents callers from expressing
+# different paths through combinations of booleans whose meaning depends on
+# the current kernel implementation.
+EXLLAMAV2_PATH_LEGACY = "legacy"
+EXLLAMAV2_PATH_FUSED = "fused"
+EXLLAMAV2_PATH_DENSE = "dense"
+EXLLAMAV2_PATH_AUTO = "auto"
+EXLLAMAV2_PATHS = frozenset(
+    {
+        EXLLAMAV2_PATH_LEGACY,
+        EXLLAMAV2_PATH_FUSED,
+        EXLLAMAV2_PATH_DENSE,
+        EXLLAMAV2_PATH_AUTO,
+    }
+)
+
+# The C++ ABI keeps the old four-argument op intact by making this a trailing
+# argument with a default.  The Python codes are not exposed to users.
+_EXLLAMAV2_PATH_CODE = {
+    EXLLAMAV2_PATH_LEGACY: -1,
+    EXLLAMAV2_PATH_FUSED: 0,
+    EXLLAMAV2_PATH_DENSE: 1,
+}
+
+
+def _legacy_exllamav2_path(m: int) -> str:
+    return EXLLAMAV2_PATH_DENSE if m > 50 else EXLLAMAV2_PATH_FUSED
+
+
+def _device_metadata(device) -> Optional[tuple[str, tuple[int, int], int, int]]:
+    """Return stable device facts used by the offline dispatch table.
+
+    Failure to obtain CUDA metadata is intentionally a normal fallback: the
+    selector must not initialize CUDA, synchronize, or tune during forward.
+    The tuple is (name, compute capability, SM count, visible device count).
+    """
+
+    try:
+        if device is None or device.type != "cuda" or not torch.cuda.is_available():
+            return None
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        props = torch.cuda.get_device_properties(index)
+        return (
+            props.name,
+            (props.major, props.minor),
+            props.multi_processor_count,
+            torch.cuda.device_count(),
+        )
+    except (RuntimeError, AttributeError, AssertionError):
+        return None
+
+
+def _rule_matches(rule, *, metadata, m, n, k, group_size, desc_act, sym, layout):
+    if metadata is None:
+        return False
+    name, capability, sm_count, device_count = metadata
+    return (
+        rule["device_name"] == name
+        and rule["capability"] == capability
+        and rule["sm_count"] == sm_count
+        and rule["device_count"] == device_count
+        and rule["n"] == n
+        and rule["k"] == k
+        and rule["group_size"] == group_size
+        and rule["desc_act"] == desc_act
+        and rule["sym"] == sym
+        and rule["layout"] == layout
+        and any(start <= m <= end for start, end, _ in rule["m_ranges"])
+    )
+
+
+def _make_rtx4090_measured_rules() -> tuple[dict, ...]:
+    """Build the reviewed singleton buckets from the RTX 4090 measurements.
+
+    Only buckets where the measured winner differs from the legacy M > 50
+    decision are listed.  Singleton buckets are intentional: the benchmark
+    covered the M values below and, where the kernel has a boundary, we do not
+    extrapolate an unmeasured interval.  Unsupported device counts, layouts,
+    or shapes use the legacy selector.
+    """
+
+    # (K, N) -> measured M/path overrides.  These are conservative overrides;
+    # a tie or noisy crossover is omitted rather than made into a default.
+    overrides = {
+        (2048, 512): {
+            51: EXLLAMAV2_PATH_FUSED,
+            52: EXLLAMAV2_PATH_FUSED,
+            64: EXLLAMAV2_PATH_FUSED,
+            96: EXLLAMAV2_PATH_FUSED,
+            128: EXLLAMAV2_PATH_FUSED,
+            256: EXLLAMAV2_PATH_FUSED,
+        },
+        (2048, 8192): {
+            40: EXLLAMAV2_PATH_DENSE,
+            48: EXLLAMAV2_PATH_DENSE,
+            49: EXLLAMAV2_PATH_DENSE,
+            50: EXLLAMAV2_PATH_DENSE,
+        },
+        (8192, 2048): {
+            49: EXLLAMAV2_PATH_DENSE,
+            50: EXLLAMAV2_PATH_DENSE,
+        },
+        (4096, 4096): {
+            48: EXLLAMAV2_PATH_DENSE,
+            49: EXLLAMAV2_PATH_DENSE,
+            50: EXLLAMAV2_PATH_DENSE,
+        },
+    }
+    rules = []
+    for (k, n), m_paths in overrides.items():
+        for requested_group_size in (32, 64, 128, -1):
+            group_size = k if requested_group_size == -1 else requested_group_size
+            for desc_act in (False, True):
+                rules.append(
+                    {
+                        "device_name": "NVIDIA GeForce RTX 4090",
+                        "capability": (8, 9),
+                        "sm_count": 128,
+                        "device_count": 4,
+                        "n": n,
+                        "k": k,
+                        "group_size": group_size,
+                        "desc_act": desc_act,
+                        "sym": True,
+                        "layout": "gptq4:qzero1",
+                        "m_ranges": tuple(
+                            (m, m, selected_path)
+                            for m, selected_path in sorted(m_paths.items())
+                        ),
+                    }
+                )
+    return tuple(rules)
+
+
+# This table contains only repeated measurements from the four RTX 4090
+# machine used for this change.  No default is inferred for other devices.
+EXLLAMAV2_MEASURED_RULES: tuple[dict, ...] = _make_rtx4090_measured_rules()
+
+
+def select_exllamav2_path(
+    *,
+    path: str,
+    m: int,
+    n: int,
+    k: int,
+    device=None,
+    group_size: int,
+    desc_act: bool,
+    sym: bool,
+    layout: str = "gptq4",
+    force_cuda: bool = False,
+    device_metadata=None,
+) -> str:
+    """Select a concrete GPTQ ExLlamaV2 execution path.
+
+    ``m`` is the flattened Linear row count.  Auto selection is a pure lookup
+    over the measured table and falls back to the historical ``M > 50`` rule.
+    No CUDA calls, synchronization, or candidate probing occur here unless
+    the caller supplies a CUDA device and the already-available CUDA metadata
+    is needed for a table lookup.
+    """
+
+    if path not in EXLLAMAV2_PATHS:
+        raise ValueError(
+            f"Unsupported ExLlamaV2 GPTQ path {path!r}; expected one of "
+            f"{sorted(EXLLAMAV2_PATHS)}"
+        )
+    if force_cuda:
+        return EXLLAMAV2_PATH_FUSED
+    if path == EXLLAMAV2_PATH_FUSED or path == EXLLAMAV2_PATH_DENSE:
+        return path
+    if path == EXLLAMAV2_PATH_LEGACY:
+        return _legacy_exllamav2_path(m)
+
+    metadata = _device_metadata(device) if device_metadata is None else device_metadata
+    for rule in EXLLAMAV2_MEASURED_RULES:
+        if _rule_matches(
+            rule,
+            metadata=metadata,
+            m=m,
+            n=n,
+            k=k,
+            group_size=group_size,
+            desc_act=desc_act,
+            sym=sym,
+            layout=layout,
+        ):
+            for start, end, selected_path in rule["m_ranges"]:
+                if start <= m <= end:
+                    return selected_path
+    return _legacy_exllamav2_path(m)
+
+
 class ScratchSpace:
     def __init__(self, scratch_bytes, dev):
         self.scratch_bytes = scratch_bytes
@@ -30,6 +225,10 @@ class ScratchSpace:
         )
 
     def get_slice(self, size_bytes):
+        # This allocator intentionally returns a view into one shared backing
+        # storage.  ExLlamaV2 uses it sequentially on one CUDA stream during a
+        # normal model forward; overlapping use from independent streams is
+        # not supported because reconstruct and cuBLAS may alias this region.
         size_halfs = next_multiple(size_bytes, 128) // 2
         scratch_slice = self.scratch.narrow(0, 0, size_halfs)
 
@@ -223,8 +422,16 @@ def exllamav2_make_q_matrix(
     )
 
 
-def exllamav2_gemm_half_q_half(a, q_handle: int, c, force_cuda: bool = False) -> None:
-    _extension_api().op("exllamav2", "gemm_half_q_half")(a, int(q_handle), c, bool(force_cuda))
+def exllamav2_gemm_half_q_half(
+    a, q_handle: int, c, force_cuda: bool = False, path: Optional[str] = None
+) -> None:
+    op = _extension_api().op("exllamav2", "gemm_half_q_half")
+    if path is None or path == EXLLAMAV2_PATH_LEGACY:
+        # Preserve the old call ABI for integrations which provide the
+        # original four-argument torch op.
+        op(a, int(q_handle), c, bool(force_cuda))
+    else:
+        op(a, int(q_handle), c, bool(force_cuda), _EXLLAMAV2_PATH_CODE[path])
 
 
 def clear_exllamav2_awq_extension_cache() -> None:
