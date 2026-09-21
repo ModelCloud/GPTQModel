@@ -180,10 +180,18 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     graph.reset()
 
 
-@pytest.mark.parametrize("m,algorithm", [(64, 2), (128, 3)])
-@pytest.mark.parametrize("bits", [2, 2.5, 3, 3.5])
+@pytest.mark.parametrize(
+    "m,algorithm,k,n,bits,expected_grid_y",
+    [
+        *[(64, 2, 2048, 256, bits, 1) for bits in (2, 2.5, 3, 3.5)],
+        *[(128, 3, 2048, 256, bits, 8) for bits in (2, 2.5, 3, 3.5)],
+        # Production Llama 3.2 down projection. This catches row-reuse
+        # schedule changes that the narrow K2048/N256 ABI gate cannot see.
+        (128, 3, 8192, 2048, 3, 2),
+    ],
+)
 def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
-    bits, m, algorithm
+    m, algorithm, k, n, bits, expected_grid_y
 ):
     from test_qvq_grouped_runtime import _child
 
@@ -191,7 +199,6 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_tuned
 
     library = _raw_library()
-    k, n = 2048, 256
     layer = _child(
         f"raw_m{m}", in_features=k, out_features=n, bits=bits,
         device="cuda", input_hadamard=False, output_hadamard=False,
@@ -217,7 +224,7 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     assert plan.launches[0].kernel_symbol
     assert plan.launches[0].kernel_name == b"qvq_p32_wgmma_direct_rows"
     assert plan.launches[0].grid_x == n // 64
-    assert plan.launches[0].grid_y == (1 if m == 64 else 8)
+    assert plan.launches[0].grid_y == expected_grid_y
     assert plan.launches[0].arg_count == 11
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -254,3 +261,116 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     stream.synchronize()
     torch.testing.assert_close(output, expected_changed, atol=0, rtol=0)
     graph.reset()
+
+
+def test_raw_abi_grouped_gate_up_matches_independent_children_and_launch_plan():
+    from test_qvq_grouped_runtime import _child
+
+    from gptqmodel.quantization.qvq import (
+        pack_qvq_binary_bank_ids,
+        unpack_qvq_binary_bank_ids,
+    )
+    from gptqmodel.quantization.qvq_rates import qvq_words_per_tile
+    from gptqmodel.utils.qvq_cuda import _pgc16_levels
+    from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_tuned
+
+    library = _raw_library()
+    m, k, child_n, bits = 128, 2048, 8192, 3.0
+    children = tuple(
+        _child(
+            name,
+            in_features=k,
+            out_features=child_n,
+            bits=bits,
+            alt_id=index + 1,
+            seed=910 + index,
+            device="cuda",
+            input_hadamard=False,
+            output_hadamard=False,
+        )
+        for index, name in enumerate(("gate_proj", "up_proj"))
+    )
+    x = torch.randn(m, k, device="cuda", dtype=torch.float16) * 0.01
+    child_windows = tuple(
+        child._prepare_hopper_p32_window(x.device) for child in children
+    )
+    words = qvq_words_per_tile(bits, weight_count=256, vector_size=2)
+    k_tiles = k // 16
+    child_n_tiles = child_n // 16
+    window = torch.cat(
+        tuple(
+            value.reshape(k_tiles, child_n_tiles, words)
+            for value in child_windows
+        ),
+        dim=1,
+    ).reshape(-1, words).contiguous()
+    child_selectors = tuple(
+        pack_qvq_binary_bank_ids(
+            unpack_qvq_binary_bank_ids(
+                child.bank_ids, k_tiles * child_n_tiles * 8
+            )
+        ).to(device=x.device)
+        for child in children
+    )
+    selectors = torch.cat(
+        tuple(value.reshape(k_tiles, child_n_tiles) for value in child_selectors),
+        dim=1,
+    ).reshape(-1).contiguous()
+    alt_ids = torch.tensor(
+        [int(child.bank_alt_id.item()) for child in children],
+        device=x.device,
+        dtype=torch.uint8,
+    )
+    levels = _pgc16_levels(x.device, children[0].codebook_version)
+    # The grouped ABI uses child-major flat storage: [gate MxN][up MxN].
+    output = torch.empty(m * 2 * child_n, device=x.device, dtype=torch.float32)
+    config = RawConfig(
+        3, ctypes.sizeof(RawConfig), m, k, 2 * child_n, 6, 1,
+        4, 128, 128,
+    )
+    assert library.qvq_p32_wgmma_raw_workspace_bytes(ctypes.byref(config)) == 0
+    plan = LaunchPlan()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_wgmma_raw_launch_plan(
+        _ptr(x), _ptr(window), _ptr(selectors), _ptr(levels), _ptr(alt_ids),
+        _ptr(output), ctypes.byref(config), ctypes.byref(plan), error, len(error),
+    )
+    assert status == 0, error.value.decode()
+    assert plan.launch_count == 1
+    assert plan.launches[0].kernel_name == b"qvq_p32_wgmma_direct_grouped_gate_up"
+    assert plan.launches[0].grid_x == child_n // 128
+    assert plan.launches[0].grid_y == 2
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream), torch.no_grad():
+        expected_children = tuple(
+            qvq_p32_window_wgmma_tuned(
+                x,
+                child_window,
+                levels,
+                child_selector,
+                bits,
+                out_features=child_n,
+                bank_alt_id=int(child.bank_alt_id.item()),
+                block_m=128,
+                block_n=64,
+            )
+            for child, child_window, child_selector in zip(
+                children, child_windows, child_selectors, strict=True
+            )
+        )
+        expected = torch.cat(
+            tuple(
+                child.reshape(-1) for child in expected_children
+            ),
+            dim=0,
+        )
+        status = library.qvq_p32_wgmma_raw_launch(
+            _ptr(x), _ptr(window), _ptr(selectors), _ptr(levels), _ptr(alt_ids),
+            _ptr(output), None, 0, ctypes.byref(config),
+            ctypes.c_void_p(stream.cuda_stream), error, len(error),
+        )
+        assert status == 0, error.value.decode()
+    stream.synchronize()
+    torch.testing.assert_close(output, expected, atol=0, rtol=0)
