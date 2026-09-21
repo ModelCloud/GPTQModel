@@ -28,15 +28,16 @@ cc_test(
     deps = [":abi"],
 )
 
-# QvQ owns the framework-neutral P32 runtime. Framework repositories consume
-# this target and provide only their graph/compiler adapters.
+# Compile kernel families as disjoint objects. Bazel can then reuse the large
+# core object while rank-recovery or runtime ABI code is being iterated.
 genrule(
-    name = "libqvq_p32",
+    name = "qvq_p32_core_object",
     srcs = [
         "qvq_p32_abi.h",
         "qvq_p32_cuda.cu",
+        "qvq_p32_internal.h",
     ],
-    outs = ["libqvq_p32.so"],
+    outs = ["qvq_p32_core.o"],
     cmd = """
 set -eu
 cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
@@ -50,7 +51,84 @@ fi
   --split-compile=8 \
   -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
-  -shared -o "$@" $(location qvq_p32_cuda.cu)
+  -c -o "$@" $(location qvq_p32_cuda.cu)
+""",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "qvq_p32_rank8_object",
+    srcs = [
+        "qvq_p32_abi.h",
+        "qvq_p32_internal.h",
+        "qvq_p32_rank8.cu",
+    ],
+    outs = ["qvq_p32_rank8.o"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
+  -gencode arch=compute_90,code=sm_90 \
+  -I$$(dirname $(location qvq_p32_abi.h)) \
+  -c -o "$@" $(location qvq_p32_rank8.cu)
+""",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "qvq_p32_runtime_object",
+    srcs = [
+        "qvq_p32_abi.h",
+        "qvq_p32_internal.h",
+        "qvq_p32_runtime.cu",
+    ],
+    outs = ["qvq_p32_runtime.o"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O2 -cudart=shared -Xcompiler=-fPIC \
+  -gencode arch=compute_90,code=sm_90 \
+  -I$$(dirname $(location qvq_p32_abi.h)) \
+  -c -o "$@" $(location qvq_p32_runtime.cu)
+""",
+    tags = ["manual"],
+)
+
+# QvQ owns the framework-neutral P32 runtime. Framework repositories consume
+# this target and provide only their graph/compiler adapters.
+genrule(
+    name = "libqvq_p32",
+    srcs = [
+        ":qvq_p32_core_object",
+        ":qvq_p32_rank8_object",
+        ":qvq_p32_runtime_object",
+    ],
+    outs = ["libqvq_p32.so"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" -shared -cudart=shared \
+  -o "$@" \
+  $(location :qvq_p32_core_object) \
+  $(location :qvq_p32_rank8_object) \
+  $(location :qvq_p32_runtime_object)
 """,
     tags = ["manual"],
 )

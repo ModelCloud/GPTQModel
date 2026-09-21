@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 3
-#define QVQ_P32_KERNEL_VERSION 14
+#define QVQ_P32_KERNEL_VERSION 15
 #define QVQ_P32_COMPILED_SM 90
 
 #define QVQ_P32_TILE_SIZE 16

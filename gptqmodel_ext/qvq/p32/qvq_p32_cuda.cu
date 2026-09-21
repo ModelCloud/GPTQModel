@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "qvq_p32_abi.h"
+#include "qvq_p32_internal.h"
 
 #include <cuda_fp16.h>
 #include <cuda_pipeline.h>
@@ -14,6 +15,9 @@
 #include <limits>
 
 namespace {
+
+using qvq_p32_internal::set_last_error;
+using qvq_p32_internal::last_error;
 
 constexpr int kThreads = 128;
 constexpr int kWarps = kThreads / 32;
@@ -1346,8 +1350,6 @@ struct GroupedP32LaunchParams {
   int64_t partial_offset[kMaxGroupedP32Segments];
 };
 
-void set_last_error(const char* message);
-
 bool build_grouped_params(
     int size_m,
     int size_n,
@@ -1572,13 +1574,6 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_block_kerne
       total_n_tiles * kTileColumns,
       params.partial_offset[segment]);
   }
-}
-
-thread_local char last_error[256] = {};
-
-void set_last_error(const char* message) {
-  const char* text = message == nullptr ? "unknown CUDA error" : message;
-  std::snprintf(last_error, sizeof(last_error), "%s", text);
 }
 
 bool normalize_external_tuning(
@@ -3514,8 +3509,9 @@ int launch_p32_large_m(
   return status;
 }
 
+#if 0  // Rank-8 recovery is compiled independently in qvq_p32_rank8.cu.
 template <int RankCount>
-__global__ __launch_bounds__(256) void p32_rank8_project_kernel(
+__global__ __launch_bounds__(32) void p32_rank8_project_kernel(
     const float* __restrict__ input,
     const half* __restrict__ rank8_a,
     half* __restrict__ hidden,
@@ -3523,33 +3519,46 @@ __global__ __launch_bounds__(256) void p32_rank8_project_kernel(
     int size_k) {
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
   constexpr int kRanksPerBlock = 8;
-  const int local_rank = static_cast<int>(threadIdx.x) >> 5;
-  const int rank = static_cast<int>(blockIdx.x) * kRanksPerBlock + local_rank;
-  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int rank_base = static_cast<int>(blockIdx.x) * kRanksPerBlock;
+  const int lane = static_cast<int>(threadIdx.x);
   // grid.y is limited to 65,535 on CUDA. Grid-stride rows preserve the exact
   // per-row reduction order while admitting full-context B1 prefill.
   for (int row = static_cast<int>(blockIdx.y); row < size_m;
        row += static_cast<int>(gridDim.y)) {
-    float accumulator = 0.0f;
+    float accumulators[kRanksPerBlock] = {};
 
-    // One warp owns one recovery rank. Directly walk K in lane-strided
-    // chunks; this keeps the reduction order deterministic and avoids a
-    // shared-memory rank tile whose layout is needlessly expensive for
-    // R <= 24.
+    // One warp owns eight adjacent recovery ranks. The previous launch used
+    // eight warps that walked the same input row independently. Reusing each
+    // input value across all eight accumulators reduces input traffic and
+    // makes rank8_A's contiguous rank dimension visible to the memory
+    // coalescer. Each rank still visits K in the same lane-strided order and
+    // uses the same FP32 FMA and shuffle reduction tree, so output is bitwise
+    // identical to the one-warp-per-rank implementation.
     for (int k = lane; k < size_k; k += 32) {
-      accumulator = fmaf(
-          input[static_cast<int64_t>(row) * size_k + k],
-          __half2float(rank8_a[static_cast<int64_t>(k) * RankCount + rank]),
-          accumulator);
+      const float input_value = input[static_cast<int64_t>(row) * size_k + k];
+#pragma unroll
+      for (int local_rank = 0; local_rank < kRanksPerBlock; ++local_rank) {
+        accumulators[local_rank] = fmaf(
+            input_value,
+            __half2float(rank8_a[
+                static_cast<int64_t>(k) * RankCount + rank_base + local_rank]),
+            accumulators[local_rank]);
+      }
     }
 
 #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1) {
-      accumulator += __shfl_down_sync(0xffffffffu, accumulator, offset);
+      for (int local_rank = 0; local_rank < kRanksPerBlock; ++local_rank) {
+        accumulators[local_rank] += __shfl_down_sync(
+            0xffffffffu, accumulators[local_rank], offset);
+      }
     }
     if (lane == 0) {
-      hidden[static_cast<int64_t>(row) * RankCount + rank] =
-          __float2half_rn(accumulator);
+#pragma unroll
+      for (int local_rank = 0; local_rank < kRanksPerBlock; ++local_rank) {
+        hidden[static_cast<int64_t>(row) * RankCount + rank_base + local_rank] =
+            __float2half_rn(accumulators[local_rank]);
+      }
     }
   }
 }
@@ -3589,9 +3598,11 @@ __global__ __launch_bounds__(128) void p32_rank8_epilogue_kernel(
     __syncthreads();
   }
 }
+#endif
 
 }  // namespace
 
+#if 0  // Runtime metadata and rank-8 entry points live in disjoint objects.
 extern "C" int qvq_p32_abi_version(void) {
   return QVQ_P32_ABI_VERSION;
 }
@@ -3710,19 +3721,19 @@ extern "C" int qvq_p32_rank8_project(
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   switch (rank_count) {
     case 8:
-      p32_rank8_project_kernel<8><<<grid, 256, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<8><<<grid, 32, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
       break;
     case 16:
-      p32_rank8_project_kernel<16><<<grid, 256, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<16><<<grid, 32, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
       break;
     case 24:
-      p32_rank8_project_kernel<24><<<grid, 256, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<24><<<grid, 32, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
@@ -3735,6 +3746,7 @@ extern "C" int qvq_p32_rank8_project(
   }
   return 0;
 }
+#endif
 
 static int qvq_p32_window_impl(
     const void* input,
