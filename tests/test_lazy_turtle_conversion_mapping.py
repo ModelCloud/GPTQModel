@@ -187,6 +187,8 @@ class _Qwen4NgramShell(nn.Module):
 
 
 class _Qwen4TextNgramShell(nn.Module):
+    """Small shell with the same layer-local PLE layout as Qwen4 text models."""
+
     _no_placement_params = ["ple.ple_embedding.ngram_embedding.weight"]
 
     def __init__(self):
@@ -1213,6 +1215,7 @@ def test_lazy_turtle_pads_qwen4_text_root_ngram_shards_to_shell_shape(tmp_path):
     assert shell_embedding.weight.is_meta
     assert tuple(shell_embedding.weight.shape) == (8, 2)
 
+    # The direct path is used when an individual meta module is requested.
     turtle.materialize_direct_meta_tensors(
         target_model=shell,
         target_submodule=shell_embedding,
@@ -1222,6 +1225,7 @@ def test_lazy_turtle_pads_qwen4_text_root_ngram_shards_to_shell_shape(tmp_path):
     assert torch.equal(shell_embedding.weight[:6], torch.cat(shards, dim=0))
     assert torch.count_nonzero(shell_embedding.weight[6:]) == 0
 
+    # The recursive path is used when LazyTurtle materializes a decoder layer.
     layer = shell.model.layers[1]
     turtle.materialize_submodule(
         target_model=shell,

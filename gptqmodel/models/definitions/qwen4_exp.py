@@ -75,6 +75,7 @@ class Qwen4ExpQModel(BaseQModel):
 class Qwen4ExpTextQModel(Qwen4ExpQModel):
     """Qwen4-Exp text-only checkpoints with the standalone decoder layout."""
 
+    # Text-only checkpoints use the causal-LM loader and have no processor.
     loader = AutoModelForCausalLM
     require_load_processor = False
 

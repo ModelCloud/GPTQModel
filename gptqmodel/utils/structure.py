@@ -1595,7 +1595,42 @@ class LazyTurtle:
         for candidate in initial_candidates:
             apply_chain(candidate, forward_chain)
             apply_chain(candidate, reverse_chain)
+
+        # Some Qwen4 text checkpoints store PLE tensors at the model root even
+        # though the runtime module lives inside its decoder layer.
+        for candidate in tuple(candidates):
+            root_alias = self._qwen4_exp_root_checkpoint_alias(candidate)
+            if root_alias is not None:
+                add(root_alias)
         return candidates
+
+    def _qwen4_exp_root_checkpoint_alias(self, name: str) -> Optional[str]:
+        """Map a layer-local Qwen4 PLE tensor to its root checkpoint key."""
+
+        if getattr(self.config, "model_type", None) not in {"qwen4_exp", "qwen4_exp_text"}:
+            return None
+
+        parts = name.split(".")
+        for index, part in enumerate(parts[:-3]):
+            if (
+                part != "layers"
+                or index + 4 >= len(parts)
+                or not parts[index + 1].isdigit()
+                or parts[index + 2 : index + 4] != ["ple", "ple_embedding"]
+            ):
+                continue
+
+            suffix = parts[index + 4 :]
+            if suffix and suffix[0] == "ngram_embedding":
+                # N-gram shards use model.ngram_embedding.* at checkpoint root.
+                root_name = "ngram_embedding"
+                suffix = suffix[1:]
+            else:
+                # PLE buffers use model.ple_embedding.* at checkpoint root.
+                root_name = "ple_embedding"
+            return ".".join(parts[:index] + [root_name] + suffix)
+
+        return None
 
     def _converter_direct_alias_candidates(self, name: str) -> list[str]:
         if not name:
@@ -1624,36 +1659,10 @@ class LazyTurtle:
                 for aliased in self._runtime_to_checkpoint_alias_candidates(converted):
                     if aliased not in candidates:
                         candidates.append(aliased)
-
-        if getattr(self.config, "model_type", None) in {"qwen4_exp", "qwen4_exp_text"}:
-            # Qwen4-Exp stores the PLE tensors once at the model root, while the
-            # runtime shell exposes them from the PLE layer that consumes them.
-            for candidate in tuple(candidates):
-                parts = candidate.split(".")
-                for index, part in enumerate(parts[:-3]):
-                    if (
-                        part != "layers"
-                        or index + 4 >= len(parts)
-                        or not parts[index + 1].isdigit()
-                        or parts[index + 2 : index + 4] != ["ple", "ple_embedding"]
-                    ):
-                        continue
-                    suffix = parts[index + 4 :]
-                    root_name = (
-                        "ngram_embedding"
-                        if suffix and suffix[0] == "ngram_embedding"
-                        else "ple_embedding"
-                    )
-                    if suffix and suffix[0] == "ngram_embedding":
-                        suffix = suffix[1:]
-                    root_candidate = ".".join(parts[:index] + [root_name] + suffix)
-                    if root_candidate not in candidates:
-                        candidates.append(root_candidate)
-                    break
         return candidates
 
     def _is_qwen4_exp_ngram_embedding(self, module_path: str, rel_name: str) -> bool:
-        """Whether a tensor is the legacy-compatible Qwen4-Exp PLE table."""
+        """Return whether this is the Qwen4 PLE n-gram embedding table."""
 
         config = self.config
         model_type = getattr(config, "model_type", None)
@@ -1671,7 +1680,7 @@ class LazyTurtle:
         target_shape: tuple[int, ...],
         concat_dim: int,
     ) -> bool:
-        """Whether a legacy Qwen4-Exp table can safely retain the shell shape."""
+        """Allow a shorter Qwen4 checkpoint table to keep the shell shape."""
 
         return (
             concat_dim == 0
@@ -1690,7 +1699,11 @@ class LazyTurtle:
         target_shape: Optional[tuple[int, ...]],
         concat_dim: int,
     ) -> bool:
-        """Append unreachable zero rows for legacy fixed-size n-gram heads."""
+        """Pad rows unused by checkpoints with fixed per-head vocab sizes.
+
+        Current Transformers derives prime-sized heads, which can make its
+        embedding shell slightly larger than an older fixed-size checkpoint.
+        """
 
         if not parts or target_shape is None or concat_dim >= parts[0].ndim:
             return False
@@ -2110,7 +2123,7 @@ class LazyTurtle:
                     break
 
                 resolved_name = None
-                for candidate in self._all_runtime_to_checkpoint_candidates(renamed):
+                for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
                     if candidate in self._weight_map:
                         resolved_name = candidate
                         break
