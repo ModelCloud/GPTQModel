@@ -3,6 +3,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "p32/qvq_p32_abi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,21 @@ int qvq_p32_wgmma_raw_launch(
     uint64_t workspace_bytes,
     const QvqP32WgmmaRawConfig* config,
     void* cuda_stream,
+    char* error,
+    uint64_t error_capacity);
+
+// Describe the direct M64/M128 launch as compiler-owned CUDA graph nodes.
+// Host-value arguments point into `plan` and remain valid until the plan is
+// rebuilt or destroyed. This avoids stream recapture on every graph replay.
+int qvq_p32_wgmma_raw_launch_plan(
+    const void* activation_f16,
+    const void* continuous_window_i32,
+    const void* bank_ids_u8,
+    const void* levels_f16,
+    const void* bank_alt_id_u8,
+    void* output_f32,
+    const QvqP32WgmmaRawConfig* config,
+    struct qvq_p32_launch_plan* plan,
     char* error,
     uint64_t error_capacity);
 

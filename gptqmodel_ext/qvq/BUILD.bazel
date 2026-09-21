@@ -8,6 +8,7 @@ genrule(
         "qvq_wgmma_cuda.cu",
         "qvq_wgmma_raw_abi.cu",
         "qvq_wgmma_raw_abi.h",
+        "//gptqmodel_ext/qvq/p32:qvq_p32_abi.h",
         "@cutlass//:headers",
         "@cutlass//:include/cutlass/cutlass.h",
     ],

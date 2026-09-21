@@ -1638,6 +1638,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   int split_count = launch_split_count;
   int bank_alt_id = launch_bank_alt_id;
   if constexpr (!Grouped) {
+    row_tile = static_cast<int>(blockIdx.y);
     if (grouped_params.launch_bank_alt_ids != nullptr) {
       bank_alt_id = grouped_params.launch_bank_alt_ids[0];
     }
