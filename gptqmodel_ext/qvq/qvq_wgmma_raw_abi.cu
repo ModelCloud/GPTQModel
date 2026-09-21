@@ -140,8 +140,11 @@ cudaError_t launch_direct(
           ? launch_direct_rows<TransitionBits, 128, 1>(
                 input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
           : n <= 2048
-              ? launch_direct_rows<TransitionBits, 128, 2>(
-                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+              ? k == 8192
+                  ? launch_direct_rows<TransitionBits, 128, 4>(
+                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+                  : launch_direct_rows<TransitionBits, 128, 2>(
+                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
               : launch_direct_rows<TransitionBits, 128, 8>(
                     input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream);
 }
@@ -357,8 +360,11 @@ cudaError_t build_direct_plan(
           ? build_direct_plan_rows<TransitionBits, 128, 1>(
                 input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
           : n <= 2048
-              ? build_direct_plan_rows<TransitionBits, 128, 2>(
-                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+              ? k == 8192
+                  ? build_direct_plan_rows<TransitionBits, 128, 4>(
+                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+                  : build_direct_plan_rows<TransitionBits, 128, 2>(
+                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
               : build_direct_plan_rows<TransitionBits, 128, 8>(
                     input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan);
 }

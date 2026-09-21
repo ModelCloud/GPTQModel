@@ -180,10 +180,18 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     graph.reset()
 
 
-@pytest.mark.parametrize("m,algorithm", [(64, 2), (128, 3)])
-@pytest.mark.parametrize("bits", [2, 2.5, 3, 3.5])
+@pytest.mark.parametrize(
+    "m,algorithm,k,n,bits,expected_grid_y",
+    [
+        *[(64, 2, 2048, 256, bits, 1) for bits in (2, 2.5, 3, 3.5)],
+        *[(128, 3, 2048, 256, bits, 8) for bits in (2, 2.5, 3, 3.5)],
+        # Production Llama 3.2 down projection. This catches row-reuse
+        # schedule changes that the narrow K2048/N256 ABI gate cannot see.
+        (128, 3, 8192, 2048, 3, 2),
+    ],
+)
 def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
-    bits, m, algorithm
+    m, algorithm, k, n, bits, expected_grid_y
 ):
     from test_qvq_grouped_runtime import _child
 
@@ -191,7 +199,6 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     from gptqmodel.utils.qvq_wgmma_cuda import qvq_p32_window_wgmma_tuned
 
     library = _raw_library()
-    k, n = 2048, 256
     layer = _child(
         f"raw_m{m}", in_features=k, out_features=n, bits=bits,
         device="cuda", input_hadamard=False, output_hadamard=False,
@@ -217,7 +224,7 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     assert plan.launches[0].kernel_symbol
     assert plan.launches[0].kernel_name == b"qvq_p32_wgmma_direct_rows"
     assert plan.launches[0].grid_x == n // 64
-    assert plan.launches[0].grid_y == (1 if m == 64 else 8)
+    assert plan.launches[0].grid_y == expected_grid_y
     assert plan.launches[0].arg_count == 11
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
