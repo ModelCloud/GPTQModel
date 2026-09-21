@@ -97,6 +97,64 @@ __global__ __launch_bounds__(128) void p32_rank8_epilogue_kernel(
   }
 }
 
+__device__ __forceinline__ float round_to_half(float value) {
+  return __half2float(__float2half_rn(value));
+}
+
+template <int RankCount>
+__global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
+    const float* base_output,
+    const half* __restrict__ hidden,
+    const float* __restrict__ rank8_b,
+    const half* __restrict__ scale_v,
+    half* output,
+    int size_m,
+    int size_n,
+    bool normalize_first) {
+  static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
+  extern __shared__ float values[];
+  const int row = static_cast<int>(blockIdx.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  const auto padded = [](int index) { return index + (index >> 5); };
+  const float sqrt_n = sqrtf(static_cast<float>(size_n));
+  const float divisor = round_to_half(sqrt_n);
+  const float reciprocal = 1.0f / sqrt_n;
+
+  for (int column = tid; column < size_n; column += blockDim.x) {
+    float correction = 0.0f;
+#pragma unroll
+    for (int rank = 0; rank < RankCount; ++rank) {
+      correction += __half2float(hidden[static_cast<int64_t>(row) * RankCount + rank]) *
+          rank8_b[static_cast<int64_t>(rank) * size_n + column];
+    }
+    float value = round_to_half(
+        base_output[static_cast<int64_t>(row) * size_n + column] + correction);
+    if (normalize_first) value = round_to_half(value / divisor);
+    values[padded(column)] = value;
+  }
+  __syncthreads();
+
+  for (int bit = 1; bit < size_n; bit <<= 1) {
+    for (int index = tid; index < size_n; index += blockDim.x) {
+      const int peer = index ^ bit;
+      if (index < peer) {
+        const float first = values[padded(index)];
+        const float second = values[padded(peer)];
+        values[padded(index)] = round_to_half(first + second);
+        values[padded(peer)] = round_to_half(first - second);
+      }
+    }
+    __syncthreads();
+  }
+
+  for (int column = tid; column < size_n; column += blockDim.x) {
+    float value = values[padded(column)];
+    if (!normalize_first) value = round_to_half(value * reciprocal);
+    value = round_to_half(value * __half2float(scale_v[column]));
+    output[static_cast<int64_t>(row) * size_n + column] = __float2half_rn(value);
+  }
+}
+
 }  // namespace
 
 extern "C" int qvq_p32_rank8_epilogue(
@@ -139,6 +197,66 @@ extern "C" int qvq_p32_rank8_epilogue(
           reinterpret_cast<const float*>(rank8_b), output, size_m, size_n);
       break;
   }
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
+}
+
+extern "C" int qvq_p32_rank8_hadamard_epilogue(
+    const float* base_output,
+    const void* hidden,
+    const void* rank8_b,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_n,
+    int rank_count,
+    int normalize_first,
+    void* stream) {
+  if (base_output == nullptr || hidden == nullptr || rank8_b == nullptr ||
+      scale_v == nullptr || output == nullptr || stream == nullptr) {
+    set_last_error("QVQ P32 rank8 Hadamard epilogue received a null device pointer");
+    return -1;
+  }
+  if (size_m < 1 || size_n < 16 || size_n > 16384 ||
+      (size_n & (size_n - 1)) != 0 ||
+      (rank_count != 8 && rank_count != 16 &&
+       rank_count != QVQ_P32_RANK8_MAX_COUNT)) {
+    set_last_error(
+        "QVQ P32 rank8 Hadamard epilogue requires M >= 1, power-of-two N in [16,16384], and rank_count in {8,16,24}");
+    return -1;
+  }
+  const size_t shared_bytes =
+      static_cast<size_t>(size_n + size_n / 32) * sizeof(float);
+  const int threads = std::min(size_n, 1024);
+  const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+#define QVQ_LAUNCH_RANK8_HADAMARD(RANK_COUNT)                              \
+  do {                                                                     \
+    const cudaError_t attribute_error = cudaFuncSetAttribute(               \
+        p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>,                    \
+        cudaFuncAttributeMaxDynamicSharedMemorySize,                       \
+        static_cast<int>(shared_bytes));                                   \
+    if (attribute_error != cudaSuccess) {                                  \
+      set_last_error(cudaGetErrorString(attribute_error));                 \
+      return static_cast<int>(attribute_error);                            \
+    }                                                                      \
+    p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>                         \
+        <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
+            base_output, reinterpret_cast<const half*>(hidden),            \
+            reinterpret_cast<const float*>(rank8_b),                       \
+            reinterpret_cast<const half*>(scale_v),                        \
+            reinterpret_cast<half*>(output), size_m, size_n,               \
+            normalize_first != 0);                                         \
+  } while (false)
+  switch (rank_count) {
+    case 8: QVQ_LAUNCH_RANK8_HADAMARD(8); break;
+    case 16: QVQ_LAUNCH_RANK8_HADAMARD(16); break;
+    case 24: QVQ_LAUNCH_RANK8_HADAMARD(24); break;
+  }
+#undef QVQ_LAUNCH_RANK8_HADAMARD
   const cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     set_last_error(cudaGetErrorString(error));
