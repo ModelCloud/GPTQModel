@@ -1,0 +1,4 @@
+interface:
+  display_name: "QVQ-ZML Kernel Contract"
+  short_description: "Keep QVQ kernels and ZML dispatch synchronized"
+  default_prompt: "Use $qvq-zml-kernel-contract to audit QVQ kernel coverage in ZML."
