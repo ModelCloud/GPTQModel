@@ -6,6 +6,7 @@
 #include "qvq_wgmma_raw_abi.h"
 
 #include <cstdio>
+#include <cstring>
 
 namespace {
 
@@ -118,7 +119,9 @@ cudaError_t launch_direct_rows(
       kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
       static_cast<int>(sizeof(SharedStorage)));
   if (status != cudaSuccess) return status;
-  const dim3 grid(static_cast<unsigned>(n / kOutputColumns), 1, 1);
+  const dim3 grid(
+      static_cast<unsigned>(n / kOutputColumns),
+      static_cast<unsigned>(Rows / (RowTiles * kRows)), 1);
   kernel<<<grid, kTmaThreads, sizeof(SharedStorage), stream>>>(
       input_tma, trellis_tma, bank_tma, levels, output, grouped,
       Rows, k, n, 1, 0);
@@ -133,8 +136,14 @@ cudaError_t launch_direct(
   return rows == 64
       ? launch_direct_rows<TransitionBits, 64, 4>(
             input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
-      : launch_direct_rows<TransitionBits, 128, 8>(
-            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream);
+      : n <= 512
+          ? launch_direct_rows<TransitionBits, 128, 1>(
+                input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+          : n <= 2048
+              ? launch_direct_rows<TransitionBits, 128, 2>(
+                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+              : launch_direct_rows<TransitionBits, 128, 8>(
+                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream);
 }
 
 __global__ void reduce_ordered_rows(
@@ -154,6 +163,144 @@ int fail(char* error, uint64_t capacity, const char* message) {
     std::snprintf(error, static_cast<size_t>(capacity), "%s", message);
   }
   return 1;
+}
+
+struct PlanStorageWriter {
+  uint8_t* data;
+  uint64_t capacity;
+  uint64_t offset = 0;
+
+  template <typename T>
+  T* store(const T& value) {
+    const uint64_t aligned = align_up(offset, alignof(T));
+    if (aligned + sizeof(T) > capacity) return nullptr;
+    auto* destination = reinterpret_cast<T*>(data + aligned);
+    std::memcpy(destination, &value, sizeof(T));
+    offset = aligned + sizeof(T);
+    return destination;
+  }
+};
+
+void set_device_arg(
+    qvq_p32_launch_descriptor* launch, int index, const void* address) {
+  launch->args[index].address = address;
+  launch->args[index].size = sizeof(void*);
+  launch->args[index].type = QVQ_P32_LAUNCH_ARG_DEVICE_POINTER;
+}
+
+template <typename T>
+bool set_host_arg(
+    qvq_p32_launch_descriptor* launch, int index, PlanStorageWriter* storage,
+    const T& value) {
+  const T* stored = storage->store(value);
+  if (stored == nullptr) return false;
+  launch->args[index].address = stored;
+  launch->args[index].size = sizeof(T);
+  launch->args[index].type = QVQ_P32_LAUNCH_ARG_HOST_VALUE;
+  return true;
+}
+
+template <int TransitionBits, int Rows, int RowTiles>
+cudaError_t build_direct_plan_rows(
+    const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
+    const Element* levels, const uint8_t* bank_alt_id, float* output,
+    int k, int n, qvq_p32_launch_plan* plan) {
+  constexpr int kWords = 4 * TransitionBits;
+  using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  using SharedStorage =
+      P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTiles>;
+  const int k_tiles = k / kP32TileRows;
+  const int n_tiles = n / kP32TileColumns;
+  auto input_tensor = cute::make_tensor(
+      input, cute::make_shape(Rows, k),
+      cute::make_stride(static_cast<int64_t>(k), cute::_1{}));
+  auto trellis_tensor = cute::make_tensor(
+      trellis, cute::make_shape(kWords, n_tiles, k_tiles),
+      cute::make_stride(cute::_1{}, cute::Int<kWords>{},
+                        static_cast<int64_t>(n_tiles) * kWords));
+  auto bank_tensor = cute::make_tensor(
+      bank_ids, cute::make_shape(n_tiles, k_tiles),
+      cute::make_stride(cute::_1{}, static_cast<int64_t>(n_tiles)));
+  auto input_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{}, input_tensor,
+      WgmmaTmaSmemLayoutB{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_256{}));
+  auto trellis_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{}, trellis_tensor,
+      TrellisLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::Int<kWords>{},
+                       cute::Int<kP32N16TilesPerBlock>{},
+                       cute::Int<kP32K16TilesPerStage>{}));
+  auto bank_tma = cute::make_tma_atom(
+      cute::SM90_TMA_LOAD{}, bank_tensor,
+      P32BankTmaSmemLayout{}(cute::_, cute::_, cute::_0{}),
+      cute::make_shape(cute::_16{}, cute::_16{}));
+  HopperGroupedP32LaunchParams grouped{};
+  grouped.launch_bank_alt_ids = bank_alt_id;
+  auto kernel = qvq_p32_window_wgmma_m16_tma_kernel<
+      TransitionBits, false, false, false, true, 1, 0, RowTiles,
+      decltype(input_tma), decltype(trellis_tma), decltype(bank_tma),
+      HopperGroupedP32LaunchParams>;
+  cudaError_t status = cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(sizeof(SharedStorage)));
+  if (status != cudaSuccess) return status;
+
+  std::memset(plan, 0, sizeof(*plan));
+  PlanStorageWriter storage{
+      reinterpret_cast<uint8_t*>(plan->host_storage),
+      sizeof(plan->host_storage)};
+  auto* launch = &plan->launches[0];
+  launch->kernel_symbol = reinterpret_cast<const void*>(kernel);
+  launch->kernel_name = "qvq_p32_wgmma_direct_rows";
+  launch->grid_x = static_cast<unsigned>(n / kOutputColumns);
+  launch->grid_y = static_cast<unsigned>(Rows / (RowTiles * kRows));
+  launch->grid_z = 1;
+  launch->block_x = kTmaThreads;
+  launch->block_y = 1;
+  launch->block_z = 1;
+  launch->shared_memory_bytes = sizeof(SharedStorage);
+  int arg = 0;
+  if (!set_host_arg(launch, arg++, &storage, input_tma) ||
+      !set_host_arg(launch, arg++, &storage, trellis_tma) ||
+      !set_host_arg(launch, arg++, &storage, bank_tma)) {
+    return cudaErrorInvalidValue;
+  }
+  set_device_arg(launch, arg++, levels);
+  set_device_arg(launch, arg++, output);
+  if (!set_host_arg(launch, arg++, &storage, grouped) ||
+      !set_host_arg(launch, arg++, &storage, Rows) ||
+      !set_host_arg(launch, arg++, &storage, k) ||
+      !set_host_arg(launch, arg++, &storage, n)) {
+    return cudaErrorInvalidValue;
+  }
+  constexpr int split_count = 1;
+  constexpr int launch_bank_alt_id = 0;
+  if (!set_host_arg(launch, arg++, &storage, split_count) ||
+      !set_host_arg(launch, arg++, &storage, launch_bank_alt_id)) {
+    return cudaErrorInvalidValue;
+  }
+  launch->arg_count = arg;
+  plan->launch_count = 1;
+  return cudaSuccess;
+}
+
+template <int TransitionBits>
+cudaError_t build_direct_plan(
+    const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
+    const Element* levels, const uint8_t* bank_alt_id, float* output,
+    int rows, int k, int n, qvq_p32_launch_plan* plan) {
+  return rows == 64
+      ? build_direct_plan_rows<TransitionBits, 64, 4>(
+            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+      : n <= 512
+          ? build_direct_plan_rows<TransitionBits, 128, 1>(
+                input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+          : n <= 2048
+              ? build_direct_plan_rows<TransitionBits, 128, 2>(
+                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+              : build_direct_plan_rows<TransitionBits, 128, 8>(
+                    input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan);
 }
 
 }  // namespace
@@ -259,6 +406,44 @@ extern "C" int qvq_p32_wgmma_raw_launch(
       partials, static_cast<float*>(output),
       values, plane_stride, c->split_count);
   status = cudaGetLastError();
+  return status == cudaSuccess ? 0
+      : fail(error, error_capacity, cudaGetErrorString(status));
+}
+
+extern "C" int qvq_p32_wgmma_raw_launch_plan(
+    const void* activation, const void* window, const void* bank_ids,
+    const void* levels, const void* bank_alt_id, void* output,
+    const QvqP32WgmmaRawConfig* c, qvq_p32_launch_plan* plan,
+    char* error, uint64_t error_capacity) {
+  if (c == nullptr || plan == nullptr ||
+      c->abi_version != QVQ_WGMMA_RAW_ABI_VERSION ||
+      c->struct_bytes != sizeof(*c)) {
+    return fail(error, error_capacity, "invalid QVQ WGMMA launch-plan config");
+  }
+  const bool direct_m64 = c->algorithm == 2 && c->block_m == 64 &&
+      c->block_n == 64 && c->m == 64 && c->split_count == 1;
+  const bool direct_m128 = c->algorithm == 3 && c->block_m == 128 &&
+      c->block_n == 64 && c->m == 128 && c->split_count == 1;
+  if ((!direct_m64 && !direct_m128) || c->k < 256 || c->k % 256 != 0 ||
+      c->n < 256 || c->n % 256 != 0 || c->transition_bits < 4 ||
+      c->transition_bits > 7) {
+    return fail(error, error_capacity, "unsupported QVQ WGMMA launch-plan geometry");
+  }
+  cudaError_t status = cudaSuccess;
+#define QVQ_BUILD_DIRECT_PLAN(BITS) build_direct_plan<BITS>(                 \
+    static_cast<const Element*>(activation),                                \
+    static_cast<const uint32_t*>(window),                                   \
+    static_cast<const uint8_t*>(bank_ids),                                  \
+    static_cast<const Element*>(levels),                                    \
+    static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output),  \
+    c->m, c->k, c->n, plan)
+  switch (c->transition_bits) {
+    case 4: status = QVQ_BUILD_DIRECT_PLAN(4); break;
+    case 5: status = QVQ_BUILD_DIRECT_PLAN(5); break;
+    case 6: status = QVQ_BUILD_DIRECT_PLAN(6); break;
+    case 7: status = QVQ_BUILD_DIRECT_PLAN(7); break;
+  }
+#undef QVQ_BUILD_DIRECT_PLAN
   return status == cudaSuccess ? 0
       : fail(error, error_capacity, cudaGetErrorString(status));
 }

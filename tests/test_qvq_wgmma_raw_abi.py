@@ -24,6 +24,41 @@ class RawConfig(ctypes.Structure):
     ]
 
 
+class LaunchArg(ctypes.Structure):
+    _fields_ = [
+        ("address", ctypes.c_void_p),
+        ("size", ctypes.c_longlong),
+        ("type", ctypes.c_int),
+    ]
+
+
+class LaunchDescriptor(ctypes.Structure):
+    _fields_ = [
+        ("kernel_symbol", ctypes.c_void_p),
+        ("kernel_name", ctypes.c_char_p),
+        ("grid_x", ctypes.c_uint),
+        ("grid_y", ctypes.c_uint),
+        ("grid_z", ctypes.c_uint),
+        ("block_x", ctypes.c_uint),
+        ("block_y", ctypes.c_uint),
+        ("block_z", ctypes.c_uint),
+        ("shared_memory_bytes", ctypes.c_uint),
+        ("uses_pdl", ctypes.c_int),
+        ("arg_count", ctypes.c_int),
+        ("args", LaunchArg * 16),
+        ("dependency_count", ctypes.c_int),
+        ("dependencies", ctypes.c_int * 5),
+    ]
+
+
+class LaunchPlan(ctypes.Structure):
+    _fields_ = [
+        ("launch_count", ctypes.c_int),
+        ("launches", LaunchDescriptor * 5),
+        ("host_storage", ctypes.c_ulonglong * 128),
+    ]
+
+
 def _raw_library():
     path = os.environ.get("QVQ_WGMMA_RAW_LIBRARY")
     if not path:
@@ -47,6 +82,19 @@ def _raw_library():
         ctypes.c_uint64,
     ]
     library.qvq_p32_wgmma_raw_launch.restype = ctypes.c_int
+    library.qvq_p32_wgmma_raw_launch_plan.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(RawConfig),
+        ctypes.POINTER(LaunchPlan),
+        ctypes.c_void_p,
+        ctypes.c_uint64,
+    ]
+    library.qvq_p32_wgmma_raw_launch_plan.restype = ctypes.c_int
     assert library.qvq_p32_wgmma_raw_abi_version() == 3
     return library
 
@@ -158,6 +206,19 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
         algorithm, m, 64,
     )
     assert library.qvq_p32_wgmma_raw_workspace_bytes(ctypes.byref(config)) == 0
+    plan = LaunchPlan()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_wgmma_raw_launch_plan(
+        _ptr(x), _ptr(window), _ptr(banks), _ptr(levels), _ptr(alt_ids),
+        _ptr(output), ctypes.byref(config), ctypes.byref(plan), error, len(error),
+    )
+    assert status == 0, error.value.decode()
+    assert plan.launch_count == 1
+    assert plan.launches[0].kernel_symbol
+    assert plan.launches[0].kernel_name == b"qvq_p32_wgmma_direct_rows"
+    assert plan.launches[0].grid_x == n // 64
+    assert plan.launches[0].grid_y == (1 if m == 64 else 8)
+    assert plan.launches[0].arg_count == 11
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
 
