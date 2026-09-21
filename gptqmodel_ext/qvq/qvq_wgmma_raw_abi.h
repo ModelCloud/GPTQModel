@@ -8,16 +8,17 @@
 extern "C" {
 #endif
 
-#define QVQ_WGMMA_RAW_ABI_VERSION 1u
+#define QVQ_WGMMA_RAW_ABI_VERSION 2u
 
 // Framework-neutral SM90 P32 core. All pointers are device pointers owned by
 // the caller; stream is a cudaStream_t represented as void*. Workspace is FP32
-// storage and must contain split_count * round_up(m,16) * n elements.
+// storage. Algorithm 1 requires the size returned by the workspace query;
+// algorithm 2 writes its unsplit result directly and requires no workspace.
 typedef struct {
   uint32_t abi_version, struct_bytes;
   uint32_t m, k, n, transition_bits;
   uint32_t split_count;
-  uint32_t algorithm;  // 1 = ordered M16; direct row reuse follows in v2.
+  uint32_t algorithm;  // 1 = ordered M16, 2 = direct M64 row-reuse.
   uint32_t block_m, block_n;
 } QvqP32WgmmaRawConfig;
 
