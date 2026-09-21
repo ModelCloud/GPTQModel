@@ -1624,7 +1624,100 @@ class LazyTurtle:
                 for aliased in self._runtime_to_checkpoint_alias_candidates(converted):
                     if aliased not in candidates:
                         candidates.append(aliased)
+
+        if getattr(self.config, "model_type", None) in {"qwen4_exp", "qwen4_exp_text"}:
+            # Qwen4-Exp stores the PLE tensors once at the model root, while the
+            # runtime shell exposes them from the PLE layer that consumes them.
+            for candidate in tuple(candidates):
+                parts = candidate.split(".")
+                for index, part in enumerate(parts[:-3]):
+                    if (
+                        part != "layers"
+                        or index + 4 >= len(parts)
+                        or not parts[index + 1].isdigit()
+                        or parts[index + 2 : index + 4] != ["ple", "ple_embedding"]
+                    ):
+                        continue
+                    suffix = parts[index + 4 :]
+                    root_name = (
+                        "ngram_embedding"
+                        if suffix and suffix[0] == "ngram_embedding"
+                        else "ple_embedding"
+                    )
+                    if suffix and suffix[0] == "ngram_embedding":
+                        suffix = suffix[1:]
+                    root_candidate = ".".join(parts[:index] + [root_name] + suffix)
+                    if root_candidate not in candidates:
+                        candidates.append(root_candidate)
+                    break
         return candidates
+
+    def _is_qwen4_exp_ngram_embedding(self, module_path: str, rel_name: str) -> bool:
+        """Whether a tensor is the legacy-compatible Qwen4-Exp PLE table."""
+
+        config = self.config
+        model_type = getattr(config, "model_type", None)
+        if model_type not in {"qwen4_exp", "qwen4_exp_text"}:
+            return False
+        return self._join_tensor_name(module_path, rel_name).endswith(
+            ".ple.ple_embedding.ngram_embedding.weight"
+        )
+
+    def _can_zero_pad_qwen4_exp_ngram_embedding(
+        self,
+        module_path: str,
+        rel_name: str,
+        source_shape: tuple[int, ...],
+        target_shape: tuple[int, ...],
+        concat_dim: int,
+    ) -> bool:
+        """Whether a legacy Qwen4-Exp table can safely retain the shell shape."""
+
+        return (
+            concat_dim == 0
+            and self._is_qwen4_exp_ngram_embedding(module_path, rel_name)
+            and len(source_shape) == len(target_shape)
+            and source_shape[1:] == target_shape[1:]
+            and source_shape[0] < target_shape[0]
+        )
+
+    def _append_qwen4_exp_ngram_padding(
+        self,
+        *,
+        module_path: str,
+        rel_name: str,
+        parts: list[torch.Tensor],
+        target_shape: Optional[tuple[int, ...]],
+        concat_dim: int,
+    ) -> bool:
+        """Append unreachable zero rows for legacy fixed-size n-gram heads."""
+
+        if not parts or target_shape is None or concat_dim >= parts[0].ndim:
+            return False
+
+        source_shape = list(parts[0].shape)
+        for part in parts[1:]:
+            if part.ndim != len(source_shape) or any(
+                left != right
+                for axis, (left, right) in enumerate(zip(source_shape, part.shape))
+                if axis != concat_dim
+            ):
+                return False
+            source_shape[concat_dim] += part.shape[concat_dim]
+        source_shape = tuple(source_shape)
+        if not self._can_zero_pad_qwen4_exp_ngram_embedding(
+            module_path,
+            rel_name,
+            source_shape,
+            target_shape,
+            concat_dim,
+        ):
+            return False
+
+        padding_shape = list(target_shape)
+        padding_shape[0] -= source_shape[0]
+        parts.append(parts[0].new_zeros(padding_shape))
+        return True
 
     @staticmethod
     def _fused_checkpoint_requests(
@@ -2017,7 +2110,7 @@ class LazyTurtle:
                     break
 
                 resolved_name = None
-                for candidate in self._runtime_to_checkpoint_alias_candidates(renamed):
+                for candidate in self._all_runtime_to_checkpoint_candidates(renamed):
                     if candidate in self._weight_map:
                         resolved_name = candidate
                         break
@@ -2471,6 +2564,13 @@ class LazyTurtle:
                         with safe_open(shard_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
+                    self._append_qwen4_exp_ngram_padding(
+                        module_path=module_path,
+                        rel_name=rel_name,
+                        parts=parts,
+                        target_shape=expected_shape,
+                        concat_dim=concat_dim,
+                    )
                     try:
                         tensor = torch.cat(parts, dim=concat_dim).contiguous()
                     except Exception as exc:
@@ -2841,6 +2941,13 @@ class LazyTurtle:
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
+                    self._append_qwen4_exp_ngram_padding(
+                        module_path=module_path,
+                        rel_name=name,
+                        parts=parts,
+                        target_shape=tuple(shell_param.shape),
+                        concat_dim=concat_dim,
+                    )
                     try:
                         source_param = torch.cat(parts, dim=concat_dim).contiguous()
                     except Exception as exc:

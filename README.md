@@ -218,12 +218,16 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | TeleChat2 | `telechat` |
 | Unlimited-OCR | `unlimited-ocr` |
 | Voxtral | `voxtral` |
-| Xing4.0 | `xing4_0` |
+| [Xing4.0 (29B-A4B)](https://huggingface.co/XingChen-AGI/Xing4.0-29B-A4B) | `xing4_0` |
 | XVERSE | `xverse` |
 | Yi | `yi` |
 | Zamba / Zamba2 | `zamba`, `zamba2` |
 | ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
+
+Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
+
+Xing4.0 loads the model repository's custom implementation and therefore requires `trust_remote_code=True`. Run its GPU model test in full mode against a freshly measured dense baseline before checking quantized evaluation: `GPTQMODEL_MODEL_TEST_MODE=slow pytest -q tests/models/test_xing4_0.py`.
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 

@@ -36,25 +36,22 @@ class TestQwen3_8FlashNext(ModelTest):
         self.quantize_and_evaluate()
 
 
-class TestWhittleNext27BA3B(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Whittle-Next-27B-A3B"
+class TestQwen4ExpText(ModelTest):
+    NATIVE_MODEL_ID = "/monster/data/model/Whittle-Next-27B-A3B"  # logic65/Whittle-Next-27B-A3B
     TRUST_REMOTE_CODE = False
     USE_FLASH_ATTN = False
     EVAL_BATCH_SIZE = 16
     EVAL_SINGLE_GPU = False
 
-    # Keep the Evalution entry point enabled while a reproducible root-BF16
-    # baseline is collected; the available 0.86 result is from a separate
-    # legacy v3 Q8 custom 200-row probe and is not a valid hard-coded baseline.
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
-            "chat_template": False,
+            "acc": {"value": 0.5469, "floor_pct": 0.04},
+            "acc_norm": {"value": 0.5656, "floor_pct": 0.04},
         },
     }
     EVAL_TASKS_FAST = ModelTest.derive_fast_eval_tasks(EVAL_TASKS_SLOW)
 
     MODEL_COMPAT_FAST_LAYER_POSITION = "first"
-    SAVE_PATH = "./temp/qwen4_exp_text_test"
 
     def _build_quantize_config(self):
         config = super()._build_quantize_config()
@@ -68,4 +65,4 @@ class TestWhittleNext27BA3B(ModelTest):
         self.quantize_and_evaluate()
 
 
-__all__ = ["TestQwen3_8FlashNext", "TestWhittleNext27BA3B"]
+__all__ = ["TestQwen3_8FlashNext", "TestQwen4ExpText"]

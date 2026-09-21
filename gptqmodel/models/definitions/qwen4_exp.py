@@ -83,10 +83,6 @@ class Qwen4ExpTextQModel(Qwen4ExpQModel):
     pre_lm_head_norm_module = "model.hyper_connection_mixer"
     rotary_embedding = "model.rotary_emb"
 
-    # The text checkpoint already uses this model type, so conversion mapping
-    # inference can read it directly from the target model's config.
-    hf_conversion_model_type_alias = None
-
     module_tree = [
         "model",
         "layers",
