@@ -1,0 +1,35 @@
+package(default_visibility = ["//visibility:public"])
+
+# Framework-neutral SM90A QVQ core for external compiler runtimes. The caller
+# owns every device allocation and supplies its exact CUDA stream.
+genrule(
+    name = "libqvq_wgmma_raw",
+    srcs = [
+        "qvq_wgmma_cuda.cu",
+        "qvq_wgmma_raw_abi.cu",
+        "qvq_wgmma_raw_abi.h",
+        "@cutlass//:headers",
+        "@cutlass//:include/cutlass/cutlass.h",
+    ],
+    outs = ["libqvq_wgmma_raw.so"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+cutlass_header=$(location @cutlass//:include/cutlass/cutlass.h)
+cutlass_include=$$(dirname "$$(dirname "$${cutlass_header}")")
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O3 -lineinfo -cudart=shared --expt-relaxed-constexpr \
+  -diag-suppress=20013,20015 -Xcompiler=-fPIC \
+  -static-global-template-stub=false --split-compile=8 \
+  -gencode arch=compute_90a,code=sm_90a \
+  -I$$(dirname $(location qvq_wgmma_raw_abi.h)) \
+  -I"$${cutlass_include}" \
+  -shared -o "$@" $(location qvq_wgmma_raw_abi.cu)
+""",
+    tags = ["manual"],
+)
