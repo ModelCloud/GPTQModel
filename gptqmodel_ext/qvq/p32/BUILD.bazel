@@ -37,7 +37,7 @@ genrule(
         "qvq_p32_cuda.cu",
         "qvq_p32_internal.h",
     ],
-    outs = ["qvq_p32_core.o"],
+    outs = ["objects/core/qvq_p32_core.o"],
     cmd = """
 set -eu
 cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
@@ -48,6 +48,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
+  --objdir-as-tempdir \
   --split-compile=8 \
   -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
@@ -63,7 +64,7 @@ genrule(
         "qvq_p32_internal.h",
         "qvq_p32_rank8.cu",
     ],
-    outs = ["qvq_p32_rank8.o"],
+    outs = ["objects/rank8/qvq_p32_rank8.o"],
     cmd = """
 set -eu
 cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
@@ -74,6 +75,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
+  --objdir-as-tempdir \
   -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -c -o "$@" $(location qvq_p32_rank8.cu)
@@ -88,7 +90,7 @@ genrule(
         "qvq_p32_internal.h",
         "qvq_p32_runtime.cu",
     ],
-    outs = ["qvq_p32_runtime.o"],
+    outs = ["objects/runtime/qvq_p32_runtime.o"],
     cmd = """
 set -eu
 cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
@@ -99,6 +101,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O2 -cudart=shared -Xcompiler=-fPIC \
+  --objdir-as-tempdir \
   -gencode arch=compute_90,code=sm_90 \
   -I$$(dirname $(location qvq_p32_abi.h)) \
   -c -o "$@" $(location qvq_p32_runtime.cu)

@@ -32,13 +32,19 @@ __global__ __launch_bounds__(32) void p32_rank8_project_kernel(
     float accumulators[kRanksPerBlock] = {};
     for (int k = lane; k < size_k; k += 32) {
       const float input_value = input[static_cast<int64_t>(row) * size_k + k];
+      union PackedRank8 {
+        uint4 vector;
+        half2 pairs[4];
+      } weights;
+      weights.vector = *reinterpret_cast<const uint4*>(
+          rank8_a + static_cast<int64_t>(k) * RankCount + rank_base);
 #pragma unroll
-      for (int local_rank = 0; local_rank < kRanksPerBlock; ++local_rank) {
-        accumulators[local_rank] = fmaf(
-            input_value,
-            __half2float(rank8_a[
-                static_cast<int64_t>(k) * RankCount + rank_base + local_rank]),
-            accumulators[local_rank]);
+      for (int pair_index = 0; pair_index < 4; ++pair_index) {
+        const float2 pair = __half22float2(weights.pairs[pair_index]);
+        accumulators[2 * pair_index] = fmaf(
+            input_value, pair.x, accumulators[2 * pair_index]);
+        accumulators[2 * pair_index + 1] = fmaf(
+            input_value, pair.y, accumulators[2 * pair_index + 1]);
       }
     }
 #pragma unroll
