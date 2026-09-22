@@ -104,6 +104,69 @@ __device__ __forceinline__ float round_to_half(float value) {
   return __half2float(__float2half_rn(value));
 }
 
+__device__ __forceinline__ half2 exact_half2_add(half2 first, half2 second) {
+  const float2 a = __half22float2(first);
+  const float2 b = __half22float2(second);
+  return __floats2half2_rn(a.x + b.x, a.y + b.y);
+}
+
+__device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
+  const float2 a = __half22float2(first);
+  const float2 b = __half22float2(second);
+  return __floats2half2_rn(a.x - b.x, a.y - b.y);
+}
+
+template <int RankCount>
+__global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_legacy_kernel(
+    const float* base_output,
+    const half* __restrict__ hidden,
+    const float* __restrict__ rank8_b,
+    const half* __restrict__ scale_v,
+    half* output,
+    int size_m,
+    int size_n,
+    bool normalize_first) {
+  extern __shared__ half legacy_values[];
+  const int row = static_cast<int>(blockIdx.x);
+  const int tid = static_cast<int>(threadIdx.x);
+  const auto padded = [](int index) { return index + ((index >> 5) << 1); };
+  const float sqrt_n = sqrtf(static_cast<float>(size_n));
+  const float divisor = round_to_half(sqrt_n);
+  const float reciprocal = 1.0f / sqrt_n;
+  for (int column = tid; column < size_n; column += blockDim.x) {
+    float correction = 0.0f;
+#pragma unroll
+    for (int rank = 0; rank < RankCount; ++rank) {
+      correction += __half2float(
+          hidden[static_cast<int64_t>(row) * RankCount + rank]) *
+          rank8_b[static_cast<int64_t>(rank) * size_n + column];
+    }
+    float value = round_to_half(
+        base_output[static_cast<int64_t>(row) * size_n + column] + correction);
+    if (normalize_first) value = round_to_half(value / divisor);
+    legacy_values[padded(column)] = __float2half_rn(value);
+  }
+  __syncthreads();
+  for (int bit = 1; bit < size_n; bit <<= 1) {
+    for (int index = tid; index < size_n; index += blockDim.x) {
+      const int peer = index ^ bit;
+      if (index < peer) {
+        const float first = __half2float(legacy_values[padded(index)]);
+        const float second = __half2float(legacy_values[padded(peer)]);
+        legacy_values[padded(index)] = __float2half_rn(first + second);
+        legacy_values[padded(peer)] = __float2half_rn(first - second);
+      }
+    }
+    __syncthreads();
+  }
+  for (int column = tid; column < size_n; column += blockDim.x) {
+    float value = __half2float(legacy_values[padded(column)]);
+    if (!normalize_first) value = round_to_half(value * reciprocal);
+    value = round_to_half(value * __half2float(scale_v[column]));
+    output[static_cast<int64_t>(row) * size_n + column] = __float2half_rn(value);
+  }
+}
+
 template <int RankCount>
 __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     const float* base_output,
@@ -115,49 +178,86 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     int size_n,
     bool normalize_first) {
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
-  extern __shared__ half values[];
+  extern __shared__ half2 packed_values[];
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
-  // Two FP16 values share a 32-bit bank. Insert one full bank after every
-  // warp-sized run so power-of-two Hadamard peers do not collapse onto the
-  // same banks at the wide stages.
-  const auto padded = [](int index) { return index + ((index >> 5) << 1); };
   const float sqrt_n = sqrtf(static_cast<float>(size_n));
   const float divisor = round_to_half(sqrt_n);
   const float reciprocal = 1.0f / sqrt_n;
+  const int pair_count = size_n / 2;
 
+  // Preserve the legacy one-column correction expression and its FP16
+  // boundary. The packed representation begins only after each scalar value
+  // has been rounded exactly as in the compatibility implementation.
+  half* scalar_values = reinterpret_cast<half*>(packed_values);
   for (int column = tid; column < size_n; column += blockDim.x) {
     float correction = 0.0f;
 #pragma unroll
     for (int rank = 0; rank < RankCount; ++rank) {
-      correction += __half2float(hidden[static_cast<int64_t>(row) * RankCount + rank]) *
+      const float hidden_value =
+          __half2float(hidden[static_cast<int64_t>(row) * RankCount + rank]);
+      correction += hidden_value *
           rank8_b[static_cast<int64_t>(rank) * size_n + column];
     }
     float value = round_to_half(
         base_output[static_cast<int64_t>(row) * size_n + column] + correction);
     if (normalize_first) value = round_to_half(value / divisor);
-    values[padded(column)] = __float2half_rn(value);
+    scalar_values[column] = __float2half_rn(value);
   }
   __syncthreads();
 
-  for (int bit = 1; bit < size_n; bit <<= 1) {
-    for (int index = tid; index < size_n; index += blockDim.x) {
-      const int peer = index ^ bit;
-      if (index < peer) {
-        const float first = __half2float(values[padded(index)]);
-        const float second = __half2float(values[padded(peer)]);
-        values[padded(index)] = __float2half_rn(first + second);
-        values[padded(peer)] = __float2half_rn(first - second);
-      }
+  for (int pair = tid; pair < pair_count; pair += blockDim.x) {
+    const float2 adjacent = __half22float2(packed_values[pair]);
+    half2 packed = __floats2half2_rn(
+        adjacent.x + adjacent.y, adjacent.x - adjacent.y);
+    // Pair-index bits below 32 never leave a warp. Keep the applicable stages
+    // in registers and exchange packed FP16 values with shuffles, preserving
+    // lower-minus-upper orientation while supporting N=16/32 partial warps.
+    const unsigned active_mask = __activemask();
+#pragma unroll
+    for (int bit = 1; bit < 32 && bit < pair_count; bit <<= 1) {
+      union Half2Bits {
+        half2 value;
+        unsigned bits;
+      } self, peer;
+      self.value = packed;
+      peer.bits = __shfl_xor_sync(active_mask, self.bits, bit);
+      packed = (pair & bit) == 0
+          ? exact_half2_add(packed, peer.value)
+          : exact_half2_sub(peer.value, packed);
     }
-    __syncthreads();
+    packed_values[pair] = packed;
   }
 
-  for (int column = tid; column < size_n; column += blockDim.x) {
-    float value = __half2float(values[padded(column)]);
-    if (!normalize_first) value = round_to_half(value * reciprocal);
-    value = round_to_half(value * __half2float(scale_v[column]));
-    output[static_cast<int64_t>(row) * size_n + column] = __float2half_rn(value);
+  for (int bit = 32; bit < pair_count; bit <<= 1) {
+    __syncthreads();
+    for (int pair = tid; pair < pair_count; pair += blockDim.x) {
+      const int peer = pair ^ bit;
+      if (pair < peer) {
+        const half2 first = packed_values[pair];
+        const half2 second = packed_values[peer];
+        packed_values[pair] = exact_half2_add(first, second);
+        packed_values[peer] = exact_half2_sub(first, second);
+      }
+    }
+  }
+  __syncthreads();
+
+  for (int pair = tid; pair < pair_count; pair += blockDim.x) {
+    const int column0 = 2 * pair;
+    const int column1 = column0 + 1;
+    const float2 pair_values = __half22float2(packed_values[pair]);
+    float value0 = pair_values.x;
+    float value1 = pair_values.y;
+    if (!normalize_first) {
+      value0 = round_to_half(value0 * reciprocal);
+      value1 = round_to_half(value1 * reciprocal);
+    }
+    value0 = round_to_half(value0 * __half2float(scale_v[column0]));
+    value1 = round_to_half(value1 * __half2float(scale_v[column1]));
+    *reinterpret_cast<half2*>(
+        output + static_cast<int64_t>(row) * size_n + column0) =
+        __floats2half2_rn(value0, value1);
   }
 }
 
@@ -235,27 +335,43 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
         "QVQ P32 rank8 Hadamard epilogue requires M >= 1, power-of-two N in [16,16384], and rank_count in {8,16,24}");
     return -1;
   }
-  const size_t shared_bytes =
-      static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
-  const int threads = std::min(size_n, 1024);
+  const bool decode_half2 = size_m <= 128;
+  const size_t shared_bytes = decode_half2
+      ? static_cast<size_t>(size_n) * sizeof(half)
+      : static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
+  const int threads = decode_half2
+      ? std::min(size_n / 2, 1024)
+      : std::min(size_n, 1024);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
 #define QVQ_LAUNCH_RANK8_HADAMARD(RANK_COUNT)                              \
   do {                                                                     \
     const cudaError_t attribute_error = cudaFuncSetAttribute(               \
-        p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>,                    \
+        decode_half2                                                       \
+            ? p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>               \
+            : p32_rank8_hadamard_epilogue_legacy_kernel<RANK_COUNT>,       \
         cudaFuncAttributeMaxDynamicSharedMemorySize,                       \
         static_cast<int>(shared_bytes));                                   \
     if (attribute_error != cudaSuccess) {                                  \
       set_last_error(cudaGetErrorString(attribute_error));                 \
       return static_cast<int>(attribute_error);                            \
     }                                                                      \
-    p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>                         \
-        <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
-            base_output, reinterpret_cast<const half*>(hidden),            \
-            reinterpret_cast<const float*>(rank8_b),                       \
-            reinterpret_cast<const half*>(scale_v),                        \
-            reinterpret_cast<half*>(output), size_m, size_n,               \
-            normalize_first != 0);                                         \
+    if (decode_half2) {                                                     \
+      p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>                       \
+          <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
+              base_output, reinterpret_cast<const half*>(hidden),          \
+              reinterpret_cast<const float*>(rank8_b),                     \
+              reinterpret_cast<const half*>(scale_v),                      \
+              reinterpret_cast<half*>(output), size_m, size_n,             \
+              normalize_first != 0);                                       \
+    } else {                                                               \
+      p32_rank8_hadamard_epilogue_legacy_kernel<RANK_COUNT>                \
+          <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
+              base_output, reinterpret_cast<const half*>(hidden),          \
+              reinterpret_cast<const float*>(rank8_b),                     \
+              reinterpret_cast<const half*>(scale_v),                      \
+              reinterpret_cast<half*>(output), size_m, size_n,             \
+              normalize_first != 0);                                       \
+    }                                                                      \
   } while (false)
   switch (rank_count) {
     case 8: QVQ_LAUNCH_RANK8_HADAMARD(8); break;
