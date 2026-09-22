@@ -78,6 +78,8 @@ def _rule_matches(rule, *, metadata, m, n, k, group_size, desc_act, sym, layout)
     if metadata is None:
         return False
     name, capability, sm_count, device_count = metadata
+    # Every field is part of the rule key; a measured result must not leak to
+    # a different GPU, matrix shape, or quantization layout.
     return (
         rule["device_name"] == name
         and rule["capability"] == capability
@@ -104,6 +106,7 @@ def _make_rtx4090_measured_rules() -> tuple[dict, ...]:
     """
 
     # (K, N) -> measured M/path overrides.  These are conservative overrides;
+    # each M is a separate bucket so an unmeasured boundary is never guessed.
     # a tie or noisy crossover is omitted rather than made into a default.
     overrides = {
         (2048, 512): {
@@ -196,6 +199,8 @@ def select_exllamav2_path(
     if path == EXLLAMAV2_PATH_LEGACY:
         return _legacy_exllamav2_path(m)
 
+    # Metadata is normally captured at post_init.  The optional argument also
+    # keeps this selector easy to test without touching CUDA.
     metadata = _device_metadata(device) if device_metadata is None else device_metadata
     for rule in EXLLAMAV2_MEASURED_RULES:
         if _rule_matches(

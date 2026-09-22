@@ -143,12 +143,10 @@ class ExllamaV2Linear(GPTQQuantLinear):
             "scales": self.scales,
             "g_idx": self.g_idx,
         }
-        # The g_idx contents are the runtime layout state consumed by the
-        # ExLlamaV2 GPTQ loader.  Record it once during initialization so the
-        # normal forward path does not synchronize just to inspect metadata.
-        self._exllamav2_desc_act = bool(
-            self.g_idx is not None and not (self.g_idx == 0).all().item()
-        )
+        # The quantization config is the source of truth for desc_act.  A
+        # regular grouped GPTQ tensor also has multiple g_idx values, so its
+        # contents cannot be used to distinguish desc_act from non-desc_act.
+        self._exllamav2_desc_act = bool(self.desc_act)
         # Device facts are stable for the module lifetime.  Keeping them next
         # to the module avoids repeating metadata queries on every forward;
         # this is not a path/output/device-pointer cache.
@@ -191,6 +189,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
 
             x = x.to(dtype=torch.float16)
 
+        # Dispatch uses the flattened row count, so [batch, seq, K] and
+        # [batch * seq, K] take the same measured path.
         # TODO: need to run checks to make sure there is no performance regression padding with F.pad
         # if in_features is padded, we need to pad the input as well
         # if x.size(-1) != self.in_features:
@@ -251,6 +251,8 @@ class ExllamaV2Linear(GPTQQuantLinear):
         self.last_exllamav2_requested_path = execution_mode
         self.last_exllamav2_path = selected_path
 
+        # Auto uses the new table only when it changes the old decision.  The
+        # old four-argument call therefore remains the exact legacy fallback.
         # A legacy fallback deliberately uses the old four-argument call so
         # the extension's historical M > 50 behavior remains the source of
         # truth.  Explicit fused/dense modes carry the new path code.

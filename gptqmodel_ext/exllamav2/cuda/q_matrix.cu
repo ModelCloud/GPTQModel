@@ -147,6 +147,8 @@ QMatrix::QMatrix
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
 
+    // Keep preprocessing on PyTorch's current stream so q_handle creation is
+    // ordered with the caller's other CUDA work.
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     shuffle_kernel<<<gridDim, blockDim, 0, stream>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
 }
@@ -453,6 +455,8 @@ __global__ void reconstruct_kernel
 
 void QMatrix::reconstruct(half* out)
 {
+    // The caller may immediately hand this buffer to cuBLAS.  Launch the
+    // reconstruction on the same stream so that dependency is implicit.
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     dim3 blockDim, gridDim;
     blockDim.x = BLOCK_KN_SIZE;
@@ -593,6 +597,7 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
 
     // Move to CUDA
 
+    // Row reordering and the following GEMM share the caller's stream.
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
     cudaMemcpyAsync(cuda_q_perm, cpu_x_map16, height * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);
     cudaMemcpyAsync(cuda_q_invperm, cpu_x_map_inv16, height * sizeof(uint16_t), cudaMemcpyHostToDevice, stream);

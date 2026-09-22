@@ -98,6 +98,7 @@ void gemm_half_q_half(
     int64_t path
 )
 {
+    // -1 preserves the old M > 50 selector; 0 and 1 request fused and dense.
     QMatrix* qm = reinterpret_cast<QMatrix*>(static_cast<uintptr_t>(b));
 
     TORCH_CHECK_DTYPE(a, kHalf);

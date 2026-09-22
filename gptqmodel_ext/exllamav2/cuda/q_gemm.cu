@@ -117,6 +117,8 @@ void gemm_half_q_half_cuda_path
     int path
 )
 {
+    // Reconstruct, fused kernels, and cuBLAS must be ordered on PyTorch's
+    // current stream; a device-wide synchronize would hide ordering bugs.
     const cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
 
     // PyTorch normally associates the current cuBLAS handle with this stream.
