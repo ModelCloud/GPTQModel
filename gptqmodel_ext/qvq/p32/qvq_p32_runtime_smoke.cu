@@ -437,11 +437,11 @@ float round_half(float value) {
 }
 
 bool test_rank8_hadamard_epilogue() {
-  constexpr int kM = 2;
+  constexpr int kM = 128;
   constexpr int kRank = 8;
   cudaStream_t stream = nullptr;
   if (!check_cuda(cudaStreamCreate(&stream), "create rank8 Hadamard stream")) return false;
-  for (const int n : {512, 2048}) {
+  for (const int n : {16, 32, 64, 512, 2048, 8192}) {
     const bool normalize_first = n >= 2048;
     std::vector<float> base(kM * n);
     std::vector<half> hidden(kM * kRank);
@@ -544,7 +544,9 @@ bool test_rank8_hadamard_epilogue() {
     }
   }
   cudaStreamDestroy(stream);
-  std::printf("qvq_p32_rank8_hadamard_epilogue=PASS M=%d N=512,2048 bitwise_fp16\n", kM);
+  std::printf(
+      "qvq_p32_rank8_hadamard_epilogue=PASS M=%d N=16,32,64,512,2048,8192 bitwise_fp16\n",
+      kM);
   return true;
 }
 
