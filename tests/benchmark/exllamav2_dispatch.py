@@ -152,7 +152,6 @@ def main():
                         "requested_group_size": group_size,
                         "desc_act": desc_act,
                     }
-                    timed = {}
                     outputs = {}
                     for mode in ("fused", "dense", "legacy", "auto"):
                         started = time.perf_counter()
