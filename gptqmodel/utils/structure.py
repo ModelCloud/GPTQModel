@@ -789,6 +789,15 @@ class _LazyWeightConverter:
                 yield _LazyWeightRenaming(source_pattern, target_pattern)
 
 
+@dataclass(frozen=True)
+class _LazyCheckpointAssembly:
+    """Describe how per-expert checkpoint tensors become one runtime tensor."""
+
+    groups: tuple[tuple[int, ...], ...]
+    merge_dim: int
+    concat_dim: Optional[int]
+
+
 class LazyTurtle:
     """Checkpoint-backed shell materializer for local dense checkpoints.
 
@@ -820,6 +829,11 @@ class LazyTurtle:
         target_model: Optional[nn.Module] = None,
     ) -> None:
         self.config = copy.deepcopy(config)
+        # Some tests and lightweight loaders pass a minimal config object.
+        # Keep the target model's type available for model-specific aliases.
+        self._model_type = getattr(self.config, "model_type", None)
+        if self._model_type is None:
+            self._model_type = getattr(getattr(target_model, "config", None), "model_type", None)
         self._model_init_kwargs = dict(model_init_kwargs or {})
         self.model_local_path, self._weight_map = self._resolve_checkpoint_source(
             model_local_path=model_local_path,
@@ -1602,7 +1616,31 @@ class LazyTurtle:
             root_alias = self._qwen4_exp_root_checkpoint_alias(candidate)
             if root_alias is not None:
                 add(root_alias)
+
+        # DeepSeek-V4 has two overlapping conversion rules for the indexer:
+        # the generic rule swaps `indexer.compressor` with
+        # `compressor.indexer`, while the leaf rule renames `wq_b` to
+        # `q_b_proj`.  Applying either rule independently (or in either
+        # declared order) misses the checkpoint spelling used by the model:
+        # `indexer.compressor.wq_b`.  Add the composed form explicitly so
+        # lazy lookup follows the same model-specific compatibility aliases
+        # as the eager Transformers loader.
+        for candidate in tuple(candidates):
+            deepseek_v4_alias = self._deepseek_v4_compressor_indexer_alias(candidate)
+            if deepseek_v4_alias is not None:
+                add(deepseek_v4_alias)
         return candidates
+
+    def _deepseek_v4_compressor_indexer_alias(self, name: str) -> Optional[str]:
+        """Map the nested DeepSeek-V4 indexer projection to its checkpoint key."""
+
+        if self._model_type != "deepseek_v4":
+            return None
+
+        marker = ".compressor.indexer.q_b_proj."
+        if marker not in name:
+            return None
+        return name.replace(marker, ".indexer.compressor.wq_b.", 1)
 
     def _qwen4_exp_root_checkpoint_alias(self, name: str) -> Optional[str]:
         """Map a layer-local Qwen4 PLE tensor to its root checkpoint key."""
@@ -2072,13 +2110,14 @@ class LazyTurtle:
         self,
         module_path: str,
         rel_name: str,
-    ) -> Optional[tuple[list[str], int]]:
+    ) -> Optional[tuple[list[str], int | _LazyCheckpointAssembly]]:
         """Resolve one fused runtime tensor backed by several split checkpoint tensors."""
 
         combined_name = self._join_tensor_name(module_path, rel_name)
 
         for converter in self._runtime_to_checkpoint_converters:
-            if "Concatenate" not in converter.operation_names:
+            operation_names = converter.operation_names
+            if "Concatenate" not in operation_names and "MergeModulelist" not in operation_names:
                 continue
             if len(converter.source_patterns) != 1:
                 continue
@@ -2086,6 +2125,85 @@ class LazyTurtle:
             runtime_pattern = converter.source_patterns[0]
             if _LazyWeightRenaming(runtime_pattern, runtime_pattern).rename_source_key(combined_name)[1] is None:
                 continue
+
+            merge_operation = next(
+                (
+                    operation
+                    for operation in converter.operations
+                    if type(operation).__name__ == "MergeModulelist"
+                ),
+                None,
+            )
+            if merge_operation is not None:
+                # MergeModulelist first stacks each wildcard source pattern by
+                # expert index. A following Concatenate then joins those
+                # stacked projection groups, e.g. w1/w3 -> gate_up_proj.
+                source_groups: list[list[str]] = []
+                for checkpoint_pattern in converter.target_patterns:
+                    renamed, matched_pattern = _LazyWeightRenaming(
+                        runtime_pattern,
+                        checkpoint_pattern,
+                    ).rename_source_key(combined_name)
+                    if matched_pattern is None or renamed == combined_name or "*" not in renamed:
+                        source_groups = []
+                        break
+
+                    source_indices = self._checkpoint_indices_for_wildcard_pattern(renamed)
+                    if not source_indices:
+                        source_groups = []
+                        break
+
+                    resolved_group: list[str] = []
+                    for source_index in source_indices:
+                        source_name = renamed.replace("*", str(source_index), 1)
+                        resolved_name = next(
+                            (
+                                candidate
+                                for candidate in self._all_runtime_to_checkpoint_candidates(source_name)
+                                if candidate in self._weight_map
+                            ),
+                            None,
+                        )
+                        if resolved_name is None:
+                            resolved_group = []
+                            break
+                        resolved_group.append(resolved_name)
+
+                    if not resolved_group:
+                        source_groups = []
+                        break
+                    source_groups.append(resolved_group)
+
+                if source_groups:
+                    group_size = len(source_groups[0])
+                    if all(len(group) == group_size for group in source_groups):
+                        flattened_names: list[str] = []
+                        groups: list[tuple[int, ...]] = []
+                        for group in source_groups:
+                            start = len(flattened_names)
+                            flattened_names.extend(group)
+                            groups.append(tuple(range(start, len(flattened_names))))
+
+                        concat_operation = next(
+                            (
+                                operation
+                                for operation in converter.operations
+                                if type(operation).__name__ == "Concatenate"
+                            ),
+                            None,
+                        )
+                        return flattened_names, _LazyCheckpointAssembly(
+                            groups=tuple(groups),
+                            merge_dim=getattr(merge_operation, "dim", 0),
+                            concat_dim=(
+                                getattr(concat_operation, "dim", 0)
+                                if concat_operation is not None
+                                else None
+                            ),
+                        )
+
+                if "Concatenate" not in operation_names:
+                    continue
 
             concat_operation = next(
                 operation
@@ -2139,6 +2257,32 @@ class LazyTurtle:
             return checkpoint_names, concat_dim
 
         return None
+
+    @staticmethod
+    def _assembly_concat_dim(assembly: int | _LazyCheckpointAssembly) -> Optional[int]:
+        if isinstance(assembly, _LazyCheckpointAssembly):
+            return assembly.concat_dim
+        return assembly
+
+    @staticmethod
+    def _assemble_checkpoint_tensor_parts(
+        parts: list[torch.Tensor],
+        assembly: int | _LazyCheckpointAssembly,
+    ) -> torch.Tensor:
+        """Apply ordinary concatenation or MergeModulelist-style assembly."""
+
+        if not isinstance(assembly, _LazyCheckpointAssembly):
+            return torch.cat(parts, dim=assembly).contiguous()
+
+        merged_groups = [
+            torch.stack([parts[index] for index in group], dim=assembly.merge_dim).contiguous()
+            for group in assembly.groups
+        ]
+        if assembly.concat_dim is None:
+            if len(merged_groups) != 1:
+                raise ValueError("MergeModulelist assembly without Concatenate produced multiple groups")
+            return merged_groups[0]
+        return torch.cat(merged_groups, dim=assembly.concat_dim).contiguous()
 
     def _materialization_device_for_tensor(
         self,
@@ -2478,7 +2622,7 @@ class LazyTurtle:
         missing_nonpersistent_buffers: list[tuple[str, str]] = []
 
         grouped_names: Dict[str, list[tuple[str, str, str, Optional[int], Optional[int], Optional[int]]]] = {}
-        concat_entries: list[tuple[str, str, list[str], int]] = []
+        concat_entries: list[tuple[str, str, list[str], int | _LazyCheckpointAssembly]] = []
         for rel_name in t_params:
             concat_source = self._resolve_concat_checkpoint_tensor_sources(module_path, rel_name)
             if concat_source is not None:
@@ -2577,15 +2721,17 @@ class LazyTurtle:
                         with safe_open(shard_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
-                    self._append_qwen4_exp_ngram_padding(
-                        module_path=module_path,
-                        rel_name=rel_name,
-                        parts=parts,
-                        target_shape=expected_shape,
-                        concat_dim=concat_dim,
-                    )
+                    assembly_concat_dim = self._assembly_concat_dim(concat_dim)
+                    if assembly_concat_dim is not None:
+                        self._append_qwen4_exp_ngram_padding(
+                            module_path=module_path,
+                            rel_name=rel_name,
+                            parts=parts,
+                            target_shape=expected_shape,
+                            concat_dim=assembly_concat_dim,
+                        )
                     try:
-                        tensor = torch.cat(parts, dim=concat_dim).contiguous()
+                        tensor = self._assemble_checkpoint_tensor_parts(parts, concat_dim)
                     except Exception as exc:
                         raise RuntimeError(
                             self._materialization_issue_message(
@@ -2924,8 +3070,14 @@ class LazyTurtle:
         *,
         shell_sub: nn.Module,
         module_path: str,
-        param_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype, bool], nn.Parameter],
-        buffer_cache: Dict[tuple[str, Optional[int], Optional[int], Optional[int], torch.dtype], torch.Tensor],
+        param_cache: Dict[
+            tuple[str, Optional[int], Optional[int], Optional[int | _LazyCheckpointAssembly], torch.dtype, bool],
+            nn.Parameter,
+        ],
+        buffer_cache: Dict[
+            tuple[str, Optional[int], Optional[int], Optional[int | _LazyCheckpointAssembly], torch.dtype],
+            torch.Tensor,
+        ],
     ) -> int:
         synced = 0
 
@@ -2954,15 +3106,17 @@ class LazyTurtle:
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
                             parts.append(handler.get_tensor(full_name))
 
-                    self._append_qwen4_exp_ngram_padding(
-                        module_path=module_path,
-                        rel_name=name,
-                        parts=parts,
-                        target_shape=tuple(shell_param.shape),
-                        concat_dim=concat_dim,
-                    )
+                    assembly_concat_dim = self._assembly_concat_dim(concat_dim)
+                    if assembly_concat_dim is not None:
+                        self._append_qwen4_exp_ngram_padding(
+                            module_path=module_path,
+                            rel_name=name,
+                            parts=parts,
+                            target_shape=tuple(shell_param.shape),
+                            concat_dim=assembly_concat_dim,
+                        )
                     try:
-                        source_param = torch.cat(parts, dim=concat_dim).contiguous()
+                        source_param = self._assemble_checkpoint_tensor_parts(parts, concat_dim)
                     except Exception as exc:
                         raise RuntimeError(self._materialization_issue_message(
                             phase="direct-meta sync",
@@ -3099,7 +3253,7 @@ class LazyTurtle:
                             parts.append(handler.get_tensor(full_name))
 
                     try:
-                        source_buffer = torch.cat(parts, dim=concat_dim).contiguous()
+                        source_buffer = self._assemble_checkpoint_tensor_parts(parts, concat_dim)
                     except Exception as exc:
                         raise RuntimeError(self._materialization_issue_message(
                             phase="direct-meta sync",
