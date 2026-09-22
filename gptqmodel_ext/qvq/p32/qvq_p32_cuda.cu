@@ -3406,12 +3406,13 @@ int launch_p32_large_m(
         return -1;
       }
       QVQ_LARGE_M2_STAGE(8)
-    } else if (row_groups == 4 && size_m == 960) {
+    } else if (row_groups == 4 && size_m == 960 && size_n != 512) {
       // The 960-row prefill bucket has exactly sixty M16 groups. Six groups
       // per CTA divides it into ten balanced blocks and amortizes each packed
-      // weight load across 50% more rows than the public RG4 schedule. Keep
-      // the external selector at RG4 so existing ZML autotune records remain
-      // valid; this is an internal specialization for the exact bucket.
+      // weight load across 50% more rows than the public RG4 schedule. N=512
+      // retains RG4 because its 120 CTAs better fill 132-SM H100s than the 80
+      // CTAs produced by RG6. Keep the external selector at RG4 so existing
+      // ZML autotune records remain valid.
       QVQ_LARGE_M2_STAGE(6)
     } else if (row_groups == 4) {
       if (size_m % (4 * kRows) != 0) {
