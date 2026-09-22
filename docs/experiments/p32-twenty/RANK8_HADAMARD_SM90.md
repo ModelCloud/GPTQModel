@@ -7,11 +7,11 @@ P32 base output and rank-8 correction. It does not change quantized weights,
 the rank-8 projection, correction accumulation order, normalization placement,
 or FP16 rounding boundaries.
 
-The decode path stores adjacent FP16 values as `half2`, executes pair-index
+The packed path stores adjacent FP16 values as `half2`, executes pair-index
 stages below 32 with warp shuffles, and retains shared memory only for wider
 stages. Each butterfly lane is converted to FP32 for scalar add/sub and rounded
-explicitly back to FP16. Prefill and other matrices above M=128 retain the
-compatibility kernel.
+explicitly back to FP16. It is selected through the production M=960 prefill
+bucket; larger/offline matrices retain the compatibility kernel.
 
 The initial native `__hadd2`/`__hsub2` prototype was not promoted. Its apparent
 token-59 regression was first confounded by comparing a B1 run with a row from
@@ -74,3 +74,29 @@ could run without changing admission between arms.
 The model-level result is consistent with the epilogue's previously measured
 single-digit share of decode time. Microkernel speedup must not be reported as
 model-level speedup.
+
+## M960 prefill extension
+
+The same row-independent packed implementation was subsequently extended from
+M<=128 through the production M960 prefill bucket. No projector fusion or
+graph-routing change is involved, so B128 decode continues to select the same
+kernel and launch geometry as before.
+
+The full compact-KV GSM8K-Platinum gate used B128, prefill bucket 960, context
+8192, 544 physical KV pages, four resident pages per lane, and one 1,209-row
+continuous-refill request. All 1,209 sample records were byte-identical to the
+accepted control: 542 correct, zero invalid, 116,002 generated tokens, and
+1,045 decode calls.
+
+| Metric | Accepted control | M960 packed | Change |
+|---|---:|---:|---:|
+| Useful prefill | 23,278.3 tok/s | 23,728.9 tok/s | +1.94% |
+| Padded prefill | 26,849.4 tok/s | 27,369.2 tok/s | +1.94% |
+| Useful decode | 9,810.7 tok/s | 9,868.6 tok/s | +0.59% |
+| Padded decode | 11,431.7 tok/s | 11,499.1 tok/s | +0.59% |
+| Wall time | 57.372 s | 56.349 s | 1.82% faster |
+
+A matched repeated 128-row warm gate improved useful prefill from 23,142.2 to
+23,687.1 tok/s (+2.35%) with identical output records. Decode moved -0.43% in
+that short pair and +0.59% in the full gate, so there is no measured decode
+regression. Full result: `/tmp/prefill10-half2-full1209.json`.
