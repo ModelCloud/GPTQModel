@@ -3406,6 +3406,13 @@ int launch_p32_large_m(
         return -1;
       }
       QVQ_LARGE_M2_STAGE(8)
+    } else if (row_groups == 4 && size_m == 960) {
+      // The 960-row prefill bucket has exactly sixty M16 groups. Six groups
+      // per CTA divides it into ten balanced blocks and amortizes each packed
+      // weight load across 50% more rows than the public RG4 schedule. Keep
+      // the external selector at RG4 so existing ZML autotune records remain
+      // valid; this is an internal specialization for the exact bucket.
+      QVQ_LARGE_M2_STAGE(6)
     } else if (row_groups == 4) {
       if (size_m % (4 * kRows) != 0) {
         set_last_error("QVQ P32 row_groups=4 requires M divisible by 64");
