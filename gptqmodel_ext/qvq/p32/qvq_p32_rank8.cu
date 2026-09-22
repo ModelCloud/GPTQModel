@@ -15,7 +15,7 @@ namespace {
 using qvq_p32_internal::set_last_error;
 
 template <int RankCount>
-__global__ __launch_bounds__(32) void p32_rank8_project_kernel(
+__global__ __launch_bounds__(128) void p32_rank8_project_kernel(
     const float* __restrict__ input,
     const half* __restrict__ rank8_a,
     half* __restrict__ hidden,
@@ -24,11 +24,14 @@ __global__ __launch_bounds__(32) void p32_rank8_project_kernel(
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
   constexpr int kRanksPerBlock = 8;
   const int rank_base = static_cast<int>(blockIdx.x) * kRanksPerBlock;
-  const int lane = static_cast<int>(threadIdx.x);
+  constexpr int kRowsPerBlock = 4;
+  const int lane = static_cast<int>(threadIdx.x) & 31;
+  const int warp = static_cast<int>(threadIdx.x) >> 5;
   // One warp reuses each input element across eight adjacent ranks while
   // preserving each rank's original FMA and shuffle-reduction order.
-  for (int row = static_cast<int>(blockIdx.y); row < size_m;
-       row += static_cast<int>(gridDim.y)) {
+  for (int row = static_cast<int>(blockIdx.y) * kRowsPerBlock + warp;
+       row < size_m;
+       row += static_cast<int>(gridDim.y) * kRowsPerBlock) {
     float accumulators[kRanksPerBlock] = {};
     for (int k = lane; k < size_k; k += 32) {
       const float input_value = input[static_cast<int64_t>(row) * size_k + k];
@@ -112,10 +115,13 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     int size_n,
     bool normalize_first) {
   static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
-  extern __shared__ float values[];
+  extern __shared__ half values[];
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
-  const auto padded = [](int index) { return index + (index >> 5); };
+  // Two FP16 values share a 32-bit bank. Insert one full bank after every
+  // warp-sized run so power-of-two Hadamard peers do not collapse onto the
+  // same banks at the wide stages.
+  const auto padded = [](int index) { return index + ((index >> 5) << 1); };
   const float sqrt_n = sqrtf(static_cast<float>(size_n));
   const float divisor = round_to_half(sqrt_n);
   const float reciprocal = 1.0f / sqrt_n;
@@ -130,7 +136,7 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     float value = round_to_half(
         base_output[static_cast<int64_t>(row) * size_n + column] + correction);
     if (normalize_first) value = round_to_half(value / divisor);
-    values[padded(column)] = value;
+    values[padded(column)] = __float2half_rn(value);
   }
   __syncthreads();
 
@@ -138,17 +144,17 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     for (int index = tid; index < size_n; index += blockDim.x) {
       const int peer = index ^ bit;
       if (index < peer) {
-        const float first = values[padded(index)];
-        const float second = values[padded(peer)];
-        values[padded(index)] = round_to_half(first + second);
-        values[padded(peer)] = round_to_half(first - second);
+        const float first = __half2float(values[padded(index)]);
+        const float second = __half2float(values[padded(peer)]);
+        values[padded(index)] = __float2half_rn(first + second);
+        values[padded(peer)] = __float2half_rn(first - second);
       }
     }
     __syncthreads();
   }
 
   for (int column = tid; column < size_n; column += blockDim.x) {
-    float value = values[padded(column)];
+    float value = __half2float(values[padded(column)]);
     if (!normalize_first) value = round_to_half(value * reciprocal);
     value = round_to_half(value * __half2float(scale_v[column]));
     output[static_cast<int64_t>(row) * size_n + column] = __float2half_rn(value);
@@ -230,7 +236,7 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
     return -1;
   }
   const size_t shared_bytes =
-      static_cast<size_t>(size_n + size_n / 32) * sizeof(float);
+      static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
   const int threads = std::min(size_n, 1024);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
 #define QVQ_LAUNCH_RANK8_HADAMARD(RANK_COUNT)                              \
@@ -283,25 +289,28 @@ extern "C" int qvq_p32_rank8_project(
     set_last_error("QVQ P32 rank8 project requires M/K >= 1 and rank_count in {8,16,24}");
     return -1;
   }
+  constexpr int kRowsPerBlock = 4;
   const dim3 grid(
       static_cast<unsigned>((rank_count + 7) / 8),
-      static_cast<unsigned>(std::min(size_m, 65535)), 1);
+      static_cast<unsigned>((std::min(size_m, 65535) + kRowsPerBlock - 1) /
+                            kRowsPerBlock),
+      1);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   switch (rank_count) {
     case 8:
-      p32_rank8_project_kernel<8><<<grid, 32, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<8><<<grid, 128, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
       break;
     case 16:
-      p32_rank8_project_kernel<16><<<grid, 32, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<16><<<grid, 128, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
       break;
     case 24:
-      p32_rank8_project_kernel<24><<<grid, 32, 0, cuda_stream>>>(
+      p32_rank8_project_kernel<24><<<grid, 128, 0, cuda_stream>>>(
           reinterpret_cast<const float*>(input),
           reinterpret_cast<const half*>(rank8_a),
           reinterpret_cast<half*>(hidden), size_m, size_k);
