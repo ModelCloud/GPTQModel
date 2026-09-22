@@ -335,18 +335,21 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
         "QVQ P32 rank8 Hadamard epilogue requires M >= 1, power-of-two N in [16,16384], and rank_count in {8,16,24}");
     return -1;
   }
-  const bool decode_half2 = size_m <= 128;
-  const size_t shared_bytes = decode_half2
+  // The packed implementation is row-independent and preserves every scalar
+  // FP16 rounding boundary. Extend it through the production M960 prefill
+  // bucket while retaining the compatibility path for larger/offline shapes.
+  const bool packed_half2 = size_m <= 960;
+  const size_t shared_bytes = packed_half2
       ? static_cast<size_t>(size_n) * sizeof(half)
       : static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
-  const int threads = decode_half2
+  const int threads = packed_half2
       ? std::min(size_n / 2, 1024)
       : std::min(size_n, 1024);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
 #define QVQ_LAUNCH_RANK8_HADAMARD(RANK_COUNT)                              \
   do {                                                                     \
     const cudaError_t attribute_error = cudaFuncSetAttribute(               \
-        decode_half2                                                       \
+        packed_half2                                                       \
             ? p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>               \
             : p32_rank8_hadamard_epilogue_legacy_kernel<RANK_COUNT>,       \
         cudaFuncAttributeMaxDynamicSharedMemorySize,                       \
@@ -355,7 +358,7 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
       set_last_error(cudaGetErrorString(attribute_error));                 \
       return static_cast<int>(attribute_error);                            \
     }                                                                      \
-    if (decode_half2) {                                                     \
+    if (packed_half2) {                                                     \
       p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>                       \
           <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
               base_output, reinterpret_cast<const half*>(hidden),          \
