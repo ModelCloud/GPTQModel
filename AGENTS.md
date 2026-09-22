@@ -21,6 +21,10 @@ backend optimization that can affect output, use
 Require a matched unfused Transformer eager oracle, fixed tokenizer/padding/seed
 and sampling inputs, stage-boundary tensor comparisons, execution-plan telemetry,
 and measured target-workload speed evidence before accepting a numerical change.
+Before comparing any two benchmark arms, use
+[$benchmark-oracle-identity](.agents/skills/benchmark-oracle-identity/SKILL.md)
+and fail closed on mismatched sample keys, batch geometry, lane mapping, padding,
+KV capacity, runtime configuration, or artifact identity.
 
 For QVQ kernel optimization, use [$qvq-kernel-accuracy](.agents/skills/qvq-kernel-accuracy/SKILL.md) before choosing
 math transformations, precision changes, or MKNE autotune winners. First pursue accuracy-preserving algebra,
