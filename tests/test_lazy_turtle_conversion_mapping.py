@@ -991,9 +991,10 @@ def test_lazy_turtle_resolves_deepseek_v4_compressor_indexer_projection_aliases(
 
 
 def test_lazy_turtle_materializes_deepseek_v4_fused_expert_params_from_w123_checkpoint(tmp_path):
-    pytest.skip(
-        "DeepSeek-V4 now relies on Defuser-defused experts; fused gate_up/down converter materialization is not used."
-    )
+    # Keep coverage for the generic fused-expert converter path. Current
+    # DeepSeek-V4 runtime shells are defused by Defuser and are covered by the
+    # test below, but LazyTurtle still needs to support legacy fused shells and
+    # checkpoints when an explicit converter mapping is supplied.
     reversed_map = LazyTurtle.reverse_hf_conversion_map(
         [
             _WeightConverterStub(
