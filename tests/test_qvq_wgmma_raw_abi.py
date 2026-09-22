@@ -187,7 +187,7 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
         *[(128, 3, 2048, 256, bits, 8) for bits in (2, 2.5, 3, 3.5)],
         # Production Llama 3.2 down projection. This catches row-reuse
         # schedule changes that the narrow K2048/N256 ABI gate cannot see.
-        (128, 3, 8192, 2048, 3, 2),
+        (128, 3, 8192, 2048, 3, 1),
     ],
 )
 def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
