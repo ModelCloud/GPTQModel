@@ -8,6 +8,22 @@
 #include <cstdio>
 #include <cstring>
 
+// A transition-rate shard compiles only one template family and publishes a
+// private entry point. The small dispatcher TU retains the stable public ABI.
+#if QVQ_WGMMA_BITS_ONLY == 4
+#define qvq_p32_wgmma_raw_launch qvq_p32_wgmma_raw_launch_w4
+#define qvq_p32_wgmma_raw_launch_plan qvq_p32_wgmma_raw_launch_plan_w4
+#elif QVQ_WGMMA_BITS_ONLY == 5
+#define qvq_p32_wgmma_raw_launch qvq_p32_wgmma_raw_launch_w5
+#define qvq_p32_wgmma_raw_launch_plan qvq_p32_wgmma_raw_launch_plan_w5
+#elif QVQ_WGMMA_BITS_ONLY == 6
+#define qvq_p32_wgmma_raw_launch qvq_p32_wgmma_raw_launch_w6
+#define qvq_p32_wgmma_raw_launch_plan qvq_p32_wgmma_raw_launch_plan_w6
+#elif QVQ_WGMMA_BITS_ONLY == 7
+#define qvq_p32_wgmma_raw_launch qvq_p32_wgmma_raw_launch_w7
+#define qvq_p32_wgmma_raw_launch_plan qvq_p32_wgmma_raw_launch_plan_w7
+#endif
+
 namespace {
 
 constexpr uint64_t align_up(uint64_t value, uint64_t alignment) {
@@ -451,12 +467,23 @@ cudaError_t build_direct_grouped_gate_up_plan(
 
 }  // namespace
 
+#if !defined(QVQ_WGMMA_BITS_ONLY)
 extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
   return QVQ_WGMMA_RAW_ABI_VERSION;
 }
 
 extern "C" uint64_t qvq_p32_wgmma_raw_workspace_bytes(
     const QvqP32WgmmaRawConfig* c) {
+  if (c == nullptr) return 0;
+  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4) return 0;
+  const uint64_t padded_input = align_up(16ull * c->k * sizeof(Element), 256);
+  const uint64_t partials =
+      static_cast<uint64_t>(c->split_count) * 16ull * c->n * sizeof(float);
+  return padded_input + partials;
+}
+#endif
+
+static uint64_t raw_workspace_bytes(const QvqP32WgmmaRawConfig* c) {
   if (c == nullptr) return 0;
   if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4) return 0;
   const uint64_t padded_input = align_up(16ull * c->k * sizeof(Element), 256);
@@ -492,7 +519,7 @@ extern "C" int qvq_p32_wgmma_raw_launch(
       ((c->k / 16) / c->split_count) % 16 != 0) {
     return fail(error, error_capacity, "unsupported QVQ WGMMA raw geometry");
   }
-  const uint64_t required = qvq_p32_wgmma_raw_workspace_bytes(c);
+  const uint64_t required = raw_workspace_bytes(c);
   if (required != 0 && (workspace == nullptr || workspace_bytes < required)) {
     return fail(error, error_capacity, "QVQ WGMMA raw workspace is too small");
   }
@@ -515,17 +542,33 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output), \
     c->k, c->n, stream)
       switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
         case 4: status = QVQ_LAUNCH_GROUPED(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
         case 5: status = QVQ_LAUNCH_GROUPED(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
         case 6: status = QVQ_LAUNCH_GROUPED(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
         case 7: status = QVQ_LAUNCH_GROUPED(7); break;
+#endif
       }
 #undef QVQ_LAUNCH_GROUPED
     } else switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
       case 4: status = QVQ_LAUNCH_DIRECT(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
       case 5: status = QVQ_LAUNCH_DIRECT(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
       case 6: status = QVQ_LAUNCH_DIRECT(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
       case 7: status = QVQ_LAUNCH_DIRECT(7); break;
+#endif
     }
 #undef QVQ_LAUNCH_DIRECT
     return status == cudaSuccess ? 0
@@ -541,26 +584,34 @@ extern "C" int qvq_p32_wgmma_raw_launch(
       static_cast<const Element*>(activation), padded_input, c->m, c->k);
   cudaError_t status = cudaSuccess;
   switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
     case 4: status = launch_ordered<4>(
         padded_input, static_cast<const uint32_t*>(window),
         static_cast<const uint8_t*>(bank_ids), static_cast<const Element*>(levels),
         static_cast<const uint8_t*>(bank_alt_id), partials,
         16, c->k, c->n, c->split_count, stream); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
     case 5: status = launch_ordered<5>(
         padded_input, static_cast<const uint32_t*>(window),
         static_cast<const uint8_t*>(bank_ids), static_cast<const Element*>(levels),
         static_cast<const uint8_t*>(bank_alt_id), partials,
         16, c->k, c->n, c->split_count, stream); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
     case 6: status = launch_ordered<6>(
         padded_input, static_cast<const uint32_t*>(window),
         static_cast<const uint8_t*>(bank_ids), static_cast<const Element*>(levels),
         static_cast<const uint8_t*>(bank_alt_id), partials,
         16, c->k, c->n, c->split_count, stream); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
     case 7: status = launch_ordered<7>(
         padded_input, static_cast<const uint32_t*>(window),
         static_cast<const uint8_t*>(bank_ids), static_cast<const Element*>(levels),
         static_cast<const uint8_t*>(bank_alt_id), partials,
         16, c->k, c->n, c->split_count, stream); break;
+#endif
   }
   if (status != cudaSuccess) return fail(error, error_capacity, cudaGetErrorString(status));
   constexpr int threads = 256;
@@ -613,17 +664,33 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output),   \
     c->k, c->n, plan)
     switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
       case 4: status = QVQ_BUILD_GROUPED_PLAN(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
       case 5: status = QVQ_BUILD_GROUPED_PLAN(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
       case 6: status = QVQ_BUILD_GROUPED_PLAN(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
       case 7: status = QVQ_BUILD_GROUPED_PLAN(7); break;
+#endif
     }
 #undef QVQ_BUILD_GROUPED_PLAN
   } else switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
     case 4: status = QVQ_BUILD_DIRECT_PLAN(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
     case 5: status = QVQ_BUILD_DIRECT_PLAN(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
     case 6: status = QVQ_BUILD_DIRECT_PLAN(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
     case 7: status = QVQ_BUILD_DIRECT_PLAN(7); break;
+#endif
   }
 #undef QVQ_BUILD_DIRECT_PLAN
   return status == cudaSuccess ? 0
