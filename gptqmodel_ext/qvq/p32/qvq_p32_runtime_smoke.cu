@@ -1157,6 +1157,12 @@ int main(int argc, char** argv) {
   if (argc == 2 && std::strcmp(argv[1], "--rank8-fused-warp-sweep") == 0) {
     return test_rank8_project_hadamard_fusion(128, 8192, 0, 1024) ? 0 : 1;
   }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-prefill-cta-2048") == 0) {
+    return test_rank8_project_hadamard_fusion(960, 2048, 4, 1024) ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-prefill-cta-8192") == 0) {
+    return test_rank8_project_hadamard_fusion(960, 8192, 4, 1024) ? 0 : 1;
+  }
   for (int bits : {4, 5, 6, 7}) {
     for (int stage : {1, 2, 3, 4}) {
       for (int rows : {1, 17, 31, 32, 64, 128, 256}) {
