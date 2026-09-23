@@ -524,9 +524,12 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
   const size_t shared_bytes = packed_half2
       ? static_cast<size_t>(size_n) * sizeof(half)
       : static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
-  const int threads = packed_half2
-      ? std::min(size_n / 2, 1024)
-      : std::min(size_n, 1024);
+  // The full M960 Rank-8 profile is faster with sixteen warps for these two
+  // wide Llama outputs. Other shapes retain their established geometry.
+  const bool prefill_wide_rank8 = packed_half2 && size_m == 960 &&
+      rank_count == 8 && (size_n == 2048 || size_n == 8192);
+  const int threads = prefill_wide_rank8 ? 512 :
+      (packed_half2 ? std::min(size_n / 2, 1024) : std::min(size_n, 1024));
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
 #define QVQ_LAUNCH_RANK8_HADAMARD(RANK_COUNT)                              \
   do {                                                                     \
