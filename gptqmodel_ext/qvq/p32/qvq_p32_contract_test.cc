@@ -8,7 +8,7 @@
 
 static_assert(QVQ_P32_OPERATION_VERSION == 1);
 static_assert(QVQ_P32_ABI_VERSION == 3);
-static_assert(QVQ_P32_KERNEL_VERSION == 16);
+static_assert(QVQ_P32_KERNEL_VERSION == 17);
 static_assert(QVQ_P32_COMPILED_SM == 90);
 static_assert(QVQ_P32_TILE_SIZE == 16);
 static_assert(QVQ_P32_LEVEL_COUNT == 256);
@@ -29,6 +29,10 @@ static_assert(QVQ_P32_TUNING_AUTO == 0);
 static_assert(QVQ_P32_TUNING_EXTERNAL == 1);
 static_assert(QVQ_P32_N_TILES_AUTO == 0);
 static_assert(QVQ_P32_WARPS_AUTO == 0);
+static_assert(QVQ_P32_RANK8_CONFIG_VERSION == 1);
+static_assert(QVQ_P32_RANK8_THREADS_AUTO == 0);
+static_assert(QVQ_P32_RANK8_PROJECT_WARPS_AUTO == 0);
+static_assert(QVQ_P32_RANK8_ROWS_PER_CTA == 1);
 static_assert(QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES == 5);
 static_assert(QVQ_P32_LAUNCH_PLAN_MAX_ARGS == 16);
 
@@ -38,6 +42,8 @@ static_assert(QVQ_P32_REDUCTION_NATIVE == 1);
 static_assert(QVQ_P32_REDUCTION_PARTIALS == 2);
 static_assert(std::is_standard_layout_v<qvq_p32_config>);
 static_assert(sizeof(qvq_p32_config) == 9 * sizeof(int));
+static_assert(std::is_standard_layout_v<qvq_p32_rank8_hadamard_config>);
+static_assert(sizeof(qvq_p32_rank8_hadamard_config) == 6 * sizeof(int));
 static_assert(std::is_standard_layout_v<qvq_p32_launch_arg>);
 static_assert(std::is_standard_layout_v<qvq_p32_launch_descriptor>);
 static_assert(std::is_standard_layout_v<qvq_p32_launch_plan>);
