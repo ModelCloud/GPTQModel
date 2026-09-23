@@ -29,10 +29,13 @@ cc_test(
     deps = [":abi"],
 )
 
-# The production P32 template matrix is split into independent kernel-family
-# and transition-width objects. Each object owns one eighth of the NVCC device
-# instantiations, so Bazel schedules the expensive CICC/PTXAS work across CPU
-# cores while preserving the runtime dispatch surface.
+# The production P32 template matrix is split by kernel family, transition
+# width, and standard-kernel workload kind. Scalar, small-block, large-M2
+# grouped rows, and large-M grid rows are split further by low/high pipeline
+# stage buckets, allowing Bazel to schedule the expensive compiler work in
+# smaller independent actions. The large-M2 and large-M grid device kernels
+# and launchers are separate inputs, so editing one path leaves the other
+# workload shards eligible for action-cache reuse.
 p32_shards()
 
 genrule(
@@ -64,10 +67,30 @@ filegroup(
     name = "qvq_p32_core_object",
     srcs = [
         ":qvq_p32_dispatch_object",
-        ":qvq_p32_standard_bits4_object",
-        ":qvq_p32_standard_bits5_object",
-        ":qvq_p32_standard_bits6_object",
-        ":qvq_p32_standard_bits7_object",
+        ":qvq_p32_standard_scalar_bits4_object",
+        ":qvq_p32_standard_scalar_bits5_object",
+        ":qvq_p32_standard_scalar_bits6_object",
+        ":qvq_p32_standard_scalar_bits7_object",
+        ":qvq_p32_standard_block_bits4_object",
+        ":qvq_p32_standard_block_bits5_object",
+        ":qvq_p32_standard_block_bits6_object",
+        ":qvq_p32_standard_block_bits7_object",
+        ":qvq_p32_standard_large_m2_low_bits4_object",
+        ":qvq_p32_standard_large_m2_low_bits5_object",
+        ":qvq_p32_standard_large_m2_low_bits6_object",
+        ":qvq_p32_standard_large_m2_low_bits7_object",
+        ":qvq_p32_standard_large_m2_high_bits4_object",
+        ":qvq_p32_standard_large_m2_high_bits5_object",
+        ":qvq_p32_standard_large_m2_high_bits6_object",
+        ":qvq_p32_standard_large_m2_high_bits7_object",
+        ":qvq_p32_standard_large_m_grid_low_bits4_object",
+        ":qvq_p32_standard_large_m_grid_low_bits5_object",
+        ":qvq_p32_standard_large_m_grid_low_bits6_object",
+        ":qvq_p32_standard_large_m_grid_low_bits7_object",
+        ":qvq_p32_standard_large_m_grid_high_bits4_object",
+        ":qvq_p32_standard_large_m_grid_high_bits5_object",
+        ":qvq_p32_standard_large_m_grid_high_bits6_object",
+        ":qvq_p32_standard_large_m_grid_high_bits7_object",
         ":qvq_p32_grouped_bits4_object",
         ":qvq_p32_grouped_bits5_object",
         ":qvq_p32_grouped_bits6_object",
@@ -85,6 +108,10 @@ genrule(
         "qvq_p32_abi.h",
         "qvq_p32_cuda.cu",
         "qvq_p32_internal.h",
+        "qvq_p32_large_m2_kernel.cuh",
+        "qvq_p32_large_m2_launch.cuh",
+        "qvq_p32_large_m_grid_kernel.cuh",
+        "qvq_p32_large_m_grid_launch.cuh",
     ],
     outs = ["objects/dev_sm90/qvq_p32_compile_check.o"],
     cmd = """
