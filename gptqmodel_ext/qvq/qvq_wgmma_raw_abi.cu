@@ -481,7 +481,8 @@ extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
 extern "C" uint64_t qvq_p32_wgmma_raw_workspace_bytes(
     const QvqP32WgmmaRawConfig* c) {
   if (c == nullptr) return 0;
-  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4) return 0;
+  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4 ||
+      c->algorithm == 5) return 0;
   const uint64_t padded_input = align_up(16ull * c->k * sizeof(Element), 256);
   const uint64_t partials =
       static_cast<uint64_t>(c->split_count) * 16ull * c->n * sizeof(float);
@@ -491,7 +492,8 @@ extern "C" uint64_t qvq_p32_wgmma_raw_workspace_bytes(
 
 static uint64_t raw_workspace_bytes(const QvqP32WgmmaRawConfig* c) {
   if (c == nullptr) return 0;
-  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4) return 0;
+  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4 ||
+      c->algorithm == 5) return 0;
   const uint64_t padded_input = align_up(16ull * c->k * sizeof(Element), 256);
   const uint64_t partials =
       static_cast<uint64_t>(c->split_count) * 16ull * c->n * sizeof(float);
@@ -518,7 +520,13 @@ extern "C" int qvq_p32_wgmma_raw_launch(
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
       c->split_count == 1;
-  if ((!ordered_m16 && !direct_m64 && !direct_m128 && !grouped_gate_up) ||
+  const bool direct_m960 = c->algorithm == 5 && c->block_m == 64 &&
+      c->block_n == 64 && c->m == 960 &&
+      ((c->k == 2048 && (c->n == 512 || c->n == 2048 || c->n == 8192)) ||
+       (c->k == 8192 && c->n == 2048)) &&
+      c->split_count == 1;
+  if ((!ordered_m16 && !direct_m64 && !direct_m128 && !grouped_gate_up &&
+       !direct_m960) ||
       c->k < 256 || c->k % 256 != 0 ||
       c->n < 256 || c->n % 256 != 0 || c->transition_bits < 4 ||
       c->transition_bits > 7 || c->split_count < 1 || c->split_count > 64 ||
@@ -531,7 +539,7 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     return fail(error, error_capacity, "QVQ WGMMA raw workspace is too small");
   }
   auto stream = static_cast<cudaStream_t>(cuda_stream);
-  if (direct_m64 || direct_m128 || grouped_gate_up) {
+  if (direct_m64 || direct_m128 || grouped_gate_up || direct_m960) {
     cudaError_t status = cudaSuccess;
 #define QVQ_LAUNCH_DIRECT(BITS) launch_direct<BITS>(                        \
     static_cast<const Element*>(activation),                               \
@@ -540,7 +548,30 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     static_cast<const Element*>(levels),                                   \
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output), \
     c->m, c->k, c->n, c->block_m, stream)
-    if (grouped_gate_up) {
+    if (direct_m960) {
+#define QVQ_LAUNCH_M960(BITS) launch_direct_rows<BITS, 960, 4>( \
+          static_cast<const Element*>(activation),                    \
+          static_cast<const uint32_t*>(window),                       \
+          static_cast<const uint8_t*>(bank_ids),                      \
+          static_cast<const Element*>(levels),                        \
+          static_cast<const uint8_t*>(bank_alt_id),                   \
+          static_cast<float*>(output), c->k, c->n, stream)
+      switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
+        case 4: status = QVQ_LAUNCH_M960(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
+        case 5: status = QVQ_LAUNCH_M960(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
+        case 6: status = QVQ_LAUNCH_M960(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
+        case 7: status = QVQ_LAUNCH_M960(7); break;
+#endif
+      }
+#undef QVQ_LAUNCH_M960
+    } else if (grouped_gate_up) {
 #define QVQ_LAUNCH_GROUPED(BITS) launch_direct_grouped_gate_up<BITS>(       \
     static_cast<const Element*>(activation),                               \
     static_cast<const uint32_t*>(window),                                  \
@@ -650,7 +681,13 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
       c->split_count == 1;
-  if ((!direct_m64 && !direct_m128 && !grouped_gate_up) || c->k < 256 || c->k % 256 != 0 ||
+  const bool direct_m960 = c->algorithm == 5 && c->block_m == 64 &&
+      c->block_n == 64 && c->m == 960 &&
+      ((c->k == 2048 && (c->n == 512 || c->n == 2048 || c->n == 8192)) ||
+       (c->k == 8192 && c->n == 2048)) &&
+      c->split_count == 1;
+  if ((!direct_m64 && !direct_m128 && !grouped_gate_up && !direct_m960) ||
+      c->k < 256 || c->k % 256 != 0 ||
       c->n < 256 || c->n % 256 != 0 || c->transition_bits < 4 ||
       c->transition_bits > 7) {
     return fail(error, error_capacity, "unsupported QVQ WGMMA launch-plan geometry");
@@ -663,7 +700,30 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
     static_cast<const Element*>(levels),                                    \
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output),  \
     c->m, c->k, c->n, c->block_m, plan)
-  if (grouped_gate_up) {
+  if (direct_m960) {
+#define QVQ_BUILD_M960_PLAN(BITS) build_direct_plan_rows<BITS, 960, 4>( \
+        static_cast<const Element*>(activation),                           \
+        static_cast<const uint32_t*>(window),                              \
+        static_cast<const uint8_t*>(bank_ids),                             \
+        static_cast<const Element*>(levels),                               \
+        static_cast<const uint8_t*>(bank_alt_id),                          \
+        static_cast<float*>(output), c->k, c->n, plan)
+    switch (c->transition_bits) {
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
+      case 4: status = QVQ_BUILD_M960_PLAN(4); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
+      case 5: status = QVQ_BUILD_M960_PLAN(5); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
+      case 6: status = QVQ_BUILD_M960_PLAN(6); break;
+#endif
+#if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
+      case 7: status = QVQ_BUILD_M960_PLAN(7); break;
+#endif
+    }
+#undef QVQ_BUILD_M960_PLAN
+  } else if (grouped_gate_up) {
 #define QVQ_BUILD_GROUPED_PLAN(BITS) build_direct_grouped_gate_up_plan<BITS>( \
     static_cast<const Element*>(activation),                                 \
     static_cast<const uint32_t*>(window),                                    \

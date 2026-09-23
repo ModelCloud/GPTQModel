@@ -43,7 +43,8 @@ extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
 extern "C" uint64_t qvq_p32_wgmma_raw_workspace_bytes(
     const QvqP32WgmmaRawConfig* c) {
   if (c == nullptr) return 0;
-  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4) return 0;
+  if (c->algorithm == 2 || c->algorithm == 3 || c->algorithm == 4 ||
+      c->algorithm == 5) return 0;
   const uint64_t padded_input = align_up(16ull * c->k * sizeof(uint16_t), 256);
   const uint64_t partials =
       static_cast<uint64_t>(c->split_count) * 16ull * c->n * sizeof(float);
