@@ -87,7 +87,7 @@ Additional signals:
 
 ## Latency-Bound (Low Occupancy)
 
-**Symptoms:** Both throughputs <40%, Achieved occupancy <50%.
+**Symptoms:** Both compute and memory SOL are low and the scheduler is not issuing enough useful work. Low achieved occupancy can contribute, but is not required; high-occupancy kernels can still be dependency- or instruction-limited.
 
 **Key Metrics:**
 - `sm__warps_active.avg.pct_of_peak_sustained_active` — active warps
@@ -96,25 +96,25 @@ Additional signals:
 - `launch__occupancy_limit_blocks` — block limit
 
 **Root Causes:**
-- High register usage per thread (>64)
-- Large shared memory per block
-- Small block sizes
-- Block dimension limitations
+- Register pressure that reduces useful residency
+- Large shared memory per block / one-CTA-per-SM residency
+- Insufficient grid waves or poor work distribution
+- Long dependency chains, barriers, or async-pipeline waits even when occupancy is nominal
 
 **Diagnosis Table:**
 
 | Symptom | Cause | Solution |
 |---------|-------|----------|
-| Theoretical occupancy < 50% | Register pressure | `--maxrregcount`, occupancy hint |
+| Theoretical occupancy is resource-limited | Register pressure | Reduce live ranges/fragments first; test a register cap only if it does not spill/regress |
 | Theoretical occupancy < 50% | Shared memory | Reduce shared memory per block |
 | Achieved << Theoretical | Workload imbalance | Adjust grid/block dimensions |
 | Both throughputs <40% | Low occupancy | Check LaunchStats for limiting resource |
 
 **Optimization Priority:**
-1. Reduce register usage (`--maxrregcount`)
-2. Reduce shared memory per block
-3. Adjust block dimensions (128-256 threads typical)
-4. Trade register usage for memory access if net-positive
+1. Identify the limiting dependency/stall and whether additional resident warps would hide it
+2. Reduce register live ranges or shared footprint when they are the measured residency limiter
+3. Adjust block dimensions/grid waves for the actual architecture and workload
+4. Test register caps only as measured experiments; forced spills can be slower than lower occupancy
 
 ## Instruction-Bound
 
@@ -135,7 +135,7 @@ Additional signals:
 1. Simplify control flow
 2. Use predication instead of branches
 3. Reorganize data to reduce divergence
-4. Unroll loops where beneficial
+4. Unroll only when it removes loop/control/address work without excessive code size, registers, or instruction-cache pressure
 
 ## Launch-Overhead Bound
 
@@ -171,3 +171,19 @@ Additional signals:
 | **ncu** | Kernel-level | 10-100x slower | Understand why a kernel is slow |
 
 Use nsys first to identify top kernels by GPU time, then ncu for deep analysis of those specific kernels.
+
+
+## Low-GB/s decision rule for compressed kernels
+
+Do not classify a quantized P32/GPTQ/QTIP-style kernel as a bad-memory-layout
+kernel just because it reaches a small fraction of peak HBM bandwidth. First ask:
+
+1. How many compressed bytes should the algorithm actually read per output?
+2. Are those bytes served by L1/L2 after reuse?
+3. How many integer/address/shared instructions execute per decoded value?
+4. Are eligible warps low because of dependent LUT loads, barriers, or MMA waits?
+5. Are shared-memory requests expanding into extra wavefronts?
+6. Is the Tensor Core pipe underfed while DRAM is idle?
+
+If the answers point to decode/scheduler/shared dependencies, increasing DRAM
+traffic is not an optimization objective.

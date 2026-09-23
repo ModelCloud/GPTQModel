@@ -59,7 +59,10 @@ when removing GPU launch/gap costs or enabling phase-local data reuse is materia
 1. Keep phase roles explicit in source even when they share one launch.
    In modern CUDA this maps to warp specialization: different warps can hold
    different phase roles (load, compute, store, tile scheduling) in one kernel.
-   See the modern SIMT/warp-specialization note in `$gptqmodel-cuda-kernels`.
+   Handoffs must use the correct scope: `__syncwarp` for one warp only, CTA
+   barriers/mbarriers for cross-warp shared handoffs, and kernel/grid/cluster
+   primitives for cross-CTA dependencies. See the A100+ execution contract in
+   `$gptqmodel-cuda-kernels`.
 2. Budget the worst live registers and launch-reserved shared memory before
    implementation. A later lightweight phase does not release earlier resources.
 3. Use block synchronization for shared-memory handoff and cooperative grid
@@ -181,3 +184,19 @@ profiler artifact paths, JIT fingerprints, errors, resources, and fallback statu
 ## See also
 
 - [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list from wafer-ai's performance engineering index.
+
+
+## NVIDIA A100+ mega-kernel resource rule
+
+A fused kernel pays for its worst live resource envelope for the entire launch.
+Before merging phases, compare the original kernels with the fused candidate on:
+
+- registers/thread and spills/local loads;
+- static+dynamic shared memory and active CTAs/SM;
+- Ampere `cp.async` or Hopper/Blackwell TMA stage depth;
+- WGMMA/TCGen05 fragment/TMEM ownership;
+- eligible warps/scheduler/cycle and barrier/dependency stalls;
+- L1/L2/DRAM bytes removed versus new shared/register traffic.
+
+Do not fuse only to reduce launch count when CUDA Graphs or a native multi-launch
+operator already removes the host gap with better per-phase residency.

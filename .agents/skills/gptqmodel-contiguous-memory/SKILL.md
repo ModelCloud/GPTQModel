@@ -5,7 +5,7 @@ description: Diagnose and prevent silent performance or correctness regressions 
 
 # Tensor contiguity in GPT-QModel
 
-Non-contiguous tensors are a common cause of silent slowdowns and subtle numerical errors. Many GPU Triton/CUDA kernels and some CPU fast paths use pointer+stride arithmetic that assumes a contiguous `[N, ...]` layout. When the input is a sliced, transposed, or reshaped view, the kernel may either:
+Non-contiguous tensors are a common cause of slowdowns and correctness bugs when a kernel's declared stride contract does not match the actual view. But non-contiguous is not synonymous with uncoalesced, and contiguous is not synonymous with fast. A strided view can have a contiguous hot dimension, while materializing a large `.contiguous()` copy can dominate the operation. Many GPU Triton/CUDA kernels and some CPU fast paths do intentionally require a dense layout; when that contract is violated, the kernel may either:
 
 - silently take a slow reference fallback, or
 - read the wrong memory locations and return incorrect scale/zero/weight values.
@@ -15,9 +15,9 @@ Always verify contiguity on the boundary between a high-level quantizer and a lo
 ## Quick checks
 
 1. Log or assert `x.is_contiguous()` before passing a tensor to a Triton/CUDA kernel or a C++/BLAS routine.
-2. If the tensor is not contiguous, call `x = x.contiguous()` on the local batch before the kernel. The copy cost is usually far smaller than the fallback path it unlocks.
+2. If the kernel requires contiguous storage, either reject the view clearly or materialize it at the narrowest stable boundary. Measure the materialization as part of the complete operator; do not assume its cost is small. If the kernel accepts strides, preserve the view when the hot lane mapping remains coalesced.
 3. Preserve the original values; `contiguous()` is a layout-only copy and does not change the numeric content.
-4. When adding telemetry, record whether the contiguous fast path was taken and measure the fallback separately.
+4. When adding telemetry, record shape, strides, storage offset, pointer alignment, whether a materialization occurred, bytes copied, and which fast/fallback path ran. For CUDA, inspect lane address compactness/sectors rather than using `is_contiguous()` as a coalescing proxy.
 
 ## Known regressions and fixes
 
@@ -71,3 +71,22 @@ arithmetic reads strided columns incorrectly.
 - `$gptqmodel-cuda-kernels` for Triton/CUDA/C++ kernel implementation and debugging.
 - `$gptqmodel-quantization` for GPTQ/AWQ/QQQ algorithm details and scale-search behavior.
 - `$gptqmodel-gpu-profiling` for identifying launch gaps and fallback hotspots.
+
+
+## CUDA A100+ layout audit
+
+Before adding a `.contiguous()` to a hot inference path:
+
+1. Write the actual lane address expression for the kernel's dominant load/store.
+2. Check natural alignment for any `half2`, `uint4`, vectorized Triton block,
+   TMA, or library operand. A contiguous tensor with a nonzero storage offset can
+   still violate a vector alignment assumption.
+3. Determine whether the stride is on a cold outer dimension or the lane-varying
+   inner dimension. Only the latter necessarily damages coalescing.
+4. Measure requested bytes versus transferred sectors and L1/L2/DRAM traffic.
+5. Compare three complete-operator candidates when practical: stride-aware
+   consumption, one-time prepared repack/cache, and per-forward materialization.
+6. For immutable quantized weights/metadata, prefer a versioned prepared layout
+   over repeated `.contiguous()` in every forward when it is storage-efficient.
+7. For fused QKV/gate-up outputs, consider stride-aware downstream elementwise
+   kernels before copying slices merely to make them contiguous.

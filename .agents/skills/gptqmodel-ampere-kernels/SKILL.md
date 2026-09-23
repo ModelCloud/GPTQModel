@@ -7,7 +7,7 @@ description: Optimize, review, or validate GPT-QModel CUDA and Triton quantized 
 
 Use this skill with `$gptqmodel-cuda-kernels`. Probe the live device first, then tune for its compute capability and resources. Treat the repository's current host inventory as a snapshot, never as a stable mapping from CUDA index to GPU type.
 
-Read [references/ampere-notes.md](references/ampere-notes.md) before setting architecture flags or shared-memory sizes.
+Read [references/ampere-notes.md](references/ampere-notes.md) and the shared [NVIDIA A100+ architecture contract](../gptqmodel-cuda-kernels/references/nvidia-a100-plus.md) before setting architecture flags, staging layouts, or shared-memory sizes.
 
 ## Probe before choosing a path
 
@@ -28,7 +28,17 @@ In code, branch on runtime device properties. Do not recognize A100 by product s
 4. Do not route Ampere through Hopper-only TMA, thread-block clusters, distributed shared memory, WGMMA, or native FP8 assumptions.
 5. Opt in explicitly when a block needs more than the default dynamic shared-memory allowance, and validate the requested bytes against the live device.
 
+## A100 execution rules
+
+- Treat `cp.async`/CUDA asynchronous copy as a pipeline with an explicit wait contract, not as a faster spelling of a load/store pair. Prefer 16-byte-aligned copies when the layout permits.
+- Compute shared-memory banks from 4-byte words. FP16 lane-contiguous values share bank words in pairs; prove the issued access pattern before padding or swizzling.
+- A100 global coalescing is about compact warp sectors, not "32 floats = one transaction". Inspect sectors/request and useful bytes.
+- Use `ldmatrix`/MMA layouts that match fragment ownership; do not transpose in registers with a large shuffle network unless it beats a load-time/shared layout.
+- `__syncwarp` is same-warp only. Cross-warp staging requires CTA synchronization.
+- Do not chase occupancy by register caps without checking spills and eligible-warps/cycle.
+
 ## Tune from the bottleneck
+
 
 - For decode-like small-M quantized GEMV/GEMM, measure launch overhead, weight bandwidth, dequantization cost, and occupancy before adding stages.
 - For prefill-like larger-M GEMM, measure Tensor Core utilization, global-to-shared pipeline efficiency, reuse, and epilogue cost.

@@ -79,7 +79,7 @@ scratch reuse: final old reader -> first new writer
 
 Apply these rules:
 
-- Use `__syncwarp()` only for participating lanes with a correct mask.
+- Use `__syncwarp()` only for participating lanes **within the same warp** with a correct mask. It cannot publish/observe a shared-memory handoff to a different warp.
 - Place `__syncthreads()` on a control path reached by every thread in the CTA.
 - Use a cooperative grid barrier only in a cooperative launch whose grid fits
   simultaneous residency. Never emulate a global barrier by spinning arbitrary
@@ -294,3 +294,23 @@ Before retaining a mega-kernel, verify:
 - [ ] Architecture-specific code is compile/runtime gated without fixed indices.
 - [ ] Rejected experiments are reverted and logged.
 - [ ] Profiler artifacts remain out of commits unless explicitly requested.
+
+
+## NVIDIA A100+ data-layout checks
+
+For a proposed fused phase boundary, write both mappings before coding:
+
+```text
+global lane -> byte address -> sectors touched
+shared lane -> byte address -> bank
+```
+
+A 128-byte-aligned base does not guarantee either compact global sectors or
+conflict-free shared access. For FP16 shared data, two adjacent values occupy
+one 32-bit bank word. For arbitrary LUT lookups, static padding/swizzling cannot
+guarantee conflict freedom; replication may, but its SMEM cost belongs in the
+resource-union calculation.
+
+On Hopper/Blackwell, preserve the TMA/CuTe swizzle expected by the MMA consumer.
+Do not apply a generic transpose padding rule to an architecture-defined operand
+layout.
