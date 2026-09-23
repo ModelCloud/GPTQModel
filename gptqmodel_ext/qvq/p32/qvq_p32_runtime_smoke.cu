@@ -449,6 +449,8 @@ bool test_rank8_hadamard_epilogue() {
     std::vector<half> scale(n);
     std::vector<half> expected(kM * n);
     std::vector<half> actual(kM * n);
+    std::vector<half> base_expected(kM * n);
+    std::vector<half> base_actual(kM * n);
     for (int index = 0; index < base.size(); ++index) {
       base[index] = (static_cast<float>((index * 7) % 43) - 21.0f) / 64.0f;
     }
@@ -496,6 +498,30 @@ bool test_rank8_hadamard_epilogue() {
         expected[row * n + column] = __float2half_rn(value);
       }
     }
+    for (int row = 0; row < kM; ++row) {
+      for (int column = 0; column < n; ++column) {
+        float value = round_half(base[row * n + column]);
+        if (normalize_first) value = round_half(value / divisor);
+        row_values[column] = value;
+      }
+      for (int bit = 1; bit < n; bit <<= 1) {
+        for (int index = 0; index < n; ++index) {
+          const int peer = index ^ bit;
+          if (index < peer) {
+            const float first = row_values[index];
+            const float second = row_values[peer];
+            row_values[index] = round_half(first + second);
+            row_values[peer] = round_half(first - second);
+          }
+        }
+      }
+      for (int column = 0; column < n; ++column) {
+        float value = row_values[column];
+        if (!normalize_first) value = round_half(value * reciprocal);
+        value = round_half(value * __half2float(scale[column]));
+        base_expected[row * n + column] = __float2half_rn(value);
+      }
+    }
 
     float* device_base = nullptr;
     half* device_hidden = nullptr;
@@ -533,6 +559,29 @@ bool test_rank8_hadamard_epilogue() {
         }
       }
     }
+    if (ok) {
+      ok = qvq_p32_hadamard_epilogue(
+               device_base, device_scale, device_output, kM, n,
+               normalize_first, stream) == 0 &&
+          check_cuda(cudaMemcpyAsync(base_actual.data(), device_output,
+                                     base_actual.size() * sizeof(half),
+                                     cudaMemcpyDeviceToHost, stream),
+                     "copy base fused result") &&
+          check_cuda(cudaStreamSynchronize(stream), "sync base fused stream");
+    }
+    if (ok) {
+      for (int index = 0; index < base_actual.size(); ++index) {
+        if (__half_as_ushort(base_actual[index]) !=
+            __half_as_ushort(base_expected[index])) {
+          std::fprintf(stderr,
+                       "base Hadamard mismatch N=%d index=%d actual=%g expected=%g\n",
+                       n, index, __half2float(base_actual[index]),
+                       __half2float(base_expected[index]));
+          ok = false;
+          break;
+        }
+      }
+    }
     cudaFree(device_output);
     cudaFree(device_scale);
     cudaFree(device_rank8_b);
@@ -545,7 +594,7 @@ bool test_rank8_hadamard_epilogue() {
   }
   cudaStreamDestroy(stream);
   std::printf(
-      "qvq_p32_rank8_hadamard_epilogue=PASS M=%d N=16,32,64,512,2048,8192 bitwise_fp16\n",
+      "qvq_p32_rank8_hadamard_epilogue=PASS qvq_p32_hadamard_epilogue=PASS M=%d N=16,32,64,512,2048,8192 bitwise_fp16\n",
       kM);
   return true;
 }
