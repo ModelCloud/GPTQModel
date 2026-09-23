@@ -117,7 +117,7 @@ __device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
 }
 
 template <int RankCount>
-__global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_legacy_kernel(
+__global__ __launch_bounds__(1024) void p32_hadamard_epilogue_legacy_kernel(
     const float* base_output,
     const half* __restrict__ hidden,
     const float* __restrict__ rank8_b,
@@ -168,7 +168,7 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_legacy_kerne
 }
 
 template <int RankCount>
-__global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
+__global__ __launch_bounds__(1024) void p32_hadamard_epilogue_kernel(
     const float* base_output,
     const half* __restrict__ hidden,
     const float* __restrict__ rank8_b,
@@ -177,7 +177,7 @@ __global__ __launch_bounds__(1024) void p32_rank8_hadamard_epilogue_kernel(
     int size_m,
     int size_n,
     bool normalize_first) {
-  static_assert(RankCount == 8 || RankCount == 16 || RankCount == 24);
+  static_assert(RankCount == 0 || RankCount == 8 || RankCount == 16 || RankCount == 24);
   extern __shared__ half2 packed_values[];
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
@@ -350,8 +350,8 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
   do {                                                                     \
     const cudaError_t attribute_error = cudaFuncSetAttribute(               \
         packed_half2                                                       \
-            ? p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>               \
-            : p32_rank8_hadamard_epilogue_legacy_kernel<RANK_COUNT>,       \
+            ? p32_hadamard_epilogue_kernel<RANK_COUNT>                     \
+            : p32_hadamard_epilogue_legacy_kernel<RANK_COUNT>,             \
         cudaFuncAttributeMaxDynamicSharedMemorySize,                       \
         static_cast<int>(shared_bytes));                                   \
     if (attribute_error != cudaSuccess) {                                  \
@@ -359,7 +359,7 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
       return static_cast<int>(attribute_error);                            \
     }                                                                      \
     if (packed_half2) {                                                     \
-      p32_rank8_hadamard_epilogue_kernel<RANK_COUNT>                       \
+      p32_hadamard_epilogue_kernel<RANK_COUNT>                             \
           <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
               base_output, reinterpret_cast<const half*>(hidden),          \
               reinterpret_cast<const float*>(rank8_b),                     \
@@ -367,7 +367,7 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
               reinterpret_cast<half*>(output), size_m, size_n,             \
               normalize_first != 0);                                       \
     } else {                                                               \
-      p32_rank8_hadamard_epilogue_legacy_kernel<RANK_COUNT>                \
+      p32_hadamard_epilogue_legacy_kernel<RANK_COUNT>                      \
           <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>( \
               base_output, reinterpret_cast<const half*>(hidden),          \
               reinterpret_cast<const float*>(rank8_b),                     \
@@ -382,6 +382,66 @@ extern "C" int qvq_p32_rank8_hadamard_epilogue(
     case 24: QVQ_LAUNCH_RANK8_HADAMARD(24); break;
   }
 #undef QVQ_LAUNCH_RANK8_HADAMARD
+  const cudaError_t error = cudaGetLastError();
+  if (error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(error));
+    return static_cast<int>(error);
+  }
+  return 0;
+}
+
+extern "C" int qvq_p32_hadamard_epilogue(
+    const float* base_output,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_n,
+    int normalize_first,
+    void* stream) {
+  if (base_output == nullptr || scale_v == nullptr || output == nullptr ||
+      stream == nullptr) {
+    set_last_error("QVQ P32 Hadamard epilogue received a null device pointer");
+    return -1;
+  }
+  if (size_m < 1 || size_n < 16 || size_n > 16384 ||
+      (size_n & (size_n - 1)) != 0) {
+    set_last_error(
+        "QVQ P32 Hadamard epilogue requires M >= 1 and power-of-two N in [16,16384]");
+    return -1;
+  }
+  const bool packed_half2 = size_m <= 960;
+  const size_t shared_bytes = packed_half2
+      ? static_cast<size_t>(size_n) * sizeof(half)
+      : static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
+  const int threads = packed_half2
+      ? std::min(size_n / 2, 1024)
+      : std::min(size_n, 1024);
+  const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+  const cudaError_t attribute_error = cudaFuncSetAttribute(
+      packed_half2
+          ? p32_hadamard_epilogue_kernel<0>
+          : p32_hadamard_epilogue_legacy_kernel<0>,
+      cudaFuncAttributeMaxDynamicSharedMemorySize,
+      static_cast<int>(shared_bytes));
+  if (attribute_error != cudaSuccess) {
+    set_last_error(cudaGetErrorString(attribute_error));
+    return static_cast<int>(attribute_error);
+  }
+  if (packed_half2) {
+    p32_hadamard_epilogue_kernel<0>
+        <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>(
+            base_output, nullptr, nullptr,
+            reinterpret_cast<const half*>(scale_v),
+            reinterpret_cast<half*>(output), size_m, size_n,
+            normalize_first != 0);
+  } else {
+    p32_hadamard_epilogue_legacy_kernel<0>
+        <<<static_cast<unsigned>(size_m), threads, shared_bytes, cuda_stream>>>(
+            base_output, nullptr, nullptr,
+            reinterpret_cast<const half*>(scale_v),
+            reinterpret_cast<half*>(output), size_m, size_n,
+            normalize_first != 0);
+  }
   const cudaError_t error = cudaGetLastError();
   if (error != cudaSuccess) {
     set_last_error(cudaGetErrorString(error));

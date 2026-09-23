@@ -231,6 +231,18 @@ int qvq_p32_rank8_hadamard_epilogue(
     int normalize_first,
     void* stream);
 
+// Base-P32 counterpart to the fused rank-8 epilogue. It applies the identical
+// exact FP16 Hadamard and SV scaling contract without loading or evaluating
+// correction factors, so disabling rank-8 does not lose epilogue fusion.
+int qvq_p32_hadamard_epilogue(
+    const float* base_output,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_n,
+    int normalize_first,
+    void* stream);
+
 // Native rank-8 recovery projection. `input` is row-major FP32 [M,K],
 // `rank8_a` is row-major FP16 [K,rank_count], and `hidden` is row-major FP16
 // [M,rank_count]. The implementation accumulates in FP32 and rounds once to
