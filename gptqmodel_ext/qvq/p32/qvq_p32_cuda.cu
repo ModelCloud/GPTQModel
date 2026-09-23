@@ -14,44 +14,53 @@
 #include <cstring>
 #include <limits>
 
-// Production builds compile one (kernel family, transition width) shard per
-// CUDA object. Give every shard a private C entry-point name; the small
-// dispatcher object restores the stable public ABI after the shards link.
+// Production builds compile one (kernel family, transition width, workload
+// kind) shard per CUDA object. Give every shard a private C entry-point name;
+// the small dispatcher object restores the stable public ABI after linking.
+// Keep the shard selectors compile-time constants so NVCC can drop unrelated
+// template instantiations before device code generation.
 #if defined(QVQ_P32_SHARD_BITS)
-#if QVQ_P32_SHARD_BITS == 4
-#define qvq_p32_window qvq_p32_window_bits4
-#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits4
-#define qvq_p32_window_tuned qvq_p32_window_tuned_bits4
-#define qvq_p32_grouped_window qvq_p32_grouped_window_bits4
-#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits4
-#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits4
-#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits4
-#elif QVQ_P32_SHARD_BITS == 5
-#define qvq_p32_window qvq_p32_window_bits5
-#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits5
-#define qvq_p32_window_tuned qvq_p32_window_tuned_bits5
-#define qvq_p32_grouped_window qvq_p32_grouped_window_bits5
-#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits5
-#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits5
-#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits5
-#elif QVQ_P32_SHARD_BITS == 6
-#define qvq_p32_window qvq_p32_window_bits6
-#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits6
-#define qvq_p32_window_tuned qvq_p32_window_tuned_bits6
-#define qvq_p32_grouped_window qvq_p32_grouped_window_bits6
-#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits6
-#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits6
-#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits6
-#elif QVQ_P32_SHARD_BITS == 7
-#define qvq_p32_window qvq_p32_window_bits7
-#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits7
-#define qvq_p32_window_tuned qvq_p32_window_tuned_bits7
-#define qvq_p32_grouped_window qvq_p32_grouped_window_bits7
-#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits7
-#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits7
-#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits7
-#else
+#if QVQ_P32_SHARD_BITS < 4 || QVQ_P32_SHARD_BITS > 7
 #error "QVQ_P32_SHARD_BITS must be 4, 5, 6, or 7"
+#endif
+#define QVQ_P32_JOIN3_RAW(a, b, c) a##b##c
+#define QVQ_P32_JOIN3(a, b, c) QVQ_P32_JOIN3_RAW(a, b, c)
+#define QVQ_P32_JOIN4_RAW(a, b, c, d) a##b##c##d
+#define QVQ_P32_JOIN4(a, b, c, d) QVQ_P32_JOIN4_RAW(a, b, c, d)
+#define QVQ_P32_BIT_SYMBOL(name) \
+  QVQ_P32_JOIN3(name, _bits, QVQ_P32_SHARD_BITS)
+#if QVQ_P32_SHARD_FAMILY == 1
+#if QVQ_P32_SHARD_KIND == 1
+#define QVQ_P32_SHARD_SUFFIX _scalar
+#elif QVQ_P32_SHARD_KIND == 2
+#define QVQ_P32_SHARD_SUFFIX _block
+#elif QVQ_P32_SHARD_KIND == 3
+#define QVQ_P32_SHARD_SUFFIX _large_m2_low
+#elif QVQ_P32_SHARD_KIND == 4
+#define QVQ_P32_SHARD_SUFFIX _large_m2_high
+#elif QVQ_P32_SHARD_KIND == 5
+#define QVQ_P32_SHARD_SUFFIX _large_m_grid_low
+#elif QVQ_P32_SHARD_KIND == 6
+#define QVQ_P32_SHARD_SUFFIX _large_m_grid_high
+#else
+#error "standard P32 shard kind must select scalar, block, or an M/stage bucket"
+#endif
+#define QVQ_P32_STANDARD_SYMBOL(name) \
+  QVQ_P32_JOIN4(name, _bits, QVQ_P32_SHARD_BITS, QVQ_P32_SHARD_SUFFIX)
+#define qvq_p32_window QVQ_P32_STANDARD_SYMBOL(qvq_p32_window)
+#define qvq_p32_window_with_row_groups \
+  QVQ_P32_STANDARD_SYMBOL(qvq_p32_window_with_row_groups)
+#define qvq_p32_window_tuned QVQ_P32_STANDARD_SYMBOL(qvq_p32_window_tuned)
+#elif QVQ_P32_SHARD_FAMILY == 2
+#define qvq_p32_grouped_window QVQ_P32_BIT_SYMBOL(qvq_p32_grouped_window)
+#define qvq_p32_grouped_window_tuned \
+  QVQ_P32_BIT_SYMBOL(qvq_p32_grouped_window_tuned)
+#define qvq_p32_grouped_launch_plan \
+  QVQ_P32_BIT_SYMBOL(qvq_p32_grouped_launch_plan)
+#define qvq_p32_grouped_launch_plan_tuned \
+  QVQ_P32_BIT_SYMBOL(qvq_p32_grouped_launch_plan_tuned)
+#else
+#error "QVQ_P32_SHARD_FAMILY must be standard (1) or grouped (2)"
 #endif
 #define QVQ_P32_SHARD_API __attribute__((visibility("hidden")))
 #else
@@ -1306,82 +1315,14 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_kernel(
       0);
 }
 
-// Large prefills share one 2-D grid across all 16-row tiles.  This keeps the
-// ABI's global [split, M, N] workspace layout while avoiding one host launch
-// (and one reduction) per row chunk.
-template <
-    int TransitionBits,
-    int Threads,
-    int StageKTiles,
-    int StaticN = 0,
-    int StaticK = 0>
-__global__ __launch_bounds__(Threads) void p32_window_ampere_large_m_kernel(
-    const half* __restrict__ input,
-    const uint32_t* __restrict__ trellis,
-    const half* __restrict__ levels,
-    const uint8_t* __restrict__ bank_ids,
-    float* __restrict__ partial_output,
-    float* __restrict__ output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    const uint8_t* __restrict__ bank_alt_id) {
-  const int row_offset = static_cast<int>(blockIdx.y) * kRows;
-  const int local_m = min(kRows, size_m - row_offset);
-  if (local_m <= 0) return;
-  const int n_tiles = size_n / kTileColumns;
-  const int n_block = static_cast<int>(blockIdx.x);
-  const int split = static_cast<int>(blockIdx.z);
-#define QVQ_LARGE_M_BODY(FULL_ROWS) \
-  p32_window_ampere_kernel_body< \
-      TransitionBits, FULL_ROWS, 0, StaticN, Threads, Threads / 32, \
-      StageKTiles, false, false, StaticK>( \
-      input + static_cast<int64_t>(row_offset) * size_k, \
-      trellis, levels, bank_ids, partial_output, \
-      output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k, \
-      size_n, split_count, bank_alt_id, n_block, split, n_tiles, 0, 0, \
-      size_n, static_cast<int64_t>(row_offset) * size_n, \
-      static_cast<int64_t>(size_m) * size_n)
-  if (local_m == kRows) QVQ_LARGE_M_BODY(true);
-  else QVQ_LARGE_M_BODY(false);
-#undef QVQ_LARGE_M_BODY
-}
-
-// Reuse one packed N-tile set across two adjacent 16-row groups.  Each warp
-// keeps two accumulator fragments, so the second row group avoids repeating
-// trellis loads and state decoding while retaining the four-warp N layout.
-template <int TransitionBits, int StaticN, int StaticK = 0,
-          int StageKTiles = 1, int RowGroups = 2>
-__global__ __launch_bounds__(128) void p32_window_ampere_large_m2_kernel(
-    const half* __restrict__ input,
-    const uint32_t* __restrict__ trellis,
-    const half* __restrict__ levels,
-    const uint8_t* __restrict__ bank_ids,
-    float* __restrict__ partial_output,
-    float* __restrict__ output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    const uint8_t* __restrict__ bank_alt_id) {
-  const int row_offset = static_cast<int>(blockIdx.y) * (RowGroups * kRows);
-  const int local_m = min(RowGroups * kRows, size_m - row_offset);
-  if (local_m < RowGroups * kRows) return;
-  const int n_tiles = size_n / kTileColumns;
-  const int n_block = static_cast<int>(blockIdx.x);
-  const int split = static_cast<int>(blockIdx.z);
-  p32_window_ampere_kernel_body<
-      TransitionBits, true, 0, StaticN, 128, 4, StageKTiles,
-      true, false, StaticK, RowGroups,
-      (RowGroups == 16 && StageKTiles >= 3)>(
-      input + static_cast<int64_t>(row_offset) * size_k,
-      trellis, levels, bank_ids, partial_output,
-      output + static_cast<int64_t>(row_offset) * size_n, local_m, size_k,
-      size_n, split_count, bank_alt_id, n_block, split, n_tiles, 0, 0,
-      size_n, static_cast<int64_t>(row_offset) * size_n,
-      static_cast<int64_t>(size_m) * size_n);
-}
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 5 || QVQ_P32_SHARD_KIND == 6
+#include "qvq_p32_large_m_grid_kernel.cuh"
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 3 || QVQ_P32_SHARD_KIND == 4
+#include "qvq_p32_large_m2_kernel.cuh"
+#endif
 
 constexpr int kMaxGroupedP32Segments = 3;
 
@@ -2782,7 +2723,12 @@ int launch_p32_config_variant(
   const auto* bank_bytes = reinterpret_cast<const uint8_t*>(bank_ids);
   const auto* bank_alt_byte = reinterpret_cast<const uint8_t*>(bank_alt_id);
 
+#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 1
+#if defined(QVQ_P32_SHARD_KIND)
+  {
+#else
   if (kernel_variant == QVQ_P32_VARIANT_SCALAR) {
+#endif
     bool launched_static = false;
     if constexpr (Threads == kM1Threads) {
       if (static_n) {
@@ -3036,7 +2982,16 @@ int launch_p32_config_variant(
           return -1;
       }
     }
+#if defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 1
+  }
+#endif
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 2
+#if defined(QVQ_P32_SHARD_KIND)
+  {
+#else
   } else if (kernel_variant == QVQ_P32_VARIANT_BLOCK) {
+#endif
     if (static_n && (size_m == 8 || size_m == 16) &&
         launch_static_n_block_kernel<TransitionBits, Threads, StageKTiles>(
             input_half, trellis_words, levels_half, bank_bytes, partial_output, output,
@@ -3064,10 +3019,16 @@ int launch_p32_config_variant(
           break;
       }
     }
+#endif
+#if defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 2
+  }
+#endif
+#if !defined(QVQ_P32_SHARD_KIND)
   } else {
     set_last_error("QVQ P32 received an unknown kernel variant");
     return -1;
   }
+#endif
 
   if (split_count > 1 &&
       reduction_mode == QVQ_P32_REDUCTION_NATIVE) {
@@ -3155,224 +3116,17 @@ int launch_p32_config(
 // so XLA/PJRT does not pay a launch boundary for every row chunk. Both large-M
 // producers use global M*N split-plane strides, retaining canonical [S,M,N]
 // partials across row chunks. The public dispatcher owns optional reduction.
-template <int TransitionBits, int Threads, int StageKTiles, int StaticN,
-          int StaticK = 0>
-int launch_p32_large_m_grid(
-    const half* input,
-    const uint32_t* trellis,
-    const half* levels,
-    const uint8_t* bank_ids,
-    const uint8_t* bank_alt_id,
-    float* output,
-    float* partial_output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    cudaStream_t stream) {
-  constexpr int tiles_per_block = Threads / 32;
-  const int n_tiles = size_n / kTileColumns;
-  const dim3 grid(
-      static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
-      static_cast<unsigned>((size_m + kRows - 1) / kRows),
-      static_cast<unsigned>(split_count));
-  p32_window_ampere_large_m_kernel<
-      TransitionBits, Threads, StageKTiles, StaticN, StaticK>
-      <<<grid, Threads, 0, stream>>>(
-      input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
-      size_n, split_count, bank_alt_id);
-  const cudaError_t error = cudaGetLastError();
-  if (error != cudaSuccess) {
-    set_last_error(cudaGetErrorString(error));
-    return static_cast<int>(error);
-  }
-  return 0;
-}
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 5 || QVQ_P32_SHARD_KIND == 6
+#include "qvq_p32_large_m_grid_launch.cuh"
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 3 || QVQ_P32_SHARD_KIND == 4
+#include "qvq_p32_large_m2_launch.cuh"
+#endif
 
-template <int TransitionBits, int Threads, int StageKTiles>
-int launch_p32_large_m_grid_dispatch(
-    const half* input,
-    const uint32_t* trellis,
-    const half* levels,
-    const uint8_t* bank_ids,
-    const uint8_t* bank_alt_id,
-    float* output,
-    float* partial_output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    bool static_n,
-    cudaStream_t stream) {
-  if (static_n && size_k == 5120) {
-    switch (size_n) {
-#define QVQ_LARGE_M_STATIC_N(N) \
-      case N: \
-        return launch_p32_large_m_grid< \
-            TransitionBits, Threads, StageKTiles, N, 5120>( \
-            input, trellis, levels, bank_ids, bank_alt_id, output, \
-            partial_output, size_m, size_k, size_n, split_count, stream)
-      QVQ_LARGE_M_STATIC_N(512);
-      QVQ_LARGE_M_STATIC_N(2048);
-      QVQ_LARGE_M_STATIC_N(8192);
-      QVQ_LARGE_M_STATIC_N(1024);
-      QVQ_LARGE_M_STATIC_N(5120);
-      QVQ_LARGE_M_STATIC_N(6144);
-      QVQ_LARGE_M_STATIC_N(10240);
-      QVQ_LARGE_M_STATIC_N(12288);
-      QVQ_LARGE_M_STATIC_N(17408);
-#undef QVQ_LARGE_M_STATIC_N
-      default:
-        set_last_error("QVQ P32 large-M static_n does not support this N");
-        return -1;
-    }
-  }
-  if (static_n) {
-    switch (size_n) {
-#define QVQ_LARGE_M_STATIC_N(N) \
-      case N: \
-        return launch_p32_large_m_grid< \
-            TransitionBits, Threads, StageKTiles, N, 0>( \
-            input, trellis, levels, bank_ids, bank_alt_id, output, \
-            partial_output, size_m, size_k, size_n, split_count, stream)
-      QVQ_LARGE_M_STATIC_N(512);
-      QVQ_LARGE_M_STATIC_N(2048);
-      QVQ_LARGE_M_STATIC_N(8192);
-      QVQ_LARGE_M_STATIC_N(1024);
-      QVQ_LARGE_M_STATIC_N(5120);
-      QVQ_LARGE_M_STATIC_N(6144);
-      QVQ_LARGE_M_STATIC_N(10240);
-      QVQ_LARGE_M_STATIC_N(12288);
-      QVQ_LARGE_M_STATIC_N(17408);
-#undef QVQ_LARGE_M_STATIC_N
-      default:
-        set_last_error("QVQ P32 large-M static_n does not support this N");
-        return -1;
-    }
-  }
-  return launch_p32_large_m_grid<
-      TransitionBits, Threads, StageKTiles, 0>(
-      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
-      size_m, size_k, size_n, split_count, stream);
-}
-
-template <int TransitionBits, int StageKTiles, int StaticN, int StaticK = 0,
-          int RowGroups = 2>
-int launch_p32_large_m2_grid(
-    const half* input,
-    const uint32_t* trellis,
-    const half* levels,
-    const uint8_t* bank_ids,
-    const uint8_t* bank_alt_id,
-    float* output,
-    float* partial_output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    cudaStream_t stream) {
-  constexpr int tiles_per_block = 4;
-  const int n_tiles = size_n / kTileColumns;
-  const dim3 grid(
-      static_cast<unsigned>((n_tiles + tiles_per_block - 1) / tiles_per_block),
-      static_cast<unsigned>(size_m / (RowGroups * kRows)),
-      static_cast<unsigned>(split_count));
-  constexpr bool kDynamicInputTile = RowGroups == 16 && StageKTiles >= 3;
-  constexpr int kDynamicInputBytes =
-      kDynamicInputTile
-          ? 2 * RowGroups * kRows * StageKTiles * kTileRows * sizeof(half)
-          : 0;
-  if constexpr (kDynamicInputTile) {
-    const cudaError_t attribute_error = cudaFuncSetAttribute(
-        p32_window_ampere_large_m2_kernel<
-            TransitionBits, StaticN, StaticK, StageKTiles, RowGroups>,
-        cudaFuncAttributeMaxDynamicSharedMemorySize,
-        kDynamicInputBytes);
-    if (attribute_error != cudaSuccess) {
-      set_last_error(cudaGetErrorString(attribute_error));
-      return static_cast<int>(attribute_error);
-    }
-  }
-  p32_window_ampere_large_m2_kernel<
-      TransitionBits, StaticN, StaticK, StageKTiles, RowGroups>
-      <<<grid, 128, kDynamicInputBytes, stream>>>(
-      input, trellis, levels, bank_ids, partial_output, output, size_m, size_k,
-      size_n, split_count, bank_alt_id);
-  const cudaError_t error = cudaGetLastError();
-  if (error != cudaSuccess) {
-    set_last_error(cudaGetErrorString(error));
-    return static_cast<int>(error);
-  }
-  return 0;
-}
-
-template <int TransitionBits, int StageKTiles, int RowGroups = 2>
-int launch_p32_large_m2_grid_dispatch(
-    const half* input,
-    const uint32_t* trellis,
-    const half* levels,
-    const uint8_t* bank_ids,
-    const uint8_t* bank_alt_id,
-    float* output,
-    float* partial_output,
-    int size_m,
-    int size_k,
-    int size_n,
-    int split_count,
-    bool static_n,
-    cudaStream_t stream) {
-  if (static_n && size_k == 5120) {
-    switch (size_n) {
-#define QVQ_LARGE_M2_STATIC_N(N) \
-      case N: \
-        return launch_p32_large_m2_grid< \
-            TransitionBits, StageKTiles, N, 5120, RowGroups>( \
-            input, trellis, levels, bank_ids, bank_alt_id, output, \
-            partial_output, size_m, size_k, size_n, split_count, stream)
-      QVQ_LARGE_M2_STATIC_N(512);
-      QVQ_LARGE_M2_STATIC_N(2048);
-      QVQ_LARGE_M2_STATIC_N(8192);
-      QVQ_LARGE_M2_STATIC_N(1024);
-      QVQ_LARGE_M2_STATIC_N(5120);
-      QVQ_LARGE_M2_STATIC_N(6144);
-      QVQ_LARGE_M2_STATIC_N(10240);
-      QVQ_LARGE_M2_STATIC_N(12288);
-      QVQ_LARGE_M2_STATIC_N(17408);
-#undef QVQ_LARGE_M2_STATIC_N
-      default:
-        set_last_error("QVQ P32 large-M2 static_n does not support this N");
-        return -1;
-    }
-  }
-  if (static_n) {
-    switch (size_n) {
-#define QVQ_LARGE_M2_STATIC_N(N) \
-      case N: \
-        return launch_p32_large_m2_grid< \
-            TransitionBits, StageKTiles, N, 0, RowGroups>( \
-            input, trellis, levels, bank_ids, bank_alt_id, output, \
-            partial_output, size_m, size_k, size_n, split_count, stream)
-      QVQ_LARGE_M2_STATIC_N(512);
-      QVQ_LARGE_M2_STATIC_N(2048);
-      QVQ_LARGE_M2_STATIC_N(8192);
-      QVQ_LARGE_M2_STATIC_N(1024);
-      QVQ_LARGE_M2_STATIC_N(5120);
-      QVQ_LARGE_M2_STATIC_N(6144);
-      QVQ_LARGE_M2_STATIC_N(10240);
-      QVQ_LARGE_M2_STATIC_N(12288);
-      QVQ_LARGE_M2_STATIC_N(17408);
-#undef QVQ_LARGE_M2_STATIC_N
-      default:
-        set_last_error("QVQ P32 large-M2 static_n does not support this N");
-        return -1;
-    }
-  }
-  return launch_p32_large_m2_grid<
-      TransitionBits, StageKTiles, 0, 0, RowGroups>(
-      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
-      size_m, size_k, size_n, split_count, stream);
-}
-
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    (QVQ_P32_SHARD_KIND >= 3 && QVQ_P32_SHARD_KIND <= 6)
 template <int TransitionBits>
 int launch_p32_large_m(
     const void* input,
@@ -3407,59 +3161,109 @@ int launch_p32_large_m(
        (size_n == 512 || size_n == 1024 || size_n == 2048 ||
         size_n == 5120 || size_n == 6144 || size_n == 8192 ||
         size_n == 10240 || size_n == 12288 || size_n == 17408));
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 3 || QVQ_P32_SHARD_KIND == 4
   const bool qwen38_27b_shape =
       (size_k == 5120 &&
        (size_n == 1024 || size_n == 6144 || size_n == 10240 ||
         size_n == 12288 || size_n == 17408)) ||
       ((size_k == 6144 || size_k == 17408) && size_n == 5120);
+#endif
+  const bool use_large_m2 = config.threads == 128 &&
+      size_m % (2 * kRows) == 0 && row_groups != 1;
   int status = -1;
-  if (config.threads == 128 && size_m % (2 * kRows) == 0 &&
-      row_groups != 1) {
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 3 || QVQ_P32_SHARD_KIND == 4
+  if (use_large_m2) {
+#if defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 3
+    if (config.stage_k_tiles > 2) {
+      set_last_error("QVQ P32 large-M2 low shard requires stage_k_tiles in [1, 2]");
+      return -1;
+    }
+#elif defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 4
+    if (config.stage_k_tiles < 3) {
+      set_last_error("QVQ P32 large-M2 high shard requires stage_k_tiles in [3, 4]");
+      return -1;
+    }
+#endif
+#define QVQ_LARGE_M2_LAUNCH_STAGE(STAGE, ROW_GROUPS) \
+    status = launch_p32_large_m2_grid_dispatch<TransitionBits, STAGE, ROW_GROUPS>( \
+        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+        output, partial_output, size_m, size_k, size_n, config.split_count, \
+        use_static_n, cuda_stream)
+#if !defined(QVQ_P32_SHARD_KIND)
 #define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
     switch (config.stage_k_tiles) { \
       case 1: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 1, ROW_GROUPS>( \
-            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-            output, partial_output, size_m, size_k, size_n, config.split_count, \
-            use_static_n, cuda_stream); \
+        QVQ_LARGE_M2_LAUNCH_STAGE(1, ROW_GROUPS); \
         break; \
       case 2: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2, ROW_GROUPS>( \
-            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-            output, partial_output, size_m, size_k, size_n, config.split_count, \
-            use_static_n, cuda_stream); \
+        QVQ_LARGE_M2_LAUNCH_STAGE(2, ROW_GROUPS); \
         break; \
       case 3: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3, ROW_GROUPS>( \
-            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-            output, partial_output, size_m, size_k, size_n, config.split_count, \
-            use_static_n, cuda_stream); \
+        QVQ_LARGE_M2_LAUNCH_STAGE(3, ROW_GROUPS); \
         break; \
       case 4: \
-        status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4, ROW_GROUPS>( \
-            input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-            output, partial_output, size_m, size_k, size_n, config.split_count, \
-            use_static_n, cuda_stream); \
+        QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS); \
         break; \
       default: \
         set_last_error("QVQ P32 large-M2 stage_k_tiles must be in [1, 4]"); \
         return -1; \
     }
+#elif QVQ_P32_SHARD_KIND == 3
+#define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
+    switch (config.stage_k_tiles) { \
+      case 1: \
+        QVQ_LARGE_M2_LAUNCH_STAGE(1, ROW_GROUPS); \
+        break; \
+      case 2: \
+        QVQ_LARGE_M2_LAUNCH_STAGE(2, ROW_GROUPS); \
+        break; \
+      default: \
+        set_last_error("QVQ P32 large-M2 low shard requires stage_k_tiles in [1, 2]"); \
+        return -1; \
+    }
+#elif QVQ_P32_SHARD_KIND == 4
+#define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
+    switch (config.stage_k_tiles) { \
+      case 3: \
+        QVQ_LARGE_M2_LAUNCH_STAGE(3, ROW_GROUPS); \
+        break; \
+      case 4: \
+        QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS); \
+        break; \
+      default: \
+        set_last_error("QVQ P32 large-M2 high shard requires stage_k_tiles in [3, 4]"); \
+        return -1; \
+    }
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 3
 #define QVQ_LARGE_M2_STAGE2(ROW_GROUPS) \
-    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 2, ROW_GROUPS>( \
-        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-        output, partial_output, size_m, size_k, size_n, config.split_count, \
-        use_static_n, cuda_stream)
+    QVQ_LARGE_M2_LAUNCH_STAGE(2, ROW_GROUPS)
+#else
+#define QVQ_LARGE_M2_STAGE2(ROW_GROUPS) \
+    do { \
+      set_last_error("QVQ P32 large-M2 high shard does not support stage 2"); \
+      return -1; \
+    } while (0)
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 4
 #define QVQ_LARGE_M2_STAGE3(ROW_GROUPS) \
-    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 3, ROW_GROUPS>( \
-        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-        output, partial_output, size_m, size_k, size_n, config.split_count, \
-        use_static_n, cuda_stream)
+    QVQ_LARGE_M2_LAUNCH_STAGE(3, ROW_GROUPS)
 #define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
-    status = launch_p32_large_m2_grid_dispatch<TransitionBits, 4, ROW_GROUPS>( \
-        input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-        output, partial_output, size_m, size_k, size_n, config.split_count, \
-        use_static_n, cuda_stream)
+    QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS)
+#else
+#define QVQ_LARGE_M2_STAGE3(ROW_GROUPS) \
+    do { \
+      set_last_error("QVQ P32 large-M2 low shard does not support stage 3"); \
+      return -1; \
+    } while (0)
+#define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
+    do { \
+      set_last_error("QVQ P32 large-M2 low shard does not support stage 4"); \
+      return -1; \
+    } while (0)
+#endif
     if (row_groups == 16) {
       const bool supported_stage2 =
           config.stage_k_tiles == 2 &&
@@ -3562,41 +3366,88 @@ int launch_p32_large_m(
 #undef QVQ_LARGE_M2_STAGE3
 #undef QVQ_LARGE_M2_STAGE2
 #undef QVQ_LARGE_M2_STAGE
+#undef QVQ_LARGE_M2_LAUNCH_STAGE
   }
+#endif
+#if defined(QVQ_P32_SHARD_KIND) && \
+    (QVQ_P32_SHARD_KIND == 3 || QVQ_P32_SHARD_KIND == 4)
+  set_last_error("QVQ P32 large-M2 shard requires 128 threads and aligned M");
+  return -1;
+#elif defined(QVQ_P32_SHARD_KIND) && \
+    (QVQ_P32_SHARD_KIND == 5 || QVQ_P32_SHARD_KIND == 6)
+  if (use_large_m2) {
+    set_last_error("QVQ P32 large-M grid shard received a grouped-row config");
+    return -1;
+  }
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 5 || QVQ_P32_SHARD_KIND == 6
+#if defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 5
+  if (config.stage_k_tiles > 2) {
+    set_last_error("QVQ P32 large-M grid low shard requires stage_k_tiles in [1, 2]");
+    return -1;
+  }
+#elif defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 6
+  if (config.stage_k_tiles < 3) {
+    set_last_error("QVQ P32 large-M grid high shard requires stage_k_tiles in [3, 4]");
+    return -1;
+  }
+#endif
   if (row_groups != QVQ_P32_ROW_GROUPS_AUTO && row_groups != 1) {
     set_last_error("QVQ P32 multi-row groups require 128 threads and aligned M");
     return -1;
   }
+#define QVQ_LARGE_M_GRID_LAUNCH(THREADS, STAGE) \
+  status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, STAGE>( \
+      input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
+      output, partial_output, size_m, size_k, size_n, config.split_count, \
+      use_static_n, cuda_stream)
+#if !defined(QVQ_P32_SHARD_KIND)
 #define QVQ_LARGE_M_STAGE(THREADS) \
   switch (config.stage_k_tiles) { \
     case 1: \
-      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 1>( \
-          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-          output, partial_output, size_m, size_k, size_n, config.split_count, \
-          use_static_n, cuda_stream); \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 1); \
       break; \
     case 2: \
-      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 2>( \
-          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-          output, partial_output, size_m, size_k, size_n, config.split_count, \
-          use_static_n, cuda_stream); \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 2); \
       break; \
     case 3: \
-      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 3>( \
-          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-          output, partial_output, size_m, size_k, size_n, config.split_count, \
-          use_static_n, cuda_stream); \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 3); \
       break; \
     case 4: \
-      status = launch_p32_large_m_grid_dispatch<TransitionBits, THREADS, 4>( \
-          input_half, trellis_words, levels_half, bank_bytes, bank_alt_byte, \
-          output, partial_output, size_m, size_k, size_n, config.split_count, \
-          use_static_n, cuda_stream); \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 4); \
       break; \
     default: \
       set_last_error("QVQ P32 large-M stage_k_tiles must be in [1, 4]"); \
       return -1; \
   }
+#elif QVQ_P32_SHARD_KIND == 5
+#define QVQ_LARGE_M_STAGE(THREADS) \
+  switch (config.stage_k_tiles) { \
+    case 1: \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 1); \
+      break; \
+    case 2: \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 2); \
+      break; \
+    default: \
+      set_last_error("QVQ P32 large-M grid low shard requires stage_k_tiles in [1, 2]"); \
+      return -1; \
+  }
+#elif QVQ_P32_SHARD_KIND == 6
+#define QVQ_LARGE_M_STAGE(THREADS) \
+  switch (config.stage_k_tiles) { \
+    case 3: \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 3); \
+      break; \
+    case 4: \
+      QVQ_LARGE_M_GRID_LAUNCH(THREADS, 4); \
+      break; \
+    default: \
+      set_last_error("QVQ P32 large-M grid high shard requires stage_k_tiles in [3, 4]"); \
+      return -1; \
+  }
+#endif
   switch (config.threads) {
     case 64:
       QVQ_LARGE_M_STAGE(64);
@@ -3612,8 +3463,11 @@ int launch_p32_large_m(
       return -1;
   }
 #undef QVQ_LARGE_M_STAGE
+#undef QVQ_LARGE_M_GRID_LAUNCH
   return status;
+#endif
 }
+#endif
 
 #if 0  // Rank-8 recovery is compiled independently in qvq_p32_rank8.cu.
 template <int RankCount>
@@ -3969,49 +3823,44 @@ static int qvq_p32_window_impl(
       reduction_mode, QVQ_P32_TUNING_AUTO, QVQ_P32_N_TILES_AUTO,
       QVQ_P32_WARPS_AUTO};
   int status = 0;
+#define QVQ_P32_STANDARD_CONFIG(BITS) \
+  launch_p32_config<BITS>( \
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output, \
+      size_m, size_k, size_n, config, stream)
+#define QVQ_P32_STANDARD_LARGE_M(BITS) \
+  launch_p32_large_m<BITS>( \
+      input, trellis, levels, bank_ids, bank_alt_id, output, partial_output, \
+      size_m, size_k, size_n, config, row_groups, stream)
+#if !defined(QVQ_P32_SHARD_KIND)
+#define QVQ_P32_STANDARD_LAUNCH(BITS) \
+  (size_m <= 16 ? QVQ_P32_STANDARD_CONFIG(BITS) \
+                : QVQ_P32_STANDARD_LARGE_M(BITS))
+#elif QVQ_P32_SHARD_KIND == 1 || QVQ_P32_SHARD_KIND == 2
+#define QVQ_P32_STANDARD_LAUNCH(BITS) QVQ_P32_STANDARD_CONFIG(BITS)
+#elif QVQ_P32_SHARD_KIND >= 3 && QVQ_P32_SHARD_KIND <= 6
+#define QVQ_P32_STANDARD_LAUNCH(BITS) QVQ_P32_STANDARD_LARGE_M(BITS)
+#else
+#error "invalid standard P32 shard kind"
+#endif
   switch (transition_bits) {
 #if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 4
     case QVQ_P32_TRANSITION_BITS_MIN:
-      status = size_m <= 16
-          ? launch_p32_config<4>(input, trellis, levels, bank_ids, bank_alt_id,
-                                 output, partial_output, size_m, size_k, size_n,
-                                 config, stream)
-          : launch_p32_large_m<4>(input, trellis, levels, bank_ids, bank_alt_id,
-                                  output, partial_output, size_m, size_k, size_n,
-                                  config, row_groups, stream);
+      status = QVQ_P32_STANDARD_LAUNCH(4);
       break;
 #endif
 #if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 5
     case 5:
-      status = size_m <= 16
-          ? launch_p32_config<5>(input, trellis, levels, bank_ids, bank_alt_id,
-                                 output, partial_output, size_m, size_k, size_n,
-                                 config, stream)
-          : launch_p32_large_m<5>(input, trellis, levels, bank_ids, bank_alt_id,
-                                  output, partial_output, size_m, size_k, size_n,
-                                  config, row_groups, stream);
+      status = QVQ_P32_STANDARD_LAUNCH(5);
       break;
 #endif
 #if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 6
     case 6:
-      status = size_m <= 16
-          ? launch_p32_config<6>(input, trellis, levels, bank_ids, bank_alt_id,
-                                 output, partial_output, size_m, size_k, size_n,
-                                 config, stream)
-          : launch_p32_large_m<6>(input, trellis, levels, bank_ids, bank_alt_id,
-                                  output, partial_output, size_m, size_k, size_n,
-                                  config, row_groups, stream);
+      status = QVQ_P32_STANDARD_LAUNCH(6);
       break;
 #endif
 #if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 7
     case QVQ_P32_TRANSITION_BITS_MAX:
-      status = size_m <= 16
-          ? launch_p32_config<7>(input, trellis, levels, bank_ids, bank_alt_id,
-                                 output, partial_output, size_m, size_k, size_n,
-                                 config, stream)
-          : launch_p32_large_m<7>(input, trellis, levels, bank_ids, bank_alt_id,
-                                  output, partial_output, size_m, size_k, size_n,
-                                  config, row_groups, stream);
+      status = QVQ_P32_STANDARD_LAUNCH(7);
       break;
 #endif
     default:
@@ -4019,6 +3868,9 @@ static int qvq_p32_window_impl(
       status = -1;
       break;
   }
+#undef QVQ_P32_STANDARD_LAUNCH
+#undef QVQ_P32_STANDARD_LARGE_M
+#undef QVQ_P32_STANDARD_CONFIG
   if (status == 0 && size_m > QVQ_P32_GROUPED_M_MAX &&
       reduction_mode == QVQ_P32_REDUCTION_NATIVE && split_count > 1) {
     launch_split_reduction(partial_output, output, size_m, size_k, size_n,
