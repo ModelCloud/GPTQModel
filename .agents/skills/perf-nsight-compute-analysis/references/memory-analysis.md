@@ -54,7 +54,7 @@ The Memory Chart visualizes the GPU memory hierarchy as a diagram of interconnec
 
 ### Device Memory (DRAM)
 - Off-chip, highest capacity, highest latency
-- Highest bandwidth when access is coalesced (128-byte transactions)
+- Highest bandwidth when warp accesses are coalesced into the minimum useful memory sectors/transactions; reason from requested versus transferred bytes and sectors rather than a single fixed transaction size.
 
 ## Key Memory Metrics
 
@@ -80,7 +80,7 @@ Low hit rates indicate:
 
 ### Coalescing Efficiency
 
-Global memory loads/stores should coalesce into minimal 128-byte transactions. Metrics to watch:
+Global memory loads/stores should coalesce into the minimum set of sectors/transactions for the addresses requested by one warp instruction. On modern NVIDIA GPUs, L1TEX sector accounting is naturally 32-byte-granular; a 128-byte contiguous warp span commonly touches four sectors. Metrics to watch:
 
 | Metric | Ideal | Problem Indicator |
 |--------|-------|-------------------|
@@ -94,14 +94,16 @@ Global memory loads/stores should coalesce into minimal 128-byte transactions. M
 
 ### Shared Memory Bank Conflicts
 
-Shared memory has 32 banks. Conflicts occur when multiple threads in a warp access different addresses in the same bank.
+A100 and newer shared memory has 32 banks with 4-byte bank granularity for ordinary accesses:
+`bank=floor(byte_address/4)%32`. Conflicts occur when one warp memory request needs different words from the same bank. Same-address accesses can broadcast, and adjacent FP16 values share a 32-bit bank word, so "lane N maps to bank N" is not generally true for half data.
 
 **Metric:** Shared memory wavefronts per request > 1 indicates conflicts.
 
 **Fixes:**
-- Pad shared memory arrays to avoid stride conflicts
-- Rearrange access patterns for conflict-free access
-- Use `__shfl_*` warp shuffle when possible
+- For regular transpose/strided patterns, pad or use the architecture/CuTe shared-memory swizzle that matches the consumer.
+- For arbitrary LUT indices, derive the bank equation; index-only swizzles cannot guarantee uniqueness for random per-lane indices. Lane/pair replication can bound or eliminate conflicts but costs shared capacity.
+- Use `__shfl_*` for same-warp routing when it is cheaper than shared traffic.
+- Measure complete-kernel residency: a conflict-free table can still lose by increasing shared-memory footprint.
 
 ## Memory Bottleneck Diagnosis
 
@@ -159,3 +161,16 @@ Load a tile of data from global memory into shared memory, compute on it, then w
 
 ### Precision Reduction
 Use FP16/BF16/INT8 where accuracy permits. Halves/quarters the memory bandwidth requirement per element.
+
+
+## A100+ memory-analysis cautions
+
+- Low DRAM throughput with low SM throughput is not enough to diagnose "memory bound".
+  Inspect scheduler stalls, eligible warps, executed instructions, L1/L2 behavior,
+  shared wavefronts, and tensor-pipe issue. Compressed quantized decoders often
+  consume few HBM bytes and are dominated by integer decode/address/dependency work.
+- Natural vector alignment and coalescing are separate. A warp of individually
+  aligned `uint4` loads can still scatter over many sectors.
+- `is_contiguous()` is not a hardware metric. Inspect the lane-varying stride.
+- TMA/WGMMA/TCGen05 operands can use architecture-defined swizzled layouts; do
+  not "fix" them with generic +1 padding without checking the descriptor/layout.

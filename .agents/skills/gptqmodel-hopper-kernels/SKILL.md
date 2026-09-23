@@ -7,7 +7,7 @@ description: Optimize, review, port, or validate GPT-QModel CUDA and Triton quan
 
 Use this skill with `$gptqmodel-cuda-kernels`. Separate portable Hopper code generation from architecture-accelerated code, and separate build evidence from runtime evidence.
 
-Read [references/hopper-notes.md](references/hopper-notes.md) before choosing `sm_90` or `sm_90a`.
+Read [references/hopper-notes.md](references/hopper-notes.md) and the shared [NVIDIA A100+ architecture contract](../gptqmodel-cuda-kernels/references/nvidia-a100-plus.md) before choosing `sm_90` or `sm_90a`, TMA layouts, WGMMA ownership, or shared-memory swizzles.
 
 ## Establish available evidence
 
@@ -28,7 +28,17 @@ The 2026-07-20 audit host had no Hopper GPU. An actual H100 run is therefore req
 4. Treat FP8 format, scaling, accumulation, saturation, and output dtype as explicit quantization contracts. Native FP8 throughput does not remove the need for accuracy and save/load tests.
 5. Derive SM count, cluster limits, shared-memory opt-in, and launch bounds from the live device rather than a canonical H100 SKU.
 
+## Hopper memory/Tensor Core rules
+
+- TMA is most valuable when it deletes per-thread address/load instructions and overlaps a sufficiently large tile. Do not infer a win from "asynchronous" alone.
+- Use TMA swizzle/CuTe shared layouts for structured operands when they reduce measured wavefronts; do not swizzle data-dependent LUTs blindly.
+- WGMMA source ownership is a design axis: register-source can save SMEM traffic but raise register/decode pressure; shared-source can enable reuse but can force one CTA/SM.
+- Keep WGMMA fragment lifetime and `warpgroup_arrive/commit/wait` ordering explicit. Reusing a fragment before the wait is a correctness bug.
+- Hopper's 227-KiB per-block SMEM ceiling makes "eliminate all bank conflicts by replication" especially dangerous for large reuse tiles. Compare whole-CTA residency and end-to-end latency.
+- A low DRAM percentage can be healthy for compressed/reuse-heavy kernels. Check scheduler eligibility, long scoreboard, shared wavefronts, integer decode instructions, and WGMMA issue before chasing HBM GB/s.
+
 ## Tune Hopper features only when justified
+
 
 - Use TMA for multidimensional transfers whose descriptors and alignment are stable enough to amortize setup.
 - Use clusters and distributed shared memory only when cross-block cooperation outweighs scheduling constraints and reduced residency.
@@ -53,7 +63,7 @@ Use these primitives to remove address generation, redundant transfers, or synch
 
 ### TMA and warp specialization
 
-TMA copies are started by one thread (or a small subset of a warp) and executed asynchronously by the hardware unit. The remaining warp threads do not have to compute addresses or move individual bytes; they can either wait on the transfer or continue with unrelated work. This is one instance of warp specialization: different warps in the same kernel can be assigned different roles (load, compute, store, tile scheduling) and hand off data through `__syncwarp()` or cluster barriers.
+TMA copies can be initiated by one elected thread and are executed asynchronously by the hardware unit. Other warps can perform independent work while the transfer is in flight. This is one instance of warp specialization, but the handoff scope must be correct: `__syncwarp()` synchronizes only one warp; producer/consumer warps in the same CTA need the matching CTA/mbarrier pipeline, and cross-CTA cooperation needs a kernel/cooperative-grid boundary or cluster-scoped primitive. The TMA transaction-byte count, stage ownership, async-proxy completion, and buffer-reuse point are part of the correctness proof.
 
 See the modern SIMT/warp-specialization note in `$gptqmodel-cuda-kernels` for the Volta+ independent-thread-scheduling caveats that affect cross-warp handoffs, including why legacy assumptions that “all threads in a warp move together” can break.
 

@@ -1,6 +1,6 @@
 ---
 name: gptqmodel-cuda-kernels
-description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA, C++, CUTLASS, or Triton kernels and their JIT wrappers. Use for quantized kernel correctness, extension registration, launch validation, illegal memory access, architecture gating, or performance work; combine with the Ampere or Hopper skill for architecture-specific tuning.
+description: Build, port, optimize, review, benchmark, or debug GPT-QModel CUDA, C++, CUTLASS, or Triton kernels and their JIT wrappers for the primary NVIDIA A100-and-newer target. Use for quantized kernel correctness, extension registration, launch validation, memory/layout/synchronization bugs, architecture gating, or performance work; combine with the Ampere, Hopper, or Blackwell skill for architecture-specific tuning.
 ---
 
 # GPT-QModel CUDA kernels
@@ -11,6 +11,19 @@ and the locked numerical contract; apply it before selecting lower precision or 
 All kernel code and kernel-library integration must satisfy
 [graph-safe-kernels](../graph-safe-kernels/SKILL.md), including native and external
 capture ownership. Read that skill before changing the runtime path.
+
+## NVIDIA A100+ target envelope
+
+GPU kernel-performance work defaults to NVIDIA compute capability 8.0 and newer. Read
+[references/nvidia-a100-plus.md](references/nvidia-a100-plus.md) before changing CUDA
+memory layout, shared-memory staging, warp/CTA synchronization, asynchronous copy,
+streams, Tensor Core ownership, or occupancy policy. It is the shared architecture
+contract for A100/Ampere, H100/H200/Hopper, and Blackwell.
+
+Pre-Ampere CUDA is compatibility/fallback scope unless the task explicitly targets it.
+AMD/ROCm and Apple/Metal optimization are separate explicit scopes; do not dilute a
+CUDA design to imitate those execution models.
+
 
 ## QVQ external tuning ABI rule
 
@@ -47,14 +60,14 @@ Use `$gptqmodel-contiguous-memory` when a kernel or caller silently falls back t
 3. Prefer CUDA/C++ through `TorchOpsJitExtension` when using CUTLASS, substantial templated C++, custom operators, vendored sources, or features Triton cannot express reliably.
 4. Extend the existing JIT system rather than introducing a second AOT build route unless the task explicitly requires packaging changes.
 
-For architecture-specific work, use `$gptqmodel-ampere-kernels` or `$gptqmodel-hopper-kernels` in addition to this skill.
+For architecture-specific work, use `$gptqmodel-ampere-kernels`, `$gptqmodel-hopper-kernels`, or `$gptqmodel-blackwell-kernels` in addition to this skill.
 
 ## Implement from the boundary inward
 
 1. Specify accepted shapes, strides, dtypes, layouts, quantization metadata, devices, and compute capabilities.
 2. Add negative validation at the Python/C++ boundary. Reject unsupported inputs before launch with an actionable message.
 3. Implement a minimal correct kernel, including tail handling and accumulation width, before tuning tiles or pipeline stages.
-4. Launch under the correct CUDA device guard and current stream. Avoid hidden global-device assumptions and fixed device indices.
+4. Launch under the correct CUDA device guard and framework current stream. Cross-stream producer/consumer ordering must use explicit CUDA events or an equivalent dependency; host launch order is not a dependency. Avoid hidden global-device assumptions, implicit private streams, and fixed device indices.
 5. Register native sources in `_EXTENSION_SPECS` in `gptqmodel/extension.py` and use the public `extension.load`, `is_available`, `error`, `op`, or `namespace` helpers.
 6. Put reusable wrapper logic in `gptqmodel/utils/` or the relevant quantized-linear module and sources in the matching `gptqmodel_ext/` subtree.
 7. Gate specialized code by compute capability and preserve a tested portable or reference fallback.
@@ -205,29 +218,31 @@ If the target GPU or instruction profiler is unavailable, mark the result
 compilation-only. Do not describe the commit/phase as complete or as a kernel
 performance win until this audit can run.
 
-## Reference: modern CUDA SIMT and warp specialization
+## Modern CUDA execution and handoff rules
 
-Modern CUDA still issues one common instruction to active threads in a warp, but the classic “all 32 threads execute exactly the same instruction at the same time” mental model is incomplete.
+A warp is still 32 lanes and issues instructions as a SIMT unit, but Volta+ independent
+thread scheduling means implicit warp-synchronous memory ordering is not a correctness
+contract. Keep synchronization scoped to the actual producer/consumer set:
 
-Key points from NVIDIA's recent Blackwell GEMM/CUTLASS work (Jessie Dong, *modern CUDA is not SIMT in the way you were probably first taught!*, 2026-08-20, https://x.com/jessiedong_/status/2090518824131121504?s=20):
+- Same warp: prefer shuffles/register routing; use `__syncwarp(mask)` when shared-memory
+  ordering or reconvergence is required.
+- Different warps in one CTA: `__syncwarp()` cannot synchronize them. Use
+  `__syncthreads()`, `cuda::barrier`/mbarrier, or the architecture pipeline primitive
+  that owns the shared handoff.
+- Different CTAs: use a kernel boundary, a proven cooperative-grid barrier, or Hopper+
+  cluster synchronization/DSM when the launch is explicitly cluster-scoped.
+- A memory fence is not a rendezvous. TMA/async-copy completion also has proxy/barrier
+  semantics that ordinary control synchronization does not replace.
 
-- **Independent thread scheduling (Volta+).** Before Volta a warp shared one program counter. Starting with Volta, each thread keeps its own PC and execution state. Threads can diverge and reconverge at a finer granularity, but the GPU still groups active threads into SIMT units when it issues instructions, so SIMT is not removed—scheduling is simply less strict.
-- **Legacy warp assumptions can break.** Code that assumes every thread in a warp reaches a memory write before any thread reads it on the next line may fail on Volta+. Use explicit warp-level synchronization (`__syncwarp()`) wherever cross-lane ordering matters.
-- **Warp specialization.** Different warps in the same kernel can stay on different jobs. One warp may schedule tiles, another loads `A` and `B`, another initiates the matrix multiply, and others finish/store the output. Loading and math can overlap instead of every warp doing load→math→store serially.
-- **Asynchronous initiators.** On Hopper/Blackwell, one thread/warp can start a TMA transfer or tensor-core operation and then continue with other work while the hardware unit completes it. The rest of the warp does not have to participate in copying every byte.
-- **Blackwell GEMM example split of 8 warps:**
-  - warp 0: matrix multiply
-  - warp 1: choose the next tile
-  - warp 2: load `A` and `B`
-  - warp 3: load data needed for the output step
-  - warps 4–7: finish and store the output
+Warp specialization is a performance pattern, not a relaxation of those rules. A loader,
+decoder, MMA issuer, and epilogue warp may follow different code paths only when their
+handoffs, buffer reuse, barrier arrivals, and tail/inactive cases are explicitly proven.
 
-Implications for GPT-QModel kernels:
-
-- Prefer explicit warp/CTA role assignment over implicit “everyone does the same thing” kernels when fusing phases.
-- Treat `__syncwarp()` and block/cluster fences as part of the handoff contract when one warp produces data another consumes.
-- Architect kernels so one warp can initiate an asynchronous copy or MMA while others continue independent work; do not block the whole warp waiting for the asynchronous unit.
-- Keep fallback paths that do not assume per-thread scheduling details (pre-Volta behavior differs from Volta+).
+On Hopper/Blackwell, a single elected thread can initiate a TMA or architecture-specific
+Tensor Core operation while other warps do independent work. On Ampere, `cp.async`
+can similarly separate global-to-shared movement from arithmetic. Always validate that
+the extra stages/roles improve event-timed latency rather than merely increasing overlap
+in a source diagram.
 
 ## See also
 

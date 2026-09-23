@@ -1,5 +1,7 @@
 # Kernel integration workflow
 
+Apply the shared [NVIDIA A100+ architecture contract](nvidia-a100-plus.md) to CUDA performance work.
+
 ## Repository path
 
 | Concern | Location |
@@ -43,3 +45,16 @@ Inspect `gptqmodel/utils/marlin.py`, `gptqmodel/utils/grasshopper.py`, and their
 9. Record instruction/opcode deltas, registers, spills, bank conflicts,
    occupancy, scheduler/stalls, exact revisions and report paths; then repeat
    correctness and warmed CUDA-event timing before promotion.
+
+
+## A100+ architecture checks before promotion
+
+For every CUDA hot path, record and verify:
+
+1. **Global access:** lane-to-lane addresses, vector natural alignment, sectors/request, and useful bytes transferred. Tensor contiguity alone is not proof of coalescing.
+2. **Shared access:** write the bank equation for the issued warp instruction. Distinguish 32-bit words from FP16 halfwords and broadcasts from true multi-address conflicts.
+3. **Async pipeline:** identify the physical producer and consumer (`cp.async`, TMA, ordinary threads, WGMMA/TCGen05) and prove commit/wait/barrier ownership including tails.
+4. **Synchronization scope:** same warp -> `__syncwarp`; cross-warp CTA handoff -> CTA barrier/mbarrier; cross-CTA -> kernel/cooperative-grid/cluster mechanism. Never use `__syncwarp` as a cross-warp fence.
+5. **Streams:** launch on the caller's current stream and make every cross-stream dependency explicit with events. Do not add device-wide synchronization to make a race disappear.
+6. **Resources:** compare registers, spills/local memory, static+dynamic shared memory, active blocks, active/eligible warps, and pipeline depth. Occupancy is evidence, not the objective.
+7. **Architecture:** compile and run the exact gated target: sm_80 for A100, sm_90/sm_90a as appropriate for Hopper, and the exact supported Blackwell target for TCGen05/TMEM. Do not assume architecture-accelerated binaries are forward compatible.

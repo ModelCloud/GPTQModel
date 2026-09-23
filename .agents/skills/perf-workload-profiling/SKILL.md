@@ -36,7 +36,7 @@ Pick ONE path based on the workload type:
 - **Measure, don't guess.** Every performance claim must trace back to profiler output or structured measurement data. Never invent metrics.
 - **Isolate steady-state.** Warmup costs (CUDA context init, cuDNN autotuning, JIT compilation) distort measurements. Always exclude warmup iterations before collecting data.
 - **Use hardware timing.** CUDA events measure GPU time precisely. CPU timers (`time.perf_counter()`) include host overhead and miss asynchronous execution.
-- **No sync inside measurement loops.** Each `torch.cuda.synchronize()` adds 10-50us overhead. Record CUDA events asynchronously, sync once at the end.
+- **No device-wide sync inside kernel microbenchmark loops.** A per-iteration `torch.cuda.synchronize()` serializes all streams and can dominate short kernels. Record CUDA events on the relevant stream and synchronize the final event/stream once. For end-to-end wall time where host submission is part of the metric, use a deliberate host timing protocol instead.
 - **Pre-allocate everything.** Tensors, events, compiled kernels — all before the timing loop. For CuTe DSL kernels, pre-compile with `cute.compile()`.
 - **Minimize profiler interference.** Start with lightweight measurement (manual timing for latency/throughput) and escalate to heavier tools (Kineto, nsys, ncu) only when lighter tools cannot answer the question.
 
@@ -161,7 +161,7 @@ def benchmark_detailed(fn, warmup=50, iters=100):
 
 | Anti-Pattern | Problem |
 |--------------|---------|
-| `torch.cuda.synchronize()` before AND after each iteration | Adds ~10-50us overhead per iteration |
+| `torch.cuda.synchronize()` before AND after each iteration | Serializes the whole device and adds platform-dependent overhead; it can dominate short kernels |
 | `time.perf_counter()` for GPU timing | Measures CPU time, misses async GPU execution |
 | Missing warmup | First iterations include JIT, clock ramp-up, context init |
 | Allocating tensors inside measurement loop | Allocation overhead pollutes timing |
@@ -198,3 +198,15 @@ For NVTX domains, categories, payloads, and legacy API details, see [references/
 - [references/nvtx-api.md](references/nvtx-api.md) — Domains, categories, payloads, legacy push/pop API
 - [references/pytorch-profiler-api.md](references/pytorch-profiler-api.md) — PyTorch 2.0+ profiler API changes (`device_time` vs deprecated `cuda_time`)
 - [references/wafer-gpu-perf-resources.md](references/wafer-gpu-perf-resources.md) — Curated external GPU performance engineering reading list from wafer-ai's performance engineering index
+
+
+## Stream-correct CUDA event timing
+
+Record events on the same stream that owns the measured work. If the function
+launches work on auxiliary streams, ordinary start/end events on the current
+stream measure only the dependency chain visible to that stream. Either encode
+the real join before the end event or measure complete wall time separately.
+
+For CUDA Graph replay, warm/capture before the formal samples and time the graph
+launch/replay contract actually used in production. Do not mix eager and graph
+samples in one distribution.

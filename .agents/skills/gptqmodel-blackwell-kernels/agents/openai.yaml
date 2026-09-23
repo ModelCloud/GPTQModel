@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT-QModel Blackwell kernels"
+  short_description: "Blackwell TCGen05/TMEM/TMA kernel tuning"
+  default_prompt: "Use the GPT-QModel Blackwell kernel workflow and the shared A100+ CUDA architecture contract."

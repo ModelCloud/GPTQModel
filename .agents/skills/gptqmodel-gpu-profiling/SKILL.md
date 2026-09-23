@@ -7,7 +7,7 @@ description: Capture, inspect, or compare GPT-QModel GPU profiles using torch.pr
 
 Profile a correct, representative workload and preserve enough context to reproduce it. A trace explains where time went in that run; it does not by itself prove that a proposed optimization is safe or faster end to end.
 
-Read [references/profiling-workflow.md](references/profiling-workflow.md) before capturing or comparing traces. Use `$gptqmodel-cuda-kernels` for kernel changes and the matching Ampere or Hopper skill for architecture claims.
+Read [references/profiling-workflow.md](references/profiling-workflow.md) before capturing or comparing traces. Use `$gptqmodel-cuda-kernels` for kernel changes and the matching Ampere, Hopper, or Blackwell skill for architecture claims.
 
 ## Establish the question and baseline
 
@@ -40,7 +40,7 @@ Do not compare the two as if disabling graphs were free. In distributed runs, st
 2. Identify uncovered CPU launch gaps, serialization, synchronization, and communication that could overlap, with dependencies stated.
 3. Map dominant kernels to the local wrapper, backend, and extension source before recommending a change.
 4. List fusion candidates only when the producer-consumer relationship and layout/dtype contract support them. Do not classify by fuzzy kernel-name similarity alone.
-5. For a dominant custom CUDA kernel, inspect a source-correlated SASS page rather than reasoning from C++ alone. Use the SASS instruction mix and dependency/stall samples to find duplicated address arithmetic, redundant masks/shifts, materialized intermediates, and producer-consumer round trips. Follow the matched workflow in the reference.
+5. For a dominant custom CUDA kernel, inspect a source-correlated SASS page rather than reasoning from C++ alone. Use executed instruction mix, scheduler eligibility/stalls, sectors and cache traffic, shared requests/wavefronts/conflicts, resource limits, and tensor-pipe activity together. Low DRAM GB/s does **not** imply bad alignment: compressed/decode-heavy kernels may be instruction-, dependency-, shared-, or Tensor-Core-issue limited. Follow the matched workflow in the reference.
 6. Re-run the synchronized benchmark and correctness check after any optimization; then capture a matched follow-up trace if attribution changed.
 
 Return the artifact path, capture command, environment/configuration record, whether evidence is mapping or formal, and complete ASCII tables for dominant kernels, overlap opportunities, and source-backed fusion candidates. Clean up only processes launched by the profiling run, using recorded PIDs and graceful termination before escalation.
@@ -48,3 +48,22 @@ Return the artifact path, capture command, environment/configuration record, whe
 ## See also
 
 - [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for GPU profiling and correctness from wafer-ai's performance engineering index.
+
+
+## A100+ diagnosis rules
+
+- **Global alignment/coalescing:** inspect lane addresses and sectors/request.
+  Do not infer coalescing from `is_contiguous()`, 128-byte allocation alignment,
+  or vector type alone.
+- **Shared memory:** report requests, wavefronts and bank conflicts. For ordinary
+  accesses use 32 banks / 4-byte granularity; for TMA/WGMMA/TCGen05 operand
+  layouts use the architecture-defined/CuTe layout rather than a generic padding rule.
+- **Scheduler:** pair occupancy with eligible warps/scheduler/cycle and dominant
+  stall reasons. A one-CTA/SM kernel may be optimal if reuse is high; a high-
+  occupancy kernel may still be dependency-bound.
+- **Async pipelines:** verify `cp.async`/TMA issue and wait/barrier behavior,
+  not just memcpy byte counts. Excess waits or a wrong stage depth can dominate.
+- **Tensor Core path:** prove HMMA/WGMMA/TCGen05 activity from generated/executed
+  code. A source call to WMMA/CuTe or a compatible dtype is not proof.
+- **HBM percentage:** compare useful bytes, arithmetic/decode work, cache hits,
+  and instruction issue. Optimize for latency/throughput, not for maximizing GB/s.
