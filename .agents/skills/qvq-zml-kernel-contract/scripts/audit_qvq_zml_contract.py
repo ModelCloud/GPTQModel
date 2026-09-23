@@ -162,9 +162,20 @@ def main() -> int:
                 r"(?:config\.)?hopper_algorithm\s*(?:==|=)\s*(\d+)", policy
             )
         } - {0}
+        # Algorithm 4 is the grouped gate/up direct-FFI route, not a
+        # single-projection XLA composite. Check that route explicitly while
+        # requiring exact agreement for the singleton algorithms.
+        grouped_ffi = (
+            "config.algorithm == 4 and config.group_count == 2" in loader
+            and "group_count == 2 and m == 128 and k == 2048 and n == 16384" in policy
+            and "config.hopper_algorithm = 4" in policy
+            and "const bool grouped_gate_up = c->algorithm == 4" in raw
+        )
+        check("Grouped algorithm 4 direct FFI", grouped_ffi, f"route_present={grouped_ffi}")
         check(
-            "Bidirectional algorithm set",
-            qvq_algorithms == xla_algorithms == policy_algorithms,
+            "Bidirectional singleton algorithm set",
+            qvq_algorithms - {4} == xla_algorithms == policy_algorithms - {4}
+            and (4 in qvq_algorithms) == (4 in policy_algorithms) == grouped_ffi,
             f"QVQ={sorted(qvq_algorithms)}, XLA={sorted(xla_algorithms)}, policy={sorted(policy_algorithms)}",
         )
 
