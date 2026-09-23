@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/22/2026 7.6.0-dev `main`: ✨ Added `olmoe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `agnes` quantization support.
 * 09/15/2026 [7.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.5.0): ✨ Added K2 Horizon, Qwen-Drive, Nanbeige, and Diffusion Gemma quantization support. Improved GPTQ/AWQ/ParoQuant reliability with device-aware kernel selection, safer CUDA dispatch and empty-input handling, partial packing-word support, correct calibration masks, model-specific Paro layer replay, and hardened Machete runtime caching. Loading and saving now validate GPTQ `qweight` and offload metadata, while InternVL image preprocessing keeps `torchvision` optional. Quantization finalization is faster and startup version reporting is more accurate.
@@ -198,7 +199,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Muse Glimmer | `muse_glimmer` |
 | Nanbeige 4.2 | `nanbeige` |
 | Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
-| OLMo 2 / 3 | `olmo2`, `olmo3` |
+| OLMo 2 / 3 / OLMoE | `olmo2`, `olmo3`, `olmoe` |
 | OPT | `opt` |
 | Ouro | `ouro` |
 | Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |
