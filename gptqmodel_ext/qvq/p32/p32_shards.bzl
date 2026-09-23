@@ -44,6 +44,7 @@ fi
 
 
 def p32_shards():
+    # Parallelize NVCC's optimizer inside each shard while retaining -O3.
     for bits in [4, 5, 6, 7]:
         _p32_shard(
             "qvq_p32_standard_scalar_bits%d_object" % bits,
@@ -51,7 +52,7 @@ def p32_shards():
             1,
             1,
             0,
-            1,
+            2,
         )
         _p32_shard(
             "qvq_p32_standard_block_bits%d_object" % bits,
@@ -59,7 +60,7 @@ def p32_shards():
             1,
             2,
             0,
-            1,
+            2,
         )
         _p32_shard(
             "qvq_p32_standard_large_m2_low_bits%d_object" % bits,
@@ -67,7 +68,7 @@ def p32_shards():
             1,
             3,
             0,
-            1,
+            2,
         )
         for stage in [3, 4]:
             _p32_shard(
@@ -76,7 +77,7 @@ def p32_shards():
                 1,
                 4,
                 stage,
-                1,
+                2,
             )
         _p32_shard(
             "qvq_p32_standard_large_m_grid_low_bits%d_object" % bits,
@@ -84,7 +85,7 @@ def p32_shards():
             1,
             5,
             0,
-            1,
+            2,
         )
         _p32_shard(
             "qvq_p32_standard_large_m_grid_high_bits%d_object" % bits,
@@ -92,6 +93,6 @@ def p32_shards():
             1,
             6,
             0,
-            1,
+            2,
         )
-        _p32_shard("qvq_p32_grouped_bits%d_object" % bits, bits, 2, 7, 0, 1)
+        _p32_shard("qvq_p32_grouped_bits%d_object" % bits, bits, 2, 7, 0, 2)
