@@ -1,6 +1,7 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load(":p32_shards.bzl", "p32_shards")
 
 package(default_visibility = ["//visibility:public"])
 
@@ -28,16 +29,19 @@ cc_test(
     deps = [":abi"],
 )
 
-# Compile kernel families as disjoint objects. Bazel can then reuse the large
-# core object while rank-recovery or runtime ABI code is being iterated.
+# The production P32 template matrix is split into independent kernel-family
+# and transition-width objects. Each object owns one eighth of the NVCC device
+# instantiations, so Bazel schedules the expensive CICC/PTXAS work across CPU
+# cores while preserving the runtime dispatch surface.
+p32_shards()
+
 genrule(
-    name = "qvq_p32_core_object",
+    name = "qvq_p32_dispatch_object",
     srcs = [
         "qvq_p32_abi.h",
-        "qvq_p32_cuda.cu",
-        "qvq_p32_internal.h",
+        "qvq_p32_dispatch.cu",
     ],
-    outs = ["objects/core/qvq_p32_core.o"],
+    outs = ["objects/core/qvq_p32_dispatch.o"],
     cmd = """
 set -eu
 cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
@@ -46,12 +50,58 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
   echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
   exit 1
 fi
-"$${cuda_home}/bin/nvcc" \
-  -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
-  --objdir-as-tempdir \
-  --split-compile=8 \
-  -gencode arch=compute_90,code=sm_90 \
-  -I$$(dirname $(location qvq_p32_abi.h)) \
+"$${cuda_home}/bin/nvcc" \\
+  -std=c++17 -O2 -cudart=shared -Xcompiler=-fPIC \\
+  --objdir-as-tempdir \\
+  -gencode arch=compute_90,code=sm_90 \\
+  -I$$(dirname $(location qvq_p32_abi.h)) \\
+  -c -o "$@" $(location qvq_p32_dispatch.cu)
+""",
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "qvq_p32_core_object",
+    srcs = [
+        ":qvq_p32_dispatch_object",
+        ":qvq_p32_standard_bits4_object",
+        ":qvq_p32_standard_bits5_object",
+        ":qvq_p32_standard_bits6_object",
+        ":qvq_p32_standard_bits7_object",
+        ":qvq_p32_grouped_bits4_object",
+        ":qvq_p32_grouped_bits5_object",
+        ":qvq_p32_grouped_bits6_object",
+        ":qvq_p32_grouped_bits7_object",
+    ],
+)
+
+# Fast compile-only check for the F6 SM90 large-M block kernels selected by
+# the Llama B128/decode and M960/prefill geometry. It compiles the same device
+# kernel definitions as the full library while avoiding its full shape/variant
+# template-instantiation matrix. The resulting object is not a runtime library.
+genrule(
+    name = "qvq_p32_sm90_compile_check",
+    srcs = [
+        "qvq_p32_abi.h",
+        "qvq_p32_cuda.cu",
+        "qvq_p32_internal.h",
+    ],
+    outs = ["objects/dev_sm90/qvq_p32_compile_check.o"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
+  echo "nvcc not found; set CUDA_HOME to a CUDA toolkit containing nvcc" >&2
+  exit 1
+fi
+"$${cuda_home}/bin/nvcc" \\
+  -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \\
+  --objdir-as-tempdir --split-compile=8 \\
+  -DQVQ_P32_SM90_COMPILE_CHECK_ONLY=1 \\
+  -diag-suppress=177 \\
+  -gencode arch=compute_90,code=sm_90 \\
+  -I$$(dirname $(location qvq_p32_abi.h)) \\
   -c -o "$@" $(location qvq_p32_cuda.cu)
 """,
     tags = ["manual"],
@@ -129,7 +179,7 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 "$${cuda_home}/bin/nvcc" -shared -cudart=shared \
   -o "$@" \
-  $(location :qvq_p32_core_object) \
+  $(locations :qvq_p32_core_object) \
   $(location :qvq_p32_rank8_object) \
   $(location :qvq_p32_runtime_object)
 """,
