@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/23/2026 7.6.0-dev `main`: ✨ Added `qwen3_vl_moe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `agnes` quantization support.
 * 09/15/2026 [7.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.5.0): ✨ Added K2 Horizon, Qwen-Drive, Nanbeige, and Diffusion Gemma quantization support. Improved GPTQ/AWQ/ParoQuant reliability with device-aware kernel selection, safer CUDA dispatch and empty-input handling, partial packing-word support, correct calibration masks, model-specific Paro layer replay, and hardened Machete runtime caching. Loading and saving now validate GPTQ `qweight` and offload metadata, while InternVL image preprocessing keeps `torchvision` optional. Quantization finalization is faster and startup version reporting is more accurate.
