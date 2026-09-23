@@ -15,7 +15,7 @@
 #include <limits>
 
 // Production builds compile one (kernel family, transition width, workload
-// kind) shard per CUDA object. Give every shard a private C entry-point name;
+// kind, pipeline stage) shard per CUDA object. Give every shard a private C entry-point name;
 // the small dispatcher object restores the stable public ABI after linking.
 // Keep the shard selectors compile-time constants so NVCC can drop unrelated
 // template instantiations before device code generation.
@@ -37,13 +37,19 @@
 #elif QVQ_P32_SHARD_KIND == 3
 #define QVQ_P32_SHARD_SUFFIX _large_m2_low
 #elif QVQ_P32_SHARD_KIND == 4
-#define QVQ_P32_SHARD_SUFFIX _large_m2_high
+#if QVQ_P32_SHARD_STAGE == 3
+#define QVQ_P32_SHARD_SUFFIX _large_m2_stage3
+#elif QVQ_P32_SHARD_STAGE == 4
+#define QVQ_P32_SHARD_SUFFIX _large_m2_stage4
+#else
+#error "unsupported large-M2 P32 shard"
+#endif
 #elif QVQ_P32_SHARD_KIND == 5
 #define QVQ_P32_SHARD_SUFFIX _large_m_grid_low
 #elif QVQ_P32_SHARD_KIND == 6
 #define QVQ_P32_SHARD_SUFFIX _large_m_grid_high
 #else
-#error "standard P32 shard kind must select scalar, block, or an M/stage bucket"
+#error "standard P32 shard kind must select scalar, block, M2, or M grid"
 #endif
 #define QVQ_P32_STANDARD_SYMBOL(name) \
   QVQ_P32_JOIN4(name, _bits, QVQ_P32_SHARD_BITS, QVQ_P32_SHARD_SUFFIX)
@@ -3181,8 +3187,8 @@ int launch_p32_large_m(
       return -1;
     }
 #elif defined(QVQ_P32_SHARD_KIND) && QVQ_P32_SHARD_KIND == 4
-    if (config.stage_k_tiles < 3) {
-      set_last_error("QVQ P32 large-M2 high shard requires stage_k_tiles in [3, 4]");
+    if (config.stage_k_tiles != QVQ_P32_SHARD_STAGE) {
+      set_last_error("QVQ P32 large-M2 shard received an unexpected stage");
       return -1;
     }
 #endif
@@ -3225,42 +3231,44 @@ int launch_p32_large_m(
     }
 #elif QVQ_P32_SHARD_KIND == 4
 #define QVQ_LARGE_M2_STAGE(ROW_GROUPS) \
-    switch (config.stage_k_tiles) { \
-      case 3: \
-        QVQ_LARGE_M2_LAUNCH_STAGE(3, ROW_GROUPS); \
-        break; \
-      case 4: \
-        QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS); \
-        break; \
-      default: \
-        set_last_error("QVQ P32 large-M2 high shard requires stage_k_tiles in [3, 4]"); \
+    do { \
+      if (config.stage_k_tiles != QVQ_P32_SHARD_STAGE) { \
+        set_last_error("QVQ P32 large-M2 shard received an unexpected stage"); \
         return -1; \
-    }
+      } \
+      QVQ_LARGE_M2_LAUNCH_STAGE(QVQ_P32_SHARD_STAGE, ROW_GROUPS); \
+    } while (0);
 #endif
-#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 3
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    QVQ_P32_SHARD_KIND == 3
 #define QVQ_LARGE_M2_STAGE2(ROW_GROUPS) \
     QVQ_LARGE_M2_LAUNCH_STAGE(2, ROW_GROUPS)
 #else
 #define QVQ_LARGE_M2_STAGE2(ROW_GROUPS) \
     do { \
-      set_last_error("QVQ P32 large-M2 high shard does not support stage 2"); \
+      set_last_error("QVQ P32 large-M2 shard does not support stage 2"); \
       return -1; \
     } while (0)
 #endif
-#if !defined(QVQ_P32_SHARD_KIND) || QVQ_P32_SHARD_KIND == 4
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    (QVQ_P32_SHARD_KIND == 4 && QVQ_P32_SHARD_STAGE == 3)
 #define QVQ_LARGE_M2_STAGE3(ROW_GROUPS) \
     QVQ_LARGE_M2_LAUNCH_STAGE(3, ROW_GROUPS)
-#define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
-    QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS)
 #else
 #define QVQ_LARGE_M2_STAGE3(ROW_GROUPS) \
     do { \
-      set_last_error("QVQ P32 large-M2 low shard does not support stage 3"); \
+      set_last_error("QVQ P32 large-M2 shard does not support stage 3"); \
       return -1; \
     } while (0)
+#endif
+#if !defined(QVQ_P32_SHARD_KIND) || \
+    (QVQ_P32_SHARD_KIND == 4 && QVQ_P32_SHARD_STAGE == 4)
+#define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
+    QVQ_LARGE_M2_LAUNCH_STAGE(4, ROW_GROUPS)
+#else
 #define QVQ_LARGE_M2_STAGE4(ROW_GROUPS) \
     do { \
-      set_last_error("QVQ P32 large-M2 low shard does not support stage 4"); \
+      set_last_error("QVQ P32 large-M2 shard does not support stage 4"); \
       return -1; \
     } while (0)
 #endif

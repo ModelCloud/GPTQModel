@@ -1,7 +1,7 @@
 """Bazel rules for parallel P32 CUDA template shards."""
 
 
-def _p32_shard(name, bits, family, kind, split_compile):
+def _p32_shard(name, bits, family, kind, stage, split_compile):
     shard_srcs = [
         "qvq_p32_abi.h",
         "qvq_p32_cuda.cu",
@@ -34,10 +34,11 @@ fi
   --objdir-as-tempdir --split-compile=%d \\
   -DQVQ_P32_SHARD_BITS=%d -DQVQ_P32_SHARD_FAMILY=%d \\
   -DQVQ_P32_SHARD_KIND=%d \\
+  -DQVQ_P32_SHARD_STAGE=%d \\
   -gencode arch=compute_90,code=sm_90 \\
   -I$$(dirname $(location qvq_p32_abi.h)) \\
   -c -o "$@" $(location qvq_p32_cuda.cu)
-""" % (split_compile, bits, family, kind),
+""" % (split_compile, bits, family, kind, stage),
         tags = ["manual"],
     )
 
@@ -49,6 +50,7 @@ def p32_shards():
             bits,
             1,
             1,
+            0,
             1,
         )
         _p32_shard(
@@ -56,6 +58,7 @@ def p32_shards():
             bits,
             1,
             2,
+            0,
             1,
         )
         _p32_shard(
@@ -63,20 +66,24 @@ def p32_shards():
             bits,
             1,
             3,
+            0,
             1,
         )
-        _p32_shard(
-            "qvq_p32_standard_large_m2_high_bits%d_object" % bits,
-            bits,
-            1,
-            4,
-            1,
-        )
+        for stage in [3, 4]:
+            _p32_shard(
+                "qvq_p32_standard_large_m2_stage%d_bits%d_object" % (stage, bits),
+                bits,
+                1,
+                4,
+                stage,
+                1,
+            )
         _p32_shard(
             "qvq_p32_standard_large_m_grid_low_bits%d_object" % bits,
             bits,
             1,
             5,
+            0,
             1,
         )
         _p32_shard(
@@ -84,6 +91,7 @@ def p32_shards():
             bits,
             1,
             6,
+            0,
             1,
         )
-        _p32_shard("qvq_p32_grouped_bits%d_object" % bits, bits, 2, 7, 1)
+        _p32_shard("qvq_p32_grouped_bits%d_object" % bits, bits, 2, 7, 0, 1)

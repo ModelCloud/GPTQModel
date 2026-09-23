@@ -30,12 +30,10 @@ cc_test(
 )
 
 # The production P32 template matrix is split by kernel family, transition
-# width, and standard-kernel workload kind. Scalar, small-block, large-M2
-# grouped rows, and large-M grid rows are split further by low/high pipeline
-# stage buckets, allowing Bazel to schedule the expensive compiler work in
-# smaller independent actions. The large-M2 and large-M grid device kernels
-# and launchers are separate inputs, so editing one path leaves the other
-# workload shards eligible for action-cache reuse.
+# width and workload kind. Large-M2 keeps stages 1/2 together and splits
+# stages 3/4; large-M grid keeps low/high buckets. Device kernels and launchers
+# are separate inputs so editing one path leaves the other workload
+# shards eligible for action-cache reuse.
 p32_shards()
 
 genrule(
@@ -79,10 +77,14 @@ filegroup(
         ":qvq_p32_standard_large_m2_low_bits5_object",
         ":qvq_p32_standard_large_m2_low_bits6_object",
         ":qvq_p32_standard_large_m2_low_bits7_object",
-        ":qvq_p32_standard_large_m2_high_bits4_object",
-        ":qvq_p32_standard_large_m2_high_bits5_object",
-        ":qvq_p32_standard_large_m2_high_bits6_object",
-        ":qvq_p32_standard_large_m2_high_bits7_object",
+        ":qvq_p32_standard_large_m2_stage3_bits4_object",
+        ":qvq_p32_standard_large_m2_stage3_bits5_object",
+        ":qvq_p32_standard_large_m2_stage3_bits6_object",
+        ":qvq_p32_standard_large_m2_stage3_bits7_object",
+        ":qvq_p32_standard_large_m2_stage4_bits4_object",
+        ":qvq_p32_standard_large_m2_stage4_bits5_object",
+        ":qvq_p32_standard_large_m2_stage4_bits6_object",
+        ":qvq_p32_standard_large_m2_stage4_bits7_object",
         ":qvq_p32_standard_large_m_grid_low_bits4_object",
         ":qvq_p32_standard_large_m_grid_low_bits5_object",
         ":qvq_p32_standard_large_m_grid_low_bits6_object",

@@ -6,6 +6,9 @@
 using WindowFn = decltype(qvq_p32_window);
 using WindowRowGroupsFn = decltype(qvq_p32_window_with_row_groups);
 using WindowTunedFn = decltype(qvq_p32_window_tuned);
+using WindowFnPtr = decltype(&qvq_p32_window);
+using WindowRowGroupsFnPtr = decltype(&qvq_p32_window_with_row_groups);
+using WindowTunedFnPtr = decltype(&qvq_p32_window_tuned);
 using GroupedWindowFn = decltype(qvq_p32_grouped_window);
 using GroupedWindowTunedFn = decltype(qvq_p32_grouped_window_tuned);
 using GroupedPlanFn = decltype(qvq_p32_grouped_launch_plan);
@@ -20,7 +23,8 @@ extern "C" {
   QVQ_DECLARE_STANDARD_KIND(BITS, _scalar);                               \
   QVQ_DECLARE_STANDARD_KIND(BITS, _block);                                \
   QVQ_DECLARE_STANDARD_KIND(BITS, _large_m2_low);                         \
-  QVQ_DECLARE_STANDARD_KIND(BITS, _large_m2_high);                        \
+  QVQ_DECLARE_STANDARD_KIND(BITS, _large_m2_stage3);                      \
+  QVQ_DECLARE_STANDARD_KIND(BITS, _large_m2_stage4);                      \
   QVQ_DECLARE_STANDARD_KIND(BITS, _large_m_grid_low);                     \
   QVQ_DECLARE_STANDARD_KIND(BITS, _large_m_grid_high)
 #define QVQ_DECLARE_GROUPED(BITS)                                         \
@@ -41,6 +45,29 @@ QVQ_DECLARE_GROUPED(7);
 #undef QVQ_DECLARE_STANDARD_KIND
 }
 
+#define QVQ_STANDARD_SHARD_TABLES(BASE, FUNCTION_PTR)                       \
+  static constexpr FUNCTION_PTR scalar_shards[4] = {                      \
+      BASE##_bits4_scalar, BASE##_bits5_scalar,                            \
+      BASE##_bits6_scalar, BASE##_bits7_scalar};                           \
+  static constexpr FUNCTION_PTR block_shards[4] = {                       \
+      BASE##_bits4_block, BASE##_bits5_block,                              \
+      BASE##_bits6_block, BASE##_bits7_block};                             \
+  static constexpr FUNCTION_PTR large_m2_shards[4][4] = {                  \
+      {BASE##_bits4_large_m2_low, BASE##_bits5_large_m2_low,              \
+       BASE##_bits6_large_m2_low, BASE##_bits7_large_m2_low},              \
+      {BASE##_bits4_large_m2_low, BASE##_bits5_large_m2_low,              \
+       BASE##_bits6_large_m2_low, BASE##_bits7_large_m2_low},              \
+      {BASE##_bits4_large_m2_stage3, BASE##_bits5_large_m2_stage3,         \
+       BASE##_bits6_large_m2_stage3, BASE##_bits7_large_m2_stage3},        \
+      {BASE##_bits4_large_m2_stage4, BASE##_bits5_large_m2_stage4,         \
+       BASE##_bits6_large_m2_stage4, BASE##_bits7_large_m2_stage4}};       \
+  static constexpr FUNCTION_PTR large_m_grid_low_shards[4] = {            \
+      BASE##_bits4_large_m_grid_low, BASE##_bits5_large_m_grid_low,       \
+      BASE##_bits6_large_m_grid_low, BASE##_bits7_large_m_grid_low};      \
+  static constexpr FUNCTION_PTR large_m_grid_high_shards[4] = {           \
+      BASE##_bits4_large_m_grid_high, BASE##_bits5_large_m_grid_high,     \
+      BASE##_bits6_large_m_grid_high, BASE##_bits7_large_m_grid_high}
+
 namespace {
 
 template <typename Function>
@@ -60,6 +87,17 @@ Function select_shard(
 }
 
 template <typename Function>
+Function select_shard(int transition_bits, const Function* shards) {
+  switch (transition_bits) {
+    case 5: return shards[1];
+    case 6: return shards[2];
+    case 7: return shards[3];
+    case 4:
+    default: return shards[0];
+  }
+}
+
+template <typename Function>
 Function select_standard_shard(
     int transition_bits,
     int size_m,
@@ -67,60 +105,29 @@ Function select_standard_shard(
     int threads,
     int row_groups,
     int stage_k_tiles,
-    Function scalar_bits4,
-    Function scalar_bits5,
-    Function scalar_bits6,
-    Function scalar_bits7,
-    Function block_bits4,
-    Function block_bits5,
-    Function block_bits6,
-    Function block_bits7,
-    Function large_m2_low_bits4,
-    Function large_m2_low_bits5,
-    Function large_m2_low_bits6,
-    Function large_m2_low_bits7,
-    Function large_m2_high_bits4,
-    Function large_m2_high_bits5,
-    Function large_m2_high_bits6,
-    Function large_m2_high_bits7,
-    Function large_m_grid_low_bits4,
-    Function large_m_grid_low_bits5,
-    Function large_m_grid_low_bits6,
-    Function large_m_grid_low_bits7,
-    Function large_m_grid_high_bits4,
-    Function large_m_grid_high_bits5,
-    Function large_m_grid_high_bits6,
-    Function large_m_grid_high_bits7) {
+    const Function* scalar_shards,
+    const Function* block_shards,
+    const Function (*large_m2_shards)[4],
+    const Function* large_m_grid_low_shards,
+    const Function* large_m_grid_high_shards) {
   if (size_m > 16) {
     const bool use_large_m2 = threads == 128 && size_m % 32 == 0 &&
         row_groups != 1;
+    const int stage_index = stage_k_tiles >= 1 && stage_k_tiles <= 4
+        ? stage_k_tiles - 1
+        : 0;
     if (use_large_m2) {
-      if (stage_k_tiles >= 3) {
-        return select_shard(
-            transition_bits, large_m2_high_bits4, large_m2_high_bits5,
-            large_m2_high_bits6, large_m2_high_bits7);
-      }
-      return select_shard(
-          transition_bits, large_m2_low_bits4, large_m2_low_bits5,
-          large_m2_low_bits6, large_m2_low_bits7);
-    }
-    if (stage_k_tiles >= 3) {
-      return select_shard(
-          transition_bits, large_m_grid_high_bits4, large_m_grid_high_bits5,
-          large_m_grid_high_bits6, large_m_grid_high_bits7);
+      return select_shard(transition_bits, large_m2_shards[stage_index]);
     }
     return select_shard(
-        transition_bits, large_m_grid_low_bits4, large_m_grid_low_bits5,
-        large_m_grid_low_bits6, large_m_grid_low_bits7);
+        transition_bits,
+        stage_k_tiles >= 3 ? large_m_grid_high_shards
+                           : large_m_grid_low_shards);
   }
   if (kernel_variant == QVQ_P32_VARIANT_BLOCK) {
-    return select_shard(
-        transition_bits, block_bits4, block_bits5,
-        block_bits6, block_bits7);
+    return select_shard(transition_bits, block_shards);
   }
-  return select_shard(
-      transition_bits, scalar_bits4, scalar_bits5,
-      scalar_bits6, scalar_bits7);
+  return select_shard(transition_bits, scalar_shards);
 }
 
 int resolve_requested_threads(const qvq_p32_config* requested) {
@@ -156,29 +163,12 @@ extern "C" int qvq_p32_window(
     int static_n,
     int reduction_mode,
     void* stream) {
+  QVQ_STANDARD_SHARD_TABLES(qvq_p32_window, WindowFnPtr);
   return select_standard_shard(
       transition_bits, size_m, kernel_variant, threads,
       QVQ_P32_ROW_GROUPS_AUTO, stage_k_tiles,
-      qvq_p32_window_bits4_scalar, qvq_p32_window_bits5_scalar,
-      qvq_p32_window_bits6_scalar, qvq_p32_window_bits7_scalar,
-      qvq_p32_window_bits4_block, qvq_p32_window_bits5_block,
-      qvq_p32_window_bits6_block, qvq_p32_window_bits7_block,
-      qvq_p32_window_bits4_large_m2_low,
-      qvq_p32_window_bits5_large_m2_low,
-      qvq_p32_window_bits6_large_m2_low,
-      qvq_p32_window_bits7_large_m2_low,
-      qvq_p32_window_bits4_large_m2_high,
-      qvq_p32_window_bits5_large_m2_high,
-      qvq_p32_window_bits6_large_m2_high,
-      qvq_p32_window_bits7_large_m2_high,
-      qvq_p32_window_bits4_large_m_grid_low,
-      qvq_p32_window_bits5_large_m_grid_low,
-      qvq_p32_window_bits6_large_m_grid_low,
-      qvq_p32_window_bits7_large_m_grid_low,
-      qvq_p32_window_bits4_large_m_grid_high,
-      qvq_p32_window_bits5_large_m_grid_high,
-      qvq_p32_window_bits6_large_m_grid_high,
-      qvq_p32_window_bits7_large_m_grid_high)(
+      scalar_shards, block_shards, large_m2_shards,
+      large_m_grid_low_shards, large_m_grid_high_shards)(
       input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
       size_m, size_k, size_n, transition_bits, split_count, kernel_variant,
       threads, stage_k_tiles, static_n, reduction_mode, stream);
@@ -204,33 +194,13 @@ extern "C" int qvq_p32_window_with_row_groups(
     int reduction_mode,
     int row_groups,
     void* stream) {
+  QVQ_STANDARD_SHARD_TABLES(
+      qvq_p32_window_with_row_groups, WindowRowGroupsFnPtr);
   return select_standard_shard(
       transition_bits, size_m, kernel_variant, threads, row_groups,
       stage_k_tiles,
-      qvq_p32_window_with_row_groups_bits4_scalar,
-      qvq_p32_window_with_row_groups_bits5_scalar,
-      qvq_p32_window_with_row_groups_bits6_scalar,
-      qvq_p32_window_with_row_groups_bits7_scalar,
-      qvq_p32_window_with_row_groups_bits4_block,
-      qvq_p32_window_with_row_groups_bits5_block,
-      qvq_p32_window_with_row_groups_bits6_block,
-      qvq_p32_window_with_row_groups_bits7_block,
-      qvq_p32_window_with_row_groups_bits4_large_m2_low,
-      qvq_p32_window_with_row_groups_bits5_large_m2_low,
-      qvq_p32_window_with_row_groups_bits6_large_m2_low,
-      qvq_p32_window_with_row_groups_bits7_large_m2_low,
-      qvq_p32_window_with_row_groups_bits4_large_m2_high,
-      qvq_p32_window_with_row_groups_bits5_large_m2_high,
-      qvq_p32_window_with_row_groups_bits6_large_m2_high,
-      qvq_p32_window_with_row_groups_bits7_large_m2_high,
-      qvq_p32_window_with_row_groups_bits4_large_m_grid_low,
-      qvq_p32_window_with_row_groups_bits5_large_m_grid_low,
-      qvq_p32_window_with_row_groups_bits6_large_m_grid_low,
-      qvq_p32_window_with_row_groups_bits7_large_m_grid_low,
-      qvq_p32_window_with_row_groups_bits4_large_m_grid_high,
-      qvq_p32_window_with_row_groups_bits5_large_m_grid_high,
-      qvq_p32_window_with_row_groups_bits6_large_m_grid_high,
-      qvq_p32_window_with_row_groups_bits7_large_m_grid_high)(
+      scalar_shards, block_shards, large_m2_shards,
+      large_m_grid_low_shards, large_m_grid_high_shards)(
       input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
       size_m, size_k, size_n, transition_bits, split_count, kernel_variant,
       threads, stage_k_tiles, static_n, reduction_mode, row_groups, stream);
@@ -256,33 +226,12 @@ extern "C" int qvq_p32_window_tuned(
       : requested->kernel_variant;
   const int threads = resolve_requested_threads(requested);
   const int stage_k_tiles = resolve_requested_stage(requested);
+  QVQ_STANDARD_SHARD_TABLES(qvq_p32_window_tuned, WindowTunedFnPtr);
   return select_standard_shard(
       transition_bits, size_m, kernel_variant, threads, row_groups,
       stage_k_tiles,
-      qvq_p32_window_tuned_bits4_scalar,
-      qvq_p32_window_tuned_bits5_scalar,
-      qvq_p32_window_tuned_bits6_scalar,
-      qvq_p32_window_tuned_bits7_scalar,
-      qvq_p32_window_tuned_bits4_block,
-      qvq_p32_window_tuned_bits5_block,
-      qvq_p32_window_tuned_bits6_block,
-      qvq_p32_window_tuned_bits7_block,
-      qvq_p32_window_tuned_bits4_large_m2_low,
-      qvq_p32_window_tuned_bits5_large_m2_low,
-      qvq_p32_window_tuned_bits6_large_m2_low,
-      qvq_p32_window_tuned_bits7_large_m2_low,
-      qvq_p32_window_tuned_bits4_large_m2_high,
-      qvq_p32_window_tuned_bits5_large_m2_high,
-      qvq_p32_window_tuned_bits6_large_m2_high,
-      qvq_p32_window_tuned_bits7_large_m2_high,
-      qvq_p32_window_tuned_bits4_large_m_grid_low,
-      qvq_p32_window_tuned_bits5_large_m_grid_low,
-      qvq_p32_window_tuned_bits6_large_m_grid_low,
-      qvq_p32_window_tuned_bits7_large_m_grid_low,
-      qvq_p32_window_tuned_bits4_large_m_grid_high,
-      qvq_p32_window_tuned_bits5_large_m_grid_high,
-      qvq_p32_window_tuned_bits6_large_m_grid_high,
-      qvq_p32_window_tuned_bits7_large_m_grid_high)(
+      scalar_shards, block_shards, large_m2_shards,
+      large_m_grid_low_shards, large_m_grid_high_shards)(
       input, trellis, levels, bank_ids, bank_alt_id, output, partial_output,
       size_m, size_k, size_n, transition_bits, row_groups, requested, stream);
 }
