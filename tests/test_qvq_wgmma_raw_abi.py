@@ -180,18 +180,32 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     graph.reset()
 
 
+def test_raw_abi_bm64_m128_is_down_projection_only():
+    library = _raw_library()
+    config = RawConfig(3, ctypes.sizeof(RawConfig), 128, 2048, 2048, 6, 1, 3, 64, 64)
+    plan = LaunchPlan()
+    error = ctypes.create_string_buffer(4096)
+    status = library.qvq_p32_wgmma_raw_launch_plan(
+        None, None, None, None, None, None,
+        ctypes.byref(config), ctypes.byref(plan), error, len(error),
+    )
+    assert status != 0
+    assert b"unsupported QVQ WGMMA launch-plan geometry" in error.value
+
+
 @pytest.mark.parametrize(
-    "m,algorithm,k,n,bits,expected_grid_y",
+    "m,algorithm,k,n,bits,block_m,expected_grid_y",
     [
-        *[(64, 2, 2048, 256, bits, 1) for bits in (2, 2.5, 3, 3.5)],
-        *[(128, 3, 2048, 256, bits, 8) for bits in (2, 2.5, 3, 3.5)],
+        *[(64, 2, 2048, 256, bits, 64, 1) for bits in (2, 2.5, 3, 3.5)],
+        *[(128, 3, 2048, 256, bits, 128, 8) for bits in (2, 2.5, 3, 3.5)],
         # Production Llama 3.2 down projection. This catches row-reuse
         # schedule changes that the narrow K2048/N256 ABI gate cannot see.
-        (128, 3, 8192, 2048, 3, 1),
+        (128, 3, 8192, 2048, 3, 128, 1),
+        *[(128, 3, 8192, 2048, bits, 64, 2) for bits in (2, 2.5, 3, 3.5)],
     ],
 )
 def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
-    m, algorithm, k, n, bits, expected_grid_y
+    m, algorithm, k, n, bits, block_m, expected_grid_y
 ):
     from test_qvq_grouped_runtime import _child
 
@@ -210,7 +224,7 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     output = torch.empty((m, n), device=x.device, dtype=torch.float32)
     config = RawConfig(
         3, ctypes.sizeof(RawConfig), m, k, n, round(2 * bits), 1,
-        algorithm, m, 64,
+        algorithm, block_m, 64,
     )
     assert library.qvq_p32_wgmma_raw_workspace_bytes(ctypes.byref(config)) == 0
     plan = LaunchPlan()
@@ -241,8 +255,14 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     with torch.cuda.stream(stream), torch.no_grad():
         expected = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=m, block_n=64,
+            bank_alt_id=alt_id, block_m=block_m, block_n=64,
         )
+        if m == 128 and k == 8192 and block_m == 64:
+            established = qvq_p32_window_wgmma_tuned(
+                x, window, levels, banks, bits, out_features=n,
+                bank_alt_id=alt_id, block_m=128, block_n=64,
+            )
+            torch.testing.assert_close(expected, established, atol=0, rtol=0)
         launch()
     stream.synchronize()
     torch.testing.assert_close(output, expected, atol=0, rtol=0)
@@ -254,8 +274,14 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
         x.normal_().mul_(0.02)
         expected_changed = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=m, block_n=64,
+            bank_alt_id=alt_id, block_m=block_m, block_n=64,
         )
+        if m == 128 and k == 8192 and block_m == 64:
+            established_changed = qvq_p32_window_wgmma_tuned(
+                x, window, levels, banks, bits, out_features=n,
+                bank_alt_id=alt_id, block_m=128, block_n=64,
+            )
+            torch.testing.assert_close(expected_changed, established_changed, atol=0, rtol=0)
     stream.synchronize()
     graph.replay()
     stream.synchronize()

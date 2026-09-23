@@ -148,7 +148,7 @@ template <int TransitionBits>
 cudaError_t launch_direct(
     const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
     const Element* levels, const uint8_t* bank_alt_id, float* output,
-    int rows, int k, int n, cudaStream_t stream) {
+    int rows, int k, int n, int block_m, cudaStream_t stream) {
   return rows == 64
       ? launch_direct_rows<TransitionBits, 64, 4>(
             input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
@@ -157,8 +157,11 @@ cudaError_t launch_direct(
                 input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
           : n <= 2048
               ? k == 8192
-                  ? launch_direct_rows<TransitionBits, 128, 8>(
-                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+                  ? block_m == 64
+                      ? launch_direct_rows<TransitionBits, 128, 4>(
+                            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
+                      : launch_direct_rows<TransitionBits, 128, 8>(
+                            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
                   : launch_direct_rows<TransitionBits, 128, 2>(
                         input, trellis, bank_ids, levels, bank_alt_id, output, k, n, stream)
               : launch_direct_rows<TransitionBits, 128, 8>(
@@ -368,7 +371,7 @@ template <int TransitionBits>
 cudaError_t build_direct_plan(
     const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
     const Element* levels, const uint8_t* bank_alt_id, float* output,
-    int rows, int k, int n, qvq_p32_launch_plan* plan) {
+    int rows, int k, int n, int block_m, qvq_p32_launch_plan* plan) {
   return rows == 64
       ? build_direct_plan_rows<TransitionBits, 64, 4>(
             input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
@@ -377,8 +380,11 @@ cudaError_t build_direct_plan(
                 input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
           : n <= 2048
               ? k == 8192
-                  ? build_direct_plan_rows<TransitionBits, 128, 8>(
-                        input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+                  ? block_m == 64
+                      ? build_direct_plan_rows<TransitionBits, 128, 4>(
+                            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
+                      : build_direct_plan_rows<TransitionBits, 128, 8>(
+                            input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
                   : build_direct_plan_rows<TransitionBits, 128, 2>(
                         input, trellis, bank_ids, levels, bank_alt_id, output, k, n, plan)
               : build_direct_plan_rows<TransitionBits, 128, 8>(
@@ -506,7 +512,8 @@ extern "C" int qvq_p32_wgmma_raw_launch(
       c->block_n == 0 && c->m >= 1 && c->m <= 16;
   const bool direct_m64 = c->algorithm == 2 && c->block_m == 64 &&
       c->block_n == 64 && c->m == 64 && c->split_count == 1;
-  const bool direct_m128 = c->algorithm == 3 && c->block_m == 128 &&
+  const bool direct_m128 = c->algorithm == 3 &&
+      (c->block_m == 128 || (c->block_m == 64 && c->k == 8192 && c->n == 2048)) &&
       c->block_n == 64 && c->m == 128 && c->split_count == 1;
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
@@ -532,7 +539,7 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     static_cast<const uint8_t*>(bank_ids),                                 \
     static_cast<const Element*>(levels),                                   \
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output), \
-    c->m, c->k, c->n, stream)
+    c->m, c->k, c->n, c->block_m, stream)
     if (grouped_gate_up) {
 #define QVQ_LAUNCH_GROUPED(BITS) launch_direct_grouped_gate_up<BITS>(       \
     static_cast<const Element*>(activation),                               \
@@ -637,7 +644,8 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
   }
   const bool direct_m64 = c->algorithm == 2 && c->block_m == 64 &&
       c->block_n == 64 && c->m == 64 && c->split_count == 1;
-  const bool direct_m128 = c->algorithm == 3 && c->block_m == 128 &&
+  const bool direct_m128 = c->algorithm == 3 &&
+      (c->block_m == 128 || (c->block_m == 64 && c->k == 8192 && c->n == 2048)) &&
       c->block_n == 64 && c->m == 128 && c->split_count == 1;
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
@@ -654,7 +662,7 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
     static_cast<const uint8_t*>(bank_ids),                                  \
     static_cast<const Element*>(levels),                                    \
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output),  \
-    c->m, c->k, c->n, plan)
+    c->m, c->k, c->n, c->block_m, plan)
   if (grouped_gate_up) {
 #define QVQ_BUILD_GROUPED_PLAN(BITS) build_direct_grouped_gate_up_plan<BITS>( \
     static_cast<const Element*>(activation),                                 \
