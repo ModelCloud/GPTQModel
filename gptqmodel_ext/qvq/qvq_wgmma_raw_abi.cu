@@ -90,15 +90,15 @@ cudaError_t launch_ordered(
   return cudaGetLastError();
 }
 
-template <int TransitionBits, int Rows, int RowTiles>
+template <int TransitionBits, int Rows, int RowTiles, int N64BlocksPerCta = 1>
 cudaError_t launch_direct_rows(
     const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
     const Element* levels, const uint8_t* bank_alt_id, float* output,
     int k, int n, cudaStream_t stream) {
   constexpr int kWords = 4 * TransitionBits;
-  using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
   using SharedStorage =
-      P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTiles>;
+      P32WgmmaTmaSharedStorageFor<TransitionBits, N64BlocksPerCta, RowTiles>;
   const int k_tiles = k / kP32TileRows;
   const int n_tiles = n / kP32TileColumns;
   auto input_tensor = cute::make_tensor(
@@ -119,7 +119,7 @@ cudaError_t launch_direct_rows(
       cute::SM90_TMA_LOAD{}, trellis_tensor,
       TrellisLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
       cute::make_shape(cute::Int<kWords>{},
-                       cute::Int<kP32N16TilesPerBlock>{},
+                       cute::Int<kP32N16TilesPerBlock * N64BlocksPerCta>{},
                        cute::Int<kP32K16TilesPerStage>{}));
   auto bank_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{}, bank_tensor,
@@ -128,7 +128,7 @@ cudaError_t launch_direct_rows(
   HopperGroupedP32LaunchParams grouped{};
   grouped.launch_bank_alt_ids = bank_alt_id;
   auto kernel = qvq_p32_window_wgmma_m16_tma_kernel<
-      TransitionBits, false, false, false, true, 1, 0, RowTiles,
+      TransitionBits, false, false, false, true, N64BlocksPerCta, 0, RowTiles,
       decltype(input_tma), decltype(trellis_tma), decltype(bank_tma),
       HopperGroupedP32LaunchParams>;
   cudaError_t status = cudaFuncSetAttribute(
@@ -136,9 +136,10 @@ cudaError_t launch_direct_rows(
       static_cast<int>(sizeof(SharedStorage)));
   if (status != cudaSuccess) return status;
   const dim3 grid(
-      static_cast<unsigned>(n / kOutputColumns),
+      static_cast<unsigned>(n / (N64BlocksPerCta * kOutputColumns)),
       static_cast<unsigned>(Rows / (RowTiles * kRows)), 1);
-  kernel<<<grid, kTmaThreads, sizeof(SharedStorage), stream>>>(
+  kernel<<<grid, kTmaThreads + (N64BlocksPerCta - 1) * kThreads,
+           sizeof(SharedStorage), stream>>>(
       input_tma, trellis_tma, bank_tma, levels, output, grouped,
       Rows, k, n, 1, 0);
   return cudaGetLastError();
@@ -247,6 +248,25 @@ int fail(char* error, uint64_t capacity, const char* message) {
   return 1;
 }
 
+bool is_direct_m960(const QvqP32WgmmaRawConfig* c) {
+  if (c->algorithm != 5 || c->m != 960 || c->split_count != 1 ||
+      !((c->k == 2048 && (c->n == 512 || c->n == 2048 || c->n == 8192)) ||
+        (c->k == 8192 && c->n == 2048))) {
+    return false;
+  }
+  const bool five_rows = c->block_m == 80 &&
+      ((c->transition_bits == 4 && c->k == 2048 && c->n == 2048) ||
+       (c->transition_bits == 6 &&
+        ((c->k == 2048 && c->n == 8192) ||
+         (c->k == 8192 && c->n == 2048))));
+  const bool bn64 = c->block_n == 64 && (c->block_m == 64 || five_rows);
+  const bool bn128 = c->block_n == 128 && c->block_m == 64 &&
+      c->transition_bits == 6 &&
+      ((c->k == 2048 && c->n == 8192) ||
+       (c->k == 8192 && c->n == 2048));
+  return bn64 || bn128;
+}
+
 struct PlanStorageWriter {
   uint8_t* data;
   uint64_t capacity;
@@ -282,15 +302,15 @@ bool set_host_arg(
   return true;
 }
 
-template <int TransitionBits, int Rows, int RowTiles>
+template <int TransitionBits, int Rows, int RowTiles, int N64BlocksPerCta = 1>
 cudaError_t build_direct_plan_rows(
     const Element* input, const uint32_t* trellis, const uint8_t* bank_ids,
     const Element* levels, const uint8_t* bank_alt_id, float* output,
     int k, int n, qvq_p32_launch_plan* plan) {
   constexpr int kWords = 4 * TransitionBits;
-  using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits>;
+  using TrellisLayout = P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
   using SharedStorage =
-      P32WgmmaTmaSharedStorageFor<TransitionBits, 1, RowTiles>;
+      P32WgmmaTmaSharedStorageFor<TransitionBits, N64BlocksPerCta, RowTiles>;
   const int k_tiles = k / kP32TileRows;
   const int n_tiles = n / kP32TileColumns;
   auto input_tensor = cute::make_tensor(
@@ -311,7 +331,7 @@ cudaError_t build_direct_plan_rows(
       cute::SM90_TMA_LOAD{}, trellis_tensor,
       TrellisLayout{}(cute::_, cute::_, cute::_, cute::_0{}),
       cute::make_shape(cute::Int<kWords>{},
-                       cute::Int<kP32N16TilesPerBlock>{},
+                       cute::Int<kP32N16TilesPerBlock * N64BlocksPerCta>{},
                        cute::Int<kP32K16TilesPerStage>{}));
   auto bank_tma = cute::make_tma_atom(
       cute::SM90_TMA_LOAD{}, bank_tensor,
@@ -320,7 +340,7 @@ cudaError_t build_direct_plan_rows(
   HopperGroupedP32LaunchParams grouped{};
   grouped.launch_bank_alt_ids = bank_alt_id;
   auto kernel = qvq_p32_window_wgmma_m16_tma_kernel<
-      TransitionBits, false, false, false, true, 1, 0, RowTiles,
+      TransitionBits, false, false, false, true, N64BlocksPerCta, 0, RowTiles,
       decltype(input_tma), decltype(trellis_tma), decltype(bank_tma),
       HopperGroupedP32LaunchParams>;
   cudaError_t status = cudaFuncSetAttribute(
@@ -335,10 +355,10 @@ cudaError_t build_direct_plan_rows(
   auto* launch = &plan->launches[0];
   launch->kernel_symbol = reinterpret_cast<const void*>(kernel);
   launch->kernel_name = "qvq_p32_wgmma_direct_rows";
-  launch->grid_x = static_cast<unsigned>(n / kOutputColumns);
+  launch->grid_x = static_cast<unsigned>(n / (N64BlocksPerCta * kOutputColumns));
   launch->grid_y = static_cast<unsigned>(Rows / (RowTiles * kRows));
   launch->grid_z = 1;
-  launch->block_x = kTmaThreads;
+  launch->block_x = kTmaThreads + (N64BlocksPerCta - 1) * kThreads;
   launch->block_y = 1;
   launch->block_z = 1;
   launch->shared_memory_bytes = sizeof(SharedStorage);
@@ -520,11 +540,7 @@ extern "C" int qvq_p32_wgmma_raw_launch(
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
       c->split_count == 1;
-  const bool direct_m960 = c->algorithm == 5 && c->block_m == 64 &&
-      c->block_n == 64 && c->m == 960 &&
-      ((c->k == 2048 && (c->n == 512 || c->n == 2048 || c->n == 8192)) ||
-       (c->k == 8192 && c->n == 2048)) &&
-      c->split_count == 1;
+  const bool direct_m960 = is_direct_m960(c);
   if ((!ordered_m16 && !direct_m64 && !direct_m128 && !grouped_gate_up &&
        !direct_m960) ||
       c->k < 256 || c->k % 256 != 0 ||
@@ -549,7 +565,8 @@ extern "C" int qvq_p32_wgmma_raw_launch(
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output), \
     c->m, c->k, c->n, c->block_m, stream)
     if (direct_m960) {
-#define QVQ_LAUNCH_M960(BITS) launch_direct_rows<BITS, 960, 4>( \
+#define QVQ_LAUNCH_M960(BITS, ROW_TILES, N64_BLOCKS) \
+        launch_direct_rows<BITS, 960, ROW_TILES, N64_BLOCKS>( \
           static_cast<const Element*>(activation),                    \
           static_cast<const uint32_t*>(window),                       \
           static_cast<const uint8_t*>(bank_ids),                      \
@@ -558,16 +575,21 @@ extern "C" int qvq_p32_wgmma_raw_launch(
           static_cast<float*>(output), c->k, c->n, stream)
       switch (c->transition_bits) {
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
-        case 4: status = QVQ_LAUNCH_M960(4); break;
+        case 4: status = c->block_m == 80
+            ? QVQ_LAUNCH_M960(4, 5, 1) : QVQ_LAUNCH_M960(4, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
-        case 5: status = QVQ_LAUNCH_M960(5); break;
+        case 5: status = QVQ_LAUNCH_M960(5, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
-        case 6: status = QVQ_LAUNCH_M960(6); break;
+        case 6: status = c->block_n == 128
+            ? QVQ_LAUNCH_M960(6, 4, 2)
+            : c->block_m == 80
+                ? QVQ_LAUNCH_M960(6, 5, 1)
+                : QVQ_LAUNCH_M960(6, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
-        case 7: status = QVQ_LAUNCH_M960(7); break;
+        case 7: status = QVQ_LAUNCH_M960(7, 4, 1); break;
 #endif
       }
 #undef QVQ_LAUNCH_M960
@@ -681,11 +703,7 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
   const bool grouped_gate_up = c->algorithm == 4 && c->block_m == 128 &&
       c->block_n == 128 && c->m == 128 && c->k == 2048 && c->n == 16384 &&
       c->split_count == 1;
-  const bool direct_m960 = c->algorithm == 5 && c->block_m == 64 &&
-      c->block_n == 64 && c->m == 960 &&
-      ((c->k == 2048 && (c->n == 512 || c->n == 2048 || c->n == 8192)) ||
-       (c->k == 8192 && c->n == 2048)) &&
-      c->split_count == 1;
+  const bool direct_m960 = is_direct_m960(c);
   if ((!direct_m64 && !direct_m128 && !grouped_gate_up && !direct_m960) ||
       c->k < 256 || c->k % 256 != 0 ||
       c->n < 256 || c->n % 256 != 0 || c->transition_bits < 4 ||
@@ -701,7 +719,8 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
     static_cast<const uint8_t*>(bank_alt_id), static_cast<float*>(output),  \
     c->m, c->k, c->n, c->block_m, plan)
   if (direct_m960) {
-#define QVQ_BUILD_M960_PLAN(BITS) build_direct_plan_rows<BITS, 960, 4>( \
+#define QVQ_BUILD_M960_PLAN(BITS, ROW_TILES, N64_BLOCKS) \
+      build_direct_plan_rows<BITS, 960, ROW_TILES, N64_BLOCKS>( \
         static_cast<const Element*>(activation),                           \
         static_cast<const uint32_t*>(window),                              \
         static_cast<const uint8_t*>(bank_ids),                             \
@@ -710,16 +729,21 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
         static_cast<float*>(output), c->k, c->n, plan)
     switch (c->transition_bits) {
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 4
-      case 4: status = QVQ_BUILD_M960_PLAN(4); break;
+      case 4: status = c->block_m == 80
+          ? QVQ_BUILD_M960_PLAN(4, 5, 1) : QVQ_BUILD_M960_PLAN(4, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 5
-      case 5: status = QVQ_BUILD_M960_PLAN(5); break;
+      case 5: status = QVQ_BUILD_M960_PLAN(5, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
-      case 6: status = QVQ_BUILD_M960_PLAN(6); break;
+      case 6: status = c->block_n == 128
+          ? QVQ_BUILD_M960_PLAN(6, 4, 2)
+          : c->block_m == 80
+              ? QVQ_BUILD_M960_PLAN(6, 5, 1)
+              : QVQ_BUILD_M960_PLAN(6, 4, 1); break;
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 7
-      case 7: status = QVQ_BUILD_M960_PLAN(7); break;
+      case 7: status = QVQ_BUILD_M960_PLAN(7, 4, 1); break;
 #endif
     }
 #undef QVQ_BUILD_M960_PLAN

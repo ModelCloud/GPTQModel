@@ -21,7 +21,10 @@ typedef struct {
   uint32_t split_count;
   uint32_t algorithm;  // 1 = ordered M16, 2 = direct M64, 3 = direct M128,
                        // 4 = direct M128 equal-width grouped gate/up,
-                       // 5 = experimental direct M960 Llama projection (BM64).
+                       // 5 = direct M960 Llama projection: block_m=64 uses
+                       // four M16 rows/CTA; block_m=80 uses five on measured
+                       // W2 Q and W3 gate/down shapes. W3 gate also exposes
+                       // BM64/BN128 on W3 gate/down with two N64 consumers/CTA.
   // For algorithm 3, BM64 is available only for M128/K8192/N2048;
   // BM128 retains the established schedule for all M128 shapes.
   uint32_t block_m, block_n;

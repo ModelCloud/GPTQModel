@@ -1596,9 +1596,9 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
        ((FixedQwenProjection == 3 && !OrderedSplit) ||
         (FixedQwenProjection != 3 && OrderedSplit))));
   static_assert(N64BlocksPerCta == 1 || N64BlocksPerCta == 2);
-  static_assert(N64BlocksPerCta == 1 || Grouped);
   static_assert(
       RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4 ||
+          RowTilesPerCta == 5 ||
           RowTilesPerCta == 8 || RowTilesPerCta == 11);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using TrellisSmemLayout =
@@ -1639,6 +1639,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   int bank_alt_id = launch_bank_alt_id;
   if constexpr (!Grouped) {
     row_tile = static_cast<int>(blockIdx.y);
+    n64_block = static_cast<int>(blockIdx.x) * N64BlocksPerCta + consumer_group;
+    n64_block_global = n64_block;
     if (grouped_params.launch_bank_alt_ids != nullptr) {
       bank_alt_id = grouped_params.launch_bank_alt_ids[0];
     }
@@ -2087,7 +2089,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
               tma_global_input1(cute::_, global_stage),
               tma_shared_input1(cute::_, write_stage));
         }
-        if constexpr (RowTilesPerCta == 4) {
+        if constexpr (RowTilesPerCta == 4 || RowTilesPerCta == 5) {
           cute::copy(
               input_tma.with(*barrier),
               tma_global_input1(cute::_, global_stage),
@@ -2100,6 +2102,12 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
               input_tma.with(*barrier),
               tma_global_input3(cute::_, global_stage),
               tma_shared_input3(cute::_, write_stage));
+        }
+        if constexpr (RowTilesPerCta == 5) {
+          cute::copy(
+              input_tma.with(*barrier),
+              tma_global_input4(cute::_, global_stage),
+              tma_shared_input4(cute::_, write_stage));
         }
         if constexpr (RowTilesPerCta == 8) {
           cute::copy(
@@ -2283,7 +2291,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
             fragment_b1(cute::_, cute::_, k_block, read_stage),
             accumulator1);
       }
-      if constexpr (RowTilesPerCta == 4) {
+      if constexpr (RowTilesPerCta == 4 || RowTilesPerCta == 5) {
         cute::gemm(
             tiled_mma,
             fragment_a(cute::_, cute::_, cute::_0{}),
@@ -2299,6 +2307,13 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
             fragment_a(cute::_, cute::_, cute::_0{}),
             fragment_b3(cute::_, cute::_, k_block, read_stage),
             accumulator3);
+      }
+      if constexpr (RowTilesPerCta == 5) {
+        cute::gemm(
+            tiled_mma,
+            fragment_a(cute::_, cute::_, cute::_0{}),
+            fragment_b4(cute::_, cute::_, k_block, read_stage),
+            accumulator4);
       }
       if constexpr (RowTilesPerCta == 8) {
         cute::gemm(
@@ -2357,10 +2372,13 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
     if constexpr (RowTilesPerCta == 2) {
       cute::warpgroup_fence_operand(accumulator1);
     }
-    if constexpr (RowTilesPerCta == 4) {
+    if constexpr (RowTilesPerCta == 4 || RowTilesPerCta == 5) {
       cute::warpgroup_fence_operand(accumulator1);
       cute::warpgroup_fence_operand(accumulator2);
       cute::warpgroup_fence_operand(accumulator3);
+    }
+    if constexpr (RowTilesPerCta == 5) {
+      cute::warpgroup_fence_operand(accumulator4);
     }
     if constexpr (RowTilesPerCta == 8) {
       cute::warpgroup_fence_operand(accumulator1);
