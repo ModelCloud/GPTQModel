@@ -48,7 +48,7 @@ especially on Laguna, Qwen3.5-27B, and Kimi-K3 proxy shapes.
    - For gate/up activation fusion, compute `SiLU(gate_slice) * up_slice` in one kernel if the backend supports it.
 
 4. **Choose attention.**
-   - Prefer `attn_implementation="flash_attention_2"` on Ampere/Hopper when available.
+   - Prefer the fastest numerically accepted attention implementation actually supported on the live A100+ device and runtime. Do not hard-code FlashAttention-2 as universally best: Hopper/Blackwell runtimes may expose newer kernels, and shape/KV-cache regimes change the winner.
    - Keep eager/SDPA fallback for unsupported shapes or devices.
 
 5. **Validate numerics first, speed second.**
@@ -71,3 +71,27 @@ especially on Laguna, Qwen3.5-27B, and Kimi-K3 proxy shapes.
 ## See also
 
 - [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for inference engines from wafer-ai's performance engineering index.
+
+
+## A100+ fusion performance rules
+
+- Fusion is a data-movement and launch-cost optimization, not a goal by itself.
+  Use Nsight Systems to prove launch/materialization cost exists and Nsight
+  Compute to ensure the fused resource union does not destroy residency.
+- Preserve strided fused outputs when downstream kernels can consume them
+  efficiently. Copying Q/K/V or gate/up slices to contiguous buffers can erase
+  the benefit of the fused producer.
+- When multiple fused children share the same input, stage/reuse that input once
+  only when the shared/register footprint and synchronization are cheaper than
+  re-reading it through cache. Measure the complete operator.
+- A fused rank/adapter projection stored as `A[K,R]` may be ideal for a vector
+  load that consumes all R values per K, but poor for a warp fixed on rank. Pick
+  the execution layout to match warp ownership; an immutable transposed cache can
+  be preferable to strided per-lane loads.
+- On Ampere use `cp.async` pipelines only when enough compute hides the copy.
+  On Hopper use TMA/WGMMA only when the descriptor/pipeline overhead amortizes.
+  On Blackwell re-evaluate ownership around TCGen05/TMEM rather than porting the
+  Hopper schedule unchanged.
+- Do not introduce cross-stream overlap without proving dependencies and adding
+  events. Concurrent kernels can contend for Tensor Cores/L2/HBM and regress even
+  when the timeline visually overlaps.

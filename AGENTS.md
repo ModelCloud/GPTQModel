@@ -110,7 +110,7 @@ QVQ extensions. Research notes do not override the accuracy gates above.
   also use `$gptqmodel-quantization-regressions`.
 - Quantized linear implementations, backend selection, capability declarations, fallback, or availability checks:
   use `$gptqmodel-backends`.
-- CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`.
+- CUDA, C++, CUTLASS, Triton, JIT extensions, correctness debugging, or kernel benchmarks: use `$gptqmodel-cuda-kernels`. NVIDIA GPU performance work defaults to A100 and newer (cc 8.0+); pre-Ampere optimization is out of scope unless explicitly requested.
 - Multi-kernel fusion, cooperative or persistent mega-kernels, cross-phase scratch reuse, grid barriers, fused phase
   scheduling, or launch-count reduction: also use `$gptqmodel-mega-kernels`.
 - Cohere-style decode task graphs, per-tile dependency counters, warp-specialized pipelines, or ragged
@@ -150,7 +150,8 @@ QVQ extensions. Research notes do not override the accuracy gates above.
   and collecting telemetry before source inspection: use `$run-user-command-with-telemetry`.
 - Upstream sync, ports, public release notes, or disclosure-boundary review: use `$gptqmodel-upstream`.
 - Ampere or A100 tuning: also use `$gptqmodel-ampere-kernels`.
-- Hopper or H100 tuning: also use `$gptqmodel-hopper-kernels`.
+- Hopper or H100/H200 tuning: also use `$gptqmodel-hopper-kernels`.
+- Blackwell data-center/client/workstation tuning, TCGen05, Tensor Memory (TMEM), Blackwell TMA, FP8/FP6/FP4 or block-scaled Tensor Core paths: also use `$gptqmodel-blackwell-kernels`.
 - AMD ROCm kernel work, including MI350/MI355, gfx950, FlyDSL, Gluon, AITER, Primus-Turbo, hipBLASLt/rocBLAS,
   rocprof, or AMD ISA analysis: also use `$gptqmodel-amd-kernels`.
 

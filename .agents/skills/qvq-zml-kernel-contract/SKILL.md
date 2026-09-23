@@ -22,7 +22,7 @@ Use the repository's git/PR workflow skill for branch and push mechanics. This s
 
 For every changed or exported QVQ family, record one row using [references/coverage-matrix.md](references/coverage-matrix.md). Include:
 
-- ABI version, symbol, algorithm ID, SM target, dtype/layout, and output accumulation type.
+- ABI version, symbol, algorithm ID, exact CUDA architecture/family target and compute-capability admission, dtype/layout, and output accumulation type.
 - Exact M/K/N and transition-bit domain; grouped versus single projection; split, BM/BN/BK, stage, warp, and workspace constraints.
 - Public tuning controls and which values are aliases rather than independent axes.
 - CUDA graph capture/replay behavior and cache-key fields.
@@ -45,7 +45,7 @@ When QVQ changes, inspect and update all affected layers in the same workstream:
 3. ZML QVQ pin and Zig ABI struct/symbol loader.
 4. ZML policy and shape admission in `zml/qvq.zig`.
 5. StableHLO custom-call attributes and XLA parsing/validation/workspace logic in `third_party/xla/qvq-p32-xla-integration.patch`.
-6. Compilation/autotune cache identity. Add every field that can change generated code or dispatch; bump the relevant version when old cache entries are unsafe.
+6. Compilation/autotune cache identity. Add every field that can change generated code or dispatch, including compute capability/architecture-family target, layout/swizzle/vectorization, pipeline stages, cluster/CTA geometry, split policy and correction mode; bump the relevant version when old cache entries are unsafe.
 7. Inference-runner defaults only when production policy changes. Keep core integration in QVQ/ZML.
 
 Do not broaden admission beyond the ABI predicate. Do not leave a newly optimized family hidden behind the portable fallback without an explicit matrix disposition.
@@ -75,3 +75,19 @@ Before handoff, report:
 - Families added/changed and their three-state disposition.
 - Tests, graph replay, runtime dispatch evidence, quality gates, and benchmarks.
 - Remaining fallbacks or intentionally unwired families with owners.
+
+
+## NVIDIA A100+ external ABI requirements
+
+When a QVQ executable exposes architecture-sensitive layout or scheduling, the
+external contract must carry enough information to reproduce the exact launch:
+
+- Ampere: async-copy stage/vector/alignment assumptions and MMA/layout family.
+- Hopper: TMA tensor-map/swizzle, stage count, WGMMA operand ownership,
+  warpgroup/CTA geometry, dynamic SMEM and cluster requirement.
+- Blackwell: exact architecture/family target, TCGen05/TMEM requirements,
+  TMA/layout and block-scale metadata where applicable.
+
+A generic algorithm name such as `hopper_direct` or `blackwell_fp4` is not
+a complete cache key. Reject an external request whose compiled specialization
+does not exactly honor the requested geometry/layout.

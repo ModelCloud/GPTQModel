@@ -74,3 +74,25 @@ cores is a ceiling, not a mandatory worker count. Set build-system and compiler
 parallelism explicitly, record the limits, and monitor memory and swap activity.
 Reduce future concurrency or stop the task's own build if pressure appears;
 never kill unrelated work. Do not retain an unconditional eight-worker cap.
+
+
+## CUDA stream and async-pipeline invariants
+
+For NVIDIA A100+ paths, graph safety also requires the same stream/dependency
+semantics as eager execution:
+
+- Launch on the caller/framework current stream unless the public API explicitly
+  owns another stream.
+- If an auxiliary stream is prepared, create its events before capture and encode
+  every producer/consumer dependency explicitly. Host submission order is not a
+  cross-stream dependency.
+- Do not use `cudaDeviceSynchronize()` or host scalar reads to make capture
+  deterministic.
+- `cp.async`, TMA, mbarrier, WGMMA and TCGen05 pipelines must reach a valid
+  completion/reuse point on every replay and every tail path; graph replay does
+  not repair a missing device-side barrier.
+- Prepared TMA descriptors, repacked execution layouts, scale tables, and tuning
+  selections need explicit owners and invalidation keys. Retain them through all
+  in-flight graph uses.
+- Capture-safe allocation is not permission for unbounded per-replay allocation.
+  Prefer stable execution-lane storage or graph-pool-owned buffers.

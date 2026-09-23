@@ -44,8 +44,7 @@ before the timed region after warmup when setup is long; if the device is no lon
 
 ## Run and validate
 
-1. Capture `nvidia-smi`, driver, Torch/CUDA versions, compute capability, SM count, memory, dtype, shapes, batch
-   and token regime, backend, bits/group size, and exact command.
+1. Capture `nvidia-smi`, driver, Torch/CUDA versions, compute capability, SM count, memory, shared-memory limits where relevant, dtype, shapes, batch/token regime, backend, bits/group size, exact architecture/JIT target, and command.
 2. Establish correctness and a dense or higher-precision reference before timing an optimized path.
 3. Warm up the exact shape class. Use CUDA events or synchronized timing and report distribution statistics.
 4. Monitor only processes launched by the task. Never terminate unrelated jobs to obtain an idle GPU.
@@ -99,3 +98,21 @@ correctness-only, compiled-only, skipped, interrupted, or invalidated by device 
 ## See also
 
 - [Curated GPU performance engineering resources](references/wafer-gpu-perf-resources.md) — External reading list for serving benchmarks and correctness from wafer-ai's performance engineering index.
+
+
+## Cross-architecture performance matrix
+
+For CUDA kernel changes, do not label "A100+" performance from a single GPU.
+At minimum:
+
+- A100/sm_80 changes require an A100-class runtime result.
+- Hopper-only TMA/WGMMA changes require H100/H200 runtime evidence and an
+  explicit Ampere rejection/fallback check.
+- Blackwell TCGen05/TMEM or architecture-family code requires runtime evidence
+  on the exact supported Blackwell target; H100 measurements do not substitute.
+- Portable source that changes generated code on multiple architectures should
+  compile all intended targets and run the highest-risk representative device
+  paths before broad promotion.
+
+Record the exact architecture binary selected at runtime. A PTX/JIT fallback is
+not equivalent evidence to the intended `sm_XX`/architecture-accelerated path.
