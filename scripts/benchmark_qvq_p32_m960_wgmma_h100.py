@@ -33,12 +33,19 @@ def main() -> None:
     parser.add_argument("--snapshot-dir", type=Path,
                         help="use layer-0 P32 metadata from this quantized snapshot")
     parser.add_argument("--rounds", type=int, default=50)
+    parser.add_argument("--profile-arm", choices=("baseline", "candidate"),
+                        help="warm only this arm, then issue one traceable launch")
+    parser.add_argument("--profiler-attached", action="store_true",
+                        help="skip the in-process idle check; check GPU idleness before attaching a profiler")
     args = parser.parse_args()
-    if args.rounds < 10:
+    if args.profile_arm is None and args.rounds < 10:
         parser.error("at least 10 paired rounds are required")
+    if args.profiler_attached and args.profile_arm is None:
+        parser.error("--profiler-attached requires --profile-arm")
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu_uuid
-    _idle_preflight(args.gpu_uuid)
+    if not args.profiler_attached:
+        _idle_preflight(args.gpu_uuid)
 
     import torch
 
@@ -115,6 +122,24 @@ def main() -> None:
             raise RuntimeError(f"candidate returned {status}: {error.value.decode()}")
 
     arms = (invoke_baseline, invoke_candidate)
+    if args.profile_arm is not None:
+        chosen = 0 if args.profile_arm == "baseline" else 1
+        for _ in range(20):
+            arms[chosen]()
+        stream.synchronize()
+        arms[chosen]()
+        stream.synchronize()
+        print(json.dumps({
+            "scope": "single_warmed_compressed_p32_profile_arm",
+            "arm": args.profile_arm,
+            "shape": {"m": m, "k": k, "n": n, "transition_bits": bits},
+            "projection": args.projection,
+            "snapshot_dir": str(args.snapshot_dir.resolve()) if args.snapshot_dir else None,
+            "library_sha256": hashlib.sha256(
+                (args.baseline if chosen == 0 else args.candidate).read_bytes()
+            ).hexdigest(),
+        }))
+        return
     for _ in range(20):
         for arm in arms:
             arm()
