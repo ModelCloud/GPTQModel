@@ -14,6 +14,50 @@
 #include <cstring>
 #include <limits>
 
+// Production builds compile one (kernel family, transition width) shard per
+// CUDA object. Give every shard a private C entry-point name; the small
+// dispatcher object restores the stable public ABI after the shards link.
+#if defined(QVQ_P32_SHARD_BITS)
+#if QVQ_P32_SHARD_BITS == 4
+#define qvq_p32_window qvq_p32_window_bits4
+#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits4
+#define qvq_p32_window_tuned qvq_p32_window_tuned_bits4
+#define qvq_p32_grouped_window qvq_p32_grouped_window_bits4
+#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits4
+#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits4
+#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits4
+#elif QVQ_P32_SHARD_BITS == 5
+#define qvq_p32_window qvq_p32_window_bits5
+#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits5
+#define qvq_p32_window_tuned qvq_p32_window_tuned_bits5
+#define qvq_p32_grouped_window qvq_p32_grouped_window_bits5
+#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits5
+#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits5
+#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits5
+#elif QVQ_P32_SHARD_BITS == 6
+#define qvq_p32_window qvq_p32_window_bits6
+#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits6
+#define qvq_p32_window_tuned qvq_p32_window_tuned_bits6
+#define qvq_p32_grouped_window qvq_p32_grouped_window_bits6
+#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits6
+#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits6
+#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits6
+#elif QVQ_P32_SHARD_BITS == 7
+#define qvq_p32_window qvq_p32_window_bits7
+#define qvq_p32_window_with_row_groups qvq_p32_window_with_row_groups_bits7
+#define qvq_p32_window_tuned qvq_p32_window_tuned_bits7
+#define qvq_p32_grouped_window qvq_p32_grouped_window_bits7
+#define qvq_p32_grouped_window_tuned qvq_p32_grouped_window_tuned_bits7
+#define qvq_p32_grouped_launch_plan qvq_p32_grouped_launch_plan_bits7
+#define qvq_p32_grouped_launch_plan_tuned qvq_p32_grouped_launch_plan_tuned_bits7
+#else
+#error "QVQ_P32_SHARD_BITS must be 4, 5, 6, or 7"
+#endif
+#define QVQ_P32_SHARD_API __attribute__((visibility("hidden")))
+#else
+#define QVQ_P32_SHARD_API
+#endif
+
 namespace {
 
 using qvq_p32_internal::set_last_error;
@@ -1576,6 +1620,52 @@ __global__ __launch_bounds__(Threads) void p32_window_ampere_grouped_block_kerne
   }
 }
 
+#if defined(QVQ_P32_SM90_COMPILE_CHECK_ONLY)
+
+}  // namespace
+
+// Compile the dynamic F6 block kernels exercised by the supplied Llama
+// decode/prefill geometry without instantiating the full production dispatch
+// matrix. This entry point is only used to force NVCC/ptxas code generation;
+// the compile-check object is never loaded or executed.
+extern "C" __attribute__((used)) int qvq_p32_sm90_compile_check(
+    const void* input,
+    const void* trellis,
+    const void* levels,
+    const void* bank_ids,
+    const uint8_t* bank_alt_ids,
+    float* partial_output,
+    float* output,
+    void* stream) {
+  const auto* input_half = reinterpret_cast<const half*>(input);
+  const auto* trellis_words = reinterpret_cast<const uint32_t*>(trellis);
+  const auto* levels_half = reinterpret_cast<const half*>(levels);
+  const auto* bank_bytes = reinterpret_cast<const uint8_t*>(bank_ids);
+  const auto* bank_alt_bytes = reinterpret_cast<const uint8_t*>(bank_alt_ids);
+  const auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);
+
+  // M=128 decode, using eight 16-row groups per CTA.
+  p32_window_ampere_large_m2_kernel<6, 0, 0, 2, 8>
+      <<<dim3(128, 1, 1), 128, 0, cuda_stream>>>(
+          input_half, trellis_words, levels_half, bank_bytes, partial_output,
+          output, 128, 2048, 8192, 1, bank_alt_bytes);
+  // M=960 prefill, using six 16-row groups per CTA.
+  p32_window_ampere_large_m2_kernel<6, 0, 0, 2, 6>
+      <<<dim3(128, 10, 1), 128, 0, cuda_stream>>>(
+          input_half, trellis_words, levels_half, bank_bytes, partial_output,
+          output, 960, 2048, 8192, 1, bank_alt_bytes);
+
+  // Grouped QKV/gate-up projection path, with shape values kept dynamic.
+  GroupedP32LaunchParams grouped_params{};
+  p32_window_ampere_grouped_block_kernel<6, 128, 2, false, 0>
+      <<<dim3(128, 1, 1), 128, 0, cuda_stream>>>(
+          input_half, trellis_words, levels_half, bank_bytes, bank_alt_bytes,
+          grouped_params, partial_output, output, 128, 2048, 512);
+  return static_cast<int>(cudaGetLastError());
+}
+
+#else
+
 bool normalize_external_tuning(
     const qvq_p32_config* requested,
     int size_m,
@@ -2442,10 +2532,18 @@ const void* grouped_kernel_symbol(
       ? grouped_scalar_kernel_symbol<BITS>(size_m, threads, stage_k_tiles)   \
       : grouped_block_kernel_symbol<BITS>(size_m, threads, stage_k_tiles)
   switch (transition_bits) {
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 4
     case 4: QVQ_GROUPED_KERNEL_SYMBOL(4);
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 5
     case 5: QVQ_GROUPED_KERNEL_SYMBOL(5);
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 6
     case 6: QVQ_GROUPED_KERNEL_SYMBOL(6);
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 7
     case 7: QVQ_GROUPED_KERNEL_SYMBOL(7);
+#endif
     default: return nullptr;
   }
 #undef QVQ_GROUPED_KERNEL_SYMBOL
@@ -3756,6 +3854,7 @@ extern "C" int qvq_p32_rank8_project(
 }
 #endif
 
+#if !defined(QVQ_P32_SHARD_FAMILY) || QVQ_P32_SHARD_FAMILY == 1
 static int qvq_p32_window_impl(
     const void* input,
     const void* trellis,
@@ -3871,6 +3970,7 @@ static int qvq_p32_window_impl(
       QVQ_P32_WARPS_AUTO};
   int status = 0;
   switch (transition_bits) {
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 4
     case QVQ_P32_TRANSITION_BITS_MIN:
       status = size_m <= 16
           ? launch_p32_config<4>(input, trellis, levels, bank_ids, bank_alt_id,
@@ -3880,6 +3980,8 @@ static int qvq_p32_window_impl(
                                   output, partial_output, size_m, size_k, size_n,
                                   config, row_groups, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 5
     case 5:
       status = size_m <= 16
           ? launch_p32_config<5>(input, trellis, levels, bank_ids, bank_alt_id,
@@ -3889,6 +3991,8 @@ static int qvq_p32_window_impl(
                                   output, partial_output, size_m, size_k, size_n,
                                   config, row_groups, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 6
     case 6:
       status = size_m <= 16
           ? launch_p32_config<6>(input, trellis, levels, bank_ids, bank_alt_id,
@@ -3898,6 +4002,8 @@ static int qvq_p32_window_impl(
                                   output, partial_output, size_m, size_k, size_n,
                                   config, row_groups, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 7
     case QVQ_P32_TRANSITION_BITS_MAX:
       status = size_m <= 16
           ? launch_p32_config<7>(input, trellis, levels, bank_ids, bank_alt_id,
@@ -3907,6 +4013,7 @@ static int qvq_p32_window_impl(
                                   output, partial_output, size_m, size_k, size_n,
                                   config, row_groups, stream);
       break;
+#endif
     default:
       set_last_error("QVQ P32 transition_bits must be in [4,7]");
       status = -1;
@@ -3925,7 +4032,7 @@ static int qvq_p32_window_impl(
   return status;
 }
 
-extern "C" int qvq_p32_window(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_window(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -3951,7 +4058,7 @@ extern "C" int qvq_p32_window(
       QVQ_P32_ROW_GROUPS_AUTO, stream);
 }
 
-extern "C" int qvq_p32_window_with_row_groups(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_window_with_row_groups(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -3977,7 +4084,7 @@ extern "C" int qvq_p32_window_with_row_groups(
       threads, stage_k_tiles, static_n, reduction_mode, row_groups, stream);
 }
 
-extern "C" int qvq_p32_window_tuned(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_window_tuned(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -4000,8 +4107,10 @@ extern "C" int qvq_p32_window_tuned(
       config.kernel_variant, config.threads, config.stage_k_tiles,
       config.static_n, config.reduction_mode, row_groups, stream);
 }
+#endif  // standard P32 API shard
 
-extern "C" int qvq_p32_grouped_window(
+#if !defined(QVQ_P32_SHARD_FAMILY) || QVQ_P32_SHARD_FAMILY == 2
+extern "C" QVQ_P32_SHARD_API int qvq_p32_grouped_window(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -4084,6 +4193,7 @@ extern "C" int qvq_p32_grouped_window(
       QVQ_P32_WARPS_AUTO};
   int status = 0;
   switch (transition_bits) {
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 4
     case QVQ_P32_TRANSITION_BITS_MIN:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<4>(
@@ -4097,6 +4207,8 @@ extern "C" int qvq_p32_grouped_window(
           split_count_2, n_tile_end_0, n_tile_end_1,
           config, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 5
     case 5:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<5>(
@@ -4110,6 +4222,8 @@ extern "C" int qvq_p32_grouped_window(
           split_count_2, n_tile_end_0, n_tile_end_1,
           config, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 6
     case 6:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<6>(
@@ -4123,6 +4237,8 @@ extern "C" int qvq_p32_grouped_window(
           split_count_2, n_tile_end_0, n_tile_end_1,
           config, stream);
       break;
+#endif
+#if !defined(QVQ_P32_SHARD_BITS) || QVQ_P32_SHARD_BITS == 7
     case QVQ_P32_TRANSITION_BITS_MAX:
       status = kernel_variant == QVQ_P32_VARIANT_SCALAR
           ? launch_p32_grouped_scalar<7>(
@@ -4136,6 +4252,7 @@ extern "C" int qvq_p32_grouped_window(
           split_count_2, n_tile_end_0, n_tile_end_1,
           config, stream);
       break;
+#endif
   }
   if (status != 0 && last_error[0] == '\0') {
     set_last_error("QVQ P32 grouped launch failed");
@@ -4143,7 +4260,7 @@ extern "C" int qvq_p32_grouped_window(
   return status;
 }
 
-extern "C" int qvq_p32_grouped_window_tuned(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_grouped_window_tuned(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -4178,7 +4295,7 @@ extern "C" int qvq_p32_grouped_window_tuned(
       n_tile_end_0, n_tile_end_1, stream);
 }
 
-extern "C" int qvq_p32_grouped_launch_plan(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_grouped_launch_plan(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -4349,7 +4466,7 @@ extern "C" int qvq_p32_grouped_launch_plan(
   return 0;
 }
 
-extern "C" int qvq_p32_grouped_launch_plan_tuned(
+extern "C" QVQ_P32_SHARD_API int qvq_p32_grouped_launch_plan_tuned(
     const void* input,
     const void* trellis,
     const void* levels,
@@ -4383,3 +4500,6 @@ extern "C" int qvq_p32_grouped_launch_plan_tuned(
       config.stage_k_tiles, config.static_n, config.reduction_mode, group_count,
       n_tile_end_0, n_tile_end_1, plan);
 }
+#endif  // grouped P32 API shard
+
+#endif  // defined(QVQ_P32_SM90_COMPILE_CHECK_ONLY)
