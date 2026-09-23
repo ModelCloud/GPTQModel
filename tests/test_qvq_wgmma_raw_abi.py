@@ -202,6 +202,12 @@ def test_raw_abi_bm64_m128_is_down_projection_only():
         # schedule changes that the narrow K2048/N256 ABI gate cannot see.
         (128, 3, 8192, 2048, 3, 128, 1),
         *[(128, 3, 8192, 2048, bits, 64, 2) for bits in (2, 2.5, 3, 3.5)],
+        # Experimental compressed-weight M960 prefill, four M16 rows/CTA.
+        (960, 5, 2048, 2048, 2, 64, 15),
+        (960, 5, 2048, 512, 2.5, 64, 15),
+        (960, 5, 2048, 512, 3.5, 64, 15),
+        (960, 5, 2048, 8192, 3, 64, 15),
+        (960, 5, 8192, 2048, 3, 64, 15),
     ],
 )
 def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
