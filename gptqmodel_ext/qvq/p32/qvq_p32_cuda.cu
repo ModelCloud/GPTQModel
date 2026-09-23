@@ -423,15 +423,24 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800 && __CUDA_ARCH__ < 1000
   constexpr int kWordsPerTile = 4 * TransitionBits;
   constexpr int kStageColumnsForKernel = StageKTiles * kTileRows;
+  // M960/F6/Stage3 uses a 48-half row stride, whose eight ldmatrix row
+  // addresses repeatedly hit the same shared-memory banks. Keep the logical
+  // 48 columns and pad only this measured prefill specialization to 56 halves.
+  constexpr bool kPaddedInputStage =
+      TransitionBits == 6 && FullRows && StaticN == 0 && StaticK == 0 &&
+      StageKTiles == 3 && RowGroups == 6;
+  constexpr int kInputStageColumns =
+      kPaddedInputStage ? 56 : kStageColumnsForKernel;
   constexpr int kRowsPerBlock = kRows * RowGroups;
   constexpr int kInputStageElements =
-      kRowsPerBlock * kStageColumnsForKernel;
+      kRowsPerBlock * kInputStageColumns;
   extern __shared__ __align__(32) half dynamic_input_tile[];
   __shared__ __align__(32) half input_tile[
       DynamicInputTile ? 1 : 2][kInputStageElements];
   __shared__ __align__(16) uint32_t packed_words[
       2][StageKTiles][TilesPerBlock][kWordsPerTile];
   __shared__ __align__(4) uint8_t packed_bank_ids[2][StageKTiles][TilesPerBlock];
+  __shared__ __align__(16) half shared_levels[kPaddedInputStage ? 256 : 1];
 
   const int thread = static_cast<int>(threadIdx.x);
   const int warp = thread >> 5;
@@ -446,6 +455,14 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
   const int k_tile_begin = (k_tiles * split) / split_count;
   const int k_tile_end = (k_tiles * (split + 1)) / split_count;
   const uint32_t alt_mask = alternate_bank_mask<TransitionBits>(*bank_alt_id);
+  const half* decode_levels = levels;
+  if constexpr (kPaddedInputStage) {
+    for (int level = thread; level < 256; level += Threads) {
+      shared_levels[level] = levels[level];
+    }
+    __syncthreads();
+    decode_levels = shared_levels;
+  }
 
   auto input_stage = [&](int destination) {
     if constexpr (DynamicInputTile) {
@@ -461,28 +478,32 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
       const int row = index / (kStageColumnsForKernel / 8);
       const int vector = index - row * (kStageColumnsForKernel / 8);
       const int source_column = k_tile_base * kTileRows + vector * 8;
+      int destination_index = index;
+      if constexpr (kPaddedInputStage) {
+        destination_index = row * (kInputStageColumns / 8) + vector;
+      }
       if constexpr (FullRows) {
         if (source_column < input_stride) {
           const half* source = input +
               static_cast<int64_t>(row) * input_stride + source_column;
-          __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+          __pipeline_memcpy_async(input_vectors + destination_index, reinterpret_cast<const uint4*>(source), 16);
         } else {
-          input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+          input_vectors[destination_index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if constexpr (ActiveRows > 0) {
         if (row < ActiveRows && source_column < input_stride) {
           const half* source = input +
               static_cast<int64_t>(row) * input_stride + source_column;
-          __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+          __pipeline_memcpy_async(input_vectors + destination_index, reinterpret_cast<const uint4*>(source), 16);
         } else {
-          input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+          input_vectors[destination_index] = make_uint4(0u, 0u, 0u, 0u);
         }
       } else if (row < size_m && source_column < input_stride) {
         const half* source = input +
             static_cast<int64_t>(row) * input_stride + source_column;
-        __pipeline_memcpy_async(input_vectors + index, reinterpret_cast<const uint4*>(source), 16);
+        __pipeline_memcpy_async(input_vectors + destination_index, reinterpret_cast<const uint4*>(source), 16);
       } else {
-        input_vectors[index] = make_uint4(0u, 0u, 0u, 0u);
+        input_vectors[destination_index] = make_uint4(0u, 0u, 0u, 0u);
       }
     }
 
@@ -590,21 +611,21 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
               selected_bank_mask(packed_bank_id, producer_row_pair, alt_mask);
           const uint32_t bank_mask_8 =
               selected_bank_mask(packed_bank_id, producer_row_pair + 4, alt_mask);
-          decode_state_pair_bits(
-              state_row_0, state_row_1, bank_mask_0, levels,
+          decode_state_pair_bits<kPaddedInputStage>(
+              state_row_0, state_row_1, bank_mask_0, decode_levels,
               decoded_row_0, decoded_row_1);
-          decode_state_pair_bits(
-              state_row_8, state_row_9, bank_mask_8, levels,
+          decode_state_pair_bits<kPaddedInputStage>(
+              state_row_8, state_row_9, bank_mask_8, decode_levels,
               decoded_row_8, decoded_row_9);
         } else {
-          decoded_row_0 = decode_pair_bits<TransitionBits>(
-              first_pair, state_row_0, packed_bank_id, alt_mask, levels);
-          decoded_row_8 = decode_pair_bits<TransitionBits>(
-              first_pair + 64, state_row_8, packed_bank_id, alt_mask, levels);
-          decoded_row_1 = decode_pair_bits<TransitionBits>(
-              second_pair, state_row_1, packed_bank_id, alt_mask, levels);
-          decoded_row_9 = decode_pair_bits<TransitionBits>(
-              second_pair + 64, state_row_9, packed_bank_id, alt_mask, levels);
+          decoded_row_0 = decode_pair_bits<TransitionBits, kPaddedInputStage>(
+              first_pair, state_row_0, packed_bank_id, alt_mask, decode_levels);
+          decoded_row_8 = decode_pair_bits<TransitionBits, kPaddedInputStage>(
+              first_pair + 64, state_row_8, packed_bank_id, alt_mask, decode_levels);
+          decoded_row_1 = decode_pair_bits<TransitionBits, kPaddedInputStage>(
+              second_pair, state_row_1, packed_bank_id, alt_mask, decode_levels);
+          decoded_row_9 = decode_pair_bits<TransitionBits, kPaddedInputStage>(
+              second_pair + 64, state_row_9, packed_bank_id, alt_mask, decode_levels);
         }
 
         const uint32_t low_rows_01 =
@@ -641,16 +662,16 @@ __device__ __forceinline__ void p32_window_ampere_kernel_body(
             const int address_column = ((lane >> 3) & 1) * 8;
             load_mma_fragment_a_upper(
                 input_fragment,
-                input_stage(parity) + row_group * kRows * kStageColumnsForKernel +
-                    address_row * kStageColumnsForKernel +
+                input_stage(parity) + row_group * kRows * kInputStageColumns +
+                    address_row * kInputStageColumns +
                     stage_k_tile * kTileRows + address_column);
           } else {
             const int address_row = (lane & 7) + ((lane >> 3) & 1) * 8;
             const int address_column = (lane >> 4) * 8;
             load_mma_fragment_a(
                 input_fragment,
-                input_stage(parity) + row_group * kRows * kStageColumnsForKernel +
-                    address_row * kStageColumnsForKernel +
+                input_stage(parity) + row_group * kRows * kInputStageColumns +
+                    address_row * kInputStageColumns +
                     stage_k_tile * kTileRows + address_column);
           }
           mma_m16n8k16(
