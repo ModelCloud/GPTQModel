@@ -178,6 +178,19 @@ def main() -> int:
             and (4 in qvq_algorithms) == (4 in policy_algorithms) == grouped_ffi,
             f"QVQ={sorted(qvq_algorithms)}, XLA={sorted(xla_algorithms)}, policy={sorted(policy_algorithms)}",
         )
+        m960_terms = {
+            "QVQ BM80": "c->block_m == 80" in raw and "c->block_n == 64" in raw,
+            "QVQ BN128": "c->block_n == 128" in raw and "c->block_m == 64" in raw,
+            "XLA BM80": "direct_m960_five_rows" in xla,
+            "XLA BN128": "direct_m960_two_consumers" in xla,
+            "ZML BM80 policy": "config.hopper_block_m = if (n == 512) 64 else 80" in policy,
+            "ZML automatic policy": "ZML_QVQ_M960_WGMMA" not in policy,
+        }
+        check(
+            "M960 specialized geometry coverage",
+            all(m960_terms.values()),
+            str(m960_terms),
+        )
 
         attrs = ("hopper_algorithm", "hopper_block_m", "hopper_block_n", "split_count")
         missing_attrs = [a for a in attrs if a not in policy or a not in xla]
