@@ -147,25 +147,31 @@ struct HopperFixedGateUpLaunchParams {
   int bank_alt_id[2];
 };
 
-using WgmmaTmaSmemLayoutB = decltype(cute::tile_to_shape(
+template <int Stages>
+using WgmmaTmaSmemLayoutBFor = decltype(cute::tile_to_shape(
     WgmmaSmemLayoutAtomB{},
-    cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<kTmaStages>{})));
-template <int TransitionBits, int N64BlocksPerCta = 1>
+    cute::make_shape(cute::_16{}, cute::_256{}, cute::Int<Stages>{})));
+using WgmmaTmaSmemLayoutB = WgmmaTmaSmemLayoutBFor<kTmaStages>;
+template <int TransitionBits, int N64BlocksPerCta = 1, int Stages = kTmaStages>
 using P32TrellisTmaSmemLayoutFor = decltype(cute::make_layout(
     cute::make_shape(
         cute::Int<4 * TransitionBits>{},
         cute::Int<kP32N16TilesPerBlock * N64BlocksPerCta>{},
         cute::Int<kP32K16TilesPerStage>{},
-        cute::Int<kTmaStages>{}),
+        cute::Int<Stages>{}),
     cute::make_stride(
         cute::_1{},
         cute::Int<4 * TransitionBits>{},
         cute::Int<4 * TransitionBits * kP32N16TilesPerBlock * N64BlocksPerCta>{},
         cute::Int<4 * TransitionBits * kP32N16TilesPerBlock *
                   N64BlocksPerCta * kP32K16TilesPerStage>{})));
-using P32BankTmaSmemLayout = decltype(cute::make_layout(
-    cute::make_shape(cute::_16{}, cute::_16{}, cute::Int<kTmaStages>{}),
+template <int Stages>
+using P32BankTmaSmemLayoutFor = decltype(cute::make_layout(
+    cute::make_shape(cute::_16{}, cute::_16{}, cute::Int<Stages>{}),
     cute::make_stride(cute::_1{}, cute::_16{}, cute::_256{})));
+using P32BankTmaSmemLayout = P32BankTmaSmemLayoutFor<kTmaStages>;
+template <int Stages>
+using WgmmaTmaPipelineFor = cutlass::PipelineTmaAsync<Stages>;
 using WgmmaTmaPipeline = cutlass::PipelineTmaAsync<kTmaStages>;
 using WgmmaTmaPipelineState = cutlass::PipelineState<kTmaStages>;
 
@@ -174,15 +180,23 @@ template <
     int N64BlocksPerCta = 1,
     int RowTilesPerCta = 1>
 struct alignas(128) P32WgmmaTmaSharedStorageFor {
-  typename WgmmaTmaPipeline::SharedStorage pipeline;
+  // The compressed M960 W3 row-five path trades double buffering for a
+  // third resident CTA. Other geometries keep the established two stages.
+  static constexpr int kStages =
+      TransitionBits == kW3TransitionBits && N64BlocksPerCta == 1 &&
+              RowTilesPerCta == 5
+          ? 1
+          : kTmaStages;
+  typename WgmmaTmaPipelineFor<kStages>::SharedStorage pipeline;
   alignas(128) cute::ArrayEngine<
       Element,
-      RowTilesPerCta * cute::cosize_v<WgmmaTmaSmemLayoutB>> input;
+      RowTilesPerCta * cute::cosize_v<WgmmaTmaSmemLayoutBFor<kStages>>> input;
   alignas(128) cute::ArrayEngine<
       uint32_t,
       cute::cosize_v<P32TrellisTmaSmemLayoutFor<
-          TransitionBits, N64BlocksPerCta>>> trellis;
-  alignas(128) cute::ArrayEngine<uint8_t, cute::cosize_v<P32BankTmaSmemLayout>> bank_ids;
+          TransitionBits, N64BlocksPerCta, kStages>>> trellis;
+  alignas(128) cute::ArrayEngine<
+      uint8_t, cute::cosize_v<P32BankTmaSmemLayoutFor<kStages>>> bank_ids;
   // Reused by every decode lane and K16 tile; avoid dependent L1/global
   // lookups for the small, read-only PGC level table. W2-W3.5 store
   // levels[index][lane], assigning each lane pair its own two alternating
@@ -1601,11 +1615,17 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
           RowTilesPerCta == 5 ||
           RowTilesPerCta == 8 || RowTilesPerCta == 11);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
-  using TrellisSmemLayout =
-      P32TrellisTmaSmemLayoutFor<TransitionBits, N64BlocksPerCta>;
   using SharedStorage =
       P32WgmmaTmaSharedStorageFor<
           TransitionBits, N64BlocksPerCta, RowTilesPerCta>;
+  constexpr int kKernelStages = SharedStorage::kStages;
+  using InputSmemLayout = WgmmaTmaSmemLayoutBFor<kKernelStages>;
+  using TrellisSmemLayout =
+      P32TrellisTmaSmemLayoutFor<
+          TransitionBits, N64BlocksPerCta, kKernelStages>;
+  using BankSmemLayout = P32BankTmaSmemLayoutFor<kKernelStages>;
+  using KernelPipeline = WgmmaTmaPipelineFor<kKernelStages>;
+  using KernelPipelineState = cutlass::PipelineState<kKernelStages>;
   extern __shared__ __align__(128) char dynamic_shared_buffer[];
   __shared__ __align__(128) char static_shared_buffer[
       N64BlocksPerCta == 1 && RowTilesPerCta == 1
@@ -1857,10 +1877,10 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   const uint32_t alternate_bank_mask =
       qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(bank_alt_id);
 
-  typename WgmmaTmaPipeline::Params pipeline_params;
+  typename KernelPipeline::Params pipeline_params;
   pipeline_params.role = is_producer
-      ? WgmmaTmaPipeline::ThreadCategory::Producer
-      : WgmmaTmaPipeline::ThreadCategory::Consumer;
+      ? KernelPipeline::ThreadCategory::Producer
+      : KernelPipeline::ThreadCategory::Consumer;
   pipeline_params.is_leader = thread == kConsumerThreads;
   pipeline_params.num_consumers = kConsumerThreads;
   pipeline_params.transaction_bytes =
@@ -1868,57 +1888,57 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       kWordsPerP32Tile * kP32N16TilesPerBlock * N64BlocksPerCta *
           kP32K16TilesPerStage * sizeof(uint32_t) +
       16 * kP32K16TilesPerStage * sizeof(uint8_t);
-  WgmmaTmaPipeline pipeline(
+  KernelPipeline pipeline(
       shared.pipeline,
       pipeline_params,
       cute::Shape<cute::_1, cute::_1, cute::_1>{});
 
   auto s_input = cute::make_tensor(
-      cute::make_smem_ptr(shared.input.begin()), WgmmaTmaSmemLayoutB{});
+      cute::make_smem_ptr(shared.input.begin()), InputSmemLayout{});
   auto s_input1 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input2 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 2 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 2 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input3 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 3 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 3 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input4 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 4 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 4 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input5 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 5 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 5 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input6 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 6 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 6 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input7 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 7 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 7 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input8 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 8 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 8 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input9 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 9 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 9 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_input10 = cute::make_tensor(
       cute::make_smem_ptr(
-          shared.input.begin() + 10 * cute::cosize_v<WgmmaTmaSmemLayoutB>),
-      WgmmaTmaSmemLayoutB{});
+          shared.input.begin() + 10 * cute::cosize_v<InputSmemLayout>),
+      InputSmemLayout{});
   auto s_trellis = cute::make_tensor(
       cute::make_smem_ptr(shared.trellis.begin()), TrellisSmemLayout{});
   auto s_bank_ids = cute::make_tensor(
-      cute::make_smem_ptr(shared.bank_ids.begin()), P32BankTmaSmemLayout{});
+      cute::make_smem_ptr(shared.bank_ids.begin()), BankSmemLayout{});
 
   auto full_input = input_tma.get_tma_tensor(cute::make_shape(launch_size_m, size_k));
   auto tiled_input = cute::local_tile(
@@ -2072,10 +2092,10 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
 
   if (is_producer) {
     if (cute::elect_one_sync()) {
-      auto write_state = cutlass::make_producer_start_state<WgmmaTmaPipeline>();
+      auto write_state = cutlass::make_producer_start_state<KernelPipeline>();
       for (int stage_offset = 0; stage_offset < stage_count; ++stage_offset) {
         pipeline.producer_acquire(write_state);
-        using Barrier = typename WgmmaTmaPipeline::ProducerBarrierType;
+        using Barrier = typename KernelPipeline::ProducerBarrierType;
         Barrier* barrier = pipeline.producer_get_barrier(write_state);
         const int global_stage = stage_begin + stage_offset;
         const int write_stage = write_state.index();
@@ -2233,8 +2253,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   const auto decode_plan = qvq_p32_window_lane_plan<TransitionBits>(lane);
   const uint32_t shared_levels_base = __cvta_generic_to_shared(shared.levels.begin());
   const uint32_t shared_levels_high_base = __cvta_generic_to_shared(shared.levels_high.begin());
-  WgmmaTmaPipelineState read_state;
-  WgmmaTmaPipelineState release_state;
+  KernelPipelineState read_state;
+  KernelPipelineState release_state;
 
   for (int stage_offset = 0; stage_offset < stage_count; ++stage_offset) {
     auto wait_token = pipeline.consumer_try_wait(read_state);
