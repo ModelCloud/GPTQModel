@@ -12,7 +12,7 @@ extern "C" {
 // launch-autotune entries when implementation details change.
 #define QVQ_P32_OPERATION_VERSION 1
 #define QVQ_P32_ABI_VERSION 3
-#define QVQ_P32_KERNEL_VERSION 16
+#define QVQ_P32_KERNEL_VERSION 17
 #define QVQ_P32_COMPILED_SM 90
 
 #define QVQ_P32_TILE_SIZE 16
@@ -32,6 +32,10 @@ extern "C" {
 #define QVQ_P32_ROW_GROUPS_MAX 16
 #define QVQ_P32_TUNING_AUTO 0
 #define QVQ_P32_TUNING_EXTERNAL 1
+#define QVQ_P32_RANK8_CONFIG_VERSION 1
+#define QVQ_P32_RANK8_THREADS_AUTO 0
+#define QVQ_P32_RANK8_PROJECT_WARPS_AUTO 0
+#define QVQ_P32_RANK8_ROWS_PER_CTA 1
 #define QVQ_P32_N_TILES_AUTO 0
 #define QVQ_P32_WARPS_AUTO 0
 #define QVQ_P32_LAUNCH_PLAN_MAX_LAUNCHES 5
@@ -70,6 +74,21 @@ struct qvq_p32_config {
   int tuning_mode;
   int n_tiles_per_block;
   int n_warps;
+};
+
+// Explicit tuning contract for the fused rank-8 projection and output
+// Hadamard. `threads` is the complete CTA width; `projection_warps` owns
+// disjoint pairs of the eight rank outputs during the projection phase.
+// `rows_per_cta` is currently fixed at one and any other value is rejected.
+// Zero-valued geometry selects the native shape policy only when
+// tuning_mode=QVQ_P32_TUNING_AUTO. External tuners must provide every field.
+struct qvq_p32_rank8_hadamard_config {
+  unsigned int version;
+  unsigned int struct_bytes;
+  int tuning_mode;
+  int projection_warps;
+  int threads;
+  int rows_per_cta;
 };
 
 // Framework-neutral CUDA launch metadata for compiler-owned command buffers.
@@ -229,6 +248,42 @@ int qvq_p32_rank8_hadamard_epilogue(
     int size_n,
     int rank_count,
     int normalize_first,
+    void* stream);
+
+// Fused rank-8 A projection, B correction, output Hadamard, and SV scaling.
+// Inputs use the same layouts and rounding boundaries as the separate
+// qvq_p32_rank8_project + qvq_p32_rank8_hadamard_epilogue calls. This fused
+// entry point currently supports rank_count=8 and M<=960.
+int qvq_p32_rank8_hadamard_project(
+    const void* input,
+    const void* rank8_a,
+    const float* base_output,
+    const void* rank8_b,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int rank_count,
+    int normalize_first,
+    void* stream);
+
+// Versioned external tuning entry point for the fused rank-8 operation.
+// Supported projection_warps specializations are 1, 2, 4, 6, and 8. CTA
+// threads must be a warp multiple in [32,1024], and rows_per_cta must equal one.
+int qvq_p32_rank8_hadamard_project_tuned(
+    const void* input,
+    const void* rank8_a,
+    const float* base_output,
+    const void* rank8_b,
+    const void* scale_v,
+    void* output,
+    int size_m,
+    int size_k,
+    int size_n,
+    int rank_count,
+    int normalize_first,
+    const struct qvq_p32_rank8_hadamard_config* config,
     void* stream);
 
 // Base-P32 counterpart to the fused rank-8 epilogue. It applies the identical

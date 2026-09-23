@@ -681,6 +681,230 @@ bool test_rank8_project() {
   return true;
 }
 
+bool test_rank8_project_hadamard_fusion(int target_m = 0, int target_n = 0,
+                                        int target_warps = 0,
+                                        int target_threads = 0) {
+  constexpr int kRank = 8;
+  constexpr int kK = 2048;
+  constexpr int kRepeats = 24;
+  cudaStream_t stream = nullptr;
+  if (!check_cuda(cudaStreamCreate(&stream), "create fused project/Hadamard stream"))
+    return false;
+  cudaEvent_t start = nullptr;
+  cudaEvent_t stop = nullptr;
+  if (!check_cuda(cudaEventCreate(&start), "create fused timing start") ||
+      !check_cuda(cudaEventCreate(&stop), "create fused timing stop")) {
+    if (start != nullptr) cudaEventDestroy(start);
+    if (stop != nullptr) cudaEventDestroy(stop);
+    cudaStreamDestroy(stream);
+    return false;
+  }
+
+  for (const int m : {1, 128, 960}) {
+    if (target_m != 0 && m != target_m) continue;
+    for (const int n : {512, 2048, 8192}) {
+      if (target_n != 0 && n != target_n) continue;
+      const bool normalize_first = n >= 2048;
+      std::vector<float> input(m * kK);
+      std::vector<half> rank8_a(kK * kRank);
+      std::vector<float> base(m * n);
+      std::vector<float> rank8_b(kRank * n);
+      std::vector<half> scale(n);
+      std::vector<half> hidden(m * kRank);
+      std::vector<half> expected(m * n);
+      std::vector<half> actual(m * n);
+      for (int index = 0; index < input.size(); ++index)
+        input[index] = (static_cast<float>((index * 17) % 101) - 50.0f) / 128.0f;
+      for (int index = 0; index < rank8_a.size(); ++index)
+        rank8_a[index] = __float2half_rn(
+            (static_cast<float>((index * 13) % 67) - 33.0f) / 512.0f);
+      for (int index = 0; index < base.size(); ++index)
+        base[index] = (static_cast<float>((index * 7) % 91) - 45.0f) / 64.0f;
+      for (int index = 0; index < rank8_b.size(); ++index)
+        rank8_b[index] = (static_cast<float>((index * 3) % 59) - 29.0f) / 256.0f;
+      for (int column = 0; column < n; ++column)
+        scale[column] = __float2half_rn(
+            0.75f + static_cast<float>(column % 17) / 64.0f);
+
+      DeviceBuffer device_input, device_a, device_base, device_b, device_scale;
+      DeviceBuffer device_hidden, device_expected, device_actual;
+      bool ok = device_input.allocate(input.size() * sizeof(float)) &&
+          device_a.allocate(rank8_a.size() * sizeof(half)) &&
+          device_base.allocate(base.size() * sizeof(float)) &&
+          device_b.allocate(rank8_b.size() * sizeof(float)) &&
+          device_scale.allocate(scale.size() * sizeof(half)) &&
+          device_hidden.allocate(hidden.size() * sizeof(half)) &&
+          device_expected.allocate(expected.size() * sizeof(half)) &&
+          device_actual.allocate(actual.size() * sizeof(half));
+      if (ok) {
+        ok = check_cuda(cudaMemcpyAsync(device_input.pointer, input.data(),
+                                        input.size() * sizeof(float),
+                                        cudaMemcpyHostToDevice, stream), "copy fused input") &&
+            check_cuda(cudaMemcpyAsync(device_a.pointer, rank8_a.data(),
+                                       rank8_a.size() * sizeof(half),
+                                       cudaMemcpyHostToDevice, stream), "copy fused A") &&
+            check_cuda(cudaMemcpyAsync(device_base.pointer, base.data(),
+                                       base.size() * sizeof(float),
+                                       cudaMemcpyHostToDevice, stream), "copy fused base") &&
+            check_cuda(cudaMemcpyAsync(device_b.pointer, rank8_b.data(),
+                                       rank8_b.size() * sizeof(float),
+                                       cudaMemcpyHostToDevice, stream), "copy fused B") &&
+            check_cuda(cudaMemcpyAsync(device_scale.pointer, scale.data(),
+                                       scale.size() * sizeof(half),
+                                       cudaMemcpyHostToDevice, stream), "copy fused scale");
+      }
+      if (ok) {
+        ok = qvq_p32_rank8_project(
+                 device_input.pointer, device_a.pointer, device_hidden.pointer,
+                 m, kK, kRank, stream) == 0 &&
+            qvq_p32_rank8_hadamard_epilogue(
+                 static_cast<const float*>(device_base.pointer),
+                 device_hidden.pointer, device_b.pointer, device_scale.pointer,
+                 device_expected.pointer, m, n, kRank, normalize_first, stream) == 0 &&
+            qvq_p32_rank8_hadamard_project(
+                 device_input.pointer, device_a.pointer,
+                 static_cast<const float*>(device_base.pointer), device_b.pointer,
+                 device_scale.pointer, device_actual.pointer,
+                 m, kK, n, kRank, normalize_first, stream) == 0 &&
+            check_cuda(cudaMemcpyAsync(expected.data(), device_expected.pointer,
+                                       expected.size() * sizeof(half),
+                                       cudaMemcpyDeviceToHost, stream), "copy separate result") &&
+            check_cuda(cudaMemcpyAsync(actual.data(), device_actual.pointer,
+                                       actual.size() * sizeof(half),
+                                       cudaMemcpyDeviceToHost, stream), "copy fused result") &&
+            check_cuda(cudaStreamSynchronize(stream), "sync fused parity run");
+      }
+      if (ok) {
+        for (int index = 0; index < actual.size(); ++index) {
+          if (__half_as_ushort(actual[index]) != __half_as_ushort(expected[index])) {
+            std::fprintf(stderr,
+                         "fused rank8 mismatch M=%d K=%d N=%d index=%d actual=%g expected=%g\n",
+                         m, kK, n, index, __half2float(actual[index]),
+                         __half2float(expected[index]));
+            ok = false;
+            break;
+          }
+        }
+      }
+      const int max_threads = std::max(32, std::min(n / 2, 1024));
+      std::vector<qvq_p32_rank8_hadamard_config> candidates;
+      for (const int threads : {32, 64, 128, 256, 512, 1024}) {
+        if (threads > max_threads) continue;
+        for (const int projection_warps : {1, 2, 4, 6, 8}) {
+          if (projection_warps > threads / 32) continue;
+          candidates.push_back({
+              QVQ_P32_RANK8_CONFIG_VERSION,
+              sizeof(qvq_p32_rank8_hadamard_config),
+              QVQ_P32_TUNING_EXTERNAL,
+              projection_warps,
+              threads,
+              QVQ_P32_RANK8_ROWS_PER_CTA,
+          });
+        }
+      }
+      for (const auto& config : candidates) {
+        if (target_warps != 0 &&
+            config.projection_warps != target_warps) continue;
+        if (target_threads != 0 && config.threads != target_threads) continue;
+        if (ok) {
+          ok = qvq_p32_rank8_hadamard_project_tuned(
+                   device_input.pointer, device_a.pointer,
+                   static_cast<const float*>(device_base.pointer), device_b.pointer,
+                   device_scale.pointer, device_actual.pointer, m, kK, n, kRank,
+                   normalize_first, &config, stream) == 0 &&
+              check_cuda(cudaMemcpyAsync(actual.data(), device_actual.pointer,
+                                         actual.size() * sizeof(half),
+                                         cudaMemcpyDeviceToHost, stream),
+                         "copy tuned fused result") &&
+              check_cuda(cudaStreamSynchronize(stream), "sync tuned parity run");
+        }
+        if (ok) {
+          for (int index = 0; index < actual.size(); ++index) {
+            if (__half_as_ushort(actual[index]) != __half_as_ushort(expected[index])) {
+              std::fprintf(stderr,
+                           "tuned fused rank8 mismatch M=%d K=%d N=%d warps=%d threads=%d index=%d actual=%g expected=%g\n",
+                           m, kK, n, config.projection_warps, config.threads,
+                           index, __half2float(actual[index]),
+                           __half2float(expected[index]));
+              ok = false;
+              break;
+            }
+          }
+        }
+        for (int warmup = 0; ok && warmup < 4; ++warmup) {
+          ok = qvq_p32_rank8_hadamard_project_tuned(
+              device_input.pointer, device_a.pointer,
+              static_cast<const float*>(device_base.pointer), device_b.pointer,
+              device_scale.pointer, device_actual.pointer, m, kK, n, kRank,
+              normalize_first, &config, stream) == 0;
+        }
+
+        float separate_ms = 0.0f;
+        float fused_ms = 0.0f;
+        for (int round = 0; ok && round < 3; ++round) {
+          const bool fused_first = (round & 1) != 0;
+          for (int arm = 0; arm < 2; ++arm) {
+            const bool fused = arm == 0 ? fused_first : !fused_first;
+            if (!check_cuda(cudaEventRecord(start, stream), "record timing start")) {
+              ok = false;
+              break;
+            }
+            for (int repeat = 0; repeat < kRepeats; ++repeat) {
+              if (fused) {
+                ok = qvq_p32_rank8_hadamard_project_tuned(
+                         device_input.pointer, device_a.pointer,
+                         static_cast<const float*>(device_base.pointer),
+                         device_b.pointer, device_scale.pointer, device_actual.pointer,
+                         m, kK, n, kRank, normalize_first, &config, stream) == 0;
+              } else {
+                ok = qvq_p32_rank8_project(
+                         device_input.pointer, device_a.pointer, device_hidden.pointer,
+                         m, kK, kRank, stream) == 0 &&
+                    qvq_p32_rank8_hadamard_epilogue(
+                         static_cast<const float*>(device_base.pointer),
+                         device_hidden.pointer, device_b.pointer, device_scale.pointer,
+                         device_expected.pointer, m, n, kRank, normalize_first, stream) == 0;
+              }
+              if (!ok) break;
+            }
+            if (!ok || !check_cuda(cudaEventRecord(stop, stream), "record timing stop") ||
+                !check_cuda(cudaEventSynchronize(stop), "sync timing stop")) {
+              ok = false;
+              break;
+            }
+            float elapsed_ms = 0.0f;
+            if (!check_cuda(cudaEventElapsedTime(&elapsed_ms, start, stop),
+                            "read event timing")) {
+              ok = false;
+              break;
+            }
+            if (fused) fused_ms += elapsed_ms / kRepeats / 3.0f;
+            else separate_ms += elapsed_ms / kRepeats / 3.0f;
+          }
+        }
+        if (ok) {
+          std::printf("rank8_project_hadamard=PASS M=%d K=%d N=%d warps=%d threads=%d bitwise=1 separate_ms=%.6f fused_ms=%.6f speedup=%.4f\n",
+                      m, kK, n, config.projection_warps, config.threads,
+                      separate_ms, fused_ms, separate_ms / fused_ms);
+        }
+        if (!ok) break;
+      }
+      if (!ok) {
+        cudaEventDestroy(stop);
+        cudaEventDestroy(start);
+        cudaStreamSynchronize(stream);
+        cudaStreamDestroy(stream);
+        return false;
+      }
+    }
+  }
+  cudaEventDestroy(stop);
+  cudaEventDestroy(start);
+  cudaStreamSynchronize(stream);
+  cudaStreamDestroy(stream);
+  return true;
+}
+
 bool test_rank8_project_full_context_rows() {
   constexpr int kM = 131070;
   constexpr int kK = 1;
@@ -920,6 +1144,18 @@ int main(int argc, char** argv) {
   }
   if (argc == 2 && std::strcmp(argv[1], "--rank8-project") == 0) {
     return test_rank8_project() && test_rank8_project_full_context_rows() ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-fused") == 0) {
+    return test_rank8_project_hadamard_fusion() ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-fused-target") == 0) {
+    return test_rank8_project_hadamard_fusion(128, 8192, 4, 1024) ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-fused-target-8") == 0) {
+    return test_rank8_project_hadamard_fusion(128, 8192, 8, 1024) ? 0 : 1;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--rank8-fused-warp-sweep") == 0) {
+    return test_rank8_project_hadamard_fusion(128, 8192, 0, 1024) ? 0 : 1;
   }
   for (int bits : {4, 5, 6, 7}) {
     for (int stage : {1, 2, 3, 4}) {
