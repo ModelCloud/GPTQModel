@@ -162,10 +162,34 @@ def main() -> int:
                 r"(?:config\.)?hopper_algorithm\s*(?:==|=)\s*(\d+)", policy
             )
         } - {0}
+        # Algorithm 4 is the grouped gate/up direct-FFI route, not a
+        # single-projection XLA composite. Check that route explicitly while
+        # requiring exact agreement for the singleton algorithms.
+        grouped_ffi = (
+            "config.algorithm == 4 and config.group_count == 2" in loader
+            and "group_count == 2 and m == 128 and k == 2048 and n == 16384" in policy
+            and "config.hopper_algorithm = 4" in policy
+            and "const bool grouped_gate_up = c->algorithm == 4" in raw
+        )
+        check("Grouped algorithm 4 direct FFI", grouped_ffi, f"route_present={grouped_ffi}")
         check(
-            "Bidirectional algorithm set",
-            qvq_algorithms == xla_algorithms == policy_algorithms,
+            "Bidirectional singleton algorithm set",
+            qvq_algorithms - {4} == xla_algorithms == policy_algorithms - {4}
+            and (4 in qvq_algorithms) == (4 in policy_algorithms) == grouped_ffi,
             f"QVQ={sorted(qvq_algorithms)}, XLA={sorted(xla_algorithms)}, policy={sorted(policy_algorithms)}",
+        )
+        m960_terms = {
+            "QVQ BM80": "c->block_m == 80" in raw and "c->block_n == 64" in raw,
+            "QVQ BN128": "c->block_n == 128" in raw and "c->block_m == 64" in raw,
+            "XLA BM80": "direct_m960_five_rows" in xla,
+            "XLA BN128": "direct_m960_two_consumers" in xla,
+            "ZML BM80 policy": "config.hopper_block_m = if (n == 512) 64 else 80" in policy,
+            "ZML automatic policy": "ZML_QVQ_M960_WGMMA" not in policy,
+        }
+        check(
+            "M960 specialized geometry coverage",
+            all(m960_terms.values()),
+            str(m960_terms),
         )
 
         attrs = ("hopper_algorithm", "hopper_block_m", "hopper_block_n", "split_count")

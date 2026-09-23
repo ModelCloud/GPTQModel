@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Matched compressed-P32 mixed-rate M960 projection comparison: large-M2 vs WGMMA.
 
 This is a local kernel benchmark, not a model-quality or B128 throughput gate.
@@ -26,6 +25,8 @@ class RawConfig(ctypes.Structure):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--baseline", required=True, type=Path)
+    parser.add_argument("--baseline-raw", action="store_true",
+                        help="compare two explicit algorithm-5 raw-ABI libraries instead of large-M2")
     parser.add_argument("--candidate", required=True, type=Path)
     parser.add_argument("--gpu-uuid", required=True)
     parser.add_argument("--projection", choices=("q", "k", "v", "gate", "down"),
@@ -33,6 +34,14 @@ def main() -> None:
     parser.add_argument("--snapshot-dir", type=Path,
                         help="use layer-0 P32 metadata from this quantized snapshot")
     parser.add_argument("--rounds", type=int, default=50)
+    parser.add_argument("--m960-block-m", type=int, choices=(64, 80), default=64,
+                        help="explicit raw-ABI row geometry: BM64=four, BM80=five M16 rows/CTA")
+    parser.add_argument("--m960-block-n", type=int, choices=(64, 128), default=64,
+                        help="explicit raw-ABI N geometry: BN128 uses two N64 consumers/CTA")
+    parser.add_argument("--baseline-block-m", type=int, choices=(64, 80),
+                        help="raw-baseline BM; defaults to candidate BM")
+    parser.add_argument("--baseline-block-n", type=int, choices=(64, 128),
+                        help="raw-baseline BN; defaults to candidate BN")
     parser.add_argument("--profile-arm", choices=("baseline", "candidate"),
                         help="warm only this arm, then issue one traceable launch")
     parser.add_argument("--profiler-attached", action="store_true",
@@ -49,7 +58,16 @@ def main() -> None:
 
     import torch
 
-    baseline, baseline_error = _load_arm(args.baseline)
+    if args.baseline_raw:
+        baseline_library = ctypes.CDLL(str(args.baseline.resolve()), mode=ctypes.RTLD_LOCAL)
+        baseline = baseline_library.qvq_p32_wgmma_raw_launch
+        baseline.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_uint64,
+            ctypes.POINTER(RawConfig), ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint64]
+        baseline.restype = ctypes.c_int
+        baseline_library.qvq_p32_wgmma_raw_abi_version.restype = ctypes.c_uint32
+        assert baseline_library.qvq_p32_wgmma_raw_abi_version() == 3
+    else:
+        baseline, baseline_error = _load_arm(args.baseline)
     library = ctypes.CDLL(str(args.candidate.resolve()), mode=ctypes.RTLD_LOCAL)
     candidate = library.qvq_p32_wgmma_raw_launch
     candidate.argtypes = [ctypes.c_void_p] * 7 + [ctypes.c_uint64,
@@ -98,18 +116,36 @@ def main() -> None:
     baseline_output = torch.empty((m, n), dtype=torch.float32, device=device)
     candidate_output = torch.empty_like(baseline_output)
     partials = torch.empty_like(baseline_output)
-    config = RawConfig(3, ctypes.sizeof(RawConfig), m, k, n, bits, 1, 5, 64, 64)
+    config = RawConfig(
+        3, ctypes.sizeof(RawConfig), m, k, n, bits, 1, 5,
+        args.m960_block_m, args.m960_block_n,
+    )
+    baseline_config = RawConfig(
+        3, ctypes.sizeof(RawConfig), m, k, n, bits, 1, 5,
+        args.baseline_block_m or args.m960_block_m,
+        args.baseline_block_n or args.m960_block_n,
+    )
     stream = torch.cuda.Stream(device=device)
     stream.wait_stream(torch.cuda.current_stream(device))
 
     def invoke_baseline() -> None:
-        status = baseline(
-            x.data_ptr(), trellis.data_ptr(), levels.data_ptr(), banks.data_ptr(),
-            alt.data_ptr(), baseline_output.data_ptr(), partials.data_ptr(),
-            m, k, n, bits, 1, 2, 128, 3, 0, 1, 4, stream.cuda_stream,
-        )
-        if status != 0:
-            raise RuntimeError(f"baseline returned {status}: {baseline_error().decode()}")
+        if args.baseline_raw:
+            error = ctypes.create_string_buffer(4096)
+            status = baseline(
+                x.data_ptr(), trellis.data_ptr(), banks.data_ptr(), levels.data_ptr(),
+                alt.data_ptr(), baseline_output.data_ptr(), None, 0,
+                ctypes.byref(baseline_config), stream.cuda_stream, error, len(error),
+            )
+            if status != 0:
+                raise RuntimeError(f"raw baseline returned {status}: {error.value.decode()}")
+        else:
+            status = baseline(
+                x.data_ptr(), trellis.data_ptr(), levels.data_ptr(), banks.data_ptr(),
+                alt.data_ptr(), baseline_output.data_ptr(), partials.data_ptr(),
+                m, k, n, bits, 1, 2, 128, 3, 0, 1, 4, stream.cuda_stream,
+            )
+            if status != 0:
+                raise RuntimeError(f"baseline returned {status}: {baseline_error().decode()}")
 
     def invoke_candidate() -> None:
         error = ctypes.create_string_buffer(4096)
@@ -134,6 +170,10 @@ def main() -> None:
             "arm": args.profile_arm,
             "shape": {"m": m, "k": k, "n": n, "transition_bits": bits},
             "projection": args.projection,
+            "m960_block_m": args.m960_block_m,
+            "m960_block_n": args.m960_block_n,
+            "baseline_block_m": baseline_config.block_m if args.baseline_raw else None,
+            "baseline_block_n": baseline_config.block_n if args.baseline_raw else None,
             "snapshot_dir": str(args.snapshot_dir.resolve()) if args.snapshot_dir else None,
             "library_sha256": hashlib.sha256(
                 (args.baseline if chosen == 0 else args.candidate).read_bytes()
@@ -170,6 +210,11 @@ def main() -> None:
         "gpu_uuid": args.gpu_uuid,
         "shape": {"m": m, "k": k, "n": n, "transition_bits": bits},
         "projection": args.projection,
+        "baseline_raw": args.baseline_raw,
+        "m960_block_m": args.m960_block_m,
+        "m960_block_n": args.m960_block_n,
+        "baseline_block_m": baseline_config.block_m if args.baseline_raw else None,
+        "baseline_block_n": baseline_config.block_n if args.baseline_raw else None,
         "seed": seed,
         "snapshot_dir": str(args.snapshot_dir.resolve()) if args.snapshot_dir else None,
         "baseline_sha256": hashlib.sha256(args.baseline.read_bytes()).hexdigest(),
