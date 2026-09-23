@@ -85,6 +85,7 @@ from .nanbeige import NanbeigeQModel
 from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .olmo3 import Olmo3QModel
+from .olmoe import OlmoeQModel
 from .opt import OptQModel
 from .ouro import OuroQModel
 from .ovis import OvisQModel
@@ -101,7 +102,7 @@ from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
 from .qwen3_moe import Qwen3MoeQModel
 from .qwen_drive import QwenDriveQModel
-from .qwen3_vl import Qwen3_VLQModel
+from .qwen3_vl import Qwen3_VLQModel, Qwen3_VL_MoeQModel
 from .qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel
 from .rw import RwgQModel
 from .solar_open import SolarOpenQModel
