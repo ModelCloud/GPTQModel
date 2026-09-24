@@ -1473,9 +1473,9 @@ class GPTQ:
                 count = i2 - i1
 
                 W1 = W[:, i1:i2].clone()
-                Q1 = torch.zeros_like(W1)
+                Q1 = Q[:, i1:i2]
                 Err1 = torch.zeros_like(W1) if Hinv is not None else None
-                Losses1 = torch.zeros_like(W1) if Hinv is not None else None
+                Losses1 = Losses[:, i1:i2] if Hinv is not None else None
 
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
@@ -1504,14 +1504,14 @@ class GPTQ:
                     q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
                     Q1[:, i] = q
                     if Hinv is not None:
-                        Losses1[:, i] = (w - q) ** 2 / d**2
-                        err1 = (w - q) / d
-                        W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                        Err1[:, i] = err1
+                        delta = Err1[:, i]
+                        torch.sub(w, q, out=delta)
+                        Losses1[:, i] = delta.square() / d.square()
+                        delta.div_(d)
+                        W1[:, i:] -= delta.unsqueeze(1) * Hinv1[i, i:]
 
-                Q[:, i1:i2] = Q1
                 if Hinv is not None:
-                    Losses[:, i1:i2] = Losses1 / 2
+                    Losses1.div_(2)
                     W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
                 del W1, Q1, Err1, Losses1
