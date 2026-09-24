@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # ruff: noqa: I001
@@ -558,6 +558,17 @@ class GPTQModel:
             "use `from_pretrained()` to load a pretrained model and prepare for quantization via `.quantize()`.\n"
             "use `from_quantized()` for inference with a post-quantized model."
         )
+
+    @staticmethod
+    def quantize_mlx(model_id_or_path: str, output_path: str, method: str = "gptq", **kwargs):
+        """Quantize a dense model directly in MLX and save an MLX-LM checkpoint.
+
+        This Apple silicon path uses a fused Metal GPTQ update or MLX-LM's
+        native AWQ implementation. It does not load a Torch model.
+        """
+        from ..quantization.mlx_native import quantize_mlx
+
+        return quantize_mlx(model_id_or_path, output_path, method=method, **kwargs)
 
     @classmethod
     def load(
