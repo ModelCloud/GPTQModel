@@ -699,6 +699,8 @@ quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0,
 
 [GSQ by Dadgarnia et al. at IST-DASLab](https://arxiv.org/abs/2604.18556) motivates an optional Gumbel-Softmax refinement of GPTQ's scalar code assignments and group scales. This implementation minimizes a local calibration-Hessian reconstruction objective after GPTQ, and keeps the original GPTQ result unless the hard codes improve that objective after checkpoint rounding. It uses existing GPTQ checkpoint formats and inference kernels. It does **not** implement the paper's complete block-training schedule or imply a model-level accuracy improvement.
 
+In the paper's dense-model schedule, query and key projections are trained separately, value and output projections jointly against attention output, and MLP projections against the full block output. Each finished block is frozen before training the next with inputs from the quantized prefix; the 2-bit Llama runs also fine-tune scales at the end. Here each selected GPTQ linear is refined independently against its saved calibration Hessian. Group scales are fixed unless `learn_scales=True`, and the optimizer uses Adam with temperature annealing instead of the paper's Lion training and temperature/logit-scale schedules. These differences mean the paper's reported quality gains do not transfer automatically to this option.
+
 ```py
 from gptqmodel.quantization import GSQConfig, QuantizeConfig
 
