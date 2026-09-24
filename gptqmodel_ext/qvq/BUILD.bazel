@@ -5,6 +5,26 @@ package(default_visibility = ["//visibility:public"])
 wgmma_rate_objects()
 
 genrule(
+    name = "qvq_hadamard_input_raw_object",
+    srcs = [
+        "qvq_hadamard_input_raw_abi.cu",
+        "qvq_hadamard_input_raw_abi.h",
+    ],
+    outs = ["objects/hadamard_input/qvq_hadamard_input_raw_abi.o"],
+    cmd = """
+set -eu
+cuda_home="$${CUDA_HOME:-/usr/local/cuda}"
+if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
+"$${cuda_home}/bin/nvcc" \
+  -std=c++17 -O3 -lineinfo -cudart=shared -Xcompiler=-fPIC \
+  -gencode arch=compute_90a,code=sm_90a \
+  -I$$(dirname $(location qvq_hadamard_input_raw_abi.h)) \
+  -c -o "$@" $(location qvq_hadamard_input_raw_abi.cu)
+""",
+    tags = ["manual"],
+)
+
+genrule(
     name = "qvq_wgmma_dispatch_object",
     srcs = [
         "qvq_wgmma_raw_abi.h",
@@ -40,6 +60,7 @@ genrule(
         ":qvq_wgmma_w5_object",
         ":qvq_wgmma_w6_object",
         ":qvq_wgmma_w7_object",
+        ":qvq_hadamard_input_raw_object",
     ],
     outs = ["libqvq_wgmma_raw.so"],
     cmd = """
@@ -51,7 +72,8 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then cuda_home=/usr/local/cuda-13.3; fi
   $(location :qvq_wgmma_w4_object) \
   $(location :qvq_wgmma_w5_object) \
   $(location :qvq_wgmma_w6_object) \
-  $(location :qvq_wgmma_w7_object)
+  $(location :qvq_wgmma_w7_object) \
+  $(location :qvq_hadamard_input_raw_object)
 """,
     tags = ["manual"],
 )
