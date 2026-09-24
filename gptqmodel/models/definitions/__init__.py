@@ -61,6 +61,7 @@ from .internlm import InternLMQModel
 from .internlm2 import InternLM2QModel
 from .intern_s2_preview import InternS2PreviewQModel
 from .interns1 import InternS1QModel
+from .internvl import InternVLQModel
 from .internvl_chat import InternVLChatQModel
 from .k2_horizon import K2HorizonGPTQ, K2HorizonQModel
 from .lfm2_vl import LFM2VLQModel

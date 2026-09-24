@@ -21,6 +21,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/24/2026 7.6.0-dev `main`: ✨ Added `intervl` quantization support.
 * 09/23/2026 7.6.0-dev `main`: ✨ Added `exaone4_5`, `qwen3_vl_moe` and `olmoe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `agnes` quantization support.
@@ -173,7 +174,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Instella | `instella` |
 | Intern S1 / S2 Preview | `interns1`, `intern_s2_preview` |
 | InternLM 1 / 2 / 2.5 | `internlm`, `internlm2` |
-| InternVL Chat | `internvl_chat` |
+| InternVL 3 / InternVL Chat | `internvl`, `internvl_chat` |
 | K2-Horizon (Dense / MoVA) |
 | Kimi K2 / K2.5 | `kimi_k2`, `kimi_k25` |
 | Klear | `klear` |
