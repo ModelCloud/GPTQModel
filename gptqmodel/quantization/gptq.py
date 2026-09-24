@@ -1062,7 +1062,13 @@ class GPTQ:
                                 Hinv_result = npu_inverse_cholesky_factor(H)
                             else:
                                 H2 = torch.linalg.cholesky(H)
-                                Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
+                                if H.device.type in ("cpu", "cuda"):
+                                    # cholesky_inverse permits the factor as its output.
+                                    # Reuse that buffer while keeping H intact for damp retries.
+                                    torch.cholesky_inverse(H2, out=H2)
+                                    Hinv_result = torch.linalg.cholesky(H2, upper=True)
+                                else:
+                                    Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
                                 del H2
                             diag_view.copy_(current_diag)
                             used_damp = damp
