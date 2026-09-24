@@ -252,6 +252,21 @@ def test_dynamic_in_place_nested_mutation_invalidates_regex_snapshot():
     assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 8
 
 
+def test_dynamic_edits_preserve_negative_override_and_invalidate_nested_results():
+    pattern = r"+:^model\.layers\.0\.mlp\.proj$"
+    name = "model.layers.0.mlp.proj"
+    cfg = QuantizeConfig(dynamic={pattern: {"meta": [{"tag": "old"}]}})
+
+    assert cfg.dynamic_get(name, "meta") == [{"tag": "old"}]
+    cfg.dynamic[pattern]["meta"][0]["tag"] = "new"
+    assert cfg.dynamic_get(name, "meta") == [{"tag": "new"}]
+
+    cfg.dynamic[pattern] = False
+    assert cfg.dynamic_get(name, "bits", cfg.bits) is False
+    cfg.dynamic[pattern] = {"bits": 3}
+    assert cfg.dynamic_get(name, "bits", cfg.bits) == 3
+
+
 def test_dynamic_config_pickle_round_trip_preserves_nested_mutation_tracking():
     pattern = r"+:^model\.layers\.\d+\.mlp\.proj$"
     cfg = QuantizeConfig(dynamic={pattern: {"bits": 2, "meta": [{"tag": "old"}]}})
