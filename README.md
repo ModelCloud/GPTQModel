@@ -689,6 +689,23 @@ FOEM (First-order error matters) adds first-order error compensation for GPTQ-st
 # FOEM default hyperparameters are alpha=0.0 and beta=0.2
 quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
 ```
+
+#### Using GSQ scalar refinement
+
+[GSQ by Dadgarnia et al. at IST-DASLab](https://arxiv.org/abs/2604.18556) motivates an optional Gumbel-Softmax refinement of GPTQ's scalar code assignments and group scales. This implementation minimizes a local calibration-Hessian reconstruction objective after GPTQ, and keeps the original GPTQ result unless the hard codes improve that objective after checkpoint rounding. It uses existing GPTQ checkpoint formats and inference kernels. It does **not** implement the paper's complete block-training schedule or imply a model-level accuracy improvement.
+
+```py
+from gptqmodel.quantization import GSQConfig, QuantizeConfig
+
+quant_config = QuantizeConfig(
+    bits=4,
+    group_size=128,
+    gsq=GSQConfig(enabled=True, steps=100, candidates=16, learn_scales=False),
+)
+```
+
+GSQ currently applies to calibrated linear layers in the scalar GPTQ, GPTQ_V2, and GPTQ_P formats; `modules=(r"q_proj$",)` can restrict it by module name. It supports 2–8 bits and all GPTQ group sizes. `max_candidate_bytes` bounds the code-candidate bank per output-row chunk (64 MiB by default); the optimizer and temporary tensors need additional memory. Refinement increases quantization time. `learn_scales=True` also tunes per-group scales while keeping zero points and group membership fixed. Measure downstream quality on your target workload before using it broadly.
+
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
@@ -711,6 +728,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The scalar refinement above is inspired by this work and is a narrower implementation.
 
 ## Citations 📖
 
@@ -733,6 +751,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   journal={arXiv preprint arXiv:2210.17323},
   year={2022}
   
+}
+
+# GSQ
+@article{dadgarnia2026gsq,
+  title={GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
+  author={Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2604.18556},
+  year={2026}
 }
 
 # AWQ
