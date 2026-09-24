@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pickle
 from enum import Enum
 from unittest.mock import patch
 
@@ -215,6 +216,29 @@ def test_dynamic_in_place_nested_mutation_invalidates_regex_snapshot():
 
     cfg.dynamic[next(iter(cfg.dynamic))]["bits"] = 8
     assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 8
+
+
+def test_dynamic_config_pickle_round_trip_preserves_nested_mutation_tracking():
+    pattern = r"+:^model\.layers\.\d+\.mlp\.proj$"
+    cfg = QuantizeConfig(dynamic={pattern: {"bits": 2, "meta": [{"tag": "old"}]}})
+    restored = pickle.loads(pickle.dumps(cfg))
+    module_name = "model.layers.0.mlp.proj"
+
+    assert restored.dynamic_get(module_name, "bits", restored.bits) == 2
+    restored.dynamic[pattern]["meta"][0]["tag"] = "new"
+    restored.dynamic[pattern]["bits"] = 8
+    assert restored.dynamic_get(module_name) == {"bits": 8, "meta": [{"tag": "new"}]}
+    assert cfg.dynamic_get(module_name) == {"bits": 2, "meta": [{"tag": "old"}]}
+
+
+def test_standalone_tracked_list_nested_edits_touch_its_root():
+    tracked = _TrackedList([{"tag": "old"}])
+    restored = pickle.loads(pickle.dumps(tracked))
+
+    tracked[0]["tag"] = "new"
+    restored[0]["tag"] = "restored"
+    assert tracked._mutation_version == 1
+    assert restored._mutation_version == 1
 
 
 def test_dynamic_caches_are_bounded():

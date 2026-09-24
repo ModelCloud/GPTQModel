@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -238,6 +240,32 @@ def test_effective_frozen_tree_preserves_shared_input_tags():
         "self_attn.q_proj",
         "self_attn.k_proj",
     )
+
+
+def test_effective_frozen_tree_can_be_copied_and_pickled():
+    tree = ["model", "layers", "#", {"mlp": {"experts": ("up_proj:0",)}}]
+    instance = _init_tree_qmodel(_AutoDetectedTreeQModel, tree)
+
+    for restored in (
+        copy.deepcopy(instance.effective_module_tree),
+        pickle.loads(pickle.dumps(instance.effective_module_tree)),
+    ):
+        assert restored == instance.effective_module_tree
+        with pytest.raises(TypeError, match="immutable"):
+            restored[3]["mlp"]["experts"] = ("changed",)
+
+
+def test_effective_tree_context_only_binds_its_model_class():
+    tree_a = ["other", "blocks", "#", {"mixer": ("proj:0",)}]
+    tree_b = ["alternate", "layers", "#", {"mlp": ("up_proj:0",)}]
+
+    with _AutoDetectedTreeQModel._module_tree_context(tree_a):
+        assert _AutoDetectedTreeQModel.extract_layers_node() == ["other.blocks"]
+        assert _SingleTreeQModel.extract_layers_node() == ["model.A_module.layers"]
+        with _AutoDetectedTreeQModel._module_tree_context(tree_b):
+            assert _AutoDetectedTreeQModel.extract_layers_node() == ["alternate.layers"]
+            assert _SingleTreeQModel.extract_layers_node() == ["model.A_module.layers"]
+        assert _AutoDetectedTreeQModel.extract_layers_node() == ["other.blocks"]
 
 
 def test_fresh_quantized_load_planning_binds_auto_detected_tree():

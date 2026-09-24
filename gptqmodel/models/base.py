@@ -261,7 +261,9 @@ class _FrozenDict(dict):
     __ior__ = _immutable
 
     def __reduce__(self):
-        return (_thaw_module_tree, (self,))
+        # A reducer argument cannot be ``self``: deepcopy/pickle would try to
+        # serialize this same frozen mapping again before calling the reducer.
+        return (_freeze_module_tree, (_thaw_module_tree(self),))
 
 
 def _freeze_module_tree(value):
@@ -288,7 +290,7 @@ def _thaw_module_tree(value):
 
 def _module_tree_for_class(cls):
     active = _ACTIVE_MODULE_TREE.get()
-    return active if active is not None else cls.module_tree
+    return active[1] if active is not None and active[0] is cls else cls.module_tree
 
 class BaseQModel(nn.Module):
     # Class-method APIs remain available to model definitions.  Calls through
@@ -568,7 +570,7 @@ class BaseQModel(nn.Module):
     @contextmanager
     def _module_tree_context(cls, module_tree):
         """Temporarily bind a loader's effective tree to class-level planners."""
-        token = _ACTIVE_MODULE_TREE.set(module_tree)
+        token = _ACTIVE_MODULE_TREE.set((cls, module_tree))
         try:
             yield
         finally:
@@ -592,7 +594,7 @@ class BaseQModel(nn.Module):
         def invoke_with_effective_tree(*args, **kwargs):
             # Class methods read this context while they run, including nested
             # calls, then restore the previous value for the caller.
-            token = _ACTIVE_MODULE_TREE.set(tree)
+            token = _ACTIVE_MODULE_TREE.set((type(self), tree))
             try:
                 return attr(*args, **kwargs)
             finally:

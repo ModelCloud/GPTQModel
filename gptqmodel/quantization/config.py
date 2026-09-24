@@ -1660,6 +1660,12 @@ class _TrackedDict(dict):
         memo[id(self)] = result
         return result
 
+    def __reduce__(self):
+        # Default dict-subclass unpickling inserts items before restoring
+        # ``_root``, so __setitem__ would try to touch a missing root. Rebuild
+        # the complete tracked subtree from plain containers instead.
+        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+
 
 class _TrackedList(list):
     """List counterpart to ``_TrackedDict`` for nested dynamic values."""
@@ -1669,7 +1675,7 @@ class _TrackedList(list):
         if self._root is None:
             self._root = self
             self._mutation_version = 0
-        list.__init__(self, (_track_dynamic_value(value, _root) for value in iterable))
+        list.__init__(self, (_track_dynamic_value(value, self._root) for value in iterable))
 
     def _touch(self):
         # Use the root token so edits below a dynamic mapping are visible to
@@ -1732,6 +1738,19 @@ class _TrackedList(list):
         result = _track_dynamic_value([copy.deepcopy(value, memo) for value in self], None)
         memo[id(self)] = result
         return result
+
+    def __reduce__(self):
+        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+
+
+def _untrack_dynamic_value(value):
+    if isinstance(value, dict):
+        return {key: _untrack_dynamic_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_untrack_dynamic_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_untrack_dynamic_value(item) for item in value)
+    return value
 
 
 def _track_dynamic_value(value, root):
