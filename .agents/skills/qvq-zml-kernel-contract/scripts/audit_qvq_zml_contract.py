@@ -141,7 +141,9 @@ def main() -> int:
         head = git(qvq, "rev-parse", "HEAD").stdout.strip()
         pin_known = git(qvq, "cat-file", "-e", f"{pin}^{{commit}}").returncode == 0
         if pin_known:
-            diff = git(qvq, "diff", "--quiet", pin, head, "--", *QVQ_PAYLOAD)
+            # Compare the pinned payload with the files actually being tested,
+            # including uncommitted ABI edits in a development worktree.
+            diff = git(qvq, "diff", "--quiet", pin, "--", *QVQ_PAYLOAD)
             payload_equal = diff.returncode == 0
             check(
                 "Pinned QVQ payload",
@@ -272,19 +274,34 @@ def main() -> int:
             and (4 in qvq_algorithms) == (4 in policy_algorithms) == grouped_ffi,
             f"QVQ={sorted(qvq_algorithms)}, XLA={sorted(xla_algorithms)}, policy={sorted(policy_algorithms)}",
         )
+        qvq_bn128 = bool_expression(raw, "bn128")
+        xla_bn128 = bool_expression(xla, "direct_m960_two_consumers")
+        gate_bn128_guard = "c->block_m == 160 && c->k == 2048 && c->n == 8192"
+        xla_gate_bn128_guard = (
+            "config.hopper_block_m == 160 && k == 2048 && n == 8192"
+        )
+        gate_bn128_supported = gate_bn128_guard in qvq_bn128
+        gate_bn128_policy = (
+            "config.hopper_block_n = if (k == 2048 and n == 8192 "
+            "and transition_bits == 6) 128 else 64"
+        )
         m960_terms = {
             "QVQ BM80": "c->block_m == 80" in raw and "c->block_n == 64" in raw,
             "QVQ BM160": "c->block_m == 160" in raw
             and "c->transition_bits == 6" in raw,
-            "QVQ BN128": "c->block_n == 128" in raw and "c->block_m == 64" in raw,
+            "QVQ BN128": "c->block_n == 128" in qvq_bn128
+            and "c->block_m == 64" in qvq_bn128,
             "XLA reused rows": "direct_m960_reused_rows" in xla
             and "config.hopper_block_m == 80" in xla
             and "config.hopper_block_m == 160" in xla,
-            "XLA BN128": "direct_m960_two_consumers" in xla,
+            "XLA BN128": "config.hopper_block_m == 64" in xla_bn128
+            and (xla_gate_bn128_guard in xla_bn128) == gate_bn128_supported,
             "ZML reused-row policy": (
                 "config.hopper_block_m = if (n == 512) 64 else if "
                 "(k == 2048 and n == 8192 and transition_bits == 6) 160 else 80"
             ) in policy,
+            "ZML W3 gate BN policy": (gate_bn128_policy in policy)
+            == gate_bn128_supported,
             "ZML automatic policy": "ZML_QVQ_M960_WGMMA" not in policy,
         }
         check(
@@ -310,6 +327,16 @@ def main() -> int:
             and "direct_m960_shape &&" in xla
             and "config.hopper_algorithm == 5" in xla,
             f"QVQ_R10={qvq_r10!r}, XLA_reused_rows={xla_reused!r}",
+        )
+        check(
+            "M960 W3 gate BN128 rollout is paired",
+            not gate_bn128_supported or (
+                xla_gate_bn128_guard in xla_bn128
+                and gate_bn128_policy in policy
+                and "AdmitsProductionM960W3GateR10Bn128" in xla
+                and "RejectsM960W3GateR5Bn128NearMiss" in xla
+            ),
+            f"QVQ_BN128={qvq_bn128!r}, XLA_BN128={xla_bn128!r}",
         )
 
         attrs = ("hopper_algorithm", "hopper_block_m", "hopper_block_n", "split_count")
