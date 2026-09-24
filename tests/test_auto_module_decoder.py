@@ -131,6 +131,87 @@ def test_native_floatx_source_format_reads_hf_fp8_quant_method():
     ) == "fp8"
 
 
+@pytest.mark.parametrize("label", ["mxfp8", "mxfp4", "nvfp8", "mixed-mxfp4-mxfp8"])
+def test_native_floatx_source_format_distinguishes_scale_layouts(label):
+    expected = "mixed-mx" if label.startswith("mixed") else label
+    assert loader_module.native_floatx_source_format(
+        SimpleNamespace(quantization_config={"format": label}),
+    ) == expected
+
+
+def test_native_floatx_source_format_reads_quark_global_and_layer_specs():
+    config = SimpleNamespace(quantization_config={
+        "quant_method": "quark_online",
+        "global_quant_config": {"weight": {
+            "dtype": "fp4", "group_size": 32, "scale_format": "e8m0",
+        }},
+        "layer_quant_config": {"*experts*": {"weight": {
+            "dtype": "fp8_e5m2", "group_size": 32, "scale_format": "e8m0",
+        }}},
+    })
+    assert loader_module.native_floatx_source_format(config) == "mixed-mx"
+
+
+@pytest.mark.parametrize("label", ["mxfp8", "mxfp4", "nvfp8"])
+def test_mx_and_nvfp8_sources_use_dense_decoder_until_kernel_is_validated(label, monkeypatch):
+    qcfg = QuantizeConfig(bits=4, offload_to_disk=False)
+    monkeypatch.setattr(loader_module, "device_supports_dtype", lambda *args, **kwargs: True)
+    source_format = loader_module.configure_native_floatx_source_quantization(
+        SimpleNamespace(quantization_config={"format": label}), qcfg, device="cuda:0",
+    )
+    assert source_format == label
+    assert qcfg._native_floatx_forward_plan["native_validated"] is False
+    assert qcfg._native_floatx_forward_plan["mode"] == "decode"
+
+
+@pytest.mark.parametrize("label,weight,scale,expected", [
+    (
+        "mxfp8",
+        torch.ones((1, 32), dtype=torch.float32).to(torch.float8_e5m2),
+        torch.tensor([[128]], dtype=torch.uint8),
+        torch.full((1, 32), 2.0, dtype=torch.bfloat16),
+    ),
+    (
+        "mxfp4",
+        torch.full((1, 16), 0x21, dtype=torch.int8),
+        torch.tensor([[128]], dtype=torch.uint8),
+        torch.tensor([[1.0, 2.0] * 16], dtype=torch.bfloat16),
+    ),
+])
+def test_module_decoder_reconstructs_mx_weight(label, weight, scale, expected):
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = _LinearWrapper(32, 1)
+    harness.model.config = SimpleNamespace(quantization_config={"format": label})
+    decoded = harness._build_decoder_quant_source_module(
+        harness.model.linear,
+        checkpoint_tensors={"weight": weight, "weight_scale": scale},
+        target_dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(decoded.weight, expected)
+
+
+def test_module_decoder_reconstructs_quark_mxfp4_sibling_scale():
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = _LinearWrapper(32, 1)
+    harness.model.config = SimpleNamespace(quantization_config={
+        "quant_method": "quark_online",
+        "global_quant_config": {"weight": {
+            "dtype": "fp4", "group_size": 32, "scale_format": "e8m0",
+        }},
+    })
+    decoded = harness._build_decoder_quant_source_module(
+        harness.model.linear,
+        checkpoint_tensors={
+            "weight": torch.full((1, 16), 0x21, dtype=torch.int8),
+            "scale": torch.tensor([[128]], dtype=torch.uint8),
+        },
+        target_dtype=torch.bfloat16,
+    )
+    torch.testing.assert_close(decoded.weight, torch.tensor([[1.0, 2.0] * 16], dtype=torch.bfloat16))
+
+
 def test_auto_module_decoder_config_exposes_validated_policies():
     config = AutoModuleDecoderConfig(
         passthrough_forward_policy="NATIVE",

@@ -23,8 +23,10 @@ from ..quantization.dtype import (
     available_float4_packed_dtypes,
     available_float8_dtype_names,
     available_float8_dtypes,
+    decode_e8m0_scale,
     dequantize_f4_e2m1,
     dequantize_fp8,
+    quark_floatx_formats,
 )
 from ..utils.logger import setup_logger
 from ..utils.planar_packing import (
@@ -41,6 +43,9 @@ LOG = logging.getLogger(__name__)
 # the CPU dequant kernels and config normalization paths.
 _FLOAT8_DTYPES = available_float8_dtypes()
 _FLOAT8_FORMAT_NAMES = frozenset(available_float8_dtype_names())
+_MXFP8_DTYPES = tuple(
+    dtype for dtype in _FLOAT8_DTYPES if dtype != getattr(torch, "float8_e8m0fnu", None)
+)
 _NVFP4_STORAGE_DTYPES = (torch.uint8, *available_float4_packed_dtypes())
 _DEEPSEEK_V4_FP4_BLOCK_SIZE = 32
 _DEEPSEEK_V4_FP4_TABLE = (
@@ -622,13 +627,71 @@ def detect_format(model_path: Path, config: dict) -> str:
     variant_name = (quant_cfg.get("variant") or "").lower()
     quant_algo = str(quant_cfg.get("quant_algo") or quant_cfg.get("algorithm") or "").lower()
 
-    files, _ = list_safetensor_files(model_path)
+    files, index = list_safetensor_files(model_path)
     if not files:
         raise FileNotFoundError("No .safetensors files found in model directory")
+
+    # MXFP4 and MXFP8 use the same value dtypes as NVFP4 and plain FP8.
+    # Inspect declared scale semantics before guessing from a weight dtype.
+    declared = " ".join((method, format_name, variant_name, quant_algo))
+    groups = quant_cfg.get("config_groups")
+    if isinstance(groups, dict):
+        declared += " " + " ".join(
+            str(group.get("format", "")) for group in groups.values() if isinstance(group, dict)
+        ).lower()
+    quark_formats = quark_floatx_formats(quant_cfg)
+    declared += " " + " ".join(quark_formats)
+    if "mxfp4" in declared and "mxfp8" in declared:
+        return "mixed-mx"
+    if "mxfp4" in declared:
+        return "mxfp4"
+    if "mxfp8" in declared:
+        return "mxfp8"
+    if "nvfp8" in declared:
+        return "nvfp8"
+    if quark_formats == {"fp8"}:
+        return "fp8"
 
     # legacy/local checkpoints that do not persist a useful quantization_config.
     with safe_open(model_path / files[0], framework="pt", device="cpu") as reader:
         keys = list(reader.keys())
+        mx_formats = set()
+        for key in keys:
+            if not key.endswith(".weight") or key + "_scale" not in keys:
+                continue
+            scale = reader.get_tensor(key + "_scale")
+            if scale.dtype not in {torch.uint8, getattr(torch, "float8_e8m0fnu", None)}:
+                continue
+            weight_dtype = reader.get_tensor(key).dtype
+            if weight_dtype in _MXFP8_DTYPES:
+                mx_formats.add("mxfp8")
+            elif weight_dtype in {torch.uint8, torch.int8, *available_float4_packed_dtypes()}:
+                mx_formats.add("mxfp4")
+        if mx_formats:
+            return "mixed-mx" if len(mx_formats) > 1 else mx_formats.pop()
+        # The index can place scales before their weights in a separate shard.
+        weight_map = index.get("weight_map", {}) if isinstance(index, dict) else {}
+        for scale_key in keys:
+            if not scale_key.endswith(".weight_scale"):
+                continue
+            weight_key = scale_key[:-len("_scale")]
+            weight_file = weight_map.get(weight_key)
+            if not weight_file or weight_file == files[0]:
+                continue
+            with safe_open(model_path / weight_file, framework="pt", device="cpu") as weight_reader:
+                if weight_key not in weight_reader.keys():
+                    continue
+                weight_dtype = weight_reader.get_tensor(weight_key).dtype
+            scale_dtype = reader.get_tensor(scale_key).dtype
+            if scale_dtype in {torch.uint8, getattr(torch, "float8_e8m0fnu", None)}:
+                if weight_dtype in _MXFP8_DTYPES:
+                    return "mxfp8"
+                if weight_dtype in {torch.uint8, torch.int8, *available_float4_packed_dtypes()}:
+                    return "mxfp4"
+            if weight_dtype in _MXFP8_DTYPES:
+                return "fp8"
+            if weight_dtype in _NVFP4_STORAGE_DTYPES:
+                return "nvfp4"
         # Prefer dtype-based detection
         for key in keys:
             if key.endswith(".weight"):
@@ -972,17 +1035,48 @@ def convert_fp8_shard(
                 )
                 LOG.debug("Using scale_inv tensor '%s' for FP8 weight '%s'", scale_key, key)
             else:
-                # Some native FP8 checkpoints (for example DeepSeek V4) store
-                # direct scales as `<module>.scale` instead of `weight_scale_inv`.
-                scale_key = key[:-len(".weight")] + ".scale"
-                if tensor_lookup is None or not tensor_lookup.has_tensor(
-                    scale_key, local_reader=reader, local_keys=reader_keys
-                ):
+                # Native FP8 checkpoints use either weight_scale or .scale.
+                for candidate in (key + "_scale", key[:-len(".weight")] + ".scale"):
+                    if tensor_lookup is not None and tensor_lookup.has_tensor(
+                        candidate, local_reader=reader, local_keys=reader_keys
+                    ):
+                        scale_key = candidate
+                        scale_tensor = tensor_lookup.get_tensor(
+                            candidate, local_reader=reader, local_keys=reader_keys
+                        )
+                        break
+                    if candidate in reader_keys:
+                        scale_key = candidate
+                        scale_tensor = reader.get_tensor(candidate)
+                        break
+                if scale_tensor is None:
                     raise KeyError(f"Missing FP8 scale tensor for {key}")
-                scale_tensor = tensor_lookup.get_tensor(
-                    scale_key, local_reader=reader, local_keys=reader_keys
-                )
                 LOG.debug("Using scale tensor '%s' for FP8 weight '%s'", scale_key, key)
+
+            if isinstance(scale_tensor, torch.Tensor):
+                if scale_tensor.dtype in {torch.uint8, getattr(torch, "float8_e8m0fnu", None)}:
+                    # An FP8 value tensor can also be stored with MX E8M0
+                    # scales, including checkpoints branded "NVFP8".
+                    if (
+                        tensor.ndim != 2
+                        or tensor.shape[1] % 32
+                        or scale_tensor.ndim != 2
+                        or scale_tensor.shape[0] < tensor.shape[0]
+                        or scale_tensor.shape[1] < tensor.shape[1] // 32
+                    ):
+                        raise ValueError(f"Unsupported byte-scale layout for FP8 weight {key}")
+                    scale_tensor = decode_e8m0_scale(
+                        scale_tensor[:tensor.shape[0], :tensor.shape[1] // 32]
+                    )
+                scale_2_key = key + "_scale_2"
+                if tensor_lookup is not None and tensor_lookup.has_tensor(
+                    scale_2_key, local_reader=reader, local_keys=reader_keys
+                ):
+                    scale_tensor = scale_tensor.to(torch.float32) * tensor_lookup.get_tensor(
+                        scale_2_key, local_reader=reader, local_keys=reader_keys
+                    ).to(torch.float32)
+                elif scale_2_key in reader_keys:
+                    scale_tensor = scale_tensor.to(torch.float32) * reader.get_tensor(scale_2_key).to(torch.float32)
 
             rows, cols = tensor.shape
             effective_block = block_shape
@@ -1059,6 +1153,19 @@ def convert_fp8_shard(
         elif key.endswith("_scale_inv"):
             LOG.debug("Dropping auxiliary FP8 tensor '%s' after dequantization", key)
             continue
+        elif key.endswith((".weight_scale", ".weight_scale_2")):
+            weight_key = key.split(".weight_scale", 1)[0] + ".weight"
+            if tensor_lookup is not None and tensor_lookup.has_tensor(
+                weight_key, local_reader=reader, local_keys=reader_keys
+            ):
+                weight_tensor = tensor_lookup.get_tensor(
+                    weight_key, local_reader=reader, local_keys=reader_keys
+                )
+                if weight_tensor.dtype in _FLOAT8_DTYPES:
+                    continue
+            elif weight_key in reader_keys and reader.get_tensor(weight_key).dtype in _FLOAT8_DTYPES:
+                continue
+            tensors[key] = finalize_for_save(tensor, target_dtype)
         elif key.endswith(".scale"):
             weight_key = key[:-len(".scale")] + ".weight"
             if tensor_lookup is not None and tensor_lookup.has_tensor(
@@ -1172,6 +1279,98 @@ def convert_nvfp4_shard(
         elif key.endswith((".weight_scale", ".weight_scale_2")):
             LOG.debug("Dropping auxiliary NVFP4 tensor '%s' after dequantization", key)
             continue
+        else:
+            tensors[key] = finalize_for_save(tensor, target_dtype)
+    return tensors
+
+
+def convert_mx_shard(
+    reader,
+    target_dtype: torch.dtype,
+    *,
+    tensor_lookup: Optional[_ShardTensorLookup] = None,
+    ignored_layers: Iterable[str] = (),
+) -> Dict[str, torch.Tensor]:
+    """Decode OCP MXFP4/MXFP8 weight tensors with E8M0 block-32 scales.
+
+    Dispatch is per weight tensor, so a checkpoint can contain both widths.
+    This is a dense export path; native matrix execution is a separate kernel
+    selection concern.
+    """
+
+    tensors: Dict[str, torch.Tensor] = {}
+    reader_keys = set(reader.keys())
+
+    def lookup(key: str) -> Optional[torch.Tensor]:
+        if tensor_lookup is not None and tensor_lookup.has_tensor(
+            key, local_reader=reader, local_keys=reader_keys
+        ):
+            return tensor_lookup.get_tensor(key, local_reader=reader, local_keys=reader_keys)
+        return reader.get_tensor(key) if key in reader_keys else None
+
+    for key in reader.keys():
+        tensor = reader.get_tensor(key)
+        ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
+        if ignored_tensor is not None:
+            tensors[key] = ignored_tensor
+            continue
+        if _tensor_key_matches_ignored_layer(key, ignored_layers):
+            continue
+
+        if key.endswith(".weight") and tensor.dtype in (*_MXFP8_DTYPES, torch.uint8, torch.int8, *available_float4_packed_dtypes()):
+            is_fp8 = tensor.dtype in _MXFP8_DTYPES
+            scale = lookup(key + "_scale")
+            scale_inv = lookup(key + "_scale_inv") if is_fp8 and scale is None else None
+            if scale is None and scale_inv is None:
+                scale = lookup(key[:-len(".weight")] + ".scale")
+            if scale is None and scale_inv is None:
+                raise KeyError(f"Missing weight scale for {key}")
+            if tensor.ndim < 2:
+                raise ValueError(f"Quantized weight must have at least two dimensions for {key}")
+            logical_cols = tensor.shape[-1] if is_fp8 else tensor.shape[-1] * 2
+            is_e8m0 = scale is not None and scale.dtype in {
+                torch.uint8, getattr(torch, "float8_e8m0fnu", None)
+            }
+            if is_e8m0:
+                if logical_cols % 32 or scale.ndim != tensor.ndim or scale.shape[:-1] != tensor.shape[:-1]:
+                    raise ValueError(f"MX weight and E8M0 scale layout mismatch for {key}")
+                expected_cols = logical_cols // 32
+                if scale.shape[-1] < expected_cols:
+                    raise ValueError(f"MX scale shape {tuple(scale.shape)} needs {expected_cols} columns for {key}")
+                scale = decode_e8m0_scale(scale[..., :expected_cols].reshape(-1, expected_cols))
+            elif not is_fp8:
+                # A mixed checkpoint may pair MXFP8 with NVFP4 layers.
+                scale = scale.to(torch.float32)
+
+            scale_2 = lookup(key + "_scale_2")
+            if isinstance(scale_2, torch.Tensor) and isinstance(scale, torch.Tensor):
+                scale = scale.to(torch.float32) * scale_2.to(torch.float32)
+
+            flat_weight = tensor.reshape(-1, tensor.shape[-1])
+            if isinstance(scale, torch.Tensor) and scale.ndim == tensor.ndim and tensor.ndim > 2:
+                scale = scale.reshape(-1, scale.shape[-1])
+            if isinstance(scale_inv, torch.Tensor) and scale_inv.ndim == tensor.ndim and tensor.ndim > 2:
+                scale_inv = scale_inv.reshape(-1, scale_inv.shape[-1])
+            if is_fp8:
+                dense = dequantize_fp8(
+                    flat_weight, scale=scale, scale_inv=scale_inv,
+                    axis=None, target_dtype=torch.float32,
+                )
+            else:
+                packed = flat_weight.view(torch.uint8) if tensor.dtype != torch.uint8 else flat_weight
+                dense = dequantize_f4_e2m1(packed, scale=scale, axis=None, target_dtype=torch.float32)
+            tensors[key] = finalize_for_save(dense.reshape(*tensor.shape[:-1], logical_cols), target_dtype)
+        elif key.endswith((".weight_scale", ".weight_scale_inv", ".weight_scale_2", ".scale")):
+            if key.endswith(".scale"):
+                weight_key = key[:-len(".scale")] + ".weight"
+            else:
+                weight_key = key.split(".weight_scale", 1)[0] + ".weight"
+            weight = lookup(weight_key)
+            if isinstance(weight, torch.Tensor) and weight.dtype in (
+                *_MXFP8_DTYPES, torch.uint8, torch.int8, *available_float4_packed_dtypes()
+            ):
+                continue
+            tensors[key] = finalize_for_save(tensor, target_dtype)
         else:
             tensors[key] = finalize_for_save(tensor, target_dtype)
     return tensors
@@ -1518,7 +1717,7 @@ def dequantize_model(
     open_device = device_str or "cpu"
 
     ignored_layers = resolve_ignored_layers(config)
-    block_shape = resolve_block_size(config) if fmt == "fp8" else None
+    block_shape = resolve_block_size(config) if fmt in {"fp8", "nvfp8"} else None
     fp8_scale_semantics = str(quant_cfg.get("weight_scale_semantics") or "heuristic").strip().lower()
 
     if block_shape is not None:
@@ -1560,7 +1759,7 @@ def dequantize_model(
             device=open_device,
             weight_map=index.get("weight_map", {}) if isinstance(index, dict) else None,
         )
-        if fmt in {"fp8", "nvfp4"}
+        if fmt in {"fp8", "nvfp8", "nvfp4", "mxfp4", "mxfp8", "mixed-mx"}
         else None
     )
 
@@ -1581,7 +1780,7 @@ def dequantize_model(
                 pb.subtitle(f"{filename} (existing)").next().draw()
                 continue
             LOG.debug("Processing shard '%s' for format %s on device %s", filename, fmt, open_device)
-            if fmt == "fp8":
+            if fmt in {"fp8", "nvfp8"}:
                 with safe_open(path, framework="pt", device=open_device) as reader:
                     tensors = convert_fp8_shard(
                         reader,
@@ -1603,6 +1802,14 @@ def dequantize_model(
             elif fmt == "nvfp4":
                 with safe_open(path, framework="pt", device=open_device) as reader:
                     tensors = convert_nvfp4_shard(
+                        reader,
+                        target_dtype,
+                        tensor_lookup=tensor_lookup,
+                        ignored_layers=ignored_layers,
+                    )
+            elif fmt in {"mxfp4", "mxfp8", "mixed-mx"}:
+                with safe_open(path, framework="pt", device=open_device) as reader:
+                    tensors = convert_mx_shard(
                         reader,
                         target_dtype,
                         tensor_lookup=tensor_lookup,
