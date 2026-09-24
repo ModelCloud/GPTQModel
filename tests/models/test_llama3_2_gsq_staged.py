@@ -11,8 +11,10 @@ times the earlier 32-record recipe), 10 training epochs, 10 Q/K steps, 128
 GSM8K Platinum rows and 96 generated tokens. The previous 32-record recipe
 produced six concatenated training sequences: its 16-block GPTQ initializer
 scored 36/128, one-epoch staged GPTQ scored 31/128, and two epochs scored
-28/128. Those scores are historical references, not matched baselines for the
-larger calibration recipe. Override GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS,
+28/128. With the 128-record recipe (25 concatenated sequences), the matched
+GPTQ initializer scored 40/128, while 10-epoch staged GSQ scored 34/128.
+The opt-in minimum score catches large failures; it does not assert a gain.
+Override GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS,
 GPTQMODEL_GSQ_STAGED_EPOCHS or GPTQMODEL_GSQ_STAGED_QK_STEPS for experiments.
 The earlier 59/128 GPTQ-only score used two decoder blocks and different
 activation-group settings, so it is not a matched baseline here.
