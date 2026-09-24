@@ -3,6 +3,33 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import torch
+
+
+def awq_gemv_codes(weight, scales, zeros, g_idx):
+    """Recover AWQ GEMV's bounded int4 codes with its source offset arithmetic."""
+    if (weight.ndim != 2 or scales.ndim != 2 or scales.shape != zeros.shape
+            or scales.shape[0] != weight.shape[0] or g_idx.shape != (weight.shape[1],)
+            or not weight.numel() or not scales.numel()):
+        raise ValueError("AWQ GEMV requires matching weight, scale, and zero-point shapes")
+    if any(t.device != weight.device for t in (scales, zeros, g_idx)):
+        raise ValueError("AWQ GEMV packing tensors must share a device")
+    if g_idx.dtype not in (torch.int32, torch.int64) or g_idx.min() < 0 or g_idx.max() >= scales.shape[1]:
+        raise ValueError("AWQ GEMV group indices must be in range")
+    if any(not torch.isfinite(t).all() for t in (weight, scales, zeros)):
+        raise ValueError("AWQ GEMV packing tensors must be finite")
+    stored = scales.half()
+    if (scales <= 0).any() or (stored <= 0).any() or not torch.isfinite(stored).all():
+        raise ValueError("AWQ GEMV scales must remain positive in FP16 storage")
+    if (zeros != zeros.round()).any() or (zeros < 0).any() or (zeros > 15).any():
+        raise ValueError("AWQ GEMV zero points must be integers in [0, 15]")
+    offset = zeros * scales
+    if not torch.isfinite(offset).all():
+        raise ValueError("AWQ GEMV source offsets must be finite")
+    # GEMV's packer does not clamp before shifting codes into its int32 words.
+    # Preserve an out-of-range result so GSQ can reject an illegal payload.
+    return ((weight + offset[:, g_idx]) / stored[:, g_idx]).round()
+
 def make_divisible(c, divisor):
     return (c + divisor - 1) // divisor
 

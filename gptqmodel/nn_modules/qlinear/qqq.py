@@ -176,6 +176,10 @@ class QQQLinear(GroupedQuantLinear):
                 self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
             else:
                 self.bias = None
+        else:
+            # Fresh quantization constructs without persistent buffers, but
+            # both runtime forward paths still inspect the optional bias.
+            self.bias = None
 
 
         (
@@ -402,6 +406,22 @@ class QQQLinear(GroupedQuantLinear):
             self.register_buffer("s_channel", packed_s_channel)
         else:
             self.register_buffer("s_channel", packed_s_channel)
+            self.register_buffer("s_group", torch.empty(0, dtype=torch.float16, device=packed_s_channel.device))
+        # Quantization constructs QQQLinear with register_buffers=False. Its
+        # packed instance still needs the nonpersistent runtime scratch buffers
+        # that a checkpoint-loaded instance receives in __init__.
+        if not hasattr(self, "workspace"):
+            self.register_buffer(
+                "workspace",
+                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32, device=packed_weight.device),
+                persistent=False,
+            )
+        if not hasattr(self, "reduce_buffer"):
+            self.register_buffer(
+                "reduce_buffer",
+                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int, device=packed_weight.device),
+                persistent=False,
+            )
         if linear.bias is not None and self.bias is not None:
             self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
 

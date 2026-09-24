@@ -496,6 +496,28 @@ class ParoQuantProcessor(LoopProcessor):
                 scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
             )
 
+        from ..quantization.gsq_scalar import gsq_enabled_for
+
+        if gsq_enabled_for(self.qcfg.gsq, module.full_name):
+            from dataclasses import replace
+
+            from ..quantization.gsq_paro import refine_paro_export
+
+            if inputs.numel() == 0:
+                raise ValueError("Paro GSQ requires nonempty calibration inputs")
+            features = inputs.reshape(-1, weight.shape[1]).to(weight.device)
+            fitted = refine_paro_export(
+                result, teacher=original_weight, inputs=features,
+                group_size=group_size, config=self.qcfg.gsq,
+                storage_dtype=weight.dtype if weight.dtype in (torch.float16, torch.bfloat16) else torch.float16)
+            result = replace(result, pack_weight=fitted["pack_weight"],
+                             pseudo_weight=fitted["pseudo_weight"],
+                             q_scales=fitted["q_scales"], q_zeros=fitted["q_zeros"])
+            module.state["gsq_diagnostics"] = {
+                "before": fitted["before"], "after": fitted["after"],
+                "history": fitted["history"], "objective": "transformed_input_mse",
+            }
+
         self._apply_optimization_result(module, result, original_weight)
         return result.train_loss, result.val_loss
 

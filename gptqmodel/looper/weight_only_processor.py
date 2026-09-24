@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from __future__ import annotations
 
@@ -112,6 +114,8 @@ class WeightOnlyProcessor(LoopProcessor):
         else:
             task = RTN(module=module, qcfg=qcfg_clone)
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = task.quantize()
+            if getattr(task, "gsq_diagnostics", None) is not None:
+                module.state["gsq_diagnostics"] = task.gsq_diagnostics
 
             module.stream_state_payload_to_cpu(
                 {
@@ -215,6 +219,26 @@ class WeightOnlyProcessor(LoopProcessor):
                         g_idx=None,
                         smooth=active_qcfg.smooth,
                     )
+                    if active_qcfg.method == METHOD.FP8:
+                        from ..quantization.gsq_fp8 import refine_fp8_weight
+                        from ..quantization.gsq_scalar import gsq_enabled_for
+
+                        if gsq_enabled_for(active_qcfg.gsq, module.full_name):
+                            teacher = qmodule._weight_to_matrix(original_layer).detach().to(
+                                device=qmodule.weight.device, dtype=torch.float32)
+                            refined = refine_fp8_weight(
+                                qmodule.weight, qmodule.weight_scale_inv, target=teacher,
+                                config=active_qcfg.gsq, method=qmodule.weight_scale_method,
+                                block_size=qmodule.weight_block_size)
+                            if (refined["weight"].shape != qmodule.weight.shape
+                                    or refined["weight"].dtype != qmodule.weight.dtype
+                                    or refined["scale_inv"].shape != qmodule.weight_scale_inv.shape):
+                                raise ValueError("FP8 GSQ export does not match the packed storage geometry")
+                            with torch.no_grad():
+                                qmodule.weight.copy_(refined["weight"])
+                                qmodule.weight_scale_inv.copy_(refined["scale_inv"])
+                            module.state["gsq_diagnostics"] = {
+                                key: refined[key] for key in ("before", "after", "history")}
             if timer is not None and pack_start is not None:
                 timer.record(
                     "submodule_finalize_pack",

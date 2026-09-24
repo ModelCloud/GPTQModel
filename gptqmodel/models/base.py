@@ -1176,6 +1176,31 @@ class BaseQModel(nn.Module):
                 f"Unsupported quantization operation for quant method: {self.quantize_config.method}"
             )
 
+        staged_gsq = getattr(self.quantize_config, "gsq_training", None)
+        if staged_gsq is not None and staged_gsq.enabled:
+            if self.quantize_config.method == METHOD.GPTQ:
+                from ..looper.gsq_training_model import quantize_llama_gsq_public
+
+                result = quantize_llama_gsq_public(
+                    self, calibration=calibration, tokenizer=tokenizer, backend=backend,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
+                    calibration_data_min_length=calibration_data_min_length,
+                    calibration_concat_separator=calibration_concat_separator,
+                    unsupported={
+                        "adapter": adapter,
+                        "adapter_calibration_dataset": adapter_calibration_dataset,
+                        "embed_quant_config": embed_quant_config,
+                        "checkpoint": checkpoint,
+                    },
+                )
+                self.after_quantize()
+                if timer is not None:
+                    timer.flush()
+                return result
+            if self.quantize_config.method != METHOD.AWQ:
+                raise ValueError(f"Staged GSQ is unsupported for {self.quantize_config.method}")
+
         if not self.support_batch_quantize:
             log.warn("Quantize: batch_size overridden by model class definition to `disabled`")
             batch_size = 1 # but actually disabled
@@ -1550,11 +1575,21 @@ class BaseQModel(nn.Module):
             quantize_processor = preprocessors + [
                 EXL3Processor(**exl3_args),
             ]
+        elif self.quantize_config.method == METHOD.FP8 and getattr(self.quantize_config, "gsq_calibration", False):
+            from ..looper.fp8_gsq_processor import FP8GSQProcessor
+
+            if needs_lora:
+                raise NotImplementedError("Calibrated FP8 GSQ does not support adapter generation")
+            fp8_args = dict(args)
+            fp8_args.pop("calculate_w_wq_diff", None)
+            quantize_processor = preprocessors + [FP8GSQProcessor(**fp8_args)]
         elif self.quantize_config.method == METHOD.QQQ:
             from ..looper.qqq_processor import QQQProcessor
 
+            qqq_args = dict(args)
+            qqq_args["backend"] = backend
             quantize_processor = preprocessors + [
-                QQQProcessor(**args),
+                QQQProcessor(**qqq_args),
             ]
         elif self.quantize_config.method == METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
