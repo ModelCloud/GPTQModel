@@ -123,9 +123,9 @@ def main() -> int:
         )
         check(
             "Input Hadamard ABI and struct",
-            input_abi == zig_input_abi == 1
+            input_abi == zig_input_abi == 2
             and input_fields == zig_input_fields
-            and "raw_version() == 1" in loader,
+            and "raw_version() == 2" in loader,
             f"QVQ/ZML versions={input_abi}/{zig_input_abi}, fields={input_fields}/{zig_input_fields}",
         )
 
@@ -269,10 +269,17 @@ def main() -> int:
         )
         m960_terms = {
             "QVQ BM80": "c->block_m == 80" in raw and "c->block_n == 64" in raw,
+            "QVQ BM160": "c->block_m == 160" in raw
+            and "c->transition_bits == 6" in raw,
             "QVQ BN128": "c->block_n == 128" in raw and "c->block_m == 64" in raw,
-            "XLA BM80": "direct_m960_five_rows" in xla,
+            "XLA reused rows": "direct_m960_reused_rows" in xla
+            and "config.hopper_block_m == 80" in xla
+            and "config.hopper_block_m == 160" in xla,
             "XLA BN128": "direct_m960_two_consumers" in xla,
-            "ZML BM80 policy": "config.hopper_block_m = if (n == 512) 64 else 80" in policy,
+            "ZML reused-row policy": (
+                "config.hopper_block_m = if (n == 512) 64 else if "
+                "(k == 2048 and n == 8192 and transition_bits == 6) 160 else 80"
+            ) in policy,
             "ZML automatic policy": "ZML_QVQ_M960_WGMMA" not in policy,
         }
         check(

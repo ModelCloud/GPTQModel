@@ -6,6 +6,11 @@ Copy one row per kernel family or specialization into the paired PRs. Never use 
 |---|---|---|---|---:|---:|---:|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | Example | vN / N | sm90 | f16/P32 | 1-16 | multiple of 256 | multiple of 256 | 4-7 | no | ordered split | queried bytes | function:line | attributes/predicate | fields/version | pass | counter + kernel name | FP32/FP64 result | warmed delta | wired | PR link |
 
+For a `wired` row, the runtime-proof cell must name the compiled custom call,
+expected/observed native calls for that projection, and same-projection dense
+fallback calls. Record a near-miss XLA rejection separately. Do not count
+unrelated dense GEMMs as fallback for the optimized projection.
+
 Required summary:
 
 - QVQ source commit:
@@ -14,5 +19,6 @@ Required summary:
 - Newly exported families:
 - ZML-only algorithms checked:
 - Optimized launches observed:
-- Portable fallbacks observed:
+- Same-projection dense fallbacks observed:
+- Near-miss XLA rejection and fallback/error:
 - Intentionally unwired items and owners:
