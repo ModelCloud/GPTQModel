@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import hashlib
 import json
 import math
 import os.path
@@ -11,6 +12,7 @@ import tempfile
 import threading
 from abc import ABC, abstractmethod
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from functools import total_ordering
@@ -2981,12 +2983,194 @@ DYNAMIC_FIELD_SYNONYMS = {}
 # Sentinel used by the dynamic override cache to indicate no pattern matched.
 _DYNAMIC_NO_MATCH = object()
 
+# Dynamic configurations are mutable user data.  These wrappers provide an
+# O(1) mutation token so the exact-pattern fast path can remain O(1) per lookup
+# without ever reusing a result after an in-place edit.
+class _TrackedDict(dict):
+    """Dict whose nested edits advance one shared root mutation version."""
+
+    def __init__(self, *args, _root=None, **kwargs):
+        dict.__init__(self)
+        self._root = _root if _root is not None else self
+        if self._root is self:
+            self._mutation_version = 0
+        if args or kwargs:
+            source = dict(*args, **kwargs)
+            for key, value in source.items():
+                dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+
+    def _touch(self):
+        # Nested tracked containers point at the same root, so any edit
+        # invalidates fingerprints computed for the complete dynamic config.
+        self._root._mutation_version += 1
+
+    def __eq__(self, other):
+        return dict.__eq__(self, other)
+
+    __hash__ = None
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def __delitem__(self, key):
+        dict.__delitem__(self, key)
+        self._touch()
+
+    def clear(self):
+        if self:
+            dict.clear(self)
+            self._touch()
+
+    def pop(self, key, *args):
+        value = dict.pop(self, key, *args)
+        self._touch()
+        return value
+
+    def popitem(self):
+        value = dict.popitem(self)
+        self._touch()
+        return value
+
+    def setdefault(self, key, default=None):
+        if key in self:
+            return self[key]
+        self[key] = default
+        return self[key]
+
+    def update(self, *args, **kwargs):
+        source = dict(*args, **kwargs)
+        for key, value in source.items():
+            self[key] = value
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def __deepcopy__(self, memo):
+        payload = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
+        result = _track_dynamic_value(payload, None)
+        memo[id(self)] = result
+        return result
+
+    def __reduce__(self):
+        # Default dict-subclass unpickling inserts items before restoring
+        # ``_root``, so __setitem__ would try to touch a missing root. Rebuild
+        # the complete tracked subtree from plain containers instead.
+        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+
+
+class _TrackedList(list):
+    """List counterpart to ``_TrackedDict`` for nested dynamic values."""
+
+    def __init__(self, iterable=(), *, _root=None):
+        self._root = _root
+        if self._root is None:
+            self._root = self
+            self._mutation_version = 0
+        list.__init__(self, (_track_dynamic_value(value, self._root) for value in iterable))
+
+    def _touch(self):
+        # Use the root token so edits below a dynamic mapping are visible to
+        # the same cache-key check as edits to the mapping itself.
+        self._root._mutation_version += 1
+
+    def __eq__(self, other):
+        return list.__eq__(self, other)
+
+    def __ne__(self, other):
+        return list.__ne__(self, other)
+
+    def __setitem__(self, index, value):
+        if isinstance(index, slice):
+            value = [_track_dynamic_value(item, self._root) for item in value]
+        else:
+            value = _track_dynamic_value(value, self._root)
+        list.__setitem__(self, index, value)
+        self._touch()
+
+    def __delitem__(self, index):
+        list.__delitem__(self, index)
+        self._touch()
+
+    def append(self, value):
+        list.append(self, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def extend(self, values):
+        list.extend(self, (_track_dynamic_value(value, self._root) for value in values))
+        self._touch()
+
+    def insert(self, index, value):
+        list.insert(self, index, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def pop(self, index=-1):
+        value = list.pop(self, index)
+        self._touch()
+        return value
+
+    def remove(self, value):
+        list.remove(self, value)
+        self._touch()
+
+    def clear(self):
+        if self:
+            list.clear(self)
+            self._touch()
+
+    def reverse(self):
+        list.reverse(self)
+        self._touch()
+
+    def sort(self, *args, **kwargs):
+        list.sort(self, *args, **kwargs)
+        self._touch()
+
+    def __deepcopy__(self, memo):
+        result = _track_dynamic_value([copy.deepcopy(value, memo) for value in self], None)
+        memo[id(self)] = result
+        return result
+
+    def __reduce__(self):
+        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+
+
+def _untrack_dynamic_value(value):
+    if isinstance(value, dict):
+        return {key: _untrack_dynamic_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_untrack_dynamic_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_untrack_dynamic_value(item) for item in value)
+    return value
+
+
+def _track_dynamic_value(value, root):
+    # Preserve the user's container shape while sharing one mutation counter
+    # across every mutable descendant.
+    if isinstance(value, dict):
+        tracked = _TrackedDict(_root=root)
+        root = tracked._root
+        for key, item in value.items():
+            dict.__setitem__(tracked, key, _track_dynamic_value(item, root))
+        return tracked
+    if isinstance(value, (list, tuple)):
+        tracked = _TrackedList(_root=root)
+        root = tracked._root
+        for item in value:
+            list.append(tracked, _track_dynamic_value(item, root))
+        return tracked if isinstance(value, list) else tuple(tracked)
+    return value
+
+
 
 @dataclass
 class _DynamicResolutionCacheEntry:
     # Keep the owner alive while its id is a cache key. Without this reference,
     # CPython may recycle the id for an unrelated config and return stale rules.
     dynamic: Dict[str, Dict[str, Any]]
+    mutation_version: Optional[int]
     patterns: List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]
     exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]
     all_exact: bool
@@ -3075,6 +3259,7 @@ def _build_dynamic_cache_entry(
         patterns.append((is_negative, compiled, overrides, exact_literal, index))
     return _DynamicResolutionCacheEntry(
         dynamic=dynamic,
+        mutation_version=dynamic._root._mutation_version if isinstance(dynamic, _TrackedDict) else None,
         patterns=patterns,
         exact_lookup=exact_lookup,
         all_exact=all_exact,
@@ -3099,21 +3284,25 @@ def _trim_dynamic_cache_locked() -> None:
 
 
 def _get_dynamic_cache_entry(dynamic: Dict[str, Dict[str, Any]]) -> _DynamicResolutionCacheEntry:
-    """Return the bounded, identity-safe cache entry for one dynamic config."""
+    """Return a bounded cache entry for the current dynamic config version."""
 
+    global _DYNAMIC_CACHE_OVERRIDE_COUNT
     cache_key = id(dynamic)
+    version = dynamic._root._mutation_version if isinstance(dynamic, _TrackedDict) else None
     with _DYNAMIC_CACHE_LOCK:
         cached = _DYNAMIC_CACHE.get(cache_key)
-        if cached is not None and cached.dynamic is dynamic:
+        if cached is not None and cached.dynamic is dynamic and cached.mutation_version == version:
             _DYNAMIC_CACHE.move_to_end(cache_key)
             return cached
 
     candidate = _build_dynamic_cache_entry(dynamic)
     with _DYNAMIC_CACHE_LOCK:
         cached = _DYNAMIC_CACHE.get(cache_key)
-        if cached is not None and cached.dynamic is dynamic:
+        if cached is not None and cached.dynamic is dynamic and cached.mutation_version == version:
             _DYNAMIC_CACHE.move_to_end(cache_key)
             return cached
+        if cached is not None:
+            _DYNAMIC_CACHE_OVERRIDE_COUNT -= len(cached.override_cache)
         _DYNAMIC_CACHE[cache_key] = candidate
         _DYNAMIC_CACHE.move_to_end(cache_key)
         _trim_dynamic_cache_locked()
@@ -3132,6 +3321,14 @@ def _resolve_dynamic_override(
 ) -> Union[Dict[str, Any], bool, None]:
     """Return the first matching dynamic override dict, False for negative, or None."""
 
+    def clone_result(value):
+        # Dynamic configs with equal content intentionally share cache entries.
+        # Never expose a cached mutable payload to callers, including nested
+        # containers returned by dynamic_get(module, key).
+        if value is None or value is False:
+            return value
+        return copy.deepcopy(value)
+
     if dynamic is None:
         return None
 
@@ -3142,7 +3339,7 @@ def _resolve_dynamic_override(
         cached = entry.override_cache.get(module_name, _DYNAMIC_NO_MATCH)
         if cached is not _DYNAMIC_NO_MATCH:
             entry.override_cache.move_to_end(module_name)
-            return cached
+            return copy.deepcopy(cached)
 
     # Fast path: every pattern is an exact literal module name.
     if entry.all_exact:
@@ -3173,7 +3370,7 @@ def _resolve_dynamic_override(
                 entry.override_cache.move_to_end(module_name)
             _DYNAMIC_CACHE.move_to_end(cache_key)
             _trim_dynamic_cache_locked()
-    return matched
+    return copy.deepcopy(matched)
 
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
@@ -4417,6 +4614,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @property
     def runtime_bits(self):
         return self.bits
+
+    def __setattr__(self, name, value):
+        # Wrap assignment as well as construction so later ``config.dynamic =``
+        # edits receive the same mutation tracking as the initial value.
+        if name == "dynamic" and value is not None and isinstance(value, dict) and not isinstance(value, _TrackedDict):
+            value = _track_dynamic_value(value, None)
+        super().__setattr__(name, value)
 
     def _resolve_checkpoint_format(self) -> FORMAT:
         self.format = _normalize_format(self.format)
