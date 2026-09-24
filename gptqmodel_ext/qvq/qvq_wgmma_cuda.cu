@@ -999,7 +999,8 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
     HopperGroupedP32DecodeParams grouped_params,
     int size_k,
     int size_n,
-    bool transpose_output) {
+    bool transpose_output,
+    const uint8_t* __restrict__ dynamic_bank_alt_ids) {
 #if defined(CUTE_ARCH_MMA_SM90A_ENABLED)
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   constexpr int kVectorsPerP32Tile = kWordsPerP32Tile / 4;
@@ -1056,7 +1057,9 @@ __global__ __launch_bounds__(kThreads) void qvq_p32_window_decode_fp16_kernel(
   }
   const uint32_t alternate_bank_mask =
       qvq_wgmma_v2_alternate_bank_mask<TransitionBits>(
-          grouped_params.bank_alt_id[segment]);
+          dynamic_bank_alt_ids == nullptr
+              ? grouped_params.bank_alt_id[segment]
+              : static_cast<int>(dynamic_bank_alt_ids[segment]));
 
   WgmmaTiledMma tiled_mma;
   auto thread_mma = tiled_mma.get_thread_slice(thread);
@@ -4302,7 +4305,8 @@ at::Tensor qvq_p32_window_decode_grouped_fp16_impl(
           grouped_params,
           static_cast<int>(in_features),
           static_cast<int>(total_n),
-          transpose_output);
+          transpose_output,
+          nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return output;
 }

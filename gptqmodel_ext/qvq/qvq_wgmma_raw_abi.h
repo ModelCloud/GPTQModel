@@ -10,6 +10,38 @@ extern "C" {
 #endif
 
 #define QVQ_WGMMA_RAW_ABI_VERSION 3u
+#define QVQ_P32_W3_DECODE_RAW_ABI_VERSION 1u
+
+// A separate compressed-payload decoder contract. The output is temporary
+// row-major FP16 [K,N] scratch, not a persistent decoded-weight cache. Only
+// W3 M960 gate/down shapes are admitted until full-model validation expands
+// the domain. No workspace is needed beyond the caller-owned output tensor.
+typedef struct {
+  uint32_t abi_version, struct_bytes;
+  uint32_t k, n, transition_bits, output_layout;
+} QvqP32W3DecodeRawConfig;
+
+uint32_t qvq_p32_w3_decode_raw_abi_version(void);
+int qvq_p32_w3_decode_raw_launch(
+    const void* continuous_window_i32,
+    const void* bank_ids_u8,
+    const void* levels_f16,
+    const void* bank_alt_id_u8,
+    void* decoded_weight_f16,
+    const QvqP32W3DecodeRawConfig* config,
+    void* cuda_stream,
+    char* error,
+    uint64_t error_capacity);
+int qvq_p32_w3_decode_raw_launch_plan(
+    const void* continuous_window_i32,
+    const void* bank_ids_u8,
+    const void* levels_f16,
+    const void* bank_alt_id_u8,
+    void* decoded_weight_f16,
+    const QvqP32W3DecodeRawConfig* config,
+    struct qvq_p32_launch_plan* plan,
+    char* error,
+    uint64_t error_capacity);
 
 // Framework-neutral SM90 P32 core. All pointers are device pointers owned by
 // the caller; stream is a cudaStream_t represented as void*. Workspace is FP32

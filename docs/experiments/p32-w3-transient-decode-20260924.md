@@ -47,9 +47,12 @@ XLA scheduling, allocator behavior, and host overhead must be measured. The
 most recent graph GPU span was about 10.54 ms and the full-suite prefill Step
 averaged 13.79 ms, versus the 8.00 ms/Step required for 120k padded tok/s.
 
-The probe exports an intentionally unversioned diagnostic decoder symbol from
-the W3 shard. It must not be used as the production external ABI. Promotion
-requires a versioned framework-neutral decode contract, exact XLA admission
-and launch proof, scratch lifetime and graph replay checks, every relevant
-layer's FP32/FP64 oracle, then the full 1,209-row B128 quality and useful plus
-padded throughput gate. No second model-weight copy may be cached.
+The follow-up branch adds a versioned W3-only framework-neutral decoder ABI
+and one-kernel launch plan, with device-resident bank-alt selection. Its two
+shape tests compare decode+FP32 GEMM bitwise against compressed WGMMA, verify
+the launch plan, reject wrong transition bits, and replay a captured decoder
+after changing the bank-alt tensor. Both tests passed. This ABI is not yet
+wired into ZML/XLA. Promotion still requires exact external admission and
+launch proof, scratch lifetime checks, every relevant layer's FP32/FP64
+oracle, and the full 1,209-row B128 quality and useful plus padded throughput
+gate. No second model-weight copy may be cached.

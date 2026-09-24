@@ -59,6 +59,13 @@ class LaunchPlan(ctypes.Structure):
     ]
 
 
+class RawDecodeConfig(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "abi_version", "struct_bytes", "k", "n", "transition_bits",
+        "output_layout",
+    )]
+
+
 def _raw_library():
     path = os.environ.get("QVQ_WGMMA_RAW_LIBRARY")
     if not path:
@@ -178,6 +185,91 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     stream.synchronize()
     torch.testing.assert_close(output, expected_changed, atol=0, rtol=0)
     graph.reset()
+
+
+@pytest.mark.parametrize("k,n,block_m", [(2048, 8192, 160), (8192, 2048, 80)])
+def test_w3_decoder_raw_abi_matches_wgmma_and_replays_dynamic_alt_id(k, n, block_m):
+    library = _raw_library()
+    library.qvq_p32_w3_decode_raw_abi_version.restype = ctypes.c_uint32
+    assert library.qvq_p32_w3_decode_raw_abi_version() == 1
+    decode = library.qvq_p32_w3_decode_raw_launch
+    decode.argtypes = [ctypes.c_void_p] * 5 + [
+        ctypes.POINTER(RawDecodeConfig), ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.c_uint64]
+    decode.restype = ctypes.c_int
+    launch_plan = library.qvq_p32_w3_decode_raw_launch_plan
+    launch_plan.argtypes = [ctypes.c_void_p] * 5 + [
+        ctypes.POINTER(RawDecodeConfig), ctypes.POINTER(LaunchPlan),
+        ctypes.c_void_p, ctypes.c_uint64]
+    launch_plan.restype = ctypes.c_int
+
+    device = torch.device("cuda")
+    m = 960
+    tiles = (k // 16) * (n // 16)
+    generator = torch.Generator(device=device).manual_seed(20260924)
+    window = torch.randint(-(2**31), 2**31 - 1, (tiles * 24,),
+                           device=device, dtype=torch.int32, generator=generator)
+    banks = torch.randint(0, 256, (tiles,), device=device,
+                          dtype=torch.uint8, generator=generator)
+    levels = torch.linspace(-1, 1, 256, device=device, dtype=torch.float16)
+    alt = torch.tensor([2], device=device, dtype=torch.uint8)
+    decoded = torch.empty((k, n), device=device, dtype=torch.float16)
+    x = torch.randn((m, k), device=device, dtype=torch.float16,
+                    generator=generator) * 0.02
+    compressed = torch.empty((m, n), device=device, dtype=torch.float32)
+    config = RawDecodeConfig(1, ctypes.sizeof(RawDecodeConfig), k, n, 6, 0)
+    core = RawConfig(3, ctypes.sizeof(RawConfig), m, k, n, 6, 1, 5,
+                     block_m, 64)
+    error = ctypes.create_string_buffer(4096)
+    plan = LaunchPlan()
+    status = launch_plan(_ptr(window), _ptr(banks), _ptr(levels),
+                         _ptr(alt), _ptr(decoded), ctypes.byref(config),
+                         ctypes.byref(plan), error, len(error))
+    assert status == 0, error.value.decode()
+    assert plan.launch_count == 1
+    assert plan.launches[0].kernel_name == b"qvq_p32_w3_decode_fp16"
+    assert (plan.launches[0].grid_x, plan.launches[0].grid_y) == (n // 64, k // 256)
+    assert plan.launches[0].arg_count == 9
+    assert plan.launches[0].args[8].address == alt.data_ptr()
+
+    def run_decode():
+        status = decode(_ptr(window), _ptr(banks), _ptr(levels),
+                        _ptr(alt), _ptr(decoded), ctypes.byref(config),
+                        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+                        error, len(error))
+        assert status == 0, error.value.decode()
+
+    status = library.qvq_p32_wgmma_raw_launch(
+        _ptr(x), _ptr(window), _ptr(banks), _ptr(levels), _ptr(alt),
+        _ptr(compressed), None, 0, ctypes.byref(core),
+        ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+        error, len(error))
+    assert status == 0, error.value.decode()
+    run_decode()
+    torch.cuda.synchronize()
+    actual = torch.mm(x, decoded, out_dtype=torch.float32)
+    torch.testing.assert_close(actual, compressed, atol=0, rtol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run_decode()
+    graph.replay()
+    torch.cuda.synchronize()
+    first_decoded = decoded.clone()
+    alt.fill_(1)
+    graph.replay()
+    torch.cuda.synchronize()
+    assert not torch.equal(first_decoded, decoded)
+    replay_decoded = decoded.clone()
+    run_decode()
+    torch.cuda.synchronize()
+    torch.testing.assert_close(replay_decoded, decoded, atol=0, rtol=0)
+
+    invalid = RawDecodeConfig(1, ctypes.sizeof(RawDecodeConfig), k, n, 5, 0)
+    assert decode(_ptr(window), _ptr(banks), _ptr(levels), _ptr(alt),
+                  _ptr(decoded), ctypes.byref(invalid),
+                  ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+                  error, len(error)) != 0
 
 
 def test_raw_abi_bm64_m128_is_down_projection_only():

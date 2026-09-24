@@ -20,6 +20,13 @@ class RawConfig(ctypes.Structure):
     )]
 
 
+class RawDecodeConfig(ctypes.Structure):
+    _fields_ = [(name, ctypes.c_uint32) for name in (
+        "abi_version", "struct_bytes", "k", "n", "transition_bits",
+        "output_layout",
+    )]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--library", required=True, type=Path)
@@ -61,10 +68,15 @@ def main() -> None:
         ctypes.POINTER(RawConfig), ctypes.c_void_p, ctypes.c_void_p,
         ctypes.c_uint64]
     launch.restype = ctypes.c_int
-    decode = library.qvq_p32_w3_decode_fp16_probe
-    decode.argtypes = [ctypes.c_void_p] * 4 + [ctypes.c_int] * 3 + [ctypes.c_void_p]
+    decode = library.qvq_p32_w3_decode_raw_launch
+    decode.argtypes = [ctypes.c_void_p] * 5 + [
+        ctypes.POINTER(RawDecodeConfig), ctypes.c_void_p,
+        ctypes.c_void_p, ctypes.c_uint64]
     decode.restype = ctypes.c_int
-    alt_id = int(alt.cpu().item())
+    library.qvq_p32_w3_decode_raw_abi_version.restype = ctypes.c_uint32
+    if library.qvq_p32_w3_decode_raw_abi_version() != 1:
+        raise RuntimeError("wrong W3 decoder raw ABI version")
+    decode_config = RawDecodeConfig(1, ctypes.sizeof(RawDecodeConfig), k, n, 6, 0)
     stream = torch.cuda.current_stream()
 
     def baseline() -> None:
@@ -78,11 +90,14 @@ def main() -> None:
             raise RuntimeError(error.value.decode())
 
     def candidate() -> torch.Tensor:
+        error = ctypes.create_string_buffer(4096)
         result = decode(trellis.data_ptr(), banks.data_ptr(), levels.data_ptr(),
-                        decoded.data_ptr(), k, n, alt_id,
-                        torch.cuda.current_stream().cuda_stream)
+                        alt.data_ptr(), decoded.data_ptr(),
+                        ctypes.byref(decode_config),
+                        torch.cuda.current_stream().cuda_stream,
+                        error, len(error))
         if result:
-            raise RuntimeError(f"decode launch failed: CUDA error {result}")
+            raise RuntimeError(f"decode launch failed: {error.value.decode()}")
         return torch.mm(x, decoded, out_dtype=torch.float32)
 
     for _ in range(10):
