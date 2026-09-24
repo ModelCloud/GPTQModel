@@ -54,12 +54,16 @@ Do not broaden admission beyond the ABI predicate. Do not leave a newly optimize
 
 XLA may decline an optimized QVQ composite and compile a numerically valid dense GEMM instead. A passing output oracle, selected Zig config, native CUDA microbenchmark, or nonzero aggregate QVQ counter can therefore give false confidence about **this projection**.
 
+Treat XLA admission as an independent capability gate, not an automatic consequence of a QVQ ABI or Zig-policy change. When a specialized shape is added, changed, or newly made the default, inspect the actual rewriter guard and the composite attributes XLA parses from the compiled HLO; a matching algorithm name elsewhere in the patch is not evidence that the guard accepts the production tuple. An unintended dense/TF32 fallback is an integration failure even when logits remain correct.
+
 For every new or changed algorithm, shape, or BM/BN/split geometry:
 
 1. Compare the exact admissible tuple in three places: ZML's emitted attributes, XLA's composite-rewriter predicate, and the pinned QVQ raw-ABI predicate. Include M/K/N, transition bits, grouping, split/workspace, and architecture. A difference needs an explicit `intentionally-unwired` disposition, not a presumed fast path. Inspect the predicate itself; finding an algorithm ID or BM value elsewhere in the patch is not enough.
 2. For each newly admitted specialization, exercise the XLA rewriter with its **exact production attributes**. Assert that the positive tuple becomes the intended QVQ custom fusion; change one guarded field (for example BM, transition bits, K, or N) and assert the near miss is rejected or follows its documented semantic fallback. Run these tests in addition to the static contract audit.
 3. On a warmed production-shape run, inspect compiled HLO/custom-call evidence **and** projection-specific kernel names or scoped dispatch counters. Verify the expected optimized calls occur and dense fallback calls for the same projection do not. A warm cache entry or Zig-selected config alone does not prove that this XLA compilation admitted the tuple; record the compiled executable/build identity and its actual launches. Other legitimate dense GEMMs in the model do not count as failures.
 4. If the optimized route cannot be distinguished from fallback at runtime, add scoped telemetry or a trace before claiming an end-to-end speedup. Record expected and observed call counts, not only latency or logits. Do not infer kernel selection from throughput or numerical parity.
+
+After changing an XLA predicate or custom-call attribute, invalidate or distinguish the previous compiled-executable/cache identity, then check a cold compile and a warmed replay of the **same** production tuple. Make the production-shape test fail if the expected native projection launches are absent or if that projection takes a dense fallback. Keep intentional fallback cases explicit and tested; do not ban unrelated dense GEMMs.
 
 The M960 W3 gate incident is the concrete failure: QVQ accepted BM160/R10, but XLA originally rejected it and emitted `sm90_xmma_gemm_f32f32`; after matching XLA admission, the warm trace showed 15 native R10 gate calls and no dense fallback for that gate. Treat the static audit as an early warning, not as a substitute for the runtime proof above.
 
