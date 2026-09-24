@@ -147,7 +147,10 @@ def collect_leaf_specs(module_tree: Any) -> Dict[str, LeafSpec]:
 
 
 def _iter_variants(module_tree: Any) -> List[List[Any]]:
-    if not isinstance(module_tree, list):
+    # BaseQModel stores an instance's effective module tree as a deeply frozen
+    # tuple.  Keep this helper compatible with both the class-level mutable
+    # declaration and that immutable runtime representation.
+    if not isinstance(module_tree, (list, tuple)):
         return []
     if module_tree and all(isinstance(item, (list, tuple)) for item in module_tree):
         return [list(item) for item in module_tree]

@@ -4,13 +4,14 @@
 
 from __future__ import annotations
 
+import contextvars
 import copy
 import json
 import os
 import threading
 import time
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from itertools import count
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -190,20 +191,42 @@ def check_support_param_buffer_assignment(*args, **kwargs):
 
 def apply_module_tree_override(module_tree, override):
     """
-    Recursively find the corresponding key of override in module_tree and override it.
+    Recursively find the corresponding key of override in ``module_tree``.
+
+    The model definition is shared by every instance, so overrides must never
+    mutate it in place.  Always copy first; callers may then freeze the result
+    for safe use during a quantization run.
     """
+    module_tree = copy.deepcopy(module_tree)
     if isinstance(module_tree, dict) and isinstance(override, dict):
         for k, v in override.items():
             if k in module_tree and isinstance(module_tree[k], (dict, list)) and isinstance(v, (dict, list)):
-                module_tree[k] = apply_module_tree_override(module_tree[k], v)
+                module_tree[k] = _apply_module_tree_override_in_place(module_tree[k], v)
             else:
-                module_tree[k] = v
+                module_tree[k] = copy.deepcopy(v)
     elif isinstance(module_tree, list) and isinstance(override, list):
         for o in override:
             if isinstance(o, dict):
                 for b in module_tree:
                     if isinstance(b, dict):
-                        apply_module_tree_override(b, o)
+                        _apply_module_tree_override_in_place(b, o)
+    return module_tree
+
+
+def _apply_module_tree_override_in_place(module_tree, override):
+    """Apply an override to an already-owned mutable tree copy."""
+    if isinstance(module_tree, dict) and isinstance(override, dict):
+        for key, value in override.items():
+            if key in module_tree and isinstance(module_tree[key], (dict, list)) and isinstance(value, (dict, list)):
+                _apply_module_tree_override_in_place(module_tree[key], value)
+            else:
+                module_tree[key] = copy.deepcopy(value)
+    elif isinstance(module_tree, list) and isinstance(override, list):
+        for item in override:
+            if isinstance(item, dict):
+                for branch in module_tree:
+                    if isinstance(branch, dict):
+                        _apply_module_tree_override_in_place(branch, item)
     return module_tree
 
 
@@ -219,7 +242,76 @@ modeling_utils.check_support_param_buffer_assignment = check_support_param_buffe
 
 log = setup_logger()
 
+
+# Class methods are intentionally kept as the public model-definition API.  At
+# runtime, however, an instance can have a module tree selected by a quantizer
+# method override or by auto-detection.  This context lets those class methods
+# retain class-level semantics when called on a class while using the selected
+# instance tree when called through an instance.
+_ACTIVE_MODULE_TREE = contextvars.ContextVar("gptqmodel_active_module_tree", default=None)
+
+
+class _FrozenDict(dict):
+    """A dict-compatible, deeply immutable mapping used by effective trees."""
+
+    def _immutable(self, *args, **kwargs):
+        raise TypeError("effective_module_tree is immutable")
+
+    __setitem__ = __delitem__ = clear = pop = popitem = setdefault = update = _immutable
+    __ior__ = _immutable
+
+    def __reduce__(self):
+        # A reducer argument cannot be ``self``: deepcopy/pickle would try to
+        # serialize this same frozen mapping again before calling the reducer.
+        return (_freeze_module_tree, (_thaw_module_tree(self),))
+
+
+def _freeze_module_tree(value):
+    # Convert every mutable container, not just the outer list, so no caller
+    # can change dispatch by mutating a nested branch after initialization.
+    if isinstance(value, dict):
+        return _FrozenDict((key, _freeze_module_tree(item)) for key, item in value.items())
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_module_tree(item) for item in value)
+    if isinstance(value, set):
+        return frozenset(_freeze_module_tree(item) for item in value)
+    return value
+
+
+def _thaw_module_tree(value):
+    if isinstance(value, dict):
+        return {key: _thaw_module_tree(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_module_tree(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return {_thaw_module_tree(item) for item in value}
+    return value
+
+
+def _module_tree_for_class(cls):
+    active = _ACTIVE_MODULE_TREE.get()
+    return active[1] if active is not None and active[0] is cls else cls.module_tree
+
 class BaseQModel(nn.Module):
+    # Class-method APIs remain available to model definitions.  Calls through
+    # an instance are wrapped in ``__getattribute__`` below so they resolve
+    # against that instance's immutable effective tree.
+    _MODULE_TREE_RUNTIME_METHODS = frozenset({
+        "extract_layers_node",
+        "_iter_module_tree_variants",
+        "_expand_module_tree_prefixes",
+        "_collect_moe_modules_from_tree",
+        "get_moe_modules",
+        "is_moe_module",
+        "get_moe_module_name",
+        "build_layer_modules",
+        "simple_layer_modules",
+        "shared_input_plan",
+        "full_layer_modules",
+        "get_base_modules",
+        "build_moe_modules_if_need",
+    })
+
     # name of lm_head
     lm_head: str = "lm_head"
 
@@ -361,23 +453,28 @@ class BaseQModel(nn.Module):
         model_local_path: str = None,
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
         turtle_model: Optional[LazyTurtle] = None,
+        effective_module_tree: Optional[Any] = None,
     ):
         super().__init__()
 
-        if quantize_config:
-            quant_method = quantize_config.method
-            # override module_tree if need
-            if self.module_tree_overrides is not None and self.module_tree_overrides.get(quant_method) is not None:
-                log.info(f'Module Tree: overridden by METHOD.{quant_method.upper()}')
-                # setting cls.module_tree
-                type(self).module_tree = apply_module_tree_override(self.module_tree, self.module_tree_overrides[quant_method])
-
-            if type(self).module_tree is None:
-                type(self).module_tree = self._auto_detect_module_tree(model, quant_method)
+        # Resolve per-instance module structure without ever changing the
+        # declaration owned by the model definition class.  ``module_tree`` is
+        # retained on the instance as a compatibility alias; class access is
+        # still the static declaration.
+        effective_tree = (
+            copy.deepcopy(effective_module_tree)
+            if effective_module_tree is not None
+            else type(self)._resolve_effective_module_tree(model, quantize_config, detector=self)
+        )
 
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
-        if type(self).module_tree is None:
+        if effective_tree is None:
             raise ValueError(f"Unsupport model_type {model.config.model_type}, and failed to auto-detect module tree for model {model}")
+
+        # Keep the selected tree stable for the lifetime of this instance;
+        # class definitions remain reusable by later instances.
+        self.effective_module_tree = _freeze_module_tree(effective_tree)
+        self.module_tree = self.effective_module_tree
 
 
         # record configuration early so model lifecycle hooks can rely on them
@@ -452,6 +549,61 @@ class BaseQModel(nn.Module):
         self._auto_configure_lookahead()
 
     @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        """Resolve a model tree before a loader needs to plan against it."""
+        quant_method = getattr(quantize_config, "method", None) if quantize_config else None
+        effective_tree = copy.deepcopy(cls.module_tree)
+        if quant_method is not None:
+            override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
+            if override is not None and effective_tree is not None:
+                log.info(f"Module Tree: overridden by METHOD.{quant_method.upper()}")
+                effective_tree = apply_module_tree_override(effective_tree, override)
+
+            if effective_tree is None:
+                if detector is None:
+                    detector = cls.__new__(cls)
+                effective_tree = detector._auto_detect_module_tree(model, quant_method)
+
+        return copy.deepcopy(effective_tree)
+
+    @classmethod
+    @contextmanager
+    def _module_tree_context(cls, module_tree):
+        """Temporarily bind a loader's effective tree to class-level planners."""
+        token = _ACTIVE_MODULE_TREE.set((cls, module_tree))
+        try:
+            yield
+        finally:
+            _ACTIVE_MODULE_TREE.reset(token)
+
+    def __getattribute__(self, name):
+        """Make tree-sensitive class methods instance-aware without changing API."""
+        attr = super().__getattribute__(name)
+        runtime_names = type(self).__dict__.get("_MODULE_TREE_RUNTIME_METHODS")
+        if runtime_names is None:
+            runtime_names = getattr(type(self), "_MODULE_TREE_RUNTIME_METHODS", ())
+        if name not in runtime_names:
+            return attr
+        try:
+            tree = object.__getattribute__(self, "effective_module_tree")
+        except AttributeError:
+            return attr
+        if tree is None or getattr(attr, "__gptqmodel_tree_bound__", False):
+            return attr
+
+        def invoke_with_effective_tree(*args, **kwargs):
+            # Class methods read this context while they run, including nested
+            # calls, then restore the previous value for the caller.
+            token = _ACTIVE_MODULE_TREE.set((type(self), tree))
+            try:
+                return attr(*args, **kwargs)
+            finally:
+                _ACTIVE_MODULE_TREE.reset(token)
+
+        invoke_with_effective_tree.__gptqmodel_tree_bound__ = True
+        return invoke_with_effective_tree
+
+    @classmethod
     def extract_layers_node(cls):
         """
         Given a module_tree structure, return the layers_node string.
@@ -475,8 +627,8 @@ class BaseQModel(nn.Module):
     def _iter_module_tree_variants(cls, module_tree=None) -> List[List[Any]]:
         """Normalize module_tree into one or more complete tree variants."""
 
-        tree = cls.module_tree if module_tree is None else module_tree
-        if not isinstance(tree, list):
+        tree = _module_tree_for_class(cls) if module_tree is None else module_tree
+        if not isinstance(tree, (list, tuple)):
             return []
 
         if tree and all(isinstance(item, (list, tuple)) for item in tree):
@@ -488,7 +640,7 @@ class BaseQModel(nn.Module):
     def _expand_module_tree_prefixes(cls, tree=None) -> List[str]:
         """Return the module_tree prefix before `#` as a concrete path."""
 
-        tree = cls.module_tree if tree is None else tree
+        tree = _module_tree_for_class(cls) if tree is None else tree
         if tree is None:
             return []
 
@@ -614,7 +766,7 @@ class BaseQModel(nn.Module):
 
         Example: {"mlp", "mlp.experts", "mlp.shared_experts", "mlp.gate"}
         """
-        if cls.module_tree is None:
+        if _module_tree_for_class(cls) is None:
             return set()
         moe_modules = set()
         for tree in cls._iter_module_tree_variants():
@@ -659,9 +811,10 @@ class BaseQModel(nn.Module):
         - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
 
         Returns:
-            The name of the MoE module (without flags), or None if no MoE module is defined
+            The names of MoE modules (without flags), or ``None`` when no
+            module tree is available.
         """
-        if cls.module_tree is None:
+        if _module_tree_for_class(cls) is None:
             return None
 
         found_names = []
@@ -859,7 +1012,9 @@ class BaseQModel(nn.Module):
     # Many models have same execution order of: attention (q_k_v) projection, attention (output) projection, mlp (n) projections
     @classmethod
     def simple_layer_modules(cls, model_config, quantize_config, is_awq_quantize: bool = False, include_capture_only: bool = False):
-        layer_modules = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
+        layer_modules = cls.build_layer_modules(
+            _module_tree_for_class(cls), include_capture_only=include_capture_only
+        )
 
         layer_modules = cls.build_moe_modules_if_need(model_config, layer_modules, is_awq_quantize)
 
@@ -902,14 +1057,16 @@ class BaseQModel(nn.Module):
         """
         layer_modules = cls.simple_layer_modules(model_config, quantize_config, is_awq_quantize=is_awq_quantize)
         return build_shared_input_plan(
-            cls.module_tree,
+            _module_tree_for_class(cls),
             layer_modules,
             explicit_tags=cls.shared_input_verified(model_config),
         )
 
     @classmethod
     def full_layer_modules(cls, model_config=None, is_awq_quantize: bool = False, include_capture_only: bool = False):
-        full = cls.build_layer_modules(cls.module_tree, include_capture_only=include_capture_only)
+        full = cls.build_layer_modules(
+            _module_tree_for_class(cls), include_capture_only=include_capture_only
+        )
         full = cls.build_moe_modules_if_need(model_config, full, is_awq_quantize)
         # print(f"full layer_modules: {full}")
         return full
@@ -3526,7 +3683,7 @@ class BaseQModel(nn.Module):
         Return list of base modules directly under the root path but not the layer container.
         """
         all_prefix_paths = []
-        for tree in cls._iter_module_tree_variants():
+        for tree in cls._iter_module_tree_variants(_module_tree_for_class(cls)):
             try:
                 sharp_idx = tree.index("#")
             except ValueError:
