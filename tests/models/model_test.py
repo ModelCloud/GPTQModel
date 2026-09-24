@@ -1344,25 +1344,39 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
+        # Small local calibration slices should not build the entire HF dataset.
+        if rows > 0 and Path("/monster/data/model/dataset/nm-calibration/llm.parquet").exists():
+            return cls._load_calibration_parquet(rows=rows)
         if hf_load_dataset is None:
             log.warning("datasets.load_dataset unavailable; falling back to local parquet: %s", DATASETS_IMPORT_ERROR)
-            dataset = cls._load_calibration_parquet()
+            dataset = cls._load_calibration_parquet(rows=rows)
         else:
             try:
                 dataset = hf_load_dataset(path="/monster/data/model/dataset/nm-calibration", name="LLM", split="train")
             except Exception as exc:  # pragma: no cover - exercised in fallbacks
                 log.warning("load_dataset failed; falling back to local parquet: %s", exc)
-                dataset = cls._load_calibration_parquet()
+                dataset = cls._load_calibration_parquet(rows=rows)
 
         if rows > 0:
             return dataset.select(range(min(rows, len(dataset))))
         return dataset
 
     @staticmethod
-    def _load_calibration_parquet():
+    def _load_calibration_parquet(rows: int = 0):
         parquet_path = Path("/monster/data/model/dataset/nm-calibration/llm.parquet").expanduser()
         if not parquet_path.exists():
             raise FileNotFoundError(f"Calibration parquet not found at {parquet_path}")
+
+        if rows > 0:
+            try:
+                import pyarrow.parquet as pq
+            except ImportError:
+                pass
+            else:
+                parquet = pq.ParquetFile(parquet_path)
+                first_batch = next(parquet.iter_batches(batch_size=rows), None)
+                records = [] if first_batch is None else first_batch.to_pylist()
+                return ModelTest._LocalCalibrationDataset(records)
 
         try:
             import pandas as pd

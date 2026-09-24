@@ -6,14 +6,14 @@
 """Opt-in full Llama 3.2 1B staged GSQ and GSM8K Platinum check.
 
 This uses all 16 decoder blocks and all seven linear projections per block.
-Smoke settings use 32 nm-calibration examples, one training epoch, one Q/K
-step, 128 GSM8K Platinum rows and 96 generated tokens. Set
-GPTQMODEL_GSQ_STAGED_EPOCHS and GPTQMODEL_GSQ_STAGED_QK_STEPS to exercise a
-longer schedule. With the exact six concatenated training sequences in this
-smoke recipe, the 16-block GPTQ initializer-only run scored 36/128 and the
-one-epoch staged GPTQ run scored 31/128; two epochs scored 28/128. This test
-detects large quality failures; it does not claim that the short GSQ schedule
-improves accuracy.
+The default quality recipe uses the first 128 nm-calibration records (four
+times the earlier 32-record recipe), 10 training epochs, 10 Q/K steps, 128
+GSM8K Platinum rows and 96 generated tokens. The previous 32-record recipe
+produced six concatenated training sequences: its 16-block GPTQ initializer
+scored 36/128, one-epoch staged GPTQ scored 31/128, and two epochs scored
+28/128. Those scores are historical references, not matched baselines for the
+larger calibration recipe. Override GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS,
+GPTQMODEL_GSQ_STAGED_EPOCHS or GPTQMODEL_GSQ_STAGED_QK_STEPS for experiments.
 The earlier 59/128 GPTQ-only score used two decoder blocks and different
 activation-group settings, so it is not a matched baseline here.
 """
@@ -45,8 +45,8 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
     source = Path("/monster/data/model/Llama-3.2-1B-Instruct")
     assert source.is_dir(), f"Missing Llama 3.2 1B source at {source}"
     options = dict(enabled=True,
-                   epochs=int(os.environ.get("GPTQMODEL_GSQ_STAGED_EPOCHS", "1")),
-                   qk_steps=int(os.environ.get("GPTQMODEL_GSQ_STAGED_QK_STEPS", "1")),
+                   epochs=int(os.environ.get("GPTQMODEL_GSQ_STAGED_EPOCHS", "10")),
+                   qk_steps=int(os.environ.get("GPTQMODEL_GSQ_STAGED_QK_STEPS", "10")),
                    batch_size=1, microbatch_size=1)
     if method == "gptq":
         config = GPTQConfig(bits=4, group_size=128, sym=True, desc_act=False,
@@ -63,7 +63,9 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
     model = GPTQModel.load(str(source), quantize_config=config, dtype=torch.bfloat16,
                            attn_implementation="eager")
     model.model.to("cuda:0")
-    calibration = ModelTest.load_dataset(rows=32)
+    calibration_rows = int(os.environ.get("GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS", "128"))
+    calibration = ModelTest.load_dataset(rows=calibration_rows)
+    assert len(calibration) == calibration_rows, "Calibration dataset has fewer records than requested"
     result = model.quantize(calibration, calibration_concat_size=2048,
                             calibration_sort="desc", backend=BACKEND.TORCH)
     assert model.quantized
