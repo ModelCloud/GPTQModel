@@ -497,6 +497,33 @@ cudaError_t build_direct_grouped_gate_up_plan(
 
 }  // namespace
 
+// Experimental, unversioned timing hook. It does not participate in the
+// production raw ABI or retain a dense weight copy between launches.
+#if QVQ_WGMMA_BITS_ONLY == 6
+extern "C" __attribute__((visibility("default")))
+int qvq_p32_w3_decode_fp16_probe(
+    const void* window, const void* bank_ids, const void* levels,
+    void* decoded, int k, int n, int bank_alt_id, void* cuda_stream) {
+  if (window == nullptr || bank_ids == nullptr || levels == nullptr ||
+      decoded == nullptr || k <= 0 || k % 256 != 0 || n <= 0 ||
+      n % 64 != 0 || bank_alt_id < 0 || bank_alt_id > 3) {
+    return static_cast<int>(cudaErrorInvalidValue);
+  }
+  HopperGroupedP32DecodeParams params{};
+  params.segment_count = 1;
+  params.n64_end[0] = n / 64;
+  params.bank_alt_id[0] = bank_alt_id;
+  qvq_p32_window_decode_fp16_kernel<6>
+      <<<dim3(n / 64, k / 256, 1), kThreads, 0,
+         static_cast<cudaStream_t>(cuda_stream)>>>(
+          static_cast<const uint32_t*>(window),
+          static_cast<const uint8_t*>(bank_ids),
+          static_cast<const Element*>(levels),
+          static_cast<Element*>(decoded), params, k, n, false);
+  return static_cast<int>(cudaGetLastError());
+}
+#endif
+
 #if !defined(QVQ_WGMMA_BITS_ONLY)
 extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
   return QVQ_WGMMA_RAW_ABI_VERSION;
