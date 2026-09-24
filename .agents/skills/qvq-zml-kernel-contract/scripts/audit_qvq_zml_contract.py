@@ -41,6 +41,11 @@ def first_int(pattern: str, text: str, label: str) -> int:
     return int(match.group(1))
 
 
+def bool_expression(text: str, name: str) -> str:
+    match = re.search(rf"const bool {re.escape(name)}\s*=\s*(.*?);", text, re.S)
+    return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
+
+
 def c_config_fields(header: str) -> list[str]:
     match = re.search(r"typedef struct \{(.*?)\}\s*QvqP32WgmmaRawConfig", header, re.S)
     if not match:
@@ -286,6 +291,25 @@ def main() -> int:
             "M960 specialized geometry coverage",
             all(m960_terms.values()),
             str(m960_terms),
+        )
+        # Check the guarded admission expression, not just a BM160 mention in
+        # the patch: a bare BM160 token previously masked dense XLA fallback.
+        qvq_r10 = bool_expression(raw, "ten_rows")
+        xla_reused = bool_expression(xla, "direct_m960_reused_rows")
+        qvq_r10_guard = (
+            "c->block_m == 160 && c->transition_bits == 6 && "
+            "c->k == 2048 && c->n == 8192"
+        )
+        xla_r10_guard = (
+            "config.hopper_block_m == 160 && "
+            "config.transition_bits == 6 && k == 2048 && n == 8192"
+        )
+        check(
+            "M960 W3 gate R10 exact XLA admission",
+            qvq_r10 == qvq_r10_guard and xla_r10_guard in xla_reused
+            and "direct_m960_shape &&" in xla
+            and "config.hopper_algorithm == 5" in xla,
+            f"QVQ_R10={qvq_r10!r}, XLA_reused_rows={xla_reused!r}",
         )
 
         attrs = ("hopper_algorithm", "hopper_block_m", "hopper_block_n", "split_count")
