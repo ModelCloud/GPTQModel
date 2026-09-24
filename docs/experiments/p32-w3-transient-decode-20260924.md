@@ -27,6 +27,13 @@ nonzero and the maximum magnitude was 4.842. These results eliminate the
 possibility that parity was merely two zero tensors. They do not establish
 parity for all layers, inputs, graph replays, or token streams.
 
+A second layer-0 gate/down pass raised the input scale from 0.02 to 1.0 and
+replayed both captured graphs after changing the input tensor. Both direct
+outputs and changed-input graph outputs remained FP32 bitwise identical. The
+transient route measured 86.032 µs for gate and 80.128 µs for down in this
+50-round stress pass; the respective compressed controls were 140.496 and
+150.832 µs. This is still only two projections on one model snapshot.
+
 At 15 full-row gate and down calls per B128 prefill Step, simply replacing
 the two kernel pairs could save roughly 1.9 ms of summed GPU kernel time.
 That is a projection-only estimate, **not** an end-to-end prediction: overlap,

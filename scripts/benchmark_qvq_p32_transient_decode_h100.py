@@ -26,6 +26,7 @@ def main() -> None:
     parser.add_argument("--snapshot", required=True, type=Path)
     parser.add_argument("--projection", choices=("gate", "down"), required=True)
     parser.add_argument("--layer", type=int, default=0)
+    parser.add_argument("--input-scale", type=float, default=0.02)
     parser.add_argument("--rounds", type=int, default=100)
     args = parser.parse_args()
 
@@ -46,7 +47,7 @@ def main() -> None:
         alt = tensors.get_tensor(prefix + "bank_alt_id").contiguous().cuda()
     levels = pgc16_levels_for_version("pgc16-v1").contiguous().cuda()
     generator = torch.Generator().manual_seed(20260924)
-    x = (torch.randn((m, k), generator=generator) * 0.02).half().cuda()
+    x = (torch.randn((m, k), generator=generator) * args.input_scale).half().cuda()
     decoded = torch.empty((k, n), dtype=torch.float16, device="cuda")
     baseline_out = torch.empty((m, n), dtype=torch.float32, device="cuda")
     config = RawConfig(3, ctypes.sizeof(RawConfig), m, k, n, 6, 1, 5,
@@ -105,14 +106,26 @@ def main() -> None:
     }
 
     graphs = []
+    graph_outputs = []
     for arm in (baseline, candidate):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            arm()
+            graph_outputs.append(arm())
         graphs.append(graph)
     for _ in range(20):
         graphs[0].replay()
         graphs[1].replay()
+    stream.synchronize()
+    x.add_(0.125)
+    graphs[0].replay()
+    graphs[1].replay()
+    stream.synchronize()
+    changed_input_delta = (baseline_out - graph_outputs[1]).abs()
+    accuracy["changed_input_graph_replay_bitwise_equal"] = bool(
+        torch.equal(baseline_out, graph_outputs[1]))
+    accuracy["changed_input_graph_replay_max_abs_difference"] = float(
+        changed_input_delta.max().item())
+    x.sub_(0.125)
     stream.synchronize()
 
     # Paired A/B/B/A rounds keep thermal and clock drift balanced.
@@ -132,6 +145,7 @@ def main() -> None:
         "shape": {"m": m, "k": k, "n": n, "transition_bits": 6},
         "projection": args.projection,
         "layer": args.layer,
+        "input_scale": args.input_scale,
         "accuracy_vs_compressed_wgmma": accuracy,
         "median_us": {"compressed_wgmma": statistics.median(latencies[0]),
                       "transient_decode_and_gemm": statistics.median(latencies[1])},
