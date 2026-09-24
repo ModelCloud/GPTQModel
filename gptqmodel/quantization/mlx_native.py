@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# GPTQ algorithm: Frantar et al., 2022, https://arxiv.org/abs/2210.17323.
 # MLX-LM supplies model loading, native AWQ quantization, and checkpoint saving.
 
 """Native MLX GPTQ/AWQ quantization for Apple silicon.
