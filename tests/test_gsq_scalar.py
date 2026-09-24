@@ -9,6 +9,7 @@ import pytest
 import torch
 from torch import nn
 
+from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import GSQConfig, QuantizeConfig
 from gptqmodel.quantization.config import FORMAT
@@ -148,3 +149,24 @@ def test_gsq_disabled_matches_original_gptq():
         outputs.append(gptq.quantize(blocksize=16))
     for left, right in zip(outputs[0][:4], outputs[1][:4]):
         torch.testing.assert_close(left, right, rtol=0, atol=0)
+
+
+def test_gsq_weight_replays_in_inference_mode():
+    with torch.inference_mode():
+        layer = nn.Linear(16, 16, bias=False, dtype=torch.float16).eval()
+        inputs = torch.randn(1, 32, 16, dtype=torch.float16)
+    hooked = HookedLinear.from_linear(layer)
+    gptq = GPTQ(
+        hooked,
+        qcfg=QuantizeConfig(
+            bits=4, group_size=16,
+            gsq=GSQConfig(enabled=True, steps=2, candidates=4),
+        ),
+    )
+    gptq.quantizer.configure(perchannel=True)
+    gptq.add_batch(inputs, None)
+    weight, *_ = gptq.quantize(blocksize=16)
+    assert weight.is_inference()
+    hooked.weight.data = weight
+    with torch.inference_mode():
+        assert hooked(inputs).shape == (1, 32, 16)

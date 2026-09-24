@@ -1266,7 +1266,10 @@ class GPTQ:
             "learn_scales": config.learn_scales,
         }
         return (
-            fitted.weight.contiguous(),
+            # The looper assigns this tensor into an inference-mode Parameter.
+            # Match the tensor kind of the original GPTQ result so the next
+            # calibration replay can use the updated weight.
+            fitted.weight.contiguous().clone(),
             fitted.scales.to(scales.device),
             fitted.zeros.to(zeros.device),
             fitted.g_idx.to(groups.device),
