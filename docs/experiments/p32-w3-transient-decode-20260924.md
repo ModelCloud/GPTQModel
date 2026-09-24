@@ -1,8 +1,9 @@
 # W3 M960 transient-decode screen (2026-09-24)
 
-This is an isolated H100 screen, **not** a production route or a qualified
-GSM8K-Platinum result. The pre-BN128 full-suite B128 baseline was 60,362 useful
-and 69,622 padded prefill tok/s. The goal remains 120,000 padded prefill tok/s.
+The first sections record the isolated H100 screen before the ZML integration.
+The later matched full-suite gate is recorded below; it is still a local-QVQ
+override, **not** the final immutable-pin production baseline. The goal remains
+120,000 padded prefill tok/s.
 
 These figures describe the pre-BN128 screen. The newer qualified pinned B128
 reference is 62,845 useful / 72,486 padded prefill tok/s (1,209/1,209 exact
@@ -73,5 +74,27 @@ graph replay, with identical sampled FP64-oracle errors between arms:
 
 At 15 prefill calls per projection, these local medians imply about 1.69 ms
 of summed kernel opportunity per request, not a 120k end-to-end prediction.
-The production path still needs exact XLA launch proof, measured scratch
+The production path then needed exact XLA launch proof, measured scratch
 lifetime, and full-suite validation before promotion.
+
+## Integrated B128 full-suite gate
+
+The fresh matched A/B/A/B 1,209-row GSM8K-Platinum runs used the same seed-7
+snapshot, B128/M960, FA2, 544-page KV pool, GPU-local CPU cores, Rank-8
+prefill-off/decode-on phase policy, and automatic terminal dead-row elimination.
+Both candidate arms returned all 1,209 streams exactly as the control, with
+543 correct and zero invalid. The two controls measured **62,144/71,678** and
+**63,660/73,427** useful/padded prefill tok/s; the candidate measured
+**72,362/83,463** and **72,715/83,870** useful/padded prefill tok/s. Decode
+was within 0.4% of the matched controls. The full result, runner hashes, and
+dataset hash are recorded in Inference-Ultra's
+`PREFILL_W3_TRANSIENT_20260924.md`.
+
+Nsight Systems node tracing proved the warm captured graph launches 15 gate
+and 15 down transient W3 decoders per Step. The two remaining compressed W3
+launches are for the final layer's small-M post-attention path, not a fallback
+for those M960 projections. Model-load live memory was identical to control;
+one candidate arm's peak live allocation increased by about 160 MiB, not a
+persistent 1.19-GiB decoded-weight cache. The trace's warm graph span was
+8.622 ms under profiler overhead. An immutable-pin rebuild and repeat remain
+the final production promotion gate.
