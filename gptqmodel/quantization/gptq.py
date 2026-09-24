@@ -1365,6 +1365,18 @@ class GPTQ:
         else:
             Hinv, damp = None, 0.0
 
+        # The block update uses Hinv, but never reads the Hessian again. Keep
+        # only its diagonal for the optional NaN -> mock-quantization retry:
+        # that path uses an identity inverse and reads H only for dead columns
+        # and activation ordering. Rebuild the diagonal matrix if it retries.
+        retry_hessian_diag = (
+            self.H.diagonal().clone()
+            if Hinv is not None and fallback_configured and not self.qcfg.mock_quantization
+            else None
+        )
+        if Hinv is not None:
+            self.H = None
+
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
@@ -1593,6 +1605,9 @@ class GPTQ:
                     print("Losses sum item:", torch.sum(Losses).item())
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
+                        del Losses, Q, W
+                        if retry_hessian_diag is not None:
+                            self.H = torch.diag(retry_hessian_diag)
                         self.qcfg.mock_quantization = True
                         return self.quantize(blocksize=blocksize)
                     else:
