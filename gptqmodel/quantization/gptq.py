@@ -1362,6 +1362,22 @@ class GPTQ:
         Losses = torch.zeros_like(W)
         Q = torch.zeros_like(W)
 
+        fused_block_update = None
+        if (
+            Hinv is not None
+            and W.device.type == "cuda"
+            and blocksize == 128
+            and self.qcfg.bits == 4
+            and int(self.quantizer.maxq.item()) == 15
+            and not self.qcfg.mock_quantization
+            and type(self.quantizer) is Quantizer
+            and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+        ):
+            from .gptq_cuda import block_update_available, gptq_block_update
+
+            if block_update_available():
+                fused_block_update = gptq_block_update
+
         # Use simplified loop when mock_quantization is active
         if self.qcfg.mock_quantization:
             for i1 in range(0, self.columns, blocksize):
@@ -1480,35 +1496,76 @@ class GPTQ:
                 if Hinv is not None:
                     Hinv1 = Hinv[i1:i2, i1:i2]
 
-                for i in range(count):
-                    w = W1[:, i]
-                    if Hinv is not None:
-                        d = Hinv1[i, i]
+                if fused_block_update is not None and count == 128:
+                    # Group parameters are based on W, which the eager column
+                    # loop does not modify until after the block. Thus every
+                    # boundary inside this block can be prepared before launch.
+                    block_scales = []
+                    block_zeros = []
+                    column_groups = []
+                    parameter_indices = {}
+                    for i in range(count):
+                        column = i1 + i
+                        if self.qcfg.group_size != -1:
+                            if not self.qcfg.static_groups:
+                                if column % self.qcfg.group_size == 0:
+                                    self.quantizer.find_params(
+                                        W[:, column : column + self.qcfg.group_size], weight=True,
+                                    )
+                                if (column // self.qcfg.group_size) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = perm[column] if self.qcfg.desc_act else column
+                                self.quantizer = groups[idx // self.qcfg.group_size]
 
-                    if self.qcfg.group_size != -1:
-                        if not self.qcfg.static_groups:
-                            if (i1 + i) % self.qcfg.group_size == 0:
-                                self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
+                        key = id(self.quantizer.scale)
+                        group_index = parameter_indices.get(key)
+                        if group_index is None:
+                            group_index = len(block_scales)
+                            parameter_indices[key] = group_index
+                            block_scales.append(self.quantizer.scale.flatten())
+                            block_zeros.append(self.quantizer.zero.flatten())
+                        column_groups.append(group_index)
 
-                            if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
-                                scale.append(self.quantizer.scale)
-                                zero.append(self.quantizer.zero)
-                                now_idx += 1
-                        else:
-                            idx = i1 + i
-                            if self.qcfg.desc_act:
-                                idx = perm[idx]
+                    block_scale = torch.stack(block_scales)
+                    block_zero = torch.stack(block_zeros)
+                    column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
+                    fused_block_update(
+                        W1, Hinv1, block_scale, block_zero, column_group,
+                        Q1, Err1, Losses1,
+                    )
+                else:
+                    for i in range(count):
+                        w = W1[:, i]
+                        if Hinv is not None:
+                            d = Hinv1[i, i]
 
-                            self.quantizer = groups[idx // self.qcfg.group_size]
+                        if self.qcfg.group_size != -1:
+                            if not self.qcfg.static_groups:
+                                if (i1 + i) % self.qcfg.group_size == 0:
+                                    self.quantizer.find_params(W[:, (i1 + i) : (i1 + i + self.qcfg.group_size)], weight=True)
 
-                    q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
-                    Q1[:, i] = q
-                    if Hinv is not None:
-                        delta = Err1[:, i]
-                        torch.sub(w, q, out=delta)
-                        Losses1[:, i] = delta.square() / d.square()
-                        delta.div_(d)
-                        W1[:, i:] -= delta.unsqueeze(1) * Hinv1[i, i:]
+                                if ((i1 + i) // self.qcfg.group_size) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if self.qcfg.desc_act:
+                                    idx = perm[idx]
+
+                                self.quantizer = groups[idx // self.qcfg.group_size]
+
+                        q = self.quantizer.quantize(w.unsqueeze(1)).flatten()
+                        Q1[:, i] = q
+                        if Hinv is not None:
+                            delta = Err1[:, i]
+                            torch.sub(w, q, out=delta)
+                            Losses1[:, i] = delta.square() / d.square()
+                            delta.div_(d)
+                            W1[:, i:] -= delta.unsqueeze(1) * Hinv1[i, i:]
 
                 if Hinv is not None:
                     Losses1.div_(2)
