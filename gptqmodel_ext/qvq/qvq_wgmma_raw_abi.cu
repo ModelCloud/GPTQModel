@@ -263,10 +263,11 @@ bool is_direct_m960(const QvqP32WgmmaRawConfig* c) {
       c->k == 2048 && c->n == 8192;
   const bool bn64 = c->block_n == 64 &&
       (c->block_m == 64 || five_rows || ten_rows);
-  const bool bn128 = c->block_n == 128 && c->block_m == 64 &&
-      c->transition_bits == 6 &&
-      ((c->k == 2048 && c->n == 8192) ||
-       (c->k == 8192 && c->n == 2048));
+  const bool bn128 = c->block_n == 128 && c->transition_bits == 6 &&
+      ((c->block_m == 64 &&
+        ((c->k == 2048 && c->n == 8192) ||
+         (c->k == 8192 && c->n == 2048))) ||
+       (c->block_m == 160 && c->k == 2048 && c->n == 8192));
   return bn64 || bn128;
 }
 
@@ -586,7 +587,9 @@ extern "C" int qvq_p32_wgmma_raw_launch(
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
         case 6: status = c->block_n == 128
-            ? QVQ_LAUNCH_M960(6, 4, 2)
+            ? (c->block_m == 160
+                ? QVQ_LAUNCH_M960(6, 10, 2)
+                : QVQ_LAUNCH_M960(6, 4, 2))
             : c->block_m == 160
                 ? QVQ_LAUNCH_M960(6, 10, 1)
             : c->block_m == 80
@@ -742,7 +745,9 @@ extern "C" int qvq_p32_wgmma_raw_launch_plan(
 #endif
 #if !defined(QVQ_WGMMA_BITS_ONLY) || QVQ_WGMMA_BITS_ONLY == 6
       case 6: status = c->block_n == 128
-          ? QVQ_BUILD_M960_PLAN(6, 4, 2)
+          ? (c->block_m == 160
+              ? QVQ_BUILD_M960_PLAN(6, 10, 2)
+              : QVQ_BUILD_M960_PLAN(6, 4, 2))
           : c->block_m == 160
               ? QVQ_BUILD_M960_PLAN(6, 10, 1)
           : c->block_m == 80
