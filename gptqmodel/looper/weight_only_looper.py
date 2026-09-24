@@ -392,7 +392,13 @@ class WeightOnlyLooper(DeviceAssignmentState):
             previous_device = None
         with device_ctx(target_device):
             move_to(named.module, device=target_device)
-            rehome_module_to_device(named.module, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                named.module,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             named.target_device = target_device
             named.module.target_device = target_device
         emit_device_telemetry(
@@ -420,7 +426,13 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 target_device=CPU,
             )
             move_to(named.module, device=CPU)
-            rehome_module_to_device(named.module, CPU, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                named.module,
+                CPU,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
 
         named.target_device = CPU
         named.module.target_device = CPU

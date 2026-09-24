@@ -60,7 +60,9 @@ def test_compute_device_filter_applies_to_forward_devices(monkeypatch):
         def _set_current_batch_index(self, _index):
             return None
 
-    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+    def fake_clone_module_for_devices(
+        _module, target_devices, progress_callback=None, root_module=None
+    ):
         return {device: object() for device in target_devices}
 
     def fake_forward_batch_worker(*args, **kwargs):
@@ -134,7 +136,9 @@ def test_parallel_forward_writes_shared_kv_cache_when_model_requests_it(monkeypa
         def _set_current_batch_index(self, _index):
             return None
 
-    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+    def fake_clone_module_for_devices(
+        _module, target_devices, progress_callback=None, root_module=None
+    ):
         return {device: object() for device in target_devices}
 
     kv_payload = ("kv",)
