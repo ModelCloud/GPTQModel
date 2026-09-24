@@ -104,13 +104,22 @@ __device__ __forceinline__ float round_to_half(float value) {
   return __half2float(__float2half_rn(value));
 }
 
+template <int RankCount>
 __device__ __forceinline__ half2 exact_half2_add(half2 first, half2 second) {
+  if constexpr (RankCount == 0) {
+    // Base-only prefill: keep each butterfly's native FP16 rounding point.
+    return __hadd2(first, second);
+  }
   const float2 a = __half22float2(first);
   const float2 b = __half22float2(second);
   return __floats2half2_rn(a.x + b.x, a.y + b.y);
 }
 
+template <int RankCount>
 __device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
+  if constexpr (RankCount == 0) {
+    return __hsub2(first, second);
+  }
   const float2 a = __half22float2(first);
   const float2 b = __half22float2(second);
   return __floats2half2_rn(a.x - b.x, a.y - b.y);
@@ -223,8 +232,8 @@ __global__ __launch_bounds__(1024) void p32_hadamard_epilogue_kernel(
       self.value = packed;
       peer.bits = __shfl_xor_sync(active_mask, self.bits, bit);
       packed = (pair & bit) == 0
-          ? exact_half2_add(packed, peer.value)
-          : exact_half2_sub(peer.value, packed);
+          ? exact_half2_add<RankCount>(packed, peer.value)
+          : exact_half2_sub<RankCount>(peer.value, packed);
     }
     packed_values[pair] = packed;
   }
@@ -241,8 +250,8 @@ __global__ __launch_bounds__(1024) void p32_hadamard_epilogue_kernel(
       const int peer = pair + bit;
       const half2 first = packed_values[pair];
       const half2 second = packed_values[peer];
-      packed_values[pair] = exact_half2_add(first, second);
-      packed_values[peer] = exact_half2_sub(first, second);
+      packed_values[pair] = exact_half2_add<RankCount>(first, second);
+      packed_values[peer] = exact_half2_sub<RankCount>(first, second);
     }
   }
   __syncthreads();
@@ -409,8 +418,8 @@ __global__ __launch_bounds__(1024) void p32_rank8_project_hadamard_kernel(
       self.value = packed;
       peer.bits = __shfl_xor_sync(active_mask, self.bits, bit);
       packed = (pair & bit) == 0
-          ? exact_half2_add(packed, peer.value)
-          : exact_half2_sub(peer.value, packed);
+          ? exact_half2_add<8>(packed, peer.value)
+          : exact_half2_sub<8>(peer.value, packed);
     }
     packed_values[pair] = packed;
   }
@@ -422,8 +431,8 @@ __global__ __launch_bounds__(1024) void p32_rank8_project_hadamard_kernel(
       if (pair < peer) {
         const half2 first = packed_values[pair];
         const half2 second = packed_values[peer];
-        packed_values[pair] = exact_half2_add(first, second);
-        packed_values[peer] = exact_half2_sub(first, second);
+        packed_values[pair] = exact_half2_add<8>(first, second);
+        packed_values[peer] = exact_half2_sub<8>(first, second);
       }
     }
   }
