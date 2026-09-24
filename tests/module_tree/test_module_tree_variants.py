@@ -94,6 +94,7 @@ class _AutoDetectedTreeQModel(BaseQModel):
     """Tiny unknown-architecture definition used to verify instance isolation."""
 
     module_tree = None
+    shared_input_verified_model_types = frozenset({"unknown"})
 
     def _auto_detect_module_tree(self, model, quant_method):
         return model.config.selected_tree
@@ -220,6 +221,23 @@ def test_effective_module_tree_is_instance_local_and_deeply_immutable(order):
     else:
         raise AssertionError("effective_module_tree must be deeply immutable")
     assert first.extract_layers_node() == [expected_paths[first_key]]
+
+
+def test_effective_frozen_tree_preserves_shared_input_tags():
+    tree = [
+        "model",
+        "layers",
+        "#",
+        {"self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "o_proj:1")},
+    ]
+    instance = _init_tree_qmodel(_AutoDetectedTreeQModel, tree)
+
+    plan = instance.shared_input_plan(instance.model.config, SimpleNamespace(dynamic=None))
+
+    assert plan.group_for("self_attn.q_proj").modules == (
+        "self_attn.q_proj",
+        "self_attn.k_proj",
+    )
 
 
 def test_fresh_quantized_load_planning_binds_auto_detected_tree():
