@@ -13,6 +13,8 @@ from pathlib import Path
 
 QVQ_PAYLOAD = (
     "gptqmodel_ext/qvq/BUILD.bazel",
+    "gptqmodel_ext/qvq/qvq_hadamard_input_raw_abi.cu",
+    "gptqmodel_ext/qvq/qvq_hadamard_input_raw_abi.h",
     "gptqmodel_ext/qvq/qvq_wgmma_cuda.cu",
     "gptqmodel_ext/qvq/qvq_wgmma_raw_abi.cu",
     "gptqmodel_ext/qvq/qvq_wgmma_raw_abi.h",
@@ -73,6 +75,9 @@ def main() -> int:
     try:
         header = read(qvq / "gptqmodel_ext/qvq/qvq_wgmma_raw_abi.h")
         raw = read(qvq / "gptqmodel_ext/qvq/qvq_wgmma_raw_abi.cu")
+        input_header = read(qvq / "gptqmodel_ext/qvq/qvq_hadamard_input_raw_abi.h")
+        input_raw = read(qvq / "gptqmodel_ext/qvq/qvq_hadamard_input_raw_abi.cu")
+        qvq_build = read(qvq / "gptqmodel_ext/qvq/BUILD.bazel")
         repo = read(zml / "third_party/qvq/repo.bzl")
         loader = read(zml / "platforms/cuda/qvq/qvq.zig")
         policy = read(zml / "zml/qvq.zig")
@@ -89,6 +94,40 @@ def main() -> int:
         qvq_fields = c_config_fields(header)
         zig_fields = zig_config_fields(loader)
         check("ABI struct layout", qvq_fields == zig_fields, f"QVQ={qvq_fields}, Zig={zig_fields}")
+
+        input_abi = first_int(
+            r"QVQ_HADAMARD_INPUT_RAW_ABI_VERSION\s+(\d+)u?",
+            input_header,
+            "input Hadamard ABI",
+        )
+        input_struct = re.search(
+            r"typedef struct \{(.*?)\}\s*QvqHadamardInputRawConfig",
+            input_header,
+            re.S,
+        )
+        zig_input_struct = re.search(
+            r"pub const HadamardInputRawConfig = extern struct \{(.*?)\n\};",
+            loader,
+            re.S,
+        )
+        if not input_struct or not zig_input_struct:
+            raise ValueError("cannot find input Hadamard raw ABI structs")
+        input_fields = re.findall(r"uint32_t\s+([a-z_]+);", input_struct.group(1))
+        zig_input_fields = re.findall(
+            r"^\s*([a-z_]+):\s*u32", zig_input_struct.group(1), re.M
+        )
+        zig_input_abi = first_int(
+            r"pub const HadamardInputRawConfig = extern struct \{.*?abi_version: u32 = (\d+)",
+            loader,
+            "ZML input Hadamard ABI",
+        )
+        check(
+            "Input Hadamard ABI and struct",
+            input_abi == zig_input_abi == 1
+            and input_fields == zig_input_fields
+            and "raw_version() == 1" in loader,
+            f"QVQ/ZML versions={input_abi}/{zig_input_abi}, fields={input_fields}/{zig_input_fields}",
+        )
 
         pin_match = re.search(r'_QVQ_COMMIT\s*=\s*"([0-9a-f]{40})"', repo)
         if not pin_match:
@@ -114,6 +153,56 @@ def main() -> int:
         )
         missing_symbols = [s for s in symbols if s not in header or s not in loader]
         check("Raw symbols exported and loaded", not missing_symbols, f"missing={missing_symbols}")
+        input_symbols = (
+            "qvq_hadamard_input_raw_abi_version",
+            "qvq_hadamard_input_raw_launch",
+        )
+        missing_input_symbols = [
+            symbol for symbol in input_symbols
+            if symbol not in input_header or symbol not in input_raw or symbol not in loader
+        ]
+        check(
+            "Input Hadamard exported and loaded",
+            not missing_input_symbols,
+            f"missing={missing_input_symbols}",
+        )
+        check(
+            "Input Hadamard built and sparse-reachable",
+            "qvq_hadamard_input_raw_object" in qvq_build
+            and all(
+                name in repo
+                for name in (
+                    "qvq_hadamard_input_raw_abi.cu",
+                    "qvq_hadamard_input_raw_abi.h",
+                )
+            ),
+            "requires object in shared library and both files in sparse checkout",
+        )
+        check(
+            "Input Hadamard admission and custom call",
+            all(
+                term in policy
+                for term in (
+                    "input.dim(axis_) == 8192",
+                    "rows == 960",
+                    "qvq_cuda.hopperHadamardInputAvailable()",
+                    "su.convert(.f16)",
+                    "P32HadamardInputCall.register(platform)",
+                    "zml_qvq_p32_hadamard_input_raw_cuda",
+                )
+            )
+            and policy.split("fn p32HadamardInputRawFfiCall", 1)[1]
+            .split("const P32HadamardInputCall", 1)[0]
+            .count("output.prepared.ptr") == 2
+            and "workspace may alias output" in input_header,
+            "SM90 M960/N8192 FP16 call is reachable with output/workspace alias",
+        )
+        check(
+            "Input Hadamard runtime counter",
+            "p32_input_hadamard_ffi_call_count.fetchAdd(1" in policy
+            and "input_hadamard: usize" in policy,
+            "optimized FFI calls must be visible in runner telemetry",
+        )
 
         sparse_paths = (
             "qvq_wgmma_cuda.cu",
