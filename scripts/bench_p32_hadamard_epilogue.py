@@ -23,14 +23,14 @@ def load(path):
     return entry
 
 
-def measure(entry, source, scale, output, loops, stream):
+def measure(entry, source, scale, output, loops, stream, normalize_first):
     start = torch.cuda.Event(enable_timing=True)
     end = torch.cuda.Event(enable_timing=True)
     start.record(stream)
     for _ in range(loops):
         status = entry(
             source.data_ptr(), scale.data_ptr(), output.data_ptr(),
-            source.shape[0], source.shape[1], 1, stream.cuda_stream,
+            source.shape[0], source.shape[1], normalize_first, stream.cuda_stream,
         )
         if status != 0:
             raise RuntimeError(f"Hadamard epilogue returned {status}")
@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--columns", type=int, nargs="+", default=[512, 2048, 8192])
     parser.add_argument("--loops", type=int, default=100)
     parser.add_argument("--repeats", type=int, default=7)
+    parser.add_argument("--normalize-first", type=int, choices=(0, 1), default=1)
     parser.add_argument("--profile-only", action="store_true", help="launch one baseline kernel for NCU")
     parser.add_argument("--graph-replay-verify", action="store_true", help="compare changed-input CUDA graph replays")
     args = parser.parse_args()
@@ -66,16 +67,16 @@ def main():
         changed = torch.empty_like(source, dtype=torch.float16)
         stream.wait_stream(torch.cuda.current_stream())
         if args.profile_only:
-            measure(baseline, source, scale, control, 1, stream)
+            measure(baseline, source, scale, control, 1, stream, args.normalize_first)
             continue
         if args.graph_replay_verify:
             def capture(entry, source, scale, output, columns, stream):
-                measure(entry, source, scale, output, 1, stream)
+                measure(entry, source, scale, output, 1, stream, args.normalize_first)
                 graph = torch.cuda.CUDAGraph()
                 with torch.cuda.graph(graph, stream=stream):
                     status = entry(
                         source.data_ptr(), scale.data_ptr(), output.data_ptr(),
-                        args.rows, columns, 1, stream.cuda_stream,
+                        args.rows, columns, args.normalize_first, stream.cuda_stream,
                     )
                     if status != 0:
                         raise RuntimeError(f"Hadamard graph capture returned {status}")
@@ -111,8 +112,8 @@ def main():
                     )
             print(f"M={args.rows} N={columns} changed_input_graph_replay=PASS cases=5 bitwise_fp16=1", flush=True)
             continue
-        measure(baseline, source, scale, control, 10, stream)
-        measure(candidate, source, scale, changed, 10, stream)
+        measure(baseline, source, scale, control, 10, stream, args.normalize_first)
+        measure(candidate, source, scale, changed, 10, stream, args.normalize_first)
         exact = torch.equal(control.view(torch.int16), changed.view(torch.int16))
         if not exact:
             mismatches = int(torch.count_nonzero(control.view(torch.int16) != changed.view(torch.int16)))
@@ -123,11 +124,13 @@ def main():
             if repeat % 2:
                 arms = arms[::-1]
             for name, entry, output in arms:
-                samples[name].append(measure(entry, source, scale, output, args.loops, stream))
+                samples[name].append(measure(
+                    entry, source, scale, output, args.loops, stream, args.normalize_first
+                ))
         reference_us = statistics.median(samples["baseline"])
         candidate_us = statistics.median(samples["candidate"])
         print(
-            f"M={args.rows} N={columns} exact_fp16={exact} "
+            f"M={args.rows} N={columns} normalize_first={args.normalize_first} exact_fp16={exact} "
             f"baseline_us={reference_us:.3f} candidate_us={candidate_us:.3f} "
             f"speedup={reference_us / candidate_us:.4f}",
             flush=True,
