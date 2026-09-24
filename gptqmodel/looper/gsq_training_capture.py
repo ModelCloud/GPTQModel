@@ -217,7 +217,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
     return prepared, batches
 
 
-def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack=True, device=None):
+def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack=True, device=None,
+                                initialization_cache=None, validation_cache=None):
     """Train/export a shared captured block even when its caller uses inference mode.
 
     The shared looper still owns installing the result and replaying it before
@@ -227,8 +228,16 @@ def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack
 
     with torch.inference_mode(False), torch.enable_grad():
         prepared, batches = prepare_llama_gsq_capture(layer, cache, device=device)
+        initialization_batches = None
+        validation_batches = None
+        if initialization_cache is not None:
+            _, initialization_batches = prepare_llama_gsq_capture(layer, initialization_cache, device=device)
+        if validation_cache is not None:
+            _, validation_batches = prepare_llama_gsq_capture(layer, validation_cache, device=device)
         return quantize_llama_gsq_block(prepared, batches, bits=bits, group_size=group_size,
-                                        gsq=gsq, pack=pack)
+                                        gsq=gsq, pack=pack,
+                                        initialization_batches=initialization_batches,
+                                        validation_batches=validation_batches)
 
 
 def capture_llama_gsq_inputs(

@@ -636,7 +636,8 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
 
 def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, seed=7,
                      qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, initializer='gptq',
-                     batch_size=1, microbatch_size=1, affine_initializers=False, **training):
+                     batch_size=1, microbatch_size=1, affine_initializers=False,
+                     initialization_batches=None, validation_batches=None, **training):
     """Fit a Llama block in author stage order from supplied scalar initializers.
 
     Batches are (hidden_states, attention_kwargs) pairs without padding. Caller
@@ -658,22 +659,23 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     if attention_implementation not in ('eager', 'sdpa'):
         raise ValueError('Staged GSQ requires eager or SDPA Llama attention')
     device = next(layer.parameters()).device
-    offloaded = getattr(batches, 'offloaded', None)
-    if offloaded is None:
-        offloaded = any(hidden.device != device for hidden, _ in batches)
     if attention_implementation == 'sdpa':
-        fixed_length = getattr(batches, 'fixed_sequence_length', None)
-        lengths = {fixed_length} if fixed_length is not None else {hidden.shape[1] for hidden, _ in batches}
-        has_attention_mask = getattr(batches, 'has_attention_mask', None)
-        if has_attention_mask is None:
-            has_attention_mask = any(kwargs.get('attention_mask') is not None for _, kwargs in batches)
-        if len(lengths) != 1 or has_attention_mask:
-            raise ValueError('SDPA staged GSQ requires equal-length documents without explicit attention masks')
+        for source in (batches, initialization_batches, validation_batches):
+            if source is None:
+                continue
+            fixed_length = getattr(source, 'fixed_sequence_length', None)
+            lengths = {fixed_length} if fixed_length is not None else {hidden.shape[1] for hidden, _ in source}
+            has_attention_mask = getattr(source, 'has_attention_mask', None)
+            if has_attention_mask is None:
+                has_attention_mask = any(kwargs.get('attention_mask') is not None for _, kwargs in source)
+            if len(lengths) != 1 or has_attention_mask:
+                raise ValueError('SDPA staged GSQ requires equal-length documents without explicit attention masks')
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
         raise ValueError('Llama GSQ requires all seven projection initializers and nonempty batches')
     initializers = dict(initializers)
+    initialization_batches = batches if initialization_batches is None else initialization_batches
     fitted = copy.deepcopy(layer).eval()
     records = {}
 
@@ -694,7 +696,7 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         return GSQScalarTrainingModule(weight, scales, group_size, bits=bits, noise=noise,
                                        logits_dtype=torch.float32 if name in names[:2] else weight.dtype)
 
-    def run(stage_name, stage, selected, stage_batches, teacher=None):
+    def run(stage_name, stage, selected, stage_batches, teacher=None, validation_stage_batches=None):
         quantizers = {name+'.weight': quantizer(name) for name in selected}
 
         def objective(batch, weights):
@@ -702,7 +704,8 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
                                              teacher_weights=teacher, output_mask=mask)
         result = fit_reconstruction_stage(quantizers, stage_batches, objective,
-                                          epochs=epochs, seed=seed, **training)
+                                          epochs=epochs, seed=seed,
+                                          validation_batches=validation_stage_batches, **training)
         if affine_initializers:
             result['zeros'] = {name: quant.zeros.detach().clone() for name, quant in quantizers.items()}
             result['codes'] = {name: quant.hard_codes().detach().clone() for name, quant in quantizers.items()}
@@ -712,8 +715,9 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         records[stage_name] = result
 
     # Keep names consistent with the containing block for functional replacement.
-    qk_inputs = batches.iter_hidden_batches() if hasattr(batches, 'iter_hidden_batches') else (
-        hidden for hidden, _ in batches)
+    qk_inputs = (initialization_batches.iter_hidden_batches()
+                 if hasattr(initialization_batches, 'iter_hidden_batches') else
+                 (hidden for hidden, _ in initialization_batches))
     factor, dead = prepare_qk_calibration_factor(
         qk_inputs,
         damp_percent=qk_damp_percent,
@@ -745,22 +749,27 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         with torch.no_grad():
             projection.weight.copy_(result['weights']['weight'])
         records[name] = result
-    if batch_size == microbatch_size == 1 and not offloaded:
-        staged_batches = [[((hidden, kwargs, None), hidden.numel())] for hidden, kwargs in batches]
-    else:
+    def prepare_stage_batches(source):
+        source_offloaded = getattr(source, 'offloaded', None)
+        if source_offloaded is None:
+            source_offloaded = any(hidden.device != device for hidden, _ in source)
+        if batch_size == microbatch_size == 1 and not source_offloaded:
+            return [[((hidden, kwargs, None), hidden.numel())] for hidden, kwargs in source]
         from .gsq_batching import llama_stage_batches
 
-        lazy_stage_batches = offloaded or (
-            hasattr(batches, 'iter_hidden_batches') and hasattr(batches, 'iter_batches')
+        lazy_stage_batches = source_offloaded or (
+            hasattr(source, 'iter_hidden_batches') and hasattr(source, 'iter_batches')
         )
-        staged_batches = llama_stage_batches(
-            batches,
+        return llama_stage_batches(
+            source,
             batch_size=batch_size,
             microbatch_size=microbatch_size,
             device=device,
             implicit_causal=attention_implementation == 'sdpa',
             lazy=lazy_stage_batches,
         )
+    staged_batches = prepare_stage_batches(batches)
+    validation_stage_batches = prepare_stage_batches(validation_batches) if validation_batches else None
     # The reference trainer retains the original attention weights as the
     # reconstruction target. Its student uses fitted Q/K and learns V/O.
     dense_attention = {
@@ -768,16 +777,17 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         for name in names[:4]
     }
     run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches,
-        teacher=dense_attention)
+        teacher=dense_attention, validation_stage_batches=validation_stage_batches)
     mlp_metadata = None
     if reinitialize_mlp:
-        refreshed, mlp_metadata = initialize_llama_gptq(fitted, batches, bits=bits, group_size=group_size,
+        refreshed, mlp_metadata = initialize_llama_gptq(fitted, initialization_batches, bits=bits, group_size=group_size,
                                                        damp_percent=qk_damp_percent, projections=names[4:],
                                                        initializer=initializer)
         initializers.update(refreshed)
     # The block target also uses original dense attention and dense MLP;
     # the student uses fitted attention and learns the three MLP projections.
-    run('mlp', fitted, names[4:], staged_batches, teacher=dense_attention)
+    run('mlp', fitted, names[4:], staged_batches, teacher=dense_attention,
+        validation_stage_batches=validation_stage_batches)
     records['mlp']['initializer_timing'] = 'after_attention' if reinitialize_mlp else 'before_attention'
     records['mlp']['initializer_metadata'] = mlp_metadata
     return fitted, records
@@ -1003,7 +1013,8 @@ def pack_llama_staged_block(fitted, records, *, bits, group_size):
     return exported
 
 
-def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack=True):
+def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack=True,
+                             initialization_batches=None, validation_batches=None):
     """Quantize one captured Llama block, optionally train GSQ, then export.
 
     The default performs ordinary GPTQ initialization. Enabled staged GSQ has
@@ -1027,10 +1038,13 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
         raise ValueError('Staged scalar GSQ requires a positive contiguous group size')
     if not isinstance(pack, bool):
         raise TypeError('pack must be boolean')
-    initializers, metadata = initialize_llama_gptq(layer, batches, bits=bits, group_size=group_size,
+    initialization_batches = batches if initialization_batches is None else initialization_batches
+    initializers, metadata = initialize_llama_gptq(layer, initialization_batches, bits=bits, group_size=group_size,
                                                   damp_percent=gsq.damp_percent, initializer=gsq.initializer)
     if gsq.enabled:
         fitted, records = fit_llama_stages(layer, initializers, batches, bits=bits, group_size=group_size,
+                                           initialization_batches=initialization_batches,
+                                           validation_batches=validation_batches,
                                            **gsq.training_kwargs())
     else:
         fitted = copy.deepcopy(layer).eval()

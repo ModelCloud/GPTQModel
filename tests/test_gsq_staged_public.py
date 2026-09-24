@@ -10,6 +10,49 @@ import torch
 import math
 
 
+def test_staged_llama_uses_separate_gptq_train_and_validation_documents(tmp_path, monkeypatch):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model
+    from gptqmodel.quantization import GSQTrainingConfig
+    from gptqmodel.quantization import gsq_training as gsq_mod
+
+    torch.manual_seed(7)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
+    config._attn_implementation = "sdpa"
+    model = LlamaForCausalLM(config).half().eval()
+    observed_initializers = []
+    original_initializer = gsq_mod.initialize_llama_gptq
+
+    def check_initializer(layer, batches, **kwargs):
+        observed_initializers.append(len(batches))
+        return original_initializer(layer, batches, **kwargs)
+
+    monkeypatch.setattr(gsq_mod, "initialize_llama_gptq", check_initializer)
+    training = [{"input_ids": list(range(1, 17))}, {"input_ids": list(range(17, 33))}]
+    gptq = [{"input_ids": list(range(33, 49))}]
+    validation = [{"input_ids": list(range(49, 65))}]
+    run = quantize_llama_gsq_model(
+        model, training, initialization_documents=gptq, validation_documents=validation,
+        bits=3, group_size=32,
+        gsq=GSQTrainingConfig(enabled=True, epochs=1, qk_steps=1,
+                              batch_size=2, microbatch_size=1),
+        offload_capture=True, capture_directory=tmp_path / "capture")
+    assert run["state"] == "complete"
+    assert (run["training_documents"], run["initialization_documents"],
+            run["validation_documents"]) == (2, 1, 1)
+    assert observed_initializers == [1, 1]
+    for name in ("attention", "mlp"):
+        stage = run["blocks"][0]["stages"][name]
+        assert len(stage["validation_history"]) == 1
+        assert math.isfinite(stage["validation_hard_loss_before"])
+        assert math.isfinite(stage["validation_hard_loss_after"])
+    assert not (tmp_path / "capture" / "layer-00" / "train").exists()
+    assert not (tmp_path / "capture" / "layer-00" / "gptq").exists()
+    assert not (tmp_path / "capture" / "layer-00" / "validation").exists()
+
+
 @pytest.mark.parametrize("method,bits,initializer", [
     ("gptq", 2, "gptq"), ("gptq", 3, "gptq"), ("gptq", 4, "gptq"),
     ("gptq", 4, "rtn"), ("awq", 4, "awq"),

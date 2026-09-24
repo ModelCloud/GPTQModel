@@ -155,6 +155,19 @@ def _make_def(tree, verified=True):
 
 
 class TestPlanDerivation:
+    def test_llama_projection_roles_and_subsets(self):
+        branches = LlamaQModel.module_tree[3]
+        assert branches["self_attn"] == (
+            "q_proj:0:q:in=x", "k_proj:0:k:in=x", "v_proj:0:v:in=x", "o_proj:1:o")
+        assert branches["mlp"] == (
+            "gate_proj:0:gate:in=x", "up_proj:0:up:in=x", "down_proj:1:down")
+        assert LlamaQModel.simple_layer_modules(None, QC) == [
+            ["self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"],
+            ["self_attn.o_proj"],
+            ["mlp.gate_proj", "mlp.up_proj"],
+            ["mlp.down_proj"],
+        ]
+
     def test_untagged_modules_are_singletons(self):
         tree = ["model", "layers", "#", {"self_attn": ("q:0", "k:0", "v:0", "o:1"), "mlp": ("g:0", "u:0", "d:1")}]
         plan = _plan(_make_def(tree))

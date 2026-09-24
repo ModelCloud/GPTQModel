@@ -39,13 +39,15 @@ def staged_documents_from_prepared(prepared):
 
 
 def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None,
-                             offload_capture=False, capture_directory=None, capture_batch_size=1):
+                             offload_capture=False, capture_directory=None, capture_batch_size=1,
+                             initialization_documents=None, validation_documents=None):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
     a complete checkpoint or replace GPTQModel.quantize dispatch. The caller
-    owns placement and supplies unpadded tokenized documents. Completed blocks
-    and diagnostics remain available if a later block fails.
+    owns placement and supplies unpadded tokenized documents. Optional GPTQ
+    and validation documents are captured separately at every block. Completed
+    blocks and diagnostics remain available if a later block fails.
     """
     from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
@@ -71,6 +73,12 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         raise ValueError('Staged model quantization requires a positive contiguous group size')
     if not documents:
         raise ValueError('Staged model quantization requires calibration documents')
+    if initialization_documents is not None and not initialization_documents:
+        raise ValueError('Staged model quantization requires nonempty GPTQ initialization documents')
+    if validation_documents is not None and not validation_documents:
+        raise ValueError('Staged model quantization requires nonempty validation documents')
+    if validation_documents is not None and not gsq.enabled:
+        raise ValueError('Validation documents require enabled staged GSQ')
     layers = model.model.layers
     indices = list(range(len(layers))) if layer_indices is None else list(layer_indices)
     if (not indices or any(isinstance(i, bool) or not isinstance(i, int) or not 0 <= i < len(layers) for i in indices)
@@ -91,6 +99,9 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 raise ValueError('Staged model quantization requires complete contiguous groups')
     run = dict(state='running', gsq_training=effective, bits=bits, group_size=group_size,
                layer_indices=indices, device=str(device), blocks=[],
+               training_documents=len(documents),
+               initialization_documents=len(initialization_documents) if initialization_documents is not None else len(documents),
+               validation_documents=len(validation_documents) if validation_documents is not None else 0,
                offload_capture=offload_capture,
                capture_storage='disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
                deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
@@ -107,16 +118,33 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             if offload_capture:
                 capture_options['offload_to_cpu'] = True
             if capture_directory is not None:
-                capture_options['offload_directory'] = capture_directory/f'layer-{index:02d}'
+                capture_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'train'
             if not offload_capture and capture_batch_size != 1:
                 capture_options['capture_batch_size'] = capture_batch_size
             cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
+            initialization_cache = None
+            validation_cache = None
             try:
+                if initialization_documents is not None:
+                    init_options = dict(capture_options)
+                    if capture_directory is not None:
+                        init_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'gptq'
+                    initialization_cache = capture_llama_gsq_inputs(
+                        model, initialization_documents, layer_index=index, **init_options)
+                if validation_documents is not None and gsq.enabled:
+                    val_options = dict(capture_options)
+                    if capture_directory is not None:
+                        val_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'validation'
+                    validation_cache = capture_llama_gsq_inputs(
+                        model, validation_documents, layer_index=index, **val_options)
                 packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
-                                                           gsq=gsq, pack=True, device=device)
+                                                           gsq=gsq, pack=True, device=device,
+                                                           initialization_cache=initialization_cache,
+                                                           validation_cache=validation_cache)
             finally:
-                if hasattr(cache, 'cleanup'):
-                    cache.cleanup()
+                for captured in (cache, initialization_cache, validation_cache):
+                    if captured is not None and hasattr(captured, 'cleanup'):
+                        captured.cleanup()
             packed = packed.to(device).eval()
             # Installation precedes the next capture: its inputs therefore
             # include both the selected assignments and stored-scale rounding.
