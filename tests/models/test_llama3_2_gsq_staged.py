@@ -15,6 +15,10 @@ scored 36/128, one-epoch staged GPTQ scored 31/128, and two epochs scored
 (25 concatenated sequences) scored 40/128 for the matched GPTQ initializer
 and 34/128 for 10-epoch staged GSQ. Those W4 GSQ scores are historical for
 the previous objective and must be remeasured for the current implementation.
+With the corrected dense-attention teacher, the matched W3 128-record recipe
+scored 6/128 for the GPTQ initializer and 2/128 for staged GSQ on the same
+128 GSM8K Platinum rows. The W3 measurement set the minimum score to zero to
+record the regression; both W3 checkpoints fail the usual 20% quality gate.
 The opt-in minimum score catches large failures; it does not assert a gain.
 Override GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS,
 GPTQMODEL_GSQ_STAGED_EPOCHS, GPTQMODEL_GSQ_STAGED_QK_STEPS, or
