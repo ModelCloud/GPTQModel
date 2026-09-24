@@ -1,4 +1,4 @@
-"""Optional native CUDA block update for GPTQ's 4-bit, 128-column path."""
+"""Optional native CUDA block update for GPTQ's 128-column path."""
 
 from pathlib import Path
 
@@ -48,5 +48,6 @@ def gptq_block_update(
     quantized: torch.Tensor,
     errors: torch.Tensor,
     losses: torch.Tensor,
+    maxq: int,
 ) -> None:
-    _EXTENSION.op("block_update")(work, hinv, scale, zero, column_group, quantized, errors, losses)
+    _EXTENSION.op("block_update")(work, hinv, scale, zero, column_group, quantized, errors, losses, maxq)

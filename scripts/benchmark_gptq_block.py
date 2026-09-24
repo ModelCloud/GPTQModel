@@ -24,7 +24,7 @@ def _time_cuda(fn):
     return time.perf_counter() - started, result
 
 
-def _block_inputs(rows, group_size):
+def _block_inputs(rows, group_size, bits):
     torch.manual_seed(117)
     work = torch.randn(rows, 128, device="cuda", dtype=torch.float32)
     hinv = torch.triu(torch.randn(128, 128, device="cuda") * 0.001)
@@ -33,11 +33,11 @@ def _block_inputs(rows, group_size):
     column_groups = [column // effective_group_size for column in range(128)]
     group_count = column_groups[-1] + 1
     scale = torch.rand(group_count, rows, device="cuda") * 0.1 + 0.01
-    zero = torch.full_like(scale, 8)
+    zero = torch.full_like(scale, 1 << (bits - 1))
     return work, hinv, scale, zero, column_groups
 
 
-def _block_run(native, inputs):
+def _block_run(native, inputs, bits):
     source, hinv, scale, zero, column_groups = inputs
     work = source.clone()
     quantized = torch.empty_like(work)
@@ -47,7 +47,7 @@ def _block_run(native, inputs):
         column_group = torch.tensor(column_groups, device="cuda", dtype=torch.int32)
         gptq_block_update(
             work, hinv, scale, zero, column_group,
-            quantized, errors, losses,
+            quantized, errors, losses, (1 << bits) - 1,
         )
     else:
         for column in range(128):
@@ -56,7 +56,7 @@ def _block_run(native, inputs):
             row_scale = scale[column_groups[column]]
             row_zero = zero[column_groups[column]]
             q = row_scale * (
-                torch.clamp(torch.round(weight / row_scale) + row_zero, 0, 15)
+                torch.clamp(torch.round(weight / row_scale) + row_zero, 0, (1 << bits) - 1)
                 - row_zero
             )
             quantized[:, column] = q
@@ -68,7 +68,7 @@ def _block_run(native, inputs):
     return work, quantized, errors, losses
 
 
-def _full_run(native, weight, inputs, group_size):
+def _full_run(native, weight, inputs, group_size, bits):
     if native:
         os.environ.pop("GPTQMODEL_DISABLE_GPTQ_CUDA", None)
     else:
@@ -76,7 +76,7 @@ def _full_run(native, weight, inputs, group_size):
     rows, columns = weight.shape
     layer = torch.nn.Linear(columns, rows, bias=False, device="cuda")
     layer.weight.data.copy_(weight)
-    cfg = QuantizeConfig(bits=4, group_size=group_size, sym=True, act_group_aware=group_size > 0)
+    cfg = QuantizeConfig(bits=bits, group_size=group_size, sym=True, act_group_aware=group_size > 0)
     task = GPTQ(layer, qcfg=cfg)
     task.quantizer.configure(perchannel=True)
     task.add_batch(inputs, None)
@@ -89,18 +89,19 @@ def main():
     parser.add_argument("--columns", type=int, default=2048)
     parser.add_argument("--trials", type=int, default=3)
     parser.add_argument("--group-size", type=int, default=128)
+    parser.add_argument("--bits", type=int, choices=range(2, 9), default=4)
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA device is required")
     if not block_update_available():
         raise RuntimeError("Native CUDA extension could not be loaded")
 
-    block_inputs = _block_inputs(args.rows, args.group_size)
+    block_inputs = _block_inputs(args.rows, args.group_size, args.bits)
     block_times = {}
     block_outputs = {}
     for label, native in (("eager", False), ("cuda", True)):
-        _time_cuda(lambda: _block_run(native, block_inputs))
-        measurements = [_time_cuda(lambda: _block_run(native, block_inputs)) for _ in range(args.trials)]
+        _time_cuda(lambda: _block_run(native, block_inputs, args.bits))
+        measurements = [_time_cuda(lambda: _block_run(native, block_inputs, args.bits)) for _ in range(args.trials)]
         block_times[label] = statistics.median(elapsed for elapsed, _ in measurements)
         block_outputs[label] = measurements[-1][1]
     for lhs, rhs in zip(block_outputs["cuda"], block_outputs["eager"]):
@@ -113,7 +114,7 @@ def main():
     full_outputs = {}
     for label, native in (("eager", False), ("cuda", True)):
         measurements = [
-            _time_cuda(lambda: _full_run(native, weight, inputs, args.group_size))
+            _time_cuda(lambda: _full_run(native, weight, inputs, args.group_size, args.bits))
             for _ in range(args.trials)
         ]
         full_times[label] = statistics.median(elapsed for elapsed, _ in measurements)
@@ -124,7 +125,7 @@ def main():
 
     print(
         f"device={torch.cuda.get_device_name()} rows={args.rows} "
-        f"columns={args.columns} group_size={args.group_size} trials={args.trials}"
+        f"columns={args.columns} group_size={args.group_size} bits={args.bits} trials={args.trials}"
     )
     for title, times in (("block_update", block_times), ("total_quantize", full_times)):
         print(f"{title}: eager={times['eager']:.6f}s cuda={times['cuda']:.6f}s speedup={times['eager'] / times['cuda']:.2f}x")

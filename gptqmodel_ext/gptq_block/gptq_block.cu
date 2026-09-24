@@ -18,7 +18,7 @@ __global__ void block_update_kernel(
     float* quantized, float* errors, float* losses, int64_t rows,
     int64_t work_stride, int64_t hinv_stride_row, int64_t hinv_stride_col, int64_t scale_stride,
     int64_t zero_stride, int64_t column_group_stride, int64_t quant_stride, int64_t error_stride,
-    int64_t loss_stride) {
+    int64_t loss_stride, float maxq) {
     const int64_t row = blockIdx.x;
     const int col = threadIdx.x;
     if (row >= rows) return;
@@ -37,7 +37,7 @@ __global__ void block_update_kernel(
             const float rounded = nearbyintf(__fdiv_rn(value, row_scale));
             const float shifted = __fadd_rn(rounded, row_zero);
             // CUDA fminf/fmaxf discard NaNs; torch.clamp preserves them.
-            const float code = isnan(shifted) ? shifted : fminf(fmaxf(shifted, 0.0f), 15.0f);
+            const float code = isnan(shifted) ? shifted : fminf(fmaxf(shifted, 0.0f), maxq);
             const float q = __fmul_rn(row_scale, __fsub_rn(code, row_zero));
             const float residual = __fsub_rn(value, q);
             const float squared = __fmul_rn(residual, residual);
@@ -61,7 +61,9 @@ void block_update_cuda(
     at::Tensor work, const at::Tensor& hinv, const at::Tensor& scale,
     const at::Tensor& zero, const at::Tensor& column_group,
     at::Tensor quantized, at::Tensor errors,
-    at::Tensor losses) {
+    at::Tensor losses, int64_t maxq) {
+    TORCH_CHECK(maxq >= 3 && maxq <= 255 && ((maxq + 1) & maxq) == 0,
+                "maxq must be 2^bits - 1 for bits 2 through 8");
     const auto device = work.device();
     TORCH_CHECK(device.is_cuda(), "work must be CUDA");
     for (const auto& tensor : {hinv, scale, zero, quantized, errors, losses}) {
@@ -97,7 +99,7 @@ void block_update_cuda(
         losses.data_ptr<float>(), rows, work.stride(0), hinv.stride(0), hinv.stride(1),
         scale.stride(0), zero.stride(0), column_group.stride(0),
         quantized.stride(0), errors.stride(0),
-        losses.stride(0));
+        losses.stride(0), static_cast<float>(maxq));
     C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

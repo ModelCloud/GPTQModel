@@ -1367,8 +1367,8 @@ class GPTQ:
             Hinv is not None
             and W.device.type == "cuda"
             and blocksize == 128
-            and self.qcfg.bits == 4
-            and int(self.quantizer.maxq.item()) == 15
+            and self.qcfg.bits in (2, 3, 4, 5, 6, 7, 8)
+            and int(self.quantizer.maxq.item()) == (1 << self.qcfg.bits) - 1
             and not self.qcfg.mock_quantization
             and type(self.quantizer) is Quantizer
             and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
@@ -1534,7 +1534,7 @@ class GPTQ:
                     column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
                     fused_block_update(
                         W1, Hinv1, block_scale, block_zero, column_group,
-                        Q1, Err1, Losses1,
+                        Q1, Err1, Losses1, (1 << self.qcfg.bits) - 1,
                     )
                 else:
                     for i in range(count):

@@ -6,6 +6,7 @@ from gptqmodel.quantization.gptq import GPTQ
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+@pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize(
     "ordering,symmetric,columns,group_size,static_groups,actual_hessian",
     [
@@ -31,7 +32,7 @@ from gptqmodel.quantization.gptq import GPTQ
     ],
 )
 def test_fused_gptq_matches_eager_exactly(
-    monkeypatch, ordering, symmetric, columns, group_size, static_groups, actual_hessian,
+    monkeypatch, bits, ordering, symmetric, columns, group_size, static_groups, actual_hessian,
 ):
     from gptqmodel.quantization import gptq_cuda
 
@@ -54,12 +55,13 @@ def test_fused_gptq_matches_eager_exactly(
         layer = torch.nn.Linear(columns, 13, bias=False, device=device)
         layer.weight.data.copy_(weight)
         qcfg = QuantizeConfig(
-            bits=4,
+            bits=bits,
             group_size=group_size,
             sym=symmetric,
             desc_act=ordering == "act_order",
             act_group_aware=ordering == "group_aware",
             static_groups=static_groups,
+            mse=2.0 if bits == 2 and not symmetric and group_size == 128 else 0.0,
         )
         task = GPTQ(layer, qcfg=qcfg)
         task.quantizer.configure(perchannel=True)
@@ -125,7 +127,8 @@ def test_cpu_quantization_keeps_python_block_loop(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_cuda_block_rounding_ties_and_saturation_match_eager():
+@pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 7, 8])
+def test_cuda_block_rounding_ties_and_saturation_match_eager(bits):
     from gptqmodel.quantization import gptq_cuda
 
     if not gptq_cuda.block_update_available():
@@ -138,7 +141,8 @@ def test_cuda_block_rounding_ties_and_saturation_match_eager():
     work = values.repeat(13)[:128].unsqueeze(0).repeat(3, 1)
     hinv = torch.eye(128, device="cuda")
     scale = torch.full((1, 3), 0.25, device="cuda")
-    zero = torch.tensor([[8.0, 7.0, 3.0]], device="cuda")
+    maxq = (1 << bits) - 1
+    zero = torch.tensor([[float(1 << (bits - 1)), float(maxq - 1), 1.0]], device="cuda")
     column_group = torch.zeros(128, device="cuda", dtype=torch.int32)
 
     eager_work = work.clone()
@@ -148,7 +152,7 @@ def test_cuda_block_rounding_ties_and_saturation_match_eager():
     for column in range(128):
         w = eager_work[:, column]
         q = scale.flatten() * (
-            torch.clamp(torch.round(w / scale.flatten()) + zero.flatten(), 0, 15)
+            torch.clamp(torch.round(w / scale.flatten()) + zero.flatten(), 0, maxq)
             - zero.flatten()
         )
         eager_q[:, column] = q
@@ -163,7 +167,7 @@ def test_cuda_block_rounding_ties_and_saturation_match_eager():
     cuda_loss = torch.empty_like(work)
     gptq_cuda.gptq_block_update(
         cuda_work, hinv, scale, zero, column_group,
-        cuda_q, cuda_error, cuda_loss,
+        cuda_q, cuda_error, cuda_loss, maxq,
     )
     for actual, expected in zip(
         (cuda_work, cuda_q, cuda_error, cuda_loss),
@@ -188,7 +192,7 @@ def test_cuda_block_preserves_nan_quantization():
     q = torch.empty_like(work)
     errors = torch.empty_like(work)
     losses = torch.empty_like(work)
-    gptq_cuda.gptq_block_update(work, hinv, scale, zero, column_group, q, errors, losses)
+    gptq_cuda.gptq_block_update(work, hinv, scale, zero, column_group, q, errors, losses, 15)
     assert torch.isnan(q[0, 0])
     assert torch.isnan(errors[0, 0])
     assert torch.isnan(losses[0, 0])
