@@ -1,9 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
+import pytest
 import torch.nn as nn
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.quantization.config import METHOD
 from gptqmodel.utils.model import get_layers_with_prefixes
 
 
@@ -86,6 +90,50 @@ class _LegacyPipePrefixQModel(BaseQModel):
     ]
 
 
+class _AutoDetectedTreeQModel(BaseQModel):
+    """Tiny unknown-architecture definition used to verify instance isolation."""
+
+    module_tree = None
+
+    def _auto_detect_module_tree(self, model, quant_method):
+        return model.config.selected_tree
+
+    def _configure_modelopt_runtime(self):
+        pass
+
+
+class _MethodOverrideTreeQModel(BaseQModel):
+    module_tree = [
+        "model",
+        "layers",
+        "#",
+        {
+            "self_attn": ("q_proj:0",),
+            "dense_mlp": ("up_proj:0", "down_proj:1"),
+            "mlp:moe": {
+                "gate": ("gate:!",),
+                "experts:0": {"#": ("up_proj:0",)},
+            },
+        },
+    ]
+    module_tree_overrides = {
+        METHOD.AWQ: [{"mlp:moe": {"gate": ("gate",)}}],
+    }
+    dynamic_expert_index = "num_experts"
+
+    def _configure_modelopt_runtime(self):
+        pass
+
+
+def _init_tree_qmodel(qmodel_cls, selected_tree, method=METHOD.GPTQ):
+    model = nn.Module()
+    model.config = SimpleNamespace(model_type="unknown", selected_tree=selected_tree, num_experts=2)
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([nn.Module()])
+    qcfg = SimpleNamespace(method=method, adapter=None)
+    return qmodel_cls(model, quantized=False, quantize_config=qcfg)
+
+
 def test_single_module_tree_expands_layer_path_base_modules_and_layer_modules():
     model = _VariantTreeModel()
 
@@ -146,3 +194,48 @@ def test_pipe_separated_module_tree_prefix_is_not_expanded():
     assert _LegacyPipePrefixQModel.extract_layers_node() == [
         "model.A_module|B_module.layers",
     ]
+
+
+@pytest.mark.parametrize("order", [("a", "b"), ("b", "a")])
+def test_effective_module_tree_is_instance_local_and_deeply_immutable(order):
+    tree_a = ["model", "layers", "#", {"mlp": ("a",)}]
+    tree_b = ["other", "blocks", "#", {"mixer": {"proj": ("b",)}}]
+    trees = {"a": tree_a, "b": tree_b}
+    first_key, second_key = order
+    first = _init_tree_qmodel(_AutoDetectedTreeQModel, trees[first_key])
+    second = _init_tree_qmodel(_AutoDetectedTreeQModel, trees[second_key])
+
+    assert _AutoDetectedTreeQModel.module_tree is None
+    expected_paths = {"a": "model.layers", "b": "other.blocks"}
+    expected_modules = {"a": [["mlp.a"]], "b": [["mixer.proj.b"]]}
+    assert first.extract_layers_node() == [expected_paths[first_key]]
+    assert second.extract_layers_node() == [expected_paths[second_key]]
+    assert first.simple_layer_modules(first.model.config, SimpleNamespace(dynamic=None)) == expected_modules[first_key]
+    assert second.full_layer_modules(second.model.config) == expected_modules[second_key]
+    assert first.effective_module_tree[0] == trees[first_key][0]
+    try:
+        first.effective_module_tree[3]["mlp"] = ("changed",)
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("effective_module_tree must be deeply immutable")
+    assert first.extract_layers_node() == [expected_paths[first_key]]
+
+
+def test_module_tree_method_override_is_copy_on_write_for_dense_moe_tree():
+    gptq = _init_tree_qmodel(_MethodOverrideTreeQModel, None, METHOD.GPTQ)
+    awq = _init_tree_qmodel(_MethodOverrideTreeQModel, None, METHOD.AWQ)
+
+    assert _MethodOverrideTreeQModel.module_tree[3]["mlp:moe"]["gate"] == ("gate:!",)
+    assert gptq.effective_module_tree[3]["mlp:moe"]["gate"] == ("gate:!",)
+    assert awq.effective_module_tree[3]["mlp:moe"]["gate"] == ("gate",)
+
+    qcfg = SimpleNamespace(dynamic=None)
+    gptq_modules = gptq.simple_layer_modules(gptq.model.config, qcfg)
+    awq_modules = awq.simple_layer_modules(gptq.model.config, qcfg, is_awq_quantize=True)
+    assert ["dense_mlp.up_proj"] in gptq_modules
+    assert ["dense_mlp.down_proj"] in gptq_modules
+    assert ["mlp.experts.0.up_proj", "mlp.experts.1.up_proj"] in gptq_modules
+    assert all("mlp.gate" not in block for block in gptq_modules)
+    assert ["mlp.gate"] in awq_modules
+    assert ["mlp.experts.0.up_proj", "mlp.experts.1.up_proj"] in awq_modules

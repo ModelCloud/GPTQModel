@@ -158,11 +158,11 @@ class GPTQProcessor(LoopProcessor):
         # activations and applies the current batch mask itself.
         self.preserve_batch_keep_mask = True
 
-        # Shared-input Hessian dedup state. The plan is derived once per model
-        # class; `_shared_input_leaders` is `{follower: leader}` for the subset
+        # Shared-input Hessian dedup state. The plan is derived once per
+        # effective model tree; `_shared_input_leaders` is `{follower: leader}` for the subset
         # pass currently being captured and is cleared once followers adopt.
         self._shared_input_plan: Optional[SharedInputPlan] = None
-        self._shared_input_plan_owner: Optional[type] = None
+        self._shared_input_plan_owner: Optional[Any] = None
         self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
         self.shared_input_dedup_count = 0
@@ -214,9 +214,13 @@ class GPTQProcessor(LoopProcessor):
             return False
 
     def _resolve_shared_input_plan(self, model) -> Optional[SharedInputPlan]:
-        """Derives (once per model class) the explicit `:in=<tag>` plan for one decoder layer."""
+        """Derive the explicit `:in=<tag>` plan once per model instance."""
 
-        owner = type(model)
+        # The effective module tree is instance-specific (method overrides and
+        # auto-detection must not share a plan solely by model class).  Keep a
+        # strong reference and compare by identity; using ``id`` alone would
+        # permit false hits after object collection and id reuse.
+        owner = model
         with self._shared_input_plan_lock:
             if self._shared_input_plan_owner is owner:
                 return self._shared_input_plan

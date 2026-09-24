@@ -4,11 +4,15 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import hashlib
 import json
 import math
 import os.path
 import tempfile
+import threading
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field, fields
 from enum import Enum
 from functools import total_ordering
@@ -1586,17 +1590,258 @@ DYNAMIC_FIELD_SYNONYMS = {}
 # Sentinel used by the dynamic override cache to indicate no pattern matched.
 _DYNAMIC_NO_MATCH = object()
 
-# Global caches for dynamic override resolution.  The `dynamic` dict is treated
-# as immutable after config construction, so caching by `id(dynamic)` is safe
-# and lets cloned configs share compiled patterns and override lookups.
-_DYNAMIC_PATTERN_CACHE: Dict[int, List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]] = {}
-_DYNAMIC_OVERRIDE_CACHE: Dict[int, Dict[str, Any]] = {}
-# Exact-literal fast-path caches: a per-dynamic dict mapping literal module names
-# to their resolved override, and whether every pattern is an exact literal.
-_DYNAMIC_EXACT_LOOKUP_CACHE: Dict[int, Dict[str, Tuple[int, Union[Dict[str, Any], bool]]]] = {}
-_DYNAMIC_ALL_EXACT_CACHE: Dict[int, bool] = {}
-# Pre-separated regex patterns for mixed dynamic configs.
-_DYNAMIC_REGEX_PATTERN_CACHE: Dict[int, List[Tuple[int, bool, Any, Dict[str, Any]]]] = {}
+# Dynamic configurations are mutable user data.  These wrappers provide an
+# O(1) mutation token so the exact-pattern fast path can remain O(1) per lookup
+# without ever reusing a result after an in-place edit.
+class _TrackedDict(dict):
+    """Dict whose nested edits advance one shared root mutation version."""
+
+    def __init__(self, *args, _root=None, **kwargs):
+        dict.__init__(self)
+        self._root = _root if _root is not None else self
+        if self._root is self:
+            self._mutation_version = 0
+        if args or kwargs:
+            source = dict(*args, **kwargs)
+            for key, value in source.items():
+                dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+
+    def _touch(self):
+        # Nested tracked containers point at the same root, so any edit
+        # invalidates fingerprints computed for the complete dynamic config.
+        self._root._mutation_version += 1
+
+    def __setitem__(self, key, value):
+        dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def __delitem__(self, key):
+        dict.__delitem__(self, key)
+        self._touch()
+
+    def clear(self):
+        if self:
+            dict.clear(self)
+            self._touch()
+
+    def pop(self, key, *args):
+        value = dict.pop(self, key, *args)
+        self._touch()
+        return value
+
+    def popitem(self):
+        value = dict.popitem(self)
+        self._touch()
+        return value
+
+    def setdefault(self, key, default=None):
+        if key in self:
+            return self[key]
+        self[key] = default
+        return self[key]
+
+    def update(self, *args, **kwargs):
+        source = dict(*args, **kwargs)
+        for key, value in source.items():
+            self[key] = value
+
+    def __ior__(self, other):
+        self.update(other)
+        return self
+
+    def __deepcopy__(self, memo):
+        payload = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
+        result = _track_dynamic_value(payload, None)
+        memo[id(self)] = result
+        return result
+
+
+class _TrackedList(list):
+    """List counterpart to ``_TrackedDict`` for nested dynamic values."""
+
+    def __init__(self, iterable=(), *, _root=None):
+        self._root = _root
+        if self._root is None:
+            self._root = self
+            self._mutation_version = 0
+        list.__init__(self, (_track_dynamic_value(value, _root) for value in iterable))
+
+    def _touch(self):
+        # Use the root token so edits below a dynamic mapping are visible to
+        # the same cache-key check as edits to the mapping itself.
+        self._root._mutation_version += 1
+
+    def __setitem__(self, index, value):
+        if isinstance(index, slice):
+            value = [_track_dynamic_value(item, self._root) for item in value]
+        else:
+            value = _track_dynamic_value(value, self._root)
+        list.__setitem__(self, index, value)
+        self._touch()
+
+    def __delitem__(self, index):
+        list.__delitem__(self, index)
+        self._touch()
+
+    def append(self, value):
+        list.append(self, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def extend(self, values):
+        list.extend(self, (_track_dynamic_value(value, self._root) for value in values))
+        self._touch()
+
+    def insert(self, index, value):
+        list.insert(self, index, _track_dynamic_value(value, self._root))
+        self._touch()
+
+    def pop(self, index=-1):
+        value = list.pop(self, index)
+        self._touch()
+        return value
+
+    def remove(self, value):
+        list.remove(self, value)
+        self._touch()
+
+    def clear(self):
+        if self:
+            list.clear(self)
+            self._touch()
+
+    def reverse(self):
+        list.reverse(self)
+        self._touch()
+
+    def sort(self, *args, **kwargs):
+        list.sort(self, *args, **kwargs)
+        self._touch()
+
+    def __deepcopy__(self, memo):
+        result = _track_dynamic_value([copy.deepcopy(value, memo) for value in self], None)
+        memo[id(self)] = result
+        return result
+
+
+def _track_dynamic_value(value, root):
+    # Preserve the user's container shape while sharing one mutation counter
+    # across every mutable descendant.
+    if isinstance(value, dict):
+        tracked = _TrackedDict(_root=root)
+        root = tracked._root
+        for key, item in value.items():
+            dict.__setitem__(tracked, key, _track_dynamic_value(item, root))
+        return tracked
+    if isinstance(value, (list, tuple)):
+        tracked = _TrackedList(_root=root)
+        root = tracked._root
+        for item in value:
+            list.append(tracked, _track_dynamic_value(item, root))
+        return tracked if isinstance(value, list) else tuple(tracked)
+    return value
+
+
+class _BoundedLRUCache(OrderedDict):
+    """Small bounded LRU map; callers serialize access with the cache lock."""
+
+    def __init__(self, maxsize: int):
+        super().__init__()
+        self.maxsize = int(maxsize)
+
+    def __getitem__(self, key):
+        value = super().__getitem__(key)
+        super().__delitem__(key)
+        super().__setitem__(key, value)
+        return value
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def clear(self):
+        super().clear()
+        identity_cache = globals().get("_DYNAMIC_IDENTITY_CACHE")
+        if identity_cache is not None and self is not identity_cache:
+            OrderedDict.clear(identity_cache)
+
+    def __setitem__(self, key, value):
+        if key in self:
+            super().__delitem__(key)
+        super().__setitem__(key, value)
+        while len(self) > self.maxsize:
+            self.popitem(last=False)
+
+
+_DYNAMIC_PATTERN_CACHE_MAXSIZE = 256
+_DYNAMIC_OVERRIDE_CACHE_MAXSIZE = 8192
+_DYNAMIC_EXACT_LOOKUP_CACHE_MAXSIZE = 256
+_DYNAMIC_ALL_EXACT_CACHE_MAXSIZE = 256
+_DYNAMIC_REGEX_PATTERN_CACHE_MAXSIZE = 256
+_DYNAMIC_IDENTITY_CACHE_MAXSIZE = 128
+
+# All five public/internal caches are bounded and keyed by content
+# fingerprints.  The identity cache below is only a bounded acceleration layer;
+# correctness always requires object identity *and* a mutation token match.
+_DYNAMIC_PATTERN_CACHE = _BoundedLRUCache(_DYNAMIC_PATTERN_CACHE_MAXSIZE)
+_DYNAMIC_OVERRIDE_CACHE = _BoundedLRUCache(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE)
+_DYNAMIC_EXACT_LOOKUP_CACHE = _BoundedLRUCache(_DYNAMIC_EXACT_LOOKUP_CACHE_MAXSIZE)
+_DYNAMIC_ALL_EXACT_CACHE = _BoundedLRUCache(_DYNAMIC_ALL_EXACT_CACHE_MAXSIZE)
+_DYNAMIC_REGEX_PATTERN_CACHE = _BoundedLRUCache(_DYNAMIC_REGEX_PATTERN_CACHE_MAXSIZE)
+_DYNAMIC_IDENTITY_CACHE = _BoundedLRUCache(_DYNAMIC_IDENTITY_CACHE_MAXSIZE)
+_DYNAMIC_CACHE_LOCK = threading.RLock()
+
+
+def _dynamic_value_fingerprint(value):
+    """Return a hashable, ordered fingerprint that preserves nested value types."""
+    if isinstance(value, Mapping):
+        # Mapping insertion order is significant: the first matching pattern
+        # wins, including for an otherwise equivalent reordered dictionary.
+        return ("mapping", tuple(
+            (_dynamic_value_fingerprint(key), _dynamic_value_fingerprint(item))
+            for key, item in value.items()
+        ))
+    if isinstance(value, list):
+        return ("list", tuple(_dynamic_value_fingerprint(item) for item in value))
+    if isinstance(value, tuple):
+        return ("tuple", tuple(_dynamic_value_fingerprint(item) for item in value))
+    if isinstance(value, set):
+        return ("set", tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)))
+    if isinstance(value, frozenset):
+        return ("frozenset", tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)))
+    if isinstance(value, Enum):
+        enum_type = type(value)
+        return ("enum", enum_type.__module__, enum_type.__qualname__, _dynamic_value_fingerprint(value.value))
+    if value is None or isinstance(value, (bool, int, float, str, bytes)):
+        return (type(value).__name__, value)
+    value_type = type(value)
+    return ("object", value_type.__module__, value_type.__qualname__, repr(value))
+
+
+def _dynamic_fingerprint(dynamic):
+    # The canonical representation preserves order, nested content, and value
+    # types before hashing it into a compact cache key.
+    canonical = repr(_dynamic_value_fingerprint(dynamic)).encode("utf-8")
+    return hashlib.sha256(canonical).digest()
+
+
+def _dynamic_cache_key(dynamic):
+    if isinstance(dynamic, _TrackedDict):
+        identity_key = id(dynamic)
+        version = dynamic._root._mutation_version
+        with _DYNAMIC_CACHE_LOCK:
+            record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
+            if record is not None and record[0] is dynamic and record[1] == version:
+                # This cache only avoids re-fingerprinting an unchanged object;
+                # identity and version checks keep it from affecting correctness.
+                return record[2]
+            fingerprint = _dynamic_fingerprint(dynamic)
+            _DYNAMIC_IDENTITY_CACHE[identity_key] = (dynamic, version, fingerprint)
+            return fingerprint
+    # Untracked mappings are still correct; they simply pay fingerprint cost
+    # because arbitrary in-place mutations cannot expose a safe O(1) token.
+    return _dynamic_fingerprint(dynamic)
 
 def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     """If `raw` is a regex that matches a single literal string, return that string."""
@@ -1634,39 +1879,47 @@ def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
 
 
 def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
-    """Return compiled PCRE patterns (plus optional exact literal) for a dynamic dict, caching by object id."""
+    """Return compiled patterns keyed by the dynamic mapping's content."""
 
-    cache_key = id(dynamic)
-    patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
-    if patterns is not None:
+    cache_key = _dynamic_cache_key(dynamic)
+    with _DYNAMIC_CACHE_LOCK:
+        patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
+        if patterns is not None:
+            return patterns
+
+        patterns = []
+        exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
+        regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
+        all_exact = True
+        if dynamic is not None:
+            for index, (pattern, overrides) in enumerate(dynamic.items()):
+                # Cache entries must own their override snapshots.  Otherwise
+                # mutating a tracked mapping would also mutate an old
+                # fingerprint's compiled-plan payload.
+                override_snapshot = copy.deepcopy(dict(overrides))
+                is_negative = pattern.startswith("-:")
+                raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+                exact_literal = _extract_literal_regex_pattern(raw)
+                if exact_literal is None:
+                    all_exact = False
+                    try:
+                        compiled = pcre.compile(raw)
+                    except Exception as exc:
+                        raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
+                    regex_patterns.append((index, is_negative, compiled, override_snapshot))
+                else:
+                    compiled = None
+                    if exact_literal not in exact_lookup:
+                        exact_lookup[exact_literal] = (
+                            index,
+                            False if is_negative else override_snapshot,
+                        )
+                patterns.append((is_negative, compiled, override_snapshot, exact_literal, index))
+        _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
+        _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
+        _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
+        _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
         return patterns
-
-    patterns = []
-    exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
-    regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
-    all_exact = True
-    if dynamic is not None:
-        for index, (pattern, overrides) in enumerate(dynamic.items()):
-            is_negative = pattern.startswith("-:")
-            raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
-            exact_literal = _extract_literal_regex_pattern(raw)
-            if exact_literal is None:
-                all_exact = False
-                try:
-                    compiled = pcre.compile(raw)
-                except Exception as exc:
-                    raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
-                regex_patterns.append((index, is_negative, compiled, overrides))
-            else:
-                compiled = None
-                if exact_literal not in exact_lookup:
-                    exact_lookup[exact_literal] = (index, False if is_negative else dict(overrides))
-            patterns.append((is_negative, compiled, overrides, exact_literal, index))
-    _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
-    _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
-    _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
-    _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
-    return patterns
 
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
@@ -1677,36 +1930,38 @@ def _resolve_dynamic_override(
     if dynamic is None:
         return None
 
-    cache_key = id(dynamic)
-    override_cache = _DYNAMIC_OVERRIDE_CACHE.setdefault(cache_key, {})
-    cached = override_cache.get(module_name, _DYNAMIC_NO_MATCH)
-    if cached is not _DYNAMIC_NO_MATCH:
-        return cached
+    cache_key = _dynamic_cache_key(dynamic)
+    lookup_key = (cache_key, module_name)
+    with _DYNAMIC_CACHE_LOCK:
+        cached = _DYNAMIC_OVERRIDE_CACHE.get(lookup_key, _DYNAMIC_NO_MATCH)
+        if cached is not _DYNAMIC_NO_MATCH:
+            return cached
 
     _get_dynamic_patterns(dynamic)
 
-    # Fast path: every pattern is an exact literal module name.
-    if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
-        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
+    with _DYNAMIC_CACHE_LOCK:
+        # Fast path: every pattern is an exact literal module name.
+        if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
+            exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
+            matched = exact_entry[1] if exact_entry is not None else None
+            _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
+            return matched
+
+        # Mixed fallback: find the earliest matching pattern among exact
+        # literals (O(1) lookup) and ordered regex patterns.
+        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
+        best_index = exact_entry[0] if exact_entry is not None else None
         matched = exact_entry[1] if exact_entry is not None else None
-        override_cache[module_name] = matched
+
+        for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE.get(cache_key, []):
+            if best_index is not None and index > best_index:
+                break
+            if compiled.match(module_name):
+                matched = False if is_negative else copy.deepcopy(dict(overrides))
+                break
+
+        _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
         return matched
-
-    # Mixed fallback: find the earliest matching pattern among exact literals
-    # (O(1) lookup) and ordered regex patterns.
-    exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key].get(module_name)
-    best_index = exact_entry[0] if exact_entry is not None else None
-    matched = exact_entry[1] if exact_entry is not None else None
-
-    for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE[cache_key]:
-        if best_index is not None and index > best_index:
-            break
-        if compiled.match(module_name):
-            matched = False if is_negative else dict(overrides)
-            break
-
-    override_cache[module_name] = matched
-    return matched
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """
@@ -2635,6 +2890,13 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @property
     def runtime_bits(self):
         return self.bits
+
+    def __setattr__(self, name, value):
+        # Wrap assignment as well as construction so later ``config.dynamic =``
+        # edits receive the same mutation tracking as the initial value.
+        if name == "dynamic" and value is not None and isinstance(value, dict) and not isinstance(value, _TrackedDict):
+            value = _track_dynamic_value(value, None)
+        super().__setattr__(name, value)
 
     def _resolve_checkpoint_format(self) -> FORMAT:
         self.format = _normalize_format(self.format)

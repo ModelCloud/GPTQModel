@@ -13,6 +13,9 @@ from gptqmodel.quantization.config import (
     _DYNAMIC_OVERRIDE_CACHE,
     _DYNAMIC_PATTERN_CACHE,
     _DYNAMIC_REGEX_PATTERN_CACHE,
+    _DYNAMIC_IDENTITY_CACHE,
+    _DYNAMIC_PATTERN_CACHE_MAXSIZE,
+    _DYNAMIC_OVERRIDE_CACHE_MAXSIZE,
 )
 
 
@@ -23,6 +26,7 @@ def _clear_dynamic_caches():
     _DYNAMIC_REGEX_PATTERN_CACHE.clear()
     _DYNAMIC_OVERRIDE_CACHE.clear()
     _DYNAMIC_ALL_EXACT_CACHE.clear()
+    _DYNAMIC_IDENTITY_CACHE.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -151,3 +155,57 @@ def test_dynamic_large_exact_config_no_pcre_regression():
             f"pcre.Pattern.match called {mock_match.call_count} times for a "
             f"fully exact dynamic config; expected zero calls."
         )
+
+
+def test_dynamic_same_content_shares_fingerprint_cache_and_order_does_not():
+    first = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {"bits": 2, "nested": {"kind": "a"}},
+        "+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 8},
+    }
+    same = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {"bits": 2, "nested": {"kind": "a"}},
+        "+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 8},
+    }
+    reordered = dict(reversed(list(first.items())))
+
+    cfg = QuantizeConfig(dynamic=first, bits=4, group_size=128, sym=False)
+    same_cfg = QuantizeConfig(dynamic=same, bits=4, group_size=128, sym=False)
+    reordered_cfg = QuantizeConfig(dynamic=reordered, bits=4, group_size=128, sym=False)
+
+    assert cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 2
+    assert same_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 2
+    assert reordered_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 8
+    assert len(_DYNAMIC_PATTERN_CACHE) == 2
+
+
+def test_dynamic_in_place_nested_mutation_invalidates_regex_snapshot():
+    dynamic = {"+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 2, "meta": {"tag": "old"}}}
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+    module_name = "model.layers.0.mlp.proj"
+    assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 2
+
+    cfg.dynamic[next(iter(cfg.dynamic))]["bits"] = 8
+    assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 8
+
+
+def test_dynamic_caches_are_bounded():
+    for index in range(_DYNAMIC_PATTERN_CACHE_MAXSIZE + 32):
+        cfg = QuantizeConfig(
+            dynamic={f"+:^module\\.{index}$": {"bits": 2}},
+            bits=4,
+            group_size=128,
+            sym=False,
+        )
+        cfg.dynamic_get(f"module.{index}", "bits", cfg.bits)
+
+    lookup_cfg = QuantizeConfig(
+        dynamic={r"+:^module\.": {"bits": 2}},
+        bits=4,
+        group_size=128,
+        sym=False,
+    )
+    for index in range(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE + 32):
+        assert lookup_cfg.dynamic_get(f"module.{index}", "bits", lookup_cfg.bits) == 2
+
+    assert len(_DYNAMIC_PATTERN_CACHE) <= _DYNAMIC_PATTERN_CACHE_MAXSIZE
+    assert len(_DYNAMIC_OVERRIDE_CACHE) <= _DYNAMIC_OVERRIDE_CACHE_MAXSIZE

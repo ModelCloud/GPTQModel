@@ -281,7 +281,7 @@ class TestMoEModuleName:
         MockModel = TestMockMoEModel.create_mock_model_class(None)
         moe_module_name = MockModel.get_moe_module_name()
 
-        assert moe_module_name == []
+        assert moe_module_name is None
 
 
 class TestMoEFlagConstant:

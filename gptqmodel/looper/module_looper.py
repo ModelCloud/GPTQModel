@@ -488,7 +488,7 @@ class ModuleLooper(DeviceAssignmentState):
                 hooks = self.module_looper.gptq_model.moe_lifecycle_hooks
                 self.moe_block = hooks.get_moe_block_for_subset(
                     self.module,
-                    self.module_looper.gptq_model.__class__,
+                    self.module_looper.gptq_model,
                     current_subset=self.current_subset,
                 )
 
@@ -509,7 +509,7 @@ class ModuleLooper(DeviceAssignmentState):
                             subset=self.current_subset,
                             ordered_module_names=self.ordered_module_names,
                             original_forward=self.moe_forward_original,
-                            model_class=self.module_looper.gptq_model.__class__,
+                            model_class=self.module_looper.gptq_model,
                             module_looper=self.module_looper,  # Pass for TLS-based hooks pausing
                             moe_block_prefix=moe_block_prefix,
                             replica_module=self.module,  # Pass replica for device-correct module resolution
@@ -928,7 +928,7 @@ class ModuleLooper(DeviceAssignmentState):
         # Check if this module contains an MoE block
         moe_block = hooks.get_moe_block_for_subset(
             module,
-            self.gptq_model.__class__,
+            self.gptq_model,
             current_subset=current_subset,
         )
         if moe_block is None:
