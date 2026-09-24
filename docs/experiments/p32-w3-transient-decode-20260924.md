@@ -34,6 +34,12 @@ transient route measured 86.032 µs for gate and 80.128 µs for down in this
 50-round stress pass; the respective compressed controls were 140.496 and
 150.832 µs. This is still only two projections on one model snapshot.
 
+A 16-row FP64 dot oracle on layer-0 metadata found identical error for both
+routes, as expected from their FP32 bitwise parity. Gate maximum/mean absolute
+errors were `1.330e-5`/`1.723e-6`; down errors were
+`8.680e-5`/`1.384e-5`. This bounds the arithmetic difference for the sampled
+rows, not the full model's post-quantization task score.
+
 At 15 full-row gate and down calls per B128 prefill Step, simply replacing
 the two kernel pairs could save roughly 1.9 ms of summed GPU kernel time.
 That is a projection-only estimate, **not** an end-to-end prediction: overlap,

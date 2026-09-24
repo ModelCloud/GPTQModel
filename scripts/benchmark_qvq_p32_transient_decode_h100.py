@@ -27,6 +27,7 @@ def main() -> None:
     parser.add_argument("--projection", choices=("gate", "down"), required=True)
     parser.add_argument("--layer", type=int, default=0)
     parser.add_argument("--input-scale", type=float, default=0.02)
+    parser.add_argument("--fp64-oracle-rows", type=int, default=16)
     parser.add_argument("--rounds", type=int, default=100)
     args = parser.parse_args()
 
@@ -104,6 +105,18 @@ def main() -> None:
         "max_absolute_difference": float(abs_delta.max().item()),
         "relative_l2_difference": relative_l2,
     }
+    if args.fp64_oracle_rows:
+        if args.fp64_oracle_rows < 0 or args.fp64_oracle_rows > m:
+            raise ValueError("FP64 oracle row count must be in [0, 960]")
+        reference = torch.mm(
+            x[:args.fp64_oracle_rows].double(), decoded.double())
+        control_error = (baseline_out[:args.fp64_oracle_rows].double() - reference).abs()
+        candidate_error = (candidate_out[:args.fp64_oracle_rows].double() - reference).abs()
+        accuracy["fp64_oracle_rows"] = args.fp64_oracle_rows
+        accuracy["fp64_control_max_abs_error"] = float(control_error.max().item())
+        accuracy["fp64_candidate_max_abs_error"] = float(candidate_error.max().item())
+        accuracy["fp64_control_mean_abs_error"] = float(control_error.mean().item())
+        accuracy["fp64_candidate_mean_abs_error"] = float(candidate_error.mean().item())
 
     graphs = []
     graph_outputs = []
