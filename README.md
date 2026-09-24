@@ -21,7 +21,7 @@
 
 ## Latest News 🗞️🚀
 
-* 09/23/2026 7.6.0-dev `main`: ✨ Added `qwen3_vl_moe` and `olmoe` quantization support.
+* 09/23/2026 7.6.0-dev `main`: ✨ Added `exaone4_5`, `qwen3_vl_moe` and `olmoe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `agnes` quantization support.
 * 09/15/2026 [7.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.5.0): ✨ Added K2 Horizon, Qwen-Drive, Nanbeige, and Diffusion Gemma quantization support. Improved GPTQ/AWQ/ParoQuant reliability with device-aware kernel selection, safer CUDA dispatch and empty-input handling, partial packing-word support, correct calibration masks, model-specific Paro layer replay, and hardened Machete runtime caching. Loading and saving now validate GPTQ `qweight` and offload metadata, while InternVL image preprocessing keeps `torchvision` optional. Quantization finalization is faster and startup version reporting is more accurate.
@@ -154,7 +154,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Dots1 | `dots1` |
 | Dream | `dream` |
 | ERNIE 4.5 / MoE / VL MoE | `ernie4_5`, `ernie4_5_moe`, `ernie4_5_moe_vl`, `ernie4_5_vl_moe` |
-| EXAONE 3 / 4 | `exaone`, `exaone4` |
+| EXAONE 3 / 4 / 4.5 | `exaone`, `exaone4`, `exaone4_5` |
 | Falcon / Falcon H1 / Falcon Mamba | `falcon`, `falcon_h1`, `falcon_mamba` |
 | Gemma 1-4 / 3n / Unified | `gemma`, `gemma2`, `gemma3`, `gemma3_text`, `gemma3n`, `gemma3n_text`, `gemma4`, `gemma4_text`, `gemma4_unified`, `gemma4_unified_text` |
 | GLM / GLM4 / GLM4V / GLM5 / OCR / ASR | `glm`, `glm4`, `glm4_moe`, `glm4_moe_lite`, `glm4v`, `glm4v_moe`, `glm4v_moe_text`, `glm5_next`, `glm_moe_dsa`, `glm_ocr`, `glmasr` |

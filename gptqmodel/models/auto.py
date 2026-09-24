@@ -94,7 +94,7 @@ from .definitions.ernie4_5 import Ernie4_5QModel  # noqa: E402
 from .definitions.ernie4_5_moe import Ernie4_5_MoeQModel  # noqa: E402
 from .definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel  # noqa: E402
 from .definitions.exaone import ExaOneQModel  # noqa: E402
-from .definitions.exaone4 import Exaone4QModel  # noqa: E402
+from .definitions.exaone4 import Exaone4QModel, Exaone4_5QModel  # noqa: E402
 from .definitions.falcon_h1 import FalconH1QModel  # noqa: E402
 from .definitions.falcon_mamba import FalconMambaQModel  # noqa: E402
 from .definitions.gemma2 import Gemma2QModel  # noqa: E402
@@ -347,6 +347,8 @@ MODEL_MAP = {
     "dots1": Dots1QModel,
     "exaone": ExaOneQModel,
     "exaone4": Exaone4QModel,
+    "exaone4_5": Exaone4_5QModel,
+    "exaone4_5_text": Exaone4QModel,
     "grinmoe": GrinMoeQModel,
     "mllama": MLlamaQModel,
     "mllama_text_model": MLlamaTextQModel,
