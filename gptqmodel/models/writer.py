@@ -799,7 +799,7 @@ def ModelWriter(cls):
         if runtime_config is not None and hasattr(runtime_config, "tie_word_embeddings"):
             model_config["tie_word_embeddings"] = bool(runtime_config.tie_word_embeddings)
         with open(config_path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(model_config, indent=2, sort_keys=True) + "\n")
+            handle.write(json.dumps(model_config, indent=2) + "\n")
 
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_local_path)
@@ -982,6 +982,20 @@ def ModelWriter(cls):
 
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
+
+        if quantize_config.dynamic:
+            # Transformers sorts nested keys, but dynamic rules use first-match order.
+            quant_config_path = os.path.join(save_dir, "quantize_config.json")
+            with open(quant_config_path, "r", encoding="utf-8") as handle:
+                saved_quant_config = json.load(handle)
+            config_path = os.path.join(save_dir, "config.json")
+            with open(config_path, "r", encoding="utf-8") as handle:
+                saved_config = json.load(handle)
+            saved_config["quantization_config"]["dynamic"] = (
+                saved_quant_config["dynamic"]
+            )
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(saved_config, indent=2) + "\n")
 
         def debug_saved_config(path):
             # List all files in the directory
