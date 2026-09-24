@@ -497,6 +497,99 @@ cudaError_t build_direct_grouped_gate_up_plan(
 
 }  // namespace
 
+#if QVQ_WGMMA_BITS_ONLY == 6
+extern "C" __attribute__((visibility("default")))
+uint32_t qvq_p32_w3_decode_raw_abi_version(void) {
+  return QVQ_P32_W3_DECODE_RAW_ABI_VERSION;
+}
+
+static bool valid_w3_decode_config(const QvqP32W3DecodeRawConfig* c) {
+  return c != nullptr &&
+      c->abi_version == QVQ_P32_W3_DECODE_RAW_ABI_VERSION &&
+      c->struct_bytes == sizeof(*c) && c->transition_bits == 6 &&
+      c->output_layout == 0 &&
+      ((c->k == 2048 && c->n == 8192) ||
+       (c->k == 8192 && c->n == 2048));
+}
+
+extern "C" __attribute__((visibility("default")))
+int qvq_p32_w3_decode_raw_launch(
+    const void* window, const void* bank_ids, const void* levels,
+    const void* bank_alt_id, void* decoded,
+    const QvqP32W3DecodeRawConfig* c, void* cuda_stream,
+    char* error, uint64_t error_capacity) {
+  if (!valid_w3_decode_config(c) || window == nullptr ||
+      bank_ids == nullptr || levels == nullptr || bank_alt_id == nullptr ||
+      decoded == nullptr) {
+    return fail(error, error_capacity, "invalid W3 P32 decoder raw config");
+  }
+  HopperGroupedP32DecodeParams params{};
+  params.segment_count = 1;
+  params.n64_end[0] = static_cast<int>(c->n / 64);
+  const bool transpose_output = false;
+  qvq_p32_window_decode_fp16_kernel<6>
+      <<<dim3(c->n / 64, c->k / 256, 1), kThreads, 0,
+         static_cast<cudaStream_t>(cuda_stream)>>>(
+          static_cast<const uint32_t*>(window),
+          static_cast<const uint8_t*>(bank_ids),
+          static_cast<const Element*>(levels),
+          static_cast<Element*>(decoded), params,
+          static_cast<int>(c->k), static_cast<int>(c->n),
+          transpose_output, static_cast<const uint8_t*>(bank_alt_id));
+  const cudaError_t status = cudaGetLastError();
+  return status == cudaSuccess ? 0
+      : fail(error, error_capacity, cudaGetErrorString(status));
+}
+
+extern "C" __attribute__((visibility("default")))
+int qvq_p32_w3_decode_raw_launch_plan(
+    const void* window, const void* bank_ids, const void* levels,
+    const void* bank_alt_id, void* decoded,
+    const QvqP32W3DecodeRawConfig* c, qvq_p32_launch_plan* plan,
+    char* error, uint64_t error_capacity) {
+  if (!valid_w3_decode_config(c) || plan == nullptr || window == nullptr ||
+      bank_ids == nullptr || levels == nullptr || bank_alt_id == nullptr ||
+      decoded == nullptr) {
+    return fail(error, error_capacity, "invalid W3 P32 decoder launch plan");
+  }
+  std::memset(plan, 0, sizeof(*plan));
+  PlanStorageWriter storage{
+      reinterpret_cast<uint8_t*>(plan->host_storage),
+      sizeof(plan->host_storage)};
+  auto* launch = &plan->launches[0];
+  launch->kernel_symbol = reinterpret_cast<const void*>(
+      qvq_p32_window_decode_fp16_kernel<6>);
+  launch->kernel_name = "qvq_p32_w3_decode_fp16";
+  launch->grid_x = c->n / 64;
+  launch->grid_y = c->k / 256;
+  launch->grid_z = 1;
+  launch->block_x = kThreads;
+  launch->block_y = 1;
+  launch->block_z = 1;
+  HopperGroupedP32DecodeParams params{};
+  params.segment_count = 1;
+  params.n64_end[0] = static_cast<int>(c->n / 64);
+  const int k = static_cast<int>(c->k);
+  const int n = static_cast<int>(c->n);
+  const bool transpose_output = false;
+  int arg = 0;
+  set_device_arg(launch, arg++, window);
+  set_device_arg(launch, arg++, bank_ids);
+  set_device_arg(launch, arg++, levels);
+  set_device_arg(launch, arg++, decoded);
+  if (!set_host_arg(launch, arg++, &storage, params) ||
+      !set_host_arg(launch, arg++, &storage, k) ||
+      !set_host_arg(launch, arg++, &storage, n) ||
+      !set_host_arg(launch, arg++, &storage, transpose_output)) {
+    return fail(error, error_capacity, "W3 P32 decoder launch plan overflow");
+  }
+  set_device_arg(launch, arg++, bank_alt_id);
+  launch->arg_count = arg;
+  plan->launch_count = 1;
+  return 0;
+}
+#endif
+
 #if !defined(QVQ_WGMMA_BITS_ONLY)
 extern "C" uint32_t qvq_p32_wgmma_raw_abi_version(void) {
   return QVQ_WGMMA_RAW_ABI_VERSION;

@@ -10,7 +10,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 QVQ_PAYLOAD = (
     "gptqmodel_ext/qvq/BUILD.bazel",
     "gptqmodel_ext/qvq/qvq_hadamard_input_raw_abi.cu",
@@ -35,19 +34,19 @@ def git(root: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def first_int(pattern: str, text: str, label: str) -> int:
-    match = re.search(pattern, text, re.S)
+    match = re.search(pattern, text, re.DOTALL)
     if not match:
         raise ValueError(f"cannot find {label}")
     return int(match.group(1))
 
 
 def bool_expression(text: str, name: str) -> str:
-    match = re.search(rf"const bool {re.escape(name)}\s*=\s*(.*?);", text, re.S)
+    match = re.search(rf"const bool {re.escape(name)}\s*=\s*(.*?);", text, re.DOTALL)
     return re.sub(r"\s+", " ", match.group(1)).strip() if match else ""
 
 
-def c_config_fields(header: str) -> list[str]:
-    match = re.search(r"typedef struct \{(.*?)\}\s*QvqP32WgmmaRawConfig", header, re.S)
+def c_config_fields(header: str, name: str = "QvqP32WgmmaRawConfig") -> list[str]:
+    match = re.search(rf"typedef struct \{{([^{{}}]*)\}}\s*{re.escape(name)}", header, re.DOTALL)
     if not match:
         raise ValueError("cannot find QVQ raw config struct")
     fields: list[str] = []
@@ -57,10 +56,10 @@ def c_config_fields(header: str) -> list[str]:
 
 
 def zig_config_fields(loader: str) -> list[str]:
-    match = re.search(r"const P32WgmmaRawConfig = extern struct \{(.*?)\n\};", loader, re.S)
+    match = re.search(r"const P32WgmmaRawConfig = extern struct \{(.*?)\n\};", loader, re.DOTALL)
     if not match:
         raise ValueError("cannot find ZML raw config struct")
-    return re.findall(r"^\s*([a-z_]+):\s*u32", match.group(1), re.M)
+    return re.findall(r"^\s*([a-z_]+):\s*u32", match.group(1), re.MULTILINE)
 
 
 def main() -> int:
@@ -100,6 +99,33 @@ def main() -> int:
         zig_fields = zig_config_fields(loader)
         check("ABI struct layout", qvq_fields == zig_fields, f"QVQ={qvq_fields}, Zig={zig_fields}")
 
+        decode_abi = first_int(r"QVQ_P32_W3_DECODE_RAW_ABI_VERSION\s+(\d+)u?", header, "W3 decoder ABI")
+        zig_decode_abi = first_int(
+            r"pub const P32W3DecodeRawConfig = extern struct \{.*?abi_version: u32 = (\d+)",
+            loader,
+            "ZML W3 decoder ABI",
+        )
+        decode_fields = c_config_fields(header, "QvqP32W3DecodeRawConfig")
+        zig_decode_struct = re.search(
+            r"pub const P32W3DecodeRawConfig = extern struct \{(.*?)\n\};", loader, re.DOTALL
+        )
+        zig_decode_fields = (
+            re.findall(r"^\s*([a-z_]+):\s*u32", zig_decode_struct.group(1), re.MULTILINE)
+            if zig_decode_struct else []
+        )
+        decode_symbols = (
+            "qvq_p32_w3_decode_raw_abi_version",
+            "qvq_p32_w3_decode_raw_launch",
+            "qvq_p32_w3_decode_raw_launch_plan",
+        )
+        check(
+            "W3 transient decoder ABI and loader",
+            decode_abi == zig_decode_abi == 1
+            and decode_fields == zig_decode_fields
+            and all(symbol in header and symbol in raw and symbol in loader for symbol in decode_symbols),
+            f"versions={decode_abi}/{zig_decode_abi}, fields={decode_fields}/{zig_decode_fields}",
+        )
+
         input_abi = first_int(
             r"QVQ_HADAMARD_INPUT_RAW_ABI_VERSION\s+(\d+)u?",
             input_header,
@@ -108,18 +134,18 @@ def main() -> int:
         input_struct = re.search(
             r"typedef struct \{(.*?)\}\s*QvqHadamardInputRawConfig",
             input_header,
-            re.S,
+            re.DOTALL,
         )
         zig_input_struct = re.search(
             r"pub const HadamardInputRawConfig = extern struct \{(.*?)\n\};",
             loader,
-            re.S,
+            re.DOTALL,
         )
         if not input_struct or not zig_input_struct:
             raise ValueError("cannot find input Hadamard raw ABI structs")
         input_fields = re.findall(r"uint32_t\s+([a-z_]+);", input_struct.group(1))
         zig_input_fields = re.findall(
-            r"^\s*([a-z_]+):\s*u32", zig_input_struct.group(1), re.M
+            r"^\s*([a-z_]+):\s*u32", zig_input_struct.group(1), re.MULTILINE
         )
         zig_input_abi = first_int(
             r"pub const HadamardInputRawConfig = extern struct \{.*?abi_version: u32 = (\d+)",
