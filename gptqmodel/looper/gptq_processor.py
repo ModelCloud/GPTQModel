@@ -338,16 +338,16 @@ class GPTQProcessor(LoopProcessor):
         # it is conservative, model-verified, and copies finalized Hessians only
         # when matching accumulation settings are proven.
         self._shared_input_plan: Optional[SharedInputPlan] = None
-        self._shared_input_plan_owner: Optional[type] = None
+        self._shared_input_plan_owner: Optional[Any] = None
         self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
 
     def _resolve_shared_input_plan(self, model) -> Optional[SharedInputPlan]:
-        """Derive the verified shared-input plan once per model class."""
+        """Derive the verified shared-input plan once per model instance."""
 
-        owner = type(model)
+        owner = model
         with self._shared_input_plan_lock:
             if self._shared_input_plan_owner is owner:
                 return self._shared_input_plan

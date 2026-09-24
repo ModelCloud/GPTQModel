@@ -128,6 +128,7 @@ from .definitions.internlm import InternLMQModel  # noqa: E402
 from .definitions.internlm2 import InternLM2QModel  # noqa: E402
 from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
 from .definitions.interns1 import InternS1QModel  # noqa: E402
+from .definitions.internvl import InternVLQModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
 from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
@@ -268,6 +269,7 @@ MODEL_MAP = {
     "internlm2": InternLM2QModel,
     "intern_s2_preview": InternS2PreviewQModel,
     "interns1": InternS1QModel,
+    "internvl": InternVLQModel,
     "internvl_chat": InternVLChatQModel,
     "hrm_text": HrmTextQModel,
     "hunyuan_v1_dense": HunYuanDenseV1QModel,

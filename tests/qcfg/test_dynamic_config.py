@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import pickle
 from unittest.mock import patch
 
 import pcre
@@ -9,7 +10,7 @@ import pytest
 import torch
 
 import gptqmodel.quantization.config as config_module
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import QuantizeConfig, _TrackedDict, _TrackedList
 
 
 def _clear_dynamic_caches():
@@ -163,3 +164,161 @@ def test_dynamic_mixed_ordering_respected():
     }
     cfg2 = QuantizeConfig(dynamic=dynamic_reordered, bits=4, group_size=128, sym=False)
     assert cfg2.dynamic_get("model.layers.5.mlp.gate_proj", "bits", cfg2.bits) == 2
+
+
+def test_dynamic_large_exact_config_no_pcre_regression():
+    """Reproduce a large exact-only dynamic config and verify zero pcre.match calls."""
+    pattern_count = 2270
+    module_count = 36432
+
+    # Build a set of exact patterns and a larger set of module names to resolve.
+    patterns = {
+        _exact_pattern(f"model.layers.{i}.mlp.down_proj"): {"bits": 2}
+        for i in range(pattern_count)
+    }
+    cfg = QuantizeConfig(dynamic=patterns, bits=4, group_size=128, sym=False)
+
+    modules = []
+    for i in range(module_count):
+        layer = i % 1000
+        proj = i % 3
+        modules.append(f"model.layers.{layer}.mlp.proj.{proj}")
+    # Make sure a subset actually matches so the test is realistic.
+    for i in range(min(pattern_count, module_count)):
+        modules[i] = f"model.layers.{i}.mlp.down_proj"
+
+    with patch.object(pcre.Pattern, "match") as mock_match:
+        for name in modules:
+            cfg.dynamic_get(name, "bits", cfg.bits)
+        assert mock_match.call_count == 0, (
+            f"pcre.Pattern.match called {mock_match.call_count} times for a "
+            f"fully exact dynamic config; expected zero calls."
+        )
+
+
+def test_dynamic_equal_content_keeps_rule_order():
+    first = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {"bits": 2, "nested": {"kind": "a"}},
+        "+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 8},
+    }
+    same = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {"bits": 2, "nested": {"kind": "a"}},
+        "+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 8},
+    }
+    reordered = dict(reversed(list(first.items())))
+
+    cfg = QuantizeConfig(dynamic=first, bits=4, group_size=128, sym=False)
+    same_cfg = QuantizeConfig(dynamic=same, bits=4, group_size=128, sym=False)
+    reordered_cfg = QuantizeConfig(dynamic=reordered, bits=4, group_size=128, sym=False)
+
+    assert cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 2
+    assert same_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 2
+    assert reordered_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 8
+    assert len(config_module._DYNAMIC_CACHE) == 3
+
+
+def test_dynamic_results_are_defensive_copies_across_equal_configs():
+    dynamic = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {
+            "bits": 2,
+            "nested": {"tag": "original"},
+        }
+    }
+    cfg_a = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+    cfg_b = QuantizeConfig(dynamic={**dynamic}, bits=4, group_size=128, sym=False)
+    module_name = "model.layers.0.mlp.proj"
+
+    result_a = cfg_a.dynamic_get(module_name)
+    result_a["bits"] = 8
+    result_a["nested"]["tag"] = "changed"
+
+    assert cfg_b.dynamic_get(module_name) == {
+        "bits": 2,
+        "nested": {"tag": "original"},
+    }
+
+    nested_b = cfg_b.dynamic_get(module_name, "nested")
+    nested_b["tag"] = "changed-again"
+    assert cfg_a.dynamic_get(module_name, "nested") == {"tag": "original"}
+
+
+def test_dynamic_in_place_nested_mutation_invalidates_regex_snapshot():
+    dynamic = {"+:^model\\.layers\\.\\d+\\.mlp\\.proj$": {"bits": 2, "meta": {"tag": "old"}}}
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+    module_name = "model.layers.0.mlp.proj"
+    assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 2
+
+    cfg.dynamic[next(iter(cfg.dynamic))]["bits"] = 8
+    assert cfg.dynamic_get(module_name, "bits", cfg.bits) == 8
+
+
+def test_dynamic_edits_preserve_negative_override_and_invalidate_nested_results():
+    pattern = r"+:^model\.layers\.0\.mlp\.proj$"
+    name = "model.layers.0.mlp.proj"
+    cfg = QuantizeConfig(dynamic={pattern: {"meta": [{"tag": "old"}]}})
+
+    assert cfg.dynamic_get(name, "meta") == [{"tag": "old"}]
+    cfg.dynamic[pattern]["meta"][0]["tag"] = "new"
+    assert cfg.dynamic_get(name, "meta") == [{"tag": "new"}]
+
+    cfg.dynamic[pattern] = False
+    assert cfg.dynamic_get(name, "bits", cfg.bits) is False
+    cfg.dynamic[pattern] = {"bits": 3}
+    assert cfg.dynamic_get(name, "bits", cfg.bits) == 3
+
+
+def test_dynamic_config_pickle_round_trip_preserves_nested_mutation_tracking():
+    pattern = r"+:^model\.layers\.\d+\.mlp\.proj$"
+    cfg = QuantizeConfig(dynamic={pattern: {"bits": 2, "meta": [{"tag": "old"}]}})
+    restored = pickle.loads(pickle.dumps(cfg))
+    module_name = "model.layers.0.mlp.proj"
+
+    assert restored.dynamic_get(module_name, "bits", restored.bits) == 2
+    restored.dynamic[pattern]["meta"][0]["tag"] = "new"
+    restored.dynamic[pattern]["bits"] = 8
+    assert restored.dynamic_get(module_name) == {"bits": 8, "meta": [{"tag": "new"}]}
+    assert cfg.dynamic_get(module_name) == {"bits": 2, "meta": [{"tag": "old"}]}
+
+
+def test_standalone_tracked_list_nested_edits_touch_its_root():
+    tracked = _TrackedList([{"tag": "old"}])
+    restored = pickle.loads(pickle.dumps(tracked))
+
+    tracked[0]["tag"] = "new"
+    restored[0]["tag"] = "restored"
+    assert tracked._mutation_version == 1
+    assert restored._mutation_version == 1
+
+
+def test_dynamic_caches_are_bounded():
+    for index in range(config_module._DYNAMIC_CACHE_MAX_CONFIGS + 32):
+        cfg = QuantizeConfig(
+            dynamic={f"+:^module\\.{index}$": {"bits": 2}},
+            bits=4,
+            group_size=128,
+            sym=False,
+        )
+        cfg.dynamic_get(f"module.{index}", "bits", cfg.bits)
+
+    lookup_cfg = QuantizeConfig(
+        dynamic={r"+:^module\.": {"bits": 2}},
+        bits=4,
+        group_size=128,
+        sym=False,
+    )
+    for index in range(1024):
+        assert lookup_cfg.dynamic_get(f"module.{index}", "bits", lookup_cfg.bits) == 2
+
+    assert len(config_module._DYNAMIC_CACHE) <= config_module._DYNAMIC_CACHE_MAX_CONFIGS
+    assert config_module._DYNAMIC_CACHE_OVERRIDE_COUNT <= config_module._DYNAMIC_CACHE_MAX_OVERRIDES
+
+
+def test_tracked_containers_preserve_content_comparison_semantics():
+    tracked_dict = _TrackedDict({"key": [1, 2]})
+    assert tracked_dict == {"key": [1, 2]}
+    with pytest.raises(TypeError):
+        hash(tracked_dict)
+
+    tracked_list = _TrackedList([1, 2])
+    assert tracked_list == [1, 2]
+    assert tracked_list != [1, 3]

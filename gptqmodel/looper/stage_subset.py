@@ -935,7 +935,7 @@ def _run_single_subset_pass(
         if hooks is not None:
             moe_block = hooks.get_moe_block_for_subset(
                 module,
-                looper.gptq_model.__class__,
+                looper.gptq_model,
                 current_subset=subset,
             )
             if moe_block is not None:

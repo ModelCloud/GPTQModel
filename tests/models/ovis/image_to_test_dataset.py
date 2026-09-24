@@ -13,6 +13,7 @@ from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
 from gptqmodel.models.definitions.interns1 import InternS1QModel
+from gptqmodel.models.definitions.internvl import InternVLQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
@@ -226,6 +227,7 @@ def get_calib_dataset(model):
         or isinstance(model, MiniCPMV4_6QModel)
         or isinstance(model, InternS1QModel)
         or isinstance(model, InternS2PreviewQModel)
+        or isinstance(model, InternVLQModel)
         or isinstance(model, InternVLChatQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
