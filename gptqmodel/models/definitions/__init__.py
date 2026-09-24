@@ -29,7 +29,7 @@ from .diffusion_gemma import DiffusionGemmaQModel
 from .dots1 import Dots1QModel
 from .dream import DreamQModel
 from .exaone import ExaOneQModel
-from .exaone4 import Exaone4QModel
+from .exaone4 import Exaone4QModel, Exaone4_5QModel
 from .ernie4_5 import Ernie4_5QModel
 from .ernie4_5_moe import Ernie4_5_MoeQModel
 from .ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
