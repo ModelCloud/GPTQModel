@@ -222,6 +222,40 @@ def test_effective_module_tree_is_instance_local_and_deeply_immutable(order):
     assert first.extract_layers_node() == [expected_paths[first_key]]
 
 
+def test_fresh_quantized_load_planning_binds_auto_detected_tree():
+    selected_tree = [
+        "model",
+        "layers",
+        "#",
+        {"self_attn": ("q_proj:0", "o_proj:1")},
+    ]
+    model = nn.Module()
+    model.config = SimpleNamespace(model_type="unknown", selected_tree=selected_tree)
+    model.model = nn.Module()
+    model.model.layers = nn.ModuleList([_BranchALayer()])
+    qcfg = SimpleNamespace(method=METHOD.GPTQ, dynamic=None, adapter=None)
+
+    effective_tree = _AutoDetectedTreeQModel._resolve_effective_module_tree(model, qcfg)
+
+    assert _AutoDetectedTreeQModel.module_tree is None
+    with _AutoDetectedTreeQModel._module_tree_context(effective_tree):
+        assert _AutoDetectedTreeQModel.extract_layers_node() == ["model.layers"]
+        assert _AutoDetectedTreeQModel.simple_layer_modules(model.config, qcfg) == [
+            ["self_attn.q_proj"],
+            ["self_attn.o_proj"],
+        ]
+
+    # The loader passes this same tree into the final instance, so detection
+    # does not need to run again after quantized modules replace the linears.
+    instance = _AutoDetectedTreeQModel(
+        model,
+        quantized=True,
+        quantize_config=qcfg,
+        effective_module_tree=effective_tree,
+    )
+    assert instance.extract_layers_node() == ["model.layers"]
+
+
 def test_module_tree_method_override_is_copy_on_write_for_dense_moe_tree():
     gptq = _init_tree_qmodel(_MethodOverrideTreeQModel, None, METHOD.GPTQ)
     awq = _init_tree_qmodel(_MethodOverrideTreeQModel, None, METHOD.AWQ)

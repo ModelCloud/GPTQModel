@@ -1948,6 +1948,14 @@ def _resolve_dynamic_override(
 ) -> Union[Dict[str, Any], bool, None]:
     """Return the first matching dynamic override dict, False for negative, or None."""
 
+    def clone_result(value):
+        # Dynamic configs with equal content intentionally share cache entries.
+        # Never expose a cached mutable payload to callers, including nested
+        # containers returned by dynamic_get(module, key).
+        if value is None or value is False:
+            return value
+        return copy.deepcopy(value)
+
     if dynamic is None:
         return None
 
@@ -1956,7 +1964,7 @@ def _resolve_dynamic_override(
     with _DYNAMIC_CACHE_LOCK:
         cached = _DYNAMIC_OVERRIDE_CACHE.get(lookup_key, _DYNAMIC_NO_MATCH)
         if cached is not _DYNAMIC_NO_MATCH:
-            return cached
+            return clone_result(cached)
 
     _get_dynamic_patterns(dynamic)
 
@@ -1966,7 +1974,7 @@ def _resolve_dynamic_override(
             exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
             matched = exact_entry[1] if exact_entry is not None else None
             _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
-            return matched
+            return clone_result(matched)
 
         # Mixed fallback: find the earliest matching pattern among exact
         # literals (O(1) lookup) and ordered regex patterns.
@@ -1982,7 +1990,7 @@ def _resolve_dynamic_override(
                 break
 
         _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
-        return matched
+        return clone_result(matched)
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
     """

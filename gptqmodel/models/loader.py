@@ -1628,23 +1628,30 @@ def ModelLoader(cls):
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
-            extract_layers_node = cls.extract_layers_node()
-            # Get the first layer to determine layer type
-            layers, _ = get_layers_with_prefixes(model, extract_layers_node)
+            effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
+            if effective_module_tree is None:
+                raise ValueError(
+                    f"Unsupport model_type {config.model_type}, and failed to auto-detect module tree for model {model}"
+                )
 
-            modules = find_modules(model)
-            ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
-            input_embeddings = model.get_input_embeddings()
-            output_embeddings = model.get_output_embeddings()
-            input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
-            output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
-            input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
-                model_dir=model_local_path,
-                input_embed_name=input_embed_name,
-                output_embed_name=output_embed_name,
-            )
+            with cls._module_tree_context(effective_module_tree):
+                extract_layers_node = cls.extract_layers_node()
+                # Get the first layer to determine layer type
+                layers, _ = get_layers_with_prefixes(model, extract_layers_node)
 
-            simple_layer_modules = cls.simple_layer_modules(config, qcfg)
+                modules = find_modules(model)
+                ignore_modules = [cls.lm_head] + cls.get_base_modules(model)
+                input_embeddings = model.get_input_embeddings()
+                output_embeddings = model.get_output_embeddings()
+                input_embed_name = get_module_name(model, input_embeddings) if input_embeddings is not None else None
+                output_embed_name = get_module_name(model, output_embeddings) if output_embeddings is not None else None
+                input_embed_quantized, output_embed_quantized = is_embeddings_module_quantized(
+                    model_dir=model_local_path,
+                    input_embed_name=input_embed_name,
+                    output_embed_name=output_embed_name,
+                )
+
+                simple_layer_modules = cls.simple_layer_modules(config, qcfg)
             for name in list(modules.keys()):
                 if input_embed_quantized and name == input_embed_name:
                     continue
@@ -2084,6 +2091,7 @@ def ModelLoader(cls):
             load_quantized_model=True,
             trust_remote_code=trust_remote_code,
             model_local_path=model_local_path,
+            effective_module_tree=effective_module_tree,
         )
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)

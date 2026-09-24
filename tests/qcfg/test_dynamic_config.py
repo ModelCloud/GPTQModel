@@ -8,18 +8,18 @@ import pcre
 import pytest
 
 from gptqmodel.quantization.config import (
-    QuantizeConfig,
     _DYNAMIC_ALL_EXACT_CACHE,
     _DYNAMIC_EXACT_LOOKUP_CACHE,
-    _DYNAMIC_OVERRIDE_CACHE,
-    _DYNAMIC_PATTERN_CACHE,
-    _DYNAMIC_REGEX_PATTERN_CACHE,
     _DYNAMIC_IDENTITY_CACHE,
-    _DYNAMIC_PATTERN_CACHE_MAXSIZE,
+    _DYNAMIC_OVERRIDE_CACHE,
     _DYNAMIC_OVERRIDE_CACHE_MAXSIZE,
+    _DYNAMIC_PATTERN_CACHE,
+    _DYNAMIC_PATTERN_CACHE_MAXSIZE,
+    _DYNAMIC_REGEX_PATTERN_CACHE,
+    QuantizeConfig,
+    _dynamic_value_fingerprint,
     _TrackedDict,
     _TrackedList,
-    _dynamic_value_fingerprint,
 )
 
 
@@ -180,6 +180,31 @@ def test_dynamic_same_content_shares_fingerprint_cache_and_order_does_not():
     assert same_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 2
     assert reordered_cfg.dynamic_get("model.layers.0.mlp.proj", "bits", cfg.bits) == 8
     assert len(_DYNAMIC_PATTERN_CACHE) == 2
+
+
+def test_dynamic_results_are_defensive_copies_across_equal_configs():
+    dynamic = {
+        "+:^model\\.layers\\.0\\.mlp\\.proj$": {
+            "bits": 2,
+            "nested": {"tag": "original"},
+        }
+    }
+    cfg_a = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+    cfg_b = QuantizeConfig(dynamic={**dynamic}, bits=4, group_size=128, sym=False)
+    module_name = "model.layers.0.mlp.proj"
+
+    result_a = cfg_a.dynamic_get(module_name)
+    result_a["bits"] = 8
+    result_a["nested"]["tag"] = "changed"
+
+    assert cfg_b.dynamic_get(module_name) == {
+        "bits": 2,
+        "nested": {"tag": "original"},
+    }
+
+    nested_b = cfg_b.dynamic_get(module_name, "nested")
+    nested_b["tag"] = "changed-again"
+    assert cfg_a.dynamic_get(module_name, "nested") == {"tag": "original"}
 
 
 def test_dynamic_in_place_nested_mutation_invalidates_regex_snapshot():

@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
-import copy
 import contextvars
+import copy
 import json
 import os
 import threading
 import time
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from itertools import count
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -451,6 +451,7 @@ class BaseQModel(nn.Module):
         model_local_path: str = None,
         # Lazy turtle is the checkpoint-backed source used to materialize shell modules on demand.
         turtle_model: Optional[LazyTurtle] = None,
+        effective_module_tree: Optional[Any] = None,
     ):
         super().__init__()
 
@@ -458,16 +459,11 @@ class BaseQModel(nn.Module):
         # declaration owned by the model definition class.  ``module_tree`` is
         # retained on the instance as a compatibility alias; class access is
         # still the static declaration.
-        quant_method = getattr(quantize_config, "method", None) if quantize_config else None
-        effective_tree = copy.deepcopy(type(self).module_tree)
-        if quant_method is not None:
-            override = (self.module_tree_overrides or {}).get(quant_method)
-            if override is not None and effective_tree is not None:
-                log.info(f"Module Tree: overridden by METHOD.{quant_method.upper()}")
-                effective_tree = apply_module_tree_override(effective_tree, override)
-
-            if effective_tree is None:
-                effective_tree = self._auto_detect_module_tree(model, quant_method)
+        effective_tree = (
+            copy.deepcopy(effective_module_tree)
+            if effective_module_tree is not None
+            else type(self)._resolve_effective_module_tree(model, quantize_config, detector=self)
+        )
 
         # If module_tree is still None after auto-detection, raise an error indicating unsupported model type
         if effective_tree is None:
@@ -549,6 +545,34 @@ class BaseQModel(nn.Module):
         log.info(f"Kernel: loaded -> `[{', '.join(cls.__name__ for cls in self.kernels())}]`")
 
         self._auto_configure_lookahead()
+
+    @classmethod
+    def _resolve_effective_module_tree(cls, model, quantize_config, detector=None):
+        """Resolve a model tree before a loader needs to plan against it."""
+        quant_method = getattr(quantize_config, "method", None) if quantize_config else None
+        effective_tree = copy.deepcopy(cls.module_tree)
+        if quant_method is not None:
+            override = (getattr(cls, "module_tree_overrides", None) or {}).get(quant_method)
+            if override is not None and effective_tree is not None:
+                log.info(f"Module Tree: overridden by METHOD.{quant_method.upper()}")
+                effective_tree = apply_module_tree_override(effective_tree, override)
+
+            if effective_tree is None:
+                if detector is None:
+                    detector = cls.__new__(cls)
+                effective_tree = detector._auto_detect_module_tree(model, quant_method)
+
+        return copy.deepcopy(effective_tree)
+
+    @classmethod
+    @contextmanager
+    def _module_tree_context(cls, module_tree):
+        """Temporarily bind a loader's effective tree to class-level planners."""
+        token = _ACTIVE_MODULE_TREE.set(module_tree)
+        try:
+            yield
+        finally:
+            _ACTIVE_MODULE_TREE.reset(token)
 
     def __getattribute__(self, name):
         """Make tree-sensitive class methods instance-aware without changing API."""
