@@ -1,8 +1,13 @@
 # W3 M960 transient-decode screen (2026-09-24)
 
 This is an isolated H100 screen, **not** a production route or a qualified
-GSM8K-Platinum result. The current full-suite B128 baseline is 60,362 useful
+GSM8K-Platinum result. The pre-BN128 full-suite B128 baseline was 60,362 useful
 and 69,622 padded prefill tok/s. The goal remains 120,000 padded prefill tok/s.
+
+These figures describe the pre-BN128 screen. The newer qualified pinned B128
+reference is 62,845 useful / 72,486 padded prefill tok/s (1,209/1,209 exact
+streams, 543 correct). Reaching 120,000 padded tok/s from that reference
+requires reducing its 16.012 s cumulative prefill time to at most 9.672 s.
 
 The probe reconstructs the canonical compressed P32 payload into a temporary
 FP16 `[K,N]` matrix on every call, then performs FP16×FP16→FP32 GEMM. It does
@@ -51,8 +56,22 @@ The follow-up branch adds a versioned W3-only framework-neutral decoder ABI
 and one-kernel launch plan, with device-resident bank-alt selection. Its two
 shape tests compare decode+FP32 GEMM bitwise against compressed WGMMA, verify
 the launch plan, reject wrong transition bits, and replay a captured decoder
-after changing the bank-alt tensor. Both tests passed. This ABI is not yet
-wired into ZML/XLA. Promotion still requires exact external admission and
+after changing the bank-alt tensor. Both tests passed. The local follow-up
+branch wires the ABI into ZML; promotion still requires exact external admission and
 launch proof, scratch lifetime checks, every relevant layer's FP32/FP64
 oracle, and the full 1,209-row B128 quality and useful plus padded throughput
 gate. No second model-weight copy may be cached.
+
+An updated layer-0 probe against the merged compressed geometry (gate
+BM160/BN128, down BM80/BN64) again passed bitwise FP32 output and changed-input
+graph replay, with identical sampled FP64-oracle errors between arms:
+
+| Projection | Current compressed WGMMA | Transient decode + GEMM | Local speedup |
+| --- | ---: | ---: | ---: |
+| Gate K2048→N8192 | 126.208 µs | 85.728 µs | 1.47× |
+| Down K8192→N2048 | 151.680 µs | 79.840 µs | 1.90× |
+
+At 15 prefill calls per projection, these local medians imply about 1.69 ms
+of summed kernel opportunity per request, not a 120k end-to-end prediction.
+The production path still needs exact XLA launch proof, measured scratch
+lifetime, and full-suite validation before promotion.

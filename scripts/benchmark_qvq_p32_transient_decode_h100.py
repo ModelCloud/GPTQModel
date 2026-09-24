@@ -40,6 +40,7 @@ def main() -> None:
 
     import torch
     from safetensors import safe_open
+
     from gptqmodel.quantization.qvq_codecs import pgc16_levels_for_version
 
     if torch.cuda.get_device_capability() != (9, 0):
@@ -60,7 +61,7 @@ def main() -> None:
     baseline_out = torch.empty((m, n), dtype=torch.float32, device="cuda")
     config = RawConfig(3, ctypes.sizeof(RawConfig), m, k, n, 6, 1, 5,
                        160 if args.projection == "gate" else 80,
-                       64)
+                       128 if args.projection == "gate" else 64)
 
     library = ctypes.CDLL(str(args.library.resolve()), mode=ctypes.RTLD_LOCAL)
     launch = library.qvq_p32_wgmma_raw_launch

@@ -187,8 +187,8 @@ def test_raw_abi_matches_public_wgmma_and_graph_replays_changed_input(
     graph.reset()
 
 
-@pytest.mark.parametrize("k,n,block_m", [(2048, 8192, 160), (8192, 2048, 80)])
-def test_w3_decoder_raw_abi_matches_wgmma_and_replays_dynamic_alt_id(k, n, block_m):
+@pytest.mark.parametrize("k,n,block_m,block_n", [(2048, 8192, 160, 128), (8192, 2048, 80, 64)])
+def test_w3_decoder_raw_abi_matches_wgmma_and_replays_dynamic_alt_id(k, n, block_m, block_n):
     library = _raw_library()
     library.qvq_p32_w3_decode_raw_abi_version.restype = ctypes.c_uint32
     assert library.qvq_p32_w3_decode_raw_abi_version() == 1
@@ -219,7 +219,7 @@ def test_w3_decoder_raw_abi_matches_wgmma_and_replays_dynamic_alt_id(k, n, block
     compressed = torch.empty((m, n), device=device, dtype=torch.float32)
     config = RawDecodeConfig(1, ctypes.sizeof(RawDecodeConfig), k, n, 6, 0)
     core = RawConfig(3, ctypes.sizeof(RawConfig), m, k, n, 6, 1, 5,
-                     block_m, 64)
+                     block_m, block_n)
     error = ctypes.create_string_buffer(4096)
     plan = LaunchPlan()
     status = launch_plan(_ptr(window), _ptr(banks), _ptr(levels),
