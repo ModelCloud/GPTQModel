@@ -1,6 +1,6 @@
 ---
 name: qvq-zml-kernel-contract
-description: Synchronize QVQ hardware-optimized kernel families with ZML/StableHLO/XLA ABI loading, admission, autotuning, cache identity, and runtime dispatch. Use whenever QVQ adds or changes a CUDA kernel, ABI, shape specialization, tuning control, workspace rule, or graph behavior, and whenever ZML changes its QVQ pin, custom calls, shape policy, or inference integration.
+description: Synchronize QVQ hardware-optimized kernels with ZML/StableHLO/XLA admission, autotuning, and runtime dispatch; catch silent dense fallbacks. Use when QVQ or ZML changes a CUDA family, ABI, shape specialization, tuning control, pin, custom call, or inference integration.
 ---
 
 # QVQ-ZML Kernel Contract
@@ -49,6 +49,19 @@ When QVQ changes, inspect and update all affected layers in the same workstream:
 7. Inference-runner defaults only when production policy changes. Keep core integration in QVQ/ZML.
 
 Do not broaden admission beyond the ABI predicate. Do not leave a newly optimized family hidden behind the portable fallback without an explicit matrix disposition.
+
+## Catch XLA's silent dense fallback
+
+XLA may decline an optimized QVQ composite and compile a numerically valid dense GEMM instead. A passing output oracle, selected Zig config, native CUDA microbenchmark, or nonzero aggregate QVQ counter can therefore give false confidence about **this projection**.
+
+For every new or changed algorithm, shape, or BM/BN/split geometry:
+
+1. Compare the exact admissible tuple in three places: ZML's emitted attributes, XLA's composite-rewriter predicate, and the pinned QVQ raw-ABI predicate. Include M/K/N, transition bits, grouping, split/workspace, and architecture. A difference needs an explicit `intentionally-unwired` disposition, not a presumed fast path.
+2. On a warmed production-shape run, inspect compiled HLO/custom-call evidence **and** projection-specific kernel names or scoped dispatch counters. Verify the expected optimized calls occur and dense fallback calls for the same projection do not. Other legitimate dense GEMMs in the model do not count as failures.
+3. Exercise a near-miss tuple that XLA must reject; verify its documented fallback or error. This distinguishes a real admission test from a check that always passes.
+4. If the optimized route cannot be distinguished from fallback at runtime, add scoped telemetry or a trace before claiming an end-to-end speedup. Record expected and observed call counts, not only latency or logits.
+
+The M960 W3 gate incident is the concrete failure: QVQ accepted BM160/R10, but XLA originally rejected it and emitted `sm90_xmma_gemm_f32f32`; after matching XLA admission, the warm trace showed 15 native R10 gate calls and no dense fallback for that gate. Treat the static audit as an early warning, not as a substitute for the runtime proof above.
 
 ## Validate reachability, quality, and speed
 
