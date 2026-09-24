@@ -20,6 +20,7 @@
 </p>
 
 ## Latest News
+* 09/24/2026 `main`: ✨ Added Transformers-native `internvl` quantization support.
 
 * 09/18/2026 `main`: The complete QVQ W3/P32 GSQ optimization effort is summarized in a reusable [math, CUDA, and performance retrospective](docs/gsq_optimization_retrospective.md), including the exact sparse-Fisher derivation, staged quality gains, 9.5x layer-fit and 17.6x projection-fit journeys, graph/fusion/layout techniques, rejected shortcuts, and the handoff to QVQ + YAQA optimization.
 * 09/18/2026 `main`: Experimental QVQ W3/P32 GSQ MLP hard checkpoints now cast reconstructed weights to the Llama BF16 parameter dtype once per checkpoint and reuse the selected checkpoint for final reporting. Canonical MLP fitting improves 1.005x--1.008x on H100, with bit-for-bit model states and identical held-out losses. See [the configuration and promotion guide](docs/gsq.md).
@@ -516,7 +517,7 @@ Selected public references where teams or companies explicitly mention GPT-QMode
 | ERNIE 4.5 / MoE / VL MoE      | ✅ | GLM 4/4V/4.5V/4.6V/5/5.1/OCR/ASR | ✅ | GLM4 MoE / Lite / 4.5V MoE | ✅ | MiniCPM 3/O/V/V 4_6             | ✅ | PanGu-α                | ✅ |
 | XVERSE                        | ✅ | Brumby                          | ✅ | Hymba      | ✅ | Mistral                         | ✅ | Qwen 1/2/3/3.5         | ✅ |
 | MiniMax M2/M3                 | ✅ | AfMoE                           | ✅ | Bailing-MoE | ✅ | LFM2 / LFM2-VL / LFM2-MoE       | ✅ | Marin                  | ✅ |
-| InternVL Chat                 | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
+| InternVL 3 / Chat             | ✅ | Laguna                          | ✅ | Mimo / Mimo V2 | ✅ | Zamba / Zamba2                  | ✅ | Intern S1 / S2 Preview | ✅ |
 | HunYuan V1 Dense / MoE        | ✅ | HunYuanOCR / HY-V3              | ✅ | LocateAnything | ✅ | North Micro Vision              | ✅ |  Mage-VL                      | ✅ |
 | Muse Glimmer        | ✅ |   SmolLM3                         | ✅ | Ouro | ✅ | Spark-X2.5 | ✅ | K2-Horizon             | ✅ |
 
