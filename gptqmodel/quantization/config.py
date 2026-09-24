@@ -1611,6 +1611,11 @@ class _TrackedDict(dict):
         # invalidates fingerprints computed for the complete dynamic config.
         self._root._mutation_version += 1
 
+    def __eq__(self, other):
+        return dict.__eq__(self, other)
+
+    __hash__ = None
+
     def __setitem__(self, key, value):
         dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
         self._touch()
@@ -1670,6 +1675,12 @@ class _TrackedList(list):
         # Use the root token so edits below a dynamic mapping are visible to
         # the same cache-key check as edits to the mapping itself.
         self._root._mutation_version += 1
+
+    def __eq__(self, other):
+        return list.__eq__(self, other)
+
+    def __ne__(self, other):
+        return list.__ne__(self, other)
 
     def __setitem__(self, index, value):
         if isinstance(index, slice):
@@ -1801,20 +1812,30 @@ def _dynamic_value_fingerprint(value):
         return ("mapping", tuple(
             (_dynamic_value_fingerprint(key), _dynamic_value_fingerprint(item))
             for key, item in value.items()
-        ))
+        ), None, None)
     if isinstance(value, list):
-        return ("list", tuple(_dynamic_value_fingerprint(item) for item in value))
+        return ("list", tuple(_dynamic_value_fingerprint(item) for item in value), None, None)
     if isinstance(value, tuple):
-        return ("tuple", tuple(_dynamic_value_fingerprint(item) for item in value))
+        return ("tuple", tuple(_dynamic_value_fingerprint(item) for item in value), None, None)
     if isinstance(value, set):
-        return ("set", tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)))
+        return ("set", tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)), None, None)
     if isinstance(value, frozenset):
-        return ("frozenset", tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)))
+        return (
+            "frozenset",
+            tuple(sorted((_dynamic_value_fingerprint(item) for item in value), key=repr)),
+            None,
+            None,
+        )
     if isinstance(value, Enum):
         enum_type = type(value)
-        return ("enum", enum_type.__module__, enum_type.__qualname__, _dynamic_value_fingerprint(value.value))
+        return (
+            "enum",
+            enum_type.__module__,
+            enum_type.__qualname__,
+            _dynamic_value_fingerprint(value.value),
+        )
     if value is None or isinstance(value, (bool, int, float, str, bytes)):
-        return (type(value).__name__, value)
+        return (type(value).__name__, value, None, None)
     value_type = type(value)
     return ("object", value_type.__module__, value_type.__qualname__, repr(value))
 

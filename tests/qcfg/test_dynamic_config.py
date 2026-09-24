@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+from enum import Enum
 from unittest.mock import patch
 
 import pcre
@@ -16,6 +17,9 @@ from gptqmodel.quantization.config import (
     _DYNAMIC_IDENTITY_CACHE,
     _DYNAMIC_PATTERN_CACHE_MAXSIZE,
     _DYNAMIC_OVERRIDE_CACHE_MAXSIZE,
+    _TrackedDict,
+    _TrackedList,
+    _dynamic_value_fingerprint,
 )
 
 
@@ -209,3 +213,55 @@ def test_dynamic_caches_are_bounded():
 
     assert len(_DYNAMIC_PATTERN_CACHE) <= _DYNAMIC_PATTERN_CACHE_MAXSIZE
     assert len(_DYNAMIC_OVERRIDE_CACHE) <= _DYNAMIC_OVERRIDE_CACHE_MAXSIZE
+
+
+def test_tracked_containers_preserve_content_comparison_semantics():
+    tracked_dict = _TrackedDict({"key": [1, 2]})
+    assert tracked_dict == {"key": [1, 2]}
+    with pytest.raises(TypeError):
+        hash(tracked_dict)
+
+    tracked_list = _TrackedList([1, 2])
+    assert tracked_list == [1, 2]
+    assert tracked_list != [1, 3]
+
+
+def test_dynamic_value_fingerprint_has_fixed_shape_and_type_metadata():
+    class FirstEnum(Enum):
+        VALUE = 1
+
+    class SecondEnum(Enum):
+        VALUE = 1
+
+    class FirstObject:
+        def __repr__(self):
+            return "same-repr"
+
+    class SecondObject:
+        def __repr__(self):
+            return "same-repr"
+
+    values = [
+        {"key": [1]},
+        [1],
+        (1,),
+        {1},
+        frozenset({1}),
+        FirstEnum.VALUE,
+        None,
+        FirstObject(),
+    ]
+    fingerprints = [_dynamic_value_fingerprint(value) for value in values]
+
+    assert all(len(fingerprint) == 4 for fingerprint in fingerprints)
+    assert fingerprints[0][0] == "mapping"
+    assert fingerprints[0][1][0][1][0] == "list"
+    assert _dynamic_value_fingerprint({"first": 1, "second": 2}) != _dynamic_value_fingerprint(
+        {"second": 2, "first": 1}
+    )
+    assert fingerprints[1] != fingerprints[2]
+    assert fingerprints[5][0] == "enum"
+    assert fingerprints[5][1:3] == (FirstEnum.__module__, FirstEnum.__qualname__)
+    assert _dynamic_value_fingerprint(FirstEnum.VALUE) != _dynamic_value_fingerprint(SecondEnum.VALUE)
+    assert fingerprints[7][1:] == (FirstObject.__module__, FirstObject.__qualname__, "same-repr")
+    assert _dynamic_value_fingerprint(FirstObject()) != _dynamic_value_fingerprint(SecondObject())
