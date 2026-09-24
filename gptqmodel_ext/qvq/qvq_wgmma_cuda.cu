@@ -180,10 +180,11 @@ template <
     int N64BlocksPerCta = 1,
     int RowTilesPerCta = 1>
 struct alignas(128) P32WgmmaTmaSharedStorageFor {
-  // The compressed M960 W3 row-five path trades double buffering for a
+  // The compressed M960 W2/W3 row-five path trades double buffering for a
   // third resident CTA. Other geometries keep the established two stages.
   static constexpr int kStages =
-      TransitionBits == kW3TransitionBits && N64BlocksPerCta == 1 &&
+      (TransitionBits == 4 || TransitionBits == kW3TransitionBits) &&
+              N64BlocksPerCta == 1 &&
               RowTilesPerCta == 5
           ? 1
           : kTmaStages;
