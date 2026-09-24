@@ -197,6 +197,7 @@ def test_raw_abi_bm64_m128_is_down_projection_only():
     "k,n,bits,block_m,block_n",
     [(2048, 512, 5, 80, 64), (2048, 2048, 5, 80, 64),
      (2048, 8192, 4, 80, 64), (2048, 8192, 6, 96, 64),
+     (8192, 2048, 6, 160, 64),
      (2048, 2048, 4, 64, 128),
      (2048, 8192, 6, 80, 128)],
 )
@@ -228,6 +229,7 @@ def test_raw_abi_m960_rejects_uncompiled_row_geometry(k, n, bits, block_m, block
         (960, 5, 2048, 512, 2.5, 64, 64, 15),
         (960, 5, 2048, 512, 3.5, 64, 64, 15),
         (960, 5, 2048, 8192, 3, 80, 64, 12),
+        (960, 5, 2048, 8192, 3, 160, 64, 6),
         (960, 5, 2048, 8192, 3, 64, 64, 15),
         (960, 5, 2048, 8192, 3, 64, 128, 15),
         (960, 5, 8192, 2048, 3, 80, 64, 12),
@@ -287,7 +289,7 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
     with torch.cuda.stream(stream), torch.no_grad():
         expected = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=64 if block_m == 80 else block_m, block_n=64,
+            bank_alt_id=alt_id, block_m=64 if block_m in (80, 160) else block_m, block_n=64,
         )
         if m == 128 and k == 8192 and block_m == 64:
             established = qvq_p32_window_wgmma_tuned(
@@ -306,7 +308,7 @@ def test_raw_abi_direct_rows_matches_public_wgmma_and_needs_no_workspace(
         x.normal_().mul_(0.02)
         expected_changed = qvq_p32_window_wgmma_tuned(
             x, window, levels, banks, bits, out_features=n,
-            bank_alt_id=alt_id, block_m=64 if block_m == 80 else block_m, block_n=64,
+            bank_alt_id=alt_id, block_m=64 if block_m in (80, 160) else block_m, block_n=64,
         )
         if m == 128 and k == 8192 and block_m == 64:
             established_changed = qvq_p32_window_wgmma_tuned(

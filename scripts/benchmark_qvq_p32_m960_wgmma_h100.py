@@ -34,11 +34,11 @@ def main() -> None:
     parser.add_argument("--snapshot-dir", type=Path,
                         help="use layer-0 P32 metadata from this quantized snapshot")
     parser.add_argument("--rounds", type=int, default=50)
-    parser.add_argument("--m960-block-m", type=int, choices=(64, 80), default=64,
-                        help="explicit raw-ABI row geometry: BM64=four, BM80=five M16 rows/CTA")
+    parser.add_argument("--m960-block-m", type=int, choices=(64, 80, 160), default=64,
+                        help="explicit raw-ABI row geometry: BM64=four, BM80=five, BM160=ten M16 rows/CTA")
     parser.add_argument("--m960-block-n", type=int, choices=(64, 128), default=64,
                         help="explicit raw-ABI N geometry: BN128 uses two N64 consumers/CTA")
-    parser.add_argument("--baseline-block-m", type=int, choices=(64, 80),
+    parser.add_argument("--baseline-block-m", type=int, choices=(64, 80, 160),
                         help="raw-baseline BM; defaults to candidate BM")
     parser.add_argument("--baseline-block-n", type=int, choices=(64, 128),
                         help="raw-baseline BN; defaults to candidate BN")

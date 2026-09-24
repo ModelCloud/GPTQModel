@@ -8,12 +8,12 @@
 extern "C" {
 #endif
 
-#define QVQ_HADAMARD_INPUT_RAW_ABI_VERSION 1u
+#define QVQ_HADAMARD_INPUT_RAW_ABI_VERSION 2u
 
-// Framework-neutral N8192 FP16 input preconditioner. All pointers are
-// caller-owned device buffers, including the Mx8192 FP16 workspace. The
-// workspace may alias output exactly: the high kernel loads all 32 inputs
-// owned by each thread before writing their 32 outputs. No host allocation,
+// Framework-neutral N2048/N8192 FP16 input preconditioner. All pointers are
+// caller-owned device buffers, including the MxN FP16 workspace. The
+// workspace may alias output exactly: the high kernel loads all 8/32 inputs
+// owned by each thread before writing its 8/32 outputs. No host allocation,
 // synchronization, autotuning, or hidden stream is permitted.
 typedef struct {
   uint32_t abi_version;

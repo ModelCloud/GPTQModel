@@ -22,10 +22,11 @@ if [ ! -x "$${cuda_home}/bin/nvcc" ]; then
 fi
 cutlass_header=$(location @cutlass//:include/cutlass/cutlass.h)
 cutlass_include=$$(dirname "$$(dirname "$${cutlass_header}")")
+# Give concurrently compiled rate shards separate NVCC intermediate directories.
 "$${cuda_home}/bin/nvcc" \
   -std=c++17 -O3 -lineinfo -cudart=shared --expt-relaxed-constexpr \
   -diag-suppress=20013,20015 -Xcompiler=-fPIC,-fvisibility=hidden \
-  -static-global-template-stub=false --split-compile=4 \
+  -static-global-template-stub=false --split-compile=4 --objdir-as-tempdir \
   -DQVQ_WGMMA_BITS_ONLY=%d \
   -gencode arch=compute_90a,code=sm_90a \
   -I$$(dirname $(location qvq_wgmma_raw_abi.h)) \

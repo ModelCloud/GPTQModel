@@ -231,14 +231,18 @@ __global__ __launch_bounds__(1024) void p32_hadamard_epilogue_kernel(
 
   for (int bit = 32; bit < pair_count; bit <<= 1) {
     __syncthreads();
-    for (int pair = tid; pair < pair_count; pair += blockDim.x) {
-      const int peer = pair ^ bit;
-      if (pair < peer) {
-        const half2 first = packed_values[pair];
-        const half2 second = packed_values[peer];
-        packed_values[pair] = exact_half2_add(first, second);
-        packed_values[peer] = exact_half2_sub(first, second);
-      }
+    // Map each thread directly to one butterfly. This visits exactly the
+    // same lower/upper pairs, but avoids scanning the upper half of each
+    // group only to discard it with a predicate.
+    for (int butterfly = tid; butterfly < pair_count / 2;
+         butterfly += blockDim.x) {
+      const int pair = (butterfly & (bit - 1)) +
+          ((butterfly & ~(bit - 1)) << 1);
+      const int peer = pair + bit;
+      const half2 first = packed_values[pair];
+      const half2 second = packed_values[peer];
+      packed_values[pair] = exact_half2_add(first, second);
+      packed_values[peer] = exact_half2_sub(first, second);
     }
   }
   __syncthreads();
@@ -598,8 +602,10 @@ extern "C" int qvq_p32_hadamard_epilogue(
   const size_t shared_bytes = packed_half2
       ? static_cast<size_t>(size_n) * sizeof(half)
       : static_cast<size_t>(size_n + 2 * (size_n / 32)) * sizeof(half);
+  // M960 has enough independent row CTAs to fill SM90 with eight-warp blocks;
+  // the 256-thread geometry also avoids a mostly empty final CTA wave.
   const int threads = packed_half2
-      ? std::min(size_n / 2, 1024)
+      ? std::min(size_n / 2, size_m == 960 ? 256 : 1024)
       : std::min(size_n, 1024);
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   const cudaError_t attribute_error = cudaFuncSetAttribute(

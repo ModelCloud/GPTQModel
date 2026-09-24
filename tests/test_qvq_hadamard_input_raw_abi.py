@@ -33,7 +33,7 @@ def _library():
         ctypes.c_void_p, ctypes.c_uint64,
     ]
     library.qvq_hadamard_input_raw_launch.restype = ctypes.c_int
-    assert library.qvq_hadamard_input_raw_abi_version() == 1
+    assert library.qvq_hadamard_input_raw_abi_version() == 2
     return library
 
 
@@ -52,17 +52,18 @@ def _reference(input_, scale):
 
 
 @pytest.mark.parametrize("rows", [1, 16, 960])
-def test_hadamard_input_raw_exact_and_changed_input_graph(rows):
+@pytest.mark.parametrize("width", [2048, 8192])
+def test_hadamard_input_raw_exact_and_changed_input_graph(rows, width):
     if not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("SM90 required")
     library = _library()
     generator = torch.Generator().manual_seed(20260924 + rows)
-    input_ = (torch.randn((rows, 8192), generator=generator) * 0.02).half().cuda()
-    scale = (torch.randn((8192,), generator=generator) * 0.1 + 1.0).half().cuda()
+    input_ = (torch.randn((rows, width), generator=generator) * 0.02).half().cuda()
+    scale = (torch.randn((width,), generator=generator) * 0.1 + 1.0).half().cuda()
     output = torch.empty_like(input_)
-    config = Config(1, ctypes.sizeof(Config), rows, 8192)
+    config = Config(2, ctypes.sizeof(Config), rows, width)
     workspace_bytes = library.qvq_hadamard_input_raw_workspace_bytes(ctypes.byref(config))
-    assert workspace_bytes == rows * 8192 * 2
+    assert workspace_bytes == rows * width * 2
     # The production FFI reuses the output as transient workspace.
     workspace = output
     stream = torch.cuda.Stream()
@@ -100,11 +101,11 @@ def test_hadamard_input_raw_exact_and_changed_input_graph(rows):
 @pytest.mark.parametrize(
     "config",
     [
-        Config(1, ctypes.sizeof(Config), 16, 2048),
-        Config(1, ctypes.sizeof(Config), 0, 8192),
-        Config(1, ctypes.sizeof(Config), 961, 8192),
-        Config(2, ctypes.sizeof(Config), 16, 8192),
-        Config(1, 0, 16, 8192),
+        Config(2, ctypes.sizeof(Config), 16, 1024),
+        Config(2, ctypes.sizeof(Config), 0, 8192),
+        Config(2, ctypes.sizeof(Config), 961, 8192),
+        Config(1, ctypes.sizeof(Config), 16, 8192),
+        Config(2, 0, 16, 8192),
     ],
 )
 def test_hadamard_input_raw_rejects_invalid_config(config):

@@ -180,12 +180,13 @@ template <
     int N64BlocksPerCta = 1,
     int RowTilesPerCta = 1>
 struct alignas(128) P32WgmmaTmaSharedStorageFor {
-  // The compressed M960 W2/W3 row-five path trades double buffering for a
-  // third resident CTA. Other geometries keep the established two stages.
+  // The compressed M960 W2/W3 row-reuse paths trade double buffering for
+  // more resident CTAs. Other geometries keep the established two stages.
   static constexpr int kStages =
       (TransitionBits == 4 || TransitionBits == kW3TransitionBits) &&
               N64BlocksPerCta == 1 &&
-              RowTilesPerCta == 5
+              (RowTilesPerCta == 5 ||
+               (TransitionBits == kW3TransitionBits && RowTilesPerCta == 10))
           ? 1
           : kTmaStages;
   typename WgmmaTmaPipelineFor<kStages>::SharedStorage pipeline;
@@ -613,11 +614,7 @@ __device__ __forceinline__ void qvq_p32_window_decode_fragment(
     }
   } else {
     if (wait_before_fragment_reuse) {
-      if constexpr (TransitionBits == 5 || TransitionBits == kW3TransitionBits) {
-        cute::warpgroup_wait<3>();
-      } else {
-        cute::warpgroup_wait<1>();
-      }
+      cute::warpgroup_wait<ReuseWaitGroups>();
     }
     qvq_p32_window_load_fragment_levels<TransitionBits, LevelsInShared>(
         fragment,
@@ -1614,7 +1611,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   static_assert(
       RowTilesPerCta == 1 || RowTilesPerCta == 2 || RowTilesPerCta == 4 ||
           RowTilesPerCta == 5 ||
-          RowTilesPerCta == 8 || RowTilesPerCta == 11);
+          RowTilesPerCta == 8 || RowTilesPerCta == 10 ||
+          RowTilesPerCta == 11);
   constexpr int kWordsPerP32Tile = 4 * TransitionBits;
   using SharedStorage =
       P32WgmmaTmaSharedStorageFor<
@@ -2160,7 +2158,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
               tma_global_input7(cute::_, global_stage),
               tma_shared_input7(cute::_, write_stage));
         }
-        if constexpr (RowTilesPerCta > 8) {
+        if constexpr (RowTilesPerCta >= 10) {
           cute::copy(input_tma.with(*barrier), tma_global_input1(cute::_, global_stage), tma_shared_input1(cute::_, write_stage));
           cute::copy(input_tma.with(*barrier), tma_global_input2(cute::_, global_stage), tma_shared_input2(cute::_, write_stage));
           cute::copy(input_tma.with(*barrier), tma_global_input3(cute::_, global_stage), tma_shared_input3(cute::_, write_stage));
@@ -2170,6 +2168,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
           cute::copy(input_tma.with(*barrier), tma_global_input7(cute::_, global_stage), tma_shared_input7(cute::_, write_stage));
           cute::copy(input_tma.with(*barrier), tma_global_input8(cute::_, global_stage), tma_shared_input8(cute::_, write_stage));
           cute::copy(input_tma.with(*barrier), tma_global_input9(cute::_, global_stage), tma_shared_input9(cute::_, write_stage));
+        }
+        if constexpr (RowTilesPerCta == 11) {
           cute::copy(input_tma.with(*barrier), tma_global_input10(cute::_, global_stage), tma_shared_input10(cute::_, write_stage));
         }
         cute::copy(
@@ -2219,6 +2219,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
   auto fragment_a1 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   auto fragment_a2 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   auto fragment_a3 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a4 = cute::make_tensor<Element>(thread_coordinate_a.shape());
+  auto fragment_a5 = cute::make_tensor<Element>(thread_coordinate_a.shape());
   static_assert(cute::size(decltype(fragment_a0){}) == 8);
 
   auto coordinate_c = cute::make_identity_tensor(cute::make_shape(cute::_64{}, cute::_16{}));
@@ -2269,13 +2271,17 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       constexpr int kDefaultDecodeDepth =
           TransitionBits == 5 || TransitionBits == kW3TransitionBits ? 4 : 2;
       constexpr int kDecodeDepth =
-          N64BlocksPerCta == 2 && TransitionBits == 5
+          RowTilesPerCta == 10 && TransitionBits == kW3TransitionBits
+          ? 6
+          : N64BlocksPerCta == 2 && TransitionBits == 5
           ? kW25N128DecodeDepth
           : kDefaultDecodeDepth;
       auto& fragment_a = (k_block % kDecodeDepth) == 0 ? fragment_a0
           : (k_block % kDecodeDepth) == 1 ? fragment_a1
           : (k_block % kDecodeDepth) == 2 ? fragment_a2
-                                         : fragment_a3;
+          : (k_block % kDecodeDepth) == 3 ? fragment_a3
+          : (k_block % kDecodeDepth) == 4 ? fragment_a4
+                                         : fragment_a5;
       const uint32_t bank_id = s_bank_ids(bank_n16_offset + warp, k_block, read_stage);
       const auto trellis_layout = TrellisSmemLayout{};
       const uint32_t* window_words = shared.trellis.begin() +
@@ -2373,7 +2379,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
             fragment_b7(cute::_, cute::_, k_block, read_stage),
             accumulator7);
       }
-      if constexpr (RowTilesPerCta > 8) {
+      if constexpr (RowTilesPerCta >= 10) {
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b1(cute::_, cute::_, k_block, read_stage), accumulator1);
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b2(cute::_, cute::_, k_block, read_stage), accumulator2);
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b3(cute::_, cute::_, k_block, read_stage), accumulator3);
@@ -2383,6 +2389,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b7(cute::_, cute::_, k_block, read_stage), accumulator7);
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b8(cute::_, cute::_, k_block, read_stage), accumulator8);
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b9(cute::_, cute::_, k_block, read_stage), accumulator9);
+      }
+      if constexpr (RowTilesPerCta == 11) {
         cute::gemm(tiled_mma, fragment_a(cute::_, cute::_, cute::_0{}), fragment_b10(cute::_, cute::_, k_block, read_stage), accumulator10);
       }
       tiled_mma.accumulate_ = cute::GMMA::ScaleOut::One;
@@ -2410,7 +2418,7 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       cute::warpgroup_fence_operand(accumulator6);
       cute::warpgroup_fence_operand(accumulator7);
     }
-    if constexpr (RowTilesPerCta > 8) {
+    if constexpr (RowTilesPerCta >= 10) {
       cute::warpgroup_fence_operand(accumulator1);
       cute::warpgroup_fence_operand(accumulator2);
       cute::warpgroup_fence_operand(accumulator3);
@@ -2420,6 +2428,8 @@ void qvq_p32_window_wgmma_m16_tma_kernel(
       cute::warpgroup_fence_operand(accumulator7);
       cute::warpgroup_fence_operand(accumulator8);
       cute::warpgroup_fence_operand(accumulator9);
+    }
+    if constexpr (RowTilesPerCta == 11) {
       cute::warpgroup_fence_operand(accumulator10);
     }
     pipeline.consumer_release(release_state);
