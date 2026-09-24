@@ -14,7 +14,7 @@ import math
     ("gptq", 2, "gptq"), ("gptq", 3, "gptq"), ("gptq", 4, "gptq"),
     ("gptq", 4, "rtn"), ("awq", 4, "awq"),
 ])
-def test_staged_llama_checkpoint_roundtrip(tmp_path, method, bits, initializer):
+def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, initializer):
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
@@ -32,6 +32,29 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, method, bits, initializer):
                          num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=2)
     config._attn_implementation = "eager"
     model = LlamaForCausalLM(config).half().eval()
+    attention_names = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj")
+    dense_attention = [
+        {f"{name}.weight": layer.get_submodule(name).weight.detach().clone() for name in attention_names}
+        for layer in model.model.layers
+    ]
+    from gptqmodel.quantization import gsq_training as gsq_mod
+
+    original_loss = gsq_mod.reconstruction_stage_loss
+    checked_stages = set()
+
+    def check_dense_teacher(stage, args, kwargs, *, student_weights, teacher_weights=None, output_mask=None):
+        stage_name = "attention" if len(student_weights) == 2 else "mlp"
+        assert stage_name in ("attention", "mlp")
+        assert teacher_weights is not None
+        assert set(teacher_weights) == set(dense_attention[0])
+        if method == "gptq":
+            assert any(all(torch.equal(teacher_weights[name], layer[name]) for name in layer)
+                       for layer in dense_attention)
+        checked_stages.add(stage_name)
+        return original_loss(stage, args, kwargs, student_weights=student_weights,
+                             teacher_weights=teacher_weights, output_mask=output_mask)
+
+    monkeypatch.setattr(gsq_mod, "reconstruction_stage_loss", check_dense_teacher)
     if method == "awq":
         from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
 
@@ -53,6 +76,7 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, method, bits, initializer):
                           tokenizer=tokenizer, model_local_path=str(tmp_path / "dense"))
     wrapper.quantize([{"input_ids": list(range(1, 17))}], backend=BACKEND.TORCH,
                      calibration_data_min_length=1)
+    assert checked_stages == {"attention", "mlp"}
     assert wrapper.quantized
     assert wrapper.quantize_config.gsq_training.enabled
     packed_type = TorchLinear if method == "gptq" else AwqTorchLinear

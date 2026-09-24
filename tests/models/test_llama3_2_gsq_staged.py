@@ -11,11 +11,14 @@ times the earlier 32-record recipe), 10 training epochs, 10 Q/K steps, 128
 GSM8K Platinum rows and 96 generated tokens. The previous 32-record recipe
 produced six concatenated training sequences: its 16-block GPTQ initializer
 scored 36/128, one-epoch staged GPTQ scored 31/128, and two epochs scored
-28/128. With the 128-record recipe (25 concatenated sequences), the matched
-GPTQ initializer scored 40/128, while 10-epoch staged GSQ scored 34/128.
+28/128. Before the dense-attention teacher correction, the 128-record recipe
+(25 concatenated sequences) scored 40/128 for the matched GPTQ initializer
+and 34/128 for 10-epoch staged GSQ. Those W4 GSQ scores are historical for
+the previous objective and must be remeasured for the current implementation.
 The opt-in minimum score catches large failures; it does not assert a gain.
 Override GPTQMODEL_GSQ_STAGED_CALIBRATION_ROWS,
-GPTQMODEL_GSQ_STAGED_EPOCHS or GPTQMODEL_GSQ_STAGED_QK_STEPS for experiments.
+GPTQMODEL_GSQ_STAGED_EPOCHS, GPTQMODEL_GSQ_STAGED_QK_STEPS, or
+GPTQMODEL_GSQ_STAGED_BITS (GPTQ W2/W3/W4) for experiments.
 The earlier 59/128 GPTQ-only score used two decoder blocks and different
 activation-group settings, so it is not a matched baseline here.
 """
@@ -46,17 +49,20 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
 
     source = Path("/monster/data/model/Llama-3.2-1B-Instruct")
     assert source.is_dir(), f"Missing Llama 3.2 1B source at {source}"
+    bits = int(os.environ.get("GPTQMODEL_GSQ_STAGED_BITS", "4"))
     options = dict(enabled=True,
                    epochs=int(os.environ.get("GPTQMODEL_GSQ_STAGED_EPOCHS", "10")),
                    qk_steps=int(os.environ.get("GPTQMODEL_GSQ_STAGED_QK_STEPS", "10")),
                    batch_size=1, microbatch_size=1)
     if method == "gptq":
-        config = GPTQConfig(bits=4, group_size=128, sym=True, desc_act=False,
+        config = GPTQConfig(bits=bits, group_size=128, sym=True, desc_act=False,
                             act_group_aware=False, format=FORMAT.GPTQ_V2,
                             device=DEVICE.CUDA, offload_to_disk=False,
                             gsq_training=options)
         packed_type = TorchLinear
     else:
+        if bits != 4:
+            pytest.skip("Staged AWQ GSQ currently supports W4 only")
         config = AWQConfig(bits=4, group_size=128, sym=False, format=FORMAT.GEMM,
                            device=DEVICE.CUDA, offload_to_disk=False,
                            gsq_training=options)
@@ -82,7 +88,8 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
         assert len(config.meta["gsq_training_runs"]) == 16
 
     save_root = Path(os.environ.get("GPTQMODEL_GSQ_STAGED_SAVE_ROOT", "/tmp"))
-    output = save_root / f"llama3_2_1b_{method}_gsq_staged"
+    suffix = "" if bits == 4 else f"_{bits}bit"
+    output = save_root / f"llama3_2_1b_{method}_gsq_staged{suffix}"
     model.save(str(output))
     del model
     torch.cuda.empty_cache()
@@ -95,6 +102,6 @@ def test_llama3_2_1b_staged_gsq_gsm8k_platinum(method):
         suite_kwargs={"batch_size": 8, "max_rows": 128, "max_new_tokens": 96, "stream": True},
     )
     score = get_eval_task_results(raw)["gsm8k_platinum_cot"]["acc,num"]
-    print(f"{method} staged GSQ GSM8K Platinum: {score:.8f} ({score * 128:.0f}/128)")
+    print(f"{method} W{bits} staged GSQ GSM8K Platinum: {score:.8f} ({score * 128:.0f}/128)")
     minimum = float(os.environ.get("GPTQMODEL_GSQ_STAGED_MIN_GSM8K", "0.20"))
     assert score >= minimum, f"{method} staged GSQ GSM8K Platinum {score:.4f} < {minimum:.4f}"

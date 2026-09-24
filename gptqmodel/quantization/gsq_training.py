@@ -761,26 +761,23 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             implicit_causal=attention_implementation == 'sdpa',
             lazy=lazy_stage_batches,
         )
-    # Q/K have already been fitted above.  The attention stage therefore uses
-    # fitted Q/K plus dense V/O as its teacher, matching the paper's sequential
-    # attention objective; overriding all attention weights with the original
-    # dense snapshot would train V/O against a state the final block does not
-    # use.
-    run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches)
+    # The reference trainer retains the original attention weights as the
+    # reconstruction target. Its student uses fitted Q/K and learns V/O.
+    dense_attention = {
+        f'{name}.weight': layer.get_submodule(name).weight.detach()
+        for name in names[:4]
+    }
+    run('attention', LlamaGSQAttentionStage(fitted), names[2:4], staged_batches,
+        teacher=dense_attention)
     mlp_metadata = None
     if reinitialize_mlp:
         refreshed, mlp_metadata = initialize_llama_gptq(fitted, batches, bits=bits, group_size=group_size,
                                                        damp_percent=qk_damp_percent, projections=names[4:],
                                                        initializer=initializer)
         initializers.update(refreshed)
-    # The MLP stage must preserve the already-fitted attention on both sides
-    # of its reconstruction target.  Passing ``teacher_attention`` here would
-    # silently replace the fitted Q/K/V/O weights with the dense attention,
-    # while the student still used the fitted attention, so the optimizer
-    # would train the MLP against a teacher that the final staged block could
-    # never reproduce.  This is the paper's sequential objective: fitted
-    # attention + dense MLP -> fitted attention + trainable MLP.
-    run('mlp', fitted, names[4:], staged_batches)
+    # The block target also uses original dense attention and dense MLP;
+    # the student uses fitted attention and learns the three MLP projections.
+    run('mlp', fitted, names[4:], staged_batches, teacher=dense_attention)
     records['mlp']['initializer_timing'] = 'after_attention' if reinitialize_mlp else 'before_attention'
     records['mlp']['initializer_metadata'] = mlp_metadata
     return fitted, records
