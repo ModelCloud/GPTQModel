@@ -2339,11 +2339,10 @@ class GPTQ:
                     finally:
                         H_eff.diagonal().copy_(orig_diag)
                     if success.item():
-                        # CPU/CUDA Cholesky inverse supports an aliased output.
-                        # Reuse the factor buffer; the original Hessian remains
-                        # intact for a damping retry if either step fails.
-                        reuse_factor = L.device.type in ("cpu", "cuda")
-                        Hinv_dense = L if reuse_factor else torch.empty_like(L)
+                        # Compute the dense inverse into a temporary buffer. ``L`` is
+                        # freed before the final Cholesky so peak memory stays at two
+                        # [columns, columns] tensors during that step.
+                        Hinv_dense = torch.empty_like(L)
                         try:
                             cholesky_inverse(L, upper=False, out=Hinv_dense)
                         except RuntimeError as e:
