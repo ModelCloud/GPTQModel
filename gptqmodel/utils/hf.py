@@ -1347,6 +1347,18 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
             return
 
     rope_parameters = getattr(config, "rope_parameters", None)
+    layer_types = getattr(config, "layer_types", None)
+    if (
+        isinstance(rope_parameters, dict)
+        and rope_parameters
+        and layer_types
+        and set(rope_parameters).issubset(set(layer_types))
+        and all(value is None or isinstance(value, dict) for value in rope_parameters.values())
+    ):
+        # Hybrid attention configs (including Dots3) already hold one RoPE
+        # dictionary per layer type. Flat legacy defaults would introduce
+        # scalar entries that Transformers' per-type validator cannot read.
+        return
     if (
         isinstance(rope_parameters, dict)
         and rope_parameters.get("rope_type") is not None
