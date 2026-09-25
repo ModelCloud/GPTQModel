@@ -1273,9 +1273,10 @@ def _is_glm5_next_nope_config(config: Any) -> bool:
         config = getattr(config, "text_config", None)
     elif model_type != "glm5_next_text":
         return False
+    # Native Glm5NextTextConfig omits mla_use_nope; zero rotary dim signals NoPE.
     return (
-        getattr(config, "mla_use_nope", False) is True
-        and getattr(config, "qk_rope_head_dim", None) == 0
+        getattr(config, "qk_rope_head_dim", None) == 0
+        and getattr(config, "mla_use_nope", True) is True
     )
 
 

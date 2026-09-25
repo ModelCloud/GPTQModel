@@ -10,11 +10,13 @@ from gptqmodel.utils.hf import normalize_hf_config_compat
 
 
 @pytest.mark.parametrize("entry", ["root", "text", "both"])
-def test_glm_nope_roundtrip(tmp_path: Path, entry: str) -> None:
+@pytest.mark.parametrize("explicit_nope_flag", [False, True])
+def test_glm_nope_roundtrip(tmp_path: Path, entry: str, explicit_nope_flag: bool) -> None:
     module = pytest.importorskip("transformers.models.glm5_next.configuration_glm5_next")
-    config = module.Glm5NextConfig(
-        text_config={"mla_use_nope": True, "qk_rope_head_dim": 0},
-    )
+    text_config = {"qk_rope_head_dim": 0}
+    if explicit_nope_flag:
+        text_config["mla_use_nope"] = True
+    config = module.Glm5NextConfig(text_config=text_config)
     if entry in {"root", "both"}:
         normalize_hf_config_compat(config)
     if entry in {"text", "both"}:
@@ -26,6 +28,16 @@ def test_glm_nope_roundtrip(tmp_path: Path, entry: str) -> None:
     assert saved["text_config"].get("rope_parameters") is None
     assert getattr(restored, "rope_parameters", None) is None
     assert getattr(restored.text_config, "rope_parameters", None) is None
+
+
+@pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text"])
+def test_glm_nope_without_flag_keeps_rotary_config_absent(model_type: str) -> None:
+    text = SimpleNamespace(model_type="glm5_next_text", qk_rope_head_dim=0)
+    config = SimpleNamespace(model_type=model_type, text_config=text) if model_type == "glm5_next" else text
+
+    normalize_hf_config_compat(config)
+
+    assert getattr(config, "rope_parameters", None) is None
 
 
 @pytest.mark.parametrize("model_type", ["glm5_next", "glm5_next_text"])
