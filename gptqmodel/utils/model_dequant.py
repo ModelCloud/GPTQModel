@@ -621,6 +621,8 @@ def infer_block_shape(weight_shape: Tuple[int, int], scale_tensor: torch.Tensor)
 
 
 def detect_format(model_path: Path, config: dict) -> str:
+    from .mimo import is_mimo_mixed_source
+
     quant_cfg = config.get("quantization_config", {}) or {}
     method = (quant_cfg.get("method") or quant_cfg.get("quant_method") or "").lower()
     format_name = (quant_cfg.get("format") or "").lower()
@@ -630,6 +632,15 @@ def detect_format(model_path: Path, config: dict) -> str:
     files, index = list_safetensor_files(model_path)
     if not files:
         raise FileNotFoundError("No .safetensors files found in model directory")
+    if is_mimo_mixed_source(config):
+        return "fp8"
+    if (
+        config.get("model_type") == "mimo_v2"
+        and config.get("mimo_mtp_source_quantization_config")
+        and method in {"gptq", "gptqmodel"}
+    ):
+        # Preserved FP8 predictors do not describe the base model's encoding.
+        return "gptq"
 
     # MXFP4 and MXFP8 use the same value dtypes as NVFP4 and plain FP8.
     # Inspect declared scale semantics before guessing from a weight dtype.
@@ -977,6 +988,46 @@ def _revert_gptq_v1_qzeros_correction(qzeros: torch.Tensor, bits: int, *, planar
     return _shift_gptq_qzeros(qzeros, bits, delta=-1, planar=planar)
 
 
+def _convert_mimo_shard(
+    reader,
+    config: dict,
+    target_dtype: torch.dtype,
+    tensor_lookup: Optional[_ShardTensorLookup],
+) -> Dict[str, torch.Tensor]:
+    from .mimo import decode_mimo_weight, is_mimo_encoded_weight
+
+    keys = set(reader.keys())
+
+    def lookup(key: str) -> Optional[torch.Tensor]:
+        if key in keys:
+            return reader.get_tensor(key)
+        if tensor_lookup is not None and tensor_lookup.has_tensor(key):
+            return tensor_lookup.get_tensor(key)
+        return None
+
+    tensors = {}
+    for key in reader.keys():
+        tensor = reader.get_tensor(key)
+        if key.startswith("model.mtp.") or not key.startswith(("model.", "lm_head.")):
+            # Auxiliary vision/audio and MTP payloads retain their source encoding.
+            tensors[key] = tensor.cpu().contiguous()
+            continue
+        if key.endswith((".weight_scale", ".weight_scale_inv")):
+            weight_key = key.split(".weight_scale")[0] + ".weight"
+            weight = lookup(weight_key)
+            if weight is None:
+                raise ValueError(f"Orphan MiMo scale tensor: {key}")
+            if is_mimo_encoded_weight(config, weight_key, weight):
+                continue
+        decoded = decode_mimo_weight(
+            config, key, tensor, lookup, target_dtype=target_dtype
+        )
+        tensors[key] = finalize_for_save(
+            tensor if decoded is None else decoded, target_dtype
+        )
+    return tensors
+
+
 def convert_fp8_shard(
     reader,
     target_dtype: torch.dtype,
@@ -986,7 +1037,12 @@ def convert_fp8_shard(
     scale_semantics: str = "heuristic",
     tensor_lookup: Optional[_ShardTensorLookup] = None,
     ignored_layers: Iterable[str] = (),
+    source_config: Optional[dict] = None,
 ) -> Dict[str, torch.Tensor]:
+    from .mimo import is_mimo_mixed_source
+
+    if is_mimo_mixed_source(source_config):
+        return _convert_mimo_shard(reader, source_config, target_dtype, tensor_lookup)
     tensors: Dict[str, torch.Tensor] = {}
     reader_keys = set(reader.keys())
     for key in reader.keys():
@@ -1533,12 +1589,16 @@ def convert_gptq_file(
     device: str,
     *,
     ignored_layers: Iterable[str] = (),
+    preserved_prefixes: tuple[str, ...] = (),
 ) -> Dict[str, torch.Tensor]:
     tensors: Dict[str, torch.Tensor] = {}
     module_buffers: Dict[str, Dict[str, torch.Tensor]] = defaultdict(dict)
     with safe_open(path, framework="pt", device=device) as reader:
         for key in reader.keys():
             tensor = reader.get_tensor(key)
+            if key.startswith(preserved_prefixes):
+                tensors[key] = tensor.cpu().contiguous()
+                continue
             ignored_tensor = _handle_ignored_tensor(key, tensor, target_dtype, ignored_layers)
             if ignored_tensor is not None:
                 tensors[key] = ignored_tensor
@@ -1801,6 +1861,7 @@ def dequantize_model(
                         scale_semantics=fp8_scale_semantics,
                         tensor_lookup=tensor_lookup,
                         ignored_layers=ignored_layers,
+                        source_config=config,
                     )
             elif fmt == "bitsandbytes":
                 with safe_open(path, framework="pt", device=open_device) as reader:
@@ -1840,6 +1901,10 @@ def dequantize_model(
                     quant_cfg,
                     open_device,
                     ignored_layers=ignored_layers,
+                    preserved_prefixes=("model.mtp.",) if (
+                        config.get("model_type") == "mimo_v2"
+                        and config.get("mimo_mtp_source_quantization_config")
+                    ) else (),
                 )
             elif fmt == "compressed-pack":
                 if compressed_compressor is None:
@@ -1879,6 +1944,10 @@ def dequantize_model(
     write_json(output_path / "model.safetensors.index.json", new_index)
 
     new_config = dict(config)
+    from .mimo import is_mimo_mixed_source
+
+    if is_mimo_mixed_source(config):
+        new_config["mimo_mtp_source_quantization_config"] = quant_cfg
     new_config.pop("quantization_config", None)
     new_config.pop("torch_dtype", None)
     new_config["dtype"] = str(target_dtype).split(".")[-1]

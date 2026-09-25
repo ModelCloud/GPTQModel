@@ -126,6 +126,11 @@ def native_floatx_source_format(
     for older FP8 exports whose model config has no ``quantization_config``.
     """
 
+    from ..utils.mimo import is_mimo_mixed_source
+
+    if is_mimo_mixed_source(config):
+        return "mimo_mixed"
+
     payloads = []
     quantization_config = getattr(config, "quantization_config", None)
     if isinstance(quantization_config, dict):
@@ -187,23 +192,43 @@ def configure_native_floatx_source_quantization(
     *,
     device: Union[DEVICE, torch.device, str],
     model_local_path: Optional[str] = None,
+    model_dtype: torch.dtype = torch.bfloat16,
 ) -> Optional[str]:
     """Configure floatx checkpoint sources for module-local W4A16 quantization.
 
     The shell model remains on ``meta`` while the looper asks the lazy
     checkpoint reader for one linear module at a time.  That module is decoded
-    into BF16 only for the duration of its GPTQ/AWQ pass, rather than expanding
-    every source weight to BF16 at model load.
+    into FP16/BF16 only for the duration of its GPTQ/AWQ pass, rather than expanding
+    every source weight to FP16/BF16 at model load.
     """
 
     source_format = native_floatx_source_format(config, model_local_path=model_local_path)
     if source_format is None or quantize_config.method not in (METHOD.GPTQ, METHOD.AWQ):
         return None
 
+    preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
+    decode_dtype = torch.bfloat16
+    if source_format == "mimo_mixed":
+        if quantize_config.method == METHOD.AWQ:
+            raise ValueError("MiMo mixed-source AWQ quantization is not supported; use GPTQ.")
+        if model_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "MiMo mixed-source GPTQ quantization requires dtype=torch.float16 or dtype=torch.bfloat16; "
+                f"got {model_dtype}. FP32 is supported for direct/offline source decoding only."
+            )
+        decode_dtype = model_dtype
+        for preprocessor in preprocessors:
+            if isinstance(preprocessor, AutoModuleDecoderConfig) and preprocessor.target_dtype != model_dtype:
+                raise ValueError(
+                    "MiMo mixed-source AutoModuleDecoderConfig.target_dtype "
+                    f"({preprocessor.target_dtype}) must match the model dtype ({model_dtype})."
+                )
+
+    decode_dtype_name = "BF16" if decode_dtype == torch.bfloat16 else "FP16"
     target_device = device.to_torch_device() if isinstance(device, DEVICE) else torch.device(device)
-    if not device_supports_dtype(target_device, torch.bfloat16, require_validation=True):
+    if not device_supports_dtype(target_device, decode_dtype, require_validation=True):
         raise EnvironmentError(
-            "Floatx source quantization requires validated BF16 linear support on the "
+            f"Floatx source quantization requires validated {decode_dtype_name} linear support on the "
             f"quantization device. Device `{target_device}` does not provide it."
         )
 
@@ -238,7 +263,8 @@ def configure_native_floatx_source_quantization(
         )
     else:
         # MX block scales need a format-specific GEMM kernel.  The auto
-        # decoder can still feed quantization from dense module-local BF16.
+        # decoder can still feed quantization from dense module-local FP16/BF16.
+        # MiMo's mixed packing and TP-local QKV scales require dense decoding.
         native_dtype_name = source_format
 
     # This is deliberately transient runtime state: it is not part of the
@@ -247,7 +273,7 @@ def configure_native_floatx_source_quantization(
     quantize_config._native_floatx_forward_plan = {
         "source_format": source_format,
         "device": str(target_device),
-        "bf16_validated": True,
+        "bf16_validated": decode_dtype == torch.bfloat16,
         "native_dtype": native_dtype_name,
         "native_validated": native_dtype_supported,
         "mode": "native" if native_dtype_supported else "decode",
@@ -263,15 +289,15 @@ def configure_native_floatx_source_quantization(
         )
     else:
         log.warning(
-            "Loader: native %s forward is unavailable on %s; using decoded BF16 for Hessian collection. "
+            "Loader: native %s forward is unavailable on %s; using decoded %s for Hessian collection. "
             "Quantization remains supported, but calibration may be slower.",
             source_format.upper(),
             target_device,
+            decode_dtype_name,
         )
 
-    preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
     if not any(isinstance(preprocessor, AutoModuleDecoderConfig) for preprocessor in preprocessors):
-        preprocessors.append(AutoModuleDecoderConfig(target_dtype=torch.bfloat16))
+        preprocessors.append(AutoModuleDecoderConfig(target_dtype=decode_dtype))
         quantize_config.preprocessors = preprocessors
 
     # Direct HF loading coerces packed floatx weights into the shell dtype and
@@ -285,8 +311,9 @@ def configure_native_floatx_source_quantization(
         quantize_config.offload_to_disk = True
 
     log.info(
-        "Loader: detected native %s source; automatically enabled BF16 auto_module_decoder for %s.",
+        "Loader: detected native %s source; automatically enabled %s auto_module_decoder for %s.",
         source_format.upper(),
+        decode_dtype_name,
         quantize_config.method.value.upper(),
     )
     return source_format
@@ -959,6 +986,10 @@ def ModelLoader(cls):
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
 
+        from ..utils.mimo import is_mimo_mixed_source
+
+        mimo_source = is_mimo_mixed_source(config)
+
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
         if atten_impl is not None and atten_impl != "auto":
@@ -994,6 +1025,7 @@ def ModelLoader(cls):
                 quantize_config,
                 device=requested_quant_device,
                 model_local_path=model_local_path,
+                model_dtype=dtype,
             )
 
         tokenizer = load_hf_tokenizer(
@@ -1148,6 +1180,11 @@ def ModelLoader(cls):
                 except RuntimeError as exc:
                     if not _is_meta_shell_build_error(exc):
                         raise
+                    if mimo_source:
+                        raise RuntimeError(
+                            "MiMo mixed sources require a checkpoint-backed shell; "
+                            "direct HF loading cannot preserve their packed layout."
+                        ) from exc
 
                     log.warn(
                         "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load without turtle_model: %s",
@@ -1179,7 +1216,7 @@ def ModelLoader(cls):
                     _maybe_print_module_tree(model=model)
                     turtle_model = LazyTurtle.maybe_create(
                         model_local_path=model_local_path,
-                        config=model.config,
+                        config=config if mimo_source else model.config,
                         model_init_kwargs=shell_model_init_kwargs,
                         module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
                         hf_conversion_map_reversed=copy.deepcopy(
