@@ -11,6 +11,12 @@ For any new or changed quantization math, weight packer, or inference kernel,
 read and follow `$gptqmodel-torch-oracle-numerics` in
 `.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md` before editing.
 
+For every MLX inference kernel, test FP16 and BF16 activations independently.
+Assert that each supported path returns the input activation dtype, and measure
+accuracy drift against an independent Torch oracle for both dtypes. Follow the
+skill's output-rounding guidance and report arithmetic error separately from
+the visible low-precision output error.
+
 ## Tokenizer normalization ownership
 
 For tokenizer initialization, tokenization normalization, special-token compatibility, prompt rendering, chat-template correctness, or unexpectedly low inference/evaluation scores, read and follow `$gptqmodel-tokenizer-normalization` in `.agents/skills/gptqmodel-tokenizer-normalization/SKILL.md` before editing.
