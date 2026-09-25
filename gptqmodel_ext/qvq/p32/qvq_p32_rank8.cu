@@ -279,18 +279,16 @@ __global__ __launch_bounds__(1024) void p32_hadamard_epilogue_kernel(
 // exchange values between threads through shared memory; every stage from
 // 256 onward is local to one thread. Keep the same ascending stage order and
 // the same FP16 rounding after each add/subtract as the shared-memory path.
-template <int SizeN>
+template <int SizeN, bool NormalizeFirst>
 __global__ __launch_bounds__(256) void p32_hadamard_epilogue_register_high_kernel(
     const float* __restrict__ base_output,
     const half* __restrict__ scale_v,
-    half* __restrict__ output,
-    bool normalize_first) {
+    half* __restrict__ output) {
   static_assert(SizeN == 2048 || SizeN == 8192);
   constexpr int kThreads = 256;
   constexpr int kPairCount = SizeN / 2;
   constexpr int kPairsPerThread = kPairCount / kThreads;
   extern __shared__ half2 packed_values[];
-  half* scalar_values = reinterpret_cast<half*>(packed_values);
   const int row = static_cast<int>(blockIdx.x);
   const int tid = static_cast<int>(threadIdx.x);
   const float sqrt_n = sqrtf(static_cast<float>(SizeN));
@@ -303,12 +301,11 @@ __global__ __launch_bounds__(256) void p32_hadamard_epilogue_register_high_kerne
     const int column = 2 * (tid + kThreads * slot);
     float first = round_to_half(base_output[row_offset + column] + 0.0f);
     float second = round_to_half(base_output[row_offset + column + 1] + 0.0f);
-    if (normalize_first) {
+    if constexpr (NormalizeFirst) {
       first = round_to_half(first / divisor);
       second = round_to_half(second / divisor);
     }
-    scalar_values[column] = __float2half_rn(first);
-    scalar_values[column + 1] = __float2half_rn(second);
+    packed_values[column / 2] = __floats2half2_rn(first, second);
   }
   __syncthreads();
 
@@ -371,17 +368,19 @@ __global__ __launch_bounds__(256) void p32_hadamard_epilogue_register_high_kerne
 #pragma unroll
   for (int slot = 0; slot < kPairsPerThread; ++slot) {
     const int column = 2 * (tid + kThreads * slot);
-    const float2 pair_values = __half22float2(values[slot]);
-    float first = pair_values.x;
-    float second = pair_values.y;
-    if (!normalize_first) {
-      first = round_to_half(first * reciprocal);
-      second = round_to_half(second * reciprocal);
+    half2 result;
+    if constexpr (NormalizeFirst) {
+      const half2 scale = *reinterpret_cast<const half2*>(scale_v + column);
+      result = __hmul2(values[slot], scale);
+    } else {
+      const float2 pair_values = __half22float2(values[slot]);
+      const float first = round_to_half(
+          round_to_half(pair_values.x * reciprocal) * __half2float(scale_v[column]));
+      const float second = round_to_half(
+          round_to_half(pair_values.y * reciprocal) * __half2float(scale_v[column + 1]));
+      result = __floats2half2_rn(first, second);
     }
-    first = round_to_half(first * __half2float(scale_v[column]));
-    second = round_to_half(second * __half2float(scale_v[column + 1]));
-    *reinterpret_cast<half2*>(output + row_offset + column) =
-        __floats2half2_rn(first, second);
+    *reinterpret_cast<half2*>(output + row_offset + column) = result;
   }
 }
 
@@ -740,29 +739,44 @@ extern "C" int qvq_p32_hadamard_epilogue(
   }
   if (packed_half2 && size_m == 960 &&
       (size_n == 2048 || size_n == 8192)) {
-    const cudaError_t register_attribute_error = size_n == 2048
-        ? cudaFuncSetAttribute(
-            p32_hadamard_epilogue_register_high_kernel<2048>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(shared_bytes))
-        : cudaFuncSetAttribute(
-            p32_hadamard_epilogue_register_high_kernel<8192>,
-            cudaFuncAttributeMaxDynamicSharedMemorySize,
-            static_cast<int>(shared_bytes));
+    const void* register_kernel = size_n == 2048
+        ? (normalize_first
+            ? reinterpret_cast<const void*>(
+                p32_hadamard_epilogue_register_high_kernel<2048, true>)
+            : reinterpret_cast<const void*>(
+                p32_hadamard_epilogue_register_high_kernel<2048, false>))
+        : (normalize_first
+            ? reinterpret_cast<const void*>(
+                p32_hadamard_epilogue_register_high_kernel<8192, true>)
+            : reinterpret_cast<const void*>(
+                p32_hadamard_epilogue_register_high_kernel<8192, false>));
+    const cudaError_t register_attribute_error = cudaFuncSetAttribute(
+        register_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+        static_cast<int>(shared_bytes));
     if (register_attribute_error != cudaSuccess) {
       set_last_error(cudaGetErrorString(register_attribute_error));
       return static_cast<int>(register_attribute_error);
     }
-    if (size_n == 2048) {
-      p32_hadamard_epilogue_register_high_kernel<2048>
+    if (size_n == 2048 && normalize_first) {
+      p32_hadamard_epilogue_register_high_kernel<2048, true>
           <<<static_cast<unsigned>(size_m), 256, shared_bytes, cuda_stream>>>(
               base_output, reinterpret_cast<const half*>(scale_v),
-              reinterpret_cast<half*>(output), normalize_first != 0);
+              reinterpret_cast<half*>(output));
+    } else if (size_n == 2048) {
+      p32_hadamard_epilogue_register_high_kernel<2048, false>
+          <<<static_cast<unsigned>(size_m), 256, shared_bytes, cuda_stream>>>(
+              base_output, reinterpret_cast<const half*>(scale_v),
+              reinterpret_cast<half*>(output));
+    } else if (normalize_first) {
+      p32_hadamard_epilogue_register_high_kernel<8192, true>
+          <<<static_cast<unsigned>(size_m), 256, shared_bytes, cuda_stream>>>(
+              base_output, reinterpret_cast<const half*>(scale_v),
+              reinterpret_cast<half*>(output));
     } else {
-      p32_hadamard_epilogue_register_high_kernel<8192>
+      p32_hadamard_epilogue_register_high_kernel<8192, false>
           <<<static_cast<unsigned>(size_m), 256, shared_bytes, cuda_stream>>>(
               base_output, reinterpret_cast<const half*>(scale_v),
-              reinterpret_cast<half*>(output), normalize_first != 0);
+              reinterpret_cast<half*>(output));
     }
   } else if (packed_half2) {
     p32_hadamard_epilogue_kernel<0>
