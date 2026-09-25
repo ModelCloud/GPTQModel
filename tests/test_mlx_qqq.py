@@ -14,6 +14,25 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 
+@pytest.mark.parametrize("width", [128, 5120, 17408])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_qqq_metal_dynamic_quant_matches_torch_codes(width, dtype):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import _dynamic_quant
+
+    torch.manual_seed(801)
+    source = torch.randn(2, 3, width, dtype=torch.float32).mul_(0.05).to(dtype)
+    source[0, 0] = 0
+    source[0, 1, 0] = 1
+    source[0, 1, 1] = -1
+    half = source.half()
+    expected_scales = (half.abs().amax(dim=-1, keepdim=True) / 127).float()
+    expected_codes = (half / expected_scales).round().clamp(-128, 127).to(torch.int8)
+    quantized, scales = _dynamic_quant(mx.array(half.numpy()))
+    mx.eval(quantized, scales)
+    np.testing.assert_array_equal(np.asarray(scales), expected_scales.numpy())
+    np.testing.assert_array_equal(np.asarray(quantized).astype(np.int8), expected_codes.numpy())
+
+
 @pytest.mark.parametrize("group_size", [-1, 128])
 @pytest.mark.parametrize("rows", [1, 3])
 def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, rows):
@@ -53,9 +72,18 @@ def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, row
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     assert isinstance(model.linear, MlxQQQLinear)
     assert config["_gptqmodel_custom_mlx_runtime"]
-    packed = np.array(model.linear.linear.weight).view(np.uint8).reshape(128, 256)
     weight, channel = source.linear._dequantize_weight_for_torch()
-    np.testing.assert_array_equal(packed, (weight.numpy().T + 128).astype(np.uint8))
+    if group_size == -1:
+        assert model.linear.linear.bits == 4
+        packed = np.asarray(model.linear.linear.weight).astype(np.uint32)
+        decoded = ((packed[..., None] >> (4 * np.arange(8))) & 15).reshape(128, 256)
+        codes = source.linear._unpack_weight_codes().numpy().T
+        np.testing.assert_array_equal(decoded, codes ^ 8)
+        np.testing.assert_array_equal((decoded.astype(np.int16) - 8) * 16, weight.numpy().T)
+    else:
+        assert model.linear.linear.bits == 8
+        packed = np.asarray(model.linear.linear.weight).view(np.uint8).reshape(128, 256)
+        np.testing.assert_array_equal(packed, (weight.numpy().T + 128).astype(np.uint8))
 
     x = rng.normal(0, 0.2, (2, rows, 256)).astype(np.float16)
     output = model(mx.array(x))
@@ -66,3 +94,9 @@ def test_qqq_mlx_matches_torch_quantized_arithmetic(monkeypatch, group_size, row
     expected = (quantized.float() @ weight.float() * scale * channel).half()
     expected += source.linear.bias
     np.testing.assert_allclose(np.array(output), expected.numpy(), rtol=0.002, atol=0.002)
+
+    zero_output = model(mx.zeros((1, 256), dtype=mx.float16))
+    mx.eval(zero_output)
+    np.testing.assert_array_equal(np.asarray(zero_output), source.linear.bias.numpy()[None, :])
+    empty_output = model(mx.zeros((0, 256), dtype=mx.float16))
+    assert empty_output.shape == (0, 128)
