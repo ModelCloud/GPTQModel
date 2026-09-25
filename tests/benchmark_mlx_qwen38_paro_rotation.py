@@ -60,10 +60,15 @@ def benchmark(name, output_dims, input_dims, rows, krot, repeats):
     layer = _make_layer(output_dims, input_dims, krot)
     rng = np.random.default_rng(380027 + rows)
     x = mx.array(rng.normal(0, 0.05, (rows, input_dims)).astype(np.float16))
+    # Reconstruct the exact merged-main runtime coefficients once, outside
+    # the timed calls. The fused path keeps float32 trigonometric values.
+    main_cosine = tuple(value.astype(mx.float16) for value in layer.cosine)
+    main_sine = tuple(value.astype(mx.float16) for value in layer.sine)
+    mx.eval(*main_cosine, *main_sine)
 
     def main_path():
         rotated = x * layer.channel_scales
-        for partner, cosine, sine in zip(layer.partner, layer.cosine, layer.sine):
+        for partner, cosine, sine in zip(layer.partner, main_cosine, main_sine):
             old = rotated
             rotated = old * cosine + mx.take(old, partner, axis=-1) * sine
         return layer.linear(rotated)

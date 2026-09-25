@@ -24,25 +24,25 @@ def _rotation_kernel():
             uint column = index % K;
             uint paired = partner[column];
             uint row_offset = index - column;
-            half left = x[index];
-            half right = x[row_offset + paired];
+            float left = float(x[index]);
+            float right = float(x[row_offset + paired]);
             if (FIRST) {
-                left = half(left * channel_scales[column]);
-                right = half(right * channel_scales[paired]);
+                left *= float(channel_scales[column]);
+                right *= float(channel_scales[paired]);
             }
-            half direct = half(left * cosine[column]);
-            half crossed = half(right * sine[column]);
-            rotated[index] = half(direct + crossed);
+            rotated[index] = left * cosine[column] + right * sine[column];
         """,
     )
 
 
 def _rotate_stage(x, partner, cosine, sine, channel_scales, first):
+    # Preserve float32 values between stages; repeated FP16 rounding was the
+    # dominant error against the independent Torch rotation oracle.
     return _rotation_kernel()(
         inputs=[x, partner, cosine, sine, channel_scales],
         template=[("K", x.shape[-1]), ("FIRST", first)],
         grid=(x.size, 1, 1), threadgroup=(min(x.size, 256), 1, 1),
-        output_shapes=[x.shape], output_dtypes=[x.dtype],
+        output_shapes=[x.shape], output_dtypes=[mx.float32],
     )[0]
 
 
@@ -60,11 +60,11 @@ class MlxParoLinear(nn.Module):
         first = (pair_rows[..., 0] + offsets).reshape(krot, -1)
         second = (pair_rows[..., 1] + offsets).reshape(krot, -1)
         partner = np.empty((krot, input_dims), dtype=np.int32)
-        cosine = np.empty((krot, input_dims), dtype=np.float16)
-        sine = np.empty((krot, input_dims), dtype=np.float16)
+        cosine = np.empty((krot, input_dims), dtype=np.float32)
+        sine = np.empty((krot, input_dims), dtype=np.float32)
         for stage in range(krot):
-            c = np.cos(angle_rows[stage]).reshape(-1).astype(np.float16)
-            s = np.sin(angle_rows[stage]).reshape(-1).astype(np.float16)
+            c = np.cos(angle_rows[stage]).reshape(-1)
+            s = np.sin(angle_rows[stage]).reshape(-1)
             partner[stage, first[stage]] = second[stage]
             partner[stage, second[stage]] = first[stage]
             cosine[stage, first[stage]] = c

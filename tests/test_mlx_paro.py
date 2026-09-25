@@ -176,6 +176,8 @@ def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims,
     expected = expected_phases[:, np.arange(output_dims) % 16]
     np.testing.assert_allclose(np.asarray(actual), expected.numpy(),
                                rtol=0.002, atol=0.002, err_msg=f"{name}, krot={krot}")
+    max_abs_error = np.max(np.abs(np.asarray(actual).astype(np.float64) - expected.numpy()))
+    assert max_abs_error < 2e-4, f"{name}, krot={krot}: max_abs_error={max_abs_error}"
     del layer, linear, packed, codes, actual
     mx.clear_cache()
     gc.collect()
