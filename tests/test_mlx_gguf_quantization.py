@@ -63,6 +63,33 @@ def test_gguf_q4_0_packing_promotes_low_precision_inputs(dtype):
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 
+def test_gguf_q4_0_packing_at_float32_rounding_boundaries():
+    rng = np.random.default_rng(819)
+    rows = 64
+    maxima = rng.uniform(0.03, 20.0, rows).astype(np.float32)
+    signed_maxima = np.where(rng.integers(0, 2, rows), maxima, -maxima)
+    weight = np.zeros((rows, 32), dtype=np.float32)
+    weight[:, 0] = signed_maxima
+    reciprocal = np.float32(1.0) / (signed_maxima / np.float32(-8.0))
+    for column in range(1, 32):
+        code = rng.integers(2, 14, rows)
+        boundary = ((code - 8.5) / reciprocal.astype(np.float64)).astype(
+            np.float32
+        )
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        weight[:, column] = np.where(
+            rng.integers(0, 3, rows) == 0,
+            np.nextafter(boundary, direction),
+            boundary,
+        )
+
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0")
+    expected = _torch_gguf_q4_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
 def test_gguf_q4_0_packing_validates_format_and_shape():
     with pytest.raises(ValueError, match="supports Q4_0"):
         native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "Q5_K")

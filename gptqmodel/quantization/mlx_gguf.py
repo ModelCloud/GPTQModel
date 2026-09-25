@@ -35,10 +35,30 @@ def _gguf_q4_0_kernel():
             packed[offset] = uchar(scale_bits & 255);
             packed[offset + 1] = uchar(scale_bits >> 8);
             for (uint k = 0; k < 16; ++k) {
-                int low = metal::clamp(
-                    int(metal::floor(values[k] * inverse + 8.5f)), 0, 15);
-                int high = metal::clamp(
-                    int(metal::floor(values[k + 16] * inverse + 8.5f)), 0, 15);
+                int low = int(metal::floor(values[k] * inverse + 8.5f));
+                int high = int(metal::floor(values[k + 16] * inverse + 8.5f));
+                // The GGUF CPU reference multiplies in float64. Use a fused
+                // multiply-add to compare the exact float32 operand product
+                // with each half-integer bin boundary before packing.
+                float low_delta = metal::fma(
+                    values[k], inverse, 8.5f - float(low));
+                if (low_delta < 0.0f) {
+                    --low;
+                } else if (metal::fma(
+                               values[k], inverse, 7.5f - float(low)) >= 0.0f) {
+                    ++low;
+                }
+                float high_delta = metal::fma(
+                    values[k + 16], inverse, 8.5f - float(high));
+                if (high_delta < 0.0f) {
+                    --high;
+                } else if (metal::fma(
+                               values[k + 16], inverse,
+                               7.5f - float(high)) >= 0.0f) {
+                    ++high;
+                }
+                low = metal::clamp(low, 0, 15);
+                high = metal::clamp(high, 0, 15);
                 packed[offset + 2 + k] = uchar(low | (high << 4));
             }
         """,
