@@ -28,6 +28,9 @@ try:
     from mlx_lm import generate
     from mlx_lm.sample_utils import make_logits_processors, make_sampler
     from mlx_lm.utils import _get_classes, load_config, quantize_model
+    from mlx.utils import tree_map_with_path
+
+    from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     MLX_AVAILABLE = True
 except ImportError:
     MLX_AVAILABLE = False
@@ -36,19 +39,21 @@ log = setup_logger()
 
 
 def _packed_mlx_weights(model, config, lm_head_name):
-    """Copy supported 4-bit layers without expanding and requantizing weights."""
+    """Copy supported GPTQ/AWQ layers without expanding and requantizing weights."""
     quantized = [(name, module) for name, module in model.named_modules()
                  if isinstance(module, (TorchLinear, AwqTorchLinear))]
     if not quantized:
         return None
 
     layer_params = {}
+    group16 = set()
     for name, module in quantized:
         mlx_linear = MlxQuantLinear if isinstance(module, TorchLinear) else AwqMlxQuantLinear
         if not mlx_linear.source_compatible(module):
             return None
-        group_size = module.in_features if module.requested_group_size == -1 else module.group_size
-        layer_params[name] = {"group_size": group_size, "bits": 4, "mode": "affine"}
+        layer_params[name] = mlx_linear.mlx_params(module)
+        if module.group_size == 16:
+            group16.add(name)
 
     weights = {}
     tied_embeddings = config.get("tie_word_embeddings", False)
@@ -57,8 +62,14 @@ def _packed_mlx_weights(model, config, lm_head_name):
             mlx_linear = MlxQuantLinear if isinstance(module, TorchLinear) else AwqMlxQuantLinear
             weight, scale, biases, _ = mlx_linear.pack_source(module)
             weights[f"{name}.weight"] = mx.array(weight)
-            weights[f"{name}.scales"] = mx.array(scale)
-            weights[f"{name}.biases"] = mx.array(biases)
+            if name in group16:
+                weights[f"{name}.scales_even"] = mx.array(scale[:, ::2]).astype(mx.float32)
+                weights[f"{name}.scales_odd"] = mx.array(scale[:, 1::2]).astype(mx.float32)
+                weights[f"{name}.biases_even"] = mx.array(biases[:, ::2])
+                weights[f"{name}.biases_odd"] = mx.array(biases[:, 1::2])
+            else:
+                weights[f"{name}.scales"] = mx.array(scale)
+                weights[f"{name}.biases"] = mx.array(biases)
         elif hasattr(module, "weight") and isinstance(module.weight, torch.Tensor):
             # Tied embedding weights are supplied by the embedding module.
             if tied_embeddings and name == lm_head_name:
@@ -86,15 +97,32 @@ def _packed_mlx_weights(model, config, lm_head_name):
     def predicate(path, module):
         if path in layer_params and hasattr(module, "to_quantized"):
             found.add(path)
-            return layer_params[path]
+            return False if path in group16 else layer_params[path]
         return False
 
-    nn.quantize(mlx_model, group_size=default["group_size"], bits=4,
+    nn.quantize(mlx_model, group_size=default["group_size"], bits=default["bits"],
                 class_predicate=predicate)
     if found != set(layer_params):
         log.warn("MLX packed layer names do not match the model; using float conversion.")
         return None
+    if group16:
+        def replace_group16(path, module):
+            if path not in group16:
+                return module
+            if not isinstance(module, nn.Linear):
+                raise ValueError(f"MLX group-16 layer {path} is not a linear module")
+            output_dims, input_dims = module.weight.shape
+            return MlxGroup16Linear(input_dims, output_dims, layer_params[path]["bits"],
+                                    bias=module.get("bias") is not None)
+
+        mlx_model.update_modules(tree_map_with_path(
+            replace_group16, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
+        ))
     mlx_model.load_weights(list(weights.items()))
+    if group16:
+        # MLX-LM's standard loader reconstructs only native QuantizedLinear.
+        # Keep this runtime model instead of round-tripping through that loader.
+        mlx_config["_gptqmodel_group16_runtime"] = True
     return mlx_model, mlx_config
 
 
@@ -109,19 +137,19 @@ def convert_gptq_to_mlx_weights(model_id_or_path: str, model: Union[PreTrainedMo
 
 def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_name):
 
-    if gptq_config["bits"] not in [2, 3, 4, 8]:
-        raise ValueError("Model bits is not in [2,3,4,8]")
+    if gptq_config["bits"] not in [2, 3, 4, 5, 6, 7, 8]:
+        raise ValueError("MLX GPTQ conversion supports 2 through 8 bits")
 
     quant_format = resolve_quant_format(gptq_config.get("format"), gptq_config.get("method", gptq_config.get("quant_method")))
-    if quant_format not in [FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GEMM]:
-        raise ValueError("MLX conversion requires GPTQ, GPTQ_V2, or AWQ GEMM format")
+    if quant_format not in [FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.GEMM]:
+        raise ValueError("MLX conversion requires GPTQ, GPTQ_V2, GPTQ_P, or AWQ GEMM format")
 
     if gptq_config.get("dynamic") is not None:
         print(gptq_config["dynamic"])
         for _, config in gptq_config["dynamic"].items():
             if config != {}:
-                if config["bits"] not in [2, 3, 4, 8]:
-                    raise ValueError(f'Model bits {config["bits"]} in dynamic, it not in [2,3,4,8]')
+                if config["bits"] not in [2, 3, 4, 5, 6, 7, 8]:
+                    raise ValueError(f'MLX GPTQ conversion does not support {config["bits"]} bits in dynamic config')
 
     model_path = Path(model_id_or_path)
     if not model_path.exists():
@@ -135,7 +163,7 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
 
     packed = _packed_mlx_weights(model, config, lm_head_name)
     if packed is not None:
-        log.info("MLX: transferred packed 4-bit weights without requantization")
+        log.info("MLX: transferred packed affine weights without requantization")
         return packed
 
     # Requantization needs an MLX-supported group size.
