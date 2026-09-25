@@ -29,6 +29,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bits", type=float, default=3.5, choices=[2.5, 3, 3.5, 4])
     parser.add_argument("--gsq-steps", type=int, default=4)
     parser.add_argument("--gsq-candidates", type=int, default=3)
+    parser.add_argument("--gsq-coordinate-sweeps", type=int, default=0)
+    parser.add_argument("--compare-no-gsq", action="store_true")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--block-index", type=int, default=0)
     parser.add_argument("--factor-mode", choices=["shared-head", "independent-blocks"],
@@ -61,6 +63,8 @@ def main() -> None:
         raise ValueError("dataset size, Gram rank, and batch size must be positive")
     if args.gsq_steps < 1 or args.gsq_candidates < 2:
         raise ValueError("GSQ steps must be positive and candidates must be at least 2")
+    if args.gsq_coordinate_sweeps < 0:
+        raise ValueError("GSQ coordinate sweeps must be nonnegative")
     started = datetime.now(timezone.utc).isoformat()
     torch.manual_seed(args.seed)
     model = GPTQModel.load(
@@ -113,16 +117,47 @@ def main() -> None:
         seed=args.seed, damp_percent=0.05, rounding="yaqa",
         v2b2_p32=args.bits < 4, bank_count=2 if args.bits < 4 else 1,
         gsq=GSQConfig(enabled=True, steps=args.gsq_steps,
-                      candidates=args.gsq_candidates, seed=args.seed),
+                      candidates=args.gsq_candidates, seed=args.seed,
+                      qvq_coordinate_sweeps=args.gsq_coordinate_sweeps),
     )
     torch.cuda.synchronize()
     quant_seconds = time.monotonic() - quant_start
     error = result.weight.float() - weight.float()
     torch.backends.cuda.matmul.fp32_precision = "ieee"
+    damped_input = input_hessian.clone()
+    damped_output = output_hessian.clone()
+    input_damping = max(float(input_hessian.diagonal().abs().mean()) * 0.05,
+                        torch.finfo(torch.float32).eps)
+    output_damping = max(float(output_hessian.diagonal().abs().mean()) * 0.05,
+                         torch.finfo(torch.float32).eps)
+    damped_input.diagonal().add_(input_damping)
+    damped_output.diagonal().add_(output_damping)
     oracle = {}
+    damped_oracle = {}
     for label, dtype in (("fp32", torch.float32), ("fp64", torch.float64)):
         e, h, g = error.to(dtype), input_hessian.to(dtype), output_hessian.to(dtype)
         oracle[label] = float(torch.einsum("oi,ij,pj,op->", e, h, e, g).item())
+        damped_oracle[label] = float(torch.einsum(
+            "oi,ij,pj,op->", e, damped_input.to(dtype), e, damped_output.to(dtype),
+        ).item())
+    baseline_oracle = None
+    baseline_damped_oracle = None
+    if args.compare_no_gsq:
+        baseline = quantize_qvq_linear(
+            weight, input_hessian, bits=args.bits, output_hessian=output_hessian,
+            seed=args.seed, damp_percent=0.05, rounding="yaqa",
+            v2b2_p32=args.bits < 4, bank_count=2 if args.bits < 4 else 1,
+            gsq=None,
+        )
+        baseline_error = baseline.weight.float() - weight.float()
+        baseline_oracle = {}
+        baseline_damped_oracle = {}
+        for label, dtype in (("fp32", torch.float32), ("fp64", torch.float64)):
+            e, h, g = baseline_error.to(dtype), input_hessian.to(dtype), output_hessian.to(dtype)
+            baseline_oracle[label] = float(torch.einsum("oi,ij,pj,op->", e, h, e, g).item())
+            baseline_damped_oracle[label] = float(torch.einsum(
+                "oi,ij,pj,op->", e, damped_input.to(dtype), e, damped_output.to(dtype),
+            ).item())
     record = {
         "started_utc": started,
         "finished_utc": datetime.now(timezone.utc).isoformat(),
@@ -141,11 +176,17 @@ def main() -> None:
         "format": "qvq_v2b2_p32" if args.bits < 4 else "qvq_planar",
         "gsq_steps_requested": args.gsq_steps,
         "gsq_candidates": args.gsq_candidates,
+        "gsq_coordinate_sweeps": args.gsq_coordinate_sweeps,
         "gsq_completed_steps": result.gsq_diagnostics["optimizer"]["completed_steps"],
+        "gsq_optimizer_diagnostics": result.gsq_diagnostics["optimizer"],
         "gsq_changed_tiles": result.gsq_diagnostics["changed_tiles"],
         "gsq_fisher_before": result.gsq_diagnostics["before"],
         "gsq_fisher_after": result.gsq_diagnostics["after"],
         "oracle": oracle,
+        "source_damped_oracle": damped_oracle,
+        "no_gsq_oracle": baseline_oracle,
+        "no_gsq_source_damped_oracle": baseline_damped_oracle,
+        "source_damping": {"input": input_damping, "output": output_damping},
         "capture_seconds": capture_seconds,
         "quant_seconds": quant_seconds,
         "peak_torch_allocated_bytes": torch.cuda.max_memory_allocated(),

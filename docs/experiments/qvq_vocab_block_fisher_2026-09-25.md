@@ -116,3 +116,35 @@ quadratic values must not be compared as a quality result. This establishes
 a bounded, coherent factor for future cross-block optimization; the current
 GSQ call still optimizes one block at a time. The full calibration corpus and
 held-out serving accuracy have not yet been run.
+
+## 128-sequence GSQ and damping diagnostic, 2026-09-25 UTC
+
+On the same Seed-7 checkpoint, the first 128 YAQA calibration sequences
+contained 214,183 valid tokens. The shared-head rank-32 factor captured in
+19.14 s. For the first 2,048-row W3.5/P32 output block, 100 Gumbel updates
+with 33 legal candidates changed no tiles. An optional deterministic
+coordinate sweep over those candidates found one improving tile. The probe
+now records the full GSQ optimizer diagnostics and, when
+`--compare-no-gsq` is set, compares the matched no-GSQ reconstruction under
+FP32 and FP64 source-space quadratic oracles.
+
+| Matched first-block metric | No GSQ | With one coordinate sweep | Reduction |
+| --- | ---: | ---: | ---: |
+| GSQ prepared Fisher | `5.51063067e-6` | `5.47116588e-6` | 0.716% |
+| Undamped source Fisher, FP64 | `3.23364450e-5` | `2.28950865e-5` | 29.197% |
+| Source Fisher with 5% diagonal damping, FP64 | `1.51785158e-3` | `1.51056899e-3` | 0.480% |
+
+The source damping was `0.00359719` on the 2,048×2,048 input factor and
+`0.01663955` on the output factor. It explains most of the difference
+between the undamped and prepared relative gains. RHT, scaling, and
+quantizer objective details may explain the remaining difference between
+the damped source and prepared objectives; that part has not been isolated.
+This local gain came from the coordinate comparator,
+**not** from Gumbel GSQ. The FP32/FP64 source-oracle gap was about 0.00494%
+without GSQ and 0.00768% after the tile change.
+
+This is one block, 128 sequences, and a low-rank Fisher approximation. It
+does not establish a full-head artifact, cross-block whole-head gain, or
+held-out GSM8K score. A positive local Fisher objective should not be used
+as a quality claim until the final serialized head and serving path are
+evaluated.
