@@ -31,6 +31,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--gsq-candidates", type=int, default=3)
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--block-index", type=int, default=0)
+    parser.add_argument("--factor-mode", choices=["shared-head", "independent-blocks"],
+                        default="shared-head")
     return parser.parse_args()
 
 
@@ -66,10 +68,17 @@ def main() -> None:
         attn_implementation="eager",
     )
     model.model = untie_word_embeddings(model.model)
-    head = VocabBlockLinear(model.get_output_embeddings(), args.block_rows).eval()
-    model.model.set_output_embeddings(head)
-    if not 0 <= args.block_index < len(head.blocks):
+    dense_head = model.get_output_embeddings()
+    block_count = (dense_head.out_features + args.block_rows - 1) // args.block_rows
+    if not 0 <= args.block_index < block_count:
         raise ValueError("block index exceeds head block count")
+    if args.factor_mode == "independent-blocks":
+        head = VocabBlockLinear(dense_head, args.block_rows).eval()
+        model.model.set_output_embeddings(head)
+        targets = head.yaqa_targets()
+    else:
+        head = dense_head
+        targets = {"lm_head": dense_head}
     source = load_calibration_data(parquet_path=str(args.calibration_parquet), dataset_size=args.dataset_size)
     batches = model.prepare_dataset(
         calibration_dataset=source, batch_size=args.batch_size,
@@ -77,18 +86,29 @@ def main() -> None:
     )
     capture_start = time.monotonic()
     inputs, outputs, stats = capture_yaqa_sketch_b(
-        model.model, batches, head.yaqa_targets(), device=torch.device("cuda:0"),
+        model.model, batches, targets, device=torch.device("cuda:0"),
         seed=args.seed, minimum_sequences=args.dataset_size, first_decoder_layer=head,
         gram_strategy="streaming_projected", gram_projection_rank=args.gram_rank,
     )
     torch.cuda.synchronize()
     capture_seconds = time.monotonic() - capture_start
-    name = f"lm_head.blocks.{args.block_index}"
-    input_hessian = inputs[name].materialize(device=torch.device("cuda:0"))
-    output_hessian = outputs[name].materialize(device=torch.device("cuda:0"))
+    start = args.block_index * args.block_rows
+    stop = min(start + args.block_rows, dense_head.out_features)
+    if args.factor_mode == "shared-head":
+        input_hessian = inputs["lm_head"].materialize(device=torch.device("cuda:0"))
+        output_factor = outputs["lm_head"].factor(device=torch.device("cuda:0"))
+        block_factor = output_factor[start:stop]
+        output_hessian = block_factor @ block_factor.T
+        output_hessian = (output_hessian + output_hessian.T) * 0.5
+        weight = dense_head.weight.detach()[start:stop]
+    else:
+        name = f"lm_head.blocks.{args.block_index}"
+        input_hessian = inputs[name].materialize(device=torch.device("cuda:0"))
+        output_hessian = outputs[name].materialize(device=torch.device("cuda:0"))
+        weight = head.blocks[args.block_index].weight.detach()
     quant_start = time.monotonic()
     result = quantize_qvq_linear(
-        head.blocks[args.block_index].weight.detach(), input_hessian,
+        weight, input_hessian,
         bits=args.bits, output_hessian=output_hessian,
         seed=args.seed, damp_percent=0.05, rounding="yaqa",
         v2b2_p32=args.bits < 4, bank_count=2 if args.bits < 4 else 1,
@@ -97,7 +117,7 @@ def main() -> None:
     )
     torch.cuda.synchronize()
     quant_seconds = time.monotonic() - quant_start
-    error = result.weight.float() - head.blocks[args.block_index].weight.detach().float()
+    error = result.weight.float() - weight.float()
     torch.backends.cuda.matmul.fp32_precision = "ieee"
     oracle = {}
     for label, dtype in (("fp32", torch.float32), ("fp64", torch.float64)):
@@ -113,8 +133,9 @@ def main() -> None:
         "independent_sequences": stats["independent_sequences"],
         "valid_tokens": stats["valid_output_samples"],
         "block_rows": args.block_rows,
-        "block_count": len(head.blocks),
+        "block_count": block_count,
         "block_index": args.block_index,
+        "factor_mode": args.factor_mode,
         "gram_rank": args.gram_rank,
         "bits": args.bits,
         "format": "qvq_v2b2_p32" if args.bits < 4 else "qvq_planar",
