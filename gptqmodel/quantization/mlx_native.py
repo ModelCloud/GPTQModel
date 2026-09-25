@@ -101,6 +101,23 @@ def _accurate_matmul_mlx(left, right):
     )
 
 
+def _affine_group_params_mlx(group, bits):
+    """Choose affine params with ties-to-even zero-point rounding like Torch."""
+    import mlx.core as mx
+
+    minimum = mx.min(group, axis=1)
+    maximum = mx.maximum(mx.max(group, axis=1), 0)
+    scale = mx.maximum((maximum - minimum) / (2**bits - 1), 1e-7)
+    use_minimum = mx.abs(minimum) > mx.abs(maximum)
+    scale = mx.where(use_minimum, scale, -scale)
+    edge = mx.where(use_minimum, minimum, maximum)
+    zero_code = mx.round(edge / scale)
+    at_zero = zero_code == 0
+    scale = mx.where(at_zero, scale, edge / mx.where(at_zero, 1, zero_code))
+    bias = mx.where(at_zero, 0, edge)
+    return scale[:, None], bias[:, None]
+
+
 def gptq_quantize_weight_mlx(
     weight, inverse_hessian, bits: int = 4, group_size: int = 64
 ):
@@ -133,7 +150,7 @@ def gptq_quantize_weight_mlx(
     for start in range(0, columns, group_size):
         end = start + group_size
         group = remaining[:, :group_size]
-        _, scales, biases = mx.quantize(group, bits=bits, group_size=group_size)
+        scales, biases = _affine_group_params_mlx(group, bits)
         packed_group, errors = kernel(
             inputs=[group, inverse_hessian[start:end, start:end], scales, biases],
             template=[("G", group_size), ("BITS", bits), ("PACK", values_per_word)],
