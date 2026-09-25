@@ -45,6 +45,40 @@ def _gguf_q1_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_q2_0_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_q2_0_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            float maximum = 0.0f;
+            for (uint k = 0; k < 64; ++k) {
+                maximum = metal::max(
+                    maximum, metal::abs(weights[block * 64 + k]));
+            }
+            float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            ushort scale_bits = as_type<ushort>(half(maximum));
+            uint offset = block * 18;
+            packed[offset] = uchar(scale_bits & 255);
+            packed[offset + 1] = uchar(scale_bits >> 8);
+            for (uint byte = 0; byte < 16; ++byte) {
+                uchar codes = 0;
+                for (uint lane = 0; lane < 4; ++lane) {
+                    float value = weights[block * 64 + byte * 4 + lane]
+                        * inverse;
+                    uint code = value >= 0.5f ? 2 : (value <= -0.5f ? 0 : 1);
+                    codes |= uchar(code << (lane * 2));
+                }
+                packed[offset + 2 + byte] = codes;
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q4_0_kernel():
     import mlx.core as mx
 
@@ -139,11 +173,18 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     import mlx.core as mx
 
     normalized = qtype.upper()
-    if normalized not in ("Q1_0", "Q1_0_G128", "Q4_0", "Q8_0"):
-        raise ValueError("MLX GGUF packing supports Q1_0, Q1_0_g128, Q4_0, and Q8_0")
+    if normalized not in ("Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q8_0"):
+        raise ValueError(
+            "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, and Q8_0"
+        )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
-    block_size = 128 if normalized.startswith("Q1_0") else 32
+    if normalized.startswith("Q1_0"):
+        block_size = 128
+    elif normalized == "Q2_0":
+        block_size = 64
+    else:
+        block_size = 32
     if weight.ndim != 2 or weight.shape[1] == 0 or weight.shape[1] % block_size:
         raise ValueError(
             f"weight must be 2D with nonzero input width divisible by {block_size}"
@@ -154,6 +195,8 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     blocks = rows * (columns // block_size)
     if normalized.startswith("Q1_0"):
         kernel, bytes_per_block = _gguf_q1_0_kernel(), 18
+    elif normalized == "Q2_0":
+        kernel, bytes_per_block = _gguf_q2_0_kernel(), 18
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
