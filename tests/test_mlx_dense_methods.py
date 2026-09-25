@@ -35,7 +35,7 @@ def test_dense_holder_validates_without_affine_group_limits(holder, bits, invali
 
 def _load_dense(monkeypatch, source, input_dims, output_dims):
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
-    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8Linear
+    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
     from gptqmodel.utils import mlx as mlx_utils
 
     class Args:
@@ -60,7 +60,11 @@ def _load_dense(monkeypatch, source, input_dims, output_dims):
         assert config["_gptqmodel_custom_mlx_runtime"]
     else:
         assert "quantization" not in config
-        assert isinstance(model.linear, nn.Linear)
+        if isinstance(source, TorchFP8Linear):
+            assert isinstance(model.linear, MlxFP8DenseLinear)
+            assert config["_gptqmodel_custom_mlx_runtime"]
+        else:
+            assert isinstance(model.linear, nn.Linear)
     return model
 
 
@@ -87,13 +91,31 @@ def test_fp8_mlx_dense_matches_torch(monkeypatch, fp8_format, scale_method, bloc
         np.testing.assert_array_equal(np.array(model.linear.linear.weight), packed)
         np.testing.assert_array_equal(np.array(model.linear.linear.scales), scales)
     else:
-        np.testing.assert_array_equal(np.array(model.linear.weight), reference_weight.numpy())
+        np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
     rng = np.random.default_rng(210)
     x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float16)
     actual = model(mx.array(x))
     mx.eval(actual)
     expected = torch.from_numpy(x).double() @ reference_weight.double().T + source.bias.double()
     np.testing.assert_allclose(np.array(actual), expected.numpy(), rtol=0.002, atol=0.002)
+
+
+@pytest.mark.parametrize("fp8_format", ["float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"])
+@pytest.mark.parametrize("scale_method,block_size", [("tensor", None), ("row", None), ("block", (16, 32))])
+def test_fp8_mlx_preserves_bfloat16_activation(monkeypatch, fp8_format, scale_method, block_size):
+    from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+
+    source = TorchFP8Linear(
+        bits=8, group_size=-1, sym=True, desc_act=False,
+        in_features=128, out_features=64, bias=True,
+        dtype=torch.float16, format=fp8_format,
+        weight_scale_method=scale_method, weight_block_size=block_size,
+    )
+    source.pack_original(torch.nn.Linear(128, 64, bias=True).half(), None, None)
+    model = _load_dense(monkeypatch, source, 128, 64)
+    actual = model(mx.ones((2, 128), dtype=mx.bfloat16))
+    mx.eval(actual)
+    assert actual.dtype == mx.bfloat16
 
 
 def test_fp8_e8m0_checkpoint_decodes_for_mlx(monkeypatch):
@@ -111,7 +133,7 @@ def test_fp8_e8m0_checkpoint_decodes_for_mlx(monkeypatch):
     source.bias.fill_(0.01)
     model = _load_dense(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight(device="cpu", dtype=torch.float16).T
-    np.testing.assert_array_equal(np.array(model.linear.weight), reference_weight.numpy())
+    np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
     output = model(mx.ones((1, 128), dtype=mx.float16))
     mx.eval(output)
     expected = torch.ones((1, 128), dtype=torch.float64) @ reference_weight.double().T + source.bias.double()

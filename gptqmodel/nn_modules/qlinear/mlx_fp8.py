@@ -31,3 +31,15 @@ class MlxFP8Linear(nn.Module):
         if "bias" in self:
             result = result + self.bias
         return result.astype(x.dtype)
+
+
+class MlxFP8DenseLinear(nn.Module):
+    """Keep the activation dtype for FP8 formats decoded to FP16 weights."""
+
+    def __init__(self, linear):
+        super().__init__()
+        self.linear = linear
+        self.freeze()
+
+    def __call__(self, x):
+        return self.linear(x).astype(x.dtype)
