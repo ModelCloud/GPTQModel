@@ -55,7 +55,7 @@ def _compare(weight, bits=4, group_size=128, sym=True):
     return actual, expected
 
 
-@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("bits", range(2, 9))
 @pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("sym", [False, True])
 def test_rtn_torch_oracle_small(bits, group_size, sym):
