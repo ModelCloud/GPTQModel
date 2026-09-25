@@ -419,8 +419,9 @@ def undo_offload_to_disk(
                         setattr(sub, name, new_b)
 
         # 2) Remove all Accelerate hooks so future forwards won't offload again.
-        # Detaching hooks can recreate tensors from their offload maps.
-        with torch.inference_mode(False):
+        # Detaching hooks can recreate tensors from their offload maps. Tying
+        # weights may also update leaf parameters in place.
+        with torch.inference_mode(False), torch.no_grad():
             remove_hook_from_submodules(module)      # public API
             remove_hook_from_module(module, recurse=False)  # ensure root is also clean
 

@@ -27,6 +27,23 @@ class _TiedModel(torch.nn.Module):
         return self.output(x * self.scale)
 
 
+class _CopyTiedModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.config = SimpleNamespace(tie_word_embeddings=True)
+        self.embedding = torch.nn.Embedding(8, 4)
+        self.output = torch.nn.Linear(4, 8, bias=False)
+        with torch.no_grad():
+            self.embedding.weight.fill_(0.5)
+            self.output.weight.zero_()
+
+    def tie_weights(self) -> None:
+        self.output.weight.copy_(self.embedding.weight)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.output(x)
+
+
 @pytest.mark.parametrize("outer_inference", [False, True])
 @pytest.mark.parametrize("offload_buffers", [False, True])
 def test_disk_restore_produces_autograd_safe_tensors(
@@ -55,3 +72,25 @@ def test_disk_restore_produces_autograd_safe_tensors(
     assert inputs.grad is not None
     assert model.output.weight.grad is not None
     assert model.output.weight.requires_grad
+
+
+@pytest.mark.parametrize("outer_inference", [False, True])
+def test_restore_allows_tie_weights_to_copy_into_trainable_parameter(
+    tmp_path: Path, outer_inference: bool
+) -> None:
+    model = _CopyTiedModel()
+    disk_offload(
+        model,
+        offload_dir=str(tmp_path / "offload"),
+        execution_device=torch.device("cpu"),
+    )
+
+    with torch.inference_mode(outer_inference):
+        undo_offload_to_disk(model)
+
+    torch.testing.assert_close(model.output.weight, model.embedding.weight)
+    assert not model.output.weight.is_inference()
+    inputs = torch.ones(2, 4, requires_grad=True)
+    model(inputs).sum().backward()
+    assert model.output.weight.grad is not None
+    assert inputs.grad is not None
