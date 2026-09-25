@@ -38,4 +38,4 @@ class MlxGroup16Linear(nn.Module):
         result = even + odd
         if "bias" in self:
             result += self.bias
-        return result
+        return result.astype(x.dtype)

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 
 import sys
 from types import SimpleNamespace
@@ -284,10 +285,11 @@ def test_awq_tensor_group_maps_to_mlx_128():
     assert params == {"group_size": 128, "bits": 4, "mode": "affine"}
 
 
+@pytest.mark.parametrize("dtype", [mlx.float16, mlx.bfloat16])
 @pytest.mark.parametrize("format,bits,planar", [("gptq", bits, bits in (5, 6, 7))
                                                for bits in (2, 3, 4, 5, 6, 7, 8)]
                          + [("gptq", 3, True), ("awq", 4, False)])
-def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format, bits, planar):
+def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format, bits, planar, dtype):
     import mlx.nn as mlx_nn
     import torch
 
@@ -355,14 +357,17 @@ def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format
     np.testing.assert_array_equal(np.array(model.linear.weight), _oracle_words(codes.T, target_bits))
 
     x_numpy = rng.normal(0, 0.2, (2, 3, in_features)).astype(np.float16)
-    output = model(mlx.array(x_numpy))
+    input_tensor = mlx.array(x_numpy).astype(dtype)
+    output = model(input_tensor)
     mlx.eval(output)
+    assert output.dtype == dtype
     torch_codes = torch.from_numpy(codes.astype(np.int64))
     torch_zeros = torch.from_numpy(zeros.astype(np.int64)).repeat_interleave(group_size, dim=0)
     torch_scales = torch.from_numpy(scales).double().repeat_interleave(group_size, dim=0)
     expected_weight = (torch_codes - torch_zeros).double() * torch_scales
-    expected = torch.from_numpy(x_numpy).double() @ expected_weight + torch.from_numpy(bias).double()
-    np.testing.assert_allclose(np.array(output), expected.numpy(), rtol=0.002, atol=0.002)
+    expected = torch.from_numpy(np.asarray(input_tensor.astype(mlx.float32))).double() @ expected_weight + torch.from_numpy(bias).double()
+    rounded = expected.to(torch.float16 if dtype == mlx.float16 else torch.bfloat16).float()
+    np.testing.assert_allclose(np.asarray(output.astype(mlx.float32)), rounded.numpy(), rtol=0.002, atol=0.002)
 
 
 @pytest.mark.parametrize("formats", [("gptq", "gptq"), ("awq", "awq"), ("gptq", "awq")])
