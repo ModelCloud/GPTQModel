@@ -1332,18 +1332,29 @@ def convert_mx_shard(
                 torch.uint8, getattr(torch, "float8_e8m0fnu", None)
             }
             if is_e8m0:
-                if logical_cols % 32 or scale.ndim != tensor.ndim or scale.shape[:-1] != tensor.shape[:-1]:
+                if logical_cols % 32 or scale.ndim != tensor.ndim or any(
+                    actual < needed for actual, needed in zip(scale.shape[:-1], tensor.shape[:-1])
+                ):
                     raise ValueError(f"MX weight and E8M0 scale layout mismatch for {key}")
                 expected_cols = logical_cols // 32
                 if scale.shape[-1] < expected_cols:
                     raise ValueError(f"MX scale shape {tuple(scale.shape)} needs {expected_cols} columns for {key}")
-                scale = decode_e8m0_scale(scale[..., :expected_cols].reshape(-1, expected_cols))
+                block_slices = tuple(slice(0, dim) for dim in tensor.shape[:-1]) + (slice(0, expected_cols),)
+                scale = decode_e8m0_scale(scale[block_slices].reshape(-1, expected_cols))
             elif not is_fp8:
                 # A mixed checkpoint may pair MXFP8 with NVFP4 layers.
                 scale = scale.to(torch.float32)
 
             scale_2 = lookup(key + "_scale_2")
             if isinstance(scale_2, torch.Tensor) and isinstance(scale, torch.Tensor):
+                if is_e8m0 and scale_2.ndim == tensor.ndim:
+                    scale_2_slices = tuple(
+                        slice(0, needed) if actual > needed else slice(None)
+                        for actual, needed in zip(scale_2.shape[:-1], tensor.shape[:-1])
+                    ) + (slice(0, expected_cols) if scale_2.shape[-1] > expected_cols else slice(None),)
+                    scale_2 = scale_2[scale_2_slices]
+                    if scale_2.ndim > 2:
+                        scale_2 = scale_2.reshape(-1, scale_2.shape[-1])
                 scale = scale.to(torch.float32) * scale_2.to(torch.float32)
 
             flat_weight = tensor.reshape(-1, tensor.shape[-1])

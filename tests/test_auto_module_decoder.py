@@ -212,6 +212,60 @@ def test_module_decoder_reconstructs_quark_mxfp4_sibling_scale():
     torch.testing.assert_close(decoded.weight, torch.tensor([[1.0, 2.0] * 16], dtype=torch.bfloat16))
 
 
+@pytest.mark.parametrize("weight_format", ["mxfp4", "mxfp8_e4m3", "mxfp8_e5m2"])
+@pytest.mark.parametrize("secondary_layout", ["global", "padded"])
+def test_module_decoder_clips_padded_mx_scales_before_expansion(weight_format, secondary_layout):
+    harness = base_module.BaseQModel.__new__(base_module.BaseQModel)
+    nn.Module.__init__(harness)
+    harness.model = _LinearWrapper(64, 2)
+    harness.model.config = SimpleNamespace(quantization_config={
+        "format": "mxfp4" if weight_format == "mxfp4" else "mxfp8",
+        "weight_block_size": [1, 32],
+    })
+    if weight_format == "mxfp4":
+        # Independent E2M1 oracle: each row exercises every positive and negative code.
+        values = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                  -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+        packed_bytes = [code | ((15 - code) << 4) for code in range(16)] * 2
+        weight = torch.tensor(packed_bytes, dtype=torch.uint8).repeat(2, 1)
+        unscaled = torch.tensor(
+            [item for code in range(16) for item in (values[code], values[15 - code])] * 2,
+            dtype=torch.float32,
+        ).repeat(2, 1)
+    else:
+        fp8_dtype = torch.float8_e4m3fn if weight_format.endswith("e4m3") else torch.float8_e5m2
+        unscaled = torch.tensor([-1.5, 0.5, 2.0, 4.0] * 16, dtype=torch.float32).repeat(2, 1)
+        weight = unscaled.to(fp8_dtype)
+    # The last two columns and rows are padding. The 255 byte must never reach the decoder.
+    scale = torch.tensor([
+        [127, 128, 255, 255],
+        [129, 126, 255, 255],
+        [255, 255, 255, 255],
+        [255, 255, 255, 255],
+    ], dtype=torch.uint8)
+    global_scale = torch.tensor(0.3, dtype=torch.float32)
+    if secondary_layout == "padded":
+        scale_2 = torch.full((4, 4), 99.0)
+        scale_2[:2, :2] = global_scale
+    else:
+        scale_2 = global_scale
+    oracle_scale = torch.tensor([[1.0, 2.0], [4.0, 0.5]], dtype=torch.float64).repeat_interleave(32, dim=1)
+    expected = (unscaled.to(torch.float64) * oracle_scale * global_scale.to(torch.float64)).to(torch.bfloat16)
+
+    decoded = harness._build_decoder_quant_source_module(
+        nn.Linear(64, 2, bias=False),
+        checkpoint_tensors={"weight": weight, "weight_scale": scale, "weight_scale_2": scale_2},
+        target_dtype=torch.bfloat16,
+    )
+
+    torch.testing.assert_close(decoded.weight, expected, rtol=0, atol=0)
+    if torch.cuda.is_available():
+        inputs = torch.arange(64, device="cuda:0", dtype=torch.bfloat16).reshape(1, 64) / 64
+        actual = decoded.to("cuda:0")(inputs)
+        oracle = torch.nn.functional.linear(inputs, expected.to("cuda:0"))
+        torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
+
+
 def test_auto_module_decoder_config_exposes_validated_policies():
     config = AutoModuleDecoderConfig(
         passthrough_forward_policy="NATIVE",
