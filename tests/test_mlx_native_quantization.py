@@ -247,6 +247,30 @@ def test_fused_gptq_matches_torch_update_oracle(bits, group_size):
     )
 
 
+def test_gptq_affine_zero_point_ties_match_torch_bfloat16():
+    """The built-in MLX quantizer rounds -8.5 away from zero, unlike Torch."""
+    torch = pytest.importorskip("torch")
+    low = torch.tensor(-1.015625, dtype=torch.bfloat16)
+    high = torch.tensor(1.328125, dtype=torch.bfloat16)
+    minus_inf = torch.tensor(-float("inf"), dtype=torch.bfloat16)
+    plus_inf = torch.tensor(float("inf"), dtype=torch.bfloat16)
+    weights = torch.zeros((6, 64), dtype=torch.bfloat16)
+    for row, selected_high in enumerate((
+        torch.nextafter(high, minus_inf), high, torch.nextafter(high, plus_inf),
+    )):
+        weights[row, 0], weights[row, 1] = low, selected_high
+        weights[row + 3, 0], weights[row + 3, 1] = -selected_high, -low
+    source = weights.float().numpy()
+    factor = torch.eye(64)
+    actual = native.gptq_quantize_weight_mlx(
+        mx.array(source).astype(mx.bfloat16), mx.eye(64), bits=4, group_size=64,
+    )
+    expected = _torch_gptq_weight_oracle(source, factor, 4, 64, torch)
+    np.testing.assert_array_equal(np.asarray(actual[0]), expected[0])
+    np.testing.assert_allclose(np.asarray(actual[1]), expected[1], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(actual[2]), expected[2], rtol=1e-6, atol=1e-6)
+
+
 @pytest.mark.parametrize("bits,group_size", [
     (3, 64), (6, 64),
     (4, -1), (4, 16), (4, 256),
