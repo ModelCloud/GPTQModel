@@ -18,6 +18,18 @@ Treat a QVQ optimization as integrated only after the pinned ZML path can select
 
 Use the repository's git/PR workflow skill for branch and push mechanics. This skill governs the cross-repository technical contract.
 
+## Recurring dispatch failures to prevent
+
+| Observed failure | Required gate before a full-suite benchmark |
+| --- | --- |
+| Fast CUDA specialization existed but ZML did not select it | Match the pinned ABI's exact shape/algorithm predicate to ZML policy and inspect a production-shaped native launch. |
+| ZML selected the algorithm but XLA rejected the composite and emitted dense TF32 | Check the actual XLA rewriter guard and optimized HLO for each projection; count native versus fallback launches. |
+| Rewrite lived in a plausible wrapper bypassed by model `forward` | Trace the real model call graph and prove the expected production Step changed before timing 1,209 rows. |
+| Autotune/cache change retuned an unrelated decode fusion | Match compiled executable, cache, decode HLO/kernel selection, warmup, and batch/row identity across control and candidate. |
+| Shape policy overrode an explicit `WithConfig`/autotune request | Keep automatic policy at the model boundary; test that explicit geometry remains intact. |
+| Diagnostic environment switch became necessary to reach production kernel | Select by architecture/ABI/shape capability and expose the selected route and fallback reason in telemetry. |
+| Correct logits were mistaken for optimized-path proof | Require projection-scoped dispatch evidence; numerical parity alone is insufficient. |
+
 ## Build a bidirectional coverage matrix
 
 For every changed or exported QVQ family, record one row using [references/coverage-matrix.md](references/coverage-matrix.md). Include:
@@ -35,6 +47,22 @@ Every row must end in exactly one disposition:
 - `not-applicable`: cannot be consumed by ZML, with a technical reason.
 
 Missing or implicit disposition is a failure. Perform the reverse check too: every nonzero algorithm or specialized geometry emitted by ZML must exist in the pinned QVQ ABI with identical constraints.
+
+## Prove the production call path before the expensive model gate
+
+Trace the *actual model entry point* for every optimized projection and phase, including rank-correction on/off and grouped/single paths. Record the chain from model `forward` through its configured QVQ call, composite/lowering, XLA admission, FFI symbol, and native kernel. Do not assume an optimization placed in a plausible public wrapper is reachable: Llama's QVQ projection called `p32WindowMatmulWithConfig` directly, so an M1920 rewrite in `p32WindowMatmul` compiled and passed tests but never executed in the full model.
+
+Before running the full quality/throughput suite, compile one **production-shaped** Step with the real pinned model and compare candidate versus matched control:
+
+- State the expected per-module/per-layer launch-count and M/K/N/rate/algorithm changes, then inspect optimized HLO and projection-scoped runtime kernel/counter evidence. Fail the path gate if the expected change is absent, even when outputs are exact and the candidate builds.
+- Verify gate/down, Q/K/V, rank correction, and small-M decode separately when their routes differ. A total QVQ launch count cannot prove that the changed projection used its intended kernel.
+- Check the caller-side shape predicate, ZML composite attributes, XLA rewriter guard, pinned QVQ raw-ABI predicate, and selected native symbol for the same tuple. Include a near-miss shape that retains its documented fallback.
+- Apply automatic shape rewrites at the model-policy boundary, not in an explicit `WithConfig`/autotune entry point: a production fix must not silently override a caller's requested algorithm or geometry. Test both the automatic route and an explicit-config near miss.
+- Hold XLA/PJRT build, autotune cache, compiled decode algorithms, graph mode, and warmup identity fixed. A prefill-only source change may independently retune decode: the M1920 investigation observed `64×128` versus `128×128` Triton decode tiles and misleading token drift until the executable policy was matched.
+- Read the runner-ready telemetry before scoring: assert the intended attention backend/page size, rank-correction phases, prefill bucket, KV pool, allocator, CPU/GPU affinity, and compiled batch. A server command that omits `ZML_LLAMA_ATTENTION=fa2`, for example, starts a valid but incomparable Triton run.
+- If a local kernel wins but full-model timing is flat, check this route proof *before* treating the mechanism as slow. Conversely, HLO attributes or selected Zig configuration alone are not proof that the native launch occurred.
+
+For an exact shape-specialized path, production selection should follow device/ABI/shape capability automatically. Keep diagnostic environment switches out of the promoted dispatch policy unless they are an intentional, user-visible control. Record the selected path and the reason for fallback in readiness/telemetry so a future benchmark can verify it without inferring from throughput.
 
 ## Propagate QVQ changes through every layer
 
