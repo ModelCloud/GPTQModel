@@ -6,11 +6,16 @@ from __future__ import annotations
 
 import copy
 
+import pytest
 import torch
 from torch import nn
 
 from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch, capture_yaqa_sketch_b
 from optimize.qvq_vocab_blocks import VocabBlockLinear, factored_head_fisher_loss
+from scripts.experiments.qvq_vocab_block_probe import (
+    load_shared_factor_cache,
+    save_shared_factor_cache,
+)
 
 
 class _TinyCausal(nn.Module):
@@ -91,3 +96,39 @@ def test_shared_head_factor_preserves_principal_and_cross_blocks():
                                    atol=2e-6, rtol=2e-6)
     cross = factor[:16] @ factor[16:32].T
     torch.testing.assert_close(cross, full[:16, 16:32], atol=2e-6, rtol=2e-6)
+
+
+def test_shared_head_factor_cache_preserves_identity_and_exact_diagonal(tmp_path):
+    torch.manual_seed(391)
+    input_source = torch.randn(16, 4)
+    output_source = torch.randn(48, 4)
+    # A transferred GPU reduction need not equal a fresh CPU reduction bitwise.
+    input_sketch = YaqaGramSketch(
+        input_source, input_source.square().sum(1), 1.0, 7,
+        source_diagonal=input_source.square().sum(1) * 1.001,
+        _source_diagonal_validated=True,
+    )
+    output_sketch = YaqaGramSketch(
+        output_source, output_source.square().sum(1), 1.0, 7,
+        source_diagonal=output_source.square().sum(1) * 1.001,
+        _source_diagonal_validated=True,
+    )
+    identity = {
+        "schema": "qvq.yaqa.shared-head-factor.v2", "model_path": "/fixture/model",
+        "calibration_sha256": "a" * 64, "requested_sequences": "2", "gram_rank": "4",
+        "batch_size": "1", "seed": "7", "input_features": "16", "output_features": "48",
+    }
+    path = tmp_path / "factors.safetensors"
+    save_shared_factor_cache(path, {"lm_head": input_sketch}, {"lm_head": output_sketch},
+                             {**identity, "independent_sequences": "2", "valid_tokens": "19"})
+    inputs, outputs, stats = load_shared_factor_cache(path, identity)
+    assert stats == {"independent_sequences": 2, "valid_output_samples": 19}
+    torch.testing.assert_close(inputs["lm_head"].factor(device=torch.device("cpu")),
+                               input_sketch.factor(device=torch.device("cpu")), atol=0, rtol=0)
+    torch.testing.assert_close(outputs["lm_head"].factor(device=torch.device("cpu")),
+                               output_sketch.factor(device=torch.device("cpu")), atol=0, rtol=0)
+    with pytest.raises(ValueError, match="provenance"):
+        load_shared_factor_cache(path, {**identity, "calibration_sha256": "b" * 64})
+    with pytest.raises(FileExistsError, match="Refusing to overwrite"):
+        save_shared_factor_cache(path, {"lm_head": input_sketch}, {"lm_head": output_sketch},
+                                 {**identity, "independent_sequences": "2", "valid_tokens": "19"})

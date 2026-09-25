@@ -148,3 +148,21 @@ does not establish a full-head artifact, cross-block whole-head gain, or
 held-out GSM8K score. A positive local Fisher objective should not be used
 as a quality claim until the final serialized head and serving path are
 evaluated.
+
+## Reusable full-head factor cache
+
+The probe accepts `--factor-cache PATH` to save the bounded full-head YAQA
+sketch as safetensors, then `--reuse-factor-cache` with the same path to
+quantize other bit rates or vocabulary blocks without recapturing the model.
+The cache contains each factor's source, exact diagonal, original
+source-diagonal reduction, and normalizer. Its metadata pins model path,
+calibration file hash, sequence count, projection rank, batch size, seed,
+and head dimensions; a mismatched identity is rejected. This cache is
+offline calibration data, not a deployable weight artifact.
+
+Saving the original source diagonal is required: recomputing it after a
+CPU transfer changed the real-model one-block quadratic despite identical
+factor source bytes. After preserving it and reseeding at the quantization
+boundary, fresh-capture and cache-reuse runs produced identical GSQ losses,
+changed-tile counts, and FP32/FP64 quadratics on the 1,955-token real-model
+smoke. The schema is `qvq.yaqa.shared-head-factor.v2`.
