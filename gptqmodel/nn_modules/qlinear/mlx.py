@@ -110,7 +110,7 @@ class MlxQuantLinear(_MlxLinearContract, TorchLinear):
     SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16]
     REQUIRES_FORMAT_V2 = True
 
     SOURCE_LINEAR = TorchLinear
@@ -149,7 +149,7 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
     SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16]
     REQUIRES_FORMAT_V2 = False
 
     SOURCE_LINEAR = AwqTorchLinear

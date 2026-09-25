@@ -26,6 +26,7 @@ try:
     import mlx.nn as nn
 
     from mlx_lm import generate
+    from mlx_lm.sample_utils import make_logits_processors, make_sampler
     from mlx_lm.utils import _get_classes, load_config, quantize_model
     MLX_AVAILABLE = True
 except ImportError:
@@ -212,11 +213,33 @@ def mlx_generate(model, tokenizer, **kwargs,):
 
     sampling_params = {}
     sampling_params["max_tokens"] = kwargs.pop("max_tokens", 256)
-    if "sampler" in kwargs:
-        sampling_params["sampler"] = kwargs.pop("sampler", None)
+    sampler = kwargs.pop("sampler", None)
+    temperature = kwargs.pop("temp", None)
+    if temperature is None:
+        temperature = kwargs.pop("temperature", None)
+    top_p = kwargs.pop("top_p", None)
+    min_p = kwargs.pop("min_p", None)
+    min_tokens_to_keep = kwargs.pop("min_tokens_to_keep", None)
+    if sampler is None and any(value is not None for value in (temperature, top_p, min_p, min_tokens_to_keep)):
+        sampler = make_sampler(
+            temp=0.0 if temperature is None else temperature,
+            top_p=0.0 if top_p is None else top_p,
+            min_p=0.0 if min_p is None else min_p,
+            min_tokens_to_keep=1 if min_tokens_to_keep is None else min_tokens_to_keep,
+        )
+    if sampler is not None:
+        sampling_params["sampler"] = sampler
 
-    if "logits_processors" in kwargs:
-        sampling_params["logits_processors"] = kwargs.pop("logits_processors", None)
+    logits_processors = kwargs.pop("logits_processors", None)
+    repetition_penalty = kwargs.pop("repetition_penalty", None)
+    repetition_context_size = kwargs.pop("repetition_context_size", 20)
+    if repetition_penalty is not None and repetition_penalty != 1.0:
+        logits_processors = list(logits_processors or []) + make_logits_processors(
+            repetition_penalty=repetition_penalty,
+            repetition_context_size=repetition_context_size,
+        )
+    if logits_processors is not None:
+        sampling_params["logits_processors"] = logits_processors
 
     if "max_kv_size" in kwargs:
         sampling_params["max_kv_size"] = kwargs.pop("max_kv_size", None)
@@ -232,27 +255,7 @@ def mlx_generate(model, tokenizer, **kwargs,):
     sampling_params["kv_group_size"] = kwargs.pop("kv_group_size", 64)
     sampling_params["quantized_kv_start"] = kwargs.pop("quantized_kv_start", 0)
 
-    if "sampler" in kwargs:
+    if "prompt_progress_callback" in kwargs:
         sampling_params["prompt_progress_callback"] = kwargs.pop("prompt_progress_callback", None)
-
-    if kwargs.pop("temp", None) is not None:
-        sampling_params["temp"] = kwargs.pop("temp")
-    elif kwargs.pop("temperature", None) is not None:
-        sampling_params["temp"] = kwargs.pop("temperature")
-
-    if "repetition_penalty" in kwargs:
-        sampling_params["repetition_penalty"] = kwargs.pop("repetition_penalty", None)
-
-    if "repetition_context_size" in kwargs:
-        sampling_params["repetition_context_size"] = kwargs.pop("repetition_context_size", None)
-
-    if "top_p" in kwargs:
-        sampling_params["top_p"] = kwargs.pop("top_p", None)
-
-    if "min_p" in kwargs:
-        sampling_params["min_p"] = kwargs.pop("min_p", None)
-
-    if "min_tokens_to_keep" in kwargs:
-        sampling_params["min_tokens_to_keep"] = kwargs.pop("min_tokens_to_keep", None)
 
     return generate(model=model, tokenizer=tokenizer, prompt=prompt, verbose=verbose, **sampling_params)

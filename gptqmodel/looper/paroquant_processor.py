@@ -952,13 +952,14 @@ class ParoQuantProcessor(LoopProcessor):
         attention_mask: Optional[torch.Tensor],
         position_ids: Optional[torch.Tensor],
         cache: bool = True,
+        layer_inputs: Optional[List[torch.Tensor]] = None,
     ) -> Dict[str, Any]:
         """Refresh grouped replay kwargs so real decoder layers can be replayed safely."""
         target_device = x.device
 
         prepared_cache_key = None
         prepared_cache = None
-        if cache and not x.requires_grad:
+        if cache and not any(t.requires_grad for t in (layer_inputs or [x])):
             prepared_cache = getattr(self, "_group_forward_prepared_cache", None)
             if prepared_cache is None:
                 prepared_cache = {}
@@ -966,6 +967,7 @@ class ParoQuantProcessor(LoopProcessor):
             prepared_cache_key = (
                 id(layer),
                 id(x),
+                tuple(id(t) for t in layer_inputs) if layer_inputs is not None else (),
                 id(input_kwargs),
                 id(attention_mask) if attention_mask is not None else 0,
                 id(position_ids) if position_ids is not None else 0,
@@ -1083,7 +1085,7 @@ class ParoQuantProcessor(LoopProcessor):
         if prepare_replay_kwargs is not None:
             module_kwargs = prepare_replay_kwargs(
                 layer=layer,
-                layer_input=[x],
+                layer_input=layer_inputs if layer_inputs is not None else [x],
                 additional_inputs=module_kwargs,
                 target_device=target_device,
             )
@@ -1509,6 +1511,7 @@ class ParoQuantProcessor(LoopProcessor):
         additional_inputs = self._prepare_group_forward_kwargs(
             layer,
             x=inputs[0],
+            layer_inputs=inputs,
             input_kwargs=input_kwargs,
             attention_mask=attention_mask,
             position_ids=position_ids,
@@ -1545,6 +1548,7 @@ class ParoQuantProcessor(LoopProcessor):
         additional_inputs = self._prepare_group_forward_kwargs(
             layer,
             x=inputs[0],
+            layer_inputs=inputs,
             input_kwargs=replay_batch.input_kwargs,
             attention_mask=replay_batch.attention_mask,
             position_ids=replay_batch.position_ids,

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import torch
+from accelerate.hooks import AlignDevicesHook, CpuOffload, SequentialHook
 from torch.nn import parallel as torch_parallel
 
 from .. import DEBUG_ON, DEVICE_THREAD_POOL
@@ -138,6 +139,75 @@ def device_ctx(dev: Optional[torch.device | "DEVICE"]):
 
 _rehome_lock = threading.Lock()
 
+def _realign_materialized_hooks(
+    module: torch.nn.Module,
+    device: torch.device,
+    root_module: Optional[torch.nn.Module],
+) -> None:
+    """Retarget resident hooks only when their containing model is known."""
+    if root_module is None or device.type == "meta":
+        return
+    if device.type == "cpu":
+        device = CPU
+    elif device.type == "mps" and device.index is None:
+        device = torch.device("mps", 0)
+    elif device.index is None and device.type in {"cuda", "xpu", "npu"}:
+        try:
+            index = torch.get_device_module(device).current_device()
+        except (AssertionError, RuntimeError):
+            return
+        device = torch.device(device.type, index)
+    hooks = []
+    submodules = set(module.modules())
+    offloaded_submodules = set()
+    for sub in submodules:
+        # PyTorch replicas share hook objects with their source module.
+        if getattr(sub, "_is_replica", False):
+            return
+        pending = [getattr(sub, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if isinstance(hook, SequentialHook):
+                pending.extend(hook.hooks)
+            elif isinstance(hook, CpuOffload) or (
+                isinstance(hook, AlignDevicesHook) and hook.offload
+            ):
+                # The owner controls its descendants, but not resident parents.
+                offloaded_submodules.update(sub.modules())
+            elif isinstance(hook, AlignDevicesHook):
+                if (
+                    hook.execution_device is not None
+                    and hook.execution_device != device
+                ):
+                    hooks.append((sub, hook))
+    for sub in submodules - offloaded_submodules:
+        for tensor in (*sub._parameters.values(), *sub._buffers.values()):
+            if tensor is not None and tensor.device != device:
+                return
+    hooks = [hook for owner, hook in hooks if owner not in offloaded_submodules]
+    if not hooks:
+        return
+    root_modules = list(root_module.modules())
+    if module not in root_modules:
+        return
+    for ancestor in root_modules:
+        if ancestor in submodules:
+            continue
+        pending = [getattr(ancestor, "_hf_hook", None)]
+        while pending:
+            hook = pending.pop()
+            if isinstance(hook, SequentialHook):
+                pending.extend(hook.hooks)
+            elif isinstance(hook, CpuOffload) or (
+                isinstance(hook, AlignDevicesHook) and hook.offload
+            ):
+                # Include every ownership path when modules have shared aliases.
+                if any(child in submodules for child in ancestor.modules()):
+                    return
+    for hook in hooks:
+        hook.execution_device = device
+
+
 @torch.inference_mode()
 def rehome_module_to_device(
     module: torch.nn.Module,
@@ -147,8 +217,13 @@ def rehome_module_to_device(
     move_buffers: bool = True,
     include_non_persistent_buffers: bool = True,
     only_mismatched: bool = True,
+    root_module: Optional[torch.nn.Module] = None,
 ) -> None:
-    """Move registered tensors on ``module`` to ``device`` with defensive fallbacks."""
+    """Move tensors, realigning hooks only with a complete containing model.
+
+    Omit ``root_module`` when ancestry is unknown to preserve hook ownership.
+    A standalone module may supply itself as the root.
+    """
     with _rehome_lock:
         for sub in module.modules():
             if move_buffers:
@@ -191,6 +266,9 @@ def rehome_module_to_device(
                             sub._parameters[pname] = new_p
                         except Exception:
                             pass
+
+        if move_parameters:
+            _realign_materialized_hooks(module, device, root_module)
 
 
 def clear_non_picklable_state(module: torch.nn.Module) -> List[Tuple[str, int]]:
@@ -262,6 +340,7 @@ def clone_module_for_devices(
     devices: List[torch.device],
     *,
     clear_state_fn=clear_non_picklable_state,
+    root_module: Optional[torch.nn.Module] = None,
     progress_callback: Optional[Callable[[int, int, torch.device, str], None]] = None,
 ) -> Dict[torch.device, torch.nn.Module]:
     clones: Dict[torch.device, torch.nn.Module] = {}
@@ -319,7 +398,13 @@ def clone_module_for_devices(
         start_ts = time.perf_counter()
         module.to(target_device)
         module.eval()
-        rehome_module_to_device(module, target_device, move_parameters=True, move_buffers=True)
+        rehome_module_to_device(
+            module,
+            target_device,
+            move_parameters=True,
+            move_buffers=True,
+            root_module=root_module,
+        )
         clear_state_fn(module)
         setattr(module, "_gptqmodule_device_hint", target_device)
         _record(step_name, start_ts)
@@ -375,7 +460,13 @@ def clone_module_for_devices(
         with _DEEPCOPY_LOCK:
             replica = copy.deepcopy(module)
         replica.eval()
-        rehome_module_to_device(replica, dev, move_parameters=True, move_buffers=True)
+        rehome_module_to_device(
+            replica,
+            dev,
+            move_parameters=True,
+            move_buffers=True,
+            root_module=replica,
+        )
         clear_state_fn(replica)
         setattr(replica, "_gptqmodule_device_hint", dev)
         clones[dev] = replica
@@ -407,7 +498,13 @@ def forward_batch_worker(
     processor._set_current_batch_index(batch_index)
     module_device = getattr(module, "_gptqmodule_device_hint", None) or get_device(module)
     # TODO: rehome was done during cloning, is it still needed there?
-    rehome_module_to_device(module, module_device, move_parameters=True, move_buffers=True)
+    rehome_module_to_device(
+        module,
+        module_device,
+        move_parameters=True,
+        move_buffers=True,
+        root_module=getattr(gptq_model, "model", None),
+    )
 
     # Replica preparation may enqueue non-blocking parameter or buffer copies.
     torch_sync(device=module_device)

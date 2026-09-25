@@ -16,11 +16,16 @@ from gptqmodel.utils.mlx_packing import repack_awq_4bit, repack_gptq_4bit  # noq
 
 
 @pytest.mark.parametrize("format", ["gptq", "awq"])
-def test_packed_4bit_matches_source_codes(format):
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_packed_4bit_matches_source_codes(format, group_size):
+    import torch
+
     rng = np.random.default_rng(17)
-    in_features, out_features, group_size = 128, 64, 64
+    in_features, out_features = 128, 64
     codes = rng.integers(0, 16, (in_features, out_features), dtype=np.uint32)
     zeros = rng.integers(0, 16, (in_features // group_size, out_features), dtype=np.uint32)
+    codes[0, 0], codes[-1, -1] = 0, 15
+    zeros[0, 0], zeros[-1, -1] = 15, 0
     scales = rng.uniform(0.01, 0.1, zeros.shape).astype(np.float16)
     shifts = np.arange(8, dtype=np.uint32) * 4
 
@@ -37,17 +42,28 @@ def test_packed_4bit_matches_source_codes(format):
     weight, mlx_scales, biases = repack(qweight, qzeros, scales, in_features, out_features)
     assert weight.dtype == np.uint32
     assert weight.shape == (out_features, in_features // 8)
+    unpacked = ((weight[:, :, None] >> shifts) & 15).reshape(out_features, in_features)
+    np.testing.assert_array_equal(unpacked, codes.T)
 
-    actual = np.array(mlx.dequantize(
-        mlx.array(weight), mlx.array(mlx_scales), mlx.array(biases), group_size, 4
-    ))
-    expected = (codes.astype(np.float32) - np.repeat(zeros.astype(np.float32), group_size, axis=0)) * np.repeat(scales.astype(np.float32), group_size, axis=0)
-    np.testing.assert_allclose(actual, expected.T, rtol=0.01, atol=0.002)
+    # Independent Torch arithmetic is the numerical oracle for MLX inference.
+    torch_codes = torch.from_numpy(codes.astype(np.int64))
+    torch_zeros = torch.from_numpy(zeros.astype(np.int64)).repeat_interleave(group_size, dim=0)
+    torch_scales = torch.from_numpy(scales).double().repeat_interleave(group_size, dim=0)
+    expected = ((torch_codes - torch_zeros).double() * torch_scales).numpy()
+    dequantized = mlx.dequantize(
+        mlx.array(weight), mlx.array(mlx_scales).astype(mlx.float32),
+        mlx.array(biases), group_size, 4
+    )
+    mlx.eval(dequantized)
+    np.testing.assert_allclose(np.array(dequantized), expected.T, rtol=0.002, atol=0.002)
 
-    x = mlx.array(rng.normal(size=(3, in_features)).astype(np.float16))
+    x_numpy = rng.normal(size=(3, in_features)).astype(np.float16)
+    x = mlx.array(x_numpy)
     y = mlx.quantized_matmul(x, mlx.array(weight), scales=mlx.array(mlx_scales),
                              biases=mlx.array(biases), group_size=group_size, bits=4)
-    np.testing.assert_allclose(np.array(y), np.array(x).astype(np.float32) @ expected, rtol=0.02, atol=0.04)
+    mlx.eval(y)
+    oracle = (torch.from_numpy(x_numpy).double() @ torch.from_numpy(expected).double()).numpy()
+    np.testing.assert_allclose(np.array(y), oracle, rtol=0.002, atol=0.002)
 
 
 @pytest.mark.parametrize("format", ["gptq", "awq"])
@@ -102,7 +118,9 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holde
     else:
         expected = dequantize_gemm(source.linear.qweight, source.linear.qzeros,
                                    source.linear.scales, 4, 64).float().sum(dim=0).numpy()
-    np.testing.assert_allclose(np.array(model(x))[0], expected, atol=0.05)
+    output = model(x)
+    mlx.eval(output)
+    np.testing.assert_allclose(np.array(output)[0], expected, rtol=0.002, atol=0.002)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX Metal requires macOS")
@@ -133,9 +151,31 @@ def test_mlx_quant_linear_registry_validates_capabilities(format):
     for change in (
         {"bits": 3}, {"group_size": 256}, {"desc_act": True},
         {"pack_dtype": torch.int16}, {"dtype": torch.float32},
+        {"dtype": torch.bfloat16},
         {"in_features": 120}, {"out_features": 63}, {"device": DEVICE.CPU},
     ):
         assert not validate_quant_linear(linear_class, **(contract | change))[0]
+
+
+def test_mlx_generate_maps_sampling_options(monkeypatch):
+    from gptqmodel.utils import mlx as mlx_utils
+
+    captured = {}
+
+    def fake_generate(**kwargs):
+        captured.update(kwargs)
+        return "generated"
+
+    monkeypatch.setattr(mlx_utils, "generate", fake_generate)
+    result = mlx_utils.mlx_generate(
+        model=object(), tokenizer=object(), prompt="Paris",
+        max_tokens=4, temperature=0.0, top_p=0.9,
+        repetition_penalty=1.1, repetition_context_size=32,
+    )
+    assert result == "generated"
+    assert callable(captured["sampler"])
+    assert len(captured["logits_processors"]) == 1
+    assert "temperature" not in captured and "repetition_penalty" not in captured
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX Metal requires macOS")

@@ -1267,6 +1267,19 @@ def _normalize_chatglm_remote_code_config_compat(config: Any) -> None:
         config.use_cache = True
 
 
+def _is_glm5_next_nope_config(config: Any) -> bool:
+    model_type = getattr(config, "model_type", None)
+    if model_type == "glm5_next":
+        config = getattr(config, "text_config", None)
+    elif model_type != "glm5_next_text":
+        return False
+    # Native Glm5NextTextConfig omits mla_use_nope; zero rotary dim signals NoPE.
+    return (
+        getattr(config, "qk_rope_head_dim", None) == 0
+        and getattr(config, "mla_use_nope", True) is True
+    )
+
+
 def _normalize_rope_parameters_config_compat(config: Any) -> None:
     # HunYuanVL is a composite config: RoPE belongs exclusively to its text
     # sub-config. Adding a synthetic top-level rope_parameters value is not
@@ -1326,6 +1339,14 @@ def _normalize_rope_parameters_config_compat(config: Any) -> None:
                 return
 
     legacy_rope_scaling = getattr(config, "rope_scaling", None)
+    if (
+        not rope_parameters
+        and not isinstance(legacy_rope_scaling, dict)
+        and getattr(config, "rope_theta", None) is None
+        and _is_glm5_next_nope_config(config)
+    ):
+        return
+
     rope_parameters = dict(legacy_rope_scaling) if isinstance(legacy_rope_scaling, dict) else dict(rope_parameters or {})
 
     rope_parameters.setdefault("rope_type", rope_parameters.get("type", "default"))

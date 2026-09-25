@@ -265,6 +265,7 @@ def _maybe_align(mod: nn.Module, device: torch.device):
         yield
 
 
+@torch.inference_mode(False)
 def _clone_into_parameter(t: torch.Tensor, *, device: torch.device, dtype: Optional[torch.dtype], requires_grad: bool) -> nn.Parameter:
     target = t
     if dtype is not None and target.dtype != dtype:
@@ -276,6 +277,7 @@ def _clone_into_parameter(t: torch.Tensor, *, device: torch.device, dtype: Optio
     return nn.Parameter(target, requires_grad=requires_grad)
 
 
+@torch.inference_mode(False)
 def _clone_into_buffer(t: torch.Tensor, *, device: torch.device, dtype: Optional[torch.dtype]) -> torch.Tensor:
     target = t
     if dtype is not None and target.dtype != dtype:
@@ -381,6 +383,16 @@ def undo_offload_to_disk(
     #with _lock:
     # Track candidate offload dirs if user asks to delete them later.
     offload_dirs: Set[str] = set()
+    # Accelerate's detach_hook reloads offloaded leaves from weights_map onto
+    # their original device and dtype, even after we materialize them below.
+    # Remember meta leaves so we can honor the caller's requested target after
+    # detaching without moving unrelated, already materialized model state.
+    offloaded_leaves = [
+        (sub, name, is_param, tensor.requires_grad)
+        for sub in module.modules()
+        for name, tensor, is_param in _iter_leaf_tensors(sub, include_buffers=include_buffers)
+        if tensor.is_meta
+    ]
 
     # 1) Materialize all offloaded leaves as real tensors on the target device/dtype.
     with torch.inference_mode():
@@ -417,12 +429,27 @@ def undo_offload_to_disk(
                         setattr(sub, name, new_b)
 
         # 2) Remove all Accelerate hooks so future forwards won't offload again.
-        remove_hook_from_submodules(module)      # public API
-        remove_hook_from_module(module, recurse=False)  # ensure root is also clean
+        # Detaching hooks can recreate tensors from their offload maps. Tying
+        # weights may also update leaf parameters in place.
+        with torch.inference_mode(False), torch.no_grad():
+            remove_hook_from_submodules(module)      # public API
+            remove_hook_from_module(module, recurse=False)  # ensure root is also clean
 
-        # 3) Tie embedding if module is model and enabled/tied
-        if hasattr(module, "config") and getattr(module.config, "tie_word_embeddings", False):
-            module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
+            for sub, name, is_param, requires_grad in offloaded_leaves:
+                tensor = getattr(sub, name)
+                if tensor.is_meta:
+                    continue  # unrelated meta leaves have no offload hook to restore them
+                if tensor.device == device and (dtype is None or tensor.dtype == dtype) and not tensor.is_inference():
+                    continue
+                if is_param:
+                    restored = _clone_into_parameter(tensor, device=device, dtype=dtype, requires_grad=requires_grad)
+                else:
+                    restored = _clone_into_buffer(tensor, device=device, dtype=dtype)
+                setattr(sub, name, restored)
+
+            # 3) Tie embedding if module is model and enabled/tied
+            if hasattr(module, "config") and getattr(module.config, "tie_word_embeddings", False):
+                module.tie_weights()  # makes lm_head.weight point to embed_tokens.weight again after undo_offload
 
         # 4) Optionally delete offload folders.
         if delete_offload_folders:

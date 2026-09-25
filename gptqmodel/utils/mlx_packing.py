@@ -36,7 +36,7 @@ def repack_gptq_4bit(qweight, qzeros, scales, in_features, out_features):
     zeros = ((qzeros.astype(np.uint32)[:, :, None] >> _SHIFTS) & 15)
     zeros = zeros.reshape(scales.shape).T
     mlx_scales = np.ascontiguousarray(scales.T)
-    biases = (-zeros.astype(np.float32) * mlx_scales.astype(np.float32)).astype(mlx_scales.dtype)
+    biases = -zeros.astype(np.float32) * mlx_scales.astype(np.float32)
     return _pack_rows(codes), mlx_scales, biases
 
 
@@ -54,5 +54,5 @@ def repack_awq_4bit(qweight, qzeros, scales, in_features, out_features):
     zeros = ((qzeros.astype(np.uint32)[:, :, None] >> _AWQ_SHIFTS) & 15)
     zeros = zeros.reshape(scales.shape).T
     mlx_scales = np.ascontiguousarray(scales.T)
-    biases = (-zeros.astype(np.float32) * mlx_scales.astype(np.float32)).astype(mlx_scales.dtype)
+    biases = -zeros.astype(np.float32) * mlx_scales.astype(np.float32)
     return _pack_rows(codes), mlx_scales, biases
