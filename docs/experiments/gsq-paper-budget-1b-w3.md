@@ -6,6 +6,9 @@ sequence counts and optimizer settings in the [GSQ Llama experiment](https://arx
 using the existing nm calibration parquet in place of FineWeb-Edu. The test
 retains the project's 128-question GSM8K Platinum evaluation; the paper uses
 five different zero-shot tasks on larger models.
+The [full FineWeb-Edu repository](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
+is about 5.84 TB; the paper's [`sample-10BT` subset](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu/tree/main/sample/10BT)
+is 28.5 GB, whereas the local nm parquet is 12.8 MB.
 
 | Setting | Paper Llama run | This test |
 | --- | --- | --- |
@@ -17,6 +20,7 @@ five different zero-shot tasks on larger models.
 | Q/K updates | 2,000 | Same |
 | Optimizer | Lion; logits LR 1e-4, scales LR 5e-5; cosine LR | Same |
 | Sampling | temperature 2→0.05, multiplier 100→500 | Same |
+| W3 logit initialization | prior strength 6, noise std 0.01 | Same |
 | Evaluation | Five zero-shot tasks on Llama 3.1 8B/70B | 128 GSM8K Platinum questions on Llama 3.2 1B |
 
 The nm file has 10,000 rows, 12,792,319 bytes, and SHA256
