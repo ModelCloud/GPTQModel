@@ -1,5 +1,7 @@
-<!-- SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
-SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai -->
+<!-- SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- Contact: qubitium@modelcloud.ai, x.com/qubitium -->
 
 <p align=center>
 <div align=center>
@@ -319,6 +321,20 @@ from gptqmodel import GPTQModel
 model = GPTQModel.load("ModelCloud/Llama-3.2-1B-Instruct-gptqmodel-4bit-vortex-v2.5")
 result = model.generate("Uncovering deep insights begins with")[0] # tokens
 print(model.tokenizer.decode(result)) # string output
+```
+
+On Apple Silicon, install the optional MLX runtime with `pip install "gptqmodel[mlx]"`.
+`GPTQModel.load(..., backend=BACKEND.AUTO)` selects MLX Metal for supported 4-bit
+GPTQ and AWQ GEMM checkpoints when the model architecture is supported by MLX-LM.
+The converter transfers compatible packed weights directly to MLX's quantized
+matmul layout. Supported affine group sizes are 32, 64, and 128. Explicit backend
+choices remain available.
+
+```py
+from gptqmodel import GPTQModel
+
+model = GPTQModel.load("ModelCloud/Qwen2.5-0.5B-Instruct-gptqmodel-w4a16")
+print(model.generate(prompt="The capital of France is", max_tokens=16))
 ```
 
 To use models from [ModelScope](https://www.modelscope.cn/) instead of HuggingFace Hub, set an environment variable:

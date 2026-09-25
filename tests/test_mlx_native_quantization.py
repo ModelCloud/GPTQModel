@@ -247,6 +247,19 @@ def test_fused_gptq_matches_torch_update_oracle(bits, group_size):
     )
 
 
+@pytest.mark.parametrize("bits,group_size", [
+    (3, 64), (6, 64),
+    (4, -1), (4, 16), (4, 256),
+])
+def test_fused_gptq_rejects_unsupported_bit_and_group_sizes(bits, group_size):
+    weight = mx.zeros((9, 128))
+    inverse_hessian = mx.eye(128)
+    with pytest.raises(ValueError):
+        native.gptq_quantize_weight_mlx(
+            weight, inverse_hessian, bits=bits, group_size=group_size,
+        )
+
+
 def test_model_uses_smaller_group_for_narrow_layers():
     class NarrowModel(nn.Module):
         def __init__(self):

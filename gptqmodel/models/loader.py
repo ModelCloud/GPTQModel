@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import time
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
@@ -112,6 +113,33 @@ _EXTERNAL_BACKEND_FORMATS = {
         FORMAT.MARLIN,
     },
 }
+
+
+def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
+    """Select MLX when its Metal runtime can use the checkpoint directly."""
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
+        return backend
+    if selector_device_family(device) != DEVICE.MPS:
+        return backend
+    try:
+        from mlx_lm.utils import _get_classes
+
+        select_quant_linear(
+            bits=qcfg.bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            backend=BACKEND.MLX,
+            format=format_code,
+            quant_method=quant_method,
+            device=DEVICE.MPS,
+            pack_dtype=qcfg.pack_dtype,
+        )
+        _get_classes(config.to_dict())
+    except (ImportError, ValueError, NotImplementedError):
+        return backend
+    log.info("Loader: selected MLX Metal for Apple Silicon inference")
+    return BACKEND.MLX
 
 
 def native_floatx_source_format(
@@ -1393,6 +1421,9 @@ def ModelLoader(cls):
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
+        backend = _auto_select_mlx_backend(
+            backend, device, config, qcfg, export_quant_method, format_code, adapter
+        )
 
         if (
             native_gguf_qspec is not None
@@ -2092,16 +2123,13 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
 
                 save_model(temp_dir, mlx_weights, donate_model=True)
                 save_config(mlx_config, config_path=temp_dir + "/config.json")
                 tokenizer.save_pretrained(temp_dir)
 
                 model, _ = load(temp_dir)
-
-                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
-
 
         instance = cls(
             model,
@@ -2114,6 +2142,8 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
         )
+        if backend == BACKEND.MLX:
+            instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
         return instance

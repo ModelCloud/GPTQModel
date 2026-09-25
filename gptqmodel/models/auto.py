@@ -819,7 +819,7 @@ class GPTQModel:
                 raise ValueError(
                     "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(gptq_model.model_local_path or model_id_or_path, gptq_model, gptq_config,
                                                                   gptq_model.lm_head)
 
             save_model(target_path, mlx_weights, donate_model=True)
