@@ -159,29 +159,32 @@ def _realign_materialized_hooks(
         device = torch.device(device.type, index)
     hooks = []
     submodules = set(module.modules())
+    offloaded_submodules = set()
     for sub in submodules:
         # PyTorch replicas share hook objects with their source module.
         if getattr(sub, "_is_replica", False):
             return
-        for tensor in (*sub._parameters.values(), *sub._buffers.values()):
-            if tensor is not None and tensor.device != device:
-                return
         pending = [getattr(sub, "_hf_hook", None)]
         while pending:
             hook = pending.pop()
             if isinstance(hook, SequentialHook):
                 pending.extend(hook.hooks)
-            elif isinstance(hook, CpuOffload):
-                return
+            elif isinstance(hook, CpuOffload) or (
+                isinstance(hook, AlignDevicesHook) and hook.offload
+            ):
+                # The owner controls its descendants, but not resident parents.
+                offloaded_submodules.update(sub.modules())
             elif isinstance(hook, AlignDevicesHook):
-                # Offloaded tensors are managed by the hook, not this relocation.
-                if hook.offload:
-                    return
                 if (
                     hook.execution_device is not None
                     and hook.execution_device != device
                 ):
-                    hooks.append(hook)
+                    hooks.append((sub, hook))
+    for sub in submodules - offloaded_submodules:
+        for tensor in (*sub._parameters.values(), *sub._buffers.values()):
+            if tensor is not None and tensor.device != device:
+                return
+    hooks = [hook for owner, hook in hooks if owner not in offloaded_submodules]
     if not hooks:
         return
     root_modules = list(root_module.modules())

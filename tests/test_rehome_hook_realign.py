@@ -65,7 +65,7 @@ def test_hook_target_forms(execution_device: object) -> None:
         "cpu-offload",
     ],
 )
-def test_partial_or_managed_placement_keeps_all_hooks(exclusion: str) -> None:
+def test_partial_or_managed_placement_preserves_owned_hooks(exclusion: str) -> None:
     module = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Linear(4, 4))
     hooks = [AlignDevicesHook(execution_device="cuda:1") for _ in module]
     for sub, hook in zip(module, hooks):
@@ -89,7 +89,41 @@ def test_partial_or_managed_placement_keeps_all_hooks(exclusion: str) -> None:
     else:
         hooks[1].offload = True
     rehome_module_to_device(module, torch.device("cpu"), root_module=module, **kwargs)
-    assert all(hook.execution_device == "cuda:1" for hook in hooks)
+    if exclusion in {"offload", "cpu-offload"}:
+        assert hooks[0].execution_device == torch.device("cpu")
+        assert hooks[1].execution_device == "cuda:1"
+    else:
+        assert all(hook.execution_device == "cuda:1" for hook in hooks)
+
+
+def test_resident_parent_realigns_with_offloaded_child() -> None:
+    class Parent(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.scale = torch.nn.Parameter(torch.ones(4))
+            self.child = torch.nn.Linear(4, 4)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.child(inputs * self.scale)
+
+    module = Parent()
+    inputs = torch.ones(2, 4)
+    expected = module(inputs)
+    child_hook = CpuOffload(execution_device=torch.device("cpu:0"))
+    add_hook_to_module(module.child, child_hook)
+    parent_hook = AlignDevicesHook(execution_device=torch.device("cpu"))
+    add_hook_to_module(module, parent_hook)
+    parent_hook.execution_device = torch.device("meta")
+
+    with pytest.raises(RuntimeError):
+        module(inputs)
+    rehome_module_to_device(
+        module, torch.device("cpu"), move_parameters=True, root_module=module
+    )
+
+    assert parent_hook.execution_device == torch.device("cpu")
+    assert child_hook.execution_device == torch.device("cpu:0")
+    torch.testing.assert_close(module(inputs), expected)
 
 
 def test_real_offload_mapping_is_untouched(tmp_path: Path) -> None:
