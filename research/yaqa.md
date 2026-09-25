@@ -53,6 +53,14 @@ sketch type, sampling, normalization, sequence/token counts and current versus
 teacher model state. Do not silently relabel an existing experiment under a
 different calibration protocol.
 
+For a large output head, the current square output Gram is not a bounded
+representation: Seed-7 Llama's 128,256 vocabulary would require 61.28 GiB
+in FP32 for that matrix alone. A [block Fisher preparation experiment](../docs/experiments/qvq_vocab_block_fisher_2026-09-25.md)
+verifies that the principal Fisher blocks and width-weighted input factor can
+be collected while retaining the full vocabulary loss. It also records the
+cross-block terms omitted by independent solves. This is a QVQ extension under
+study, not a paper result or a validated large-head quantization method.
+
 Use local reconstruction error to diagnose changes, then measure propagated
 teacher KL/agreement and downstream task scores separately. A gain in one proxy
 does not prove a universal task gain. Broader live-gradient or propagation-aware
