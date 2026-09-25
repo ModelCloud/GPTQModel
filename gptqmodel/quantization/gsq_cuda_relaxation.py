@@ -3,10 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-"""Fused W3/W4 BF16 scalar GSQ relaxation compiled with CUDA NVRTC.
+"""Fused W3/W4 scalar GSQ relaxation compiled with CUDA NVRTC.
 
 The CUDA code is optional. Callers retain the eager autograd implementation
 when CUDA runtime compilation is unavailable or the geometry is unsupported.
+BF16 logits retain BF16 softmax probabilities; FP32 Q/K logits retain FP32
+probabilities, matching the eager candidate and gradient precision.
 """
 
 import ctypes
@@ -32,7 +34,7 @@ __device__ __forceinline__ float load_choice(const void* values, int offset, int
 __global__ void gsq_forward(
     const void* logits, const float* scales, const float* initial,
     const unsigned char* valid, const void* uniform,
-    float* output, unsigned short* probability, float* expected,
+    float* output, void* probability, float* expected,
     int n, int columns, int groups, int group_size, float temperature, float multiplier, int fp32)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -63,11 +65,16 @@ __global__ void gsq_forward(
     }
     float shift_sum = 0.0f;
     for (int j = 0; j < 5; ++j) {
-        unsigned short p = to_bf16(exponent[j] / total);
-        probability[j*n+i] = p;
-        shift_sum += bf(from_bf16(p) * (float)(j-2));
+        float p = exponent[j] / total;
+        if (fp32) ((float*)probability)[j*n+i] = p;
+        else {
+            unsigned short rounded = to_bf16(p);
+            ((unsigned short*)probability)[j*n+i] = rounded;
+            p = from_bf16(rounded);
+        }
+        shift_sum += p * (float)(j-2);
     }
-    float value = initial[i] + bf(shift_sum);
+    float value = initial[i] + shift_sum;
     expected[i] = value;
     int row = i / columns;
     int group = (i % columns) / group_size;
@@ -76,7 +83,7 @@ __global__ void gsq_forward(
 }
 
 __global__ void gsq_backward(
-    const float* grad_output, const unsigned short* probability,
+    const float* grad_output, const void* probability,
     const float* expected, const float* scales,
     void* grad_logits, float* scale_terms,
     int n, int columns, int groups, int group_size, float temperature, float multiplier, int fp32)
@@ -93,10 +100,10 @@ __global__ void gsq_backward(
     float dot = 0.0f;
     for (int j = 0; j < 5; ++j) {
         categorical[j] = output_grad * (float)(j-2);
-        dot += categorical[j] * from_bf16(probability[j*n+i]);
+        dot += categorical[j] * load_choice(probability, j*n+i, fp32);
     }
     for (int j = 0; j < 5; ++j) {
-        float p = from_bf16(probability[j*n+i]);
+        float p = load_choice(probability, j*n+i, fp32);
         float delta = categorical[j] - dot;
         float result = (p*delta) * multiplier;
         if (fp32) ((float*)grad_logits)[j*n+i] = result / temperature;
@@ -244,7 +251,7 @@ class _GSQCudaRelaxation(torch.autograd.Function):
         groups = scales.shape[1]
         count = rows*columns
         output = torch.empty_like(initial)
-        probability = torch.empty(logits.shape, dtype=torch.bfloat16, device=logits.device)
+        probability = torch.empty_like(logits)
         expected = torch.empty_like(initial)
         _launch(driver, functions[0], (count+127)//128,
                 (logits, scales, initial, valid, uniform, output, probability, expected),
@@ -276,7 +283,7 @@ class _GSQCudaRelaxation(torch.autograd.Function):
 
 def cuda_relaxed_scalar_weights(logits, scales, initial, valid, uniform, group_size,
                                 temperature, multiplier):
-    """Return None when the optional CUDA BF16 path cannot be used."""
+    """Return None when the optional CUDA scalar path cannot be used."""
     if initial is None or initial.ndim != 2 or logits.ndim != 3:
         return None
     rows, columns = initial.shape

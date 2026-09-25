@@ -114,3 +114,21 @@ functions have small rounding differences from PyTorch eager. The numerical
 tests compare weights and gradients with tolerances. Set
 `GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION=1` to use the eager implementation;
 CUDA configurations without the runtime compiler also fall back to eager.
+
+The precision audit found and corrected a Q/K discrepancy in the first fused
+version: FP32-logit softmax probabilities were stored in BF16 even though the
+eager scalar path retains FP32 probabilities. The corrected kernel also
+accumulates scalar shifts in FP32, as the eager W3/W4 candidates do. A crafted
+near-certain-choice test protects the small but nonzero FP32 gradient at the
+lowest scheduled temperature. In a separate 2,048×2,048 W3/group128 probe,
+the corrected fused and eager FP32 logit gradients had no sign disagreements
+among 20,971,520 entries at each of four schedule points, including
+temperature 0.05 and multiplier 500. This is a local numerical probe, not a
+full model quality measurement.
+
+Three matched-randomness, 30-update tests compare W3 BF16, W4 BF16, and W3
+FP32 training trajectories, including hard choices and reconstruction loss.
+A paired tiny-Llama W3 run trained, packed, and evaluated all seven projections
+after three epochs and three Q/K updates. The eager and corrected CUDA paths
+produced identical packed-model logits and measured hard-stage losses on that
+case. The full 20-epoch Llama 3.2 1B GSM8K result remains unmeasured.
