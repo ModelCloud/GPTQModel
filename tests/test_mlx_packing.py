@@ -211,8 +211,8 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
 
 
 @pytest.mark.parametrize("bits,group_size,in_features", [(7, 256, 256), (4, 512, 512),
-                                                          (5, 1024, 1024), (4, -1, 256),
-                                                          (7, -1, 1024)])
+                                                          (5, 1024, 1024)]
+                         + [(bits, -1, 256) for bits in (2, 3, 4, 5, 6, 7, 8)])
 def test_large_gptq_groups_load_with_repeated_mlx_scales(monkeypatch, bits, group_size, in_features):
     import mlx.nn as mlx_nn
     import torch
@@ -227,9 +227,9 @@ def test_large_gptq_groups_load_with_repeated_mlx_scales(monkeypatch, bits, grou
         bits=bits, group_size=group_size, sym=False, desc_act=False,
         in_features=in_features, out_features=64, bias=False,
         pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
-        format=FORMAT.GPTQ_P if bits in (5, 7) else FORMAT.GPTQ_V2,
+        format=FORMAT.GPTQ_P if bits in (5, 6, 7) else FORMAT.GPTQ_V2,
     )
-    if bits == 4:
+    if bits in (2, 3, 4, 8):
         source.linear.qzero_format(2)
     source.linear.qweight.fill_(0x76543210)
     source.linear.qzeros.fill_(0x11111111)
