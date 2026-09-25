@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# MLX matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
+# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Qwen3.8-27B projection checks for merged GPTQ/AWQ to MLX layout packers."""
 
@@ -79,8 +81,9 @@ def test_qwen38_27b_repack_and_inference(source_format, name, out_features, in_f
     np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16))
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
-def test_qwen38_27b_group16_inference(name, out_features, in_features):
+def test_qwen38_27b_group16_inference(name, out_features, in_features, dtype, record_property):
     """Check the merged two-matmul group-16 kernel on complete projections."""
     del name
     rng = np.random.default_rng(4800 + out_features + in_features)
@@ -101,12 +104,17 @@ def test_qwen38_27b_group16_inference(name, out_features, in_features):
     layer.biases_even = mx.array(group_biases[..., 0])
     layer.biases_odd = mx.array(group_biases[..., 1])
     x = rng.normal(0, 0.01, (1, in_features)).astype(np.float32)
-    mlx_x = mx.array(x).astype(mx.bfloat16)
+    mlx_x = mx.array(x).astype(dtype)
     actual = layer(mlx_x)
     mx.eval(actual)
+    assert actual.dtype == dtype
     oracle_weight = (
         torch.from_numpy(codes.astype(np.float32))
         - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(16, dim=0)
     ) * torch.from_numpy(scales).repeat_interleave(16, dim=0)
     expected = torch.from_numpy(np.asarray(mlx_x.astype(mx.float32))) @ oracle_weight
-    np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
+    rounded = expected.to(torch.float16 if dtype == mx.float16 else torch.bfloat16).float()
+    visible = np.asarray(actual.astype(mx.float32))
+    record_property("max_abs_vs_rounded_torch", float(np.max(np.abs(visible - rounded.numpy()))))
+    record_property("max_abs_vs_float32_torch", float(np.max(np.abs(visible - expected.numpy()))))
+    np.testing.assert_allclose(visible, rounded.numpy(), rtol=2e-3, atol=2e-3)
