@@ -72,6 +72,35 @@ def inverse_hessian_mlx(hessian, damp_percent: float = 0.01):
     return result
 
 
+def _hessian_partial_mlx(activations):
+    """Accumulate an accurate float32 Hessian with MLX GPU matmuls."""
+    import mlx.core as mx
+
+    flat = activations.reshape(-1, activations.shape[-1]).astype(mx.float32)
+    # Splitting into BF16 high and residual parts avoids the reduced input
+    # precision of a single GPU float32 matmul while staying on the GPU.
+    high = flat.astype(mx.bfloat16).astype(mx.float32)
+    low = flat - high
+    cross = high.T @ low
+    return high.T @ high + cross + cross.T + low.T @ low
+
+
+def _accurate_matmul_mlx(left, right):
+    """Multiply float32 arrays on the GPU with BF16 residual correction."""
+    import mlx.core as mx
+
+    left_high = left.astype(mx.bfloat16).astype(mx.float32)
+    right_high = right.astype(mx.bfloat16).astype(mx.float32)
+    left_low = left - left_high
+    right_low = right - right_high
+    return (
+        left_high @ right_high
+        + left_high @ right_low
+        + left_low @ right_high
+        + left_low @ right_low
+    )
+
+
 def gptq_quantize_weight_mlx(
     weight, inverse_hessian, bits: int = 4, group_size: int = 64
 ):
@@ -118,7 +147,8 @@ def gptq_quantize_weight_mlx(
         all_biases.append(biases)
         if end < columns:
             remaining = (
-                remaining[:, group_size:] - errors @ inverse_hessian[start:end, end:]
+                remaining[:, group_size:]
+                - _accurate_matmul_mlx(errors, inverse_hessian[start:end, end:])
             )
             mx.eval(remaining)
 
@@ -170,8 +200,7 @@ def gptq_quantize_model_mlx(
             self.H = None
 
         def __call__(self, x, *args, **kwargs):
-            flat = x.reshape(-1, x.shape[-1]).astype(mx.float32)
-            partial = flat.T @ flat
+            partial = _hessian_partial_mlx(x)
             self.H = partial if self.H is None else self.H + partial
             return self.module(x, *args, **kwargs)
 

@@ -7,6 +7,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 if sys.platform != "darwin":
@@ -68,9 +69,20 @@ def test_fused_gptq_matches_mlx_reference(bits, group_size):
     actual = native.gptq_quantize_weight_mlx(weight, hinv, bits, group_size)
     expected = _reference_gptq_weight(weight, hinv, bits, group_size)
 
-    assert bool(mx.array_equal(actual[0], expected[0]).item())
+    # The MLX-LM reference uses the default Metal matmul for the cross-group
+    # update, which can round differently from the Torch oracle.
+    changed_words = mx.sum(actual[0] != expected[0]).item()
+    assert changed_words <= 1
     assert bool(mx.allclose(actual[1], expected[1], rtol=1e-3, atol=2e-4).item())
     assert bool(mx.allclose(actual[2], expected[2], rtol=1e-3, atol=2e-4).item())
+
+    torch = pytest.importorskip("torch")
+    oracle = _torch_gptq_weight_oracle(
+        np.asarray(weight), torch.from_numpy(np.asarray(hinv)), bits, group_size, torch
+    )
+    np.testing.assert_array_equal(np.asarray(actual[0]), oracle[0])
+    np.testing.assert_allclose(np.asarray(actual[1]), oracle[1], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(actual[2]), oracle[2], rtol=1e-6, atol=1e-6)
 
 
 def test_fused_gptq_supports_expert_weights():
@@ -106,6 +118,133 @@ def test_large_fused_gptq_stays_close_to_reference():
 def test_zero_hessian_has_finite_inverse_factor():
     inverse_factor = native.inverse_hessian_mlx(mx.zeros((32, 32)))
     assert bool(mx.all(mx.isfinite(inverse_factor)).item())
+
+
+@pytest.mark.parametrize("width", [64, 128, 512])
+def test_hessian_accumulation_and_inverse_match_torch(width):
+    torch = pytest.importorskip("torch")
+    samples = np.random.default_rng(42).standard_normal(
+        (4, 2 * width, width)
+    ).astype(np.float32)
+    samples[..., :2] = 0
+    x_torch = torch.from_numpy(samples).reshape(-1, width)
+    h_mlx = native._hessian_partial_mlx(mx.array(samples))
+    # Double precision keeps the oracle's accumulation error below the MLX
+    # float32 acceptance threshold for large calibration batches.
+    x_oracle = x_torch.double()
+    h_torch = x_oracle.T @ x_oracle
+    h_mlx_numpy = np.asarray(h_mlx)
+    h_torch_numpy = h_torch.numpy()
+    relative_error = np.linalg.norm(h_mlx_numpy - h_torch_numpy) / np.linalg.norm(
+        h_torch_numpy
+    )
+    assert np.isfinite(h_mlx_numpy).all()
+    assert relative_error <= 1e-6
+
+    # Use one Hessian for both backends so this checks factorization separately.
+    h_factor_input = h_torch.float()
+    diagonal = torch.diagonal(h_factor_input)
+    damp = torch.maximum(
+        0.01 * diagonal.mean(),
+        torch.maximum(diagonal.max() * 1e-6, torch.tensor(1e-12)),
+    )
+    regularized = h_factor_input + torch.eye(width) * damp
+    lower = torch.linalg.cholesky(regularized)
+    torch_factor = torch.linalg.cholesky(torch.cholesky_inverse(lower)).T
+    mlx_factor = native.inverse_hessian_mlx(mx.array(h_factor_input.numpy()))
+    np.testing.assert_allclose(
+        np.asarray(mlx_factor), torch_factor.numpy(), rtol=1e-6, atol=1e-6
+    )
+
+
+def _torch_affine_group_params(weight, bits, torch):
+    """Compute MLX affine-compatible scale and bias using only Torch ops."""
+    minimum = weight.amin(dim=1)
+    maximum = weight.amax(dim=1).clamp_min(0)
+    scale = ((maximum - minimum) / (2**bits - 1)).clamp_min(1e-7)
+    use_minimum = minimum.abs() > maximum.abs()
+    scale = torch.where(use_minimum, scale, -scale)
+    edge = torch.where(use_minimum, minimum, maximum)
+    zero_code = torch.round(edge / scale)
+    at_zero = zero_code == 0
+    safe_code = torch.where(at_zero, torch.ones_like(zero_code), zero_code)
+    scale = torch.where(at_zero, scale, edge / safe_code)
+    bias = torch.where(at_zero, torch.zeros_like(edge), edge)
+    return scale[:, None], bias[:, None]
+
+
+def _torch_gptq_weight_oracle(weight, factor, bits, group_size, torch):
+    # Torch independently chooses affine parameters, applies the GPTQ
+    # correction across columns and groups, and packs the integer codes.
+    rows, columns = weight.shape
+    corrected = torch.from_numpy(weight.copy())
+    packed_groups, expected_scales, expected_biases = [], [], []
+    values_per_word = 32 // bits
+    for start in range(0, columns, group_size):
+        end = start + group_size
+        scales, biases = _torch_affine_group_params(
+            corrected[:, start:end], bits, torch
+        )
+        expected_scales.append(scales)
+        expected_biases.append(biases)
+        errors = torch.empty((rows, group_size), dtype=torch.float32)
+        codes = torch.empty((rows, group_size), dtype=torch.int64)
+        for offset in range(group_size):
+            column = start + offset
+            value = corrected[:, column].clone()
+            code = torch.round((value - biases[:, 0]) / scales[:, 0]).clamp(
+                0, 2**bits - 1
+            )
+            error = (value - (code * scales[:, 0] + biases[:, 0])) / factor[
+                column, column
+            ]
+            codes[:, offset] = code.to(torch.int64)
+            errors[:, offset] = error
+            corrected[:, column + 1 : end] -= error[:, None] * factor[
+                column, column + 1 : end
+            ]
+        shifts = torch.arange(values_per_word, dtype=torch.int64) * bits
+        packed_groups.append(
+            torch.sum(codes.reshape(rows, -1, values_per_word) << shifts, dim=-1)
+        )
+        if end < columns:
+            corrected[:, end:] -= errors @ factor[start:end, end:]
+
+    return (
+        torch.cat(packed_groups, dim=1).numpy().astype(np.uint32),
+        torch.cat(expected_scales, dim=1).numpy(),
+        torch.cat(expected_biases, dim=1).numpy(),
+    )
+
+
+@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_fused_gptq_matches_torch_update_oracle(bits, group_size):
+    torch = pytest.importorskip("torch")
+    rng = np.random.default_rng(2026)
+    columns = 2 * group_size
+    weight = rng.standard_normal((9, columns)).astype(np.float32)
+    samples = torch.from_numpy(
+        rng.standard_normal((2 * columns, columns)).astype(np.float32)
+    )
+    hessian = samples.T @ samples + 0.1 * torch.eye(columns)
+    inverse = torch.cholesky_inverse(torch.linalg.cholesky(hessian))
+    factor = torch.linalg.cholesky(inverse).T
+    actual = native.gptq_quantize_weight_mlx(
+        mx.array(weight), mx.array(factor.numpy()), bits=bits, group_size=group_size
+    )
+    expected_packed, expected_scales, expected_biases = _torch_gptq_weight_oracle(
+        weight, factor, bits, group_size, torch
+    )
+    np.testing.assert_array_equal(np.asarray(actual[0]), expected_packed)
+    np.testing.assert_allclose(
+        np.asarray(actual[1]), expected_scales,
+        rtol=1e-6, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual[2]), expected_biases,
+        rtol=1e-6, atol=1e-6,
+    )
 
 
 def test_model_uses_smaller_group_for_narrow_layers():
