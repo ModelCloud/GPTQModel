@@ -583,7 +583,7 @@ def test_auto_selects_mlx_only_for_compatible_models():
     assert select(method=METHOD.AWQ, format_code=FORMAT.GEMM) == BACKEND.MLX
     assert select(backend=BACKEND.GPTQ_TORCH) == BACKEND.GPTQ_TORCH
     assert select(device=DEVICE.CPU) == BACKEND.AUTO
-    assert select(method=METHOD.AWQ, format_code=FORMAT.GEMV) == BACKEND.AUTO
+    assert select(method=METHOD.AWQ, format_code=FORMAT.GEMV) == BACKEND.MLX
     qcfg.desc_act = True
     assert select() == BACKEND.AUTO
     qcfg.desc_act = False

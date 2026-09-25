@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# MLX loader integration references Apple Inc. and MLX-LM contributors (MIT).
 
 from __future__ import annotations
 
@@ -119,7 +120,18 @@ def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format
     """Select MLX when its Metal runtime can use the checkpoint directly."""
     if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
         return backend
+    if quant_method == METHOD.GGUF and getattr(getattr(qcfg, "runtime_bits", None), "name", None) not in {
+            "q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q4_k_s", "q4_k_m",
+            "q5_k", "q5_k_s", "q5_k_m", "q6_k"}:
+        return backend
+    if quant_method == METHOD.BITSANDBYTES:
+        # CPU bitsandbytes is faster for token decode on this host; explicit
+        # backend=MLX remains available for larger batches.
+        return backend
     if selector_device_family(device) != DEVICE.MPS:
+        return backend
+    if quant_method == METHOD.EXL3:
+        # The existing EXL3 Torch cache is faster for token decode on M5 Ultra.
         return backend
     try:
         from mlx_lm.utils import _get_classes
@@ -1468,10 +1480,10 @@ def ModelLoader(cls):
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
-            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON, BACKEND.MLX}
         ):
             raise ValueError(
-                "Native Q1_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                "Native Q1_0 GGUF checkpoints support AUTO, GGUF_TORCH, GGUF_TRITON, or MLX. "
                 f"Actual backend: `{backend}`."
             )
         elif (
@@ -1480,15 +1492,15 @@ def ModelLoader(cls):
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
-            elif backend != BACKEND.GGUF_TORCH:
+            elif backend not in (BACKEND.GGUF_TORCH, BACKEND.MLX):
                 raise ValueError(
-                    "Native Q2_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q2_0 GGUF checkpoints require GGUF_TORCH or MLX. "
                     f"Actual backend: `{backend}`."
                 )
 
         if format_code == FORMAT.EXL3:
-            if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
-                raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, or BACKEND.EXL3_TORCH.")
+            if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH, BACKEND.MLX):
+                raise TypeError("FORMAT.EXL3 requires AUTO, EXL3_EXLLAMA_V3, EXL3_TORCH, or MLX backend.")
             if backend == BACKEND.AUTO:
                 if torch.cuda.is_available() and selector_device_family(device) in (DEVICE.CUDA, DEVICE.ROCM):
                     backend = BACKEND.EXL3_EXLLAMA_V3
@@ -1500,9 +1512,10 @@ def ModelLoader(cls):
                 if selector_device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM):
                     raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
         elif format_code == FORMAT.BITSANDBYTES:
-            if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES):
-                raise TypeError("FORMAT.BITSANDBYTES requires BACKEND.AUTO or BACKEND.BITSANDBYTES.")
-            backend = BACKEND.BITSANDBYTES
+            if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
+                raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.BITSANDBYTES
 
         if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
             # GEMV_FAST and LLM_AWQ only supports torch.float16
@@ -1784,7 +1797,8 @@ def ModelLoader(cls):
                 if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
                     raise ValueError("EXL3 checkpoints require `quantization_config.tensor_storage` metadata.")
 
-                exl3_module_cls = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
+                exl3_module_cls = (ExllamaV3TorchLinear if backend in (BACKEND.EXL3_TORCH, BACKEND.MLX)
+                                   else ExllamaV3Linear)
                 replace_exllamav3_placeholders(
                     model=model,
                     module_names=list(qcfg.tensor_storage.keys()),
@@ -2117,7 +2131,8 @@ def ModelLoader(cls):
             model = simple_dispatch_model(model, dispatch_device_map)
 
         if format_code == FORMAT.EXL3:
-            qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
+            qlinear_kernel = (ExllamaV3TorchLinear if backend in (BACKEND.EXL3_TORCH, BACKEND.MLX)
+                              else ExllamaV3Linear)
         else:
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,
@@ -2164,7 +2179,8 @@ def ModelLoader(cls):
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
-                if mlx_config.pop("_gptqmodel_group16_runtime", False):
+                if (mlx_config.pop("_gptqmodel_group16_runtime", False)
+                        or mlx_config.pop("_gptqmodel_custom_mlx_runtime", False)):
                     model = mlx_weights
                 else:
                     save_model(temp_dir, mlx_weights, donate_model=True)

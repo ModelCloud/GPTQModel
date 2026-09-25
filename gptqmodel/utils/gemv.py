@@ -14,6 +14,8 @@ def calculate_zeros_width(in_features, group_size=128, pack_num=8):
         size_multiplier = 2
     elif group_size == 32:
         size_multiplier = 4
+    elif group_size == 16:
+        size_multiplier = 8
     else:
         raise NotImplementedError
 
