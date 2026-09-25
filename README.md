@@ -299,7 +299,8 @@ On Apple Silicon, install the optional MLX runtime with `pip install "gptqmodel[
 `GPTQModel.load(..., backend=BACKEND.AUTO)` selects MLX Metal for supported 4-bit
 GPTQ and AWQ GEMM checkpoints when the model architecture is supported by MLX-LM.
 The converter transfers compatible packed weights directly to MLX's quantized
-matmul layout. Explicit backend choices remain available.
+matmul layout. Supported affine group sizes are 32, 64, and 128. Explicit backend
+choices remain available.
 
 ```py
 from gptqmodel import GPTQModel

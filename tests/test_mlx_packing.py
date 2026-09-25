@@ -51,17 +51,23 @@ def test_packed_4bit_matches_source_codes(format):
 
 
 @pytest.mark.parametrize("format", ["gptq", "awq"])
-def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format):
+@pytest.mark.parametrize("holder", ["torch", "mlx"])
+def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holder):
     import mlx.nn as mlx_nn
     import torch
 
+    from gptqmodel.nn_modules.qlinear.mlx import AwqMlxQuantLinear, MlxQuantLinear
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.quantization.awq.utils.packing_utils import dequantize_gemm
     from gptqmodel.utils import mlx as mlx_utils
 
     source = torch.nn.Module()
-    linear_class = TorchLinear if format == "gptq" else AwqTorchLinear
+    linear_class = (
+        MlxQuantLinear if format == "gptq" else AwqMlxQuantLinear
+    ) if holder == "mlx" else (
+        TorchLinear if format == "gptq" else AwqTorchLinear
+    )
     source.linear = linear_class(
         bits=4, group_size=64, sym=False, desc_act=False,
         in_features=128, out_features=64, bias=False,
@@ -100,6 +106,39 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format):
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX Metal requires macOS")
+@pytest.mark.parametrize("format", ["gptq", "awq"])
+def test_mlx_quant_linear_registry_validates_capabilities(format):
+    import torch
+
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear.mlx import AwqMlxQuantLinear, MlxQuantLinear
+    from gptqmodel.quantization.config import FORMAT, METHOD
+    from gptqmodel.utils.backend import BACKEND
+    from gptqmodel.utils.importer import select_quant_linear, validate_quant_linear
+
+    linear_class, method, checkpoint_format = (
+        (MlxQuantLinear, METHOD.GPTQ, FORMAT.GPTQ_V2) if format == "gptq"
+        else (AwqMlxQuantLinear, METHOD.AWQ, FORMAT.GEMM)
+    )
+    contract = dict(
+        bits=4, group_size=64, desc_act=False, sym=False,
+        pack_dtype=torch.int32, dtype=torch.float16,
+        in_features=128, out_features=64, device=DEVICE.MPS,
+    )
+    assert select_quant_linear(
+        **{key: contract[key] for key in ("bits", "group_size", "desc_act", "sym", "pack_dtype", "dtype", "device")},
+        backend=BACKEND.MLX, format=checkpoint_format, quant_method=method,
+    ) is linear_class
+    assert validate_quant_linear(linear_class, **contract)[0]
+    for change in (
+        {"bits": 3}, {"group_size": 256}, {"desc_act": True},
+        {"pack_dtype": torch.int16}, {"dtype": torch.float32},
+        {"in_features": 120}, {"out_features": 63}, {"device": DEVICE.CPU},
+    ):
+        assert not validate_quant_linear(linear_class, **(contract | change))[0]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="MLX Metal requires macOS")
 def test_auto_selects_mlx_only_for_compatible_models():
     import torch
 
@@ -113,7 +152,7 @@ def test_auto_selects_mlx_only_for_compatible_models():
             return {"model_type": "qwen2"}
 
     qcfg = SimpleNamespace(
-        bits=4, pack_dtype=torch.int32, group_size=128,
+        bits=4, pack_dtype=torch.int32, group_size=128, sym=False,
         desc_act=False, dynamic=None, rotation=None,
     )
 
@@ -129,4 +168,7 @@ def test_auto_selects_mlx_only_for_compatible_models():
     assert select(device=DEVICE.CPU) == BACKEND.AUTO
     assert select(method=METHOD.AWQ, format_code=FORMAT.GEMV) == BACKEND.AUTO
     qcfg.desc_act = True
+    assert select() == BACKEND.AUTO
+    qcfg.desc_act = False
+    qcfg.group_size = 256
     assert select() == BACKEND.AUTO

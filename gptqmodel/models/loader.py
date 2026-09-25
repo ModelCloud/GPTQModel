@@ -9,7 +9,6 @@ import copy
 import json
 import os
 import shutil
-import sys
 import time
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
@@ -118,33 +117,26 @@ _EXTERNAL_BACKEND_FORMATS = {
 
 def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
     """Select MLX when its Metal runtime can use the checkpoint directly."""
-    if backend != BACKEND.AUTO or adapter is not None:
-        return backend
-    if sys.platform != "darwin" or os.uname().machine != "arm64":
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
         return backend
     if selector_device_family(device) != DEVICE.MPS:
         return backend
-    if quant_method == METHOD.GPTQ:
-        if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
-            return backend
-    elif quant_method == METHOD.AWQ:
-        if format_code != FORMAT.GEMM:
-            return backend
-    else:
-        return backend
-    group_size = qcfg.group_size
-    if (qcfg.bits != 4 or qcfg.pack_dtype != torch.int32
-            or group_size < 32 or group_size & (group_size - 1)
-            or qcfg.desc_act or qcfg.dynamic or qcfg.rotation):
-        return backend
     try:
-        import mlx.core as mx
         from mlx_lm.utils import _get_classes
 
-        if not mx.metal.is_available():
-            return backend
+        select_quant_linear(
+            bits=qcfg.bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            backend=BACKEND.MLX,
+            format=format_code,
+            quant_method=quant_method,
+            device=DEVICE.MPS,
+            pack_dtype=qcfg.pack_dtype,
+        )
         _get_classes(config.to_dict())
-    except (ImportError, ValueError):
+    except (ImportError, ValueError, NotImplementedError):
         return backend
     log.info("Loader: selected MLX Metal for Apple Silicon inference")
     return BACKEND.MLX
@@ -1740,16 +1732,11 @@ def ModelLoader(cls):
                 )
                 preload_qlinear_kernel = exl3_module_cls
             else:
-                # MLX consumes the packed tensors after checkpoint loading; use
-                # the matching Torch holder while loading GPTQ/AWQ checkpoints.
-                load_backend = (
-                    BACKEND.AWQ_TORCH if export_quant_method == METHOD.AWQ else BACKEND.GPTQ_TORCH
-                ) if backend == BACKEND.MLX else backend
                 preload_qlinear_kernel = make_quant(
                     model,
                     qcfg=qcfg,
                     quant_result=modules,
-                    backend=load_backend,
+                    backend=backend,
                     lm_head_name=cls.lm_head,
                     device=device,
                     dtype=dtype,
@@ -2071,16 +2058,13 @@ def ModelLoader(cls):
         if format_code == FORMAT.EXL3:
             qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
         else:
-            load_backend = (
-                BACKEND.AWQ_TORCH if export_quant_method == METHOD.AWQ else BACKEND.GPTQ_TORCH
-            ) if backend == BACKEND.MLX else backend
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,
                 dynamic=qcfg.dynamic,
                 group_size=qcfg.group_size,
                 desc_act=qcfg.desc_act,
                 sym=qcfg.sym,
-                backend=load_backend,
+                backend=backend,
                 format=format_code,
                 quant_method=export_quant_method,
                 device=device,

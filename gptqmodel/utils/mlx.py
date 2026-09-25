@@ -12,12 +12,12 @@ from huggingface_hub import snapshot_download
 from transformers import PreTrainedModel
 
 from ..models import BaseQModel
+from ..nn_modules.qlinear.mlx import AwqMlxQuantLinear, MlxQuantLinear
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization import FORMAT
 from ..quantization.config import resolve_quant_format
 from .logger import setup_logger
-from .mlx_packing import repack_awq_4bit, repack_gptq_4bit
 from .torch import torch_empty_cache
 
 
@@ -43,31 +43,18 @@ def _packed_mlx_weights(model, config, lm_head_name):
 
     layer_params = {}
     for name, module in quantized:
-        group_size = module.in_features if module.group_size == -1 else module.group_size
-        if (module.bits != 4 or module.pack_dtype != torch.int32
-                or group_size < 32 or group_size & (group_size - 1)
-                or module.in_features % group_size or module.out_features % 8
-                or module.in_features % 8 or module.adapter is not None):
+        mlx_linear = MlxQuantLinear if isinstance(module, TorchLinear) else AwqMlxQuantLinear
+        if not mlx_linear.source_compatible(module):
             return None
-        if isinstance(module, TorchLinear):
-            if module.qzero_format() != 2 or module.planar:
-                return None
-            expected_g_idx = torch.arange(module.in_features, device=module.g_idx.device) // group_size
-            if not torch.equal(module.g_idx, expected_g_idx):
-                return None
+        group_size = module.in_features if module.requested_group_size == -1 else module.group_size
         layer_params[name] = {"group_size": group_size, "bits": 4, "mode": "affine"}
 
     weights = {}
     tied_embeddings = config.get("tie_word_embeddings", False)
     for name, module in model.named_modules():
         if name in layer_params:
-            qweight = module.qweight.detach().to("cpu").numpy()
-            qzeros = module.qzeros.detach().to("cpu").numpy()
-            scales = module.scales.detach().to("cpu", torch.float16).numpy()
-            repack = repack_gptq_4bit if isinstance(module, TorchLinear) else repack_awq_4bit
-            weight, scale, biases = repack(
-                qweight, qzeros, scales, module.in_features, module.out_features
-            )
+            mlx_linear = MlxQuantLinear if isinstance(module, TorchLinear) else AwqMlxQuantLinear
+            weight, scale, biases, _ = mlx_linear.pack_source(module)
             weights[f"{name}.weight"] = mx.array(weight)
             weights[f"{name}.scales"] = mx.array(scale)
             weights[f"{name}.biases"] = mx.array(biases)
