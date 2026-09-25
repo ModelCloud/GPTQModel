@@ -492,6 +492,11 @@ class BaseQModel(nn.Module):
 
         self.processor: ProcessorMixin = None
 
+        from ..utils.mimo import is_mimo_mixed_source
+
+        # Saving replaces MiMo metadata; decoding still needs the source layout.
+        if is_mimo_mixed_source(getattr(model, "config", None)):
+            self._source_model_config = copy.deepcopy(model.config)
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
         self.turtle_model = turtle_model
         # Captures forward-role auto-decoder choices for regression tests and debug logs.
@@ -2067,7 +2072,7 @@ class BaseQModel(nn.Module):
             return 0
 
         decoded_count = 0
-        for _, module in list(self.model.named_modules()):
+        for module_name, module in list(self.model.named_modules()):
             if isinstance(module, BaseQuantLinear) or not hasattr(module, "weight"):
                 continue
 
@@ -2087,6 +2092,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             )
             if decoder_kind is None:
                 continue
@@ -2095,6 +2101,7 @@ class BaseQModel(nn.Module):
                 module,
                 checkpoint_tensors=checkpoint_tensors,
                 target_dtype=decoder_cfg.target_dtype,
+                module_name=module_name,
             )
             self._replace_live_submodule(module, decoded_module)
             decoded_count += 1
@@ -2115,7 +2122,7 @@ class BaseQModel(nn.Module):
 
         target_device = torch.device(device)
         decoded_count = 0
-        for _, module in list(self.model.named_modules()):
+        for module_name, module in list(self.model.named_modules()):
             if isinstance(module, BaseQuantLinear) or not hasattr(module, "weight"):
                 continue
 
@@ -2135,6 +2142,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             )
             if decoder_kind is None:
                 continue
@@ -2161,6 +2169,7 @@ class BaseQModel(nn.Module):
                     module,
                     checkpoint_tensors=checkpoint_tensors,
                     target_dtype=decoder_cfg.target_dtype,
+                    module_name=module_name,
                 )
                 forward_module = self._build_decoder_forward_module(
                     quant_source=decoded_module,
@@ -2200,6 +2209,7 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             )
             if decoder_kind is None:
                 continue
@@ -2208,6 +2218,7 @@ class BaseQModel(nn.Module):
                 module,
                 checkpoint_tensors=checkpoint_tensors,
                 target_dtype=decoder_cfg.target_dtype,
+                module_name=module_name,
             )
             decoded_prefixes.append(module_name)
             for key, tensor in decoded_module.state_dict().items():
@@ -2414,12 +2425,18 @@ class BaseQModel(nn.Module):
             weight = checkpoint_tensors.get("weight")
             if not isinstance(weight, torch.Tensor):
                 continue
-            if self._decoder_weight_format(weight=weight, checkpoint_tensors=checkpoint_tensors) is None:
+            module_name = _get_qualified_name(self.model, submodule)
+            if self._decoder_weight_format(
+                weight=weight,
+                checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
+            ) is None:
                 continue
             decoded = self._build_decoder_quant_source_module(
                 submodule,
                 checkpoint_tensors=checkpoint_tensors,
                 target_dtype=decoder_cfg.target_dtype,
+                module_name=module_name,
             )
             self._replace_live_submodule(submodule, decoded)
             decoded_any = True
@@ -2490,6 +2507,7 @@ class BaseQModel(nn.Module):
         *,
         checkpoint_tensors: Optional[Dict[str, torch.Tensor]] = None,
         target_dtype: torch.dtype,
+        module_name: Optional[str] = None,
     ) -> nn.Module:
         """Build a dense CPU source module from checkpoint tensors for quantization."""
 
@@ -2509,54 +2527,69 @@ class BaseQModel(nn.Module):
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             )
-            result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
-            if decoder_kind == "fp4":
-                scale = self._decoder_fp4_effective_scale(
-                    checkpoint_tensors=checkpoint_tensors,
-                    result_shape=result_shape,
-                )
-            elif decoder_kind == "fp8" and is_mx_block_scale:
-                scale = self._decoder_mx_block_scale(
-                    scale_tensor=direct_scale,
-                    result_shape=result_shape,
-                    format_name="FP8",
-                )
-            else:
-                scale = self._decoder_scale_tensor(
-                    scale_tensor=direct_scale,
-                    result_shape=result_shape,
-                )
-            if decoder_kind == "fp8" and isinstance(scale, torch.Tensor):
-                scale_2 = checkpoint_tensors.get("weight_scale_2")
-                if isinstance(scale_2, torch.Tensor):
-                    if is_mx_block_scale:
-                        scale_2 = self._decoder_mx_secondary_scale(scale_2, result_shape)
-                    scale = scale.to(torch.float32) * scale_2.to(torch.float32)
-            scale_inv = None
-            if not isinstance(scale, torch.Tensor):
-                scale_inv = self._decoder_scale_tensor(
-                    scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
-                    result_shape=result_shape,
-                )
-            if decoder_kind == "fp8":
-                decoded_weight = dequantize_fp8(
+            if decoder_kind == "mimo_mixed":
+                from ..utils.mimo import decode_mimo_weight
+
+                prefix = module_name + "."
+                decoded_weight = decode_mimo_weight(
+                    self._decoder_source_config(),
+                    prefix + "weight",
                     weight,
-                    scale=scale if isinstance(scale, torch.Tensor) else None,
-                    scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
-                    axis=None,
-                    target_dtype=torch.float32,
+                    lambda key: checkpoint_tensors.get(key.removeprefix(prefix)),
+                    target_dtype=target_dtype,
                 )
-            elif decoder_kind == "fp4":
-                decoded_weight = dequantize_f4_e2m1(
-                    weight.view(torch.uint8) if weight.dtype is torch.int8 else weight,
-                    scale=scale if isinstance(scale, torch.Tensor) else None,
-                    scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
-                    axis=None,
-                    target_dtype=torch.float32,
-                )
+                if decoded_weight.shape != quant_source.weight.shape:
+                    raise ValueError(f"MiMo decoded shape does not match module {module_name}")
             else:
-                decoded_weight = weight.to(dtype=target_dtype)
+                result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
+                if decoder_kind == "fp4":
+                    scale = self._decoder_fp4_effective_scale(
+                        checkpoint_tensors=checkpoint_tensors,
+                        result_shape=result_shape,
+                    )
+                elif decoder_kind == "fp8" and is_mx_block_scale:
+                    scale = self._decoder_mx_block_scale(
+                        scale_tensor=direct_scale,
+                        result_shape=result_shape,
+                        format_name="FP8",
+                    )
+                else:
+                    scale = self._decoder_scale_tensor(
+                        scale_tensor=direct_scale,
+                        result_shape=result_shape,
+                    )
+                if decoder_kind == "fp8" and isinstance(scale, torch.Tensor):
+                    scale_2 = checkpoint_tensors.get("weight_scale_2")
+                    if isinstance(scale_2, torch.Tensor):
+                        if is_mx_block_scale:
+                            scale_2 = self._decoder_mx_secondary_scale(scale_2, result_shape)
+                        scale = scale.to(torch.float32) * scale_2.to(torch.float32)
+                scale_inv = None
+                if not isinstance(scale, torch.Tensor):
+                    scale_inv = self._decoder_scale_tensor(
+                        scale_tensor=checkpoint_tensors.get("weight_scale_inv"),
+                        result_shape=result_shape,
+                    )
+                if decoder_kind == "fp8":
+                    decoded_weight = dequantize_fp8(
+                        weight,
+                        scale=scale if isinstance(scale, torch.Tensor) else None,
+                        scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
+                        axis=None,
+                        target_dtype=torch.float32,
+                    )
+                elif decoder_kind == "fp4":
+                    decoded_weight = dequantize_f4_e2m1(
+                        weight.view(torch.uint8) if weight.dtype is torch.int8 else weight,
+                        scale=scale if isinstance(scale, torch.Tensor) else None,
+                        scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
+                        axis=None,
+                        target_dtype=torch.float32,
+                    )
+                else:
+                    decoded_weight = weight.to(dtype=target_dtype)
 
             existing_weight = getattr(quant_source, "weight")
             quant_source.weight = nn.Parameter(
@@ -2769,13 +2802,29 @@ class BaseQModel(nn.Module):
             scale = scale.to(torch.float32) * scale_2.to(torch.float32)
         return scale
 
+    def _decoder_source_config(self) -> Any:
+        """Keep checkpoint encoding metadata after the output config changes."""
+
+        turtle_config = getattr(getattr(self, "turtle_model", None), "config", None)
+        if turtle_config is not None:
+            return turtle_config
+        return self.__dict__.get("_source_model_config", getattr(self.model, "config", None))
+
     def _decoder_weight_format(
         self,
         *,
         weight: torch.Tensor,
         checkpoint_tensors: Dict[str, torch.Tensor],
+        module_name: Optional[str] = None,
     ) -> Optional[str]:
         """Infer which floatx decoder matches one checkpoint weight tensor."""
+
+        from ..utils.mimo import is_mimo_encoded_weight
+
+        if module_name and is_mimo_encoded_weight(
+            self._decoder_source_config(), module_name + ".weight", weight
+        ):
+            return "mimo_mixed"
 
         if weight.dtype in available_float8_dtypes():
             return "fp8"
@@ -3049,6 +3098,7 @@ class BaseQModel(nn.Module):
         decoder_kind = self._decoder_weight_format(
             weight=weight,
             checkpoint_tensors=checkpoint_tensors,
+            module_name=named_module.full_name,
         )
         if decoder_kind is None:
             return target_submodule
@@ -3101,6 +3151,7 @@ class BaseQModel(nn.Module):
                     target_submodule,
                     checkpoint_tensors=checkpoint_tensors,
                     target_dtype=target_dtype,
+                    module_name=named_module.full_name,
                 )
                 named_module.state["quant_source_module"] = quant_source
             decoded_forward = self._build_decoder_forward_module(
@@ -3415,6 +3466,7 @@ class BaseQModel(nn.Module):
                         quant_source_template,
                         checkpoint_tensors=checkpoint_tensors,
                         target_dtype=target_dtype,
+                        module_name=named_module.full_name,
                     )
                     named_module.state["quant_source_module"] = quant_source
                     decoder_plan = named_module.state.get("auto_module_decoder") or {}
@@ -3443,6 +3495,7 @@ class BaseQModel(nn.Module):
                     decoder_kind = self._decoder_weight_format(
                         weight=weight,
                         checkpoint_tensors=checkpoint_tensors,
+                        module_name=named_module.full_name,
                     )
                     if decoder_kind is not None:
                         # Packed floatx checkpoints can require decoder-specific

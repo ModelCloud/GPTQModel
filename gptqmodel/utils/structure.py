@@ -2599,6 +2599,36 @@ class LazyTurtle:
                     tensors[rel_name] = handler.get_tensor(full_name)
         return tensors
 
+    def _decode_mimo_checkpoint_tensor(
+        self,
+        full_name: str,
+        tensor: torch.Tensor,
+        *,
+        target_dtype: Optional[torch.dtype],
+    ) -> torch.Tensor:
+        """Decode MiMo storage before shape checks and dense shell copies."""
+
+        from .mimo import decode_mimo_weight, is_mimo_encoded_weight
+
+        if not is_mimo_encoded_weight(self.config, full_name, tensor):
+            return tensor
+
+        def lookup(name: str) -> Optional[torch.Tensor]:
+            shard = self._weight_map.get(name)
+            if shard is None:
+                return None
+            source_path = os.path.join(self.model_local_path, shard)
+            with safe_open(source_path, framework="pt", device="cpu") as handler:
+                return handler.get_tensor(name)
+
+        return decode_mimo_weight(
+            self.config,
+            full_name,
+            tensor,
+            lookup,
+            target_dtype=target_dtype,
+        )
+
     def _copy_checkpoint_tensors_into_submodule(
         self,
         *,
@@ -2719,7 +2749,14 @@ class LazyTurtle:
                             )
                         shard_path = os.path.join(self.model_local_path, shard)
                         with safe_open(shard_path, framework="pt", device="cpu") as handler:
-                            parts.append(handler.get_tensor(full_name))
+                            parts.append(self._decode_mimo_checkpoint_tensor(
+                                full_name,
+                                handler.get_tensor(full_name),
+                                target_dtype=(
+                                    target_tensor.dtype
+                                    if target_tensor is not None else None
+                                ),
+                            ))
 
                     assembly_concat_dim = self._assembly_concat_dim(concat_dim)
                     if assembly_concat_dim is not None:
@@ -2826,7 +2863,14 @@ class LazyTurtle:
                                 rel_name=rel_name,
                                 modules_by_name=modules_by_name,
                             )
-                            checkpoint_tensor = handler.get_tensor(full_name)
+                            checkpoint_tensor = self._decode_mimo_checkpoint_tensor(
+                                full_name,
+                                handler.get_tensor(full_name),
+                                target_dtype=(
+                                    target_tensor.dtype
+                                    if target_tensor is not None else None
+                                ),
+                            )
                             tensor = self._transform_checkpoint_tensor(
                                 checkpoint_tensor,
                                 expert_index=expert_index,
@@ -3104,7 +3148,11 @@ class LazyTurtle:
                             ))
                         source_path = os.path.join(self.model_local_path, shard)
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
-                            parts.append(handler.get_tensor(full_name))
+                            parts.append(self._decode_mimo_checkpoint_tensor(
+                                full_name,
+                                handler.get_tensor(full_name),
+                                target_dtype=shell_param.dtype,
+                            ))
 
                     assembly_concat_dim = self._assembly_concat_dim(concat_dim)
                     if assembly_concat_dim is not None:
@@ -3175,7 +3223,11 @@ class LazyTurtle:
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
-                    checkpoint_param = handler.get_tensor(full_name)
+                    checkpoint_param = self._decode_mimo_checkpoint_tensor(
+                        full_name,
+                        handler.get_tensor(full_name),
+                        target_dtype=shell_param.dtype,
+                    )
                 source_param = self._transform_checkpoint_tensor(
                     checkpoint_param,
                     expert_index=expert_index,
@@ -3250,7 +3302,11 @@ class LazyTurtle:
                             ))
                         source_path = os.path.join(self.model_local_path, shard)
                         with safe_open(source_path, framework="pt", device="cpu") as handler:
-                            parts.append(handler.get_tensor(full_name))
+                            parts.append(self._decode_mimo_checkpoint_tensor(
+                                full_name,
+                                handler.get_tensor(full_name),
+                                target_dtype=shell_buffer.dtype,
+                            ))
 
                     try:
                         source_buffer = self._assemble_checkpoint_tensor_parts(parts, concat_dim)
@@ -3310,7 +3366,11 @@ class LazyTurtle:
 
                 source_path = os.path.join(self.model_local_path, shard)
                 with safe_open(source_path, framework="pt", device="cpu") as handler:
-                    checkpoint_buffer = handler.get_tensor(full_name)
+                    checkpoint_buffer = self._decode_mimo_checkpoint_tensor(
+                        full_name,
+                        handler.get_tensor(full_name),
+                        target_dtype=shell_buffer.dtype,
+                    )
                 source_buffer = self._transform_checkpoint_tensor(
                     checkpoint_buffer,
                     expert_index=expert_index,

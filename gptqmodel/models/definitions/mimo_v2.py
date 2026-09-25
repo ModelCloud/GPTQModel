@@ -1,16 +1,43 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import copy
+import inspect
 import json
 import os
+from collections.abc import Callable
+from functools import wraps
+from importlib import import_module
+from typing import Any
 
 from safetensors import safe_open
 from torch import nn
 
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
+from ...utils.mimo import is_mimo_mixed_source
 from ...utils.torch import CPU
 from ..base import BaseQModel
+
+
+def _compatible_mask(function: Callable) -> Callable:
+    """Adapt legacy MiMo keywords within its remote modeling module."""
+    if getattr(function, "_gptqmodel_mimo_mask_compat", False):
+        return function
+    parameters = inspect.signature(function).parameters
+    if "inputs_embeds" not in parameters:
+        return function
+
+    @wraps(function)
+    def mask(*args: Any, **kwargs: Any) -> Any:
+        if "input_embeds" in kwargs:
+            kwargs["inputs_embeds"] = kwargs.pop("input_embeds")
+        if "cache_position" not in parameters:
+            kwargs.pop("cache_position", None)
+        return function(*args, **kwargs)
+
+    mask._gptqmodel_mimo_mask_compat = True
+    return mask
 
 
 class MimoV2QModel(BaseQModel):
@@ -25,6 +52,9 @@ class MimoV2QModel(BaseQModel):
     awq_scale_optimize_shape_dependent_modules = ["self_attn.o_proj"]
 
     moe_lifecycle_hooks = GateUpDownMoELifecycleHooks()
+
+    # The remote base model does not instantiate these auxiliary predictors.
+    out_of_model_tensors = {"prefixes": ["model.mtp"]}
 
     # MiMo V2 supports both split q/k/v and fused qkv checkpoints, and individual
     # layers can be dense MLP or routed MoE according to config.moe_layer_freq.
@@ -120,6 +150,15 @@ class MimoV2QModel(BaseQModel):
 
     def after_model_load(self, model, load_quantized_model=False):
         model = super().after_model_load(model, load_quantized_model=load_quantized_model)
+        modeling = import_module(type(model).__module__)
+        for name in ("create_causal_mask", "create_sliding_window_causal_mask"):
+            function = getattr(modeling, name, None)
+            if callable(function):
+                setattr(modeling, name, _compatible_mask(function))
+        if is_mimo_mixed_source(model.config):
+            model.config.mimo_mtp_source_quantization_config = copy.deepcopy(
+                model.config.quantization_config
+            )
         self._drop_visual_merger_biases_if_checkpoint_omits_them(model, self.model_local_path)
         self._drop_checkpoint_omitted_audio_tensors(model, self.model_local_path)
         return model

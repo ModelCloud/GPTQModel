@@ -78,7 +78,12 @@ class StageInputsCapture:
         embedding_device = get_device(embedding)
         return fallback if embedding_device == META else embedding_device
 
-    def _first_layer_has_deferred_floatx_source(self, layer: torch.nn.Module) -> bool:
+    def _first_layer_has_deferred_floatx_source(
+        self,
+        layer: torch.nn.Module,
+        *,
+        module_path: Optional[str] = None,
+    ) -> bool:
         """Whether input capture must not materialize a packed floatx layer.
 
         The first decoder layer is only used as a pre-forward hook during input
@@ -98,7 +103,7 @@ class StageInputsCapture:
         if not callable(get_tensors) or not callable(decoder_format):
             return False
 
-        for submodule in layer.modules():
+        for submodule_name, submodule in layer.named_modules():
             if not hasattr(submodule, "weight"):
                 continue
             checkpoint_tensors = get_tensors(
@@ -107,9 +112,13 @@ class StageInputsCapture:
                 recurse=False,
             )
             weight = checkpoint_tensors.get("weight") if isinstance(checkpoint_tensors, dict) else None
+            module_name = None
+            if module_path is not None:
+                module_name = ".".join(part for part in (module_path, submodule_name) if part)
             if isinstance(weight, torch.Tensor) and decoder_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             ) is not None:
                 return True
         return False
@@ -184,7 +193,7 @@ class StageInputsCapture:
         # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
         # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
         # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
-        if self._first_layer_has_deferred_floatx_source(layers[0]):
+        if self._first_layer_has_deferred_floatx_source(layers[0], module_path=module_path):
             self.logger.info(
                 "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
             )
