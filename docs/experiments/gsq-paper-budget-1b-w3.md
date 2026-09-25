@@ -61,3 +61,10 @@ The prior small-budget W3 check scored 6/128 for the GPTQ initializer and
 are historical for the 25-sequence, 10-epoch recipe and must not be presented
 as results of the paper-budget test. A paper-budget quality result has not
 yet been measured.
+
+A one-block geometry smoke used 64 training documents, two GPTQ documents,
+and two validation documents at 4,096 tokens. With batch 64, microbatch 2,
+one epoch, and one Q/K update, all four stages completed and the held-out
+V/O and MLP hard losses were finite. The block quantization took 21.6 seconds
+after dataset preparation, and its disk capture was cleaned afterward. This
+checks the full sequence and batch shapes; it is not the 20-epoch quality run.
