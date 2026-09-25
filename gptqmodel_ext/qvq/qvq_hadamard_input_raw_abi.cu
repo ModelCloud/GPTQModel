@@ -97,16 +97,12 @@ __device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
   return __hsub2(first, second);
 }
 
-__device__ __forceinline__ half swiglu_value(half gate, half up) {
+__device__ __forceinline__ half swiglu_exponential(half gate) {
   const float g = __half2float(gate);
-  // StableHLO logistic(f16) lowers to f16 exp, f16 add, f16 divide.
-  // Keep those materialization points even though this kernel fuses the
-  // subsequent SwiGLU multiply with SU/Hadamard preparation.
-  const half exponential = __float2half_rn(expf(-g));
-  const half denominator = __float2half_rn(1.0f + __half2float(exponential));
-  const half sigmoid = __float2half_rn(1.0f / __half2float(denominator));
-  const half silu = __float2half_rn(g * __half2float(sigmoid));
-  return __float2half_rn(__half2float(silu) * __half2float(up));
+  // StableHLO logistic(f16) rounds the exponential before its FP16 add and
+  // reciprocal. Exhaustive SM90 testing of finite FP16 gate inputs found
+  // the same rounded exponential for __expf and expf.
+  return __float2half_rn(__expf(-g));
 }
 
 template <int Width, int Threads, bool SwiGlu = false>
@@ -131,9 +127,14 @@ __global__ void hadamard_input_single(
     if constexpr (SwiGlu) {
       const half2 gate_pair = *reinterpret_cast<const half2*>(input + offset);
       const half2 up_pair = *reinterpret_cast<const half2*>(up + offset);
-      activation = __halves2half2(
-          swiglu_value(__low2half(gate_pair), __low2half(up_pair)),
-          swiglu_value(__high2half(gate_pair), __high2half(up_pair)));
+      const half2 exponential_pair = __halves2half2(
+          swiglu_exponential(__low2half(gate_pair)),
+          swiglu_exponential(__high2half(gate_pair)));
+      const half2 ones = __float2half2_rn(1.0f);
+      const half2 denominator_pair = __hadd2(ones, exponential_pair);
+      const half2 sigmoid_pair = h2rcp(denominator_pair);
+      const half2 silu_pair = __hmul2(gate_pair, sigmoid_pair);
+      activation = __hmul2(silu_pair, up_pair);
     } else {
       activation = *reinterpret_cast<const half2*>(input + offset);
     }
