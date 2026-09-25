@@ -68,7 +68,8 @@ def test_packed_4bit_matches_source_codes(format, group_size):
 
 @pytest.mark.parametrize("format", ["gptq", "awq"])
 @pytest.mark.parametrize("holder", ["torch", "mlx"])
-def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holder):
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holder, group_size):
     import mlx.nn as mlx_nn
     import torch
 
@@ -85,7 +86,7 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holde
         TorchLinear if format == "gptq" else AwqTorchLinear
     )
     source.linear = linear_class(
-        bits=4, group_size=64, sym=False, desc_act=False,
+        bits=4, group_size=group_size, sym=False, desc_act=False,
         in_features=128, out_features=64, bias=False,
         pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
     )
@@ -112,15 +113,131 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, holde
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     assert isinstance(model.linear, mlx_nn.QuantizedLinear)
     assert config["quantization"]["bits"] == 4
+    assert config["quantization"]["group_size"] == group_size
     x = mlx.ones((1, 128), dtype=mlx.float16)
     if format == "gptq":
         expected = source.linear.dequantize_weight().float().sum(dim=0).numpy()
     else:
         expected = dequantize_gemm(source.linear.qweight, source.linear.qzeros,
-                                   source.linear.scales, 4, 64).float().sum(dim=0).numpy()
+                                   source.linear.scales, 4, source.linear.group_size).float().sum(dim=0).numpy()
     output = model(x)
     mlx.eval(output)
     np.testing.assert_allclose(np.array(output)[0], expected, rtol=0.002, atol=0.002)
+
+
+@pytest.mark.parametrize("formats", [("gptq", "gptq"), ("awq", "awq"), ("gptq", "awq")])
+def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatch, formats):
+    import mlx.nn as mlx_nn
+    import torch
+
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+    from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+    from gptqmodel.utils import mlx as mlx_utils
+
+    rng = np.random.default_rng(286)
+    shifts = np.arange(8, dtype=np.uint32) * 4
+    awq_order = [0, 2, 4, 6, 1, 3, 5, 7]
+    source = torch.nn.Module()
+    oracle_weights = []
+    oracle_biases = []
+
+    for name, format, in_features, out_features, group_size in (
+        ("first", formats[0], 128, 64, 32),
+        ("second", formats[1], 64, 64, 64),
+    ):
+        codes = rng.integers(0, 16, (in_features, out_features), dtype=np.uint32)
+        zeros = rng.integers(0, 16, (in_features // group_size, out_features), dtype=np.uint32)
+        codes[0, 0], codes[-1, -1] = 0, 15
+        zeros[0, 0], zeros[-1, -1] = 15, 0
+        scales = rng.uniform(0.005, 0.03, zeros.shape).astype(np.float16)
+        scales[0, 1] = 0  # An exact zero scale catches bias and zero-point handling.
+        bias = rng.uniform(-0.05, 0.05, out_features).astype(np.float16)
+        linear_class = TorchLinear if format == "gptq" else AwqTorchLinear
+        linear = linear_class(
+            bits=4, group_size=group_size, sym=False, desc_act=False,
+            in_features=in_features, out_features=out_features, bias=True,
+            pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
+        )
+        if format == "gptq":
+            linear.qzero_format(2)
+            qweight = np.bitwise_or.reduce(
+                codes.reshape(-1, 8, out_features) << shifts[None, :, None], axis=1,
+            )
+            qzeros = np.bitwise_or.reduce(
+                zeros.reshape(-1, out_features // 8, 8) << shifts, axis=-1,
+            )
+        else:
+            qweight = np.bitwise_or.reduce(
+                codes.reshape(in_features, -1, 8)[:, :, awq_order] << shifts, axis=-1,
+            )
+            qzeros = np.bitwise_or.reduce(
+                zeros.reshape(-1, out_features // 8, 8)[:, :, awq_order] << shifts, axis=-1,
+            )
+        linear.qweight.copy_(torch.from_numpy(qweight.astype(np.int32)))
+        linear.qzeros.copy_(torch.from_numpy(qzeros.astype(np.int32)))
+        linear.scales.copy_(torch.from_numpy(scales))
+        linear.bias.copy_(torch.from_numpy(bias))
+        setattr(source, name, linear)
+
+        expanded_zeros = torch.from_numpy(zeros.astype(np.int64)).repeat_interleave(group_size, dim=0)
+        expanded_scales = torch.from_numpy(scales).double().repeat_interleave(group_size, dim=0)
+        oracle_weights.append((torch.from_numpy(codes.astype(np.int64)) - expanded_zeros).double() * expanded_scales)
+        oracle_biases.append(torch.from_numpy(bias).double())
+
+    class ModelArgs:
+        @classmethod
+        def from_dict(cls, _config):
+            return cls()
+
+    class TinyModel(mlx_nn.Module):
+        def __init__(self, _args):
+            super().__init__()
+            self.first = mlx_nn.Linear(128, 64, bias=True)
+            self.second = mlx_nn.Linear(64, 64, bias=True)
+
+        def __call__(self, x):
+            return self.second(self.first(x))
+
+    monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (TinyModel, ModelArgs))
+    model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
+    assert isinstance(model.first, mlx_nn.QuantizedLinear)
+    assert isinstance(model.second, mlx_nn.QuantizedLinear)
+    assert config["quantization"]["group_size"] == 32
+    assert config["quantization"]["second"]["group_size"] == 64
+
+    x_numpy = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float16)
+    first_actual = model.first(mlx.array(x_numpy))
+    actual = model(mlx.array(x_numpy))
+    mlx.eval(first_actual, actual)
+    expected = torch.from_numpy(x_numpy).double()
+    expected = expected @ oracle_weights[0] + oracle_biases[0]
+    first_error = np.max(np.abs(np.array(first_actual) - expected.numpy()))
+    assert first_error <= 0.002
+    np.testing.assert_allclose(np.array(first_actual), expected.numpy(), rtol=0.002, atol=0.002)
+    expected = expected @ oracle_weights[1] + oracle_biases[1]
+    final_error = np.max(np.abs(np.array(actual) - expected.numpy()))
+    assert final_error <= 0.002
+    np.testing.assert_allclose(np.array(actual), expected.numpy(), rtol=0.002, atol=0.002)
+
+
+def test_packed_gptq_rejects_reordered_group_indices_and_legacy_zeros():
+    import torch
+
+    from gptqmodel.nn_modules.qlinear.mlx import MlxQuantLinear
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
+    source = TorchLinear(
+        bits=4, group_size=64, sym=False, desc_act=False,
+        in_features=128, out_features=64, bias=False,
+        pack_dtype=torch.int32, register_buffers=True, dtype=torch.float16,
+    )
+    source.qzero_format(2)
+    assert MlxQuantLinear.source_compatible(source)
+    source.g_idx[0] = 1
+    assert not MlxQuantLinear.source_compatible(source)
+    source.g_idx[0] = 0
+    source.qzero_format(1)
+    assert not MlxQuantLinear.source_compatible(source)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="MLX Metal requires macOS")
@@ -149,7 +266,9 @@ def test_mlx_quant_linear_registry_validates_capabilities(format):
     ) is linear_class
     assert validate_quant_linear(linear_class, **contract)[0]
     for change in (
-        {"bits": 3}, {"group_size": 256}, {"desc_act": True},
+        {"bits": 2}, {"bits": 3}, {"bits": 8},
+        {"group_size": -1}, {"group_size": 16}, {"group_size": 256},
+        {"desc_act": True},
         {"pack_dtype": torch.int16}, {"dtype": torch.float32},
         {"dtype": torch.bfloat16},
         {"in_features": 120}, {"out_features": 63}, {"device": DEVICE.CPU},
@@ -212,3 +331,11 @@ def test_auto_selects_mlx_only_for_compatible_models():
     qcfg.desc_act = False
     qcfg.group_size = 256
     assert select() == BACKEND.AUTO
+    qcfg.group_size = 128
+    for bits in (2, 3, 8):
+        qcfg.bits = bits
+        assert select() == BACKEND.AUTO
+    qcfg.bits = 4
+    for group_size in (-1, 16, 256):
+        qcfg.group_size = group_size
+        assert select() == BACKEND.AUTO
