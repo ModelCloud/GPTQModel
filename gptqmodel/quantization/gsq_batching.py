@@ -8,6 +8,85 @@
 import torch
 
 
+class CachedLlamaStageBatches:
+    """Read fixed teacher or MLP inputs once per optimizer microbatch.
+
+    Cache files keep the original microbatch boundaries. A teacher computed
+    over two documents is therefore reused for that same pair, avoiding any
+    change in GEMM batch geometry or loss weighting.
+    """
+
+    def __init__(self, source, files, *, mode, device):
+        if mode not in ('attention', 'mlp') or len(files) != len(source):
+            raise ValueError('Invalid GSQ stage cache')
+        self.source = source
+        self.files = files
+        self.mode = mode
+        self.device = torch.device(device)
+
+    def __len__(self):
+        return len(self.files)
+
+    def __getitem__(self, index):
+        if self.mode == 'attention':
+            original = self.source[index]
+            paths = self.files[index]
+            if len(original) != len(paths):
+                raise ValueError('GSQ attention cache lost microbatch alignment')
+            return [((hidden, kwargs, mask,
+                      torch.load(path, map_location=self.device, weights_only=True)), count)
+                    for ((hidden, kwargs, mask), count), path in zip(original, paths)]
+        return self.from_cpu(index, self.load_cpu(index))
+
+    def load_cpu(self, index):
+        if self.mode != 'mlp':
+            raise ValueError('Only cached MLP batches support CPU prefetch')
+        return torch.load(self.files[index], map_location='cpu', weights_only=True)
+
+    def from_cpu(self, index, packed):
+        if hasattr(self.source, 'documents'):
+            remaining = len(self.source.documents)-index*self.source.batch_size
+            count = (min(self.source.batch_size, remaining)+self.source.microbatch_size-1)//self.source.microbatch_size
+        else:
+            count = len(self.source[index])
+        if isinstance(packed, torch.Tensor):
+            if packed.ndim != 5 or packed.shape[1] != 2 or packed.shape[0] != count:
+                raise ValueError('GSQ cached MLP optimizer batch is malformed')
+            payloads = packed.to(self.device, non_blocking=True).unbind(0)
+        elif isinstance(packed, tuple) and len(packed) == count:
+            payloads = packed
+        else:
+            raise ValueError('GSQ cached MLP optimizer batch is malformed')
+        result = []
+        for payload in payloads:
+            if not isinstance(payload, torch.Tensor) or payload.ndim != 4 or payload.shape[0] != 2:
+                raise ValueError('GSQ cached MLP microbatch is malformed')
+            microbatch = payload if payload.device == self.device else payload.to(self.device, non_blocking=True)
+            residual, teacher = microbatch.unbind(0)
+            result.append(((residual, teacher), residual.numel()))
+        return result
+
+
+def iter_gsq_training_batches(batches, order):
+    """Read the next fixed-target cache batch while the current one trains."""
+    order = list(order)
+    if not order:
+        return
+    if not isinstance(batches, CachedLlamaStageBatches) or batches.mode != 'mlp' or len(order) < 2:
+        for index in order:
+            yield index, batches[index]
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(batches.load_cpu, order[0])
+        for position, index in enumerate(order):
+            packed = future.result()
+            if position+1 < len(order):
+                future = pool.submit(batches.load_cpu, order[position+1])
+            yield index, batches.from_cpu(index, packed)
+
+
 def collate_llama_documents(documents, *, device=None, implicit_causal=False):
     """Preserve eager-attention masks/rotary values and return a loss mask."""
     if not documents:

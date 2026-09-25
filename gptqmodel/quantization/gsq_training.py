@@ -4,6 +4,9 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+from contextlib import ExitStack
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import torch
 
 
@@ -157,6 +160,7 @@ class GSQScalarTrainingModule(torch.nn.Module):
 
     def __init__(self, weight, scales, group_size, *, bits, noise, std=.01, strength=6., logits_dtype=None):
         super().__init__()
+        self.group_size = group_size
         prepared = scalar_training_candidates(weight, scales, group_size, bits=bits,
                                                noise=noise, std=std, strength=strength)
         self.register_buffer('initial', None if bits == 2 else
@@ -166,7 +170,15 @@ class GSQScalarTrainingModule(torch.nn.Module):
         for name in ('candidates', 'valid', 'group_index'):
             self.register_buffer(name, prepared[name])
 
-    def forward(self, *, uniform, temperature, multiplier):
+    def forward(self, *, uniform, temperature, multiplier, trusted_uniform=False):
+        if trusted_uniform:
+            from .gsq_cuda_relaxation import cuda_relaxed_scalar_weights
+
+            fast = cuda_relaxed_scalar_weights(
+                self.logits, self.scales, self.initial, self.valid, uniform,
+                self.group_size, temperature, multiplier)
+            if fast is not None:
+                return fast
         masked = self.logits.masked_fill(~self.valid, -torch.inf)
         candidates = self.candidates
         if self.initial is not None:
@@ -260,6 +272,75 @@ def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
     return torch.nn.functional.mse_loss(student, teacher)
 
 
+def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights):
+    """Train only the changing MLP against an exact fixed-block cache."""
+    residual, teacher = batch
+    from .gsq_cuda_relaxation import cuda_rms_norm
+
+    norm_input = cuda_rms_norm(residual, layer.post_attention_layernorm.weight,
+                               layer.post_attention_layernorm.variance_epsilon)
+    if norm_input is None:
+        norm_input = layer.post_attention_layernorm(residual)
+    names = ('gate_proj', 'up_proj', 'down_proj')
+    if set(student_weights) != {f'mlp.{name}.weight' for name in names}:
+        raise ValueError('GSQ cached MLP replacement does not match the layer')
+    projections = [getattr(layer.mlp, name) for name in names]
+    weights = []
+    for name, projection in zip(names, projections):
+        value = student_weights[f'mlp.{name}.weight']
+        if value.shape != projection.weight.shape:
+            raise ValueError('GSQ cached MLP replacement shape differs')
+        weights.append(value.to(device=projection.weight.device, dtype=projection.weight.dtype))
+    gate = torch.nn.functional.linear(norm_input, weights[0], projections[0].bias)
+    up = torch.nn.functional.linear(norm_input, weights[1], projections[1].bias)
+    hidden = layer.mlp.act_fn(gate)*up
+    student = residual + torch.nn.functional.linear(hidden, weights[2], projections[2].bias)
+    if student.shape != teacher.shape or student.device != teacher.device:
+        raise ValueError('GSQ cached MLP target does not match the student')
+    return torch.nn.functional.mse_loss(student, teacher)
+
+
+def cache_llama_stage_targets(stage, batches, teacher_weights, *, mode, directory):
+    """Precompute fixed teacher results with the original microbatch geometry."""
+    if mode not in ('attention', 'mlp'):
+        raise ValueError('Invalid GSQ fixed-target cache mode')
+    directory = Path(directory)
+    parameters = {name: value.detach() for name, value in stage.named_parameters()}
+    for name, value in teacher_weights.items():
+        if name not in parameters or value.shape != parameters[name].shape:
+            raise ValueError('GSQ fixed-target teacher replacement does not match the stage')
+        parameter = parameters[name]
+        parameters[name] = value.detach().to(device=parameter.device, dtype=parameter.dtype)
+    attention = LlamaGSQAttentionStage(stage) if mode == 'mlp' else None
+    files = []
+    with torch.no_grad():
+        for batch_index in range(len(batches)):
+            microbatch_files = []
+            packed_batch = []
+            for microbatch_index, ((inputs, kwargs, mask), _) in enumerate(batches[batch_index]):
+                if mask is not None:
+                    raise ValueError('GSQ fixed-target cache requires complete fixed-length documents')
+                buffers = {name: value.detach().clone() for name, value in stage.named_buffers()}
+                teacher = torch.func.functional_call(stage, (parameters, buffers), (inputs,), kwargs)
+                if mode == 'attention':
+                    payload = teacher.detach().cpu()
+                    path = directory/f'{batch_index:05d}-{microbatch_index:03d}.pt'
+                    torch.save(payload, path)
+                    microbatch_files.append(path)
+                else:
+                    residual = attention(inputs, **kwargs)
+                    payload = torch.stack((residual, teacher)).detach().cpu()
+                    packed_batch.append(payload)
+            if mode == 'attention':
+                files.append(tuple(microbatch_files))
+            else:
+                path = directory/f'{batch_index:05d}.pt'
+                same_shape = all(item.shape == packed_batch[0].shape for item in packed_batch)
+                torch.save(torch.stack(packed_batch) if same_shape else tuple(packed_batch), path)
+                files.append(path)
+    return files
+
+
 def train_stage_update(quantizers, optimizer, microbatches, objective, *, generator,
                        temperature, multiplier, uniforms=None, static_gradients=False):
     """One accumulated staged update; objective(batch, weights) returns mean MSE.
@@ -289,7 +370,7 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
                 )
                 weights[name] = quantizer(
                     uniform=uniform, temperature=temperature,
-                    multiplier=multiplier,
+                    multiplier=multiplier, trusted_uniform=uniforms is None,
                 )
             loss = objective(batch, weights)
             if loss.ndim != 0:
@@ -536,7 +617,10 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         if fp32_tail_epochs and epoch == epochs-fp32_tail_epochs:
             for quantizer in quantizers.values():
                 quantizer.training_dtype = torch.float32
-        for index in torch.randperm(len(batches), generator=shuffle_rng).tolist():
+        from .gsq_batching import iter_gsq_training_batches
+
+        order = torch.randperm(len(batches), generator=shuffle_rng).tolist()
+        for index, microbatches in iter_gsq_training_batches(batches, order):
             step = len(history)
             tau, kappa = sampling_schedule(step, total_steps, temperature=temperature, multiplier=multiplier)
             learning_rates = [
@@ -549,7 +633,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
             for group, learning_rate in zip(optimizer.param_groups, learning_rates):
                 group['lr'] = learning_rate
             loss = train_stage_update(
-                quantizers, optimizer, batches[index], objective,
+                quantizers, optimizer, microbatches, objective,
                 generator=sampling_rng, temperature=tau, multiplier=kappa,
             )
             if step == 0 or (step+1) % 100 == 0 or step+1 == total_steps or time.monotonic() >= progress_at:
@@ -698,14 +782,42 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
 
     def run(stage_name, stage, selected, stage_batches, teacher=None, validation_stage_batches=None):
         quantizers = {name+'.weight': quantizer(name) for name in selected}
+        from .gsq_batching import CachedLlamaStageBatches
 
-        def objective(batch, weights):
-            inputs, kwargs, mask = batch
-            return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
-                                             teacher_weights=teacher, output_mask=mask)
-        result = fit_reconstruction_stage(quantizers, stage_batches, objective,
-                                          epochs=epochs, seed=seed,
-                                          validation_batches=validation_stage_batches, **training)
+        def disk_source(source):
+            documents = getattr(source, 'documents', None)
+            return getattr(getattr(documents, 'capture', None), 'directory', None)
+
+        cache_targets = (attention_implementation == 'sdpa' and disk_source(stage_batches) is not None
+                         and (validation_stage_batches is None or disk_source(validation_stage_batches) is not None))
+        with ExitStack() as stack:
+            if cache_targets:
+                def cached(source, label):
+                    parent = Path(disk_source(source)).parent
+                    directory = stack.enter_context(TemporaryDirectory(
+                        prefix=f'gsq-{stage_name}-{label}-', dir=parent))
+                    files = cache_llama_stage_targets(stage, source, teacher, mode=stage_name,
+                                                      directory=directory)
+                    return CachedLlamaStageBatches(source, files, mode=stage_name, device=device)
+
+                stage_batches = cached(stage_batches, 'train')
+                if validation_stage_batches is not None:
+                    validation_stage_batches = cached(validation_stage_batches, 'validation')
+
+            def objective(batch, weights):
+                if cache_targets:
+                    if stage_name == 'attention':
+                        inputs, kwargs, mask, target = batch
+                        return reconstruction_stage_student_loss(
+                            stage, (inputs,), kwargs, student_weights=weights,
+                            teacher=target, output_mask=mask)
+                    return reconstruction_cached_llama_mlp_loss(stage, batch, weights)
+                inputs, kwargs, mask = batch
+                return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
+                                                 teacher_weights=teacher, output_mask=mask)
+            result = fit_reconstruction_stage(quantizers, stage_batches, objective,
+                                              epochs=epochs, seed=seed,
+                                              validation_batches=validation_stage_batches, **training)
         if affine_initializers:
             result['zeros'] = {name: quant.zeros.detach().clone() for name, quant in quantizers.items()}
             result['codes'] = {name: quant.hard_codes().detach().clone() for name, quant in quantizers.items()}

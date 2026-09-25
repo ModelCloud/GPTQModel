@@ -76,3 +76,41 @@ one epoch, and one Q/K update, all four stages completed and the held-out
 V/O and MLP hard losses were finite. The block quantization took 21.6 seconds
 after dataset preparation, and its disk capture was cleaned afterward. This
 checks the full sequence and batch shapes; it is not the 20-epoch quality run.
+
+## Training speed experiment
+
+The attempted full 20-epoch run was stopped after its first block had reached
+MLP step 436/1,280. That run produced no GSQ quality score. The temporary
+activation capture was used to benchmark the training loop, then removed.
+
+The speed experiment used 128 captured Llama 3.2 1B documents of 4,096 tokens,
+W3/group128, batch 64, microbatch 2, BF16 projections, SDPA, and one CUDA GPU.
+It compared the same two optimizer batches with the original eager relaxation
+and teacher evaluation against the fused CUDA relaxation and fixed-target cache.
+Both paths used the same stage geometry and loss weighting. The caches preserve
+the original microbatch boundaries. Measurements include disk reads and GPU
+synchronization at the end of each two-batch epoch, but exclude one-time cache
+construction, capture, GPTQ initialization, hard validation, packing, and
+generation.
+
+| Stage | Eager, 2 batches | Optimized, 2 batches | Speedup |
+| --- | ---: | ---: | ---: |
+| MLP, trial 1 | 18.34 s | 4.41 s | 4.16× |
+| MLP, trial 2 | 19.08 s | 4.49 s | 4.25× |
+| V/O attention, trial 1 | 3.54 s | 1.98 s | 1.79× |
+| V/O attention, trial 2 | 3.36 s | 1.91 s | 1.76× |
+
+Summing the separately measured MLP and V/O stage times gives approximately
+3.4–3.5× for those two stages. Their cache construction took 10.4 s and
+2.0 s respectively for 128 documents. A separate 2,048×2,048 Q/K projection
+microbenchmark with its quadratic loss and FP32 logits measured 33 ms eager
+versus 13 ms fused per warmed update, about 2.5×. These results do **not**
+establish a 4× end-to-end GSQ speedup or a quality gain.
+
+The optional CUDA runtime-compiled path supports W3/W4 with BF16 or FP32
+assignment logits and any positive contiguous group size. It uses the same
+scalar relaxation and gradient equations, but GPU reductions and transcendental
+functions have small rounding differences from PyTorch eager. The numerical
+tests compare weights and gradients with tolerances. Set
+`GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION=1` to use the eager implementation;
+CUDA configurations without the runtime compiler also fall back to eager.

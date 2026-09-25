@@ -5,6 +5,7 @@
 
 """Saved model coverage for the public staged scalar GSQ lifecycle."""
 
+import copy
 import pytest
 import torch
 import math
@@ -51,6 +52,102 @@ def test_staged_llama_uses_separate_gptq_train_and_validation_documents(tmp_path
     assert not (tmp_path / "capture" / "layer-00" / "train").exists()
     assert not (tmp_path / "capture" / "layer-00" / "gptq").exists()
     assert not (tmp_path / "capture" / "layer-00" / "validation").exists()
+    assert not list((tmp_path / "capture" / "layer-00").glob("gsq-*-*"))
+
+
+@pytest.mark.parametrize("mode", ["attention", "mlp"])
+def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.quantization.gsq_batching import CachedLlamaStageBatches
+    from gptqmodel.quantization.gsq_training import (
+        LlamaGSQAttentionStage,
+        cache_llama_stage_targets,
+        reconstruction_cached_llama_mlp_loss,
+        reconstruction_stage_loss,
+        reconstruction_stage_student_loss,
+    )
+
+    torch.manual_seed(17)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
+    config._attn_implementation = "sdpa"
+    model = LlamaForCausalLM(config).eval()
+    pristine = model.model.layers[0]
+    fitted = copy.deepcopy(pristine)
+    names = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj")
+    teacher_weights = {name + ".weight": pristine.get_submodule(name).weight.detach().clone()
+                       for name in names}
+    with torch.no_grad():
+        for name in names:
+            fitted.get_submodule(name).weight.add_(0.01)
+    hidden = torch.randn(2, 16, 64)
+    positions = torch.arange(16).expand(2, -1)
+    kwargs = dict(attention_mask=None, position_ids=positions,
+                  position_embeddings=model.model.rotary_emb(hidden, positions), use_cache=False)
+    original = [[((hidden, kwargs, None), hidden.numel())]]
+    if mode == "mlp":
+        short_kwargs = {**kwargs, "position_ids": positions[:1],
+                        "position_embeddings": tuple(value[:1] for value in kwargs["position_embeddings"])}
+        original[0].append(((hidden[:1], short_kwargs, None), hidden[:1].numel()))
+    stage = LlamaGSQAttentionStage(fitted) if mode == "attention" else fitted
+    selected = names[2:] if mode == "attention" else ("mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+
+    def weights():
+        return {name + ".weight": stage.get_submodule(name).weight.detach().clone().requires_grad_()
+                for name in selected}
+
+    old_weights = weights()
+    old_loss = reconstruction_stage_loss(stage, (hidden,), kwargs, student_weights=old_weights,
+                                         teacher_weights=teacher_weights)
+    old_loss.backward()
+    paths = cache_llama_stage_targets(stage, original, teacher_weights, mode=mode, directory=tmp_path)
+    cached = CachedLlamaStageBatches(original, paths, mode=mode, device="cpu")
+    if mode == "mlp":
+        assert cached[0][1][0][0].shape[0] == 1
+    new_weights = weights()
+    if mode == "attention":
+        inputs, cached_kwargs, mask, teacher = cached[0][0][0]
+        new_loss = reconstruction_stage_student_loss(stage, (inputs,), cached_kwargs,
+                                                      student_weights=new_weights, teacher=teacher,
+                                                      output_mask=mask)
+    else:
+        new_loss = reconstruction_cached_llama_mlp_loss(stage, cached[0][0][0], new_weights)
+    new_loss.backward()
+    torch.testing.assert_close(new_loss, old_loss, rtol=0, atol=0)
+    for name in old_weights:
+        torch.testing.assert_close(new_weights[name].grad, old_weights[name].grad, rtol=0, atol=0)
+
+
+def test_cached_mlp_prefetch_preserves_shuffled_optimizer_order(tmp_path):
+    from gptqmodel.quantization.gsq_batching import CachedLlamaStageBatches, iter_gsq_training_batches
+
+    source = [[((None, None, None), 8)] for _ in range(3)]
+    files = []
+    for index in range(3):
+        residual = torch.full((1, 2, 4), float(index))
+        teacher = residual+1
+        path = tmp_path / f"{index}.pt"
+        torch.save(torch.stack((residual, teacher)).unsqueeze(0), path)
+        files.append(path)
+    cached = CachedLlamaStageBatches(source, files, mode="mlp", device="cpu")
+    observed = [(index, microbatches[0][0][0][0, 0, 0].item(), microbatches[0][1])
+                for index, microbatches in iter_gsq_training_batches(cached, [2, 0, 1])]
+    assert observed == [(2, 2., 8), (0, 0., 8), (1, 1., 8)]
+
+
+def test_cached_mlp_accepts_short_final_microbatch(tmp_path):
+    from gptqmodel.quantization.gsq_batching import CachedLlamaStageBatches
+
+    source = [[((None, None, None), 16), ((None, None, None), 8)]]
+    complete = torch.zeros(2, 2, 2, 4)
+    short = torch.ones(2, 1, 2, 4)
+    path = tmp_path / "ragged.pt"
+    torch.save((complete, short), path)
+    cached = CachedLlamaStageBatches(source, [path], mode="mlp", device="cpu")
+    batches = cached[0]
+    assert [count for _, count in batches] == [16, 8]
+    assert [batch[0].shape[0] for batch, _ in batches] == [2, 1]
 
 
 @pytest.mark.parametrize("method,bits,initializer", [
