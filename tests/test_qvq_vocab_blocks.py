@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""Check that vocabulary partitioning preserves logits and Fisher blocks."""
+
+from __future__ import annotations
+
+import copy
+
+import torch
+from torch import nn
+
+from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
+from optimize.qvq_vocab_blocks import VocabBlockLinear, factored_head_fisher_loss
+
+
+class _TinyCausal(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Embedding(64, 16)
+        self.decoder = nn.Linear(16, 16, bias=False)
+        self.lm_head = nn.Linear(16, 48, bias=False)
+
+    def forward(self, input_ids, attention_mask, use_cache=False):
+        del attention_mask, use_cache
+        from types import SimpleNamespace
+
+        return SimpleNamespace(logits=self.lm_head(self.decoder(self.embed(input_ids))))
+
+
+def test_vocab_blocks_preserve_full_distribution_and_principal_fisher_blocks():
+    torch.manual_seed(778)
+    control = _TinyCausal().eval()
+    partitioned = copy.deepcopy(control)
+    partitioned.lm_head = VocabBlockLinear(partitioned.lm_head, block_rows=16)
+    batches = [{"input_ids": torch.tensor([[1, 3, 5], [2, 4, 6]]),
+                "attention_mask": torch.ones(2, 3, dtype=torch.long)}]
+    with torch.no_grad():
+        baseline_logits = control(**batches[0]).logits
+        block_logits = partitioned(**batches[0]).logits
+    torch.testing.assert_close(block_logits, baseline_logits, atol=0, rtol=0)
+
+    full_input, full_output, _ = capture_yaqa_sketch_b(
+        control, batches, {"lm_head": control.lm_head}, device=torch.device("cpu"),
+        seed=778, minimum_sequences=2, first_decoder_layer=control.lm_head,
+    )
+    block_input, block_output, _ = capture_yaqa_sketch_b(
+        partitioned, batches, partitioned.lm_head.yaqa_targets(), device=torch.device("cpu"),
+        seed=778, minimum_sequences=2, first_decoder_layer=partitioned.lm_head,
+    )
+    # YAQA normalizes an input Gram by its module's output width. Recover
+    # the full-head normalization when combining independently captured blocks.
+    combined_input = sum(
+        block_input[name] * (module.out_features / control.lm_head.out_features)
+        for name, module in partitioned.lm_head.yaqa_targets().items()
+    )
+    torch.testing.assert_close(combined_input, full_input["lm_head"], atol=2e-6, rtol=2e-6)
+    for index in range(3):
+        name = f"lm_head.blocks.{index}"
+        expected = full_output["lm_head"][index * 16:(index + 1) * 16,
+                                           index * 16:(index + 1) * 16]
+        torch.testing.assert_close(block_output[name], expected, atol=2e-6, rtol=2e-6)
+
+
+def test_factored_head_fisher_oracle_retains_cross_block_terms():
+    torch.manual_seed(471)
+    error = torch.randn(5, 12, dtype=torch.float64)
+    source = torch.randn(12, 3, dtype=torch.float64)
+    input_source = torch.randn(5, 5, dtype=torch.float64)
+    hessian = input_source @ input_source.T
+    dense_output = source @ source.T
+    expected = torch.einsum("in,ij,jm,nm->", error, hessian, error, dense_output)
+    blocks = [error[:, :7], error[:, 7:]]
+    factor_blocks = [source[:7], source[7:]]
+    actual64 = factored_head_fisher_loss(blocks, factor_blocks, hessian, dtype=torch.float64)
+    actual32 = factored_head_fisher_loss(blocks, factor_blocks, hessian, dtype=torch.float32)
+    torch.testing.assert_close(actual64, expected, atol=1e-10, rtol=1e-10)
+    torch.testing.assert_close(actual32.double(), expected, atol=1e-4, rtol=1e-5)
