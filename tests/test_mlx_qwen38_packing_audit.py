@@ -65,8 +65,9 @@ def test_qwen38_27b_repack_and_inference(source_format, name, out_features, in_f
     np.testing.assert_array_equal(biases, expected_biases)
 
     x = rng.normal(0, 0.01, (1, in_features)).astype(np.float32)
+    mlx_x = mx.array(x).astype(mx.bfloat16)
     actual = mx.quantized_matmul(
-        mx.array(x), mx.array(packed), mx.array(mlx_scales), mx.array(biases),
+        mlx_x, mx.array(packed), mx.array(mlx_scales), mx.array(biases),
         group_size=group_size, bits=4,
     )
     mx.eval(actual)
@@ -74,7 +75,7 @@ def test_qwen38_27b_repack_and_inference(source_format, name, out_features, in_f
         torch.from_numpy(codes.astype(np.float32))
         - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(group_size, dim=0)
     ) * torch.from_numpy(scales.astype(np.float32)).repeat_interleave(group_size, dim=0)
-    expected = torch.from_numpy(x) @ oracle_weight
+    expected = torch.from_numpy(np.asarray(mlx_x.astype(mx.float32))) @ oracle_weight
     np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
 
 
@@ -100,11 +101,12 @@ def test_qwen38_27b_group16_inference(name, out_features, in_features):
     layer.biases_even = mx.array(group_biases[..., 0])
     layer.biases_odd = mx.array(group_biases[..., 1])
     x = rng.normal(0, 0.01, (1, in_features)).astype(np.float32)
-    actual = layer(mx.array(x))
+    mlx_x = mx.array(x).astype(mx.bfloat16)
+    actual = layer(mlx_x)
     mx.eval(actual)
     oracle_weight = (
         torch.from_numpy(codes.astype(np.float32))
         - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(16, dim=0)
     ) * torch.from_numpy(scales).repeat_interleave(16, dim=0)
-    expected = torch.from_numpy(x) @ oracle_weight
+    expected = torch.from_numpy(np.asarray(mlx_x.astype(mx.float32))) @ oracle_weight
     np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
