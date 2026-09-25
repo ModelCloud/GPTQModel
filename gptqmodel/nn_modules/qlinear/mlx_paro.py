@@ -78,7 +78,7 @@ class MlxParoLinear(nn.Module):
         self.identity = bool(np.all(theta == 0) and np.all(channel_scales == 1))
         self.freeze()
 
-    def __call__(self, x):
+    def _forward_unrounded(self, x):
         if not self.identity:
             if x.dtype == mx.float16 and x.size:
                 for stage, (partner, cosine, sine) in enumerate(zip(self.partner, self.cosine, self.sine)):
@@ -89,3 +89,8 @@ class MlxParoLinear(nn.Module):
                     old = x
                     x = old * cosine + mx.take(old, partner, axis=-1) * sine
         return self.linear(x)
+
+    def __call__(self, x):
+        # Rotation and the affine matmul use FP32 intermediates, but a
+        # quantized projection keeps the model's activation dtype.
+        return self._forward_unrounded(x).astype(x.dtype)
