@@ -53,7 +53,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.qvq import QVQLinear
-from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig
+from ..quantization.config import FORMAT, METHOD, GPTQConfig, HessianConfig, QVQConfig, QuantizeEmbed, QuantizeEmbedConfig
 from ..quantization.gptq import GPTQ
 from ..quantization.qvq import (
     QVQQuantizationTelemetry,
@@ -170,6 +170,7 @@ class QVQProcessor(LoopProcessor):
         execution_config: Optional[ExecutionConfig] = None,
         grouped_p32_candidates: object = None,
         transform_axis_overrides: object = None,
+        embed_quant_config: QuantizeEmbedConfig | None = None,
     ):
         """Initialize QVQ lifecycle state and validate currently supported capture modes."""
 
@@ -194,6 +195,10 @@ class QVQProcessor(LoopProcessor):
         # The ordinary calibration dataset remains the source for activation
         # Hessians and module replay.
         self.yaqa_calibration = self.calibration_dataset if yaqa_calibration is None else yaqa_calibration
+        self._yaqa_endpoint_only = bool(embed_quant_config is not None and embed_quant_config.embed_only)
+        self._yaqa_endpoint_mode = (
+            embed_quant_config.embed_quant_mode if self._yaqa_endpoint_only else None
+        )
         self._module_replay_search_calibration = module_replay_search_calibration
         self._module_replay_confirmation_calibration = module_replay_confirmation_calibration
         self._module_replay_model: Optional[BaseQModel] = None
@@ -1440,6 +1445,20 @@ class QVQProcessor(LoopProcessor):
     ) -> tuple[dict[str, torch.nn.Linear], list[Module]]:
         """Resolve exact lifecycle targets from the model's declared module tree."""
 
+        if self._yaqa_endpoint_only:
+            if self._yaqa_endpoint_mode != QuantizeEmbed.OUTPUT:
+                raise NotImplementedError(
+                    "QVQ YAQA endpoint requantization currently supports output lm_head only; "
+                    "input embedding Fisher and tied input/output packing need separate operators."
+                )
+            name = gptq_model.get_output_embeddings_name() or gptq_model.lm_head
+            module = gptq_model.get_output_embeddings()
+            if not isinstance(module, torch.nn.Linear):
+                raise NotImplementedError("QVQ YAQA output endpoint requires a dense nn.Linear lm_head.")
+            if gptq_model.get_input_embeddings().weight is module.weight:
+                raise ValueError("QVQ YAQA lm_head must be untied before endpoint requantization.")
+            return {name: module}, [module]
+
         layers, layer_names = get_layers_with_prefixes(gptq_model.model, gptq_model.extract_layers_node())
         if not layers:
             raise ValueError("QVQ YAQA requires at least one decoder layer.")
@@ -1531,6 +1550,18 @@ class QVQProcessor(LoopProcessor):
         source_device = next(iter(source_devices))
         target_device = normalize_device_like(self.qcfg.device) or source_device
         targets, decoder_layers = self._yaqa_target_modules(gptq_model)
+        if self._yaqa_endpoint_only:
+            head = next(iter(targets.values()))
+            # Both the exact collector and the current VAQA/GSQ solver materialize
+            # the output Gram. A projected collector only delays that allocation.
+            # Reject huge heads before a 128k-vocabulary matrix consumes >60 GiB.
+            output_gram_bytes = head.out_features * head.out_features * 4
+            if output_gram_bytes > 1024**3:
+                raise NotImplementedError(
+                    "QVQ YAQA endpoint output Fisher needs a bounded/blockwise solver: "
+                    f"lm_head output Gram alone requires {output_gram_bytes / 1024**3:.2f} GiB. "
+                    "The current dense Fisher/GSQ path cannot safely requantize this vocabulary."
+                )
         total_factor_bytes = sum(self._yaqa_factor_bytes(module) for module in targets.values())
         max_factor_bytes = self.qcfg.yaqa.max_factor_bytes_per_pass
         if max_factor_bytes is None:
@@ -1666,7 +1697,9 @@ class QVQProcessor(LoopProcessor):
                 "QVQ YAQA requires a directly loaded dense source model; reload with `offload_to_disk=False` "
                 "because an exact full-model backward cannot traverse a LazyTurtle meta shell."
             )
-        if any(isinstance(module, BaseQuantLinear) for module in gptq_model.model.modules()):
+        if not self._yaqa_endpoint_only and any(
+            isinstance(module, BaseQuantLinear) for module in gptq_model.model.modules()
+        ):
             raise NotImplementedError(
                 "QVQ YAQA requires an entirely dense source model for the exact full-model backward; "
                 "incremental YAQA requantization after installing quantized layers is not supported."
@@ -1851,6 +1884,12 @@ class QVQProcessor(LoopProcessor):
         """Build a masked input-Hessian capture task and effective QVQ config."""
 
         del fallback, kwargs
+        if (self._yaqa_endpoint_only and self.qcfg.rounding == "yaqa"
+                and module.full_name not in self._yaqa_input_hessians):
+            # The embedding-only layer loop still visits decoder layers to
+            # replay their outputs. They have no endpoint Fisher factor and
+            # must never be scheduled for requantization.
+            return
         module_qcfg = clone_qvq_config_for_module(self.qcfg, module.full_name)
         if module_qcfg is None:
             return
