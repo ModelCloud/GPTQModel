@@ -323,7 +323,9 @@ def _run_executor_single(executor, processor, *, apply_moe_config):
 
 
 def _run_executor_parallel(executor, processor, *, apply_moe_config):
-    def clone_module_for_devices_fn(module, devices, progress_callback=None):
+    def clone_module_for_devices_fn(
+        module, devices, progress_callback=None, root_module=None
+    ):
         del progress_callback
         return dict.fromkeys(devices, module)
 

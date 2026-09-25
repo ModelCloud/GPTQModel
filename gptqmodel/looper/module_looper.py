@@ -1041,7 +1041,13 @@ class ModuleLooper(DeviceAssignmentState):
                 target_device=target,
             )
             move_to(module_ref, device=target)
-            rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_ref,
+                target,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", target)
             setattr(module_ref, "target_device", target)
@@ -1076,7 +1082,13 @@ class ModuleLooper(DeviceAssignmentState):
                 target_device=revert_device,
             )
             move_to(module_ref, device=revert_device)
-            rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_ref,
+                revert_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", revert_device)
             setattr(module_ref, "target_device", revert_device)
@@ -1109,13 +1121,25 @@ class ModuleLooper(DeviceAssignmentState):
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
             move_to(module_attr, device=target_device)
-            rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_attr,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
             move_to(layer_attr, device=target_device)
-            rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                layer_attr,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             setattr(layer_attr, "target_device", target_device)
 
         quantizer = getattr(task, "quantizer", None)
@@ -1192,7 +1216,13 @@ class ModuleLooper(DeviceAssignmentState):
                 named_module.module = prepared
         else:
             move_to(named_module.module, device=target_device)
-        rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
+        rehome_module_to_device(
+            named_module.module,
+            target_device,
+            move_parameters=True,
+            move_buffers=True,
+            root_module=getattr(self.gptq_model, "model", None),
+        )
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)

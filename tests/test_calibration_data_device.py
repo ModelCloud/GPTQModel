@@ -790,7 +790,9 @@ def test_balanced_mode_assigns_batches_to_input_devices(monkeypatch):
     # Track which device each batch was executed on
     batch_to_device = {}
 
-    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+    def fake_clone_module_for_devices(
+        _module, target_devices, progress_callback=None, root_module=None
+    ):
         return {device: object() for device in target_devices}
 
     class DummyProcessor:
@@ -901,7 +903,9 @@ def test_balanced_mode_fallback_when_input_device_not_in_forward_devices(monkeyp
 
     batch_to_device = {}
 
-    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+    def fake_clone_module_for_devices(
+        _module, target_devices, progress_callback=None, root_module=None
+    ):
         return {device: object() for device in target_devices}
 
     class DummyProcessor:
@@ -1072,7 +1076,9 @@ def test_output_moved_to_input_device_in_parallel_mode(monkeypatch):
 
     looper = ModuleLooper(model=gptq_model, processors=[])
 
-    def fake_clone_module_for_devices(_module, target_devices, progress_callback=None):
+    def fake_clone_module_for_devices(
+        _module, target_devices, progress_callback=None, root_module=None
+    ):
         return {device: object() for device in target_devices}
 
     class DummyProcessor:
