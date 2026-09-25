@@ -87,6 +87,7 @@ def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot
     inputs = rng.normal(0, 0.2, (2, 3, input_dims)).astype(np.float16)
     actual = model(mx.array(inputs))
     mx.eval(actual)
+    assert actual.dtype == mx.float16
     rotated = torch.from_numpy(inputs).double()
     rotated = rotated * torch.from_numpy(channel_scales).double()
     for stage in range(krot):
@@ -122,9 +123,33 @@ def test_invalid_paro_matching_is_rejected():
     assert not ParoMlxQuantLinear.source_compatible(layer)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_rotated_paro_preserves_activation_dtype(dtype):
+    from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
+
+    linear = nn.QuantizedLinear(128, 64, bias=False, group_size=128, bits=4)
+    linear.load_weights([
+        ("weight", mx.zeros((64, 16), dtype=mx.uint32)),
+        ("scales", mx.full((64, 1), 0.01, dtype=mx.float16)),
+        ("biases", mx.full((64, 1), -0.08, dtype=mx.float32)),
+    ])
+    layer = MlxParoLinear(
+        linear, np.arange(128, dtype=np.int16).reshape(1, -1),
+        np.full((1, 64), 0.01, dtype=np.float16),
+        np.full((1, 128), 1.01, dtype=np.float16), 128,
+    )
+    x = mx.ones((2, 128), dtype=dtype)
+    actual, internal = layer(x), layer._forward_unrounded(x)
+    mx.eval(actual, internal)
+    assert internal.dtype == mx.float32
+    assert actual.dtype == dtype
+    assert np.isfinite(np.asarray(actual.astype(mx.float32))).all()
+
+
 @pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
 @pytest.mark.parametrize("krot", [1, 8])
-def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims, krot):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims, krot, dtype):
     from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
 
     rng = np.random.default_rng(380027)
@@ -154,8 +179,12 @@ def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims,
     layer = MlxParoLinear(linear, pairs, angles, channel_scales, group_size)
     torch.manual_seed(380027)
     x = (torch.randn(3, input_dims) * 0.05).half()
-    actual = layer(mx.array(x.numpy()))
-    mx.eval(actual)
+    x = x.to(torch.bfloat16) if dtype == mx.bfloat16 else x
+    mlx_x = mx.array(x.float().numpy()).astype(dtype)
+    actual = layer(mlx_x)
+    internal = layer._forward_unrounded(mlx_x)
+    mx.eval(actual, internal)
+    assert actual.dtype == dtype
 
     # Separate Torch oracle: pairwise rotations in float64, followed by a
     # 16-phase dense matmul whose rows are tiled across the projection output.
@@ -174,9 +203,9 @@ def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims,
     pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).double() - 8
     expected_phases = rotated @ (pattern * float(scale)).T
     expected = expected_phases[:, np.arange(output_dims) % 16]
-    np.testing.assert_allclose(np.asarray(actual), expected.numpy(),
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected.numpy(),
                                rtol=0.002, atol=0.002, err_msg=f"{name}, krot={krot}")
-    max_abs_error = np.max(np.abs(np.asarray(actual).astype(np.float64) - expected.numpy()))
+    max_abs_error = np.max(np.abs(np.asarray(internal).astype(np.float64) - expected.numpy()))
     assert max_abs_error < 2e-4, f"{name}, krot={krot}: max_abs_error={max_abs_error}"
     del layer, linear, packed, codes, actual
     mx.clear_cache()
