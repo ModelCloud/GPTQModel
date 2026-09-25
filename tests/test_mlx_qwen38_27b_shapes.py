@@ -177,3 +177,94 @@ def test_qwen38_k_projection_merged_gptq_all_bit_rates(bits):
     expected = (x.float().sum(dim=-1, keepdim=True) * float(np.float16(0.01)))
     expected = expected.expand(-1, output_dims).half().numpy()
     np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002)
+
+
+@pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
+def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_dims):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+
+    phase = np.arange(output_dims, dtype=np.uint8)[:, None] % 16
+    index = np.arange(input_dims, dtype=np.uint8)[None, :] % 16
+    codes = ((index + phase) % 16 + 120).astype(np.uint8)
+    packed = np.ascontiguousarray(codes).view(np.uint32).reshape(output_dims, input_dims // 4)
+    native = nn.QuantizedLinear(input_dims, output_dims, bias=False,
+                                group_size=128, bits=8)
+    native.load_weights([
+        ("weight", mx.array(packed)),
+        ("scales", mx.ones((output_dims, input_dims // 128), dtype=mx.float32)),
+        ("biases", mx.full((output_dims, input_dims // 128), -128, dtype=mx.float32)),
+    ])
+    layer = MlxQQQLinear(native, np.full((1, output_dims), 0.001, dtype=np.float32))
+    np.testing.assert_array_equal(np.asarray(layer.linear.weight).view(np.uint8).reshape(codes.shape), codes)
+    torch.manual_seed(380027)
+    x = (torch.randn(3, input_dims) * 0.05).half()
+    actual = layer(mx.array(x.numpy()))
+    mx.eval(actual)
+    input_scale = (x.abs().amax(dim=-1, keepdim=True) / 127).float()
+    quantized = (x / input_scale).round().clamp(-128, 127).float()
+    pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).float() - 8
+    expected_by_phase = ((quantized @ pattern.T) * input_scale * 0.001).half().numpy()
+    expected = expected_by_phase[:, np.arange(output_dims) % 16]
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002, err_msg=name)
+
+
+@pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
+def test_qwen38_projection_gguf_q4_0_packed_inference(name, output_dims, input_dims):
+    from gptqmodel.utils.mlx_gguf_packing import repack_gguf_affine
+
+    block = np.zeros((1, 1, 18), dtype=np.uint8)
+    block[..., :2] = np.array([0.01], dtype=np.float16).view(np.uint8)
+    block[..., 2:] = 0x98
+    source = np.tile(block, (output_dims, input_dims // 32, 1)).reshape(output_dims, -1)
+    packed, scales, biases, params = repack_gguf_affine(source, "Q4_0", input_dims)
+    np.testing.assert_array_equal(
+        packed.reshape(output_dims, -1, 4),
+        np.broadcast_to(np.array([0x88888888, 0x88888888, 0x99999999, 0x99999999],
+                                 dtype=np.uint32), (output_dims, input_dims // 32, 4)),
+    )
+    layer = nn.QuantizedLinear(input_dims, output_dims, bias=False, **params)
+    layer.load_weights([
+        ("weight", mx.array(packed)), ("scales", mx.array(scales)),
+        ("biases", mx.array(biases)),
+    ])
+    torch.manual_seed(380027)
+    x = (torch.randn(3, input_dims) * 0.05).half()
+    actual = layer(mx.array(x.numpy()))
+    mx.eval(actual)
+    expected_column = x.float().reshape(3, input_dims // 32, 32)[:, :, 16:].sum(dim=(1, 2))
+    expected = (expected_column * float(np.float16(0.01)))[:, None].expand(-1, output_dims).half().numpy()
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002, err_msg=name)
+
+
+@pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
+def test_qwen38_projection_awq_gemv_fast_llm_layout(name, output_dims, input_dims):
+    """GEMV_FAST and LLM_AWQ share this four-output-row packed layout."""
+    from gptqmodel.utils.mlx_packing import repack_awq_gemv_fast
+
+    source = np.full((output_dims // 4, input_dims), 0x3210, dtype=np.int16)
+    group_count = input_dims // 128
+    scales = np.full((group_count, output_dims), np.float16(0.01))
+    scaled_zeros = -scales
+    packed, mlx_scales, biases = repack_awq_gemv_fast(
+        source, scaled_zeros, scales, input_dims, output_dims, 128,
+    )
+    input_codes = np.arange(input_dims, dtype=np.uint32) // 8 % 4
+    np.testing.assert_array_equal(
+        packed,
+        np.broadcast_to((np.arange(input_dims // 8, dtype=np.uint32) % 4
+                         * np.uint32(0x11111111))[None, :], packed.shape),
+    )
+    layer = nn.QuantizedLinear(input_dims, output_dims, bias=False,
+                               group_size=128, bits=4)
+    layer.load_weights([
+        ("weight", mx.array(packed)), ("scales", mx.array(mlx_scales)),
+        ("biases", mx.array(biases)),
+    ])
+    torch.manual_seed(380027)
+    x = (torch.randn(3, input_dims) * 0.05).half()
+    actual = layer(mx.array(x.numpy()))
+    mx.eval(actual)
+    expected_column = x.float() @ torch.from_numpy(input_codes.astype(np.float32) - 1)
+    expected = (expected_column[:, None] * float(np.float16(0.01)))
+    expected = expected.expand(-1, output_dims).half().numpy()
+    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002, err_msg=name)
