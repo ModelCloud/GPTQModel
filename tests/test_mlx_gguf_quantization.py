@@ -250,6 +250,136 @@ def _torch_gguf_tq2_0_oracle(weight):
     return packed.reshape(rows, columns // 256 * 66)
 
 
+def _torch_gguf_mxfp4_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 32)
+    maxima = blocks.abs().amax(dim=1)
+    exponents = torch.where(
+        maxima > 0, torch.floor(torch.log2(maxima)) + 125, 0
+    ).to(torch.int32).to(torch.uint8).to(torch.int32)
+    scale_bits = torch.where(
+        exponents < 2, 0x00200000 << exponents, (exponents - 1) << 23
+    ).to(torch.int32)
+    scales = scale_bits.view(torch.float32)
+    fp4 = torch.tensor(
+        [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12],
+        dtype=torch.float32,
+    )
+    codes = (scales[:, None, None] * fp4 - blocks[:, :, None]).abs().argmin(
+        dim=-1
+    ).to(torch.uint8)
+    payload = codes[:, :16] | (codes[:, 16:] << 4)
+    packed = torch.cat((exponents.to(torch.uint8)[:, None], payload), dim=1)
+    return packed.numpy().reshape(rows, columns // 32 * 17)
+
+
+@pytest.mark.parametrize("rows,width", [(9, 32), (13, 256), (129, 512)])
+def test_gguf_mxfp4_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(118).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :32] = -0.0
+    weight[2, :32] = np.linspace(-8, 8, 32, dtype=np.float32)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_mxfp4_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(119).standard_normal((4, 256))).astype(
+        dtype
+    )
+    expected = _torch_gguf_mxfp4_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "MXFP4")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_mxfp4_packing_at_code_midpoints_and_saturation():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for sign in (-1, 1):
+        for low, high in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 6), (6, 8)]:
+            midpoint = np.float32(sign * (low + high))
+            for direction in (-np.inf, None, np.inf):
+                value = (
+                    midpoint if direction is None
+                    else np.nextafter(midpoint, np.float32(direction))
+                )
+                row = np.full(32, value, dtype=np.float32)
+                row[0] = 15.0  # Select an e8m0 scale of two for the block.
+                rows.append(row)
+    for value in (0.0, -0.0, 15.0, -15.0):
+        rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "MXFP4"))
+
+
+def test_gguf_mxfp4_packing_at_e8m0_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for power in range(-126, 128):
+        bits = np.float32(2.0**power).view(np.uint32)
+        for steps in (0, 1, 2, 5, 11, 22, 44, 45, 64):
+            value = np.array([bits - steps], dtype=np.uint32).view(np.float32)[0]
+            rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = _fallback_gguf_quantize(weight, "MXFP4")
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_mxfp4_packing_at_subnormal_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for power in range(-149, -125):
+        bits = np.float32(2.0**power).view(np.uint32)
+        for steps in (0, 1, 2, 5, 11, 22, 44, 45, 64):
+            if bits > steps:
+                value = np.array([bits - steps], dtype=np.uint32).view(np.float32)[0]
+                rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = _fallback_gguf_quantize(weight, "MXFP4")
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_mxfp4_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(120).standard_normal((4, 256)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "MXFP4"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "MXFP4")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_mxfp4_packing_accepts_transposed_weights():
+    weight = np.random.default_rng(123).standard_normal((64, 5)).astype(np.float32)
+    transposed = mx.array(weight).T
+    actual = native.gguf_quantize_weight_mlx(transposed, "MXFP4")
+    expected = _torch_gguf_mxfp4_oracle(weight.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_mxfp4_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 32"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 31)), "MXFP4")
+
+
 @pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
 def test_gguf_tq2_0_packing_matches_torch_oracle(rows, width):
     weight = np.random.default_rng(115).standard_normal((rows, width)).astype(
@@ -1035,7 +1165,7 @@ def test_gguf_q4_0_packing_preserves_zero_scale_sign():
 
 def test_gguf_q4_0_packing_validates_format_and_shape():
     with pytest.raises(ValueError, match="supports Q1_0.*Q4_0.*Q8_0"):
-        native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "MXFP4")
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "IQ4_XS")
     with pytest.raises(ValueError, match="divisible by 32"):
         native.gguf_quantize_weight_mlx(mx.zeros((2, 33)), "Q4_0")
     with pytest.raises(ValueError, match="nonzero input width"):

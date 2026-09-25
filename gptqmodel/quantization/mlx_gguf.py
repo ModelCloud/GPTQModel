@@ -461,6 +461,93 @@ def _gguf_tq2_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_mxfp4_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_mxfp4_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            uint maximum_bits = 0;
+            for (uint k = 0; k < 32; ++k) {
+                maximum_bits = metal::max(maximum_bits,
+                    as_type<uint>(weights[block * 32 + k]) & 0x7fffffffu);
+            }
+            int power = int(maximum_bits >> 23) - 127;
+            if (maximum_bits == 0) {
+                power = -125;
+            } else if (maximum_bits < 0x00800000u) {
+                uint leading = 31u - metal::clz(maximum_bits);
+                power = int(leading) - 149;
+                int next_power = power + 1;
+                uint cutoff = next_power == -126 ? 22
+                    : (next_power >= -128 ? 11
+                    : (next_power == -129 ? 5
+                    : (next_power == -130 ? 2
+                    : (next_power == -131 ? 1 : 0))));
+                uint next_bits = 1u << (leading + 1u);
+                if (maximum_bits >= next_bits - cutoff) power = next_power;
+            } else {
+                // NumPy rounds log2 to float32 before floor. Near powers of
+                // two that rounds to the next integer; these ULP cutoffs
+                // reproduce its rounding for normal float32 weights.
+                int next_power = power + 1;
+                uint cutoff = 0;
+                if (next_power <= -64) cutoff = 44;
+                else if (next_power <= -32) cutoff = 22;
+                else if (next_power <= -16) cutoff = 11;
+                else if (next_power <= -8) cutoff = 5;
+                else if (next_power <= -4) cutoff = 2;
+                else if (next_power <= -2) cutoff = 1;
+                else if (next_power >= 65) cutoff = 44;
+                else if (next_power >= 33) cutoff = 22;
+                else if (next_power >= 17) cutoff = 11;
+                else if (next_power >= 9) cutoff = 5;
+                else if (next_power >= 5) cutoff = 2;
+                else if (next_power >= 3) cutoff = 1;
+                if (maximum_bits >= ((maximum_bits & 0x7f800000u)
+                    + 0x00800000u - cutoff)) power = next_power;
+            }
+            uint exponent = uint(power + 125) & 255u;
+            uint scale_bits = exponent < 2
+                ? (0x00200000u << exponent) : ((exponent - 1) << 23);
+            float scale = as_type<float>(scale_bits);
+            // Metal flushes subnormal arithmetic. For e8m0 scales 0 and 1,
+            // move both operands into the normal range before comparison.
+            float multiplier = exponent < 2 ? 0x1p126f : 1.0f;
+            float comparison_scale = exponent < 2
+                ? (exponent == 0 ? 0.25f : 0.5f) : scale;
+            float fp4[16] = {
+                0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f,
+                0.0f, -1.0f, -2.0f, -3.0f, -4.0f, -6.0f, -8.0f, -12.0f
+            };
+            uchar codes[32];
+            for (uint k = 0; k < 32; ++k) {
+                float weight = weights[block * 32 + k] * multiplier;
+                uint best = 0;
+                float best_error = metal::abs(weight);
+                for (uint candidate = 1; candidate < 16; ++candidate) {
+                    float error = metal::abs(
+                        comparison_scale * fp4[candidate] - weight);
+                    if (error < best_error) {
+                        best_error = error;
+                        best = candidate;
+                    }
+                }
+                codes[k] = uchar(best);
+            }
+            uint offset = block * 17;
+            packed[offset] = uchar(exponent);
+            for (uint k = 0; k < 16; ++k) {
+                packed[offset + 1 + k] = uchar(codes[k] | (codes[k + 16] << 4));
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q8_0_kernel():
     import mlx.core as mx
 
@@ -498,11 +585,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     normalized = qtype.upper()
     if normalized not in (
         "Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q4_K", "Q4_K_S", "Q4_K_M",
-        "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "TQ1_0", "TQ2_0", "Q8_0",
+        "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "TQ1_0", "TQ2_0",
+        "MXFP4", "Q8_0",
     ):
         raise ValueError(
             "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, "
-            "Q4_K, Q5_K, Q6_K, TQ1_0, TQ2_0, and Q8_0"
+            "Q4_K, Q5_K, Q6_K, TQ1_0, TQ2_0, MXFP4, and Q8_0"
         )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
@@ -538,6 +626,8 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_tq1_0_kernel(), 54
     elif normalized == "TQ2_0":
         kernel, bytes_per_block = _gguf_tq2_0_kernel(), 66
+    elif normalized == "MXFP4":
+        kernel, bytes_per_block = _gguf_mxfp4_kernel(), 17
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
