@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # Layout reference: MLX (Apple Inc., MIT), mlx/nn/layers/quantized.py.
-# Format references: ParoQuant (z-lab), QQQ (vLLM), GGUF (ggml-org),
+# Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
 """Validated GPT-QModel checkpoint holders for MLX native linear inference."""
@@ -422,7 +422,10 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
 
     @classmethod
     def mlx_params(cls, module):
-        return {"group_size": 64 if module.in_features == 64 else 128, "bits": 8, "mode": "affine"}
+        # Whole-row QQQ codes are signed nibbles scaled by 16. Grouped QQQ
+        # rounds each group's scaled nibbles to INT8 and needs the 8-bit path.
+        bits = 4 if module.group_size == module.in_features else 8
+        return {"group_size": 64 if module.in_features == 64 else 128, "bits": bits, "mode": "affine"}
 
     @classmethod
     def pack_source(cls, module):
@@ -430,6 +433,20 @@ class QQQMlxQuantLinear(_MlxLinearContract, QQQTorchLinear):
 
         if not cls.source_compatible(module):
             raise ValueError("QQQ layer cannot be transferred to MLX")
+        if module.group_size == module.in_features:
+            # XOR the sign bit so MLX's unsigned affine codes decode to
+            # QQQ's signed two's-complement nibbles without rounding.
+            codes = module._unpack_weight_codes().to("cpu", torch.uint8).numpy().T
+            codes = np.ascontiguousarray(codes ^ np.uint8(8))
+            lanes = codes.reshape(module.out_features, module.in_features // 8, 8)
+            packed = np.zeros((module.out_features, module.in_features // 8), dtype=np.uint32)
+            for lane in range(8):
+                packed |= lanes[:, :, lane].astype(np.uint32) << (4 * lane)
+            group_size = cls.mlx_params(module)["group_size"]
+            shape = (module.out_features, module.in_features // group_size)
+            scales = np.full(shape, 16, dtype=np.float32)
+            biases = np.full(shape, -128, dtype=np.float32)
+            return packed, scales, biases, cls.mlx_params(module)
         weight, _ = module._dequantize_weight_for_torch()
         weight = weight.detach().to("cpu", torch.int16).numpy().T
         if np.any((weight < -128) | (weight > 127)):

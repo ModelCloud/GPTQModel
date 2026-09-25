@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
+# QQQ reference: vLLM contributors, Apache-2.0, https://github.com/vllm-project/vllm
 # MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
-"""Full Qwen3.8-27B projection shape accuracy for packed AWQ GEMV on MLX."""
+"""Full Qwen3.8-27B projection accuracy for packed MLX inference."""
 
 import gc
 
@@ -180,22 +181,33 @@ def test_qwen38_k_projection_merged_gptq_all_bit_rates(bits):
 
 
 @pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
-def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_dims):
+@pytest.mark.parametrize("bits", [4, 8])
+def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_dims, bits):
     from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
 
     phase = np.arange(output_dims, dtype=np.uint8)[:, None] % 16
     index = np.arange(input_dims, dtype=np.uint8)[None, :] % 16
-    codes = ((index + phase) % 16 + 120).astype(np.uint8)
-    packed = np.ascontiguousarray(codes).view(np.uint32).reshape(output_dims, input_dims // 4)
+    codes = ((index + phase) % 16).astype(np.uint8)
+    if bits == 4:
+        packed = np.zeros((output_dims, input_dims // 8), dtype=np.uint32)
+        lanes = codes.reshape(output_dims, input_dims // 8, 8)
+        for lane in range(8):
+            packed |= lanes[:, :, lane].astype(np.uint32) << (4 * lane)
+    else:
+        codes += 120
+        packed = np.ascontiguousarray(codes).view(np.uint32).reshape(output_dims, input_dims // 4)
     native = nn.QuantizedLinear(input_dims, output_dims, bias=False,
-                                group_size=128, bits=8)
+                                group_size=128, bits=bits)
     native.load_weights([
         ("weight", mx.array(packed)),
-        ("scales", mx.ones((output_dims, input_dims // 128), dtype=mx.float32)),
+        ("scales", mx.full((output_dims, input_dims // 128), 16 if bits == 4 else 1, dtype=mx.float32)),
         ("biases", mx.full((output_dims, input_dims // 128), -128, dtype=mx.float32)),
     ])
     layer = MlxQQQLinear(native, np.full((1, output_dims), 0.001, dtype=np.float32))
-    np.testing.assert_array_equal(np.asarray(layer.linear.weight).view(np.uint8).reshape(codes.shape), codes)
+    if bits == 8:
+        np.testing.assert_array_equal(np.asarray(layer.linear.weight).view(np.uint8).reshape(codes.shape), codes)
+    else:
+        np.testing.assert_array_equal(np.asarray(layer.linear.weight), packed)
     torch.manual_seed(380027)
     x = (torch.randn(3, input_dims) * 0.05).half()
     actual = layer(mx.array(x.numpy()))
@@ -203,7 +215,8 @@ def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_d
     input_scale = (x.abs().amax(dim=-1, keepdim=True) / 127).float()
     quantized = (x / input_scale).round().clamp(-128, 127).float()
     pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).float() - 8
-    expected_by_phase = ((quantized @ pattern.T) * input_scale * 0.001).half().numpy()
+    expected_by_phase = ((quantized @ pattern.T) * (16 if bits == 4 else 1)
+                         * input_scale * 0.001).half().numpy()
     expected = expected_by_phase[:, np.arange(output_dims) % 16]
     np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002, err_msg=name)
 
