@@ -101,9 +101,22 @@ __device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
   return __floats2half2_rn(a.x - b.x, a.y - b.y);
 }
 
-template <int Width, int Threads>
+__device__ __forceinline__ half swiglu_value(half gate, half up) {
+  const float g = __half2float(gate);
+  // StableHLO logistic(f16) lowers to f16 exp, f16 add, f16 divide.
+  // Keep those materialization points even though this kernel fuses the
+  // subsequent SwiGLU multiply with SU/Hadamard preparation.
+  const half exponential = __float2half_rn(expf(-g));
+  const half denominator = __float2half_rn(1.0f + __half2float(exponential));
+  const half sigmoid = __float2half_rn(1.0f / __half2float(denominator));
+  const half silu = __float2half_rn(g * __half2float(sigmoid));
+  return __float2half_rn(__half2float(silu) * __half2float(up));
+}
+
+template <int Width, int Threads, bool SwiGlu = false>
 __global__ void hadamard_input_single(
     const half* __restrict__ input,
+    const half* __restrict__ up,
     const half* __restrict__ scale,
     half* __restrict__ output) {
   constexpr int Pairs = Width / 2;
@@ -118,9 +131,18 @@ __global__ void hadamard_input_single(
     const int pair = lane + item * Threads;
     const int column0 = 2 * pair;
     const int64_t offset = static_cast<int64_t>(row) * Width + column0;
+    half2 activation;
+    if constexpr (SwiGlu) {
+      const half2 gate_pair = *reinterpret_cast<const half2*>(input + offset);
+      const half2 up_pair = *reinterpret_cast<const half2*>(up + offset);
+      activation = __halves2half2(
+          swiglu_value(__low2half(gate_pair), __low2half(up_pair)),
+          swiglu_value(__high2half(gate_pair), __high2half(up_pair)));
+    } else {
+      activation = *reinterpret_cast<const half2*>(input + offset);
+    }
     const half2 scaled = __hmul2(
-        *reinterpret_cast<const half2*>(input + offset),
-        *reinterpret_cast<const half2*>(scale + column0));
+        activation, *reinterpret_cast<const half2*>(scale + column0));
     const float2 scaled_values = __half22float2(scaled);
     const half value0 = __float2half_rn(scaled_values.x / divisor);
     const half value1 = __float2half_rn(scaled_values.y / divisor);
@@ -226,6 +248,10 @@ uint32_t qvq_hadamard_input_raw_abi_version(void) {
   return QVQ_HADAMARD_INPUT_RAW_ABI_VERSION;
 }
 
+uint32_t qvq_hadamard_input_swiglu_raw_abi_version(void) {
+  return QVQ_HADAMARD_INPUT_SWIGLU_RAW_ABI_VERSION;
+}
+
 uint64_t qvq_hadamard_input_raw_workspace_bytes(
     const QvqHadamardInputRawConfig* config) {
   return valid(config)
@@ -255,16 +281,19 @@ int qvq_hadamard_input_raw_launch(
   if (config->width == 2048) {
     hadamard_input_single<2048, 256><<<config->rows, kTile, 0, stream>>>(
         static_cast<const half*>(input_f16),
+        nullptr,
         static_cast<const half*>(pre_scale_f16),
         static_cast<half*>(output_f16));
   } else if (config->rows >= 256) {
     hadamard_input_single<8192, 512><<<config->rows, 512, 0, stream>>>(
         static_cast<const half*>(input_f16),
+        nullptr,
         static_cast<const half*>(pre_scale_f16),
         static_cast<half*>(output_f16));
   } else if (config->rows >= 64) {
     hadamard_input_single<8192, 1024><<<config->rows, 1024, 0, stream>>>(
         static_cast<const half*>(input_f16),
+        nullptr,
         static_cast<const half*>(pre_scale_f16),
         static_cast<half*>(output_f16));
   } else {
@@ -291,6 +320,33 @@ int qvq_hadamard_input_raw_launch(
     }
   }
   return 0;
+}
+
+int qvq_hadamard_input_swiglu_raw_launch(
+    const void* gate_f16,
+    const void* up_f16,
+    const void* pre_scale_f16,
+    void* output_f16,
+    const QvqHadamardInputRawConfig* config,
+    void* cuda_stream,
+    char* error,
+    uint64_t error_capacity) {
+  if (!valid(config) || config->rows != 960 || config->width != 8192) {
+    return fail(error, error_capacity, "unsupported SwiGLU Hadamard geometry");
+  }
+  if (gate_f16 == nullptr || up_f16 == nullptr || pre_scale_f16 == nullptr ||
+      output_f16 == nullptr || cuda_stream == nullptr) {
+    return fail(error, error_capacity, "missing SwiGLU Hadamard input");
+  }
+  hadamard_input_single<8192, 512, true><<<config->rows, 512, 0,
+                                            static_cast<cudaStream_t>(cuda_stream)>>>(
+      static_cast<const half*>(gate_f16),
+      static_cast<const half*>(up_f16),
+      static_cast<const half*>(pre_scale_f16),
+      static_cast<half*>(output_f16));
+  const cudaError_t status = cudaGetLastError();
+  return status == cudaSuccess
+      ? 0 : fail(error, error_capacity, cudaGetErrorString(status));
 }
 
 }  // extern "C"
