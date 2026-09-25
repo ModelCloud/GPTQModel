@@ -7,6 +7,44 @@ from functools import lru_cache
 
 
 @lru_cache(maxsize=1)
+def _gguf_q1_0_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_q1_0_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            // Match the existing NumPy reference's eight-lane float32 sum.
+            float sums[8];
+            for (uint lane = 0; lane < 8; ++lane) {
+                sums[lane] = metal::abs(weights[block * 128 + lane]);
+            }
+            for (uint k = 8; k < 128; k += 8) {
+                for (uint lane = 0; lane < 8; ++lane) {
+                    sums[lane] += metal::abs(weights[block * 128 + k + lane]);
+                }
+            }
+            float absolute_sum = ((sums[0] + sums[1]) + (sums[2] + sums[3]))
+                + ((sums[4] + sums[5]) + (sums[6] + sums[7]));
+            ushort scale_bits = as_type<ushort>(half(absolute_sum / 128.0f));
+            uint offset = block * 18;
+            packed[offset] = uchar(scale_bits & 255);
+            packed[offset + 1] = uchar(scale_bits >> 8);
+            for (uint byte = 0; byte < 16; ++byte) {
+                uchar bits = 0;
+                for (uint bit = 0; bit < 8; ++bit) {
+                    bits |= uchar(weights[block * 128 + byte * 8 + bit] >= 0.0f)
+                        << bit;
+                }
+                packed[offset + 2 + byte] = bits;
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q4_0_kernel():
     import mlx.core as mx
 
@@ -97,25 +135,34 @@ def _gguf_q8_0_kernel():
 
 
 def gguf_quantize_weight_mlx(weight, qtype: str):
-    """Pack a 2D weight matrix into GGUF Q4_0 or Q8_0 bytes on Metal."""
+    """Pack a 2D weight matrix into supported GGUF block bytes on Metal."""
     import mlx.core as mx
 
     normalized = qtype.upper()
-    if normalized not in ("Q4_0", "Q8_0"):
-        raise ValueError("MLX GGUF packing supports Q4_0 and Q8_0")
-    if weight.ndim != 2 or weight.shape[1] == 0 or weight.shape[1] % 32:
-        raise ValueError("weight must be 2D with nonzero input width divisible by 32")
+    if normalized not in ("Q1_0", "Q1_0_G128", "Q4_0", "Q8_0"):
+        raise ValueError("MLX GGUF packing supports Q1_0, Q1_0_g128, Q4_0, and Q8_0")
+    if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
+        raise ValueError("weight must have float16, bfloat16, or float32 dtype")
+    block_size = 128 if normalized.startswith("Q1_0") else 32
+    if weight.ndim != 2 or weight.shape[1] == 0 or weight.shape[1] % block_size:
+        raise ValueError(
+            f"weight must be 2D with nonzero input width divisible by {block_size}"
+        )
     if weight.shape[0] == 0:
         raise ValueError("weight must have at least one row")
     rows, columns = weight.shape
-    blocks = rows * (columns // 32)
-    kernel = _gguf_q4_0_kernel() if normalized == "Q4_0" else _gguf_q8_0_kernel()
-    bytes_per_block = 18 if normalized == "Q4_0" else 34
+    blocks = rows * (columns // block_size)
+    if normalized.startswith("Q1_0"):
+        kernel, bytes_per_block = _gguf_q1_0_kernel(), 18
+    elif normalized == "Q4_0":
+        kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
+    else:
+        kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
     packed = kernel(
         inputs=[weight.astype(mx.float32)],
         grid=(blocks, 1, 1),
         threadgroup=(min(blocks, 256), 1, 1),
-        output_shapes=[(rows, columns // 32 * bytes_per_block)],
+        output_shapes=[(rows, columns // block_size * bytes_per_block)],
         output_dtypes=[mx.uint8],
     )[0]
     mx.eval(packed)
