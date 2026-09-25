@@ -16,6 +16,8 @@ from scripts.experiments.qvq_vocab_block_probe import (
     load_shared_factor_cache,
     save_shared_factor_cache,
 )
+from scripts.experiments.qvq_vocab_head_arbitrate import choose_guarded_blocks
+from scripts.experiments.qvq_vocab_head_artifact import _oracle, _oracle_contribution
 
 
 class _TinyCausal(nn.Module):
@@ -132,3 +134,49 @@ def test_shared_head_factor_cache_preserves_identity_and_exact_diagonal(tmp_path
     with pytest.raises(FileExistsError, match="Refusing to overwrite"):
         save_shared_factor_cache(path, {"lm_head": input_sketch}, {"lm_head": output_sketch},
                                  {**identity, "independent_sequences": "2", "valid_tokens": "19"})
+
+
+def test_streaming_whole_head_oracle_retains_cross_blocks_and_damping():
+    torch.manual_seed(521)
+    error = torch.randn(13, 5, dtype=torch.float64)
+    factor = torch.randn(13, 3, dtype=torch.float64)
+    h_source = torch.randn(5, 5, dtype=torch.float64)
+    h = h_source @ h_source.T
+    input_damping = 0.07
+    output_damping = 0.11
+    for dtype in (torch.float32, torch.float64):
+        contributions = [
+            _oracle_contribution(error[start:stop], factor[start:stop], h,
+                                 input_damping, dtype=dtype)
+            for start, stop in ((0, 6), (6, 13))
+        ]
+        z = sum(item[0] for item in contributions)
+        penalty = sum(item[1] for item in contributions)
+        undamped, damped = _oracle(z, penalty, h, input_damping, output_damping, dtype=dtype)
+        e, s, hd = error.to(dtype), factor.to(dtype), h.to(dtype)
+        gd = s @ s.T
+        expected_undamped = torch.einsum("oi,ij,pj,op->", e, hd, e, gd)
+        hd = hd + input_damping * torch.eye(5, dtype=dtype)
+        gd = gd + output_damping * torch.eye(13, dtype=dtype)
+        expected_damped = torch.einsum("oi,ij,pj,op->", e, hd, e, gd)
+        tolerance = 1e-6 if dtype == torch.float32 else 1e-12
+        assert abs(undamped - float(expected_undamped)) < tolerance * abs(float(expected_undamped))
+        assert abs(damped - float(expected_damped)) < tolerance * abs(float(expected_damped))
+
+
+def test_whole_head_arbitration_rejects_cross_block_overshoot_and_damped_loss():
+    h = torch.ones((1, 1), dtype=torch.float64)
+    base_z = torch.ones((1, 1), dtype=torch.float64)
+    base_penalty = torch.zeros((), dtype=torch.float64)
+    delta = torch.full((1, 1), -0.8, dtype=torch.float64)
+    zero = torch.zeros((), dtype=torch.float64)
+    selected, z, _ = choose_guarded_blocks(
+        base_z, base_penalty, [(delta, zero), (delta, zero)], h, 0.0, 0.0,
+    )
+    assert len(selected) == 1
+    torch.testing.assert_close(z.square().sum(), torch.tensor(0.04, dtype=torch.float64))
+    selected, _, _ = choose_guarded_blocks(
+        base_z, base_penalty,
+        [(delta, torch.tensor(100.0, dtype=torch.float64))], h, 0.0, 0.1,
+    )
+    assert selected == []

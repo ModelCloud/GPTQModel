@@ -43,6 +43,93 @@ class VocabBlockLinear(nn.Module):
         return {f"{prefix}.blocks.{index}": block for index, block in enumerate(self.blocks)}
 
 
+class QVQVocabHead(nn.Module):
+    """Concatenate independently quantized vocabulary blocks in token order."""
+
+    def __init__(self, blocks: list[nn.Module], in_features: int, out_features: int):
+        super().__init__()
+        if not blocks or in_features < 1 or out_features < 1:
+            raise ValueError("QVQ vocabulary head requires nonempty blocks and dimensions")
+        self.blocks = nn.ModuleList(blocks)
+        self.in_features = in_features
+        self.out_features = out_features
+
+    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
+        return torch.cat([block(hidden) for block in self.blocks], dim=-1)
+
+
+def install_qvq_vocab_head_delta(
+    model: nn.Module,
+    artifact_dir: str,
+    *,
+    expected_model_path: str,
+    arm: str = "candidate",
+    allow_partial: bool = False,
+) -> QVQVocabHead:
+    """Install an offline block-head delta on a GPTQModel/HF causal model.
+
+    This loader supports PyTorch validation. It does not register the delta
+    as a standard QVQ checkpoint or provide a ZML serving implementation.
+    """
+    import json
+    from pathlib import Path
+
+    from safetensors import safe_open
+
+    from gptqmodel import BACKEND
+    from gptqmodel.nn_modules.qlinear.qvq import QVQLinear
+
+    if arm not in {"baseline", "candidate", "guarded"}:
+        raise ValueError("vocabulary-head arm must be baseline, candidate, or guarded")
+    artifact = Path(artifact_dir)
+    manifest = json.loads((artifact / "manifest.json").read_text())
+    if manifest.get("schema") != "qvq.vocab-head-delta.v1":
+        raise ValueError("unsupported QVQ vocabulary-head artifact schema")
+    if str(Path(expected_model_path).resolve()) != manifest.get("model_path"):
+        raise ValueError("QVQ vocabulary-head artifact was built for a different model")
+    if not allow_partial and manifest.get("complete_head") != "true":
+        raise ValueError("partial QVQ vocabulary head cannot replace a model endpoint")
+    source = model if hasattr(model, "set_output_embeddings") else model.model
+    head = source.get_output_embeddings()
+    if not isinstance(head, nn.Linear):
+        raise TypeError("QVQ vocabulary-head delta requires a dense nn.Linear endpoint")
+    if (int(manifest["head_columns"]) != head.in_features
+            or int(manifest["head_rows"]) != head.out_features):
+        raise ValueError("QVQ vocabulary-head delta does not match model endpoint dimensions")
+    bits = float(manifest["bits"])
+    block_rows = int(manifest["block_rows"])
+    count = int(manifest["block_count"])
+    blocks = []
+    with safe_open(str(artifact / f"{arm}.safetensors"), framework="pt", device="cpu") as packed:
+        metadata = packed.metadata()
+        if any(metadata.get(key) != manifest[key]
+               for key in ("schema", "model_path", "bits", "block_rows", "block_count")):
+            raise ValueError("QVQ vocabulary-head tensor metadata differs from manifest")
+        for index in range(count):
+            start = index * block_rows
+            stop = min(start + block_rows, head.out_features)
+            prefix = f"lm_head.blocks.{index}."
+            tensors = {
+                key.removeprefix(prefix): packed.get_tensor(key).to(device=head.weight.device)
+                for key in packed.keys() if key.startswith(prefix)  # noqa: SIM118 - safetensors reader API
+            }
+            if not {"trellis", "SU", "SV"}.issubset(tensors):
+                raise ValueError(f"QVQ vocabulary block {index} is missing required tensors")
+            block = QVQLinear(
+                bits=bits, in_features=head.in_features, out_features=stop - start,
+                bias=False, backend=BACKEND.QVQ,
+                name=f"lm_head.blocks.{index}", dtype=head.weight.dtype,
+                tensors=tensors, v2b2_p32=bits < 4,
+                bank_count=2 if bits < 4 else 1,
+            ).eval()
+            block.post_init()
+            blocks.append(block)
+    replacement = QVQVocabHead(blocks, head.in_features, head.out_features)
+    source.config.tie_word_embeddings = False
+    source.set_output_embeddings(replacement)
+    return replacement
+
+
 def factored_head_fisher_loss(
     errors: list[torch.Tensor],
     output_factors: list[torch.Tensor],
