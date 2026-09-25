@@ -14,6 +14,24 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 
+@pytest.mark.parametrize("holder,bits,invalid_bits", [
+    ("FP8MlxQuantLinear", 8, 4),
+    ("BitsAndBytesMlxQuantLinear", 4, 3),
+])
+def test_dense_holder_validates_without_affine_group_limits(holder, bits, invalid_bits):
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear import mlx as mlx_holders
+
+    cls = getattr(mlx_holders, holder)
+    params = dict(
+        group_size=-1, desc_act=False, sym=True,
+        in_features=96, out_features=64, pack_dtype=torch.int32,
+        dtype=torch.float16, device=DEVICE.MPS,
+    )
+    assert cls.validate(bits=bits, **params)[0]
+    assert not cls.validate(bits=invalid_bits, **params)[0]
+
+
 def _load_dense(monkeypatch, source, input_dims, output_dims):
     from gptqmodel.utils import mlx as mlx_utils
 

@@ -508,8 +508,9 @@ class _MlxDenseContract(_MlxLinearContract):
 
     @classmethod
     def _validate(cls, **kwargs):
-        # Weight-only formats do not have affine group constraints.
-        return super(_MlxLinearContract, cls)._validate(**kwargs)
+        # Dense weight-only formats still use BaseQuantLinear validation, but
+        # have no affine group constraints from _MlxLinearContract.
+        return BaseQuantLinear._validate.__func__(cls, **kwargs)
 
     @classmethod
     def source_compatible(cls, module):
