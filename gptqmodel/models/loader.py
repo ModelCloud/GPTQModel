@@ -83,7 +83,10 @@ from ..utils.model import (
     make_quant,
     no_placement_module_names,
     simple_dispatch_model,
+    select_qvq_checkpoint_modules,
+    prepare_qvq_checkpoint_rank8_buffers,
     validate_checkpoint_qweights,
+    validate_loaded_qvq_checkpoint_modules,
 )
 from ._const import DEVICE, HAS_NPU, normalize_device
 
@@ -1396,6 +1399,16 @@ def ModelLoader(cls):
                     log.info(f"The layer {name} is not quantized.")
                     del modules[name]
 
+            qvq_quantized_names = ()
+            qvq_dense_names = ()
+            if qcfg.method == METHOD.QVQ:
+                modules, qvq_dense_names = select_qvq_checkpoint_modules(modules, model_save_name)
+                qvq_quantized_names = tuple(modules)
+                log.info(
+                    "QVQ checkpoint payload: %d compressed projections, %d dense fallbacks",
+                    len(qvq_quantized_names), len(qvq_dense_names),
+                )
+
             if qcfg.rotation:
                 if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
                     raise NotImplementedError(
@@ -1432,6 +1445,9 @@ def ModelLoader(cls):
                     dtype=dtype,
                     is_sharded=is_sharded,
                 )
+
+            if qcfg.method == METHOD.QVQ:
+                prepare_qvq_checkpoint_rank8_buffers(model, model_save_name, qvq_quantized_names)
 
         validate_checkpoint_qweights(model, model_save_name, format_code)
 
@@ -1823,6 +1839,11 @@ def ModelLoader(cls):
         if format_code != FORMAT.EXL3:
             # Any post-initialization that require device information, for example buffers initialization on device.
             model = gptqmodel_post_init(model, use_act_order=qcfg.desc_act, quantize_config=qcfg)
+
+        if qcfg.method == METHOD.QVQ:
+            validate_loaded_qvq_checkpoint_modules(
+                model, model_save_name, qvq_quantized_names, qvq_dense_names,
+            )
 
         model.eval()
 

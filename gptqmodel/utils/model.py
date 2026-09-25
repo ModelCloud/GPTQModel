@@ -18,7 +18,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Collection, Dict, List, Optional, Tuple, Type, Union
 
 import accelerate
 import pcre
@@ -2594,6 +2594,124 @@ def _checkpoint_tensor_keys(
         return None
 
     return index_keys(os.path.join(checkpoint, index_files[0]))
+
+
+def select_qvq_checkpoint_modules(
+    modules: Dict[str, nn.Module], checkpoint: str | os.PathLike,
+) -> tuple[Dict[str, nn.Module], tuple[str, ...]]:
+    """Use serialized weight ownership, rather than stale dynamic rates, for QVQ.
+
+    Dense fallbacks retain their native Linear module.  A missing or ambiguous
+    payload is an error: converting it to a QVQ placeholder silently changes
+    the model used for calibration and inference.
+    """
+    keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if keys is None:
+        raise ValueError(f"Cannot inspect QVQ checkpoint tensor keys: {checkpoint}")
+    quantized = {}
+    dense = []
+    for name, module in modules.items():
+        has_trellis = f"{name}.trellis" in keys
+        has_weight = f"{name}.weight" in keys
+        if has_trellis == has_weight:
+            raise ValueError(
+                f"QVQ checkpoint module {name} must have exactly one of "
+                f"{name}.trellis or {name}.weight"
+            )
+        if has_trellis:
+            quantized[name] = module
+        else:
+            dense.append(name)
+    return quantized, tuple(sorted(dense))
+
+
+def prepare_qvq_checkpoint_rank8_buffers(
+    model: nn.Module, checkpoint: str | os.PathLike, quantized_names: Collection[str],
+) -> None:
+    """Register serialized Rank-8 buffers before Accelerate assigns weights.
+
+    QVQLinear registers absent recovery tensors as None. Accelerate's direct
+    checkpoint assignment skips those entries rather than invoking
+    QVQLinear._load_from_state_dict, so their shapes must exist first.
+    """
+    from ..nn_modules.qlinear.qvq import QVQLinear
+
+    checkpoint = os.fspath(checkpoint)
+    if checkpoint.endswith(".json"):
+        with open(checkpoint, encoding="utf-8") as handle:
+            weight_map = json.load(handle)["weight_map"]
+        directory = os.path.dirname(checkpoint)
+    else:
+        keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+        if keys is None:
+            raise ValueError(f"Cannot inspect QVQ checkpoint tensor keys: {checkpoint}")
+        weight_map = dict.fromkeys(keys, os.path.basename(checkpoint))
+        directory = os.path.dirname(checkpoint)
+    for name in quantized_names:
+        module = model.get_submodule(name)
+        if not isinstance(module, QVQLinear):
+            raise ValueError(f"QVQ checkpoint module {name} was not instantiated")
+        rank_keys = [f"{name}.{field}" for field in ("rank8_A", "rank8_B", "rank8_metadata")]
+        if any(key in weight_map for key in rank_keys) and not all(key in weight_map for key in rank_keys):
+            raise ValueError(f"QVQ checkpoint module {name} has incomplete Rank-8 payload")
+        for key in rank_keys:
+            if key not in weight_map:
+                continue
+            with safe_open(os.path.join(directory, weight_map[key]), framework="pt", device="cpu") as source:
+                value = source.get_tensor(key)
+            setattr(module, key.rsplit(".", 1)[-1], torch.empty_like(value, device=module.SU.device))
+
+
+def validate_loaded_qvq_checkpoint_modules(
+    model: nn.Module, checkpoint: str | os.PathLike,
+    quantized_names: Collection[str], dense_names: Collection[str],
+) -> None:
+    """Fail closed if a selected payload was not materialized after load/init."""
+    from ..nn_modules.qlinear.qvq import QVQLinear
+
+    checkpoint = os.fspath(checkpoint)
+    keys = _checkpoint_tensor_keys(checkpoint, verify_shards=True)
+    if keys is None:
+        raise ValueError(f"Cannot inspect QVQ checkpoint tensor keys: {checkpoint}")
+    if checkpoint.endswith(".json"):
+        with open(checkpoint, encoding="utf-8") as handle:
+            weight_map = json.load(handle)["weight_map"]
+        checkpoint_dir = os.path.dirname(checkpoint)
+    else:
+        weight_map = dict.fromkeys(keys, os.path.basename(checkpoint))
+        checkpoint_dir = os.path.dirname(checkpoint)
+
+    def assert_loaded_tensor(name: str, tensor: torch.Tensor | None) -> None:
+        if name not in keys or tensor is None or tensor.device.type == "meta" or tensor.numel() == 0:
+            raise ValueError(f"QVQ checkpoint tensor {name} was not materialized")
+        if tensor.is_floating_point() and not torch.isfinite(tensor).all():
+            raise ValueError(f"QVQ checkpoint tensor {name} contains nonfinite values")
+        shard = os.path.join(checkpoint_dir, weight_map[name])
+        with safe_open(shard, framework="pt", device="cpu") as source:
+            expected = source.get_tensor(name)
+        # The loader may cast floating tensors to the requested inference dtype.
+        if tensor.shape != expected.shape or not torch.equal(tensor.detach().cpu(), expected.to(tensor.dtype)):
+            raise ValueError(f"QVQ checkpoint tensor {name} differs from its serialized payload")
+
+    for name in quantized_names:
+        module = model.get_submodule(name)
+        if not isinstance(module, QVQLinear):
+            raise ValueError(f"QVQ checkpoint module {name} was not loaded as QVQLinear")
+        for field in ("trellis", "SU", "SV"):
+            assert_loaded_tensor(f"{name}.{field}", getattr(module, field, None))
+        for field in ("bank_ids", "bank_alt_id", "rank8_A", "rank8_B", "rank8_metadata", "bias"):
+            if f"{name}.{field}" in keys:
+                assert_loaded_tensor(f"{name}.{field}", getattr(module, field, None))
+        if not torch.count_nonzero(module.trellis):
+            raise ValueError(f"QVQ checkpoint module {name} has an all-zero trellis placeholder")
+    for name in dense_names:
+        module = model.get_submodule(name)
+        if not isinstance(module, nn.Linear):
+            raise ValueError(f"Dense QVQ fallback {name} was not loaded as Linear")
+        weight = module.weight
+        assert_loaded_tensor(f"{name}.weight", weight)
+        if not torch.count_nonzero(weight):
+            raise ValueError(f"Dense QVQ fallback {name} has an invalid or all-zero weight")
 
 
 def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | None) -> None:
