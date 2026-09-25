@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # Layout reference: MLX (Apple Inc., MIT), mlx/nn/layers/quantized.py.
-# Format references: ParoQuant (z-lab), QQQ (vLLM), GGUF (ggml-org),
+# Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
 """Validated GPT-QModel checkpoint holders for MLX native linear inference."""

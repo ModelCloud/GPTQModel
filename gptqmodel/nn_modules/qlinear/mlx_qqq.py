@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# QQQ arithmetic reference: https://github.com/vllm-project/vllm
+# QQQ arithmetic reference: vLLM contributors, Apache-2.0, https://github.com/vllm-project/vllm
 # MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """MLX packed 4/8-bit QQQ matmul with fused dynamic activation quantization."""
 
