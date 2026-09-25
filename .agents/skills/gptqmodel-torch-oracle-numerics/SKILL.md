@@ -47,6 +47,17 @@ backends before reading results or timing them. Run the tests on the target
 hardware. Report the tested shapes, dtypes, tolerances, observed errors, and
 benchmark method in the pull request.
 
+For MLX weight quantizers, packers, and inference kernels, include every
+projection in `tests/qwen38_27b_shapes.py`: full-attention Q/K/V/O, fused
+linear-attention QKV/O, and MLP gate/up/down. Use the checkpoint's bfloat16
+dtype where the kernel supports it. Compare quantization against the independent
+Torch oracle over the complete output, including every packed byte. Compare
+inference outputs using the limits above. Benchmark every applicable projection
+shape against the corresponding main-branch path with inputs already resident;
+report per-shape timings and the aggregation method. Keep small boundary tests
+in addition to this model-scale matrix. If a projection or dtype cannot run,
+name the specific limitation and cover the closest supported configuration.
+
 If an optimized path exceeds a limit, fix the arithmetic and rerun the A/B
 tests before treating its speedup as validated. Record any unresolved mismatch
 as a merge blocker; do not loosen the limit merely to make the test pass.
