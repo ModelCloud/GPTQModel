@@ -1,3 +1,6 @@
+<!-- SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+SPDX-License-Identifier: Apache-2.0 -->
+
 <p align=center>
 <div align=center>
 <img src="https://github.com/user-attachments/assets/ab70eb1e-06e7-4dc9-83e5-bd562e1a78b2" width=500>
@@ -249,6 +252,34 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
+
+### Native MLX quantization on Apple silicon
+
+Install the optional MLX dependency and quantize a dense model directly to an
+MLX-LM checkpoint:
+
+```bash
+pip install 'gptqmodel[mlx]'
+```
+
+```python
+from gptqmodel import GPTQModel
+
+GPTQModel.quantize_mlx(
+    "Qwen/Qwen3-0.6B",
+    "./qwen3-mlx-gptq",
+    method="gptq",  # or "awq"
+    bits=4,
+    group_size=64,
+    num_samples=128,
+)
+```
+
+GPTQ uses MLX for calibration and weight updates, with one fused Metal dispatch
+per weight group. MLX currently performs the Cholesky factorization on its CPU
+stream. AWQ uses MLX-LM's native scale and clip search. The output uses MLX-LM's
+quantized model format and can be loaded with `mlx_lm.load`.
+Pass an MLX token array as `calibration_data` to use your own calibration set.
 
 
 ## Install 💾

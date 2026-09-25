@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
 [build-system]
 requires = [
     "setuptools>=77.0.1,<83",
@@ -89,7 +92,8 @@ openai = [
     "pydantic",
 ]
 mlx = [
-    "mlx_lm>=0.24.0",
+    "mlx>=0.32.2",
+    "mlx_lm>=0.31.3",
 ]
 
 [tool.uv]
