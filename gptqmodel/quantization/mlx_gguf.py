@@ -365,6 +365,64 @@ def _gguf_q4_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_tq1_0_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_tq1_0_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            float maximum = 0.0f;
+            for (uint k = 0; k < 256; ++k) {
+                maximum = metal::max(
+                    maximum, metal::abs(weights[block * 256 + k]));
+            }
+            float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            uint offset = block * 54;
+            uint powers[5] = {81, 27, 9, 3, 1};
+            for (uint byte = 0; byte < 32; ++byte) {
+                uint value = 0;
+                for (uint digit = 0; digit < 5; ++digit) {
+                    float normalized = weights[
+                        block * 256 + digit * 32 + byte] * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    value += code * powers[digit];
+                }
+                packed[offset + byte] = uchar((value * 256 + 242) / 243);
+            }
+            for (uint byte = 0; byte < 16; ++byte) {
+                uint value = 0;
+                for (uint digit = 0; digit < 5; ++digit) {
+                    float normalized = weights[
+                        block * 256 + 160 + digit * 16 + byte] * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    value += code * powers[digit];
+                }
+                packed[offset + 32 + byte] = uchar((value * 256 + 242) / 243);
+            }
+            for (uint byte = 0; byte < 4; ++byte) {
+                uint value = 0;
+                for (uint digit = 0; digit < 4; ++digit) {
+                    float normalized = weights[
+                        block * 256 + 240 + digit * 4 + byte] * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    value += code * powers[digit];
+                }
+                packed[offset + 48 + byte] = uchar((value * 256 + 242) / 243);
+            }
+            ushort scale_bits = as_type<ushort>(half(maximum));
+            packed[offset + 52] = uchar(scale_bits & 255);
+            packed[offset + 53] = uchar(scale_bits >> 8);
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q8_0_kernel():
     import mlx.core as mx
 
@@ -402,17 +460,17 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     normalized = qtype.upper()
     if normalized not in (
         "Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q4_K", "Q4_K_S", "Q4_K_M",
-        "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0",
+        "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "TQ1_0", "Q8_0",
     ):
         raise ValueError(
             "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, "
-            "Q4_K, Q5_K, Q6_K, and Q8_0"
+            "Q4_K, Q5_K, Q6_K, TQ1_0, and Q8_0"
         )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
     if normalized.startswith("Q1_0"):
         block_size = 128
-    elif normalized.startswith(("Q4_K", "Q5_K")) or normalized == "Q6_K":
+    elif normalized.startswith(("Q4_K", "Q5_K")) or normalized in ("Q6_K", "TQ1_0"):
         block_size = 256
     elif normalized == "Q2_0":
         block_size = 64
@@ -436,6 +494,8 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q5_k_kernel(), 176
     elif normalized == "Q6_K":
         kernel, bytes_per_block = _gguf_q6_k_kernel(), 210
+    elif normalized == "TQ1_0":
+        kernel, bytes_per_block = _gguf_tq1_0_kernel(), 54
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
