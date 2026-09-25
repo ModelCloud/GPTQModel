@@ -5,6 +5,7 @@
 # MLX-LM loader reference: Apple Inc. and MLX-LM contributors (MIT).
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
+# Native MXFP8 matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 
 from copy import deepcopy
 from pathlib import Path
@@ -46,6 +47,7 @@ try:
     from mlx.utils import tree_map_with_path
 
     from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+    from ..nn_modules.qlinear.mlx_fp8 import MlxFP8Linear
     from ..nn_modules.qlinear.mlx_paro import MlxParoLinear
     from ..nn_modules.qlinear.mlx_qqq import MlxQQQLinear
     MLX_AVAILABLE = True
@@ -91,6 +93,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     group16 = set()
     paro = {}
     qqq = {}
+    fp8_native = {}
     dense = {}
     for name, module in quantized:
         if isinstance(module, ExllamaV3TorchLinear):
@@ -105,7 +108,9 @@ def _packed_mlx_weights(model, config, lm_head_name):
                                    AwqGEMVFastLinear)):
                 raise ValueError(f"{type(module).__name__} layer {name} cannot be transferred to MLX")
             return None
-        if isinstance(module, (TorchFP8Linear, BitsAndBytesLinear)):
+        if isinstance(module, TorchFP8Linear) and mlx_linear.native_compatible(module):
+            fp8_native[name] = module
+        elif isinstance(module, (TorchFP8Linear, BitsAndBytesLinear)):
             dense[name] = module
             continue
         layer_params[name] = mlx_linear.mlx_params(module)
@@ -114,7 +119,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
         if isinstance(module, QQQTorchLinear):
             qqq[name] = module
         if (isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K") or (
-                not isinstance(module, (QQQTorchLinear, GGUFTorchLinear)) and module.group_size == 16):
+                not isinstance(module, (QQQTorchLinear, GGUFTorchLinear, TorchFP8Linear))
+                and module.group_size == 16):
             group16.add(name)
 
     weights = {}
@@ -130,8 +136,11 @@ def _packed_mlx_weights(model, config, lm_head_name):
         elif name in layer_params:
             mlx_linear = _mlx_holder_class(module)
             weight, scale, biases, _ = mlx_linear.pack_source(module)
-            prefix = f"{name}.linear" if name in paro or name in qqq else name
+            prefix = f"{name}.linear" if name in paro or name in qqq or name in fp8_native else name
             weights[f"{prefix}.weight"] = mx.array(weight)
+            if name in fp8_native:
+                weights[f"{name}.output_scale"] = mx.array(biases).astype(mx.float32)
+                weights[f"{prefix}.scales"] = mx.array(scale)
             if name in paro:
                 weights[f"{name}.channel_scales"] = mx.array(
                     module.channel_scales.detach().to("cpu", torch.float16).numpy()
@@ -146,7 +155,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 weights[f"{prefix}.scales_odd"] = mx.array(scale[:, 1::2]).astype(mx.float32)
                 weights[f"{prefix}.biases_even"] = mx.array(biases[:, ::2])
                 weights[f"{prefix}.biases_odd"] = mx.array(biases[:, 1::2])
-            else:
+            elif name not in fp8_native:
                 weights[f"{prefix}.scales"] = mx.array(scale)
                 if biases is not None:
                     weights[f"{prefix}.biases"] = mx.array(biases)
@@ -183,7 +192,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     def predicate(path, module):
         if path in layer_params and hasattr(module, "to_quantized"):
             found.add(path)
-            return False if path in group16 else layer_params[path]
+            return False if path in group16 or path in fp8_native else layer_params[path]
         return False
 
     if layer_params:
@@ -205,8 +214,15 @@ def _packed_mlx_weights(model, config, lm_head_name):
         mlx_model.update_modules(tree_map_with_path(
             replace_group16, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
-    if paro or qqq:
+    if paro or qqq or fp8_native:
         def replace_custom(path, module):
+            if path in fp8_native:
+                source = fp8_native[path]
+                return MlxFP8Linear(
+                    source.in_features, source.out_features,
+                    (1.0 / source.weight_scale_inv.detach().float()).cpu().numpy(),
+                    None if source.bias is None else source.bias.detach().cpu().numpy(),
+                )
             if path in paro:
                 source = paro[path]
                 return MlxParoLinear(
@@ -229,7 +245,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
             replace_custom, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
     mlx_model.load_weights(list(weights.items()))
-    if group16 or paro or qqq or (dense and layer_params):
+    if group16 or paro or qqq or fp8_native or (dense and layer_params):
         # MLX-LM's standard loader reconstructs only native QuantizedLinear.
         # Keep this runtime model instead of round-tripping through that loader.
         mlx_config["_gptqmodel_group16_runtime" if group16 and not paro and not qqq and not dense

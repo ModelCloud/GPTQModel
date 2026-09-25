@@ -542,7 +542,7 @@ class _MlxDenseContract(_MlxLinearContract):
 
 
 class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
-    """FP8 checkpoint holder decoded once for MLX native dense matmul."""
+    """FP8 holder with exact native MXFP8 for E4M3 row/tensor scales."""
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.FP8]
@@ -571,6 +571,36 @@ class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
     @classmethod
     def dense_weight(cls, module):
         return module.dequantize_weight(device="cpu", dtype=torch.float16).T.contiguous()
+
+    @classmethod
+    def native_compatible(cls, module):
+        return (cls.source_compatible(module)
+                and module.fp8_format == "float8_e4m3fn"
+                and module.weight_scale_method in {"row", "tensor"}
+                and module.in_features % 32 == 0
+                and torch.isfinite(module.weight_scale_inv).all().item()
+                and (module.weight_scale_inv > 0).all().item()
+                and torch.isfinite(1.0 / module.weight_scale_inv).all().item()
+                and not ((module.weight.detach().view(torch.uint8) & 0x7f) == 0x7f).any().item())
+
+    @classmethod
+    def mlx_params(cls, module):
+        if not cls.native_compatible(module):
+            raise ValueError("FP8 layer cannot use exact native MXFP8 inference")
+        return {"group_size": 32, "bits": 8, "mode": "mxfp8"}
+
+    @classmethod
+    def pack_source(cls, module):
+        import numpy as np
+
+        if not cls.native_compatible(module):
+            raise ValueError("FP8 layer cannot use exact native MXFP8 inference")
+        # MLX MXFP8 stores E4M3 bytes in ascending K order, four per uint32.
+        codes = module.weight.detach().contiguous().view(torch.uint8).cpu().numpy()
+        packed = np.ascontiguousarray(codes).view(np.uint32).reshape(module.out_features, -1)
+        scales = np.full((module.out_features, module.in_features // 32), 127, dtype=np.uint8)
+        output_scale = (1.0 / module.weight_scale_inv.detach().float()).cpu().numpy()
+        return packed, scales, output_scale, cls.mlx_params(module)
 
 
 class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):

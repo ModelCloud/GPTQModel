@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # MLX dense matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # bitsandbytes reference: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
+# MXFP8 matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Weight-only FP8 and bitsandbytes MLX transfer checked against Torch."""
 
 import numpy as np
@@ -33,6 +34,8 @@ def test_dense_holder_validates_without_affine_group_limits(holder, bits, invali
 
 
 def _load_dense(monkeypatch, source, input_dims, output_dims):
+    from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8Linear
     from gptqmodel.utils import mlx as mlx_utils
 
     class Args:
@@ -52,8 +55,12 @@ def _load_dense(monkeypatch, source, input_dims, output_dims):
     holder = torch.nn.Module()
     holder.linear = source
     model, config = mlx_utils._packed_mlx_weights(holder, {}, "lm_head")
-    assert "quantization" not in config
-    assert isinstance(model.linear, nn.Linear)
+    if isinstance(source, TorchFP8Linear) and source.fp8_format == "float8_e4m3fn" and source.weight_scale_method in {"row", "tensor"}:
+        assert isinstance(model.linear, MlxFP8Linear)
+        assert config["_gptqmodel_custom_mlx_runtime"]
+    else:
+        assert "quantization" not in config
+        assert isinstance(model.linear, nn.Linear)
     return model
 
 
@@ -75,7 +82,12 @@ def test_fp8_mlx_dense_matches_torch(monkeypatch, fp8_format, scale_method, bloc
     assert FP8MlxQuantLinear.source_compatible(source)
     model = _load_dense(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight(device="cpu", dtype=torch.float16).T
-    np.testing.assert_array_equal(np.array(model.linear.weight), reference_weight.numpy())
+    if scale_method in {"row", "tensor"} and fp8_format == "float8_e4m3fn":
+        packed, scales, _, _ = FP8MlxQuantLinear.pack_source(source)
+        np.testing.assert_array_equal(np.array(model.linear.linear.weight), packed)
+        np.testing.assert_array_equal(np.array(model.linear.linear.scales), scales)
+    else:
+        np.testing.assert_array_equal(np.array(model.linear.weight), reference_weight.numpy())
     rng = np.random.default_rng(210)
     x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float16)
     actual = model(mx.array(x))
