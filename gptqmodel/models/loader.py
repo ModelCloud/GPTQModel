@@ -11,6 +11,7 @@ import os
 import shutil
 import sys
 import time
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
@@ -2125,9 +2126,6 @@ def ModelLoader(cls):
 
                 model, _ = load(temp_dir)
 
-                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
-
-
         instance = cls(
             model,
             quantized=True,
@@ -2139,6 +2137,8 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
         )
+        if backend == BACKEND.MLX:
+            instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
         return instance
