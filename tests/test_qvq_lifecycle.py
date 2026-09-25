@@ -929,6 +929,74 @@ class _YaqaQModel:
         return True
 
 
+@pytest.mark.parametrize("bits", [2.5, 3, 3.5, 4])
+def test_qvq_yaqa_output_requant_captures_after_nondifferentiable_decoder(monkeypatch, bits):
+    """Endpoint Fisher needs a head-input gradient, not decoder backward."""
+    from gptqmodel.looper import qvq_processor
+    from gptqmodel.quantization.config import QuantizeEmbed, QuantizeEmbedConfig
+
+    class QuantizedProjection(torch.nn.Linear):
+        def forward(self, hidden):
+            with torch.no_grad():
+                return super().forward(hidden)
+
+    cfg = QVQConfig(bits=bits, format="qvq_v2b2_p32" if bits < 4 else "qvq", rounding="yaqa",
+                    yaqa={"minimum_sequences": 2},
+                    gsq={"enabled": True, "steps": 4, "candidates": 3},
+                    device="cpu", offload_to_disk=False)
+    qmodel = _YaqaQModel(cfg)
+    old = qmodel.model.model.layers[0].proj
+    replacement = QuantizedProjection(16, 16, bias=False)
+    replacement.weight.data.copy_(old.weight)
+    qmodel.model.model.layers[0].proj = replacement
+    monkeypatch.setattr(qvq_processor, "BaseQuantLinear", QuantizedProjection)
+    qmodel.get_input_embeddings = lambda: qmodel.model.embed
+    qmodel.get_output_embeddings = lambda: qmodel.model.lm_head
+    qmodel.get_output_embeddings_name = lambda: "lm_head"
+    qmodel.lm_head = "lm_head"
+
+    rows = [{"input_ids": torch.tensor([[1, 2, 3], [4, 5, 6]]),
+             "attention_mask": torch.ones(2, 3, dtype=torch.long)}]
+    kwargs = {"tokenizer": None, "qcfg": cfg, "calibration": rows,
+              "prepare_dataset_func": _prepared_calibration,
+              "calibration_concat_size": None, "calibration_sort": None, "batch_size": 2}
+    dense_only = QVQProcessor(**kwargs)
+    with pytest.raises(NotImplementedError, match="entirely dense source model"):
+        dense_only.prepare_yaqa(qmodel)
+
+    endpoint = QVQProcessor(
+        **kwargs,
+        embed_quant_config=QuantizeEmbedConfig(embed_quant_mode=QuantizeEmbed.OUTPUT, embed_only=True),
+    )
+    endpoint.prepare_yaqa(qmodel)
+    assert set(endpoint._yaqa_input_hessians) == {"lm_head"}
+    assert endpoint._yaqa_input_hessians["lm_head"].shape == (16, 16)
+    assert endpoint._yaqa_output_hessians["lm_head"].shape == (32, 32)
+    assert endpoint._yaqa_stats["independent_sequences"] == 2
+    decoder = NamedModule(replacement, name="proj", full_name="model.layers.0.proj", layer_index=0)
+    endpoint.preprocess(decoder)
+    assert "proj" not in endpoint.tasks
+    head = NamedModule(qmodel.model.lm_head, name="lm_head", full_name="lm_head", layer_index=2)
+    endpoint.preprocess(head)
+    with torch.no_grad():
+        hidden = qmodel.model.embed(rows[0]["input_ids"])
+        for layer in qmodel.model.model.layers:
+            hidden = layer(hidden)
+    endpoint._mask_tls = threading.local()
+    endpoint._mask_tls.value = rows[0]["attention_mask"].bool()
+    endpoint._set_current_batch_index(0)
+    endpoint.pre_process_fwd_hook("lm_head")(head.module, (hidden,), head.module(hidden))
+    endpoint.process(head, device=torch.device("cpu"))
+    assert endpoint.log[-1]["gsq"]["after"] <= endpoint.log[-1]["gsq"]["before"]
+    assert "lm_head" not in endpoint._yaqa_input_hessians
+
+    # The compact YAQA collector still materializes the output Gram for GSQ.
+    # Reject a large vocabulary before it allocates a multi-GiB square matrix.
+    qmodel.model.lm_head = torch.nn.Linear(16, 16400, bias=False)
+    with pytest.raises(NotImplementedError, match="bounded/blockwise solver"):
+        endpoint.yaqa_execution_plan(qmodel)
+
+
 def _fake_yaqa_result(module, bits):
     result = SimpleNamespace(
         trellis=torch.zeros((1, int(8 * bits)), dtype=torch.int32),

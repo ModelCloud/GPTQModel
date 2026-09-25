@@ -89,6 +89,7 @@ from ..utils.model import (
     get_module_by_name_prefix,
     get_module_name,
     move_to,
+    untie_word_embeddings,
 )
 from ..utils.model_dequant import infer_block_shape
 from ..utils.structure import (
@@ -2185,6 +2186,11 @@ class BaseQModel(nn.Module):
 
             if needs_lora:
                 raise NotImplementedError("QVQ quantization does not support adapter/EoRA generation.")
+            if embed_quant_config is not None and embed_quant_config.embed_only:
+                # YAQA prepares its factors before ModuleLooper is created.
+                # Untie here so endpoint capture sees the same head that the
+                # later module loop will quantize.
+                self.model = untie_word_embeddings(self.model)
             grouped_p32_candidates = getattr(
                 self, "qvq_grouped_p32_candidates", None
             )
@@ -2206,6 +2212,7 @@ class BaseQModel(nn.Module):
                 "transform_axis_overrides": getattr(
                     self, "qvq_transform_axis_overrides", None
                 ),
+                "embed_quant_config": embed_quant_config,
             }
             if propagated_replay_enabled:
                 qvq_args["module_replay_search_calibration"] = self.prepare_dataset(
@@ -2262,8 +2269,9 @@ class BaseQModel(nn.Module):
             # Smooth-SwiGLU must precede every Hessian/YAQA capture.  It is an
             # exact dense reparameterization, but it intentionally changes the
             # activation geometry seen by the down projection.
-            qvq_processor.prepare_smooth_swiglu(self)
-            qvq_processor.prepare_module_granular_replay(self)
+            if not (embed_quant_config is not None and embed_quant_config.embed_only):
+                qvq_processor.prepare_smooth_swiglu(self)
+                qvq_processor.prepare_module_granular_replay(self)
             qvq_processor.prepare_yaqa(self)
             quantize_processor = preprocessors + [qvq_processor]
         elif self.quantize_config.method == METHOD.EXL3:
