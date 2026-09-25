@@ -1,15 +1,18 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant rotation reference: https://github.com/z-lab/paroquant
+# ParoQuant rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
 # MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """ParoQuant MLX packed transfer and independent Torch accuracy checks."""
 
+import gc
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
+
+from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 
 mx = pytest.importorskip("mlx.core")
@@ -117,3 +120,62 @@ def test_invalid_paro_matching_is_rejected():
     assert not AwqMlxQuantLinear.source_compatible(layer)
     layer.pairs[0, 1] = layer.pairs[0, 0]
     assert not ParoMlxQuantLinear.source_compatible(layer)
+
+
+@pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
+@pytest.mark.parametrize("krot", [1, 8])
+def test_qwen38_paro_fused_rotation_matches_torch(name, output_dims, input_dims, krot):
+    from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
+
+    rng = np.random.default_rng(380027)
+    group_size = 128
+    pairs = np.empty((krot, input_dims), dtype=np.int16)
+    for stage in range(krot):
+        for group in range(input_dims // group_size):
+            pairs[stage, group * group_size:(group + 1) * group_size] = rng.permutation(group_size)
+    angles = rng.uniform(-0.025, 0.025, (krot, input_dims // 2)).astype(np.float16)
+    channel_scales = rng.uniform(0.95, 1.05, (1, input_dims)).astype(np.float16)
+
+    phase = np.arange(output_dims, dtype=np.uint8)[:, None] % 16
+    index = np.arange(input_dims, dtype=np.uint8)[None, :] % 16
+    codes = ((index + phase) % 16).astype(np.uint8)
+    lanes = codes.reshape(output_dims, input_dims // 8, 8)
+    packed = np.zeros((output_dims, input_dims // 8), dtype=np.uint32)
+    for lane in range(8):
+        packed |= lanes[:, :, lane].astype(np.uint32) << (4 * lane)
+    scale = np.float16(0.01)
+    linear = nn.QuantizedLinear(input_dims, output_dims, bias=False,
+                                group_size=128, bits=4)
+    linear.load_weights([
+        ("weight", mx.array(packed)),
+        ("scales", mx.full((output_dims, input_dims // 128), scale, dtype=mx.float16)),
+        ("biases", mx.full((output_dims, input_dims // 128), -8 * float(scale), dtype=mx.float32)),
+    ])
+    layer = MlxParoLinear(linear, pairs, angles, channel_scales, group_size)
+    torch.manual_seed(380027)
+    x = (torch.randn(3, input_dims) * 0.05).half()
+    actual = layer(mx.array(x.numpy()))
+    mx.eval(actual)
+
+    # Separate Torch oracle: pairwise rotations in float64, followed by a
+    # 16-phase dense matmul whose rows are tiled across the projection output.
+    rotated = x.double() * torch.from_numpy(channel_scales).double()
+    offsets = torch.arange(input_dims // group_size).repeat_interleave(group_size // 2) * group_size
+    for stage in range(krot):
+        pair_row = torch.from_numpy(pairs[stage].reshape(-1, 2).astype(np.int64))
+        first, second = pair_row[:, 0] + offsets, pair_row[:, 1] + offsets
+        cosine = torch.cos(torch.from_numpy(angles[stage]).double())
+        sine = torch.sin(torch.from_numpy(angles[stage]).double())
+        left, right = rotated[:, first], rotated[:, second]
+        next_rotated = torch.empty_like(rotated)
+        next_rotated[:, first] = left * cosine + right * sine
+        next_rotated[:, second] = -left * sine + right * cosine
+        rotated = next_rotated
+    pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).double() - 8
+    expected_phases = rotated @ (pattern * float(scale)).T
+    expected = expected_phases[:, np.arange(output_dims) % 16]
+    np.testing.assert_allclose(np.asarray(actual), expected.numpy(),
+                               rtol=0.002, atol=0.002, err_msg=f"{name}, krot={krot}")
+    del layer, linear, packed, codes, actual
+    mx.clear_cache()
+    gc.collect()

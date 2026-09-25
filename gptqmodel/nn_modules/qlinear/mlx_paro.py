@@ -1,13 +1,49 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# ParoQuant rotation reference: https://github.com/z-lab/paroquant
+# ParoQuant rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
 # MLX array operations: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """ParoQuant rotations followed by a packed MLX affine matrix product."""
+
+from functools import lru_cache
 
 import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
+
+
+@lru_cache(maxsize=1)
+def _rotation_kernel():
+    """Apply one pairwise rotation stage in one Metal dispatch."""
+    return mx.fast.metal_kernel(
+        name="gptqmodel_paro_rotation",
+        input_names=["x", "partner", "cosine", "sine", "channel_scales"],
+        output_names=["rotated"],
+        source="""
+            uint index = thread_position_in_grid.x;
+            uint column = index % K;
+            uint paired = partner[column];
+            uint row_offset = index - column;
+            half left = x[index];
+            half right = x[row_offset + paired];
+            if (FIRST) {
+                left = half(left * channel_scales[column]);
+                right = half(right * channel_scales[paired]);
+            }
+            half direct = half(left * cosine[column]);
+            half crossed = half(right * sine[column]);
+            rotated[index] = half(direct + crossed);
+        """,
+    )
+
+
+def _rotate_stage(x, partner, cosine, sine, channel_scales, first):
+    return _rotation_kernel()(
+        inputs=[x, partner, cosine, sine, channel_scales],
+        template=[("K", x.shape[-1]), ("FIRST", first)],
+        grid=(x.size, 1, 1), threadgroup=(min(x.size, 256), 1, 1),
+        output_shapes=[x.shape], output_dtypes=[x.dtype],
+    )[0]
 
 
 class MlxParoLinear(nn.Module):
@@ -44,8 +80,12 @@ class MlxParoLinear(nn.Module):
 
     def __call__(self, x):
         if not self.identity:
-            x = x * self.channel_scales
-            for partner, cosine, sine in zip(self.partner, self.cosine, self.sine):
-                old = x
-                x = old * cosine + mx.take(old, partner, axis=-1) * sine
+            if x.dtype == mx.float16 and x.size:
+                for stage, (partner, cosine, sine) in enumerate(zip(self.partner, self.cosine, self.sine)):
+                    x = _rotate_stage(x, partner, cosine, sine, self.channel_scales, stage == 0)
+            else:
+                x = x * self.channel_scales
+                for partner, cosine, sine in zip(self.partner, self.cosine, self.sine):
+                    old = x
+                    x = old * cosine + mx.take(old, partner, axis=-1) * sine
         return self.linear(x)
