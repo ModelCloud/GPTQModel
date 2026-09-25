@@ -32,6 +32,14 @@ the fused kernel averaged 45.46 µs. Both old and fused Hadamard kernels used
 The graph result includes overlap and cannot be inferred by adding those
 individual kernel times.
 
+An isolated Nsight Compute instruction comparison on the same M960×8192
+inputs measured 25.76M executed instructions in the original Hadamard and
+34.18M in the fused kernel; the added work is the SwiGLU arithmetic that
+otherwise runs in XLA. Both had zero local/shared spills and about 83%
+achieved occupancy. Source-correlated SASS shows the fused path's EX2/RCP
+sequence and FP16 packing at the declared logistic rounding points. The
+isolated instruction counts are not a graph-critical-path estimate.
+
 On full GSM8K-Platinum, B128/M960, 1,209 requests, the crossed two-run means
 were 93,524 → 94,512 useful and 107,871 → 109,011 padded prefill tok/s
 (+1.06%). Both fused runs matched all 1,209 control token streams, with 543
