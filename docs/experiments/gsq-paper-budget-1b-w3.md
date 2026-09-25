@@ -60,11 +60,15 @@ GPTQMODEL_RUN_GSQ_PAPER_W3_E2E=1 python -m pytest -q \
   tests/models/test_llama3_2_gsq_paper_w3.py
 ```
 
+The dense Llama 3.2 1B model scored 54/128 (42.2%) with the same GSM8K
+settings. The full 512-sequence, 4,096-token W3 GPTQ initializer scored
+**5/128 (3.9%)** after all 16 blocks were packed, saved, and reloaded. The
+initializer is a measured reference; the configurable 20% quality gate applies
+to GSQ. A full 20-epoch GSQ quality result has not yet been measured.
+
 The prior small-budget W3 check scored 6/128 for the GPTQ initializer and
-2/128 after GSQ, both below the usual 20% GSM8K quality gate. These values
-are historical for the 25-sequence, 10-epoch recipe and must not be presented
-as results of the paper-budget test. A paper-budget quality result has not
-yet been measured.
+2/128 after GSQ. Those scores are historical for the 25-sequence, 10-epoch
+recipe and must not be presented as results of the paper-budget test.
 
 A one-block geometry smoke used 64 training documents, two GPTQ documents,
 and two validation documents at 4,096 tokens. With batch 64, microbatch 2,

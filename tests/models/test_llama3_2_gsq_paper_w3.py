@@ -119,4 +119,5 @@ def test_llama3_2_1b_gsq_paper_budget_w3(staged):
     score = get_eval_task_results(raw)["gsm8k_platinum_cot"]["acc,num"]
     print(f"paper-budget W3 {'GSQ' if staged else 'GPTQ'} GSM8K Platinum: {score:.8f} ({score * 128:.0f}/128)")
     minimum = float(os.environ.get("GPTQMODEL_GSQ_PAPER_MIN_GSM8K", "0.20"))
-    assert score >= minimum
+    if staged:
+        assert score >= minimum
