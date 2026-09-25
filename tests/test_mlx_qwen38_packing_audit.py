@@ -17,6 +17,7 @@ mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
 from gptqmodel.utils.mlx_packing import repack_awq_4bit, repack_gptq_4bit  # noqa: E402
+from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear  # noqa: E402
 
 
 @pytest.mark.parametrize("source_format", ("gptq", "awq"))
@@ -73,5 +74,37 @@ def test_qwen38_27b_repack_and_inference(source_format, name, out_features, in_f
         torch.from_numpy(codes.astype(np.float32))
         - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(group_size, dim=0)
     ) * torch.from_numpy(scales.astype(np.float32)).repeat_interleave(group_size, dim=0)
+    expected = torch.from_numpy(x) @ oracle_weight
+    np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
+def test_qwen38_27b_group16_inference(name, out_features, in_features):
+    """Check the merged two-matmul group-16 kernel on complete projections."""
+    del name
+    rng = np.random.default_rng(4800 + out_features + in_features)
+    codes = rng.integers(0, 16, (in_features, out_features), dtype=np.uint8)
+    zeros = rng.integers(0, 16, (in_features // 16, out_features), dtype=np.uint8)
+    scales = rng.uniform(0.0005, 0.002, zeros.shape).astype(np.float32)
+    shifts = np.arange(8, dtype=np.uint32) * 4
+    packed = np.bitwise_or.reduce(
+        codes.T.reshape(out_features, -1, 8).astype(np.uint32)
+        << shifts[None, None, :], axis=-1,
+    )
+    group_scales = scales.T.reshape(out_features, -1, 2)
+    group_biases = (-zeros.astype(np.float32) * scales).T.reshape(out_features, -1, 2)
+    layer = MlxGroup16Linear(in_features, out_features, 4)
+    layer.weight = mx.array(packed)
+    layer.scales_even = mx.array(group_scales[..., 0])
+    layer.scales_odd = mx.array(group_scales[..., 1])
+    layer.biases_even = mx.array(group_biases[..., 0])
+    layer.biases_odd = mx.array(group_biases[..., 1])
+    x = rng.normal(0, 0.01, (1, in_features)).astype(np.float32)
+    actual = layer(mx.array(x))
+    mx.eval(actual)
+    oracle_weight = (
+        torch.from_numpy(codes.astype(np.float32))
+        - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(16, dim=0)
+    ) * torch.from_numpy(scales).repeat_interleave(16, dim=0)
     expected = torch.from_numpy(x) @ oracle_weight
     np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)
