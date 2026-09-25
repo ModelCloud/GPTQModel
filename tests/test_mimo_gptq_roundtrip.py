@@ -255,6 +255,17 @@ def test_mimo_cpu_gptq_roundtrip(
 ) -> None:
     # The lazy loader's virtual pool requires two CPU workers, even on CI VMs.
     monkeypatch.setenv("GPTQMODEL_CPU_WORKERS", "2")
+    if dtype == "auto":
+        # A host accelerator must not override the explicit CPU quantization device.
+        select_device = loader_module.auto_select_device
+        monkeypatch.setattr(
+            loader_module,
+            "auto_select_device",
+            lambda device, backend: (
+                loader_module.DEVICE.MPS
+                if device is None else select_device(device, backend)
+            ),
+        )
     source, output = tmp_path / "source", tmp_path / "quantized"
     execution_dtype = torch.bfloat16 if dtype == "auto" else dtype
     baseline, preserved = make_source(source, tp, dtype=execution_dtype)

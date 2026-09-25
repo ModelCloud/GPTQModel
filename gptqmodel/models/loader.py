@@ -1002,9 +1002,12 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+            dtype_device = selector_device_family(resolved_device)
+            if mimo_source and isinstance(quantize_config, BaseQuantizeConfig) and quantize_config.device is not None:
+                dtype_device = selector_device_family(normalize_device(quantize_config.device))
             dtype = auto_dtype(
                 config=config,
-                device=selector_device_family(resolved_device),
+                device=dtype_device,
                 quant_inference=False,
             )
 
