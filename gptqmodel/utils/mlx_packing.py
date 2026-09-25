@@ -105,3 +105,42 @@ def repack_awq_4bit(qweight, qzeros, scales, in_features, out_features, bits=4, 
     mlx_scales = np.ascontiguousarray(scales.T)
     biases = -zeros.astype(np.float32) * mlx_scales.astype(np.float32)
     return _pack_rows(codes), mlx_scales, biases
+
+
+def repack_awq_gemv(qweight, qzeros, scales, in_features, out_features, group_size):
+    """Decode AWQ GEMV's output-major INT4 words into MLX input-major words."""
+    if in_features % 32 or out_features % 8:
+        raise ValueError("AWQ GEMV to MLX needs input/output dimensions aligned to 32/8")
+    groups = in_features // group_size
+    if (qweight.shape != (out_features, in_features // 8)
+            or qzeros.shape[0] != out_features or qzeros.shape[1] < (groups + 7) // 8):
+        raise ValueError("Unsupported AWQ GEMV packed shape")
+    shifts = np.arange(8, dtype=np.uint32) * 4
+    codes = ((qweight.astype(np.uint32)[..., None] >> shifts) & 15).reshape(out_features, in_features)
+    zeros = ((qzeros.astype(np.uint32)[..., None] >> shifts) & 15).reshape(out_features, -1)[:, :groups]
+    if scales.shape[0] != out_features or scales.shape[1] < groups:
+        raise ValueError("Unsupported AWQ GEMV scale shape")
+    scales = np.ascontiguousarray(scales[:, :groups].astype(np.float16))
+    return _pack_rows(codes), scales, -zeros.astype(np.float32) * scales.astype(np.float32)
+
+
+def repack_awq_gemv_fast(qweight, scaled_zeros, scales, in_features, out_features, group_size):
+    """Undo AWQ GEMV_FAST's 4-row interleave and 32-value input permutation."""
+    if in_features % 64 or out_features % 8:
+        raise ValueError("AWQ GEMV_FAST to MLX needs input/output dimensions aligned to 64/8")
+    groups = in_features // group_size
+    if qweight.shape != (out_features // 4, in_features):
+        raise ValueError("Unsupported AWQ GEMV_FAST packed weight shape")
+    packed = qweight.astype(np.uint16).reshape(out_features // 4, in_features // 64, 64)
+    nibble = ((packed[..., None] >> (np.arange(4, dtype=np.uint16) * 4)) & 15)
+    interleaved = nibble.reshape(out_features // 4, in_features // 64, 4, 64)
+    reordered = interleaved.transpose(0, 2, 1, 3).reshape(out_features, in_features)
+    step_two = reordered.reshape(out_features, in_features // 32, 4, 2, 4)
+    step_one = step_two.transpose(0, 1, 2, 4, 3).reshape(out_features, in_features)
+    original = step_one.reshape(out_features, in_features // 32, 4, 4, 2)
+    codes = original.transpose(0, 1, 3, 2, 4).reshape(out_features, in_features)
+    if scaled_zeros.shape != scales.shape or scales.shape[1] != out_features:
+        raise ValueError("Unsupported AWQ GEMV_FAST scale/zero shape")
+    if scales.shape[0] < groups:
+        raise ValueError("AWQ GEMV_FAST has fewer scales than input groups")
+    return _pack_rows(codes), scales[:groups].T.copy(), scaled_zeros[:groups].T.copy()
