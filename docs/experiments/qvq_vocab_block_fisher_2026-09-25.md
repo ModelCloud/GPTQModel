@@ -68,7 +68,8 @@ python -m scripts.experiments.qvq_vocab_block_probe \
   --calibration-parquet /monster/data/model/qvq/modelcloud-qvq__llama-3.2-1b-instruct__f6-p32__qvq-p32-gguf-exl3__yaqa125x__seed7__20260904__commit5c5979194dc0__aff65a505e88/calibration/source/yaqa182-nm10000.parquet \
   --output-json /root/work/qvq-vocab-block-w3p5-first-sequence-20260925.json \
   --dataset-size 1 --block-rows 2048 --gram-rank 8 --batch-size 1 \
-  --bits 3.5 --gsq-steps 4 --gsq-candidates 3 --seed 7 --block-index 0
+  --bits 3.5 --gsq-steps 4 --gsq-candidates 3 --seed 7 --block-index 0 \
+  --factor-mode independent-blocks
 ```
 
 The repeat completed at 2026-09-25 11:52:32 UTC. Capture was 2.132 s,
@@ -84,3 +85,34 @@ GSM8K-Platinum test rows were not used. One calibration sequence and four
 optimization updates do not qualify a W3.5 endpoint artifact. The complete
 calibration pass, bit-rate sweep, serialization, ZML serving integration,
 and held-out full-suite quality and throughput gates remain outstanding.
+
+## Shared-head factor follow-up, 2026-09-25 UTC
+
+The collector can also target the full dense `lm_head` once, using
+`streaming_projected` YAQA. Its 128,256×rank source and exact diagonal are
+bounded; only the 2,048×2,048 input Gram is materialized. The new
+`YaqaGramSketch.factor()` applies the same diagonal correction and exposes
+one normalized full-head output factor. Slicing its rows gives block-local
+principal Grams **and compatible off-diagonal terms**. This removes the
+independent-block random-projection mismatch described above. The probe's
+`--factor-mode shared-head` path uses that factor and leaves model logits
+unchanged throughout capture.
+
+The same first calibration sequence and block-0 W3.5/P32 four-step GSQ probe
+finished at 2026-09-25 11:56:22 UTC:
+
+| Diagnostic | Shared-head result |
+| --- | ---: |
+| Capture time | 2.034 s |
+| Block-0 quantization time | 2.492 s |
+| PyTorch peak allocation | 5,600,208,896 bytes |
+| GSQ changed tiles | 0 |
+| Independent quadratic FP32 | `5.31350051e-5` |
+| Independent quadratic FP64 | `5.31346847e-5` |
+| FP32/FP64 relative gap | about 0.00060% |
+
+The two probe modes use different randomized sketches, so their absolute
+quadratic values must not be compared as a quality result. This establishes
+a bounded, coherent factor for future cross-block optimization; the current
+GSQ call still optimizes one block at a time. The full calibration corpus and
+held-out serving accuracy have not yet been run.

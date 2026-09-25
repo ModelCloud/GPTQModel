@@ -9,7 +9,7 @@ import copy
 import torch
 from torch import nn
 
-from gptqmodel.quantization.qvq_yaqa import capture_yaqa_sketch_b
+from gptqmodel.quantization.qvq_yaqa import YaqaGramSketch, capture_yaqa_sketch_b
 from optimize.qvq_vocab_blocks import VocabBlockLinear, factored_head_fisher_loss
 
 
@@ -75,3 +75,19 @@ def test_factored_head_fisher_oracle_retains_cross_block_terms():
     actual32 = factored_head_fisher_loss(blocks, factor_blocks, hessian, dtype=torch.float32)
     torch.testing.assert_close(actual64, expected, atol=1e-10, rtol=1e-10)
     torch.testing.assert_close(actual32.double(), expected, atol=1e-4, rtol=1e-5)
+
+
+def test_shared_head_factor_preserves_principal_and_cross_blocks():
+    torch.manual_seed(934)
+    source = torch.randn(48, 8, dtype=torch.float32)
+    diagonal = source.square().sum(1).mul_(1.125 / 29)
+    sketch = YaqaGramSketch(source=source, diagonal=diagonal, normalizer=29, seed=7)
+    factor = sketch.factor(device=torch.device("cpu"))
+    full = sketch.materialize(device=torch.device("cpu"))
+    torch.testing.assert_close(factor @ factor.T, full, atol=2e-6, rtol=2e-6)
+    for start in (0, 16, 32):
+        block = factor[start:start + 16]
+        torch.testing.assert_close(block @ block.T, full[start:start + 16, start:start + 16],
+                                   atol=2e-6, rtol=2e-6)
+    cross = factor[:16] @ factor[16:32].T
+    torch.testing.assert_close(cross, full[:16, 16:32], atol=2e-6, rtol=2e-6)

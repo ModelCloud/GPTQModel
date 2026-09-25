@@ -132,6 +132,26 @@ class YaqaGramSketch:
     def rank(self) -> int:
         return self.source.shape[1]
 
+    def factor(self, *, device: torch.device) -> torch.Tensor:
+        """Return one normalized factor whose rows retain cross-block terms.
+
+        Slicing this factor by output row gives compatible principal and
+        off-diagonal Gram blocks without forming a full output Gram. The
+        factor uses the same exact-diagonal congruence as ``materialize``.
+        """
+
+        _reject_yaqa_capture("YAQA Gram factor extraction")
+        source = self.source.to(device=device, non_blocking=True)
+        diagonal = self.diagonal.to(device=device, non_blocking=True)
+        assert self.source_diagonal is not None
+        source_diagonal = self.source_diagonal.to(device=device, non_blocking=True)
+        scale = torch.where(
+            diagonal > 0,
+            (diagonal * self.normalizer / source_diagonal.clamp_min(torch.finfo(source.dtype).tiny)).sqrt(),
+            0,
+        )
+        return source.mul(scale.unsqueeze(1)).div_(math.sqrt(self.normalizer))
+
     def materialize(self, *, device: torch.device) -> torch.Tensor:
         """Build the dense PSD factor only for the module being quantized."""
 
