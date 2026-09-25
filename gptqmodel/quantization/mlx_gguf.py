@@ -79,6 +79,85 @@ def _gguf_q2_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_q4_k_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_q4_k_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            float minima[8];
+            float scales[8];
+            float max_scale = 0.0f;
+            float max_minimum = 0.0f;
+            for (uint group = 0; group < 8; ++group) {
+                float low = weights[block * 256 + group * 32];
+                float high = low;
+                for (uint k = 1; k < 32; ++k) {
+                    float value = weights[block * 256 + group * 32 + k];
+                    low = metal::min(low, value);
+                    high = metal::max(high, value);
+                }
+                float minimum = metal::max(-low, 0.0f);
+                float scale = (high + minimum) / 15.0f;
+                minima[group] = minimum;
+                scales[group] = scale;
+                max_scale = metal::max(max_scale, scale);
+                max_minimum = metal::max(max_minimum, minimum);
+            }
+            float base = max_scale / 63.0f;
+            float min_base = max_minimum / 63.0f;
+            uint offset = block * 144;
+            ushort d = as_type<ushort>(half(base));
+            ushort dmin = as_type<ushort>(half(min_base));
+            packed[offset] = uchar(d & 255);
+            packed[offset + 1] = uchar(d >> 8);
+            packed[offset + 2] = uchar(dmin & 255);
+            packed[offset + 3] = uchar(dmin >> 8);
+            uint scale_codes[8];
+            uint min_codes[8];
+            for (uint group = 0; group < 8; ++group) {
+                scale_codes[group] = base > 0.0f
+                    ? uint(metal::clamp(int(metal::rint(scales[group] / base)), 0, 63))
+                    : 0;
+                min_codes[group] = min_base > 0.0f
+                    ? uint(metal::clamp(
+                        int(metal::rint(minima[group] / min_base)), 0, 63))
+                    : 0;
+            }
+            for (uint k = 0; k < 4; ++k) {
+                packed[offset + 4 + k] = uchar(
+                    (scale_codes[k] & 63) | ((scale_codes[k + 4] & 48) << 2));
+                packed[offset + 8 + k] = uchar(
+                    (min_codes[k] & 63) | ((min_codes[k + 4] & 48) << 2));
+                packed[offset + 12 + k] = uchar(
+                    (scale_codes[k + 4] & 15) | ((min_codes[k + 4] & 15) << 4));
+            }
+            for (uint group = 0; group < 8; group += 2) {
+                float step0 = base * float(scale_codes[group]);
+                float step1 = base * float(scale_codes[group + 1]);
+                float bias0 = min_base * float(min_codes[group]);
+                float bias1 = min_base * float(min_codes[group + 1]);
+                for (uint k = 0; k < 32; ++k) {
+                    float shifted0 = weights[block * 256 + group * 32 + k] + bias0;
+                    float shifted1 = weights[
+                        block * 256 + (group + 1) * 32 + k] + bias1;
+                    uint code0 = step0 > 0.0f
+                        ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 15))
+                        : 0;
+                    uint code1 = step1 > 0.0f
+                        ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 15))
+                        : 0;
+                    packed[offset + 16 + group * 16 + k] = uchar(code0 | (code1 << 4));
+                }
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q4_0_kernel():
     import mlx.core as mx
 
@@ -173,14 +252,18 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     import mlx.core as mx
 
     normalized = qtype.upper()
-    if normalized not in ("Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q8_0"):
+    if normalized not in (
+        "Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q4_K", "Q4_K_S", "Q4_K_M", "Q8_0"
+    ):
         raise ValueError(
-            "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, and Q8_0"
+            "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, Q4_K, and Q8_0"
         )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
     if normalized.startswith("Q1_0"):
         block_size = 128
+    elif normalized.startswith("Q4_K"):
+        block_size = 256
     elif normalized == "Q2_0":
         block_size = 64
     else:
@@ -197,6 +280,8 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q1_0_kernel(), 18
     elif normalized == "Q2_0":
         kernel, bytes_per_block = _gguf_q2_0_kernel(), 18
+    elif normalized.startswith("Q4_K"):
+        kernel, bytes_per_block = _gguf_q4_k_kernel(), 144
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
