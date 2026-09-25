@@ -2164,12 +2164,14 @@ def ModelLoader(cls):
 
             with tempfile.TemporaryDirectory() as temp_dir:
                 mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
+                if mlx_config.pop("_gptqmodel_group16_runtime", False):
+                    model = mlx_weights
+                else:
+                    save_model(temp_dir, mlx_weights, donate_model=True)
+                    save_config(mlx_config, config_path=temp_dir + "/config.json")
+                    tokenizer.save_pretrained(temp_dir)
 
-                save_model(temp_dir, mlx_weights, donate_model=True)
-                save_config(mlx_config, config_path=temp_dir + "/config.json")
-                tokenizer.save_pretrained(temp_dir)
-
-                model, _ = load(temp_dir)
+                    model, _ = load(temp_dir)
 
         instance = cls(
             model,
