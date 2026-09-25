@@ -165,6 +165,68 @@ def _gguf_q5_k_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_q6_k_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_q6_k_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            float scales[16];
+            float largest_scale = 0.0f;
+            for (uint group = 0; group < 16; ++group) {
+                float maximum = 0.0f;
+                for (uint k = 0; k < 16; ++k) {
+                    maximum = metal::max(maximum,
+                        metal::abs(weights[block * 256 + group * 16 + k]));
+                }
+                scales[group] = maximum / 31.0f;
+                largest_scale = metal::max(largest_scale, scales[group]);
+            }
+            float base = largest_scale / 127.0f;
+            uint offset = block * 210;
+            uint scale_codes[16];
+            for (uint group = 0; group < 16; ++group) {
+                uint code = base > 0.0f
+                    ? uint(metal::clamp(
+                        int(metal::rint(scales[group] / base)), 0, 127))
+                    : 0;
+                scale_codes[group] = code;
+                packed[offset + 192 + group] = uchar(code);
+            }
+            ushort scale_bits = as_type<ushort>(half(base));
+            packed[offset + 208] = uchar(scale_bits & 255);
+            packed[offset + 209] = uchar(scale_bits >> 8);
+            for (uint segment = 0; segment < 2; ++segment) {
+                for (uint k = 0; k < 32; ++k) {
+                    uint raw[4];
+                    for (uint lane = 0; lane < 4; ++lane) {
+                        uint index = segment * 128 + lane * 32 + k;
+                        uint group = index / 16;
+                        float step = base * float(scale_codes[group]);
+                        int code = step > 0.0f
+                            ? metal::clamp(int(metal::rint(
+                                weights[block * 256 + index] / step)), -32, 31)
+                            : 0;
+                        raw[lane] = uint(code + 32);
+                    }
+                    packed[offset + segment * 64 + k] = uchar(
+                        (raw[0] & 15) | ((raw[2] & 15) << 4));
+                    packed[offset + segment * 64 + 32 + k] = uchar(
+                        (raw[1] & 15) | ((raw[3] & 15) << 4));
+                    packed[offset + 128 + segment * 32 + k] = uchar(
+                        ((raw[0] >> 4) & 3) | (((raw[1] >> 4) & 3) << 2)
+                        | (((raw[2] >> 4) & 3) << 4)
+                        | (((raw[3] >> 4) & 3) << 6));
+                }
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q4_k_kernel():
     import mlx.core as mx
 
@@ -340,17 +402,17 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     normalized = qtype.upper()
     if normalized not in (
         "Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q4_K", "Q4_K_S", "Q4_K_M",
-        "Q5_K", "Q5_K_S", "Q5_K_M", "Q8_0",
+        "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "Q8_0",
     ):
         raise ValueError(
             "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, "
-            "Q4_K, Q5_K, and Q8_0"
+            "Q4_K, Q5_K, Q6_K, and Q8_0"
         )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
     if normalized.startswith("Q1_0"):
         block_size = 128
-    elif normalized.startswith(("Q4_K", "Q5_K")):
+    elif normalized.startswith(("Q4_K", "Q5_K")) or normalized == "Q6_K":
         block_size = 256
     elif normalized == "Q2_0":
         block_size = 64
@@ -372,6 +434,8 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q4_k_kernel(), 144
     elif normalized.startswith("Q5_K"):
         kernel, bytes_per_block = _gguf_q5_k_kernel(), 176
+    elif normalized == "Q6_K":
+        kernel, bytes_per_block = _gguf_q6_k_kernel(), 210
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
