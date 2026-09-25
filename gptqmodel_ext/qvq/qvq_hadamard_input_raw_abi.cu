@@ -90,15 +90,11 @@ __global__ void hadamard_input_high(
 // A full-row CTA can keep every FP16-rounded stage inside registers/shared
 // memory, avoiding the global intermediate and second launch.
 __device__ __forceinline__ half2 exact_half2_add(half2 first, half2 second) {
-  const float2 a = __half22float2(first);
-  const float2 b = __half22float2(second);
-  return __floats2half2_rn(a.x + b.x, a.y + b.y);
+  return __hadd2(first, second);
 }
 
 __device__ __forceinline__ half2 exact_half2_sub(half2 first, half2 second) {
-  const float2 a = __half22float2(first);
-  const float2 b = __half22float2(second);
-  return __floats2half2_rn(a.x - b.x, a.y - b.y);
+  return __hsub2(first, second);
 }
 
 __device__ __forceinline__ half swiglu_value(half gate, half up) {
