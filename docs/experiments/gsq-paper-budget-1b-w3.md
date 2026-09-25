@@ -132,3 +132,26 @@ A paired tiny-Llama W3 run trained, packed, and evaluated all seven projections
 after three epochs and three Q/K updates. The eager and corrected CUDA paths
 produced identical packed-model logits and measured hard-stage losses on that
 case. The full 20-epoch Llama 3.2 1B GSM8K result remains unmeasured.
+
+### Corrected-kernel stage timing
+
+After the FP32 probability correction, the two-stage comparison was repeated
+using the Llama 3.2 1B layer dimensions, W3/group128, 4,096-token sequences,
+batch 64, microbatch 2, and 128 synthetic captured documents. Each path saw
+the same synthetic activations and two optimizer batches. The source documents
+were hard-linked copies of one random BF16 activation, so this is a
+shape-matched training-speed measurement rather than a quality experiment.
+The source and temporary target caches were removed after the benchmark.
+
+| Stage | Eager trial 1 / 2 | Optimized trial 1 / 2 | Speedup |
+| --- | ---: | ---: | ---: |
+| MLP | 18.08 / 18.11 s | 4.39 / 4.40 s | 4.11–4.12× |
+| V/O attention | 3.51 / 3.39 s | 1.93 / 1.91 s | 1.77–1.82× |
+| Sum of measured stages | 21.59 / 21.50 s | 6.32 / 6.30 s | 3.41× |
+
+MLP target-cache construction took 7.60 s and V/O target-cache construction
+took 2.06 s for these 128 documents. Those one-time costs, Q/K training,
+GPTQ initialization, validation, packing, and evaluation are excluded from the
+stage timing. CPU prefetch of the next attention optimizer batch was also
+tested; its timing varied between slower and faster than the current path,
+so it was not incorporated. A 4× complete-run gain remains unverified.
