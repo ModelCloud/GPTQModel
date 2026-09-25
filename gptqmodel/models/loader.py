@@ -48,7 +48,7 @@ from ..quantization.config import (
     BaseQuantizeConfig,
     resolve_quant_format,
 )
-from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4
+from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils import internal_gguf
 from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
@@ -183,8 +183,25 @@ def native_floatx_source_format(
             if isinstance(value, str):
                 algorithms.append(value.lower())
 
-    # Test FP4 first because its name may otherwise be caught by generic
-    # float-format matching in future ModelOpt spellings.
+        groups = payload.get("config_groups")
+        if isinstance(groups, dict):
+            algorithms.extend(
+                str(group.get("format", "")).lower()
+                for group in groups.values()
+                if isinstance(group, dict)
+            )
+        algorithms.extend(quark_floatx_formats(payload))
+
+    if any("mxfp4" in algorithm for algorithm in algorithms) and any(
+        "mxfp8" in algorithm for algorithm in algorithms
+    ):
+        return "mixed-mx"
+    if any("mxfp4" in algorithm for algorithm in algorithms):
+        return "mxfp4"
+    if any("mxfp8" in algorithm for algorithm in algorithms):
+        return "mxfp8"
+    if any("nvfp8" in algorithm for algorithm in algorithms):
+        return "nvfp8"
     if any("fp4" in algorithm for algorithm in algorithms):
         return "nvfp4"
     if any("fp8" in algorithm for algorithm in algorithms):
@@ -199,7 +216,7 @@ def configure_native_floatx_source_quantization(
     device: Union[DEVICE, torch.device, str],
     model_local_path: Optional[str] = None,
 ) -> Optional[str]:
-    """Configure a native FP8/NVFP4 source for checkpoint-backed W4A16 quantization.
+    """Configure floatx checkpoint sources for module-local W4A16 quantization.
 
     The shell model remains on ``meta`` while the looper asks the lazy
     checkpoint reader for one linear module at a time.  That module is decoded
@@ -214,13 +231,13 @@ def configure_native_floatx_source_quantization(
     target_device = device.to_torch_device() if isinstance(device, DEVICE) else torch.device(device)
     if not device_supports_dtype(target_device, torch.bfloat16, require_validation=True):
         raise EnvironmentError(
-            "Native FP8/NVFP4 source quantization requires validated BF16 linear support on the "
+            "Floatx source quantization requires validated BF16 linear support on the "
             f"quantization device. Device `{target_device}` does not provide it."
         )
 
     # GPTQ's Hessian is part of the quantization mathematics, not a property
     # of the packed source weight.  Preserve the normal FP32 collection path
-    # even when the source forward view is FP8/NVFP4.
+    # even when the source forward view is floatx.
     hessian = getattr(quantize_config, "hessian", None)
     if hessian is not None and getattr(hessian, "staging_dtype", torch.float32) != torch.float32:
         log.warning(
@@ -241,12 +258,16 @@ def configure_native_floatx_source_quantization(
             native_dtype is not None
             and device_supports_dtype(target_device, native_dtype, require_validation=True)
         )
-    else:
+    elif source_format == "nvfp4":
         native_dtype_name = "float4_e2m1fn_x2"
         native_dtype_supported = device_supports_native_fp4(
             target_device,
             require_validation=True,
         )
+    else:
+        # MX block scales need a format-specific GEMM kernel.  The auto
+        # decoder can still feed quantization from dense module-local BF16.
+        native_dtype_name = source_format
 
     # This is deliberately transient runtime state: it is not part of the
     # exported W4 config.  A per-module check still guards mixed/odd shards,

@@ -59,11 +59,13 @@ from ..quantization.config import (
 )
 from ..quantization.dtype import (
     available_float8_dtypes,
+    decode_e8m0_scale,
     dequantize_f4_e2m1,
     dequantize_fp8,
     device_supports_dtype,
     device_supports_native_fp4,
     is_fp4_packed_dtype,
+    quark_floatx_formats,
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
@@ -2498,22 +2500,39 @@ class BaseQModel(nn.Module):
             quant_source = quant_source.to(device=CPU)
         weight = None if checkpoint_tensors is None else checkpoint_tensors.get("weight")
         if isinstance(weight, torch.Tensor) and hasattr(quant_source, "weight"):
+            direct_scale = checkpoint_tensors.get("weight_scale")
+            if not isinstance(direct_scale, torch.Tensor):
+                direct_scale = checkpoint_tensors.get("scale")
+            is_mx_block_scale = isinstance(direct_scale, torch.Tensor) and direct_scale.dtype in {
+                torch.uint8, getattr(torch, "float8_e8m0fnu", None)
+            }
             decoder_kind = self._decoder_weight_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
             )
             result_shape = tuple(getattr(quant_source.weight, "shape", weight.shape))
-            scale = (
-                self._decoder_fp4_effective_scale(
+            if decoder_kind == "fp4":
+                scale = self._decoder_fp4_effective_scale(
                     checkpoint_tensors=checkpoint_tensors,
                     result_shape=result_shape,
                 )
-                if decoder_kind == "fp4"
-                else self._decoder_scale_tensor(
-                    scale_tensor=checkpoint_tensors.get("weight_scale"),
+            elif decoder_kind == "fp8" and is_mx_block_scale:
+                scale = self._decoder_mx_block_scale(
+                    scale_tensor=direct_scale,
+                    result_shape=result_shape,
+                    format_name="FP8",
+                )
+            else:
+                scale = self._decoder_scale_tensor(
+                    scale_tensor=direct_scale,
                     result_shape=result_shape,
                 )
-            )
+            if decoder_kind == "fp8" and isinstance(scale, torch.Tensor):
+                scale_2 = checkpoint_tensors.get("weight_scale_2")
+                if isinstance(scale_2, torch.Tensor):
+                    if is_mx_block_scale:
+                        scale_2 = self._decoder_mx_secondary_scale(scale_2, result_shape)
+                    scale = scale.to(torch.float32) * scale_2.to(torch.float32)
             scale_inv = None
             if not isinstance(scale, torch.Tensor):
                 scale_inv = self._decoder_scale_tensor(
@@ -2526,15 +2545,15 @@ class BaseQModel(nn.Module):
                     scale=scale if isinstance(scale, torch.Tensor) else None,
                     scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
                     axis=None,
-                    target_dtype=target_dtype,
+                    target_dtype=torch.float32,
                 )
             elif decoder_kind == "fp4":
                 decoded_weight = dequantize_f4_e2m1(
-                    weight,
+                    weight.view(torch.uint8) if weight.dtype is torch.int8 else weight,
                     scale=scale if isinstance(scale, torch.Tensor) else None,
                     scale_inv=scale_inv if isinstance(scale_inv, torch.Tensor) else None,
                     axis=None,
-                    target_dtype=target_dtype,
+                    target_dtype=torch.float32,
                 )
             else:
                 decoded_weight = weight.to(dtype=target_dtype)
@@ -2569,6 +2588,23 @@ class BaseQModel(nn.Module):
         if isinstance(block_size, (list, tuple)) and len(block_size) == 2:
             return int(block_size[0]), int(block_size[1])
         return None
+
+    def _decoder_declared_floatx_format(self) -> str:
+        """Read flat and compressed-tensors group format labels."""
+
+        quant_config = getattr(getattr(self.model, "config", None), "quantization_config", None)
+        if not isinstance(quant_config, dict):
+            return str(getattr(quant_config, "format", "") or getattr(quant_config, "quant_algo", "")).lower()
+        labels = [str(quant_config.get(key) or "").lower() for key in ("format", "quant_algo", "variant")]
+        groups = quant_config.get("config_groups")
+        if isinstance(groups, dict):
+            labels.extend(
+                str(group.get("format") or "").lower()
+                for group in groups.values()
+                if isinstance(group, dict)
+            )
+        labels.extend(quark_floatx_formats(quant_config))
+        return " ".join(labels)
 
     def _decoder_quant_method_name(self) -> str:
         """Return the checkpoint quantizer family declared in model config."""
@@ -2671,6 +2707,34 @@ class BaseQModel(nn.Module):
         expanded = expanded.repeat_interleave(block_cols, dim=1)
         return expanded[:rows, :cols].contiguous()
 
+    @staticmethod
+    def _decoder_mx_block_scale(
+        *,
+        scale_tensor: torch.Tensor,
+        result_shape: tuple[int, ...],
+        format_name: str,
+    ) -> torch.Tensor:
+        """Clip padded E8M0 block grids before decoding or expanding their values."""
+
+        if len(result_shape) != 2 or result_shape[1] % 32 or scale_tensor.ndim != 2:
+            raise ValueError(f"Unsupported {format_name} E8M0 scale layout for weight {result_shape}")
+        rows, cols = result_shape
+        blocks = cols // 32
+        if scale_tensor.shape[0] < rows or scale_tensor.shape[1] < blocks:
+            raise ValueError(
+                f"{format_name} E8M0 scale shape {tuple(scale_tensor.shape)} is smaller than {(rows, blocks)}"
+            )
+        return decode_e8m0_scale(scale_tensor[:rows, :blocks])
+
+    @staticmethod
+    def _decoder_mx_secondary_scale(scale_tensor: torch.Tensor, result_shape: tuple[int, ...]) -> torch.Tensor:
+        """Trim padded block factors while preserving scalar or row broadcasting."""
+
+        if scale_tensor.ndim != 2:
+            return scale_tensor
+        rows, cols = result_shape
+        return scale_tensor[:min(scale_tensor.shape[0], rows), :min(scale_tensor.shape[1], cols // 32)]
+
     def _decoder_fp4_effective_scale(
         self,
         *,
@@ -2679,14 +2743,29 @@ class BaseQModel(nn.Module):
     ) -> Optional[torch.Tensor]:
         """Resolve NVFP4 weight scales, including ModelOpt's secondary global scale."""
 
-        scale = self._decoder_scale_tensor(
-            scale_tensor=checkpoint_tensors.get("weight_scale"),
-            result_shape=result_shape,
-        )
-        if not isinstance(scale, torch.Tensor):
+        direct_scale = checkpoint_tensors.get("weight_scale")
+        if not isinstance(direct_scale, torch.Tensor):
+            direct_scale = checkpoint_tensors.get("scale")
+        if not isinstance(direct_scale, torch.Tensor):
             return None
+        is_mx_block_scale = direct_scale.dtype == getattr(torch, "float8_e8m0fnu", None) or (
+            direct_scale.dtype == torch.uint8 and "mxfp4" in self._decoder_declared_floatx_format()
+        )
+        if is_mx_block_scale:
+            scale = self._decoder_mx_block_scale(
+                scale_tensor=direct_scale,
+                result_shape=result_shape,
+                format_name="MXFP4",
+            )
+        else:
+            scale = self._decoder_scale_tensor(
+                scale_tensor=direct_scale,
+                result_shape=result_shape,
+            )
         scale_2 = checkpoint_tensors.get("weight_scale_2")
         if isinstance(scale_2, torch.Tensor):
+            if is_mx_block_scale:
+                scale_2 = self._decoder_mx_secondary_scale(scale_2, result_shape)
             scale = scale.to(torch.float32) * scale_2.to(torch.float32)
         return scale
 
@@ -2702,7 +2781,10 @@ class BaseQModel(nn.Module):
             return "fp8"
         if is_fp4_packed_dtype(weight.dtype):
             return "fp4"
-        if weight.dtype is not torch.uint8 or not isinstance(checkpoint_tensors.get("weight_scale"), torch.Tensor):
+        direct_scale = checkpoint_tensors.get("weight_scale")
+        if not isinstance(direct_scale, torch.Tensor):
+            direct_scale = checkpoint_tensors.get("scale")
+        if weight.dtype not in {torch.uint8, torch.int8} or not isinstance(direct_scale, torch.Tensor):
             return None
         if isinstance(checkpoint_tensors.get("weight_scale_2"), torch.Tensor):
             return "fp4"
@@ -2712,7 +2794,7 @@ class BaseQModel(nn.Module):
             format_name = quant_config.get("format") or quant_config.get("quant_method")
         else:
             format_name = getattr(quant_config, "format", None) or getattr(quant_config, "quant_method", None)
-        if str(format_name or "").strip().lower() in {"nvfp4", "fp4"}:
+        if str(format_name or "").strip().lower() in {"nvfp4", "fp4", "mxfp4"} or "mxfp4" in self._decoder_declared_floatx_format():
             return "fp4"
         return None
 
@@ -2776,6 +2858,9 @@ class BaseQModel(nn.Module):
 
         if not isinstance(target_submodule, nn.Linear):
             return None
+        if any(name in self._decoder_declared_floatx_format() for name in ("mxfp8", "nvfp8")):
+            # The plain FP8 wrapper does not execute MX block scales natively.
+            return None
 
         weight = checkpoint_tensors.get("weight")
         if not isinstance(weight, torch.Tensor):
@@ -2788,8 +2873,11 @@ class BaseQModel(nn.Module):
         if not isinstance(scale_inv, torch.Tensor):
             # ModelOpt-style FP8 checkpoints store direct scales instead of inverse scales;
             # normalize them here so TorchFP8Linear can use one consistent metadata form.
+            direct_scale = checkpoint_tensors.get("weight_scale")
+            if not isinstance(direct_scale, torch.Tensor):
+                direct_scale = checkpoint_tensors.get("scale")
             scale = self._decoder_scale_tensor(
-                scale_tensor=checkpoint_tensors.get("weight_scale"),
+                scale_tensor=direct_scale,
                 result_shape=tuple(weight.shape),
             )
             if not isinstance(scale, torch.Tensor):
@@ -2858,6 +2946,9 @@ class BaseQModel(nn.Module):
         """Rebuild one linear submodule as a native NVFP4 forward wrapper."""
 
         if not isinstance(target_submodule, nn.Linear):
+            return None
+        if "mxfp4" in self._decoder_declared_floatx_format():
+            # torchao's NVFP4 wrapper expects 16-wide E4M3 scales, not MX E8M0.
             return None
 
         weight = checkpoint_tensors.get("weight")
