@@ -44,6 +44,17 @@ class _CopyTiedModel(torch.nn.Module):
         return self.output(x)
 
 
+class _RestoreTargetModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.eye(2))
+        self.register_buffer("scale", torch.ones(2))
+        self.child = torch.nn.Linear(2, 2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return (x * self.scale) @ self.weight.T + self.child(x)
+
+
 @pytest.mark.parametrize("outer_inference", [False, True])
 @pytest.mark.parametrize("offload_buffers", [False, True])
 def test_disk_restore_produces_autograd_safe_tensors(
@@ -94,3 +105,66 @@ def test_restore_allows_tie_weights_to_copy_into_trainable_parameter(
     model(inputs).sum().backward()
     assert model.output.weight.grad is not None
     assert inputs.grad is not None
+
+
+@pytest.mark.parametrize("offload_buffers", [False, True])
+def test_disk_restore_preserves_requested_dtype_after_hook_detach(
+    tmp_path: Path, offload_buffers: bool
+) -> None:
+    model = _RestoreTargetModel()
+    disk_offload(
+        model,
+        offload_dir=str(tmp_path / "offload"),
+        execution_device=torch.device("cpu"),
+        offload_buffers=offload_buffers,
+    )
+
+    with torch.inference_mode():
+        undo_offload_to_disk(model, dtype=torch.float64)
+
+    assert all(param.dtype == torch.float64 for param in model.parameters())
+    assert model.scale.dtype == (torch.float64 if offload_buffers else torch.float32)
+    assert not any(hasattr(sub, "_hf_hook") for sub in model.modules())
+    inputs = torch.ones(2, 2, dtype=torch.float64, requires_grad=True)
+    model(inputs).sum().backward()
+    assert inputs.grad is not None
+    assert model.weight.grad is not None
+
+
+def test_disk_restore_leaves_unrelated_meta_tensors_alone(tmp_path: Path) -> None:
+    model = torch.nn.Module()
+    model.offloaded = torch.nn.Linear(2, 2)
+    model.uninitialized = torch.nn.Linear(2, 2, device="meta")
+    disk_offload(
+        model.offloaded,
+        offload_dir=str(tmp_path / "offload"),
+        execution_device=torch.device("cpu"),
+    )
+
+    undo_offload_to_disk(model, dtype=torch.float64)
+
+    assert model.offloaded.weight.dtype == torch.float64
+    assert model.uninitialized.weight.is_meta
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_disk_restore_preserves_requested_gpu_after_hook_detach(tmp_path: Path) -> None:
+    model = _RestoreTargetModel()
+    disk_offload(
+        model,
+        offload_dir=str(tmp_path / "offload"),
+        execution_device=torch.device("cuda:0"),
+        offload_buffers=True,
+    )
+
+    with torch.inference_mode():
+        undo_offload_to_disk(model, device=torch.device("cuda:0"), dtype=torch.float64)
+
+    assert all(param.device == torch.device("cuda:0") and param.dtype == torch.float64 for param in model.parameters())
+    assert model.scale.device == torch.device("cuda:0")
+    assert model.scale.dtype == torch.float64
+    assert not any(hasattr(sub, "_hf_hook") for sub in model.modules())
+    inputs = torch.ones(2, 2, device="cuda:0", dtype=torch.float64, requires_grad=True)
+    model(inputs).sum().backward()
+    assert inputs.grad is not None
+    assert model.weight.grad is not None

@@ -383,6 +383,16 @@ def undo_offload_to_disk(
     #with _lock:
     # Track candidate offload dirs if user asks to delete them later.
     offload_dirs: Set[str] = set()
+    # Accelerate's detach_hook reloads offloaded leaves from weights_map onto
+    # their original device and dtype, even after we materialize them below.
+    # Remember meta leaves so we can honor the caller's requested target after
+    # detaching without moving unrelated, already materialized model state.
+    offloaded_leaves = [
+        (sub, name, is_param, tensor.requires_grad)
+        for sub in module.modules()
+        for name, tensor, is_param in _iter_leaf_tensors(sub, include_buffers=include_buffers)
+        if tensor.is_meta
+    ]
 
     # 1) Materialize all offloaded leaves as real tensors on the target device/dtype.
     with torch.inference_mode():
@@ -424,6 +434,18 @@ def undo_offload_to_disk(
         with torch.inference_mode(False), torch.no_grad():
             remove_hook_from_submodules(module)      # public API
             remove_hook_from_module(module, recurse=False)  # ensure root is also clean
+
+            for sub, name, is_param, requires_grad in offloaded_leaves:
+                tensor = getattr(sub, name)
+                if tensor.is_meta:
+                    continue  # unrelated meta leaves have no offload hook to restore them
+                if tensor.device == device and (dtype is None or tensor.dtype == dtype) and not tensor.is_inference():
+                    continue
+                if is_param:
+                    restored = _clone_into_parameter(tensor, device=device, dtype=dtype, requires_grad=requires_grad)
+                else:
+                    restored = _clone_into_buffer(tensor, device=device, dtype=dtype)
+                setattr(sub, name, restored)
 
             # 3) Tie embedding if module is model and enabled/tied
             if hasattr(module, "config") and getattr(module.config, "tie_word_embeddings", False):
