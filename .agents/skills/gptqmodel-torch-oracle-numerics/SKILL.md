@@ -2,16 +2,17 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 name: gptqmodel-torch-oracle-numerics
-description: Validate faster quantization math and inference kernels against an independent Torch oracle before accepting performance claims or regressions.
+description: Validate changed quantization math, packed formats, and inference kernels against an independent Torch oracle, including rounding boundaries.
 ---
 
 # Torch oracle for numerical changes
 
-Apply this skill when adding or optimizing a quantization computation or an
-inference kernel, regardless of backend. Build deterministic A/B unit tests
-that feed the same inputs and configuration to the changed path and a separate
-Torch reference. The oracle must perform its own arithmetic; do not call the
-changed kernel or reuse its intermediate outputs as expected results.
+Apply this skill when adding or changing quantization math, a weight packer,
+or an inference kernel, regardless of backend or performance intent. Build
+deterministic A/B unit tests that feed the same inputs and configuration to the
+changed path and a separate Torch reference. The oracle must perform its own
+arithmetic; do not call the changed kernel or reuse its intermediate outputs as
+expected results.
 
 ## Acceptance limits
 
@@ -26,11 +27,25 @@ changed kernel or reuse its intermediate outputs as expected results.
   `2e-3`. Discrete outputs, including selected token IDs, must match exactly
   when the test fixes sampling and tie behavior.
 
-Use representative sizes, supported dtypes, and at least one edge case that
-could change the numerical result. Synchronize asynchronous backends before
-reading results or timing them. Run the tests on the target hardware. Report
-the tested shapes, dtypes, tolerances, observed errors, and benchmark method in
-the pull request.
+## Quantization boundary cases
+
+For every changed packer or quantizer, test values exactly at and one
+representable input step on each side of relevant rounding thresholds. Also
+cover clamp/saturation endpoints, positive and negative values, zero (including
+signed zero when its packed bits matter), and scale or zero-point selection ties
+when the format has them. Exercise casts used by supported input dtypes. Random
+inputs are supplemental; they cannot replace boundary cases.
+
+Compare complete packed bytes or codes exactly with the independent Torch
+oracle. Reproduce the format's specified intermediate precision in that oracle
+(for example, float64 arithmetic applied to float32 operands) so reference
+rounding error does not hide a boundary mismatch. Report the exact comparison
+and the boundary cases in the pull request.
+
+Use representative sizes and supported dtypes. Synchronize asynchronous
+backends before reading results or timing them. Run the tests on the target
+hardware. Report the tested shapes, dtypes, tolerances, observed errors, and
+benchmark method in the pull request.
 
 If an optimized path exceeds a limit, fix the arithmetic and rerun the A/B
 tests before treating its speedup as validated. Record any unresolved mismatch

@@ -7,8 +7,8 @@ This file governs the whole repository in addition to any parent agent instructi
 
 ## Numerical oracle validation
 
-For faster quantization math or inference kernels, read and follow
-`$gptqmodel-torch-oracle-numerics` in
+For any new or changed quantization math, weight packer, or inference kernel,
+read and follow `$gptqmodel-torch-oracle-numerics` in
 `.agents/skills/gptqmodel-torch-oracle-numerics/SKILL.md` before editing.
 
 ## Tokenizer normalization ownership
