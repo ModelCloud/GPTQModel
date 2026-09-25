@@ -17,8 +17,8 @@ def _gguf_q4_0_kernel():
         source="""
             uint block = thread_position_in_grid.x;
             float values[32];
-            float maximum = 0.0f;
-            float signed_maximum = 0.0f;
+            float signed_maximum = weights[block * 32];
+            float maximum = metal::abs(signed_maximum);
             for (uint k = 0; k < 32; ++k) {
                 float value = weights[block * 32 + k];
                 values[k] = value;

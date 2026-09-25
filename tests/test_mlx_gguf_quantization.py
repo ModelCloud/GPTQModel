@@ -90,6 +90,14 @@ def test_gguf_q4_0_packing_at_float32_rounding_boundaries():
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 
+def test_gguf_q4_0_packing_preserves_zero_scale_sign():
+    weight = np.zeros((2, 32), dtype=np.float32)
+    weight[1, 0] = np.float32(-0.0)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0")
+    expected = _torch_gguf_q4_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
 def test_gguf_q4_0_packing_validates_format_and_shape():
     with pytest.raises(ValueError, match="supports Q4_0"):
         native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "Q5_K")
