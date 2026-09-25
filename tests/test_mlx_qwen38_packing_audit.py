@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Qwen3.8-27B projection checks for merged GPTQ/AWQ to MLX layout packers."""
+
+import sys
+
+import numpy as np
+import pytest
+
+from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
+
+if sys.platform != "darwin":
+    pytest.skip("MLX requires macOS", allow_module_level=True)
+
+mx = pytest.importorskip("mlx.core")
+torch = pytest.importorskip("torch")
+
+from gptqmodel.utils.mlx_packing import repack_awq_4bit, repack_gptq_4bit  # noqa: E402
+
+
+@pytest.mark.parametrize("source_format", ("gptq", "awq"))
+@pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
+def test_qwen38_27b_repack_and_inference(source_format, name, out_features, in_features):
+    """Check complete 4-bit words, scales, and one-token dense Torch output."""
+    del name
+    group_size = 128
+    rng = np.random.default_rng(3800 + out_features + in_features)
+    codes = rng.integers(0, 16, (in_features, out_features), dtype=np.uint8)
+    zeros = rng.integers(0, 16, (in_features // group_size, out_features), dtype=np.uint8)
+    scales = rng.uniform(0.0005, 0.002, zeros.shape).astype(np.float16)
+    shifts = np.arange(8, dtype=np.uint32) * 4
+    if source_format == "gptq":
+        qweight = np.bitwise_or.reduce(
+            codes.reshape(-1, 8, out_features).astype(np.uint32)
+            << shifts[None, :, None], axis=1,
+        )
+        qzeros = np.bitwise_or.reduce(
+            zeros.reshape(-1, out_features // 8, 8).astype(np.uint32)
+            << shifts[None, None, :], axis=-1,
+        )
+        repack = repack_gptq_4bit
+    else:
+        order = [0, 2, 4, 6, 1, 3, 5, 7]
+        qweight = np.bitwise_or.reduce(
+            codes.reshape(in_features, -1, 8)[:, :, order].astype(np.uint32)
+            << shifts[None, None, :], axis=-1,
+        )
+        qzeros = np.bitwise_or.reduce(
+            zeros.reshape(-1, out_features // 8, 8)[:, :, order].astype(np.uint32)
+            << shifts[None, None, :], axis=-1,
+        )
+        repack = repack_awq_4bit
+    packed, mlx_scales, biases = repack(
+        qweight, qzeros, scales, in_features, out_features,
+    )
+    expected_packed = np.bitwise_or.reduce(
+        codes.T.reshape(out_features, -1, 8).astype(np.uint32)
+        << shifts[None, None, :], axis=-1,
+    )
+    np.testing.assert_array_equal(packed, expected_packed)
+    np.testing.assert_array_equal(mlx_scales, scales.T)
+    expected_biases = -zeros.T.astype(np.float32) * scales.T.astype(np.float32)
+    np.testing.assert_array_equal(biases, expected_biases)
+
+    x = rng.normal(0, 0.01, (1, in_features)).astype(np.float32)
+    actual = mx.quantized_matmul(
+        mx.array(x), mx.array(packed), mx.array(mlx_scales), mx.array(biases),
+        group_size=group_size, bits=4,
+    )
+    mx.eval(actual)
+    oracle_weight = (
+        torch.from_numpy(codes.astype(np.float32))
+        - torch.from_numpy(zeros.astype(np.float32)).repeat_interleave(group_size, dim=0)
+    ) * torch.from_numpy(scales.astype(np.float32)).repeat_interleave(group_size, dim=0)
+    expected = torch.from_numpy(x) @ oracle_weight
+    np.testing.assert_allclose(np.asarray(actual), expected.numpy(), rtol=2e-3, atol=2e-3)

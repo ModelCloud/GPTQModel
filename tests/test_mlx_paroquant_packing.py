@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
@@ -95,6 +97,30 @@ def test_paroquant_packing_matches_existing_awq_export_layout():
     np.testing.assert_array_equal(np.asarray(actual[0]), current.qweight.numpy())
     np.testing.assert_array_equal(np.asarray(actual[1]), current.qzeros.numpy())
     np.testing.assert_array_equal(np.asarray(actual[2]), current.scales.numpy())
+
+
+@pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
+def test_paroquant_packing_qwen38_27b_shapes(name, out_features, in_features):
+    """Check complete BF16 projection packs against the Torch export oracle."""
+    del name
+    group_size = 64
+    generator = torch.Generator().manual_seed(2718 + in_features + out_features)
+    scales = torch.rand(
+        (out_features, in_features // group_size), generator=generator,
+        dtype=torch.float32,
+    ).mul(0.02).add(0.01).to(torch.bfloat16)
+    codes = torch.randint(
+        -7, 8, (out_features, in_features), generator=generator, dtype=torch.int8,
+    )
+    weight = (codes.to(torch.bfloat16).reshape(out_features, -1, group_size)
+              * scales[:, :, None]).reshape(out_features, in_features)
+    del codes
+    mlx_weight, mlx_scales = _mlx_inputs(weight, scales)
+    actual = native.paroquant_pack_weight_mlx(mlx_weight, mlx_scales, group_size=group_size)
+    expected = _torch_paroquant_oracle(weight, scales, group_size)
+    np.testing.assert_array_equal(np.asarray(actual[0]), expected[0])
+    np.testing.assert_array_equal(np.asarray(actual[1]), expected[1])
+    np.testing.assert_array_equal(np.asarray(actual[2].astype(mx.float32)), expected[2])
 
 
 def test_paroquant_packing_at_code_boundaries():
