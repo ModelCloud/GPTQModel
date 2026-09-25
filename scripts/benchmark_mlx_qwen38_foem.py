@@ -63,7 +63,7 @@ def _torch_foem_group_update(weight, factor, group_size=128, beta=0.2, *, record
                 )
         if end < columns:
             working[:, end:] -= errors @ factor[start:end, end:]
-    return (output, scales, zeros, near_tie) if record_ties else (output, scales, zeros)
+    return output, scales, zeros, near_tie
 
 
 def _median_ms(fn, repeats):
