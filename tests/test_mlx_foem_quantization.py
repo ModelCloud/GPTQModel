@@ -4,6 +4,7 @@
 """Independent Torch-oracle checks for native MLX FOEM quantization."""
 
 import sys
+from decimal import ROUND_FLOOR, ROUND_HALF_EVEN, Decimal, localcontext
 
 import numpy as np
 import pytest
@@ -37,13 +38,14 @@ def _torch_params(group, bits, sym):
     return scale, zero
 
 
-def _torch_foem_oracle(weight, inverse_hessian, bits, group_size, beta, sym):
+def _torch_foem_oracle(weight, inverse_hessian, bits, group_size, beta, sym, *, return_ties=False):
     """Follow FOEM's sequential column corrections using independent Torch ops."""
     raw = torch.from_numpy(weight.copy())
     factor = torch.from_numpy(inverse_hessian.copy())
     rows, columns = raw.shape
     remaining = raw.clone()
     quantized, scales, zeros = [], [], []
+    near_ties = torch.empty_like(raw, dtype=torch.bool) if return_ties else None
     for start in range(0, columns, group_size):
         end = start + group_size
         group = remaining[:, :group_size].clone()
@@ -52,7 +54,12 @@ def _torch_foem_oracle(weight, inverse_hessian, bits, group_size, beta, sym):
         output = torch.empty_like(group)
         for offset in range(group_size):
             value = group[:, offset].clone()
-            code = (torch.round(value / scale) + zero).clamp(0, 2**bits - 1)
+            scaled = value / scale
+            if return_ties:
+                near_ties[:, start + offset] = (
+                    (scaled - torch.floor(scaled) - 0.5).abs() <= 2e-6
+                )
+            code = (torch.round(scaled) + zero).clamp(0, 2**bits - 1)
             q = scale * (code - zero)
             error = ((value - q) - (value - raw[:, start + offset]) * beta) / factor[
                 start + offset, start + offset
@@ -71,7 +78,35 @@ def _torch_foem_oracle(weight, inverse_hessian, bits, group_size, beta, sym):
         zeros.append(zero[:, None])
         if end < columns:
             remaining = remaining[:, group_size:] - errors @ factor[start:end, end:]
-    return tuple(torch.cat(values, dim=1).numpy() for values in (quantized, scales, zeros))
+    result = tuple(torch.cat(values, dim=1).numpy() for values in (quantized, scales, zeros))
+    return (*result, near_ties.numpy()) if return_ties else result
+
+
+def _exact_banded_foem_tie_margin(source_row, target, group_size=128):
+    """Recompute a disputed BF16 code using high precision FOEM arithmetic."""
+    with localcontext() as context:
+        context.prec = 80
+        raw = [Decimal.from_float(float(value)) for value in source_row]
+        working = raw.copy()
+        upper = Decimal.from_float(float(np.float32(0.05)))
+        beta = Decimal("0.2")
+        for start in range(0, target + 1, group_size):
+            end = min(start + group_size, len(raw))
+            group = working[start:end]
+            maximum = max(abs(min(Decimal(0), min(group))), max(Decimal(0), max(group)))
+            scale = 2 * maximum / 15
+            for column in range(start, min(end, target + 1)):
+                value = working[column]
+                quotient = value / scale
+                if column == target:
+                    return abs(quotient - quotient.to_integral_value(rounding=ROUND_FLOOR) - Decimal("0.5"))
+                code = max(0, min(15, int(quotient.to_integral_value(rounding=ROUND_HALF_EVEN)) + 8))
+                quantized = scale * (code - 8)
+                error = (value - quantized) - (value - raw[column]) * beta
+                working[column + 1] -= error * upper
+                if column + 1 < end:
+                    working[column + 1] -= (working[column + 1] - raw[column + 1]) * beta
+    raise AssertionError("target column not reached")
 
 
 def _codes_from_dequantized(result, group_size):
@@ -200,7 +235,7 @@ def test_foem_bfloat16_with_cross_group_updates(sym):
 
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
 def test_foem_qwen38_27b_full_projection(name, out_features, in_features):
-    """Compare every BF16 weight, scale, and zero on model-scale projections."""
+    """Compare every BF16 output and code with nonzero Hessian corrections."""
     del name
     group_size, bits = 128, 4
     rng = np.random.default_rng(7700 + out_features + in_features)
@@ -208,32 +243,25 @@ def test_foem_qwen38_27b_full_projection(name, out_features, in_features):
     weight = mx.array(source).astype(mx.bfloat16)
     mx.eval(weight)
     source = np.asarray(weight.astype(mx.float32))
-    oracle = torch.from_numpy(source).reshape(out_features, -1, group_size)
-    minimum = torch.minimum(oracle.amin(dim=-1), torch.zeros((out_features, in_features // group_size)))
-    maximum = torch.maximum(oracle.amax(dim=-1), torch.zeros_like(minimum))
-    maximum = torch.maximum(minimum.abs(), maximum)
-    minimum = torch.where(minimum < 0, -maximum, minimum)
-    empty = (minimum == 0) & (maximum == 0)
-    minimum = torch.where(empty, -1, minimum)
-    maximum = torch.where(empty, 1, maximum)
-    scales = (maximum - minimum) / 15
-    zeros = torch.full_like(scales, 8)
-    codes = (torch.round(oracle / scales[..., None]) + zeros[..., None]).clamp(0, 15)
-    expected = scales[..., None] * (codes - zeros[..., None])
+    factor = np.eye(in_features, dtype=np.float32)
+    np.fill_diagonal(factor[:, 1:], 0.05)
+    expected = _torch_foem_oracle(source, factor, bits, group_size, 0.2, True, return_ties=True)
     actual = foem_quantize_weight_mlx(
-        weight, mx.eye(in_features), bits=bits, group_size=group_size,
+        weight, mx.array(factor), bits=bits, group_size=group_size,
         beta=0.2, sym=True,
     )
-    np.testing.assert_allclose(
-        np.asarray(actual[0]), expected.reshape(out_features, in_features).numpy(),
-        rtol=1e-6, atol=1e-6,
-    )
-    np.testing.assert_allclose(np.asarray(actual[1]), scales.numpy(), rtol=1e-6, atol=1e-6)
-    np.testing.assert_array_equal(np.asarray(actual[2]), zeros.numpy())
-    np.testing.assert_array_equal(
-        _codes_from_dequantized(tuple(np.asarray(value) for value in actual), group_size),
-        codes.numpy().astype(np.uint8),
-    )
+    output = np.asarray(actual[0])
+    ties = expected[3]
+    np.testing.assert_allclose(output[~ties], expected[0][~ties], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(actual[1]), expected[1], rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(np.asarray(actual[2]), expected[2])
+    actual_codes = _codes_from_dequantized(tuple(np.asarray(value) for value in actual), group_size).reshape(output.shape)
+    expected_codes = _codes_from_dequantized(expected[:3], group_size).reshape(output.shape)
+    np.testing.assert_array_equal(actual_codes[~ties], expected_codes[~ties])
+    for row, column in np.argwhere(actual_codes != expected_codes):
+        assert ties[row, column]
+        assert abs(int(actual_codes[row, column]) - int(expected_codes[row, column])) == 1
+        assert _exact_banded_foem_tie_margin(source[row], column) < Decimal("1e-12")
 
 
 def test_foem_rejects_invalid_inputs():
