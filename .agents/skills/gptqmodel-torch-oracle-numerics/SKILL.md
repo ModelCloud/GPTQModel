@@ -70,6 +70,19 @@ report per-shape timings and the aggregation method. Keep small boundary tests
 in addition to this model-scale matrix. If a projection or dtype cannot run,
 name the specific limitation and cover the closest supported configuration.
 
+For every MLX inference kernel, test FP16 and BF16 activations separately.
+Assert `output.dtype == input.dtype` for each supported activation dtype and
+compare both outputs against an independent Torch oracle. Keep the FP32
+arithmetic comparison separate from the visible-output comparison. Also compare
+the visible output with the Torch oracle rounded to the same dtype, so kernel
+error can be distinguished from mandatory output rounding. Report both error
+measurements; keep `rtol=atol=2e-3` or tighter and do not hide raw-oracle drift
+caused by low-precision output rounding.
+
+Cover each execution path used by the kernel, including native and dense
+fallback paths when both exist. If FP16 or BF16 is unsupported, test its
+explicit rejection and document the limitation instead of omitting that dtype.
+
 If an optimized path exceeds a limit, investigate the numerical cause before
 changing it. Fix genuine arithmetic or format errors and rerun the A/B tests.
 Record unresolved mismatches as merge blockers; retain a faster accurate path
