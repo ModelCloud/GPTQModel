@@ -188,7 +188,8 @@ def _gguf_q6_k_kernel():
                 float maximum = 0.0f;
                 for (uint k = 0; k < 16; ++k) {
                     maximum = metal::max(maximum,
-                        metal::abs(weights[block * 256 + lane * 16 + k]));
+                        metal::abs(float(
+                            weights[block * 256 + lane * 16 + k])));
                 }
                 scale = maximum / 31.0f;
                 scales[lane] = scale;
@@ -218,7 +219,7 @@ def _gguf_q6_k_kernel():
                     float step = base * float(scale_codes[group]);
                     int code = step > 0.0f
                         ? metal::clamp(int(metal::rint(
-                            weights[block * 256 + index] / step)), -32, 31)
+                            float(weights[block * 256 + index]) / step)), -32, 31)
                         : 0;
                     raw[value_lane] = uint(code + 32);
                 }
@@ -768,7 +769,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     )
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
-        or normalized in ("Q2_0", "Q4_0", "MXFP4", "Q8_0")
+        or normalized in ("Q2_0", "Q4_0", "Q6_K", "MXFP4", "Q8_0")
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
