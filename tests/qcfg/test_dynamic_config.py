@@ -3,7 +3,9 @@
 
 import gc
 import pickle
+import threading
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -232,6 +234,99 @@ def test_active_configs_have_independent_cache_capacity_and_lifetime():
     assert cache_ref() is None
 
 
+def test_three_configs_match_concurrently():
+    configs = [
+        QuantizeConfig(dynamic={rf"+:^model_{index}\.module_\d+$": {"bits": index + 2}})
+        for index in range(3)
+    ]
+    for index, cfg in enumerate(configs):
+        assert cfg.dynamic_get(f"model_{index}.module_0", "bits") == index + 2
+
+    entered_match = threading.Barrier(3)
+    original_match = pcre.Pattern.match
+
+    def concurrent_match(pattern, name):
+        if name.endswith("module_1"):
+            entered_match.wait(timeout=5)
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", concurrent_match):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(
+                lambda index: configs[index].dynamic_get(f"model_{index}.module_1", "bits"),
+                range(3),
+            ))
+    assert results == [2, 3, 4]
+
+
+def test_dynamic_edit_waits_for_inflight_lookup():
+    cfg = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 2}})
+    entered_match = threading.Event()
+    continue_match = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    original_match = pcre.Pattern.match
+
+    def paused_match(pattern, name):
+        entered_match.set()
+        assert continue_match.wait(timeout=5)
+        return original_match(pattern, name)
+
+    def edit():
+        writer_started.set()
+        cfg.dynamic[r"+:^module\.\d+$"]["bits"] = 3
+        writer_finished.set()
+
+    with patch.object(pcre.Pattern, "match", paused_match):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            lookup = pool.submit(cfg.dynamic_get, "module.1", "bits")
+            assert entered_match.wait(timeout=5)
+            writer = pool.submit(edit)
+            assert writer_started.wait(timeout=5)
+            assert not writer_finished.wait(timeout=0.05)
+            continue_match.set()
+            assert lookup.result(timeout=5) == 2
+            writer.result(timeout=5)
+    assert cfg.dynamic_get("module.1", "bits") == 3
+
+
+def test_shared_config_reserves_capacity_for_live_models_only():
+    class FakeModel:
+        def __init__(self, prefix):
+            self.prefix = prefix
+
+        def named_modules(self, remove_duplicate=False):
+            yield "", self
+            for index in range(12_000):
+                yield f"{self.prefix}.module.{index}", self
+
+    cfg = QuantizeConfig(dynamic={r"+:^model_[ab]\.module\.\d+$": {"bits": 2}})
+    model_a, model_b = FakeModel("model_a"), FakeModel("model_b")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capacities = list(pool.map(
+            lambda model: configure_dynamic_override_cache_for_model(model, cfg),
+            (model_a, model_b),
+        ))
+    assert sorted(capacities) == [16384, 32768]
+    assert configure_dynamic_override_cache_for_model(model_a, cfg) == 32768
+
+    for _ in range(2):
+        for index in range(12_000):
+            assert cfg.dynamic_get(f"model_a.module.{index}", "bits") == 2
+            assert cfg.dynamic_get(f"model_b.module.{index}", "bits") == 2
+    stats = dynamic_override_cache_stats(cfg.dynamic)
+    assert (stats["hits"], stats["misses"], stats["evictions"]) == (24_000, 24_000, 0)
+
+    model_b_ref = weakref.ref(model_b)
+    del model_b
+    gc.collect()
+    assert model_b_ref() is None
+    assert dynamic_override_cache_stats(cfg.dynamic)["maxsize"] == 16384
+    del model_a
+    gc.collect()
+    assert dynamic_override_cache_stats(cfg.dynamic)["maxsize"] == 8192
+
+
 def test_standalone_dynamic_lookup_keeps_bounded_global_fallback():
     dynamic = {r"+:^module\.\d+$": {"bits": 2}}
     for index in range(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE + 32):
@@ -452,6 +547,16 @@ def test_standalone_tracked_list_nested_edits_touch_its_root():
     restored[0]["tag"] = "restored"
     assert tracked._mutation_version == 1
     assert restored._mutation_version == 1
+
+
+def test_tracked_list_in_place_operations_advance_mutation_version():
+    tracked = _TrackedList([{"tag": "old"}])
+    tracked += [{"tag": "new"}]
+    assert tracked._mutation_version == 1
+    tracked *= 2
+    assert tracked._mutation_version == 2
+    tracked[1]["tag"] = "changed"
+    assert tracked._mutation_version == 3
 
 
 def test_dynamic_caches_are_bounded():

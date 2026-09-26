@@ -1602,6 +1602,7 @@ class _TrackedDict(dict):
         self._root = _root if _root is not None else self
         if self._root is self:
             self._mutation_version = 0
+            self._dynamic_lock = threading.RLock()
         if args or kwargs:
             source = dict(*args, **kwargs)
             for key, value in source.items():
@@ -1618,54 +1619,63 @@ class _TrackedDict(dict):
     __hash__ = None
 
     def __setitem__(self, key, value):
-        dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
-        self._touch()
-
-    def __delitem__(self, key):
-        dict.__delitem__(self, key)
-        self._touch()
-
-    def clear(self):
-        if self:
-            dict.clear(self)
+        with self._root._dynamic_lock:
+            dict.__setitem__(self, key, _track_dynamic_value(value, self._root))
             self._touch()
 
+    def __delitem__(self, key):
+        with self._root._dynamic_lock:
+            dict.__delitem__(self, key)
+            self._touch()
+
+    def clear(self):
+        with self._root._dynamic_lock:
+            if self:
+                dict.clear(self)
+                self._touch()
+
     def pop(self, key, *args):
-        value = dict.pop(self, key, *args)
-        self._touch()
-        return value
+        with self._root._dynamic_lock:
+            value = dict.pop(self, key, *args)
+            self._touch()
+            return value
 
     def popitem(self):
-        value = dict.popitem(self)
-        self._touch()
-        return value
+        with self._root._dynamic_lock:
+            value = dict.popitem(self)
+            self._touch()
+            return value
 
     def setdefault(self, key, default=None):
-        if key in self:
+        with self._root._dynamic_lock:
+            if key in self:
+                return self[key]
+            self[key] = default
             return self[key]
-        self[key] = default
-        return self[key]
 
     def update(self, *args, **kwargs):
-        source = dict(*args, **kwargs)
-        for key, value in source.items():
-            self[key] = value
+        with self._root._dynamic_lock:
+            source = dict(*args, **kwargs)
+            for key, value in source.items():
+                self[key] = value
 
     def __ior__(self, other):
         self.update(other)
         return self
 
     def __deepcopy__(self, memo):
-        payload = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
-        result = _track_dynamic_value(payload, None)
-        memo[id(self)] = result
-        return result
+        with self._root._dynamic_lock:
+            payload = {copy.deepcopy(key, memo): copy.deepcopy(value, memo) for key, value in self.items()}
+            result = _track_dynamic_value(payload, None)
+            memo[id(self)] = result
+            return result
 
     def __reduce__(self):
         # Default dict-subclass unpickling inserts items before restoring
         # ``_root``, so __setitem__ would try to touch a missing root. Rebuild
         # the complete tracked subtree from plain containers instead.
-        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+        with self._root._dynamic_lock:
+            return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
 
 
 class _TrackedList(list):
@@ -1676,6 +1686,7 @@ class _TrackedList(list):
         if self._root is None:
             self._root = self
             self._mutation_version = 0
+            self._dynamic_lock = threading.RLock()
         list.__init__(self, (_track_dynamic_value(value, self._root) for value in iterable))
 
     def _touch(self):
@@ -1690,58 +1701,80 @@ class _TrackedList(list):
         return list.__ne__(self, other)
 
     def __setitem__(self, index, value):
-        if isinstance(index, slice):
-            value = [_track_dynamic_value(item, self._root) for item in value]
-        else:
-            value = _track_dynamic_value(value, self._root)
-        list.__setitem__(self, index, value)
-        self._touch()
-
-    def __delitem__(self, index):
-        list.__delitem__(self, index)
-        self._touch()
-
-    def append(self, value):
-        list.append(self, _track_dynamic_value(value, self._root))
-        self._touch()
-
-    def extend(self, values):
-        list.extend(self, (_track_dynamic_value(value, self._root) for value in values))
-        self._touch()
-
-    def insert(self, index, value):
-        list.insert(self, index, _track_dynamic_value(value, self._root))
-        self._touch()
-
-    def pop(self, index=-1):
-        value = list.pop(self, index)
-        self._touch()
-        return value
-
-    def remove(self, value):
-        list.remove(self, value)
-        self._touch()
-
-    def clear(self):
-        if self:
-            list.clear(self)
+        with self._root._dynamic_lock:
+            if isinstance(index, slice):
+                value = [_track_dynamic_value(item, self._root) for item in value]
+            else:
+                value = _track_dynamic_value(value, self._root)
+            list.__setitem__(self, index, value)
             self._touch()
 
+    def __delitem__(self, index):
+        with self._root._dynamic_lock:
+            list.__delitem__(self, index)
+            self._touch()
+
+    def append(self, value):
+        with self._root._dynamic_lock:
+            list.append(self, _track_dynamic_value(value, self._root))
+            self._touch()
+
+    def extend(self, values):
+        with self._root._dynamic_lock:
+            list.extend(self, (_track_dynamic_value(value, self._root) for value in values))
+            self._touch()
+
+    def __iadd__(self, values):
+        self.extend(values)
+        return self
+
+    def __imul__(self, count):
+        with self._root._dynamic_lock:
+            list.__imul__(self, count)
+            self._touch()
+            return self
+
+    def insert(self, index, value):
+        with self._root._dynamic_lock:
+            list.insert(self, index, _track_dynamic_value(value, self._root))
+            self._touch()
+
+    def pop(self, index=-1):
+        with self._root._dynamic_lock:
+            value = list.pop(self, index)
+            self._touch()
+            return value
+
+    def remove(self, value):
+        with self._root._dynamic_lock:
+            list.remove(self, value)
+            self._touch()
+
+    def clear(self):
+        with self._root._dynamic_lock:
+            if self:
+                list.clear(self)
+                self._touch()
+
     def reverse(self):
-        list.reverse(self)
-        self._touch()
+        with self._root._dynamic_lock:
+            list.reverse(self)
+            self._touch()
 
     def sort(self, *args, **kwargs):
-        list.sort(self, *args, **kwargs)
-        self._touch()
+        with self._root._dynamic_lock:
+            list.sort(self, *args, **kwargs)
+            self._touch()
 
     def __deepcopy__(self, memo):
-        result = _track_dynamic_value([copy.deepcopy(value, memo) for value in self], None)
-        memo[id(self)] = result
-        return result
+        with self._root._dynamic_lock:
+            result = _track_dynamic_value([copy.deepcopy(value, memo) for value in self], None)
+            memo[id(self)] = result
+            return result
 
     def __reduce__(self):
-        return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
+        with self._root._dynamic_lock:
+            return (_track_dynamic_value, (_untrack_dynamic_value(self), None))
 
 
 def _untrack_dynamic_value(value):
@@ -1788,6 +1821,15 @@ class _BoundedLRUCache(OrderedDict):
         if capacity < 1:
             raise ValueError("cache capacity must be positive")
         self.maxsize = max(self.maxsize, int(capacity))
+
+    def resize(self, capacity: int) -> None:
+        """Release entries beyond a departed model's reservation."""
+        if capacity < 1:
+            raise ValueError("cache capacity must be positive")
+        self.maxsize = int(capacity)
+        while len(self) > self.maxsize:
+            self.popitem(last=False)
+            self.evictions += 1
 
     def __getitem__(self, key):
         value = super().__getitem__(key)
@@ -1836,7 +1878,29 @@ _DYNAMIC_EXACT_LOOKUP_CACHE = _BoundedLRUCache(_DYNAMIC_EXACT_LOOKUP_CACHE_MAXSI
 _DYNAMIC_ALL_EXACT_CACHE = _BoundedLRUCache(_DYNAMIC_ALL_EXACT_CACHE_MAXSIZE)
 _DYNAMIC_REGEX_PATTERN_CACHE = _BoundedLRUCache(_DYNAMIC_REGEX_PATTERN_CACHE_MAXSIZE)
 _DYNAMIC_IDENTITY_CACHE = _BoundedLRUCache(_DYNAMIC_IDENTITY_CACHE_MAXSIZE)
+# Always acquire a tracked root's lock before this shared-plan lock. Matching
+# runs after the shared lock is released, so separate configs can match in parallel.
 _DYNAMIC_CACHE_LOCK = threading.RLock()
+
+
+def _dynamic_lock_for(dynamic):
+    """Serialize one tracked configuration, or the standalone fallback."""
+    if isinstance(dynamic, _TrackedDict):
+        return dynamic._root._dynamic_lock
+    return _DYNAMIC_CACHE_LOCK
+
+
+def _dynamic_capacity_for(module_count: int) -> int:
+    target = max(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE, (module_count * 5 + 3) // 4)
+    return 1 << (target - 1).bit_length()
+
+
+def _reserved_dynamic_capacity(root) -> int:
+    module_count = sum(count for _, count in root._dynamic_model_working_sets.values())
+    return max(
+        getattr(root, "_dynamic_manual_capacity", _DYNAMIC_OVERRIDE_CACHE_MAXSIZE),
+        _dynamic_capacity_for(module_count),
+    )
 
 
 def configure_dynamic_override_cache(*, module_count: int,
@@ -1846,10 +1910,14 @@ def configure_dynamic_override_cache(*, module_count: int,
     """Reserve 25% headroom for a tracked config or standalone fallback."""
     if module_count < 0:
         raise ValueError("module_count must be non-negative")
-    target = max(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE, (module_count * 5 + 3) // 4)
-    capacity = 1 << (target - 1).bit_length()
-    with _DYNAMIC_CACHE_LOCK:
+    capacity = _dynamic_capacity_for(module_count)
+    with _dynamic_lock_for(dynamic):
         cache = _dynamic_override_cache_for(dynamic)
+        if isinstance(dynamic, _TrackedDict):
+            root = dynamic._root
+            root._dynamic_manual_capacity = max(
+                getattr(root, "_dynamic_manual_capacity", _DYNAMIC_OVERRIDE_CACHE_MAXSIZE), capacity,
+            )
         cache.ensure_capacity(capacity)
         capacity = cache.maxsize
     log.debug(
@@ -1864,12 +1932,39 @@ def _dynamic_override_cache_for(dynamic) -> _BoundedLRUCache:
     if not isinstance(dynamic, _TrackedDict):
         return _DYNAMIC_OVERRIDE_CACHE
     root = dynamic._root
-    with _DYNAMIC_CACHE_LOCK:
+    with root._dynamic_lock:
         cache = getattr(root, "_dynamic_override_cache", None)
         if cache is None:
             cache = _BoundedLRUCache(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE)
             root._dynamic_override_cache = cache
+        reservations = getattr(root, "_dynamic_model_working_sets", None)
+        if reservations:
+            # Prune under the root lock on access. A weakref callback acquiring
+            # this lock could deadlock if GC ran while another lock was held.
+            expired = [model_id for model_id, (model_ref, _) in reservations.items() if model_ref() is None]
+            if expired:
+                for model_id in expired:
+                    del reservations[model_id]
+                cache.resize(_reserved_dynamic_capacity(root))
         return cache
+
+
+def _reserve_dynamic_model_working_set(dynamic, model, module_count: int) -> int:
+    """Cover all live models sharing one config; prune dead model reservations."""
+    root = dynamic._root
+    with root._dynamic_lock:
+        cache = _dynamic_override_cache_for(dynamic)
+        if not hasattr(root, "_dynamic_model_working_sets"):
+            root._dynamic_model_working_sets = {}
+        model_id = id(model)
+        try:
+            model_ref = weakref.ref(model)
+        except TypeError:
+            cache.ensure_capacity(_dynamic_capacity_for(module_count))
+            return cache.maxsize
+        root._dynamic_model_working_sets[model_id] = (model_ref, module_count)
+        cache.resize(_reserved_dynamic_capacity(root))
+        return cache.maxsize
 
 
 def configure_dynamic_override_cache_for_model(
@@ -1897,25 +1992,34 @@ def configure_dynamic_override_cache_for_model(
     }
     logical_count = len(relative_names) * (layer_count + 1)
     working_set = max(physical_count, logical_count)
-    capacity = configure_dynamic_override_cache(
-        module_count=working_set, layer_count=layer_count, dynamic=dynamic,
-    )
+    if isinstance(dynamic, _TrackedDict):
+        capacity = _reserve_dynamic_model_working_set(dynamic, model, working_set)
+        log.debug(
+            "Dynamic cache: modules=%s layers=%s override capacity=%s",
+            working_set, layer_count, capacity,
+        )
+    else:
+        capacity = configure_dynamic_override_cache(
+            module_count=working_set, layer_count=layer_count, dynamic=dynamic,
+        )
     log.debug("Dynamic cache: physical modules=%s logical paths=%s", physical_count, logical_count)
-    exact_rules = sum(
-        _extract_literal_regex_pattern(pattern[2:] if pattern.startswith(("-:", "+:")) else pattern)
-        is not None
-        for pattern in quantize_config.dynamic
-    )
+    with _dynamic_lock_for(dynamic):
+        exact_rules = sum(
+            _extract_literal_regex_pattern(pattern[2:] if pattern.startswith(("-:", "+:")) else pattern)
+            is not None
+            for pattern in dynamic
+        )
+        rule_count = len(dynamic)
     log.debug(
         "Dynamic cache: dynamic rules=%s regex rules=%s exact rules=%s",
-        len(quantize_config.dynamic), len(quantize_config.dynamic) - exact_rules, exact_rules,
+        rule_count, rule_count - exact_rules, exact_rules,
     )
     return capacity
 
 
 def dynamic_override_cache_stats(dynamic=None) -> Dict[str, int]:
     """Return counters for one tracked config, or the standalone fallback."""
-    with _DYNAMIC_CACHE_LOCK:
+    with _dynamic_lock_for(dynamic):
         cache = _dynamic_override_cache_for(dynamic)
         return {
             "hits": cache.hits,
@@ -1937,7 +2041,7 @@ def log_dynamic_override_cache_stats(
     evictions = stats["evictions"] - before["evictions"]
     lookups = hits + misses
     hit_rate = 100 * hits / lookups if lookups else 0
-    log.debug("Dynamic cache since start: lookups=%s hits=%s misses=%s evictions=%s "
+    log.debug("Dynamic cache (configuration since snapshot): lookups=%s hits=%s misses=%s evictions=%s "
               "size=%s peak_size=%s capacity=%s hit_rate=%.2f%%",
               lookups, hits, misses, evictions, stats["size"],
               stats["peak_size"], stats["maxsize"], hit_rate)
@@ -1988,17 +2092,17 @@ def _dynamic_fingerprint(dynamic):
 
 def _dynamic_cache_key(dynamic):
     if isinstance(dynamic, _TrackedDict):
-        identity_key = id(dynamic)
-        version = dynamic._root._mutation_version
-        with _DYNAMIC_CACHE_LOCK:
-            record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
-            if record is not None and record[0]() is dynamic and record[1] == version:
-                # This cache only avoids re-fingerprinting an unchanged object;
-                # identity and version checks keep it from affecting correctness.
-                return record[2]
-            fingerprint = _dynamic_fingerprint(dynamic)
-            _DYNAMIC_IDENTITY_CACHE[identity_key] = (weakref.ref(dynamic), version, fingerprint)
-            return fingerprint
+        with dynamic._root._dynamic_lock:
+            identity_key = id(dynamic)
+            version = dynamic._root._mutation_version
+            with _DYNAMIC_CACHE_LOCK:
+                record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
+                if record is not None and record[0]() is dynamic and record[1] == version:
+                    # Identity and version checks keep this acceleration safe.
+                    return record[2]
+                fingerprint = _dynamic_fingerprint(dynamic)
+                _DYNAMIC_IDENTITY_CACHE[identity_key] = (weakref.ref(dynamic), version, fingerprint)
+                return fingerprint
     # Untracked mappings are still correct; they simply pay fingerprint cost
     # because arbitrary in-place mutations cannot expose a safe O(1) token.
     return _dynamic_fingerprint(dynamic)
@@ -2038,48 +2142,51 @@ def _extract_literal_regex_pattern(raw: str) -> Optional[str]:
     return "".join(out)
 
 
-def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]) -> List[Tuple[bool, Any, Dict[str, Any], Optional[str], int]]:
-    """Return compiled patterns keyed by the dynamic mapping's content."""
+def _get_dynamic_patterns(dynamic: Dict[str, Dict[str, Any]]):
+    """Return a stable compiled matching plan for this dynamic mapping."""
 
-    cache_key = _dynamic_cache_key(dynamic)
-    with _DYNAMIC_CACHE_LOCK:
-        patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
-        if patterns is not None:
-            return patterns
+    with _dynamic_lock_for(dynamic):
+        cache_key = _dynamic_cache_key(dynamic)
+        with _DYNAMIC_CACHE_LOCK:
+            patterns = _DYNAMIC_PATTERN_CACHE.get(cache_key)
+            exact_lookup = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key)
+            all_exact = _DYNAMIC_ALL_EXACT_CACHE.get(cache_key)
+            regex_patterns = _DYNAMIC_REGEX_PATTERN_CACHE.get(cache_key)
+            if (patterns is not None and exact_lookup is not None
+                    and all_exact is not None and regex_patterns is not None):
+                return exact_lookup, all_exact, regex_patterns
 
-        patterns = []
-        exact_lookup: Dict[str, Tuple[int, Union[Dict[str, Any], bool]]] = {}
-        regex_patterns: List[Tuple[int, bool, Any, Dict[str, Any]]] = []
-        all_exact = True
-        if dynamic is not None:
-            for index, (pattern, overrides) in enumerate(dynamic.items()):
-                # Cache entries must own their override snapshots.  Otherwise
-                # mutating a tracked mapping would also mutate an old
-                # fingerprint's compiled-plan payload.
-                override_snapshot = copy.deepcopy(dict(overrides))
-                is_negative = pattern.startswith("-:")
-                raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
-                exact_literal = _extract_literal_regex_pattern(raw)
-                if exact_literal is None:
-                    all_exact = False
-                    try:
-                        compiled = pcre.compile(raw)
-                    except Exception as exc:
-                        raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
-                    regex_patterns.append((index, is_negative, compiled, override_snapshot))
-                else:
-                    compiled = None
-                    if exact_literal not in exact_lookup:
-                        exact_lookup[exact_literal] = (
-                            index,
-                            False if is_negative else override_snapshot,
-                        )
-                patterns.append((is_negative, compiled, override_snapshot, exact_literal, index))
-        _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
-        _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
-        _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
-        _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
-        return patterns
+            patterns = []
+            exact_lookup = {}
+            regex_patterns = []
+            all_exact = True
+            if dynamic is not None:
+                for index, (pattern, overrides) in enumerate(dynamic.items()):
+                    # Cache entries own snapshots, so later edits cannot change them.
+                    override_snapshot = copy.deepcopy(dict(overrides))
+                    is_negative = pattern.startswith("-:")
+                    raw = pattern[2:] if pattern.startswith(("-:", "+:")) else pattern
+                    exact_literal = _extract_literal_regex_pattern(raw)
+                    if exact_literal is None:
+                        all_exact = False
+                        try:
+                            compiled = pcre.compile(raw)
+                        except Exception as exc:
+                            raise ValueError(f"QuantizeConfig: invalid dynamic pattern `{pattern}`") from exc
+                        regex_patterns.append((index, is_negative, compiled, override_snapshot))
+                    else:
+                        compiled = None
+                        if exact_literal not in exact_lookup:
+                            exact_lookup[exact_literal] = (
+                                index,
+                                False if is_negative else override_snapshot,
+                            )
+                    patterns.append((is_negative, compiled, override_snapshot, exact_literal, index))
+            _DYNAMIC_PATTERN_CACHE[cache_key] = patterns
+            _DYNAMIC_EXACT_LOOKUP_CACHE[cache_key] = exact_lookup
+            _DYNAMIC_ALL_EXACT_CACHE[cache_key] = all_exact
+            _DYNAMIC_REGEX_PATTERN_CACHE[cache_key] = regex_patterns
+            return exact_lookup, all_exact, regex_patterns
 
 def _resolve_dynamic_override(
     dynamic: Dict[str, Dict[str, Any]],
@@ -2098,31 +2205,29 @@ def _resolve_dynamic_override(
     if dynamic is None:
         return None
 
-    cache_key = _dynamic_cache_key(dynamic)
-    override_cache = _dynamic_override_cache_for(dynamic)
-    lookup_key = (cache_key, module_name)
-    with _DYNAMIC_CACHE_LOCK:
+    with _dynamic_lock_for(dynamic):
+        cache_key = _dynamic_cache_key(dynamic)
+        override_cache = _dynamic_override_cache_for(dynamic)
+        lookup_key = (cache_key, module_name)
         cached = override_cache.get(lookup_key, _DYNAMIC_NO_MATCH)
         if cached is not _DYNAMIC_NO_MATCH:
             return clone_result(cached)
 
-    _get_dynamic_patterns(dynamic)
-
-    with _DYNAMIC_CACHE_LOCK:
+        exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
         # Fast path: every pattern is an exact literal module name.
-        if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
-            exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
+        if all_exact:
+            exact_entry = exact_lookup.get(module_name)
             matched = exact_entry[1] if exact_entry is not None else None
             override_cache[lookup_key] = matched
             return clone_result(matched)
 
         # Mixed fallback: find the earliest matching pattern among exact
         # literals (O(1) lookup) and ordered regex patterns.
-        exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
+        exact_entry = exact_lookup.get(module_name)
         best_index = exact_entry[0] if exact_entry is not None else None
         matched = exact_entry[1] if exact_entry is not None else None
 
-        for index, is_negative, compiled, overrides in _DYNAMIC_REGEX_PATTERN_CACHE.get(cache_key, []):
+        for index, is_negative, compiled, overrides in regex_patterns:
             if best_index is not None and index > best_index:
                 break
             if compiled.match(module_name):
