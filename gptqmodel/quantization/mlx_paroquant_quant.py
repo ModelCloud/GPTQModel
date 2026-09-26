@@ -6,10 +6,15 @@
 from functools import lru_cache
 
 
-@lru_cache(maxsize=1)
-def _paroquant_quantize_kernel():
+@lru_cache(maxsize=3)
+def _paroquant_quantize_kernel(output_type="float32"):
     import mlx.core as mx
 
+    output_cast = {
+        "float32": "float",
+        "float16": "half",
+        "bfloat16": "bfloat16_t",
+    }[output_type]
     return mx.fast.metal_kernel(
         name="gptqmodel_paroquant_pseudo_quantize",
         input_names=["weights", "scales", "zero_points"],
@@ -30,8 +35,8 @@ def _paroquant_quantize_kernel():
                 zero = metal::clamp(metal::rint(-zero_points[group]), qmin, qmax);
             }
             float code = metal::clamp(metal::rint(value) + zero, qmin, qmax);
-            dequantized[index] = (code - zero) * scale;
-        """,
+            dequantized[index] = OUTPUT_CAST((code - zero) * scale);
+        """.replace("OUTPUT_CAST", output_cast),
     )
 
 
@@ -107,7 +112,11 @@ def paroquant_quantize_weight_mlx(
     if not bool(valid.item()):
         raise ValueError("weight and quantization parameters must be finite")
 
-    kernel = _paroquant_quantize_kernel()
+    output_type = {
+        mx.float16: "float16",
+        mx.bfloat16: "bfloat16",
+    }.get(weight.dtype, "float32")
+    kernel = _paroquant_quantize_kernel(output_type)
     result = kernel(
         inputs=[
             mx.contiguous(weight.reshape(-1)),
@@ -124,9 +133,8 @@ def paroquant_quantize_weight_mlx(
         grid=(weight.size, 1, 1),
         threadgroup=(min(weight.size, 256), 1, 1),
         output_shapes=[weight.shape],
-        output_dtypes=[mx.float32],
+        output_dtypes=[weight.dtype],
     )[0]
-    result = result.astype(weight.dtype)
     mx.eval(result)
     return result
 
