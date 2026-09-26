@@ -767,7 +767,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
     direct_input = (
-        normalized.startswith(("Q1_0", "Q4_K"))
+        normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
         or normalized in ("Q2_0", "Q4_0", "MXFP4", "Q8_0")
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
