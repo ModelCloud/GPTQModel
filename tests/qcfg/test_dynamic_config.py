@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pcre
 import pytest
+import torch.nn as nn
 
 from gptqmodel.quantization.config import (
     _DYNAMIC_ALL_EXACT_CACHE,
@@ -21,6 +22,9 @@ from gptqmodel.quantization.config import (
     _dynamic_value_fingerprint,
     _TrackedDict,
     _TrackedList,
+    configure_dynamic_override_cache,
+    configure_dynamic_override_cache_for_model,
+    dynamic_override_cache_stats,
 )
 
 
@@ -36,9 +40,97 @@ def _clear_dynamic_caches():
 
 @pytest.fixture(autouse=True)
 def clear_caches():
+    original_capacity = _DYNAMIC_OVERRIDE_CACHE.maxsize
     _clear_dynamic_caches()
+    _DYNAMIC_OVERRIDE_CACHE.maxsize = _DYNAMIC_OVERRIDE_CACHE_MAXSIZE
     yield
     _clear_dynamic_caches()
+    _DYNAMIC_OVERRIDE_CACHE.maxsize = original_capacity
+
+
+def test_dynamic_cache_default_and_grow_only_sizing():
+    assert _DYNAMIC_OVERRIDE_CACHE.maxsize == 8192
+    assert configure_dynamic_override_cache(module_count=3_000) == 8192
+    assert configure_dynamic_override_cache(module_count=8_000) == 16384
+    assert configure_dynamic_override_cache(module_count=50_000, layer_count=64, expert_count=256) == 65536
+    assert configure_dynamic_override_cache(module_count=1_000) == 65536
+
+
+def test_dynamic_cache_keeps_negative_and_no_match_results():
+    cfg = QuantizeConfig(dynamic={r"-:^model\.skip$": {}, r"+:^model\.hit$": {"bits": 2}})
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        assert cfg.dynamic_get("model.skip") is False
+        assert cfg.dynamic_get("model.miss") is None
+        first_pass = match_calls
+        assert cfg.dynamic_get("model.skip") is False
+        assert cfg.dynamic_get("model.miss") is None
+        assert match_calls == first_pass
+    assert dynamic_override_cache_stats()["hits"] == 2
+    assert dynamic_override_cache_stats()["misses"] == 2
+
+
+def test_dynamic_cache_second_pass_avoids_regex_for_120_layer_512_expert_model():
+    class FakeMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([
+                nn.ModuleDict({"moe": nn.ModuleDict({"experts": nn.ModuleList([
+                    nn.Module() for _ in range(512)
+                ])})})
+                for _ in range(120)
+            ])
+
+    model = FakeMoEModel()
+    cfg = QuantizeConfig(dynamic={r"+:^layers\.\d+\.moe\.experts\.\d+$": {"bits": 2}})
+    capacity = configure_dynamic_override_cache_for_model(model, cfg)
+    names = [name for name, _ in model.named_modules(remove_duplicate=False) if name]
+    expert_names = [name for name in names if ".experts." in name]
+    assert len(expert_names) == 120 * 512
+    assert capacity == 131072
+    assert capacity >= len(names)
+
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == (2 if ".experts." in name else cfg.bits)
+        first_pass_calls = match_calls
+        first_pass_stats = dynamic_override_cache_stats()
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == (2 if ".experts." in name else cfg.bits)
+
+    stats = dynamic_override_cache_stats()
+    assert first_pass_calls == len(names)
+    assert match_calls == first_pass_calls
+    assert first_pass_stats["misses"] == len(names)
+    assert stats["misses"] == len(names)
+    assert stats["hits"] == len(names)
+    assert stats["evictions"] == 0
+    assert stats["peak_size"] == len(names)
+
+
+def test_dynamic_cache_isolated_between_configs_for_same_module():
+    module_name = "model.layers.0.mlp.proj"
+    cfg_a = QuantizeConfig(dynamic={r"+:^model\.layers\.\d+\.mlp\.proj$": {"bits": 2}})
+    cfg_b = QuantizeConfig(dynamic={r"+:^model\.layers\.\d+\.mlp\.proj$": {"bits": 3}})
+    assert cfg_a.dynamic_get(module_name, "bits") == 2
+    assert cfg_b.dynamic_get(module_name, "bits") == 3
+    assert cfg_a.dynamic_get(module_name, "bits") == 2
+    assert dynamic_override_cache_stats()["size"] == 2
 
 
 def _exact_pattern(module_name: str) -> str:

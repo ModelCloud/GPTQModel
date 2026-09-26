@@ -54,7 +54,9 @@ from ..quantization.config import (
     QuantizeEmbed,
     QuantizeEmbedConfig,
     VramStrategy,
+    configure_dynamic_override_cache_for_model,
     dynamic_get,
+    log_dynamic_override_cache_stats,
     resolve_quant_format,
 )
 from ..quantization.dtype import (
@@ -498,6 +500,7 @@ class BaseQModel(nn.Module):
         if is_mimo_mixed_source(getattr(model, "config", None)):
             self._source_model_config = copy.deepcopy(model.config)
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
+        configure_dynamic_override_cache_for_model(self.model, quantize_config)
         self.turtle_model = turtle_model
         # Captures forward-role auto-decoder choices for regression tests and debug logs.
         self.auto_module_decoder_events: List[Dict[str, Any]] = []
@@ -1401,6 +1404,8 @@ class BaseQModel(nn.Module):
             timer.flush()
 
         _setup_rotation_online_had(self.model, self.quantize_config.rotation)
+        if self.quantize_config.dynamic:
+            log_dynamic_override_cache_stats()
         return result
 
     @staticmethod

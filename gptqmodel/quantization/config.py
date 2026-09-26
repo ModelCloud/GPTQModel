@@ -1772,14 +1772,25 @@ def _track_dynamic_value(value, root):
 
 
 class _BoundedLRUCache(OrderedDict):
-    """Small bounded LRU map; callers serialize access with the cache lock."""
+    """Bounded LRU map; callers serialize access with the cache lock."""
 
     def __init__(self, maxsize: int):
         super().__init__()
         self.maxsize = int(maxsize)
+        self.hits = 0
+        self.misses = 0
+        self.evictions = 0
+        self.peak_size = 0
+
+    def ensure_capacity(self, capacity: int) -> None:
+        """Grow without evicting entries needed by another loaded model."""
+        if capacity < 1:
+            raise ValueError("cache capacity must be positive")
+        self.maxsize = max(self.maxsize, int(capacity))
 
     def __getitem__(self, key):
         value = super().__getitem__(key)
+        self.hits += 1
         super().__delitem__(key)
         super().__setitem__(key, value)
         return value
@@ -1788,10 +1799,12 @@ class _BoundedLRUCache(OrderedDict):
         try:
             return self[key]
         except KeyError:
+            self.misses += 1
             return default
 
     def clear(self):
         super().clear()
+        self.hits = self.misses = self.evictions = self.peak_size = 0
         identity_cache = globals().get("_DYNAMIC_IDENTITY_CACHE")
         if identity_cache is not None and self is not identity_cache:
             OrderedDict.clear(identity_cache)
@@ -1802,6 +1815,8 @@ class _BoundedLRUCache(OrderedDict):
         super().__setitem__(key, value)
         while len(self) > self.maxsize:
             self.popitem(last=False)
+            self.evictions += 1
+        self.peak_size = max(self.peak_size, len(self))
 
 
 _DYNAMIC_PATTERN_CACHE_MAXSIZE = 256
@@ -1821,6 +1836,67 @@ _DYNAMIC_ALL_EXACT_CACHE = _BoundedLRUCache(_DYNAMIC_ALL_EXACT_CACHE_MAXSIZE)
 _DYNAMIC_REGEX_PATTERN_CACHE = _BoundedLRUCache(_DYNAMIC_REGEX_PATTERN_CACHE_MAXSIZE)
 _DYNAMIC_IDENTITY_CACHE = _BoundedLRUCache(_DYNAMIC_IDENTITY_CACHE_MAXSIZE)
 _DYNAMIC_CACHE_LOCK = threading.RLock()
+
+
+def configure_dynamic_override_cache(*, module_count: int,
+                                     layer_count: Optional[int] = None,
+                                     expert_count: Optional[int] = None) -> int:
+    """Reserve room for the discovered module working set, with 25% headroom."""
+    if module_count < 0:
+        raise ValueError("module_count must be non-negative")
+    target = max(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE, (module_count * 5 + 3) // 4)
+    capacity = 1 << (target - 1).bit_length()
+    with _DYNAMIC_CACHE_LOCK:
+        _DYNAMIC_OVERRIDE_CACHE.ensure_capacity(capacity)
+        capacity = _DYNAMIC_OVERRIDE_CACHE.maxsize
+    log.debug(
+        "Dynamic cache: modules=%s layers=%s experts/layer=%s override capacity=%s",
+        module_count, layer_count, expert_count, capacity,
+    )
+    return capacity
+
+
+def configure_dynamic_override_cache_for_model(model, quantize_config) -> int:
+    """Size from actual named paths once a model shell exists."""
+    if not getattr(quantize_config, "dynamic", None) or not hasattr(model, "named_modules"):
+        return _DYNAMIC_OVERRIDE_CACHE.maxsize
+    # Include aliased paths: callers address modules by name, not by identity.
+    module_count = sum(bool(name) for name, _ in model.named_modules(remove_duplicate=False))
+    capacity = configure_dynamic_override_cache(module_count=module_count)
+    exact_rules = sum(
+        _extract_literal_regex_pattern(pattern[2:] if pattern.startswith(("-:", "+:")) else pattern)
+        is not None
+        for pattern in quantize_config.dynamic
+    )
+    log.debug(
+        "Dynamic cache: dynamic rules=%s regex rules=%s exact rules=%s",
+        len(quantize_config.dynamic), len(quantize_config.dynamic) - exact_rules, exact_rules,
+    )
+    return capacity
+
+
+def dynamic_override_cache_stats() -> Dict[str, int]:
+    """Return a stable snapshot of process-wide resolved-result cache counters."""
+    with _DYNAMIC_CACHE_LOCK:
+        cache = _DYNAMIC_OVERRIDE_CACHE
+        return {
+            "hits": cache.hits,
+            "misses": cache.misses,
+            "evictions": cache.evictions,
+            "peak_size": cache.peak_size,
+            "size": len(cache),
+            "maxsize": cache.maxsize,
+        }
+
+
+def log_dynamic_override_cache_stats() -> None:
+    stats = dynamic_override_cache_stats()
+    lookups = stats["hits"] + stats["misses"]
+    hit_rate = 100 * stats["hits"] / lookups if lookups else 0
+    log.debug("Dynamic cache results: lookups=%s hits=%s misses=%s evictions=%s "
+              "peak_size=%s capacity=%s hit_rate=%.2f%%",
+              lookups, stats["hits"], stats["misses"], stats["evictions"],
+              stats["peak_size"], stats["maxsize"], hit_rate)
 
 
 def _dynamic_value_fingerprint(value):

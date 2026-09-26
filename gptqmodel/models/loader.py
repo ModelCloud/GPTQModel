@@ -46,6 +46,8 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
+    configure_dynamic_override_cache_for_model,
+    log_dynamic_override_cache_stats,
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
@@ -1318,6 +1320,9 @@ def ModelLoader(cls):
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
+        if quantize_config.dynamic:
+            log_dynamic_override_cache_stats()
+
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
@@ -1732,6 +1737,7 @@ def ModelLoader(cls):
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
+            configure_dynamic_override_cache_for_model(model, qcfg)
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
@@ -2203,6 +2209,8 @@ def ModelLoader(cls):
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
+        if qcfg.dynamic:
+            log_dynamic_override_cache_stats()
         return instance
 
     cls.from_quantized = from_quantized
