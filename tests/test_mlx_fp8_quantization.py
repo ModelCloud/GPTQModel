@@ -80,6 +80,15 @@ def test_fp8_boundaries_and_one_float32_step(fmt):
 
 
 @pytest.mark.parametrize("fmt", FORMATS)
+def test_fp8_all_finite_codes_roundtrip(fmt):
+    dtype = getattr(torch, fmt)
+    count = 124 if fmt == "float8_e5m2" else 127 if fmt == "float8_e4m3fn" else 128
+    positive = torch.arange(count, dtype=torch.uint8).view(dtype).float()
+    weight = torch.cat((positive, -positive))[None, :].numpy()
+    _compare(weight, fmt, "row")
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
 def test_fp8_all_zero_groups(fmt):
     weight = np.zeros((4, 128), dtype=np.float32)
     weight[0, 0] = -0.0
