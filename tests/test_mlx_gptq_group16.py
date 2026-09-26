@@ -19,7 +19,10 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
-from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear.mlx_gptq import (  # noqa: E402
+    MlxGPTQGroup16Linear,
+    _uses_packed_prefill,
+)
 from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear  # noqa: E402
 from gptqmodel.utils.mlx_packing import _pack_rows  # noqa: E402
 
@@ -67,6 +70,35 @@ def _rounded_oracle(x, reference, output_pattern, layer_bias, dtype):
     return values.to(target).float().numpy(), values.numpy()
 
 
+def _unrounded_output(layer, x):
+    rows = x.size // layer.input_dims
+    output_dims = layer.weight.shape[0]
+    if _uses_packed_prefill(
+        x.dtype, rows, layer.input_dims, output_dims,
+    ):
+        return layer._packed_prefill(
+            x, rows, min(rows, 4), output_dtype=mx.float32,
+        )
+    return layer(x.astype(mx.float32))
+
+
+def _assert_within_one_output_ulp(actual, rounded, dtype):
+    target = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    actual_target = torch.from_numpy(actual).to(target)
+    rounded_target = torch.from_numpy(rounded).to(target)
+    lower = torch.nextafter(
+        rounded_target, torch.full_like(rounded_target, float("-inf")),
+    )
+    upper = torch.nextafter(
+        rounded_target, torch.full_like(rounded_target, float("inf")),
+    )
+    assert torch.all(
+        (actual_target == rounded_target)
+        | (actual_target == lower)
+        | (actual_target == upper)
+    )
+
+
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
 @pytest.mark.parametrize("bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("source_bits", SOURCE_BITS, ids=lambda bits: f"{bits}bit")
@@ -100,7 +132,8 @@ def test_gptq_group16_random_decode_matches_independent_torch_oracle(
     reference += np.repeat(offsets.astype(np.float64), 16, axis=1)
     x = mx.array(rng.normal(0, 0.2, (1, in_features)).astype(np.float32)).astype(dtype)
     actual = layer(x)
-    mx.eval(actual)
+    internal = _unrounded_output(layer, x)
+    mx.eval(actual, internal)
     source = torch.from_numpy(np.asarray(x.astype(mx.float32))).double()
     expected = source @ torch.from_numpy(reference).double().T
     if layer_bias is not None:
@@ -108,9 +141,16 @@ def test_gptq_group16_random_decode_matches_independent_torch_oracle(
     target = torch.float16 if dtype == mx.float16 else torch.bfloat16
     rounded = expected.to(target).float().numpy()
     visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
+    record_property(
+        "max_abs_internal_vs_fp64_torch",
+        float(np.max(np.abs(internal_values - expected.numpy()))),
+    )
     record_property("max_abs_vs_rounded_torch", float(np.max(np.abs(visible - rounded))))
     record_property("max_abs_vs_fp64_torch", float(np.max(np.abs(visible - expected.numpy()))))
     assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, expected.numpy(), rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
 
 
@@ -127,34 +167,142 @@ def test_gptq_group16_qwen38_decode_preserves_dtype_and_accuracy(
     source = (np.sin(positions * 0.013) * 0.08 + np.cos(positions * 0.007) * 0.04)[None]
     x = mx.array(source).astype(dtype)
     actual = layer(x)
-    mx.eval(actual)
+    internal = _unrounded_output(layer, x)
+    mx.eval(actual, internal)
     rounded, raw = _rounded_oracle(x, reference, output_pattern, layer_bias, dtype)
     visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
     record_property("projection", name)
     record_property("source_bits", source_bits)
+    record_property(
+        "max_abs_internal_vs_fp64_torch",
+        float(np.max(np.abs(internal_values - raw))),
+    )
     record_property("max_abs_vs_rounded_torch", float(np.max(np.abs(visible - rounded))))
     record_property("max_abs_vs_fp64_torch", float(np.max(np.abs(visible - raw))))
     assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, raw, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
-    del layer, actual
+    del layer, actual, internal
     gc.collect()
     mx.clear_cache()
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("bias", (False, True), ids=("no_bias", "bias"))
 @pytest.mark.parametrize("source_bits", SOURCE_BITS, ids=lambda bits: f"{bits}bit")
-def test_gptq_group16_prefill_uses_exact_existing_path(source_bits, dtype):
-    candidate, _, _, _ = _group16_fixture(96, 256, source_bits, bias=False)
-    baseline = MlxGroup16Linear(256, 96, bits=candidate.bits)
-    for name in ("weight", "scales_even", "scales_odd", "biases_even", "biases_odd"):
-        setattr(baseline, name, getattr(candidate, name))
-    x = mx.full((3, 256), 0.03125, dtype=dtype)
-    expected, actual = baseline(x), candidate(x)
-    mx.eval(expected, actual)
-    assert actual.dtype == dtype
-    np.testing.assert_array_equal(
-        np.asarray(actual.astype(mx.float32)), np.asarray(expected.astype(mx.float32)),
+@pytest.mark.parametrize("rows", (2, 5, 8, 12, 16), ids=lambda rows: f"rows{rows}")
+def test_gptq_group16_small_prefill_matches_boundary_oracle(
+    rows, source_bits, dtype, bias, record_property,
+):
+    layer, reference, output_pattern, layer_bias = _group16_fixture(
+        96, 256, source_bits, bias=bias,
     )
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    base_tensor = torch.linspace(-0.2, 0.2, 256).to(torch_dtype)
+    upper = torch.nextafter(base_tensor, torch.full_like(base_tensor, float("inf")))
+    base = base_tensor.float().numpy()
+    patterns = [base, upper.float().numpy(), -base]
+    sources = [patterns[row % len(patterns)].copy() for row in range(rows)]
+    sources[0][127] = np.float32(-0.0)
+    sources[0][128] = np.float32(0.0)
+    x = mx.array(np.stack(sources)).astype(dtype)
+    actual = layer._packed_prefill(x, rows, min(rows, 4))
+    internal = layer._packed_prefill(
+        x, rows, min(rows, 4), output_dtype=mx.float32,
+    )
+    mx.eval(actual, internal)
+    rounded, raw = _rounded_oracle(
+        x, reference, output_pattern, layer_bias, dtype,
+    )
+    visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
+    record_property(
+        "max_abs_internal_vs_fp64_torch",
+        float(np.max(np.abs(internal_values - raw))),
+    )
+    record_property(
+        "max_abs_visible_vs_rounded_torch",
+        float(np.max(np.abs(visible - rounded))),
+    )
+    record_property(
+        "max_abs_visible_vs_fp64_torch",
+        float(np.max(np.abs(visible - raw))),
+    )
+    assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, raw, rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("source_bits", SOURCE_BITS, ids=lambda bits: f"{bits}bit")
+@pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
+def test_gptq_group16_qwen38_prefill_matches_independent_torch_oracle(
+    name, out_features, in_features, source_bits, dtype, record_property,
+):
+    layer, reference, output_pattern, layer_bias = _group16_fixture(
+        out_features, in_features, source_bits,
+    )
+    positions = np.arange(in_features, dtype=np.float32)
+    source = np.stack([
+        np.sin(positions * (0.011 + row * 0.0001)) * 0.08
+        + np.cos(positions * (0.007 + row * 0.0001)) * 0.04
+        for row in range(16)
+    ])
+    x = mx.array(source).astype(dtype)
+    actual = layer(x)
+    internal = _unrounded_output(layer, x)
+    baseline = MlxGroup16Linear.__call__(layer, x)
+    mx.eval(actual, internal, baseline)
+    rounded, raw = _rounded_oracle(x, reference, output_pattern, layer_bias, dtype)
+    visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
+    internal_error = float(np.max(np.abs(internal_values - raw)))
+    rounded_error = float(np.max(np.abs(visible - rounded)))
+    raw_error = float(np.max(np.abs(visible - raw)))
+    record_property("projection", name)
+    record_property("source_bits", source_bits)
+    record_property("max_abs_internal_vs_fp64_torch", internal_error)
+    record_property("max_abs_visible_vs_rounded_torch", rounded_error)
+    record_property("max_abs_visible_vs_fp64_torch", raw_error)
+    assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, raw, rtol=2e-3, atol=2e-3)
+    native = _uses_packed_prefill(dtype, 16, in_features, out_features)
+    if native:
+        np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
+    else:
+        np.testing.assert_array_equal(
+            visible, np.asarray(baseline.astype(mx.float32)),
+        )
+        within_tolerance = np.allclose(
+            visible, rounded, rtol=2e-3, atol=2e-3,
+        )
+        record_property(
+            "fallback_one_ulp_adjudication", not within_tolerance,
+        )
+        if not within_tolerance:
+            _assert_within_one_output_ulp(visible, rounded, dtype)
+    del layer, actual, internal
+    gc.collect()
+    mx.clear_cache()
+
+
+@pytest.mark.parametrize(
+    "rows,expected",
+    (
+        (1, False), (2, True), (8, True), (9, False), (10, False),
+        (11, False), (12, True),
+        (13, False), (14, False), (15, False), (16, True), (17, False),
+    ),
+)
+def test_gptq_group16_prefill_gate_excludes_slower_partial_tiles(rows, expected):
+    assert _uses_packed_prefill(mx.bfloat16, rows, 5120, 1024) is expected
+    assert not _uses_packed_prefill(mx.float16, rows, 5120, 1024)
+    assert not _uses_packed_prefill(mx.bfloat16, rows, 4096, 1024)
+    assert not _uses_packed_prefill(mx.bfloat16, rows, 5120, 2048)
 
 
 def test_gptq_group16_validates_width_and_empty_output():

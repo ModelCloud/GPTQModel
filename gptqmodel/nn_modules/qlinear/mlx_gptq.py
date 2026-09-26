@@ -11,8 +11,17 @@ import mlx.nn as nn
 from .mlx_group16 import MlxGroup16Linear
 
 
-@lru_cache(maxsize=3)
-def _gptq_group16_kernel(output_dtype):
+def _uses_packed_prefill(output_dtype, rows, input_dims, output_dims):
+    return (
+        output_dtype == mx.bfloat16
+        and input_dims >= 5120
+        and output_dims <= 1024
+        and (1 < rows <= 8 or rows in (12, 16))
+    )
+
+
+@lru_cache(maxsize=6)
+def _gptq_group16_kernel(output_dtype, tiled=False):
     """Multiply packed GPTQ codes with exact 16-value affine groups."""
     output_types = {
         mx.float16: ("fp16", "half"),
@@ -24,6 +33,52 @@ def _gptq_group16_kernel(output_dtype):
     except KeyError as exc:
         raise ValueError(f"Unsupported GPTQ group-16 activation dtype: {output_dtype}") from exc
 
+    if tiled:
+        output_suffix += "_prefill"
+        row_setup = """
+            uint row_base = threadgroup_position_in_grid.z * RTILE;
+            threadgroup float partials[RTILE * GROUPS];
+            float sums[RTILE];
+            for (uint r = 0; r < RTILE; ++r) sums[r] = 0.0f;
+        """
+        accumulate = """
+            uint k = group * 16 + index;
+            for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r)
+                sums[r] = metal::fma(float(x[(row_base + r) * K + k]), value, sums[r]);
+        """
+        reduction = """
+            for (uint r = 0; r < RTILE; ++r) {
+                float reduced = simd_sum(sums[r]);
+                if ((lane & 31u) == 0)
+                    partials[r * GROUPS + (lane >> 5)] = reduced;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
+                float reduced = lane < GROUPS ? partials[r * GROUPS + lane] : 0.0f;
+                reduced = simd_sum(reduced);
+                if (lane == 0)
+                    output[(row_base + r) * N + column] = OUTPUT_TYPE(reduced + bias[column]);
+            }
+        """
+    else:
+        row_setup = """
+            threadgroup float partials[8];
+            float sum = 0.0f;
+        """
+        accumulate = """
+            sum = metal::fma(float(x[group * 16 + index]), value, sum);
+        """
+        reduction = """
+            float reduced = simd_sum(sum);
+            if ((lane & 31u) == 0)
+                partials[lane >> 5] = reduced;
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            reduced = lane < GROUPS ? partials[lane] : 0.0f;
+            reduced = simd_sum(reduced);
+            if (lane == 0)
+                output[column] = OUTPUT_TYPE(reduced + bias[column]);
+        """
+
     return mx.fast.metal_kernel(
         name=f"gptqmodel_gptq_group16_matmul_{output_suffix}",
         input_names=[
@@ -34,8 +89,7 @@ def _gptq_group16_kernel(output_dtype):
         source="""
             uint lane = thread_position_in_threadgroup.x;
             uint column = threadgroup_position_in_grid.y;
-            threadgroup float partials[8];
-            float sum = 0.0f;
+            ROW_SETUP
             uint weight_offset = column * (K * BITS / 32);
 
             for (uint group = lane; group < K / 16; group += THREADS) {
@@ -60,19 +114,15 @@ def _gptq_group16_kernel(output_dtype):
                         window |= ulong(packed[word + 1]) << 32;
                     uint code = uint((window >> shift) & MASK);
                     float value = metal::fma(float(code), scale, offset);
-                    sum = metal::fma(float(x[group * 16 + index]), value, sum);
+                    ACCUMULATE
                 }
             }
 
-            float reduced = simd_sum(sum);
-            if ((lane & 31u) == 0)
-                partials[lane >> 5] = reduced;
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-            reduced = lane < GROUPS ? partials[lane] : 0.0f;
-            reduced = simd_sum(reduced);
-            if (lane == 0)
-                output[column] = OUTPUT_TYPE(reduced + bias[column]);
-        """.replace("OUTPUT_TYPE", output_type),
+            REDUCTION
+        """.replace("ROW_SETUP", row_setup)
+        .replace("ACCUMULATE", accumulate)
+        .replace("REDUCTION", reduction)
+        .replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -84,6 +134,26 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
         if not bias:
             self.zero_bias = (mx.zeros((output_dims,), dtype=mx.float32),)
 
+    def _packed_prefill(self, x, rows, row_tile, output_dtype=None):
+        output_dims = self.weight.shape[0]
+        output_dtype = x.dtype if output_dtype is None else output_dtype
+        bias = self.bias if "bias" in self else self.zero_bias[0]
+        return _gptq_group16_kernel(output_dtype, tiled=True)(
+            inputs=[
+                x, self.weight, self.scales_even, self.scales_odd,
+                self.biases_even, self.biases_odd, bias,
+            ],
+            template=[
+                ("K", self.input_dims), ("N", output_dims),
+                ("BITS", self.bits), ("MASK", (1 << self.bits) - 1),
+                ("WORDS", (self.bits + 1) // 2), ("ROWS", rows),
+                ("RTILE", row_tile), ("THREADS", 32), ("GROUPS", 1),
+            ],
+            grid=(32, output_dims, (rows + row_tile - 1) // row_tile),
+            threadgroup=(32, 1, 1),
+            output_shapes=[(rows, output_dims)], output_dtypes=[output_dtype],
+        )[0]
+
     def __call__(self, x):
         if x.shape[-1] != self.input_dims:
             raise ValueError(f"expected input width {self.input_dims}, got {x.shape[-1]}")
@@ -93,7 +163,12 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
             return mx.zeros(output_shape, dtype=x.dtype)
         rows = x.size // self.input_dims
         if rows != 1:
-            return super().__call__(x)
+            if not _uses_packed_prefill(
+                x.dtype, rows, self.input_dims, output_dims,
+            ):
+                return super().__call__(x)
+            output = self._packed_prefill(x, rows, min(rows, 4))
+            return output.reshape(output_shape)
         threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         bias = self.bias if "bias" in self else self.zero_bias[0]
         output = _gptq_group16_kernel(x.dtype)(
