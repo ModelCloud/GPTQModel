@@ -13,14 +13,13 @@ import time
 from functools import partial
 
 import mlx.core as mx
-import numpy as np
 import torch
 
-from gptqmodel.quantization.mlx_exl3_gss import (
-    exl3_sample_global_scale_tiles_mlx,
-)
+from gptqmodel.quantization.mlx_exl3_gss import exl3_global_scale_search_mlx
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 from tests.test_mlx_exl3_gss import (
+    _patterned_weight,
+    _torch_global_scale_search_oracle,
     _torch_gss_sample_oracle,
     _torch_tensor_core_permutation,
 )
@@ -50,14 +49,6 @@ def _main_torch_gss_sample(weight, *, width=3):
     return torch.stack(tiles)
 
 
-def _bit_mismatches(actual, expected):
-    return int(
-        np.count_nonzero(
-            np.asarray(actual).view(np.uint32) != np.asarray(expected).view(np.uint32)
-        )
-    )
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--repeats", type=int, default=3)
@@ -66,38 +57,64 @@ def main():
         parser.error("--repeats must be positive")
 
     print(
-        "projection | checkpoint shape | EXL3 matrix shape | sampled values | "
-        "bit mismatches | max abs error | Torch ms | MLX ms | speedup",
+        "projection | checkpoint shape | EXL3 matrix shape | sampled tiles | "
+        "scale drift | MSE abs drift | MSE relative drift | "
+        "Torch oracle extrapolated ms | MLX measured ms | estimated speedup",
         flush=True,
     )
     for name, out_features, in_features in QWEN38_27B_PROJECTIONS:
-        rng = np.random.default_rng(23164 + out_features + in_features)
-        source = rng.normal(0.0, 0.2, (in_features, out_features)).astype(np.float32)
-        expected = _torch_gss_sample_oracle(source)
+        source = _patterned_weight(
+            in_features,
+            out_features,
+            seed=33164 + out_features + in_features,
+        )
+        sampled = _torch_gss_sample_oracle(source)
+        expected_scale, expected_mse = _torch_global_scale_search_oracle(
+            sampled, bits=4, codebook="mcg"
+        )
         mlx_weight = mx.array(source)
         mx.eval(mlx_weight)
-        actual = np.asarray(exl3_sample_global_scale_tiles_mlx(mlx_weight))
-        mismatches = _bit_mismatches(actual, expected)
-        max_abs_error = float(np.max(np.abs(actual - expected)))
-        if mismatches:
-            raise AssertionError(f"{name}: {mismatches} bit mismatches")
+        actual_scale, actual_mse = exl3_global_scale_search_mlx(mlx_weight, bits=4)
+        scale_drift = abs(actual_scale - expected_scale)
+        mse_drift = abs(actual_mse - expected_mse)
+        mse_relative_drift = mse_drift / max(abs(expected_mse), 1e-20)
+        if scale_drift > 1e-6 or mse_drift > 1e-6 or mse_relative_drift > 1e-6:
+            raise AssertionError(
+                f"{name}: scale drift {scale_drift}, MSE drift {mse_drift}, "
+                f"relative MSE drift {mse_relative_drift}"
+            )
 
         torch_weight = torch.from_numpy(source)
-        torch_ms = _median_ms(
+        torch_sample_ms = _median_ms(
             partial(_main_torch_gss_sample, torch_weight), args.repeats
         )
+        one_tile = sampled[:1]
+        torch_tile_ms = _median_ms(
+            partial(
+                _torch_global_scale_search_oracle,
+                one_tile,
+                bits=4,
+                codebook="mcg",
+            ),
+            args.repeats,
+        )
+        sample_count = sampled.shape[0]
+        torch_ms = torch_sample_ms + torch_tile_ms * sample_count
         mlx_ms = _median_ms(
-            partial(exl3_sample_global_scale_tiles_mlx, mlx_weight), args.repeats
+            partial(exl3_global_scale_search_mlx, mlx_weight, bits=4),
+            args.repeats,
         )
         print(
             f"{name} | {out_features}x{in_features} | "
-            f"{in_features}x{out_features} | {expected.size} | {mismatches} | "
-            f"{max_abs_error:.3e} | {torch_ms:.3f} | {mlx_ms:.3f} | "
+            f"{in_features}x{out_features} | {sample_count} | "
+            f"{scale_drift:.9g} | {mse_drift:.9g} | "
+            f"{mse_relative_drift:.9g} | "
+            f"{torch_ms:.3f} | {mlx_ms:.3f} | "
             f"{torch_ms / mlx_ms:.2f}x",
             flush=True,
         )
 
-        del source, expected, actual, mlx_weight, torch_weight
+        del source, sampled, mlx_weight, torch_weight, one_tile
         gc.collect()
         mx.clear_cache()
 
