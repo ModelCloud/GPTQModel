@@ -20,7 +20,6 @@ mx = pytest.importorskip("mlx.core")
 torch = pytest.importorskip("torch")
 
 from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFQ6KLinear  # noqa: E402
-from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear  # noqa: E402
 from gptqmodel.utils.mlx_packing import _pack_rows  # noqa: E402
 
 
@@ -58,18 +57,46 @@ def _rounded_oracle(x, reference, output_pattern, layer_bias, dtype):
     return values.to(target).float().numpy(), values.numpy()
 
 
+def _unrounded_output(layer, x):
+    rows = x.size // layer.input_dims
+    output_dims = layer.weight.shape[0]
+    if x.dtype == mx.bfloat16 and 1 < rows <= 16 and output_dims <= 2048:
+        return layer._packed_matmul(
+            x, rows, min(rows, 4), 32, output_dtype=mx.float32,
+        )
+    return layer(x.astype(mx.float32))
+
+
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
 @pytest.mark.parametrize("bias", (False, True), ids=("no_bias", "bias"))
-def test_q6_k_decode_matches_independent_torch_oracle(dtype, bias, record_property):
+@pytest.mark.parametrize("rows", (1, 3), ids=("decode", "small_prefill"))
+def test_q6_k_matches_independent_torch_boundary_oracle(
+    dtype, bias, rows, record_property,
+):
     layer, reference, output_pattern, layer_bias = _q6_k_fixture(96, 256, bias=bias)
-    x = mx.array(np.linspace(-0.2, 0.2, 256, dtype=np.float32)[None]).astype(dtype)
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    base_tensor = torch.linspace(-0.2, 0.2, 256).to(torch_dtype)
+    upper = torch.nextafter(base_tensor, torch.full_like(base_tensor, float("inf")))
+    base = base_tensor.float().numpy()
+    sources = [base, upper.float().numpy(), -base]
+    sources[0][127] = np.float32(-0.0)
+    sources[0][128] = np.float32(0.0)
+    x = mx.array(np.stack(sources[:rows])).astype(dtype)
     actual = layer(x)
-    mx.eval(actual)
+    internal = _unrounded_output(layer, x)
+    mx.eval(actual, internal)
     rounded, raw = _rounded_oracle(x, reference, output_pattern, layer_bias, dtype)
     visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
+    record_property(
+        "max_abs_internal_vs_fp64_torch",
+        float(np.max(np.abs(internal_values - raw))),
+    )
     record_property("max_abs_vs_rounded_torch", float(np.max(np.abs(visible - rounded))))
     record_property("max_abs_vs_fp64_torch", float(np.max(np.abs(visible - raw))))
     assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, raw, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
 
 
@@ -101,18 +128,40 @@ def test_q6_k_decode_qwen38_shapes_preserve_dtype_and_accuracy(
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
-def test_q6_k_prefill_uses_exact_group16_path(dtype):
-    candidate, _, _, _ = _q6_k_fixture(96, 256)
-    baseline = MlxGroup16Linear(256, 96, bits=6)
-    for name in ("weight", "scales_even", "scales_odd", "biases_even", "biases_odd"):
-        setattr(baseline, name, getattr(candidate, name))
-    x = mx.full((3, 256), 0.03125, dtype=dtype)
-    expected, actual = baseline(x), candidate(x)
-    mx.eval(expected, actual)
-    assert actual.dtype == dtype
-    np.testing.assert_array_equal(
-        np.asarray(actual.astype(mx.float32)), np.asarray(expected.astype(mx.float32)),
+@pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
+def test_q6_k_prefill_qwen38_shapes_matches_independent_torch_oracle(
+    name, out_features, in_features, dtype, record_property,
+):
+    layer, reference, output_pattern, _ = _q6_k_fixture(
+        out_features, in_features, patterns=2,
     )
+    positions = np.arange(in_features, dtype=np.float32)
+    source = np.stack([
+        np.sin(positions * (0.011 + row * 0.0001)) * 0.08
+        + np.cos(positions * (0.007 + row * 0.0001)) * 0.04
+        for row in range(16)
+    ])
+    x = mx.array(source).astype(dtype)
+    actual = layer(x)
+    internal = _unrounded_output(layer, x)
+    mx.eval(actual, internal)
+    rounded, raw = _rounded_oracle(x, reference, output_pattern, None, dtype)
+    visible = np.asarray(actual.astype(mx.float32))
+    internal_values = np.asarray(internal)
+    rounded_error = float(np.max(np.abs(visible - rounded)))
+    raw_error = float(np.max(np.abs(visible - raw)))
+    internal_error = float(np.max(np.abs(internal_values - raw)))
+    record_property("projection", name)
+    record_property("max_abs_internal_vs_fp64_torch", internal_error)
+    record_property("max_abs_visible_vs_rounded_torch", rounded_error)
+    record_property("max_abs_visible_vs_fp64_torch", raw_error)
+    assert actual.dtype == dtype
+    assert internal.dtype == mx.float32
+    np.testing.assert_allclose(internal_values, raw, rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
+    del layer, actual, internal
+    gc.collect()
+    mx.clear_cache()
 
 
 def test_q6_k_validates_width_and_empty_output():
