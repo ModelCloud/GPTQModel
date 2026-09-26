@@ -390,7 +390,7 @@ def _gguf_tq1_0_kernel():
             float maximum = 0.0f;
             for (uint k = 0; k < 256; ++k) {
                 maximum = metal::max(
-                    maximum, metal::abs(weights[block * 256 + k]));
+                    maximum, metal::abs(float(weights[block * 256 + k])));
             }
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
             uint offset = block * 54;
@@ -398,8 +398,8 @@ def _gguf_tq1_0_kernel():
             for (uint byte = 0; byte < 32; ++byte) {
                 uint value = 0;
                 for (uint digit = 0; digit < 5; ++digit) {
-                    float normalized = weights[
-                        block * 256 + digit * 32 + byte] * inverse;
+                    float normalized = float(weights[
+                        block * 256 + digit * 32 + byte]) * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -409,8 +409,8 @@ def _gguf_tq1_0_kernel():
             for (uint byte = 0; byte < 16; ++byte) {
                 uint value = 0;
                 for (uint digit = 0; digit < 5; ++digit) {
-                    float normalized = weights[
-                        block * 256 + 160 + digit * 16 + byte] * inverse;
+                    float normalized = float(weights[
+                        block * 256 + 160 + digit * 16 + byte]) * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -420,8 +420,8 @@ def _gguf_tq1_0_kernel():
             for (uint byte = 0; byte < 4; ++byte) {
                 uint value = 0;
                 for (uint digit = 0; digit < 4; ++digit) {
-                    float normalized = weights[
-                        block * 256 + 240 + digit * 4 + byte] * inverse;
+                    float normalized = float(weights[
+                        block * 256 + 240 + digit * 4 + byte]) * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -449,7 +449,7 @@ def _gguf_tq1_0_parallel_kernel():
             float maximum = 0.0f;
             for (uint k = lane; k < 256; k += 32) {
                 maximum = metal::max(
-                    maximum, metal::abs(weights[block * 256 + k]));
+                    maximum, metal::abs(float(weights[block * 256 + k])));
             }
             maximum = simd_max(maximum);
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
@@ -457,8 +457,8 @@ def _gguf_tq1_0_parallel_kernel():
             uint powers[5] = {81, 27, 9, 3, 1};
             uint value = 0;
             for (uint digit = 0; digit < 5; ++digit) {
-                float normalized = weights[
-                    block * 256 + digit * 32 + lane] * inverse;
+                float normalized = float(weights[
+                    block * 256 + digit * 32 + lane]) * inverse;
                 uint code = normalized >= 0.5f
                     ? 2 : (normalized <= -0.5f ? 0 : 1);
                 value += code * powers[digit];
@@ -467,8 +467,8 @@ def _gguf_tq1_0_parallel_kernel():
             if (lane < 16) {
                 value = 0;
                 for (uint digit = 0; digit < 5; ++digit) {
-                    float normalized = weights[
-                        block * 256 + 160 + digit * 16 + lane] * inverse;
+                    float normalized = float(weights[
+                        block * 256 + 160 + digit * 16 + lane]) * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -479,8 +479,8 @@ def _gguf_tq1_0_parallel_kernel():
             if (lane < 4) {
                 value = 0;
                 for (uint digit = 0; digit < 4; ++digit) {
-                    float normalized = weights[
-                        block * 256 + 240 + digit * 4 + lane] * inverse;
+                    float normalized = float(weights[
+                        block * 256 + 240 + digit * 4 + lane]) * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -769,7 +769,9 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     )
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
-        or normalized in ("Q2_0", "Q4_0", "Q6_K", "MXFP4", "Q8_0")
+        or normalized in (
+            "Q2_0", "Q4_0", "Q6_K", "TQ1_0", "MXFP4", "Q8_0"
+        )
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
