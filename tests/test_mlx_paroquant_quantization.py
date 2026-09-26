@@ -182,6 +182,7 @@ def test_paroquant_accepts_transposed_low_precision_weights(dtype, sym):
         sym=sym,
         zero_point_float=zeros,
     )
+    assert actual.dtype == dtype
     expected = paroquant_quantize_weight_mlx(
         mx.contiguous(weight),
         scales,
