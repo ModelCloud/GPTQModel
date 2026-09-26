@@ -13,6 +13,59 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
 
+def _qqq_qwen_down_fixture(group_size):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+
+    out_features, in_features = 5120, 17408
+    shape = (out_features, in_features // 128)
+    if group_size == -1:
+        bits = 4
+        packed_word = np.uint32(0x76543210)
+        weight = np.full((out_features, in_features // 8), packed_word, dtype=np.uint32)
+        scales = np.full(shape, 0.002, dtype=np.float32)
+        biases = np.full(shape, -0.007, dtype=np.float32)
+        row_weight = (
+            (np.arange(in_features, dtype=np.int32) & 7) * np.float32(0.002)
+            - np.float32(0.007)
+        )
+    else:
+        bits = 8
+        packed_word = np.uint32(0x03020100)
+        weight = np.full((out_features, in_features // 4), packed_word, dtype=np.uint32)
+        scales = np.full(shape, 0.001, dtype=np.float32)
+        biases = np.full(shape, -0.0015, dtype=np.float32)
+        row_weight = (
+            (np.arange(in_features, dtype=np.int32) & 3) * np.float32(0.001)
+            - np.float32(0.0015)
+        )
+    linear = nn.QuantizedLinear(
+        in_features, out_features, bias=False, group_size=128, bits=bits,
+    )
+    linear.load_weights([
+        ("weight", mx.array(weight)),
+        ("scales", mx.array(scales)),
+        ("biases", mx.array(biases)),
+    ])
+    channel_scale = np.linspace(
+        0.008, 0.012, out_features, dtype=np.float32,
+    )[None, :]
+    return MlxQQQLinear(linear, channel_scale), row_weight, channel_scale
+
+
+def _qqq_dynamic_quant_256(x):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import _dynamic_quant_kernel
+
+    width = x.shape[-1]
+    rows = x.size // width
+    return _dynamic_quant_kernel(256)(
+        inputs=[x],
+        template=[("K", width)],
+        grid=(256, rows, 1), threadgroup=(256, 1, 1),
+        output_shapes=[x.shape, (*x.shape[:-1], 1)],
+        output_dtypes=[mx.float32, mx.float32],
+    )
+
+
 @pytest.mark.parametrize("width", [128, 5120, 17408])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_qqq_metal_dynamic_quant_matches_torch_codes(width, dtype):
@@ -30,6 +83,69 @@ def test_qqq_metal_dynamic_quant_matches_torch_codes(width, dtype):
     mx.eval(quantized, scales)
     np.testing.assert_array_equal(np.asarray(scales), expected_scales.numpy())
     np.testing.assert_array_equal(np.asarray(quantized).astype(np.int8), expected_codes.numpy())
+
+
+@pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize("rows", [1, 16], ids=["decode", "prefill"])
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+def test_qqq_qwen_down_wide_reduction_matches_previous_and_torch(
+    group_size, rows, dtype, record_property,
+):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import _dynamic_quant
+
+    layer, row_weight, channel_scale = _qqq_qwen_down_fixture(group_size)
+    positions = np.arange(17408, dtype=np.float32)
+    source = np.stack([
+        np.sin(positions * (0.013 + row * 0.0001)) * 0.05
+        + np.cos(positions * (0.007 + row * 0.0001)) * 0.025
+        for row in range(rows)
+    ])
+    x = mx.array(source).astype(dtype)
+    half = x.astype(mx.float16)
+    quantized, input_scale = _dynamic_quant(half)
+    previous_quantized, previous_scale = _qqq_dynamic_quant_256(half)
+    internal = layer.linear(quantized) * input_scale * layer.channel_scale
+    previous = (
+        layer.linear(previous_quantized) * previous_scale * layer.channel_scale
+    ).astype(mx.float16).astype(dtype)
+    actual = layer(x)
+    mx.eval(
+        quantized, input_scale, previous_quantized, previous_scale,
+        internal, previous, actual,
+    )
+
+    torch_input = torch.from_numpy(np.asarray(half)).double()
+    torch_scale = (torch_input.abs().amax(dim=-1, keepdim=True).half() / 127).double()
+    torch_codes = (torch_input / torch_scale).round().clamp(-128, 127)
+    raw_row = (
+        torch_codes @ torch.from_numpy(row_weight.astype(np.float64))
+    )[:, None] * torch_scale
+    raw = raw_row.numpy() * channel_scale.astype(np.float64)
+    rounded = torch.from_numpy(raw).to(torch.float16)
+    if dtype == mx.bfloat16:
+        rounded = rounded.to(torch.bfloat16)
+    rounded = rounded.float().numpy()
+
+    visible = np.asarray(actual.astype(mx.float32))
+    previous_visible = np.asarray(previous.astype(mx.float32))
+    record_property(
+        "max_abs_internal_fp32_vs_fp64",
+        float(np.max(np.abs(np.asarray(internal) - raw))),
+    )
+    record_property(
+        "max_abs_visible_vs_rounded_torch",
+        float(np.max(np.abs(visible - rounded))),
+    )
+    record_property(
+        "changed_vs_previous_256_threads",
+        int(np.count_nonzero(visible != previous_visible)),
+    )
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(np.asarray(quantized), np.asarray(previous_quantized))
+    np.testing.assert_array_equal(np.asarray(input_scale), np.asarray(previous_scale))
+    np.testing.assert_array_equal(visible, previous_visible)
+    np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("group_size", [-1, 128])
