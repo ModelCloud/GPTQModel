@@ -162,9 +162,21 @@ class MlxBitsAndBytesLinear(nn.Module):
             return (output + self.bias).astype(x.dtype)
         rows = x.size // self.in_features
         row_tile = 1 if rows == 1 else min(8, rows)
+        small_decode = (
+            self.bits == 4
+            and rows == 1
+            and self.out_features <= 2048
+            and self.in_features >= 4096
+        )
+        if small_decode and x.dtype == mx.float16:
+            threads = 128
+        elif small_decode and x.dtype == mx.bfloat16:
+            threads = 256
+        else:
+            threads = _THREADS
         common = {
-            "grid": (_THREADS, self.out_features, (rows + row_tile - 1) // row_tile),
-            "threadgroup": (_THREADS, 1, 1),
+            "grid": (threads, self.out_features, (rows + row_tile - 1) // row_tile),
+            "threadgroup": (threads, 1, 1),
             "output_shapes": [(rows, self.out_features)],
             "output_dtypes": [mx.float32],
         }
@@ -172,17 +184,17 @@ class MlxBitsAndBytesLinear(nn.Module):
             output = _four_bit_kernel()(
                 inputs=[x, self.weight, self.scales, self.codebook, self.bias],
                 template=[("K", self.in_features), ("N", self.out_features), ("BLOCK", self.block_size),
-                          ("ROWS", rows), ("RTILE", row_tile), ("THREADS", _THREADS),
+                          ("ROWS", rows), ("RTILE", row_tile), ("THREADS", threads),
                           ("EVEN", self.in_features % 2 == 0),
-                          ("GROUPS", _THREADS // 32)],
+                          ("GROUPS", threads // 32)],
                 **common,
             )[0]
         else:
             output = _int8_kernel()(
                 inputs=[x, self.weight, self.scales, self.bias],
                 template=[("K", self.in_features), ("N", self.out_features),
-                          ("ROWS", rows), ("RTILE", row_tile), ("THREADS", _THREADS),
-                          ("GROUPS", _THREADS // 32)],
+                          ("ROWS", rows), ("RTILE", row_tile), ("THREADS", threads),
+                          ("GROUPS", threads // 32)],
                 **common,
             )[0]
         return output.reshape(output_shape).astype(x.dtype)
