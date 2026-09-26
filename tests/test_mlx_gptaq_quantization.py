@@ -17,7 +17,7 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_gptaq import (
+from gptqmodel.quantization.mlx_gptaq import (  # noqa: E402
     gptaq_correction_mlx,
     gptaq_quantize_weight_mlx,
 )
@@ -155,6 +155,26 @@ def test_gptaq_code_boundaries_and_input_casts(sym):
             )
 
 
+@pytest.mark.parametrize("sym", [False, True])
+def test_gptaq_fused_params_extrema_match_torch(sym):
+    source = np.zeros((4, 32), dtype=np.float32)
+    source[1] = np.linspace(0.125, 2, 32, dtype=np.float32)
+    source[2] = -source[1]
+    source[3, :2] = (-3, 2)
+    factor = np.eye(32, dtype=np.float32)
+    correction = np.zeros((32, 32), dtype=np.float32)
+    expected = _torch_oracle(source, factor, correction, 4, 32, sym)
+    actual = gptaq_quantize_weight_mlx(
+        mx.array(source),
+        mx.array(factor),
+        mx.array(correction),
+        group_size=32,
+        sym=sym,
+    )
+    for index in range(3):
+        np.testing.assert_array_equal(np.asarray(actual[index]), expected[index])
+
+
 def _torch_banded_oracle(source, group_size=128):
     """Independent Torch update for unit diagonal and one off-diagonal."""
     weight = torch.from_numpy(source.copy())
@@ -231,10 +251,11 @@ def _exact_banded_tie_margin(source_row, target, group_size=128):
 
 
 @pytest.mark.parametrize("name,rows,columns", QWEN38_27B_PROJECTIONS)
-def test_gptaq_qwen38_projection_oracle(name, rows, columns):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+def test_gptaq_qwen38_projection_oracle(name, rows, columns, dtype):
     rng = np.random.default_rng(3270 + rows + columns)
     source = rng.normal(0, 0.2, (rows, columns)).astype(np.float32)
-    weight = mx.array(source).astype(mx.bfloat16)
+    weight = mx.array(source).astype(dtype)
     mx.eval(weight)
     source = np.asarray(weight.astype(mx.float32))
     factor = np.eye(columns, dtype=np.float32)
