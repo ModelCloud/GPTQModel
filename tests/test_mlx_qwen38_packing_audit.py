@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Qwen3.8-27B projection checks for merged GPTQ/AWQ to MLX layout packers."""

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
-# MLX Metal runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Benchmark merged and packed-kernel GGUF Q6_K paths on Qwen3.8-27B shapes."""
 

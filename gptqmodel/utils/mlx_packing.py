@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-# Layout reference: MLX-LM (Apple Inc., MIT), mlx_lm/utils.py.
 """Transfer supported GPTQ/AWQ weights into MLX's affine quantized layout."""
 
 import numpy as np

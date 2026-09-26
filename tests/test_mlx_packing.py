@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 
 import sys
 from types import SimpleNamespace

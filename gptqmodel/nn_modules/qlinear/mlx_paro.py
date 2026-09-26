@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # ParoQuant rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-# MLX array operations: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """ParoQuant rotations followed by a packed MLX affine matrix product."""
 
 from functools import lru_cache

@@ -2,10 +2,8 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-# MLX-LM loader reference: Apple Inc. and MLX-LM contributors (MIT).
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
-# Native MXFP8 matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 
 from copy import deepcopy
 from pathlib import Path

@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Compare group-16 activation dtype preservation with the merged main path."""
 

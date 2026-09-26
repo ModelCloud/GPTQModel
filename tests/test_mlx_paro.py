@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # ParoQuant rotation reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """ParoQuant MLX packed transfer and independent Torch accuracy checks."""
 
 import gc

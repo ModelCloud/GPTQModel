@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GGUF reference: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """GGUF compressed block to MLX affine conversion checked against Torch math."""
 
 import numpy as np

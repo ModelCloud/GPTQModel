@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
 """GGUF MLX inference wrappers that preserve FP16/BF16 activation dtype."""
 

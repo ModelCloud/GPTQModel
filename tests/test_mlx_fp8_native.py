@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Qwen3.8-27B shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 # FP8 E4M3 reference: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
-# MXFP8 matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Exact packed FP8 transfer and independent Torch inference checks on Metal."""
 
 import numpy as np

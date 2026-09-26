@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # AWQ packing reference: ModelCloud.ai, Apache-2.0, gptqmodel/nn_modules/qlinear/gemv_fast_awq.py
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Independent code and output checks for both AWQ GEMV checkpoint layouts."""
 
 from types import SimpleNamespace

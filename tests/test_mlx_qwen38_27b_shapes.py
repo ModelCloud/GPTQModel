@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 # QQQ reference: vLLM contributors, Apache-2.0, https://github.com/vllm-project/vllm
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Full Qwen3.8-27B projection accuracy for packed MLX inference."""
 
 import gc
