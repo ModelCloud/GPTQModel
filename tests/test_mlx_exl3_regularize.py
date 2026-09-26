@@ -6,6 +6,7 @@
 
 import gc
 import sys
+from functools import lru_cache
 
 import numpy as np
 import pytest
@@ -20,19 +21,27 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_exl3_fallback import exl3_fallback_quantize_mlx
-from gptqmodel.quantization.mlx_exl3_regularize import (
+from gptqmodel.quantization.mlx_exl3_fallback import exl3_fallback_quantize_mlx  # noqa: E402
+from gptqmodel.quantization.mlx_exl3_regularize import (  # noqa: E402
     exl3_input_regularize_mlx,
     exl3_output_regularize_mlx,
     exl3_regularize_transforms_mlx,
 )
-from tests.test_mlx_exl3_tiles import (
+from tests.test_mlx_exl3_tiles import (  # noqa: E402
     _torch_from_tiles_oracle,
     _torch_to_tiles_oracle,
 )
-from tests.test_mlx_exl3_viterbi import _torch_viterbi_oracle_tensors
+from tests.test_mlx_exl3_viterbi import _torch_viterbi_oracle_tensors  # noqa: E402
 
 _CODEBOOK_SCALE = 1.24371088
+
+
+@lru_cache(maxsize=1)
+def _float64_hadamard():
+    hadamard = np.ones((1, 1), dtype=np.float64)
+    while hadamard.shape[0] < 128:
+        hadamard = np.block([[hadamard, hadamard], [hadamard, -hadamard]])
+    return hadamard / np.sqrt(128.0)
 
 
 def _torch_output_regularize_oracle(weight, signs, rms, mean, apply_scales):
@@ -112,12 +121,7 @@ def _torch_regularize_transforms_oracle(
 
 def _float64_regularize_transforms_oracle(weight, input_signs, output_signs):
     """Evaluate the transform in float64 to adjudicate natural float32 drift."""
-    hadamard = np.ones((1, 1), dtype=np.float64)
-    while hadamard.shape[0] < 128:
-        hadamard = np.block(
-            [[hadamard, hadamard], [hadamard, -hadamard]]
-        )
-    hadamard /= np.sqrt(128.0)
+    hadamard = _float64_hadamard()
 
     transformed = weight.astype(np.float64)
     output_rms = np.sqrt(np.mean(np.square(transformed), axis=0, keepdims=True))
@@ -155,6 +159,41 @@ def _assert_matches(actual, expected, *, err_msg=None):
     )
     assert np.isfinite(actual).all(), err_msg
     assert _normalized_rms_drift(actual, expected) <= 1e-6, err_msg
+
+
+def _assert_hadamard_matches(actual, expected, scaled, axis, *, err_msg=None):
+    """Adjudicate butterfly/dense-order drift with selected FP64 outputs."""
+    assert np.isfinite(actual).all(), err_msg
+    assert _normalized_rms_drift(actual, expected) <= 1e-6, err_msg
+    error = np.abs(actual - expected)
+    differing = np.argwhere(error > 1e-6 + 1e-6 * np.abs(expected))
+    if not differing.size:
+        return
+
+    hadamard = _float64_hadamard()
+    ideal = np.empty(differing.shape[0], dtype=np.float64)
+    if axis == 0:
+        for index, (row, column) in enumerate(differing):
+            start = (row // 128) * 128
+            ideal[index] = (
+                hadamard[row % 128]
+                @ scaled[start : start + 128, column].astype(np.float64)
+            )
+    else:
+        for index, (row, column) in enumerate(differing):
+            start = (column // 128) * 128
+            ideal[index] = (
+                scaled[row, start : start + 128].astype(np.float64)
+                @ hadamard[:, column % 128]
+            )
+    actual_values = actual[tuple(differing.T)].astype(np.float64)
+    expected_values = expected[tuple(differing.T)].astype(np.float64)
+    np.testing.assert_allclose(
+        actual_values, ideal, rtol=1e-6, atol=1e-6, err_msg=err_msg
+    )
+    assert np.all(
+        np.abs(actual_values - ideal) <= np.abs(expected_values - ideal)
+    ), err_msg
 
 
 def _assert_composed_weight_matches(actual, expected, *, err_msg=None):
@@ -360,9 +399,39 @@ def test_exl3_regularize_transforms_skew_threshold_boundaries():
             hessian_diagonal=mx.array(hessian_diagonal),
         )
         assert actual[0] is expected[0]
-        _assert_composed_weight_matches(np.asarray(actual[1]), expected[1])
+        actual_weight = np.asarray(actual[1])
+        ideal = _float64_regularize_transforms_oracle(
+            weight, input_signs, output_signs
+        )
+        assert _normalized_rms_drift(actual_weight, ideal) <= 1e-6
+        assert np.linalg.norm(actual_weight.astype(np.float64) - ideal) <= (
+            np.linalg.norm(expected[1].astype(np.float64) - ideal)
+        )
         for actual_array, expected_array in zip(actual[2:], expected[2:]):
             _assert_matches(np.asarray(actual_array), expected_array)
+
+
+def test_exl3_regularize_butterfly_cancellation_matches_fp64():
+    weight = np.zeros((128, 128), dtype=np.float32)
+    weight[:, 0] = 1.0
+    input_signs = np.ones((128, 1), dtype=np.float32)
+    output_signs = np.ones((1, 128), dtype=np.float32)
+    expected = _torch_regularize_transforms_oracle(
+        weight, input_signs, output_signs
+    )[1]
+    actual = np.asarray(
+        exl3_regularize_transforms_mlx(
+            mx.array(weight), mx.array(input_signs), mx.array(output_signs)
+        )[1]
+    )
+    ideal = _float64_regularize_transforms_oracle(
+        weight, input_signs, output_signs
+    )
+
+    assert _normalized_rms_drift(actual, ideal) <= 1e-6
+    actual_error = np.linalg.norm(actual.astype(np.float64) - ideal)
+    torch_error = np.linalg.norm(expected.astype(np.float64) - ideal)
+    assert actual_error < torch_error
 
 
 def test_exl3_regularize_transforms_all_zero_forces_configured_scales():
@@ -522,8 +591,15 @@ def test_exl3_regularize_qwen38_projection_oracle(
             mx.array(weight), mx.array(signs), mx.array(rms)
         )
 
-    _assert_matches(
-        np.asarray(actual_weight), expected_weight, err_msg=f"{name} {mode} weight"
+    scaled = np.ascontiguousarray(
+        weight / expected_scales, dtype=np.float32
+    )
+    _assert_hadamard_matches(
+        np.asarray(actual_weight),
+        expected_weight,
+        scaled,
+        1 if mode == "output" else 0,
+        err_msg=f"{name} {mode} weight",
     )
     _assert_matches(
         np.asarray(actual_scales), expected_scales, err_msg=f"{name} {mode} scales"
