@@ -7,7 +7,10 @@
 import math
 from functools import lru_cache
 
+from .mlx_exl3_rms import exl3_block_rms_mlx
+
 _EXL3_ZERO_THRESHOLD = 1e-30
+_EXL3_OUTPUT_SKEW_THRESHOLD = 0.15
 
 
 @lru_cache(maxsize=1)
@@ -175,4 +178,95 @@ def exl3_input_regularize_mlx(weight, signs, rms):
     )
 
 
-__all__ = ["exl3_input_regularize_mlx", "exl3_output_regularize_mlx"]
+def exl3_regularize_transforms_mlx(
+    weight,
+    input_signs,
+    output_signs,
+    *,
+    force_output_scales=None,
+    hessian_diagonal=None,
+    fallback: bool = False,
+):
+    """Apply EXL3's complete two-sided regularization transform on MLX.
+
+    This composes the native block-RMS reductions, channel scaling, and
+    Hadamard kernels while keeping the weight resident in MLX. It intentionally
+    stops before EXL3's separately exposed global-scale search.
+
+    Returns ``(apply_output_scales, transformed_weight, input_scales,
+    output_scales)``. ``input_signs`` and ``output_signs`` use shapes
+    ``(input_features, 1)`` and ``(1, output_features)`` respectively.
+    """
+    import mlx.core as mx
+
+    weight = mx.array(weight)
+    input_signs = mx.array(input_signs)
+    output_signs = mx.array(output_signs)
+    if force_output_scales is not None and not isinstance(force_output_scales, bool):
+        raise TypeError("force_output_scales must be a boolean or None")
+    if not isinstance(fallback, bool):
+        raise TypeError("fallback must be a boolean")
+
+    if hessian_diagonal is not None:
+        hessian_diagonal = mx.array(hessian_diagonal)
+        expected_shape = (weight.shape[0],) if weight.ndim == 2 else None
+        if hessian_diagonal.shape != expected_shape:
+            raise ValueError(
+                "hessian_diagonal must have one value per input feature"
+            )
+        if hessian_diagonal.dtype != mx.float32:
+            raise ValueError("hessian_diagonal must have float32 dtype")
+        valid_diagonal = mx.all(
+            mx.isfinite(hessian_diagonal) & (hessian_diagonal >= 0)
+        )
+        mx.eval(valid_diagonal)
+        if not bool(valid_diagonal.item()):
+            raise ValueError(
+                "hessian_diagonal must contain finite nonnegative values"
+            )
+
+    if not fallback and hessian_diagonal is not None:
+        diagonal = mx.sort(mx.sqrt(hessian_diagonal))[::-1]
+        cutoff = diagonal.shape[0] // 50
+        skew = mx.sum(diagonal[:cutoff]) / mx.sum(diagonal)
+        mx.eval(skew)
+        apply_output_scales = (
+            float(skew.item()) < _EXL3_OUTPUT_SKEW_THRESHOLD
+            if force_output_scales is None
+            else force_output_scales
+        )
+    else:
+        apply_output_scales = (
+            True if force_output_scales is None else force_output_scales
+        )
+    if fallback:
+        apply_output_scales = force_output_scales
+
+    output_rms = exl3_block_rms_mlx(weight, axis=0)
+    output_mean_array = mx.mean(output_rms)
+    mx.eval(output_mean_array)
+    output_mean = float(output_mean_array.item())
+    if output_mean <= _EXL3_ZERO_THRESHOLD and force_output_scales is not None:
+        apply_output_scales = True
+
+    transformed, output_scales, _ = exl3_output_regularize_mlx(
+        weight,
+        output_signs,
+        output_rms,
+        mean=output_mean,
+        apply_scales=bool(apply_output_scales),
+    )
+    input_rms = exl3_block_rms_mlx(transformed, axis=1)
+    transformed, input_scales = exl3_input_regularize_mlx(
+        transformed,
+        input_signs,
+        input_rms,
+    )
+    return apply_output_scales, transformed, input_scales, output_scales
+
+
+__all__ = [
+    "exl3_input_regularize_mlx",
+    "exl3_output_regularize_mlx",
+    "exl3_regularize_transforms_mlx",
+]
