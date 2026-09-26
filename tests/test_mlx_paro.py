@@ -28,7 +28,8 @@ def _packed_awq(values):
 @pytest.mark.parametrize("group_size", [16, 32, 64, 128, -1])
 @pytest.mark.parametrize("krot", [1, 8])
 @pytest.mark.parametrize("desc_act", [False, True])
-def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot, desc_act):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot, desc_act, dtype):
     from gptqmodel.nn_modules.qlinear.mlx import ParoMlxQuantLinear
     from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
     from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
@@ -85,10 +86,12 @@ def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot
     )
 
     inputs = rng.normal(0, 0.2, (2, 3, input_dims)).astype(np.float16)
-    actual = model(mx.array(inputs))
+    mlx_inputs = mx.array(inputs).astype(dtype)
+    actual = model(mlx_inputs)
     mx.eval(actual)
-    assert actual.dtype == mx.float16
-    rotated = torch.from_numpy(inputs).double()
+    assert actual.dtype == dtype
+    rounded_inputs = np.asarray(mlx_inputs.astype(mx.float32))
+    rotated = torch.from_numpy(rounded_inputs).double()
     rotated = rotated * torch.from_numpy(channel_scales).double()
     for stage in range(krot):
         next_rotated = rotated.clone()
@@ -106,7 +109,9 @@ def test_packed_paro_rotation_matches_torch_oracle(monkeypatch, group_size, krot
     expanded_scales = np.repeat(scales.astype(np.float64), source_group, axis=0)
     weights = torch.from_numpy((codes.astype(np.float64) - expanded_zeros) * expanded_scales)
     expected = rotated @ weights + source.linear.bias.double()
-    np.testing.assert_allclose(np.array(actual), expected.numpy(), rtol=0.002, atol=0.002)
+    np.testing.assert_allclose(
+        np.asarray(actual.astype(mx.float32)), expected.numpy(), rtol=0.002, atol=0.002,
+    )
 
 
 def test_invalid_paro_matching_is_rejected():
