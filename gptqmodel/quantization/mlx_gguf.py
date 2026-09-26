@@ -60,7 +60,7 @@ def _gguf_q2_0_kernel():
             float maximum = 0.0f;
             for (uint k = 0; k < 64; ++k) {
                 maximum = metal::max(
-                    maximum, metal::abs(weights[block * 64 + k]));
+                    maximum, metal::abs(float(weights[block * 64 + k])));
             }
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
             ushort scale_bits = as_type<ushort>(half(maximum));
@@ -70,7 +70,7 @@ def _gguf_q2_0_kernel():
             for (uint byte = 0; byte < 16; ++byte) {
                 uchar codes = 0;
                 for (uint lane = 0; lane < 4; ++lane) {
-                    float value = weights[block * 64 + byte * 4 + lane]
+                    float value = float(weights[block * 64 + byte * 4 + lane])
                         * inverse;
                     uint code = value >= 0.5f ? 2 : (value <= -0.5f ? 0 : 1);
                     codes |= uchar(code << (lane * 2));
@@ -766,7 +766,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     )
     direct_input = (
         normalized.startswith("Q1_0")
-        or normalized in ("Q4_0", "MXFP4", "Q8_0")
+        or normalized in ("Q2_0", "Q4_0", "MXFP4", "Q8_0")
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
