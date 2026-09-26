@@ -64,6 +64,13 @@ def _torch_block_ldl(hessian, *, block_size=16):
     for block in range(block_count):
         factor[:, block, :] = factor[:, block, :] @ diagonal_inverse[block]
     factor = factor.reshape(columns, columns).contiguous()
+    factor_blocks = factor.reshape(
+        block_count, block_size, block_count, block_size
+    ).permute(0, 2, 1, 3)
+    block_indices = torch.arange(block_count)
+    factor_blocks[block_indices, block_indices] = torch.stack(
+        [torch.eye(block_size, dtype=factor.dtype)] * block_count
+    )
     diagonal_indices = torch.arange(columns)
     factor[diagonal_indices, diagonal_indices] = 0
     return factor
