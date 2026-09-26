@@ -324,10 +324,10 @@ def _gguf_q4_0_kernel():
         source="""
             uint block = thread_position_in_grid.x;
             float values[32];
-            float signed_maximum = weights[block * 32];
+            float signed_maximum = float(weights[block * 32]);
             float maximum = metal::abs(signed_maximum);
             for (uint k = 0; k < 32; ++k) {
-                float value = weights[block * 32 + k];
+                float value = float(weights[block * 32 + k]);
                 values[k] = value;
                 float magnitude = metal::abs(value);
                 if (magnitude > maximum) {
@@ -761,10 +761,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
-    direct_q8 = normalized == "Q8_0" and weight.dtype in (
+    direct_input = normalized in ("Q4_0", "Q8_0") and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
-    kernel_weight = mx.contiguous(weight) if direct_q8 else weight.astype(mx.float32)
+    kernel_weight = (
+        mx.contiguous(weight) if direct_input else weight.astype(mx.float32)
+    )
     packed = kernel(
         inputs=[kernel_weight],
         output_shapes=[(rows, columns // block_size * bytes_per_block)],
