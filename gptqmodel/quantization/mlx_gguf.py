@@ -469,6 +469,46 @@ def _gguf_tq2_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_tq2_0_parallel_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_tq2_0_pack_parallel",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint lane = thread_position_in_threadgroup.x;
+            uint block = threadgroup_position_in_grid.y;
+            float maximum = 0.0f;
+            for (uint k = lane; k < 256; k += 32) {
+                maximum = metal::max(
+                    maximum, metal::abs(weights[block * 256 + k]));
+            }
+            maximum = simd_max(maximum);
+            float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            uint offset = block * 66;
+            for (uint segment = 0; segment < 2; ++segment) {
+                uchar bits = 0;
+                for (uint value_lane = 0; value_lane < 4; ++value_lane) {
+                    float normalized = weights[
+                        block * 256 + segment * 128 + value_lane * 32 + lane]
+                        * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    bits |= uchar(code << (2 * value_lane));
+                }
+                packed[offset + segment * 32 + lane] = bits;
+            }
+            if (lane == 0) {
+                ushort scale_bits = as_type<ushort>(half(maximum));
+                packed[offset + 64] = uchar(scale_bits & 255);
+                packed[offset + 65] = uchar(scale_bits >> 8);
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_mxfp4_kernel():
     import mlx.core as mx
 
@@ -633,7 +673,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     elif normalized == "TQ1_0":
         kernel, bytes_per_block = _gguf_tq1_0_kernel(), 54
     elif normalized == "TQ2_0":
-        kernel, bytes_per_block = _gguf_tq2_0_kernel(), 66
+        kernel = (
+            _gguf_tq2_0_parallel_kernel()
+            if blocks >= 65536
+            else _gguf_tq2_0_kernel()
+        )
+        bytes_per_block = 66
     elif normalized == "MXFP4":
         kernel, bytes_per_block = _gguf_mxfp4_kernel(), 17
     elif normalized == "Q4_0":
@@ -645,6 +690,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         if normalized == "Q6_K"
         or normalized.startswith("Q5_K")
         or normalized.startswith("Q4_K")
+        or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
     packed = kernel(
