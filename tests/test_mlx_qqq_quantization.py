@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# QQQ method: Meituan, Ying Zhang et al., https://arxiv.org/abs/2406.09904
+# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Independent Torch-oracle checks for native MLX QQQ quantization."""
 
@@ -17,7 +19,7 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_qqq import qqq_quantize_weight_mlx
+from gptqmodel.quantization.mlx_qqq import qqq_quantize_weight_mlx  # noqa: E402
 
 
 def _params(group, group_size):
@@ -143,6 +145,18 @@ def test_qqq_group_updates_match_torch(group_size):
             )
 
 
+def test_qqq_dynamic_fused_extrema_rows():
+    source = np.zeros((4, 128), dtype=np.float32)
+    source[1] = np.linspace(0.25, 2.0, 128, dtype=np.float32)
+    source[2] = np.linspace(-3.0, -0.5, 128, dtype=np.float32)
+    source[3] = np.linspace(-2.0, 1.5, 128, dtype=np.float32)
+    factor = np.eye(128, dtype=np.float32)
+    expected = _torch_oracle(source, factor, 128)
+    actual = _observe(mx.array(source), factor, 128)
+    for index in range(4):
+        np.testing.assert_array_equal(actual[index], expected[index])
+
+
 def _torch_banded_oracle(source, group_size):
     """Torch oracle specialized to unit diagonal and one 0.05 superdiagonal."""
     weight = torch.from_numpy(source.copy())
@@ -189,7 +203,9 @@ def _boundary_margin(source_row, quantized_row, scale, column):
     """Measure a disputed quotient using its full row recurrence."""
     with localcontext() as context:
         context.prec = 80
-        decimal = lambda value: Decimal.from_float(float(value))
+        def decimal(value):
+            return Decimal.from_float(float(value))
+
         h = decimal(np.float32(0.05))
         error = Decimal(0)
         for index in range(column + 1):
@@ -201,11 +217,16 @@ def _boundary_margin(source_row, quantized_row, scale, column):
 
 
 @pytest.mark.parametrize("group_size", [-1, 128])
+@pytest.mark.parametrize(
+    "dtype",
+    [mx.float16, mx.bfloat16],
+    ids=["fp16", "bf16"],
+)
 @pytest.mark.parametrize("name,rows,columns", QWEN38_27B_PROJECTIONS)
-def test_qqq_qwen38_projection_oracle(name, rows, columns, group_size):
+def test_qqq_qwen38_projection_oracle(name, rows, columns, dtype, group_size):
     rng = np.random.default_rng(744 + rows + columns)
     source = rng.normal(0, 0.2, (rows, columns)).astype(np.float32)
-    weight = mx.array(source).astype(mx.bfloat16)
+    weight = mx.array(source).astype(dtype)
     mx.eval(weight)
     resident = np.asarray(weight.astype(mx.float32))
     factor = np.eye(columns, dtype=np.float32)
