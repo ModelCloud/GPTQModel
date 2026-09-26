@@ -190,6 +190,12 @@ class MlxBitsAndBytesLinear(nn.Module):
             return (output + self.bias).astype(x.dtype)
         rows = x.size // self.in_features
         row_tile = 1 if rows == 1 else min(8, rows)
+        if (
+            8 < rows <= 16
+            and self.in_features == 6144
+            and self.out_features == 5120
+        ):
+            row_tile = 16
         small_decode = (
             self.bits == 4
             and rows == 1
