@@ -19,18 +19,34 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 torch = pytest.importorskip("torch")
-bnb = pytest.importorskip("bitsandbytes")
 
 from gptqmodel.nn_modules.qlinear.mlx_bitsandbytes import (  # noqa: E402
     MlxBitsAndBytesLinear,
+    _four_bit_kernel,
     repack_int8_affine,
 )
+
+
+_CODEBOOKS = {
+    "nf4": np.array([
+        -1.0, -0.6961928, -0.52507305, -0.3949175,
+        -0.28444138, -0.18477343, -0.09105003625154495, 0.0,
+        0.0795803, 0.1609302, 0.2461123, 0.33791524,
+        0.44070983, 0.562617, 0.72295684, 1.0,
+    ], dtype=np.float32),
+    "fp4": np.array([
+        0.0, 0.0052083335, 0.6666667, 1.0,
+        0.33333334, 0.5, 0.16666667, 0.25,
+        0.0, -0.0052083335, -0.6666667, -1.0,
+        -0.33333334, -0.5, -0.16666667, -0.25,
+    ], dtype=np.float32),
+}
 
 
 def _weights(format_name, out_features, in_features, block_size=64):
     scale = np.float32(0.01875)
     if format_name in ("nf4", "fp4"):
-        codebook = bnb.functional.get_4bit_type(format_name, device="cpu").numpy().astype(np.float32)
+        codebook = _CODEBOOKS[format_name]
         codes = np.arange(in_features, dtype=np.uint8) & np.uint8(15)
         packed_row = ((codes[0::2] << 4) | codes[1::2]).astype(np.uint8)
         packed = np.tile(packed_row, out_features)
@@ -55,6 +71,86 @@ def _weights(format_name, out_features, in_features, block_size=64):
             packed, scales, in_features, out_features,
         )
     return packed, scales, codebook, dense, row_weight, bits, payload
+
+
+def _four_bit_unrounded(layer, x):
+    rows = x.size // layer.in_features
+    row_tile = 1 if rows == 1 else min(8, rows)
+    small_decode = (
+        rows == 1 and layer.out_features <= 2048 and layer.in_features >= 4096
+    )
+    if small_decode and x.dtype == mx.float16:
+        threads = 128
+    elif small_decode and x.dtype == mx.bfloat16:
+        threads = 256
+    else:
+        threads = 32
+    return _four_bit_kernel()(
+        inputs=[x, layer.weight, layer.scales, layer.codebook, layer.bias],
+        template=[
+            ("K", layer.in_features), ("N", layer.out_features),
+            ("BLOCK", layer.block_size), ("ROWS", rows),
+            ("RTILE", row_tile), ("THREADS", threads),
+            ("EVEN", layer.in_features % 2 == 0), ("GROUPS", threads // 32),
+        ],
+        grid=(threads, layer.out_features, (rows + row_tile - 1) // row_tile),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(rows, layer.out_features)],
+        output_dtypes=[mx.float32],
+    )[0]
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("format_name", ("nf4", "fp4"))
+def test_bnb_four_code_decode_codebook_and_block_boundaries(format_name, dtype):
+    out_features, in_features, block_size = 5, 128, 32
+    codebook = _CODEBOOKS[format_name]
+    codes = np.resize(
+        np.array([0, 15, 1, 14, 7, 8, 6, 9], dtype=np.uint8),
+        in_features,
+    )
+    packed_row = ((codes[0::2] << 4) | codes[1::2]).astype(np.uint8)
+    packed = np.tile(packed_row, out_features)
+    scales = np.linspace(
+        0.006, 0.024, out_features * (in_features // block_size),
+        dtype=np.float32,
+    ).reshape(out_features, -1)
+    bias = np.linspace(-0.003, 0.003, out_features, dtype=np.float32).astype(
+        np.float16
+    )
+    layer = MlxBitsAndBytesLinear(
+        packed,
+        scales,
+        in_features=in_features,
+        out_features=out_features,
+        bits=4,
+        block_size=block_size,
+        codebook=codebook,
+        bias=bias,
+    )
+    boundary = np.array(
+        [-1.0, np.nextafter(-1.0, 0.0), -0.0, 0.0,
+         np.nextafter(1.0, 0.0), 1.0, -0.5, 0.5],
+        dtype=np.float32,
+    )
+    x = mx.array(np.resize(boundary, (2, in_features))).astype(dtype)
+    internal = _four_bit_unrounded(layer, x)
+    actual = layer(x)
+    mx.eval(internal, actual)
+
+    dense = codebook[codes][None, :] * np.repeat(scales, block_size, axis=1)
+    dense = dense.astype(np.float16).astype(np.float64)
+    torch_input = torch.from_numpy(np.asarray(x.astype(mx.float32))).double()
+    raw = (torch_input @ torch.from_numpy(dense).double().T).numpy()
+    raw += bias.astype(np.float64)[None, :]
+    target = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    rounded = torch.from_numpy(raw).to(target).float().numpy()
+
+    assert actual.dtype == dtype
+    np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
+    np.testing.assert_allclose(
+        np.asarray(actual.astype(mx.float32)), rounded, rtol=2e-3, atol=2e-3,
+    )
 
 
 @pytest.mark.parametrize("block_size", (32, 64, 128, 256, 512, 1024, 2048, 4096))
@@ -113,7 +209,8 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     # Merged main decodes to FP16 dense weights, then preserves activation dtype.
     main_output = main(x).astype(dtype)
     actual = native(x)
-    mx.eval(main_output, actual)
+    internal = _four_bit_unrounded(native, x) if bits == 4 else None
+    mx.eval(main_output, actual, *(() if internal is None else (internal,)))
     assert actual.dtype == dtype
 
     input_values = np.asarray(x.astype(mx.float32)).astype(np.float64)
@@ -130,6 +227,15 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     record_property("max_abs_native_vs_main", float(np.max(np.abs(visible - main_values))))
     record_property("max_abs_native_vs_rounded_torch", float(np.max(np.abs(visible - rounded_oracle))))
     record_property("max_abs_native_vs_fp64", float(np.max(np.abs(visible - raw_oracle))))
+    if internal is not None:
+        internal_values = np.asarray(internal)
+        record_property(
+            "max_abs_internal_fp32",
+            float(np.max(np.abs(internal_values - raw_oracle))),
+        )
+        np.testing.assert_allclose(
+            internal_values, raw_oracle, rtol=2e-3, atol=2e-3,
+        )
     np.testing.assert_allclose(main_values, rounded_oracle, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded_oracle, rtol=2e-3, atol=2e-3)
     del main, native, main_output, actual, packed
