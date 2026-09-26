@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# QQQ method: Meituan, Ying Zhang et al., https://arxiv.org/abs/2406.09904
 
 """Opt-in native MLX QQQ weight quantization for Apple silicon."""
 
@@ -39,7 +40,51 @@ def _qqq_group_kernel():
     )
 
 
-def _qqq_params(group, *, full_row):
+@lru_cache(maxsize=1)
+def _qqq_dynamic_group_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_qqq_dynamic_group_update",
+        input_names=["weights", "hinv"],
+        output_names=["quantized", "errors", "scales", "zeros"],
+        source="""
+            uint row = thread_position_in_grid.x;
+            float values[G];
+            float minimum = 0.0f;
+            float maximum = 0.0f;
+            for (int k = 0; k < G; ++k) {
+                values[k] = weights[row * G + k];
+                minimum = metal::min(minimum, values[k]);
+                maximum = metal::max(maximum, values[k]);
+            }
+            maximum = metal::max(metal::abs(minimum), maximum);
+            if (minimum < 0.0f) minimum = -maximum;
+            if (minimum == 0.0f && maximum == 0.0f) {
+                minimum = -1.0f;
+                maximum = 1.0f;
+            }
+            float scale = (maximum - minimum) / 15.0f;
+            float zero = 8.0f;
+            scales[row] = scale;
+            zeros[row] = zero;
+            for (int k = 0; k < G; ++k) {
+                float value = values[k];
+                float code = metal::clamp(
+                    metal::rint(value / scale) + zero, 0.0f, 15.0f);
+                float q = scale * (code - zero);
+                float error = (value - q) / hinv[k * G + k];
+                quantized[row * G + k] = q;
+                errors[row * G + k] = error;
+                for (int j = k + 1; j < G; ++j) {
+                    values[j] -= error * hinv[k * G + j];
+                }
+            }
+        """,
+    )
+
+
+def _qqq_fixed_params(group):
     import mlx.core as mx
 
     minimum = mx.minimum(mx.min(group, axis=1), 0)
@@ -49,11 +94,7 @@ def _qqq_params(group, *, full_row):
     empty = (minimum == 0) & (maximum == 0)
     minimum = mx.where(empty, -1, minimum)
     maximum = mx.where(empty, 1, maximum)
-    if full_row:
-        return (maximum / 7)[:, None], mx.zeros((group.shape[0], 1))
-    return (maximum - minimum)[:, None] / 15, mx.full(
-        (group.shape[0], 1), 8, dtype=mx.float32
-    )
+    return (maximum / 7)[:, None], mx.zeros((group.shape[0], 1))
 
 
 def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
@@ -88,33 +129,37 @@ def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
     maximum = mx.max(mx.abs(original), axis=1)
     scale_extra = mx.where(maximum == 0, 1, maximum)[:, None] / 127
     fixed_scale, fixed_zero = (
-        _qqq_params(original, full_row=True) if group_size == -1 else (None, None)
+        _qqq_fixed_params(original) if group_size == -1 else (None, None)
     )
     remaining = original
     quantized, scales, zeros = [], [], []
-    kernel = _qqq_group_kernel()
+    kernel = (
+        _qqq_group_kernel() if group_size == -1 else _qqq_dynamic_group_kernel()
+    )
     block = 128 if group_size == -1 else group_size
     for start in range(0, columns, block):
         end = min(start + block, columns)
         width = end - start
         group = mx.contiguous(remaining[:, :width])
         factor = mx.contiguous(inverse_hessian[start:end, start:end])
-        scale, zero = (
-            (fixed_scale, fixed_zero)
-            if group_size == -1
-            else _qqq_params(group, full_row=False)
-        )
-        q, error = kernel(
-            inputs=[group, factor, scale, zero],
-            template=[
-                ("G", width),
-                ("SIGNED", group_size == -1),
-            ],
-            grid=(rows, 1, 1),
-            threadgroup=(min(rows, 64), 1, 1),
-            output_shapes=[(rows, width), (rows, width)],
-            output_dtypes=[mx.float32, mx.float32],
-        )
+        if group_size == -1:
+            q, error = kernel(
+                inputs=[group, factor, fixed_scale, fixed_zero],
+                template=[("G", width), ("SIGNED", True)],
+                grid=(rows, 1, 1),
+                threadgroup=(min(rows, 64), 1, 1),
+                output_shapes=[(rows, width), (rows, width)],
+                output_dtypes=[mx.float32, mx.float32],
+            )
+        else:
+            q, error, scale, zero = kernel(
+                inputs=[group, factor],
+                template=[("G", width)],
+                grid=(rows, 1, 1),
+                threadgroup=(min(rows, 64), 1, 1),
+                output_shapes=[(rows, width), (rows, width), (rows, 1), (rows, 1)],
+                output_dtypes=[mx.float32] * 4,
+            )
         quantized.append(q)
         if group_size != -1:
             scales.append(scale)
