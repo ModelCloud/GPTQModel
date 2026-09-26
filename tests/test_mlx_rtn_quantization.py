@@ -79,6 +79,21 @@ def test_rtn_all_bits_groups_and_low_precision_inputs(dtype, bits, group_size, s
     _compare(source, bits=bits, group_size=group_size, sym=sym)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_rtn_accepts_transposed_low_precision_weights(dtype):
+    source = mx.random.normal((256, 7)).astype(dtype)
+    weight = source.T
+    actual = quantize_rtn_weight_mlx(weight, bits=4, group_size=128, sym=True)
+    expected = quantize_rtn_weight_mlx(
+        mx.contiguous(weight), bits=4, group_size=128, sym=True
+    )
+    for observed, reference in zip(actual, expected):
+        np.testing.assert_array_equal(
+            np.asarray(observed.astype(mx.float32)),
+            np.asarray(reference.astype(mx.float32)),
+        )
+
+
 def test_rtn_rounding_boundaries():
     # The first row's extrema fix scale at 2/15. Adjacent values probe
     # values exactly on and one float32 step around several code boundaries.
