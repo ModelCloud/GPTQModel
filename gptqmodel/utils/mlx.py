@@ -50,7 +50,7 @@ try:
     from ..nn_modules.qlinear.mlx_gptq import MlxGPTQLinear
     from ..nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from ..nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
-    from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear
+    from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
     from ..nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
     from ..nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
     from ..nn_modules.qlinear.mlx_paro import MlxParoLinear
@@ -97,6 +97,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     layer_params = {}
     group16 = set()
     gguf_dtype = set()
+    gguf_q6_k = set()
     bitsandbytes_native = {}
     exl3_dtype = set()
     gptq_dtype = set()
@@ -138,6 +139,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 not isinstance(module, (QQQTorchLinear, GGUFTorchLinear, TorchFP8Linear))
                 and module.group_size == 16):
             group16.add(name)
+            if isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K":
+                gguf_q6_k.add(name)
         elif isinstance(module, TorchLinear):
             gptq_dtype.add(name)
         elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
@@ -242,6 +245,10 @@ def _packed_mlx_weights(model, config, lm_head_name):
             if not isinstance(module, nn.Linear):
                 raise ValueError(f"MLX group-16 layer {path} is not a linear module")
             output_dims, input_dims = module.weight.shape
+            if path in gguf_q6_k:
+                return MlxGGUFQ6KLinear(
+                    input_dims, output_dims, bias=module.get("bias") is not None,
+                )
             return MlxGroup16Linear(input_dims, output_dims, layer_params[path]["bits"],
                                     bias=module.get("bias") is not None)
 

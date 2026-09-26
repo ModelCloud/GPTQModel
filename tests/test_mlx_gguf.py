@@ -20,7 +20,7 @@ _QTYPES = ("Q1_0", "Q1_0_g128", "Q2_0", "Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K", 
 @pytest.mark.parametrize("qtype", _QTYPES)
 def test_gguf_affine_weights_and_matmul_match_source_oracle(qtype):
     from gptqmodel.nn_modules.qlinear.gguf import _GGUF_TYPE_INFO, _dequantize_gguf_tensor_numpy
-    from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+    from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFQ6KLinear
     from gptqmodel.utils.mlx_gguf_packing import repack_gguf_affine
 
     rng = np.random.default_rng(203 + _QTYPES.index(qtype))
@@ -40,7 +40,7 @@ def test_gguf_affine_weights_and_matmul_match_source_oracle(qtype):
     words, scales, biases, params = repack_gguf_affine(source, qtype, input_dims)
     expected_weights = torch.from_numpy(_dequantize_gguf_tensor_numpy(source, qtype).copy()).double()
     if qtype == "Q6_K":
-        layer = MlxGroup16Linear(input_dims, output_dims, bits=6)
+        layer = MlxGGUFQ6KLinear(input_dims, output_dims)
         layer.weight = mx.array(words)
         layer.scales_even = mx.array(scales[:, ::2])
         layer.scales_odd = mx.array(scales[:, 1::2])
@@ -76,8 +76,7 @@ def test_gguf_holder_loads_packed_mlx_layer(monkeypatch, bits, dtype):
 
     from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
     from gptqmodel.nn_modules.qlinear.mlx import GGUFMlxQuantLinear
-    from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
-    from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear
+    from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     source = torch.nn.Module()
@@ -109,7 +108,7 @@ def test_gguf_holder_loads_packed_mlx_layer(monkeypatch, bits, dtype):
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (Tiny, Args))
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     if bits == "q6_k":
-        assert isinstance(model.linear, MlxGroup16Linear)
+        assert isinstance(model.linear, MlxGGUFQ6KLinear)
     else:
         assert isinstance(model.linear, MlxGGUFLinear)
         assert config["_gptqmodel_custom_mlx_runtime"]
