@@ -27,10 +27,23 @@ def repack_int8_affine(weight, scales, in_features, out_features):
     return packed, affine_scales, affine_biases, group_size
 
 
-@lru_cache(maxsize=1)
-def _four_bit_kernel():
+def _output_type(output_dtype):
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        return output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported BitsAndBytes activation dtype: {output_dtype}") from exc
+
+
+@lru_cache(maxsize=3)
+def _four_bit_kernel(output_dtype=mx.float32):
+    output_suffix, output_type = _output_type(output_dtype)
     return mx.fast.metal_kernel(
-        name="gptqmodel_bnb_4bit_matmul",
+        name=f"gptqmodel_bnb_4bit_matmul_{output_suffix}",
         input_names=["x", "weight", "scales", "codebook", "bias"],
         output_names=["output"],
         source="""
@@ -90,9 +103,10 @@ def _four_bit_kernel():
             for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
                 float reduced = lane < GROUPS ? partials[r * GROUPS + lane] : 0.0f;
                 reduced = simd_sum(reduced);
-                if (lane == 0) output[(row_base + r) * N + column] = reduced + bias[column];
+                if (lane == 0)
+                    output[(row_base + r) * N + column] = OUTPUT_TYPE(reduced + bias[column]);
             }
-        """,
+        """.replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -196,10 +210,10 @@ class MlxBitsAndBytesLinear(nn.Module):
             "grid": (threads, self.out_features, (rows + row_tile - 1) // row_tile),
             "threadgroup": (threads, 1, 1),
             "output_shapes": [(rows, self.out_features)],
-            "output_dtypes": [mx.float32],
+            "output_dtypes": [x.dtype if self.bits == 4 else mx.float32],
         }
         if self.bits == 4:
-            output = _four_bit_kernel()(
+            output = _four_bit_kernel(x.dtype)(
                 inputs=[x, self.weight, self.scales, self.codebook, self.bias],
                 template=[("K", self.in_features), ("N", self.out_features), ("BLOCK", self.block_size),
                           ("ROWS", rows), ("RTILE", row_tile), ("THREADS", threads),
@@ -215,4 +229,5 @@ class MlxBitsAndBytesLinear(nn.Module):
                           ("GROUPS", threads // 32)],
                 **common,
             )[0]
-        return output.reshape(output_shape).astype(x.dtype)
+        output = output.reshape(output_shape)
+        return output if self.bits == 4 else output.astype(x.dtype)
