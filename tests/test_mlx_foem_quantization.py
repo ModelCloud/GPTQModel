@@ -185,6 +185,21 @@ def test_foem_asymmetric_zero_point_tie_and_neighbors():
         np.testing.assert_allclose(np.asarray(actual[index]), expected[index], rtol=1e-6, atol=1e-6)
 
 
+@pytest.mark.parametrize("sym", [True, False])
+def test_foem_fused_params_extrema_match_torch(sym):
+    weight = np.zeros((4, 32), dtype=np.float32)
+    weight[1] = np.linspace(0.125, 2, 32, dtype=np.float32)
+    weight[2] = -weight[1]
+    weight[3, :2] = (-3, 2)
+    factor = np.eye(32, dtype=np.float32)
+    expected = _torch_foem_oracle(weight, factor, 4, 32, 0.2, sym)
+    actual = foem_quantize_weight_mlx(
+        mx.array(weight), mx.array(factor), group_size=32, sym=sym,
+    )
+    for index in range(3):
+        np.testing.assert_array_equal(np.asarray(actual[index]), expected[index])
+
+
 @pytest.mark.parametrize("dtype,torch_dtype", [
     (mx.float16, torch.float16), (mx.bfloat16, torch.bfloat16),
 ])
@@ -234,13 +249,14 @@ def test_foem_bfloat16_with_cross_group_updates(sym):
 
 
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
-def test_foem_qwen38_27b_full_projection(name, out_features, in_features):
-    """Compare every BF16 output and code with nonzero Hessian corrections."""
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+def test_foem_qwen38_27b_full_projection(name, out_features, in_features, dtype):
+    """Compare every low-precision output and code with Hessian corrections."""
     del name
     group_size, bits = 128, 4
     rng = np.random.default_rng(7700 + out_features + in_features)
     source = rng.normal(0, 0.2, (out_features, in_features)).astype(np.float32)
-    weight = mx.array(source).astype(mx.bfloat16)
+    weight = mx.array(source).astype(dtype)
     mx.eval(weight)
     source = np.asarray(weight.astype(mx.float32))
     factor = np.eye(in_features, dtype=np.float32)

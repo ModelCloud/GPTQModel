@@ -12,18 +12,33 @@ def _foem_group_kernel():
 
     return mx.fast.metal_kernel(
         name="gptqmodel_foem_group_update",
-        input_names=["weights", "raw", "hinv", "scales", "zeros", "beta"],
-        output_names=["quantized", "errors"],
+        input_names=["weights", "raw", "hinv", "beta"],
+        output_names=["quantized", "errors", "scales", "zeros"],
         source="""
             uint row = thread_position_in_grid.x;
             float values[G];
             float original[G];
+            float minimum = 0.0f;
+            float maximum = 0.0f;
             for (int k = 0; k < G; ++k) {
                 values[k] = weights[row * G + k];
                 original[k] = raw[row * G + k];
+                minimum = metal::min(minimum, values[k]);
+                maximum = metal::max(maximum, values[k]);
             }
-            float scale = scales[row];
-            float zero = zeros[row];
+            if (SYM) {
+                maximum = metal::max(metal::abs(minimum), maximum);
+                if (minimum < 0.0f) minimum = -maximum;
+            }
+            if (minimum == 0.0f && maximum == 0.0f) {
+                minimum = -1.0f;
+                maximum = 1.0f;
+            }
+            float scale = (maximum - minimum) / float(MAXQ);
+            float zero = SYM ? float(1 << (BITS - 1))
+                             : metal::rint(-minimum / scale);
+            scales[row] = scale;
+            zeros[row] = zero;
             float correction = beta;
             for (int k = 0; k < G; ++k) {
                 float value = values[k];
@@ -43,23 +58,6 @@ def _foem_group_kernel():
             }
         """,
     )
-
-
-def _foem_group_params_mlx(group, *, bits: int, sym: bool):
-    """Match Quantizer.find_params for per-channel weights with MSE disabled."""
-    import mlx.core as mx
-
-    minimum = mx.minimum(mx.min(group, axis=1), 0)
-    maximum = mx.maximum(mx.max(group, axis=1), 0)
-    if sym:
-        maximum = mx.maximum(mx.abs(minimum), maximum)
-        minimum = mx.where(minimum < 0, -maximum, minimum)
-    empty = (minimum == 0) & (maximum == 0)
-    minimum = mx.where(empty, -1, minimum)
-    maximum = mx.where(empty, 1, maximum)
-    scale = (maximum - minimum) / (2**bits - 1)
-    zero = mx.full(scale.shape, 2 ** (bits - 1), dtype=mx.float32) if sym else mx.round(-minimum / scale)
-    return scale[:, None], zero[:, None]
 
 
 def foem_quantize_weight_mlx(
@@ -114,14 +112,18 @@ def foem_quantize_weight_mlx(
         group = mx.contiguous(remaining[:, :group_size])
         original = mx.contiguous(raw[:, start:end])
         factor = mx.contiguous(inverse_hessian[start:end, start:end])
-        scale, zero = _foem_group_params_mlx(group, bits=bits, sym=sym)
-        q, error = kernel(
-            inputs=[group, original, factor, scale, zero, beta_input],
-            template=[("G", group_size), ("MAXQ", 2**bits - 1)],
+        q, error, scale, zero = kernel(
+            inputs=[group, original, factor, beta_input],
+            template=[
+                ("G", group_size), ("BITS", bits),
+                ("MAXQ", 2**bits - 1), ("SYM", int(sym)),
+            ],
             grid=(rows, 1, 1),
             threadgroup=(min(rows, 64), 1, 1),
-            output_shapes=[(rows, group_size), (rows, group_size)],
-            output_dtypes=[mx.float32, mx.float32],
+            output_shapes=[
+                (rows, group_size), (rows, group_size), (rows, 1), (rows, 1),
+            ],
+            output_dtypes=[mx.float32, mx.float32, mx.float32, mx.float32],
         )
         quantized_groups.append(q)
         scales.append(scale)
