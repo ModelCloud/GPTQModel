@@ -11,6 +11,7 @@ import torch
 
 
 mx = pytest.importorskip("mlx.core")
+nn = pytest.importorskip("mlx.nn")
 
 
 _QTYPES = ("Q1_0", "Q1_0_g128", "Q2_0", "Q4_0", "Q8_0", "Q4_K", "Q5_K", "Q6_K", "TQ1_0", "TQ2_0")
@@ -68,13 +69,15 @@ def test_gguf_affine_weights_and_matmul_match_source_oracle(qtype):
     np.testing.assert_allclose(np.array(actual), oracle.numpy(), rtol=0.002, atol=0.002)
 
 
-@pytest.mark.parametrize("bits", ["q1_0", "q2_0", "q4_0", "q8_0", "q4_k", "q5_k", "q6_k"])
-def test_gguf_holder_loads_packed_mlx_layer(monkeypatch, bits):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=("fp16", "bf16"))
+@pytest.mark.parametrize("bits", ["q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q5_k", "q6_k"])
+def test_gguf_holder_loads_packed_mlx_layer(monkeypatch, bits, dtype):
     import mlx.nn as nn
 
     from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
     from gptqmodel.nn_modules.qlinear.mlx import GGUFMlxQuantLinear
     from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+    from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     source = torch.nn.Module()
@@ -104,18 +107,26 @@ def test_gguf_holder_loads_packed_mlx_layer(monkeypatch, bits):
             return self.linear(x)
 
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (Tiny, Args))
-    model, _ = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
-    assert isinstance(model.linear, MlxGroup16Linear if bits == "q6_k" else nn.QuantizedLinear)
-    x = mx.ones((1, 256), dtype=mx.float16)
+    model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
+    if bits == "q6_k":
+        assert isinstance(model.linear, MlxGroup16Linear)
+    else:
+        assert isinstance(model.linear, MlxGGUFLinear)
+        assert config["_gptqmodel_custom_mlx_runtime"]
+    x = mx.ones((1, 256), dtype=dtype)
     actual = model(x)
     mx.eval(actual)
     oracle = torch.from_numpy(np.ones((1, 256), dtype=np.float16)).double() @ source.linear.dequantize_weight(dtype=torch.float32).double()
-    np.testing.assert_allclose(np.array(actual), oracle.numpy(), rtol=0.002, atol=0.002)
+    expected = oracle.to(torch.float16 if dtype == mx.float16 else torch.bfloat16).float().numpy()
+    assert actual.dtype == dtype
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=0.002, atol=0.002)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=("fp16", "bf16"))
 @pytest.mark.parametrize("qtype", ["MXFP4", "NVFP4"])
-def test_gguf_fp4_maps_to_native_mlx_float4_mode(qtype):
+def test_gguf_fp4_maps_to_native_mlx_float4_mode(qtype, dtype):
     from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy
+    from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear
     from gptqmodel.utils.mlx_gguf_packing import repack_gguf_float4
 
     rng = np.random.default_rng(440 + len(qtype))
@@ -133,9 +144,18 @@ def test_gguf_fp4_maps_to_native_mlx_float4_mode(qtype):
                                 group_size=params["group_size"], bits=4).astype(mx.float32)
     mx.eval(dequantized)
     np.testing.assert_allclose(np.array(dequantized), reference.numpy(), rtol=0.002, atol=0.002)
-    x = rng.normal(0, 0.2, (2, 3, 256)).astype(np.float16)
-    actual = mx.quantized_matmul(mx.array(x), mx.array(words), mx.array(scales),
-                                 mode=params["mode"], group_size=params["group_size"], bits=4)
-    mx.eval(actual)
-    expected = torch.from_numpy(x).double() @ reference.T
-    np.testing.assert_allclose(np.array(actual.astype(mx.float32)), expected.numpy(), rtol=0.002, atol=0.002)
+    linear = nn.QuantizedLinear(
+        256, 64, bias=False, group_size=params["group_size"], bits=4, mode=params["mode"],
+    )
+    linear.weight = mx.array(words)
+    linear.scales = mx.array(scales)
+    layer = MlxGGUFLinear(linear)
+    x = rng.normal(0, 0.2, (2, 3, 256)).astype(np.float32)
+    mlx_input = mx.array(x).astype(dtype)
+    internal = linear(mlx_input)
+    actual = layer(mlx_input)
+    mx.eval(internal, actual)
+    assert actual.dtype == dtype
+    expected = (torch.from_numpy(np.asarray(mlx_input.astype(mx.float32))).double() @ reference.T)
+    rounded = expected.to(torch.float16 if dtype == mx.float16 else torch.bfloat16).float()
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), rounded.numpy(), rtol=0.002, atol=0.002)
