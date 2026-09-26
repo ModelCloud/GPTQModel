@@ -336,6 +336,22 @@ def test_gguf_mxfp4_packing_at_code_midpoints_and_saturation():
     np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "MXFP4"))
 
 
+def test_gguf_mxfp4_positive_and_negative_codes_share_magnitudes():
+    magnitudes = np.resize(
+        np.array([0, 2, 4, 6, 8, 12, 15], dtype=np.float32), 16
+    )
+    weight = np.concatenate((magnitudes, -magnitudes))[None, :]
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(packed, _torch_gguf_mxfp4_oracle(weight))
+
+    positive = packed[0, 1:] & 0x0F
+    negative = packed[0, 1:] >> 4
+    np.testing.assert_array_equal(
+        negative,
+        positive | np.where(positive == 0, 0, 8).astype(np.uint8),
+    )
+
+
 def test_gguf_mxfp4_packing_at_e8m0_scale_boundaries():
     from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
 
