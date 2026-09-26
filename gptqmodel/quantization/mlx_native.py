@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # MLX-LM supplies model loading, native AWQ quantization, and checkpoint saving.
+# GPTQ method: Elias Frantar et al., https://arxiv.org/abs/2210.17323
 
 """Native MLX GPTQ/AWQ quantization for Apple silicon.
 
@@ -17,22 +18,39 @@ def _gptq_group_kernel():
     import mlx.core as mx
 
     return mx.fast.metal_kernel(
-        name="gptqmodel_group_update",
-        input_names=["weights", "hinv", "scales", "biases"],
-        output_names=["packed", "errors"],
+        name="gptqmodel_fused_group_update",
+        input_names=["weights", "hinv"],
+        output_names=["packed", "errors", "scales", "biases"],
         source="""
             uint row = thread_position_in_grid.x;
             float values[G];
-            for (int k = 0; k < G; ++k) {
+            float first = weights[row * G];
+            values[0] = first;
+            float minimum = first;
+            float maximum = first;
+            for (int k = 1; k < G; ++k) {
                 values[k] = weights[row * G + k];
+                minimum = metal::min(minimum, values[k]);
+                maximum = metal::max(maximum, values[k]);
             }
-            float scale = scales[row];
-            float bias = biases[row];
+            maximum = metal::max(maximum, 0.0f);
+            float scale = metal::max(
+                (maximum - minimum) / float((1 << BITS) - 1), 1.0e-7f);
+            bool use_minimum = metal::abs(minimum) > metal::abs(maximum);
+            scale = use_minimum ? scale : -scale;
+            float edge = use_minimum ? minimum : maximum;
+            float zero_code = metal::rint(edge / scale);
+            bool at_zero = zero_code == 0.0f;
+            scale = at_zero ? scale : edge / zero_code;
+            float bias = at_zero ? 0.0f : edge;
+            scales[row] = scale;
+            biases[row] = bias;
+
             uint word = 0;
             for (int k = 0; k < G; ++k) {
-                float code = scale == 0.0f ? 0.0f :
-                    metal::clamp(metal::rint((values[k] - bias) / scale),
-                                 0.0f, float((1 << BITS) - 1));
+                float code = metal::clamp(
+                    metal::rint((values[k] - bias) / scale),
+                    0.0f, float((1 << BITS) - 1));
                 float quantized = code * scale + bias;
                 float error = (values[k] - quantized) / hinv[k * G + k];
                 word |= uint(code) << ((k % PACK) * BITS);
@@ -101,23 +119,6 @@ def _accurate_matmul_mlx(left, right):
     )
 
 
-def _affine_group_params_mlx(group, bits):
-    """Choose affine params with ties-to-even zero-point rounding like Torch."""
-    import mlx.core as mx
-
-    minimum = mx.min(group, axis=1)
-    maximum = mx.maximum(mx.max(group, axis=1), 0)
-    scale = mx.maximum((maximum - minimum) / (2**bits - 1), 1e-7)
-    use_minimum = mx.abs(minimum) > mx.abs(maximum)
-    scale = mx.where(use_minimum, scale, -scale)
-    edge = mx.where(use_minimum, minimum, maximum)
-    zero_code = mx.round(edge / scale)
-    at_zero = zero_code == 0
-    scale = mx.where(at_zero, scale, edge / mx.where(at_zero, 1, zero_code))
-    bias = mx.where(at_zero, 0, edge)
-    return scale[:, None], bias[:, None]
-
-
 def gptq_quantize_weight_mlx(
     weight, inverse_hessian, bits: int = 4, group_size: int = 64
 ):
@@ -150,14 +151,18 @@ def gptq_quantize_weight_mlx(
     for start in range(0, columns, group_size):
         end = start + group_size
         group = remaining[:, :group_size]
-        scales, biases = _affine_group_params_mlx(group, bits)
-        packed_group, errors = kernel(
-            inputs=[group, inverse_hessian[start:end, start:end], scales, biases],
+        packed_group, errors, scales, biases = kernel(
+            inputs=[group, inverse_hessian[start:end, start:end]],
             template=[("G", group_size), ("BITS", bits), ("PACK", values_per_word)],
             grid=(rows, 1, 1),
             threadgroup=(min(rows, 64), 1, 1),
-            output_shapes=[(rows, group_size // values_per_word), (rows, group_size)],
-            output_dtypes=[mx.uint32, mx.float32],
+            output_shapes=[
+                (rows, group_size // values_per_word),
+                (rows, group_size),
+                (rows, 1),
+                (rows, 1),
+            ],
+            output_dtypes=[mx.uint32, mx.float32, mx.float32, mx.float32],
         )
         packed_groups.append(packed_group)
         all_scales.append(scales)
