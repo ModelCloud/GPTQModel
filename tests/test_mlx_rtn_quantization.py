@@ -40,6 +40,7 @@ def _compare(weight, bits=4, group_size=128, sym=True):
         group_size=group_size,
         sym=sym,
     )
+    assert actual[0].dtype == mlx_dtype
     for index in range(4):
         observed = actual[index].astype(mx.float32) if index == 0 else actual[index]
         reference = expected[index].float() if index == 0 else expected[index]
