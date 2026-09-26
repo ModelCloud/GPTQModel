@@ -189,6 +189,50 @@ def test_bnb_small_decode_all_4bit_block_sizes(format_name, dtype, block_size):
     np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)
 
 
+@pytest.mark.parametrize("rows", (9, 15), ids=("lower_boundary", "upper_neighbor"))
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("format_name", ("nf4", "fp4"))
+def test_bnb_5120x6144_mid_prefill_matches_previous_path_and_torch(
+    format_name, dtype, rows, record_property,
+):
+    out_features, in_features = 5120, 6144
+    codebook = _CODEBOOKS[format_name]
+    codes = np.arange(in_features, dtype=np.uint8) & np.uint8(15)
+    packed_row = ((codes[0::2] << 4) | codes[1::2]).astype(np.uint8)
+    packed = np.tile(packed_row, out_features)
+    scale = np.float32(0.01875)
+    scales = np.full(out_features * in_features // 64, scale, dtype=np.float32)
+    bias = np.linspace(-0.002, 0.002, out_features, dtype=np.float32).astype(np.float16)
+    layer = MlxBitsAndBytesLinear(
+        packed, scales, in_features=in_features, out_features=out_features,
+        bits=4, block_size=64, codebook=codebook, bias=bias,
+    )
+    positions = np.arange(in_features, dtype=np.float32)
+    source = np.stack([
+        np.sin(positions * (0.013 + row * 0.0001)) * 0.08
+        + np.cos(positions * (0.007 + row * 0.0001)) * 0.04
+        for row in range(rows)
+    ])
+    x = mx.array(source).astype(dtype)
+    previous = _four_bit_unrounded(layer, x).astype(dtype)
+    actual = layer(x)
+    mx.eval(previous, actual)
+
+    torch_input = torch.from_numpy(np.asarray(x.astype(mx.float32))).double()
+    row_weight = torch.from_numpy((codebook[codes] * scale).astype(np.float16)).double()
+    raw_row = torch_input @ row_weight
+    raw = raw_row[:, None] + torch.from_numpy(bias).double()[None, :]
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    rounded = raw.to(torch_dtype).float().numpy()
+    visible = np.asarray(actual.astype(mx.float32))
+    previous_visible = np.asarray(previous.astype(mx.float32))
+    record_property("max_abs_vs_rounded_torch", float(np.max(np.abs(visible - rounded))))
+    record_property("changed_vs_previous_tile", int(np.count_nonzero(visible != previous_visible)))
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(visible, previous_visible)
+    np.testing.assert_allclose(visible, rounded, rtol=2e-3, atol=2e-3)
+
+
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
 @pytest.mark.parametrize(
     "format_name,rows",
