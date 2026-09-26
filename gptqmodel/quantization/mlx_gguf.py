@@ -99,10 +99,11 @@ def _gguf_q5_k_kernel():
             float scale = 0.0f;
             float minimum = 0.0f;
             if (lane < 8) {
-                float low = weights[block * 256 + lane * 32];
+                float low = float(weights[block * 256 + lane * 32]);
                 float high = low;
                 for (uint k = 1; k < 32; ++k) {
-                    float value = weights[block * 256 + lane * 32 + k];
+                    float value = float(
+                        weights[block * 256 + lane * 32 + k]);
                     low = metal::min(low, value);
                     high = metal::max(high, value);
                 }
@@ -148,9 +149,10 @@ def _gguf_q5_k_kernel():
                 float step1 = base * float(scale_codes[group + 1]);
                 float bias0 = min_base * float(min_codes[group]);
                 float bias1 = min_base * float(min_codes[group + 1]);
-                float shifted0 = weights[block * 256 + group * 32 + lane] + bias0;
-                float shifted1 = weights[
-                    block * 256 + (group + 1) * 32 + lane] + bias1;
+                float shifted0 = float(
+                    weights[block * 256 + group * 32 + lane]) + bias0;
+                float shifted1 = float(weights[
+                    block * 256 + (group + 1) * 32 + lane]) + bias1;
                 uint code0 = step0 > 0.0f
                     ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 31))
                     : 0;
@@ -765,7 +767,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
     direct_input = (
-        normalized.startswith("Q1_0")
+        normalized.startswith(("Q1_0", "Q4_K"))
         or normalized in ("Q2_0", "Q4_0", "MXFP4", "Q8_0")
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
