@@ -19,8 +19,10 @@ from gptqmodel.quantization.config import QuantizeConfig
 config = importlib.import_module("gptqmodel.quantization.config")
 
 
-def run_case(label, capacity, cfg, names, calls_per_module):
-    cache = config._BoundedLRUCache(capacity)
+def run_case(label, capacity, dynamic, names, calls_per_module):
+    cfg = QuantizeConfig(dynamic=dynamic)
+    cache = config._dynamic_override_cache_for(cfg.dynamic)
+    cache.ensure_capacity(capacity)
     config._DYNAMIC_PATTERN_CACHE.clear()
     config._DYNAMIC_EXACT_LOOKUP_CACHE.clear()
     config._DYNAMIC_REGEX_PATTERN_CACHE.clear()
@@ -33,7 +35,7 @@ def run_case(label, capacity, cfg, names, calls_per_module):
         match_calls += 1
         return original_match(pattern, name)
 
-    with patch.object(config, "_DYNAMIC_OVERRIDE_CACHE", cache), patch.object(pcre.Pattern, "match", counted_match):
+    with patch.object(pcre.Pattern, "match", counted_match):
         rows = []
         for traversal in range(2):
             start = time.perf_counter()
@@ -60,12 +62,10 @@ def main():
     dynamic = {f"+:^unused\\.rule\\.{i}\\..*$": {"bits": 3} for i in range(args.rules - 1)}
     dynamic[r"+:^model\.layers\.\d+\.moe\.experts\.\d+$"] = {"bits": 2}
     assert all(config._extract_literal_regex_pattern(pattern[2:]) is None for pattern in dynamic)
-    cfg = QuantizeConfig(dynamic=dynamic)
-
     adaptive = 1 << (max(8192, (args.modules * 5 + 3) // 4) - 1).bit_length()
     print("case pass seconds pcre_calls hits misses evictions peak_size")
     for label, capacity in (("fixed", 8192), ("adaptive", adaptive), ("reference", 1 << 31)):
-        for row in run_case(label, capacity, cfg, names, args.calls_per_module):
+        for row in run_case(label, capacity, dynamic, names, args.calls_per_module):
             print("%s %d %.3f %d %d %d %d %d" % row)
 
 

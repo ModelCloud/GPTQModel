@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import time
+import weakref
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
@@ -1322,7 +1323,9 @@ def ModelLoader(cls):
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
         if quantize_config.dynamic:
-            log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before)
+            log_dynamic_override_cache_stats(
+                instance._dynamic_cache_stats_before, dynamic=quantize_config.dynamic,
+            )
 
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
@@ -1738,7 +1741,7 @@ def ModelLoader(cls):
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
-            dynamic_cache_stats_before = dynamic_override_cache_stats() if qcfg.dynamic else None
+            dynamic_cache_stats_before = dynamic_override_cache_stats(qcfg.dynamic) if qcfg.dynamic else None
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
@@ -1758,7 +1761,7 @@ def ModelLoader(cls):
                         layer_modules=planning_layer_modules,
                         layer_prefixes=extract_layers_node,
                     )
-                    model._gptqmodel_dynamic_cache_prepared_for = qcfg
+                    model._gptqmodel_dynamic_cache_prepared_for = weakref.ref(qcfg)
                     model._gptqmodel_dynamic_cache_stats_before = dynamic_cache_stats_before
                 # Get the first layer to determine layer type
                 layers, _ = get_layers_with_prefixes(model, extract_layers_node)
@@ -2224,7 +2227,7 @@ def ModelLoader(cls):
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
         if qcfg.dynamic:
-            log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before)
+            log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)
         return instance
 
     cls.from_quantized = from_quantized

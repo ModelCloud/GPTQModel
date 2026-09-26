@@ -502,11 +502,11 @@ class BaseQModel(nn.Module):
             self._source_model_config = copy.deepcopy(model.config)
         dynamic_cache_prepared = (
             bool(getattr(quantize_config, "dynamic", None))
-            and getattr(model, "_gptqmodel_dynamic_cache_prepared_for", None) is quantize_config
+            and getattr(model, "_gptqmodel_dynamic_cache_prepared_for", lambda: None)() is quantize_config
         )
         self._dynamic_cache_stats_before = (
             getattr(model, "_gptqmodel_dynamic_cache_stats_before")
-            if dynamic_cache_prepared else dynamic_override_cache_stats()
+            if dynamic_cache_prepared else dynamic_override_cache_stats(getattr(quantize_config, "dynamic", None))
         )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
         if (getattr(quantize_config, "dynamic", None)
@@ -1187,7 +1187,7 @@ class BaseQModel(nn.Module):
             raise AttributeError("`quantize_config` must be not None")
 
         dynamic_cache_stats_before = (
-            dynamic_override_cache_stats() if self.quantize_config.dynamic else None
+            dynamic_override_cache_stats(self.quantize_config.dynamic) if self.quantize_config.dynamic else None
         )
 
         if os.environ.get("GPTQMODEL_RESUME") == "1":
@@ -1431,7 +1431,7 @@ class BaseQModel(nn.Module):
 
         _setup_rotation_online_had(self.model, self.quantize_config.rotation)
         if self.quantize_config.dynamic:
-            log_dynamic_override_cache_stats(dynamic_cache_stats_before)
+            log_dynamic_override_cache_stats(dynamic_cache_stats_before, dynamic=self.quantize_config.dynamic)
         return result
 
     @staticmethod

@@ -10,6 +10,7 @@ import math
 import os.path
 import tempfile
 import threading
+import weakref
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
@@ -1840,19 +1841,17 @@ _DYNAMIC_CACHE_LOCK = threading.RLock()
 
 def configure_dynamic_override_cache(*, module_count: int,
                                      layer_count: Optional[int] = None,
-                                     expert_count: Optional[int] = None) -> int:
-    """Reserve room for one model's working set, with 25% headroom.
-
-    The process-global LRU may still evict an earlier model's entries when
-    several distinct dynamic configs are active at once.
-    """
+                                     expert_count: Optional[int] = None,
+                                     dynamic=None) -> int:
+    """Reserve 25% headroom for a tracked config or standalone fallback."""
     if module_count < 0:
         raise ValueError("module_count must be non-negative")
     target = max(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE, (module_count * 5 + 3) // 4)
     capacity = 1 << (target - 1).bit_length()
     with _DYNAMIC_CACHE_LOCK:
-        _DYNAMIC_OVERRIDE_CACHE.ensure_capacity(capacity)
-        capacity = _DYNAMIC_OVERRIDE_CACHE.maxsize
+        cache = _dynamic_override_cache_for(dynamic)
+        cache.ensure_capacity(capacity)
+        capacity = cache.maxsize
     log.debug(
         "Dynamic cache: modules=%s layers=%s experts/layer=%s override capacity=%s",
         module_count, layer_count, expert_count, capacity,
@@ -1860,12 +1859,26 @@ def configure_dynamic_override_cache(*, module_count: int,
     return capacity
 
 
+def _dynamic_override_cache_for(dynamic) -> _BoundedLRUCache:
+    """Tie resolved results to a tracked dynamic mapping's lifetime."""
+    if not isinstance(dynamic, _TrackedDict):
+        return _DYNAMIC_OVERRIDE_CACHE
+    root = dynamic._root
+    with _DYNAMIC_CACHE_LOCK:
+        cache = getattr(root, "_dynamic_override_cache", None)
+        if cache is None:
+            cache = _BoundedLRUCache(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE)
+            root._dynamic_override_cache = cache
+        return cache
+
+
 def configure_dynamic_override_cache_for_model(
     model, quantize_config, *, layer_modules=None, layer_prefixes=None,
 ) -> int:
     """Size for physical modules and the expanded dynamic module plan."""
-    if not getattr(quantize_config, "dynamic", None) or not hasattr(model, "named_modules"):
-        return _DYNAMIC_OVERRIDE_CACHE.maxsize
+    dynamic = getattr(quantize_config, "dynamic", None)
+    if not dynamic or not hasattr(model, "named_modules"):
+        return _dynamic_override_cache_for(dynamic).maxsize
     prefixes = set(layer_prefixes or ())
     seen_containers = set()
     physical_count = layer_count = 0
@@ -1884,7 +1897,9 @@ def configure_dynamic_override_cache_for_model(
     }
     logical_count = len(relative_names) * (layer_count + 1)
     working_set = max(physical_count, logical_count)
-    capacity = configure_dynamic_override_cache(module_count=working_set, layer_count=layer_count)
+    capacity = configure_dynamic_override_cache(
+        module_count=working_set, layer_count=layer_count, dynamic=dynamic,
+    )
     log.debug("Dynamic cache: physical modules=%s logical paths=%s", physical_count, logical_count)
     exact_rules = sum(
         _extract_literal_regex_pattern(pattern[2:] if pattern.startswith(("-:", "+:")) else pattern)
@@ -1898,10 +1913,10 @@ def configure_dynamic_override_cache_for_model(
     return capacity
 
 
-def dynamic_override_cache_stats() -> Dict[str, int]:
-    """Return a stable snapshot of process-wide resolved-result cache counters."""
+def dynamic_override_cache_stats(dynamic=None) -> Dict[str, int]:
+    """Return counters for one tracked config, or the standalone fallback."""
     with _DYNAMIC_CACHE_LOCK:
-        cache = _DYNAMIC_OVERRIDE_CACHE
+        cache = _dynamic_override_cache_for(dynamic)
         return {
             "hits": cache.hits,
             "misses": cache.misses,
@@ -1912,8 +1927,10 @@ def dynamic_override_cache_stats() -> Dict[str, int]:
         }
 
 
-def log_dynamic_override_cache_stats(stats_before: Optional[Dict[str, int]] = None) -> None:
-    stats = dynamic_override_cache_stats()
+def log_dynamic_override_cache_stats(
+    stats_before: Optional[Dict[str, int]] = None, *, dynamic=None,
+) -> None:
+    stats = dynamic_override_cache_stats(dynamic)
     before = stats_before or {"hits": 0, "misses": 0, "evictions": 0}
     hits = stats["hits"] - before["hits"]
     misses = stats["misses"] - before["misses"]
@@ -1921,7 +1938,7 @@ def log_dynamic_override_cache_stats(stats_before: Optional[Dict[str, int]] = No
     lookups = hits + misses
     hit_rate = 100 * hits / lookups if lookups else 0
     log.debug("Dynamic cache since start: lookups=%s hits=%s misses=%s evictions=%s "
-              "size=%s process_peak_size=%s capacity=%s hit_rate=%.2f%%",
+              "size=%s peak_size=%s capacity=%s hit_rate=%.2f%%",
               lookups, hits, misses, evictions, stats["size"],
               stats["peak_size"], stats["maxsize"], hit_rate)
 
@@ -1975,12 +1992,12 @@ def _dynamic_cache_key(dynamic):
         version = dynamic._root._mutation_version
         with _DYNAMIC_CACHE_LOCK:
             record = _DYNAMIC_IDENTITY_CACHE.get(identity_key)
-            if record is not None and record[0] is dynamic and record[1] == version:
+            if record is not None and record[0]() is dynamic and record[1] == version:
                 # This cache only avoids re-fingerprinting an unchanged object;
                 # identity and version checks keep it from affecting correctness.
                 return record[2]
             fingerprint = _dynamic_fingerprint(dynamic)
-            _DYNAMIC_IDENTITY_CACHE[identity_key] = (dynamic, version, fingerprint)
+            _DYNAMIC_IDENTITY_CACHE[identity_key] = (weakref.ref(dynamic), version, fingerprint)
             return fingerprint
     # Untracked mappings are still correct; they simply pay fingerprint cost
     # because arbitrary in-place mutations cannot expose a safe O(1) token.
@@ -2082,9 +2099,10 @@ def _resolve_dynamic_override(
         return None
 
     cache_key = _dynamic_cache_key(dynamic)
+    override_cache = _dynamic_override_cache_for(dynamic)
     lookup_key = (cache_key, module_name)
     with _DYNAMIC_CACHE_LOCK:
-        cached = _DYNAMIC_OVERRIDE_CACHE.get(lookup_key, _DYNAMIC_NO_MATCH)
+        cached = override_cache.get(lookup_key, _DYNAMIC_NO_MATCH)
         if cached is not _DYNAMIC_NO_MATCH:
             return clone_result(cached)
 
@@ -2095,7 +2113,7 @@ def _resolve_dynamic_override(
         if _DYNAMIC_ALL_EXACT_CACHE.get(cache_key, False):
             exact_entry = _DYNAMIC_EXACT_LOOKUP_CACHE.get(cache_key, {}).get(module_name)
             matched = exact_entry[1] if exact_entry is not None else None
-            _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
+            override_cache[lookup_key] = matched
             return clone_result(matched)
 
         # Mixed fallback: find the earliest matching pattern among exact
@@ -2111,7 +2129,7 @@ def _resolve_dynamic_override(
                 matched = False if is_negative else copy.deepcopy(dict(overrides))
                 break
 
-        _DYNAMIC_OVERRIDE_CACHE[lookup_key] = matched
+        override_cache[lookup_key] = matched
         return clone_result(matched)
 
 def dict_scale_dtype_to_str(d: Dict[str, Any]) -> None:
