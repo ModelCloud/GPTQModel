@@ -139,7 +139,8 @@ def _qwen_hessian(width, *, sample_count=8):
 
 
 def _qwen_signs(width):
-    return np.where(np.arange(width) & 1, -1.0, 1.0).astype(np.float32)
+    generator = np.random.default_rng(73172 + width)
+    return np.where(generator.integers(0, 2, size=width), -1.0, 1.0).astype(np.float32)
 
 
 @cache
@@ -258,6 +259,7 @@ def test_exl3_finalize_hessian_rejects_invalid_inputs():
             "nonempty",
         ),
         (valid.astype(mx.float16), signs, {}, "float32"),
+        (valid.astype(mx.bfloat16), signs, {}, "float32"),
         (
             mx.eye(144, dtype=mx.float32),
             mx.ones((144,), dtype=mx.float32),
