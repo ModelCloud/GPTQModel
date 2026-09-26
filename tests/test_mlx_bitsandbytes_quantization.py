@@ -21,6 +21,10 @@ mx = pytest.importorskip("mlx.core")
 bnb = pytest.importorskip("bitsandbytes")
 
 from gptqmodel.quantization.mlx_bitsandbytes import (  # noqa: E402
+    _FP4,
+    _NF4,
+    _dynamic_lookup_np,
+    _subnormal_nested_scales,
     quantize_4bit_weight_mlx,
     quantize_int8_weight_mlx,
 )
@@ -161,6 +165,94 @@ def test_4bit_subnormal_and_zero_blocks(quant_type):
     tiny = torch.zeros((1, 33), dtype=torch.float32)
     tiny[0, :2] = torch.tensor([1e-40, -1e-40])
     _check_4bit(tiny, quant_type, 32, True)
+
+
+def _pack_exact_subnormal_codes(raw_bits, quant_type, block_size):
+    code = np.array(_NF4 if quant_type == "nf4" else _FP4, dtype=np.float32)
+    order = np.argsort(code, kind="stable")
+    bounds = (code[order[:-1]] + code[order[1:]]) / np.float32(2)
+    magnitude = raw_bits & np.uint32(0x7FFFFFFF)
+    result = []
+    minimum_denominator = np.float32(1e-38).view(np.uint32)
+    for start in range(0, raw_bits.size, block_size):
+        stop = min(start + block_size, raw_bits.size)
+        denominator = max(int(magnitude[start:stop].max()), int(minimum_denominator))
+        signed = magnitude[start:stop].astype(np.float64) / denominator
+        signed[(raw_bits[start:stop] >> 31) != 0] *= -1
+        result.extend(order[np.searchsorted(bounds, signed, side="left")])
+    codes = np.array(result, dtype=np.uint8)
+    if codes.size % 2:
+        zero_code = order[np.searchsorted(bounds, 0.0, side="left")]
+        codes = np.append(codes, zero_code)
+    return ((codes[0::2] << 4) | codes[1::2]).reshape(-1, 1)
+
+
+@pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
+def test_4bit_subnormal_boundaries_match_exact_oracle(quant_type):
+    code = np.array(_NF4 if quant_type == "nf4" else _FP4, dtype=np.float32)
+    order = np.argsort(code, kind="stable")
+    bounds = (code[order[:-1]] + code[order[1:]]) / np.float32(2)
+    denominator = np.uint32(8_200_000)
+    magnitudes = [int(denominator)]
+    signs = [0]
+    for boundary in bounds:
+        center = int(round(abs(float(boundary)) * int(denominator)))
+        for neighbor in (center - 1, center, center + 1):
+            magnitudes.append(max(neighbor, 0))
+            signs.append(int(np.signbit(boundary)))
+    magnitudes.extend([0] * (64 - len(magnitudes)))
+    signs.extend([0] * (64 - len(signs)))
+    raw_bits = np.array(magnitudes, dtype=np.uint32) | (
+        np.array(signs, dtype=np.uint32) << 31
+    )
+    source = torch.from_numpy(raw_bits.view(np.float32).reshape(1, 64))
+    actual, _ = quantize_4bit_weight_mlx(
+        mx.array(source.numpy()), quant_type=quant_type, block_size=64
+    )
+    exact = _pack_exact_subnormal_codes(raw_bits, quant_type, 64)
+    np.testing.assert_array_equal(np.asarray(actual), exact)
+
+    torch_codes, _ = bnb.functional.quantize_4bit(
+        source, quant_type=quant_type, blocksize=64, quant_storage=torch.uint8
+    )
+    actual_codes = np.asarray(actual)
+    torch_codes = torch_codes.numpy()
+    differing = np.flatnonzero(actual_codes != torch_codes)
+    if differing.size:
+        np.testing.assert_array_equal(actual_codes, exact)
+
+
+def test_subnormal_nested_statistics_match_fp64_oracle():
+    rng = np.random.default_rng(20260926)
+    raw_bits = np.concatenate([
+        np.array([0, 1, 2, 0x003FFFFF, 0x00400000, 0x007FFFFF], dtype=np.uint32),
+        rng.integers(0, 0x00800000, 507, dtype=np.uint32),
+    ])
+    absmax = mx.array(raw_bits).view(mx.float32)
+    actual = _subnormal_nested_scales(absmax)
+
+    total = int(raw_bits.astype(np.uint64).sum())
+    quotient, remainder = divmod(total, raw_bits.size)
+    offset_bits = quotient + int(
+        2 * remainder > raw_bits.size
+        or (2 * remainder == raw_bits.size and quotient % 2)
+    )
+    centered = raw_bits.astype(np.int64) - offset_bits
+    padded = (-centered.size) % 256
+    maximums = np.max(
+        np.abs(np.pad(centered, (0, padded))).reshape(-1, 256), axis=1
+    )
+    scaled = centered.astype(np.float64) / maximums[np.arange(centered.size) // 256]
+    _, dynamic_code = _dynamic_lookup_np()
+    bounds = (dynamic_code[:-1] + dynamic_code[1:]) / np.float32(2)
+    expected_codes = np.searchsorted(bounds, scaled, side="left").astype(np.uint8)
+
+    np.testing.assert_array_equal(np.asarray(actual["absmax"]), expected_codes)
+    np.testing.assert_array_equal(
+        np.asarray(actual["nested_absmax"]).view(np.uint32),
+        maximums.astype(np.uint32),
+    )
+    assert int(np.asarray(actual["offset"]).view(np.uint32)) == offset_bits
 
 
 def test_int8_zero_rows_and_rounding_boundaries():
