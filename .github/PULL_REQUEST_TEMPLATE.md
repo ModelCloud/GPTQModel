@@ -12,9 +12,8 @@ Describe the bug, fix, or feature clearly and briefly.
 
 Every working PR must include at least one new simple, fast, targeted unit test when the change affects behavior, a bug fix, or a regression path.
 
+- [ ] Unit tests have been executed and passed, or the reason they are not applicable is documented.
 - [ ] I added a new simple/fast unit test for this change, or documented why that is not applicable.
-- [ ] I ran the new targeted test locally before opening this PR.
-- [ ] I ran any other directly relevant local tests.
 
 Paste the exact test commands and results here:
 
@@ -23,15 +22,19 @@ Paste the exact test commands and results here:
 
 ## Review Requirements
 
-AI-assisted code is welcome.
+AI-assisted code is welcome. The PR must still be reviewed before it is opened as ready for review.
 
-Every changed file must still be properly reviewed by a human before the PR is opened as ready for review.
+I or an AI agent (such as Codex or Claude) have:
 
-We will not accept PRs that are effectively unreviewed AI output. Non-human-reviewed changes often introduce obscure structure, mismatched APIs, project-inconsistent code patterns, or unnecessary monkeypatching instead of a correct fix or clean feature expansion.
+- [ ] Reviewed this PR.
+- [ ] Checked that the code matches existing project structure, APIs, and conventions.
+- [ ] Avoided unnecessary monkeypatching and used the project's normal extension points where possible.
+- [ ] Minimized and compacted the impacted code surface.
+- [ ] Considered and eliminated potential regressions.
 
-- [ ] I personally reviewed every file in this diff.
-- [ ] I checked that the code matches existing project structure, APIs, and conventions.
-- [ ] I avoided unnecessary monkeypatching and used the project's normal extension points where possible.
+## Kernel Accuracy Requirements
+
+- [ ] For kernel-related changes, accuracy drift was measured against an applicable independent Torch FP32/FP64 oracle, or the reason this is not applicable is documented.
 
 ## Notes
 
