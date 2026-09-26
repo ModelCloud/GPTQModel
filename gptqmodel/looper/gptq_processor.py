@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
@@ -29,7 +29,15 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
-from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import (
+    GPTAQConfig,
+    FOEMConfig,
+    HessianConfig,
+    METHOD,
+    QuantizeConfig,
+    normalize_gsq_config,
+    resolve_quant_format,
+)
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -97,6 +105,7 @@ def clone_gptq_config_for_module(
                 raise ValueError("QuantizeConfig: dynamic `hessian` must be a HessianConfig or dict.")
         gptaq_override = qcfg.dynamic_get(module_full_name, "gptaq", None)
         foem_override = qcfg.dynamic_get(module_full_name, "foem", None)
+        qcfg_clone.gsq = normalize_gsq_config(qcfg.dynamic_get(module_full_name, "gsq", qcfg_clone.gsq))
         if gptaq_override is not None:
             if isinstance(gptaq_override, dict):
                 qcfg_clone.gptaq = GPTAQConfig(**gptaq_override)
@@ -113,6 +122,7 @@ def clone_gptq_config_for_module(
                 raise ValueError("QuantizeConfig: dynamic `foem` must be a FOEMConfig or dict.")
 
         qcfg_clone._resolve_activation_ordering(desc_act_override, act_group_aware_override)
+        qcfg_clone.validate_gsq()
 
     qcfg_clone.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
     return qcfg_clone
@@ -485,6 +495,9 @@ class GPTQProcessor(LoopProcessor):
                 )
 
         wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, nsamples = g.quantize()
+        gsq_diagnostics = getattr(g, "gsq_diagnostics", None)
+        if gsq_diagnostics is not None:
+            module.state["gsq_diagnostics"] = gsq_diagnostics
 
         workspace_summary = getattr(g, "_borrow_workspace_last_summary", None)
         workspace_totals = getattr(g, "_borrow_workspace_totals", None)

@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
@@ -31,6 +31,7 @@ from .gar import (
     extend_perm_with_tail,
     invert_perm,
 )
+from .gsq_scalar import gsq_enabled_for, refine_gptq_scalar
 from .npu_linalg import npu_inverse_cholesky_factor
 from .quantizer import HF_OPTIMUM, Quantizer
 
@@ -1214,6 +1215,72 @@ class GPTQ:
 
     @torch.inference_mode()
     def quantize(
+            self,
+            blocksize=128,
+    ):
+        config = getattr(self.qcfg, "gsq", None)
+        module_name = self._named_module.full_name if self._named_module is not None else self.name
+        if getattr(self, "_gsq_active", False) or not gsq_enabled_for(config, module_name):
+            return self._quantize_impl(blocksize=blocksize)
+
+        if not isinstance(self.module, nn.Linear):
+            raise ValueError("GSQ currently supports GPTQ linear projections only")
+        if self._tp_pad_cols:
+            raise ValueError("GSQ does not support tensor-parallel padded projections")
+        from ..utils.fallback import should_use_fallback
+
+        if should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "data_independent_fallback"}
+            return self._quantize_impl(blocksize=blocksize)
+        if self.nsamples == 0:
+            raise ValueError("GSQ requires calibration activations")
+
+        start = time.time()
+        target = self.clone_module().detach()
+        hessian = self.finalize_hessian(target_device=target.device).detach().clone()
+        self._gsq_active = True
+        try:
+            result = self._quantize_impl(blocksize=blocksize)
+        finally:
+            self._gsq_active = False
+        weight, scales, zeros, groups, duration, avg_loss, damp, samples = result
+        if self.qcfg.mock_quantization or not isinstance(avg_loss, (int, float)) or not math.isfinite(avg_loss):
+            self.gsq_diagnostics = {"status": "skipped", "reason": "initializer_fallback"}
+            return result
+
+        device = weight.device
+        fitted = refine_gptq_scalar(
+            weight,
+            scales.to(device),
+            zeros.to(device),
+            groups.to(device),
+            target=target.to(device),
+            bits=int(self.qcfg.bits),
+            config=config,
+            hessian=hessian.to(device),
+        )
+        self.gsq_diagnostics = {
+            "objective": "calibration_hessian",
+            "before": fitted.before,
+            "after": fitted.after,
+            "learn_scales": config.learn_scales,
+        }
+        return (
+            # The looper assigns this tensor into an inference-mode Parameter.
+            # Match the tensor kind of the original GPTQ result so the next
+            # calibration replay can use the updated weight.
+            fitted.weight.contiguous().clone(),
+            fitted.scales.to(scales.device),
+            fitted.zeros.to(zeros.device),
+            fitted.g_idx.to(groups.device),
+            time.time() - start,
+            avg_loss,
+            damp,
+            samples,
+        )
+
+    @torch.inference_mode()
+    def _quantize_impl(
             self,
             blocksize=128,
     ):

@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
@@ -3576,6 +3576,53 @@ class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
 
 
 @dataclass
+class GSQConfig:
+    """Optional Gumbel-Softmax refinement of an existing scalar GPTQ grid."""
+
+    enabled: bool = False
+    steps: int = 100
+    candidates: int = 33
+    seed: int = 7
+    learning_rate: float = 0.1
+    temperature_start: float = 1.0
+    temperature_end: float = 0.1
+    max_candidate_bytes: int = 64 * 1024**2
+    learn_scales: bool = False
+    modules: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool) or not isinstance(self.learn_scales, bool):
+            raise TypeError("GSQConfig: enabled and learn_scales must be boolean")
+        for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"GSQConfig: {name} must be an integer >= {minimum}")
+        for name in ("learning_rate", "temperature_start", "temperature_end"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"GSQConfig: {name} must be finite and positive")
+        if self.modules is not None:
+            if not isinstance(self.modules, (tuple, list)) or not self.modules:
+                raise ValueError("GSQConfig: modules must be a nonempty sequence of regular expressions")
+            for pattern in self.modules:
+                if not isinstance(pattern, str) or not pattern:
+                    raise ValueError("GSQConfig: module patterns must be nonempty strings")
+                pcre.compile(pattern)
+            self.modules = tuple(self.modules)
+
+
+def normalize_gsq_config(value) -> Optional[GSQConfig]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return GSQConfig(**value)
+    if not isinstance(value, GSQConfig):
+        raise TypeError("gsq must be a GSQConfig, dictionary or None")
+    value.__post_init__()
+    return value
+
+
+@dataclass
 class GPTQConfig(PreProcessorConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
@@ -3584,6 +3631,7 @@ class GPTQConfig(PreProcessorConfig):
     mse: float = field(default=0.0)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
+    gsq: Optional[GSQConfig] = field(default=None)
     mock_quantization: bool = field(
         default=False,
         metadata={"help": "Skip heavy computations for fast model loading validation"},
@@ -3616,6 +3664,8 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self.gsq = normalize_gsq_config(self.gsq)
+        self.validate_gsq()
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -3625,6 +3675,15 @@ class GPTQConfig(PreProcessorConfig):
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    def validate_gsq(self) -> None:
+        if self.gsq is not None and self.gsq.enabled:
+            if self.mock_quantization:
+                raise ValueError("GPTQConfig: GSQ is incompatible with mock quantization")
+            if self.gptaq is not None or self.foem is not None:
+                raise ValueError("GPTQConfig: GSQ currently supports plain GPTQ only")
+            if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
+                raise ValueError("GPTQConfig: GSQ requires a GPTQ scalar checkpoint format")
 
     def _resolve_activation_ordering(
         self,
@@ -3678,6 +3737,8 @@ class GPTQConfig(PreProcessorConfig):
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
 
 
 @dataclass
