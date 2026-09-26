@@ -583,7 +583,8 @@ def _gguf_mxfp4_kernel():
             uint maximum_bits = 0;
             for (uint k = 0; k < 32; ++k) {
                 maximum_bits = metal::max(maximum_bits,
-                    as_type<uint>(weights[block * 32 + k]) & 0x7fffffffu);
+                    as_type<uint>(float(weights[block * 32 + k]))
+                        & 0x7fffffffu);
             }
             int power = int(maximum_bits >> 23) - 127;
             if (maximum_bits == 0) {
@@ -635,7 +636,7 @@ def _gguf_mxfp4_kernel():
             };
             uchar codes[32];
             for (uint k = 0; k < 32; ++k) {
-                float weight = weights[block * 32 + k] * multiplier;
+                float weight = float(weights[block * 32 + k]) * multiplier;
                 uint best = 0;
                 float best_error = metal::abs(weight);
                 for (uint candidate = 1; candidate < 16; ++candidate) {
@@ -761,7 +762,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
-    direct_input = normalized in ("Q4_0", "Q8_0") and weight.dtype in (
+    direct_input = normalized in ("Q4_0", "MXFP4", "Q8_0") and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
     kernel_weight = (
