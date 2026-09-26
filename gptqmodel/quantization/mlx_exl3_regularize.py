@@ -23,6 +23,7 @@ def _exl3_regularize_kernel():
         output_names=["transformed", "channel_scales"],
         source="""
             threadgroup float current[128];
+            threadgroup float next_values[128];
 
             uint lane = thread_position_in_threadgroup.x;
             uint vector = threadgroup_position_in_grid.x;
@@ -66,18 +67,18 @@ def _exl3_regularize_kernel():
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            float total = 0.0f;
-            for (uint source = 0u; source < 128u; ++source) {
-                uint bits = lane & source;
-                bits ^= bits >> 4u;
-                bits ^= bits >> 2u;
-                bits ^= bits >> 1u;
-                float coefficient = (bits & 1u)
-                    ? -0.08838834764831845f
-                    : 0.08838834764831845f;
-                total = metal::fma(current[source], coefficient, total);
+            for (uint stride = 1; stride < 128; stride <<= 1) {
+                uint partner = lane ^ stride;
+                float own = current[lane];
+                float other = current[partner];
+                next_values[lane] = (lane & stride) == 0
+                    ? own + other
+                    : other - own;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                current[lane] = next_values[lane];
+                threadgroup_barrier(mem_flags::mem_threadgroup);
             }
-            transformed[element] = total;
+            transformed[element] = current[lane] * 0.08838834764831845f;
         """,
     )
 
