@@ -19,7 +19,9 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_exl3_hadamard import exl3_hadamard_128_mlx
+from gptqmodel.quantization.mlx_exl3_hadamard import (  # noqa: E402
+    exl3_hadamard_128_mlx,
+)
 
 
 @lru_cache(maxsize=1)
@@ -98,6 +100,25 @@ def test_exl3_hadamard_cancellation_and_float32_boundaries(axis):
     )
     source = np.resize(boundary, (256, 256)).astype(np.float32, copy=False)
     source[1::2] *= -1
+    expected = _torch_hadamard_oracle(source, axis)
+    actual = np.asarray(exl3_hadamard_128_mlx(mx.array(source), axis=axis))
+    np.testing.assert_allclose(actual, expected, atol=1e-6, rtol=1e-6)
+    assert _normalized_rms_drift(actual, expected) <= 1e-6
+
+
+@pytest.mark.parametrize("axis", [0, 1])
+def test_exl3_hadamard_block_lane_boundaries(axis):
+    source = np.zeros((128, 128), dtype=np.float32)
+    boundaries = (0, 31, 32, 63, 64, 95, 96, 127)
+    values = np.array(
+        [1.0, -1.0, np.nextafter(1.0, 0.0), -0.0, 0.0, 0.5, -0.5, 2.0],
+        dtype=np.float32,
+    )
+    if axis == 1:
+        source[17, boundaries] = values
+    else:
+        source[boundaries, 17] = values
+
     expected = _torch_hadamard_oracle(source, axis)
     actual = np.asarray(exl3_hadamard_128_mlx(mx.array(source), axis=axis))
     np.testing.assert_allclose(actual, expected, atol=1e-6, rtol=1e-6)
