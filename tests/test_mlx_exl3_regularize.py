@@ -411,6 +411,29 @@ def test_exl3_regularize_transforms_skew_threshold_boundaries():
             _assert_matches(np.asarray(actual_array), expected_array)
 
 
+def test_exl3_regularize_butterfly_cancellation_matches_fp64():
+    weight = np.zeros((128, 128), dtype=np.float32)
+    weight[:, 0] = 1.0
+    input_signs = np.ones((128, 1), dtype=np.float32)
+    output_signs = np.ones((1, 128), dtype=np.float32)
+    expected = _torch_regularize_transforms_oracle(
+        weight, input_signs, output_signs
+    )[1]
+    actual = np.asarray(
+        exl3_regularize_transforms_mlx(
+            mx.array(weight), mx.array(input_signs), mx.array(output_signs)
+        )[1]
+    )
+    ideal = _float64_regularize_transforms_oracle(
+        weight, input_signs, output_signs
+    )
+
+    assert _normalized_rms_drift(actual, ideal) <= 1e-6
+    actual_error = np.linalg.norm(actual.astype(np.float64) - ideal)
+    torch_error = np.linalg.norm(expected.astype(np.float64) - ideal)
+    assert actual_error < torch_error
+
+
 def test_exl3_regularize_transforms_all_zero_forces_configured_scales():
     weight = np.zeros((128, 128), dtype=np.float32)
     input_signs = np.ones((128, 1), dtype=np.float32)
