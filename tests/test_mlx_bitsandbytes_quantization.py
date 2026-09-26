@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# bitsandbytes: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
+# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Independent bitsandbytes CPU-oracle checks for MLX weight quantization."""
 
@@ -18,10 +20,14 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 bnb = pytest.importorskip("bitsandbytes")
 
-from gptqmodel.quantization.mlx_bitsandbytes import (
+from gptqmodel.quantization.mlx_bitsandbytes import (  # noqa: E402
     quantize_4bit_weight_mlx,
     quantize_int8_weight_mlx,
 )
+
+
+BLOCK_SIZES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
+SOURCE_DTYPES = (torch.float16, torch.bfloat16)
 
 
 def _check_4bit(source, quant_type, block_size, compressed):
@@ -67,7 +73,13 @@ def _check_nested_codes(source, block_size, actual, expected):
     nested_scale = np.max(np.abs(np.pad(centered, (0, padded_scales)).reshape(-1, 256)), axis=1)
     position = (centered[differing] / nested_scale[differing // 256] + 1) * 32767.5
     distance_to_boundary = np.abs(position - (np.floor(position) + 0.5))
-    np.testing.assert_array_less(distance_to_boundary, np.spacing(position.astype(np.float32)))
+    # The offset and nested block maximum each use a parallel reduction.
+    # Different valid reduction orders can move a lookup by up to two FP32
+    # steps when the normalized value is directly beside a code boundary.
+    np.testing.assert_array_less(
+        distance_to_boundary,
+        2 * np.spacing(position.astype(np.float32)),
+    )
     np.testing.assert_array_equal(
         np.abs(actual[differing].astype(np.int16) - expected[differing].astype(np.int16)),
         np.ones(differing.size, dtype=np.int16),
@@ -75,10 +87,14 @@ def _check_nested_codes(source, block_size, actual, expected):
 
 
 def _check_int8(source):
-    source = source.to(torch.float16)
     expected, stats, outliers = bnb.functional.int8_vectorwise_quant(source, threshold=0.0)
     assert outliers is None or outliers.numel() == 0
-    actual, actual_stats = quantize_int8_weight_mlx(mx.array(source.numpy()))
+    weight = mx.array(source.float().numpy()).astype({
+        torch.float16: mx.float16,
+        torch.bfloat16: mx.bfloat16,
+        torch.float32: mx.float32,
+    }[source.dtype])
+    actual, actual_stats = quantize_int8_weight_mlx(weight)
     actual_codes = np.asarray(actual)
     expected_codes = expected.numpy()
     np.testing.assert_allclose(np.asarray(actual_stats), stats.numpy(), rtol=1e-6, atol=1e-6)
@@ -86,7 +102,7 @@ def _check_int8(source):
     if rows.size:
         # Both backends multiply a rounded float32 reciprocal. At exact
         # half steps, one ULP can choose a neighboring int8 code.
-        value = source.numpy()[rows, cols].astype(np.float64)
+        value = source.float().numpy()[rows, cols].astype(np.float64)
         maximum = stats.numpy()[rows].astype(np.float64)
         exact = value * 127.0 / maximum
         np.testing.assert_array_equal(exact - np.floor(exact), np.full(rows.size, 0.5))
@@ -105,6 +121,19 @@ def test_4bit_small_dtypes_and_zero_blocks(quant_type, compressed, dtype):
     source[0] = 0
     source[0, 0] = -0.0
     _check_4bit(source, quant_type, 32, compressed)
+
+
+@pytest.mark.parametrize("block_size", BLOCK_SIZES)
+@pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
+@pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("dtype", SOURCE_DTYPES)
+def test_4bit_all_block_sizes_low_precision(
+    block_size, quant_type, compressed, dtype
+):
+    torch.manual_seed(4100 + block_size)
+    source = torch.randn((2, block_size + 1), dtype=torch.float32).to(dtype)
+    source[0, :block_size] = 0
+    _check_4bit(source, quant_type, block_size, compressed)
 
 
 @pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
@@ -143,21 +172,25 @@ def test_int8_zero_rows_and_rounding_boundaries():
 
 @pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
 @pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("dtype", SOURCE_DTYPES)
 @pytest.mark.parametrize("name,rows,cols", QWEN38_27B_PROJECTIONS)
-def test_4bit_qwen38_27b_full_projection(quant_type, compressed, name, rows, cols):
+def test_4bit_qwen38_27b_full_projection(
+    quant_type, compressed, dtype, name, rows, cols
+):
     del name
     torch.manual_seed(380027 + rows + cols)
-    source = torch.randn((rows, cols), dtype=torch.float32).to(torch.bfloat16)
+    source = torch.randn((rows, cols), dtype=torch.float32).to(dtype)
     _check_4bit(source, quant_type, 64, compressed)
     mx.clear_cache()
     gc.collect()
 
 
+@pytest.mark.parametrize("dtype", SOURCE_DTYPES)
 @pytest.mark.parametrize("name,rows,cols", QWEN38_27B_PROJECTIONS)
-def test_int8_qwen38_27b_full_projection(name, rows, cols):
+def test_int8_qwen38_27b_full_projection(dtype, name, rows, cols):
     del name
     torch.manual_seed(380027 + rows + cols)
-    source = torch.randn((rows, cols), dtype=torch.float32).to(torch.bfloat16)
+    source = torch.randn((rows, cols), dtype=torch.float32).to(dtype)
     _check_int8(source)
     mx.clear_cache()
     gc.collect()

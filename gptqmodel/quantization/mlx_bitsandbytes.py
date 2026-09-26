@@ -87,14 +87,18 @@ def _pack_kernel():
             if (pair >= PAIRS) return;
             uint first = pair * 2;
             uint block0 = first / BLOCK;
-            float a = metal::clamp(bnb_scaled(weight[first], absmax[block0]), -1.0f, 1.0f);
+            float a = metal::clamp(
+                bnb_scaled(as_type<uint>(float(weight[first])), absmax[block0]),
+                -1.0f, 1.0f);
             uint code0 = 0;
             for (uint i = 0; i < 15; ++i) code0 += a > bounds[i];
             code0 = uint(order[code0]);
             uint code1 = 0;
             if (first + 1 < SIZE) {
                 uint block1 = (first + 1) / BLOCK;
-                float b = metal::clamp(bnb_scaled(weight[first + 1], absmax[block1]), -1.0f, 1.0f);
+                float b = metal::clamp(
+                    bnb_scaled(as_type<uint>(float(weight[first + 1])), absmax[block1]),
+                    -1.0f, 1.0f);
                 for (uint i = 0; i < 15; ++i) code1 += b > bounds[i];
                 code1 = uint(order[code1]);
             } else {
@@ -107,12 +111,15 @@ def _pack_kernel():
 
 
 def _block_absmax(weight, block_size, *, clamp_remainder=False):
-    flat = weight.astype(mx.float32).reshape(-1)
+    flat = weight.reshape(-1)
     padded = (block_size - flat.size % block_size) % block_size
     if padded:
         flat = mx.pad(flat, [(0, padded)])
-    magnitude = flat.view(mx.uint32) & 0x7fffffff
-    maximum = mx.max(magnitude.reshape(-1, block_size), axis=1).view(mx.float32)
+    if flat.dtype == mx.float32:
+        magnitude = flat.view(mx.uint32) & 0x7fffffff
+        maximum = mx.max(magnitude.reshape(-1, block_size), axis=1).view(mx.float32)
+    else:
+        maximum = mx.max(mx.abs(flat.reshape(-1, block_size)), axis=1).astype(mx.float32)
     if padded and clamp_remainder:
         maximum = mx.concatenate([maximum[:-1], mx.maximum(maximum[-1:], 1e-38)])
     return maximum
@@ -190,7 +197,7 @@ def _int8_kernel():
             if (i >= SIZE) return;
             float maximum = absmax[i / COLS];
             float ratio = 127.0f / maximum;
-            float scaled = maximum == 0.0f ? 0.0f : weight[i] * ratio;
+            float scaled = maximum == 0.0f ? 0.0f : float(weight[i]) * ratio;
             codes[i] = char(metal::rint(scaled));
         """,
         compile_options={"math_mode": "safe"},
@@ -214,12 +221,12 @@ def quantize_4bit_weight_mlx(weight, *, quant_type="nf4", block_size=64, compres
         raise ValueError("unsupported bitsandbytes block_size")
     if not bool(mx.all(mx.isfinite(weight)).item()):
         raise ValueError("weight must be finite")
-    flat = mx.contiguous(weight.astype(mx.float32).reshape(-1))
+    flat = mx.contiguous(weight.reshape(-1))
     absmax = _block_absmax(weight, block_size, clamp_remainder=True)
     bounds, order = _codebook(quant_type)
     pairs = (flat.size + 1) // 2
     packed = _pack_kernel()(
-        inputs=[flat.view(mx.uint32), absmax.view(mx.uint32), bounds, order],
+        inputs=[flat, absmax.view(mx.uint32), bounds, order],
         template=[("SIZE", flat.size), ("PAIRS", pairs), ("BLOCK", block_size)],
         grid=(pairs, 1, 1),
         threadgroup=(256, 1, 1),
@@ -263,8 +270,8 @@ def quantize_int8_weight_mlx(weight):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
     if not bool(mx.all(mx.isfinite(weight)).item()):
         raise ValueError("weight must be finite")
-    matrix = weight.astype(mx.float32)
-    absmax = mx.max(mx.abs(matrix), axis=1)
+    matrix = weight
+    absmax = mx.max(mx.abs(matrix), axis=1).astype(mx.float32)
     codes = _int8_kernel()(
         inputs=[mx.contiguous(matrix), absmax],
         template=[("SIZE", weight.size), ("COLS", weight.shape[1])],
