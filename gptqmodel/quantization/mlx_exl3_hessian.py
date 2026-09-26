@@ -71,6 +71,11 @@ def _all_finite(array, *, stream):
     return bool(mx.all(mx.isfinite(array, stream=stream), stream=stream).item())
 
 
+def _validate_transform_size(columns):
+    if columns * columns > 0xFFFFFFFF:
+        raise ValueError("hessian is too large for the Metal transform kernel")
+
+
 def _transform_hessian(hessian, signs, parameters):
     import mlx.core as mx
 
@@ -136,6 +141,7 @@ def exl3_finalize_hessian_mlx(
     columns = hessian.shape[0]
     if columns % 128:
         raise ValueError("hessian width must be divisible by 128")
+    _validate_transform_size(columns)
     if signs.ndim != 1 or signs.shape[0] != columns:
         raise ValueError("signs must be a vector with one value per Hessian column")
     if signs.dtype != mx.float32:
