@@ -1,13 +1,20 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import gc
 import pickle
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pcre
 import pytest
+import torch.nn as nn
 
+from gptqmodel.models.definitions.deepseek_v3 import DeepSeekV3QModel
 from gptqmodel.quantization.config import (
     _DYNAMIC_ALL_EXACT_CACHE,
     _DYNAMIC_EXACT_LOOKUP_CACHE,
@@ -21,6 +28,12 @@ from gptqmodel.quantization.config import (
     _dynamic_value_fingerprint,
     _TrackedDict,
     _TrackedList,
+    _dynamic_override_cache_for,
+    configure_dynamic_override_cache,
+    configure_dynamic_override_cache_for_model,
+    dynamic_get,
+    dynamic_override_cache_stats,
+    log_dynamic_override_cache_stats,
 )
 
 
@@ -36,9 +49,304 @@ def _clear_dynamic_caches():
 
 @pytest.fixture(autouse=True)
 def clear_caches():
+    original_capacity = _DYNAMIC_OVERRIDE_CACHE.maxsize
     _clear_dynamic_caches()
+    _DYNAMIC_OVERRIDE_CACHE.maxsize = _DYNAMIC_OVERRIDE_CACHE_MAXSIZE
     yield
     _clear_dynamic_caches()
+    _DYNAMIC_OVERRIDE_CACHE.maxsize = original_capacity
+
+
+def test_dynamic_cache_default_and_grow_only_sizing():
+    assert _DYNAMIC_OVERRIDE_CACHE.maxsize == 8192
+    assert configure_dynamic_override_cache(module_count=3_000) == 8192
+    assert configure_dynamic_override_cache(module_count=8_000) == 16384
+    assert configure_dynamic_override_cache(module_count=50_000, layer_count=64, expert_count=256) == 65536
+    assert configure_dynamic_override_cache(module_count=1_000) == 65536
+
+
+def test_dynamic_cache_keeps_negative_and_no_match_results():
+    cfg = QuantizeConfig(dynamic={r"-:^model\.skip$": {}, r"+:^model\.hit$": {"bits": 2}})
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        assert cfg.dynamic_get("model.skip") is False
+        assert cfg.dynamic_get("model.miss") is None
+        first_pass = match_calls
+        assert cfg.dynamic_get("model.skip") is False
+        assert cfg.dynamic_get("model.miss") is None
+        assert match_calls == first_pass
+    assert dynamic_override_cache_stats(cfg.dynamic)["hits"] == 2
+    assert dynamic_override_cache_stats(cfg.dynamic)["misses"] == 2
+
+
+def test_dynamic_cache_second_pass_avoids_regex_for_120_layer_512_expert_model():
+    class FakeMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleList([
+                nn.ModuleDict({"moe": nn.ModuleDict({"experts": nn.ModuleList([
+                    nn.Module() for _ in range(512)
+                ])})})
+                for _ in range(120)
+            ])
+
+    model = FakeMoEModel()
+    cfg = QuantizeConfig(dynamic={r"+:^layers\.\d+\.moe\.experts\.\d+$": {"bits": 2}})
+    capacity = configure_dynamic_override_cache_for_model(model, cfg)
+    names = [name for name, _ in model.named_modules(remove_duplicate=False) if name]
+    expert_names = [name for name in names if ".experts." in name]
+    assert len(expert_names) == 120 * 512
+    assert capacity == 131072
+    assert capacity >= len(names)
+
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == (2 if ".experts." in name else cfg.bits)
+        first_pass_calls = match_calls
+        first_pass_stats = dynamic_override_cache_stats(cfg.dynamic)
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == (2 if ".experts." in name else cfg.bits)
+
+    stats = dynamic_override_cache_stats(cfg.dynamic)
+    assert first_pass_calls == len(names)
+    assert match_calls == first_pass_calls
+    assert first_pass_stats["misses"] == len(names)
+    assert stats["misses"] == len(names)
+    assert stats["hits"] == len(names)
+    assert stats["evictions"] == 0
+    assert stats["peak_size"] == len(names)
+
+
+def test_dynamic_cache_sizes_fused_moe_from_logical_plan():
+    class FusedMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList(nn.Module() for _ in range(120))
+            self.config = SimpleNamespace(n_routed_experts=512)
+
+    model = FusedMoEModel()
+    plan = DeepSeekV3QModel.full_layer_modules(model.config)
+    physical_count = sum(bool(name) for name, _ in model.named_modules())
+    assert physical_count < 8192
+
+    dynamic = {f"+:^never\\.{i}\\..*$": {"bits": 3} for i in range(15)}
+    dynamic[r"+:^model\.layers\.\d+\.mlp\.experts\.\d+\.gate_proj$"] = {"bits": 2}
+    cfg = QuantizeConfig(dynamic=dynamic)
+    capacity = configure_dynamic_override_cache_for_model(
+        model, cfg, layer_modules=plan, layer_prefixes=DeepSeekV3QModel.extract_layers_node(),
+    )
+    assert capacity == 262144
+
+    names = (
+        f"model.layers.{layer}.mlp.experts.{expert}.gate_proj"
+        for layer in range(120) for expert in range(512)
+    )
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == 2
+        first_pass_calls = match_calls
+        for layer in range(120):
+            for expert in range(512):
+                name = f"model.layers.{layer}.mlp.experts.{expert}.gate_proj"
+                assert cfg.dynamic_get(name, "bits", cfg.bits) == 2
+
+    stats = dynamic_override_cache_stats(cfg.dynamic)
+    assert first_pass_calls == 120 * 512 * len(dynamic)
+    assert match_calls == first_pass_calls
+    assert stats["misses"] == 120 * 512
+    assert stats["hits"] == 120 * 512
+    assert stats["evictions"] == 0
+
+
+def test_dynamic_cache_isolated_between_configs_for_same_module():
+    module_name = "model.layers.0.mlp.proj"
+    cfg_a = QuantizeConfig(dynamic={r"+:^model\.layers\.\d+\.mlp\.proj$": {"bits": 2}})
+    cfg_b = QuantizeConfig(dynamic={r"+:^model\.layers\.\d+\.mlp\.proj$": {"bits": 3}})
+    assert cfg_a.dynamic_get(module_name, "bits") == 2
+    assert cfg_b.dynamic_get(module_name, "bits") == 3
+    assert cfg_a.dynamic_get(module_name, "bits") == 2
+    assert dynamic_override_cache_stats(cfg_a.dynamic)["size"] == 1
+    assert dynamic_override_cache_stats(cfg_b.dynamic)["size"] == 1
+
+
+def test_active_configs_have_independent_cache_capacity_and_lifetime():
+    cfg_a = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 2}})
+    cfg_b = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 3}})
+    for cfg in (cfg_a, cfg_b):
+        assert configure_dynamic_override_cache(module_count=12_000, dynamic=cfg.dynamic) == 16384
+
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        for index in range(12_000):
+            name = f"module.{index}"
+            assert cfg_a.dynamic_get(name, "bits") == 2
+            assert cfg_b.dynamic_get(name, "bits") == 3
+        first_pass_calls = match_calls
+        for index in range(12_000):
+            name = f"module.{index}"
+            assert cfg_a.dynamic_get(name, "bits") == 2
+            assert cfg_b.dynamic_get(name, "bits") == 3
+
+    assert first_pass_calls == 24_000
+    assert match_calls == first_pass_calls
+    for cfg in (cfg_a, cfg_b):
+        stats = dynamic_override_cache_stats(cfg.dynamic)
+        assert (stats["size"], stats["hits"], stats["misses"], stats["evictions"]) == (12_000, 12_000, 12_000, 0)
+    assert dynamic_override_cache_stats()["size"] == 0
+    assert _DYNAMIC_OVERRIDE_CACHE.maxsize == 8192
+
+    mapping_ref = weakref.ref(cfg_a.dynamic)
+    cache_ref = weakref.ref(_dynamic_override_cache_for(cfg_a.dynamic))
+    del cfg_a
+    gc.collect()
+    assert mapping_ref() is None
+    assert cache_ref() is None
+
+
+def test_three_configs_match_concurrently():
+    configs = [
+        QuantizeConfig(dynamic={rf"+:^model_{index}\.module_\d+$": {"bits": index + 2}})
+        for index in range(3)
+    ]
+    for index, cfg in enumerate(configs):
+        assert cfg.dynamic_get(f"model_{index}.module_0", "bits") == index + 2
+
+    entered_match = threading.Barrier(3)
+    original_match = pcre.Pattern.match
+
+    def concurrent_match(pattern, name):
+        if name.endswith("module_1"):
+            entered_match.wait(timeout=5)
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", concurrent_match):
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(
+                lambda index: configs[index].dynamic_get(f"model_{index}.module_1", "bits"),
+                range(3),
+            ))
+    assert results == [2, 3, 4]
+
+
+def test_dynamic_edit_waits_for_inflight_lookup():
+    cfg = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 2}})
+    entered_match = threading.Event()
+    continue_match = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    original_match = pcre.Pattern.match
+
+    def paused_match(pattern, name):
+        entered_match.set()
+        assert continue_match.wait(timeout=5)
+        return original_match(pattern, name)
+
+    def edit():
+        writer_started.set()
+        cfg.dynamic[r"+:^module\.\d+$"]["bits"] = 3
+        writer_finished.set()
+
+    with patch.object(pcre.Pattern, "match", paused_match):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            lookup = pool.submit(cfg.dynamic_get, "module.1", "bits")
+            assert entered_match.wait(timeout=5)
+            writer = pool.submit(edit)
+            assert writer_started.wait(timeout=5)
+            assert not writer_finished.wait(timeout=0.05)
+            continue_match.set()
+            assert lookup.result(timeout=5) == 2
+            writer.result(timeout=5)
+    assert cfg.dynamic_get("module.1", "bits") == 3
+
+
+def test_shared_config_reserves_capacity_for_live_models_only():
+    class FakeModel:
+        def __init__(self, prefix):
+            self.prefix = prefix
+
+        def named_modules(self, remove_duplicate=False):
+            yield "", self
+            for index in range(12_000):
+                yield f"{self.prefix}.module.{index}", self
+
+    cfg = QuantizeConfig(dynamic={r"+:^model_[ab]\.module\.\d+$": {"bits": 2}})
+    model_a, model_b = FakeModel("model_a"), FakeModel("model_b")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        capacities = list(pool.map(
+            lambda model: configure_dynamic_override_cache_for_model(model, cfg),
+            (model_a, model_b),
+        ))
+    assert sorted(capacities) == [16384, 32768]
+    assert configure_dynamic_override_cache_for_model(model_a, cfg) == 32768
+
+    for _ in range(2):
+        for index in range(12_000):
+            assert cfg.dynamic_get(f"model_a.module.{index}", "bits") == 2
+            assert cfg.dynamic_get(f"model_b.module.{index}", "bits") == 2
+    stats = dynamic_override_cache_stats(cfg.dynamic)
+    assert (stats["hits"], stats["misses"], stats["evictions"]) == (24_000, 24_000, 0)
+
+    model_b_ref = weakref.ref(model_b)
+    del model_b
+    gc.collect()
+    assert model_b_ref() is None
+    assert dynamic_override_cache_stats(cfg.dynamic)["maxsize"] == 16384
+    del model_a
+    gc.collect()
+    assert dynamic_override_cache_stats(cfg.dynamic)["maxsize"] == 8192
+
+
+def test_standalone_dynamic_lookup_keeps_bounded_global_fallback():
+    dynamic = {r"+:^module\.\d+$": {"bits": 2}}
+    for index in range(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE + 32):
+        assert dynamic_get(dynamic, f"module.{index}", "bits") == 2
+    stats = dynamic_override_cache_stats()
+    assert stats["size"] == _DYNAMIC_OVERRIDE_CACHE_MAXSIZE
+    assert stats["evictions"] == 32
+
+
+def test_dynamic_cache_log_reports_since_start_counters():
+    cfg = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 2}})
+    cfg.dynamic_get("module.0")
+    before = dynamic_override_cache_stats(cfg.dynamic)
+    cfg.dynamic_get("module.0")
+    cfg.dynamic_get("module.1")
+
+    with patch("gptqmodel.quantization.config.log.debug") as mock_debug:
+        log_dynamic_override_cache_stats(before, dynamic=cfg.dynamic)
+
+    assert mock_debug.call_args.args[1:5] == (2, 1, 1, 0)
 
 
 def _exact_pattern(module_name: str) -> str:
@@ -239,6 +547,16 @@ def test_standalone_tracked_list_nested_edits_touch_its_root():
     restored[0]["tag"] = "restored"
     assert tracked._mutation_version == 1
     assert restored._mutation_version == 1
+
+
+def test_tracked_list_in_place_operations_advance_mutation_version():
+    tracked = _TrackedList([{"tag": "old"}])
+    tracked += [{"tag": "new"}]
+    assert tracked._mutation_version == 1
+    tracked *= 2
+    assert tracked._mutation_version == 2
+    tracked[1]["tag"] = "changed"
+    assert tracked._mutation_version == 3
 
 
 def test_dynamic_caches_are_bounded():

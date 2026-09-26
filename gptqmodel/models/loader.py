@@ -10,6 +10,7 @@ import json
 import os
 import shutil
 import time
+import weakref
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
@@ -46,6 +47,9 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
+    configure_dynamic_override_cache_for_model,
+    dynamic_override_cache_stats,
+    log_dynamic_override_cache_stats,
     resolve_quant_format,
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
@@ -1318,6 +1322,11 @@ def ModelLoader(cls):
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
+        if quantize_config.dynamic:
+            log_dynamic_override_cache_stats(
+                instance._dynamic_cache_stats_before, dynamic=quantize_config.dynamic,
+            )
+
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
@@ -1732,6 +1741,7 @@ def ModelLoader(cls):
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
+            dynamic_cache_stats_before = dynamic_override_cache_stats(qcfg.dynamic) if qcfg.dynamic else None
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
@@ -1740,6 +1750,19 @@ def ModelLoader(cls):
 
             with cls._module_tree_context(effective_module_tree):
                 extract_layers_node = cls.extract_layers_node()
+                if qcfg.dynamic:
+                    planning_layer_modules = cls.full_layer_modules(
+                        model_config=config,
+                        is_awq_quantize=qcfg.method == METHOD.AWQ,
+                        include_capture_only=True,
+                    )
+                    configure_dynamic_override_cache_for_model(
+                        model, qcfg,
+                        layer_modules=planning_layer_modules,
+                        layer_prefixes=extract_layers_node,
+                    )
+                    model._gptqmodel_dynamic_cache_prepared_for = weakref.ref(qcfg)
+                    model._gptqmodel_dynamic_cache_stats_before = dynamic_cache_stats_before
                 # Get the first layer to determine layer type
                 layers, _ = get_layers_with_prefixes(model, extract_layers_node)
 
@@ -2203,6 +2226,8 @@ def ModelLoader(cls):
             instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
+        if qcfg.dynamic:
+            log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)
         return instance
 
     cls.from_quantized = from_quantized
