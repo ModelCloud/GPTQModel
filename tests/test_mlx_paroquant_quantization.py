@@ -16,7 +16,7 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_paroquant_quant import (
+from gptqmodel.quantization.mlx_paroquant_quant import (  # noqa: E402
     paroquant_quantize_weight_mlx,
 )
 
@@ -127,6 +127,74 @@ def test_paroquant_low_precision_inputs(dtype, sym):
     np.testing.assert_array_equal(actual, expected)
 
 
+@pytest.mark.parametrize(
+    "dtype,torch_dtype",
+    [(mx.float16, torch.float16), (mx.bfloat16, torch.bfloat16)],
+)
+@pytest.mark.parametrize("sym", [True, False])
+def test_paroquant_low_precision_rounding_neighbors(dtype, torch_dtype, sym):
+    midpoint = torch.tensor(0.0625, dtype=torch_dtype)
+    lower = torch.nextafter(
+        midpoint, torch.tensor(-float("inf"), dtype=torch_dtype)
+    )
+    upper = torch.nextafter(
+        midpoint, torch.tensor(float("inf"), dtype=torch_dtype)
+    )
+    source = torch.zeros((2, 32), dtype=torch_dtype)
+    source[0, :3] = torch.stack((lower, midpoint, upper))
+    source[1, :3] = -source[0, :3]
+    source[:, -3:] = torch.tensor([-100.0, -0.0, 100.0], dtype=torch_dtype)
+    weight = mx.array(source.float().numpy()).astype(dtype)
+    resident = np.asarray(weight.astype(mx.float32))
+    scales = np.full((2, 1), 0.125, dtype=np.float32)
+    zeros = None if sym else np.full((2, 1), -7.5, dtype=np.float32)
+    expected = _torch_oracle(
+        resident,
+        scales,
+        bits=4,
+        group_size=32,
+        sym=sym,
+        zero_point_float=zeros,
+    )
+    expected = torch.from_numpy(expected).to(torch_dtype).float().numpy()
+    actual = _run(
+        weight,
+        scales,
+        bits=4,
+        group_size=32,
+        sym=sym,
+        zero_point_float=zeros,
+    )
+    np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("sym", [True, False])
+def test_paroquant_accepts_transposed_low_precision_weights(dtype, sym):
+    source = mx.random.normal((128, 7)).astype(dtype)
+    weight = source.T
+    scales = mx.full((7, 1), 0.125, dtype=mx.float32)
+    zeros = None if sym else mx.full((7, 1), -7.5, dtype=mx.float32)
+    actual = paroquant_quantize_weight_mlx(
+        weight,
+        scales,
+        group_size=128,
+        sym=sym,
+        zero_point_float=zeros,
+    )
+    expected = paroquant_quantize_weight_mlx(
+        mx.contiguous(weight),
+        scales,
+        group_size=128,
+        sym=sym,
+        zero_point_float=zeros,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual.astype(mx.float32)),
+        np.asarray(expected.astype(mx.float32)),
+    )
+
+
 def test_paroquant_accepts_learned_parameter_layout():
     rng = np.random.default_rng(413)
     weight = rng.normal(0, 0.2, (5, 128)).astype(np.float32)
@@ -154,11 +222,12 @@ def test_paroquant_accepts_learned_parameter_layout():
 
 @pytest.mark.parametrize("sym", [True, False])
 @pytest.mark.parametrize("name,rows,columns", QWEN38_27B_PROJECTIONS)
-def test_paroquant_qwen38_projection_oracle(name, rows, columns, sym):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+def test_paroquant_qwen38_projection_oracle(name, rows, columns, sym, dtype):
     group_size = 128
     rng = np.random.default_rng(8821 + rows + columns)
     source = rng.normal(0, 0.2, (rows, columns)).astype(np.float32)
-    weight = mx.array(source).astype(mx.bfloat16)
+    weight = mx.array(source).astype(dtype)
     mx.eval(weight)
     resident = np.asarray(weight.astype(mx.float32))
     groups = columns // group_size
@@ -172,7 +241,8 @@ def test_paroquant_qwen38_projection_oracle(name, rows, columns, sym):
         sym=sym,
         zero_point_float=zero_float,
     )
-    expected = torch.from_numpy(expected).to(torch.bfloat16).float().numpy()
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    expected = torch.from_numpy(expected).to(torch_dtype).float().numpy()
     actual = _run(
         weight,
         scales,
