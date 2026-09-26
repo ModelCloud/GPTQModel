@@ -3,9 +3,12 @@
 # EXL3 quantization formats: TurboDerp and ExLlamaV3 contributors.
 # MLX runtime license: MIT, https://github.com/ml-explore/mlx
 
-"""Native MLX tile sampling for EXL3 global-scale search."""
+"""Native MLX sampling and optimization for EXL3 global-scale search."""
 
+import math
 from functools import lru_cache
+
+from .mlx_exl3 import exl3_quantize_tiles_mlx
 
 
 @lru_cache(maxsize=1)
@@ -84,4 +87,79 @@ def exl3_sample_global_scale_tiles_mlx(weight, *, width: int = 3):
     return output
 
 
-__all__ = ["exl3_sample_global_scale_tiles_mlx"]
+def _exl3_global_scale_search_tiles_mlx(
+    tiles,
+    *,
+    bits: int,
+    codebook: str,
+    workspace_bytes: int,
+):
+    import mlx.core as mx
+
+    phi = (1 + math.sqrt(5)) / 2
+    resphi = 2 - phi
+    lower = 0.1
+    upper = 1.9
+    tolerance = 0.01
+
+    def test_scale(scale: float):
+        quantized, _ = exl3_quantize_tiles_mlx(
+            tiles * scale,
+            bits=bits,
+            codebook=codebook,
+            workspace_bytes=workspace_bytes,
+        )
+        mse = mx.mean(mx.square(quantized / scale - tiles))
+        mx.eval(mse)
+        return float(mse.item())
+
+    x1 = lower + resphi * (upper - lower)
+    x2 = upper - resphi * (upper - lower)
+    f1 = test_scale(x1)
+    f2 = test_scale(x2)
+    while abs(upper - lower) > tolerance:
+        if f1 < f2:
+            upper = x2
+            x2 = x1
+            f2 = f1
+            x1 = lower + resphi * (upper - lower)
+            f1 = test_scale(x1)
+        else:
+            lower = x1
+            x1 = x2
+            f1 = f2
+            x2 = upper - resphi * (upper - lower)
+            f2 = test_scale(x2)
+
+    final_mse = (mx.array(f1, dtype=mx.float32) + mx.array(f2, dtype=mx.float32)) / 2
+    mx.eval(final_mse)
+    return (lower + upper) / 2, float(final_mse.item())
+
+
+def exl3_global_scale_search_mlx(
+    weight,
+    *,
+    bits: int,
+    codebook: str = "mcg",
+    width: int = 3,
+    workspace_bytes: int = 256 << 20,
+):
+    """Find EXL3's global weight scale with native MLX quantization.
+
+    This reproduces EXL3's fixed ``[0.1, 1.9]`` golden-section search with a
+    ``0.01`` interval tolerance. It returns the selected Python float scale and
+    the mean of the final two float32 quantization errors.
+    """
+    tiles = exl3_sample_global_scale_tiles_mlx(weight, width=width)
+    return _exl3_global_scale_search_tiles_mlx(
+        tiles,
+        bits=bits,
+        codebook=codebook,
+        workspace_bytes=workspace_bytes,
+    )
+
+
+__all__ = [
+    "exl3_global_scale_search_mlx",
+    "exl3_sample_global_scale_tiles_mlx",
+]
