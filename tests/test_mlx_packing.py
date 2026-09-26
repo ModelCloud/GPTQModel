@@ -151,8 +151,7 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
     import torch
 
     from gptqmodel.nn_modules.qlinear.mlx import AwqMlxQuantLinear, MlxQuantLinear
-    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
-    from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
     from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -198,7 +197,7 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
     else:
         model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     if group_size == 16:
-        expected_group16 = MlxGPTQGroup16Linear if format == "gptq" else MlxGroup16Linear
+        expected_group16 = MlxGPTQGroup16Linear if format == "gptq" else MlxAWQGroup16Linear
         assert type(model.linear) is expected_group16
         assert config["_gptqmodel_group16_runtime"]
     elif format == "gptq":
@@ -306,7 +305,7 @@ def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format
     import mlx.nn as mlx_nn
     import torch
 
-    from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear
     from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -365,7 +364,7 @@ def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (TinyModel, ModelArgs))
     with mlx.stream(mlx.cpu):
         model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
-    expected_type = MlxGPTQGroup16Linear if format == "gptq" else MlxGroup16Linear
+    expected_type = MlxGPTQGroup16Linear if format == "gptq" else MlxAWQGroup16Linear
     assert type(model.linear) is expected_type
     assert config["_gptqmodel_group16_runtime"]
     target_bits = 8 if bits == 7 else bits
@@ -393,9 +392,8 @@ def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatc
 
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
-    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     rng = np.random.default_rng(286)
@@ -465,7 +463,7 @@ def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatc
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (TinyModel, ModelArgs))
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     expected_first = (MlxGPTQGroup16Linear if first_group_size == 16 and formats[0] == "gptq" else
-                      MlxGroup16Linear if first_group_size == 16 else
+                      MlxAWQGroup16Linear if first_group_size == 16 else
                       MlxGPTQLinear if formats[0] == "gptq" else MlxAWQLinear)
     expected_second = MlxGPTQLinear if formats[1] == "gptq" else MlxAWQLinear
     assert isinstance(model.first, expected_first)
