@@ -2,17 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # AWQ format and packing: ModelCloud.ai, Apache-2.0, https://github.com/ModelCloud/GPTQModel
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
-"""Benchmark main and single-pass AWQ group-16 decode on Qwen3.8-27B shapes."""
+"""Benchmark main and direct-dtype AWQ group-16 decode on Qwen3.8-27B shapes."""
 
 import argparse
 import gc
 import statistics
 import time
+from functools import partial
 
 import mlx.core as mx
 import numpy as np
 
-from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
+from gptqmodel.nn_modules.qlinear.mlx_awq import _awq_group16_kernel
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 from tests.test_mlx_awq_group16 import _awq_group16_fixture, _rounded_oracle
 
@@ -31,6 +32,27 @@ def measure_pair(baseline, candidate, x, warmups, samples):
     return statistics.median(timings["main"]), statistics.median(timings["pr"])
 
 
+def main_decode(layer, x):
+    """Reconstruct main's FP32 kernel output followed by an activation-dtype cast."""
+    output_dims = layer.weight.shape[0]
+    threads = 128 if layer.input_dims >= 8192 or output_dims >= 16384 else 64
+    bias = layer.bias if "bias" in layer else layer.zero_bias[0]
+    output = _awq_group16_kernel(mx.float32)(
+        inputs=[
+            x, layer.weight, layer.scales_even, layer.scales_odd,
+            layer.biases_even, layer.biases_odd, bias,
+        ],
+        template=[
+            ("K", layer.input_dims), ("THREADS", threads),
+            ("GROUPS", threads // 32),
+        ],
+        grid=(threads, output_dims, 1),
+        threadgroup=(threads, 1, 1),
+        output_shapes=[(1, output_dims)], output_dtypes=[mx.float32],
+    )[0]
+    return output.astype(x.dtype)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--warmups", type=int, default=10)
@@ -43,14 +65,10 @@ def main():
         candidate, reference, output_pattern, layer_bias = _awq_group16_fixture(
             out_features, in_features,
         )
-        baseline = MlxGroup16Linear(in_features, out_features, bits=4, bias=True)
-        for parameter in (
-            "weight", "scales_even", "scales_odd", "biases_even", "biases_odd", "bias",
-        ):
-            setattr(baseline, parameter, getattr(candidate, parameter))
         for dtype_name, dtype in (("FP16", mx.float16), ("BF16", mx.bfloat16)):
             x = mx.array(source).astype(dtype)
             mx.eval(x)
+            baseline = partial(main_decode, candidate)
             main_ms, pr_ms = measure_pair(baseline, candidate, x, args.warmups, args.samples)
             main_output, pr_output = baseline(x), candidate(x)
             mx.eval(main_output, pr_output)
@@ -70,7 +88,7 @@ def main():
                 f"{record[5]:.8f}/{record[6]:.8f}/{record[7]:.8f}",
                 flush=True,
             )
-        del baseline, candidate
+        del candidate
         gc.collect()
         mx.clear_cache()
 
