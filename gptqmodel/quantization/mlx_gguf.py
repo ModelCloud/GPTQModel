@@ -670,7 +670,7 @@ def _gguf_q8_0_kernel():
             float maximum = 0.0f;
             for (uint k = 0; k < 32; ++k) {
                 maximum = metal::max(
-                    maximum, metal::abs(weights[block * 32 + k]));
+                    maximum, metal::abs(float(weights[block * 32 + k])));
             }
             float scale = maximum / 127.0f;
             float inverse = scale == 0.0f ? 0.0f : 1.0f / scale;
@@ -680,7 +680,7 @@ def _gguf_q8_0_kernel():
             packed[offset + 1] = uchar(scale_bits >> 8);
             for (uint k = 0; k < 32; ++k) {
                 int code = metal::clamp(
-                    int(metal::rint(weights[block * 32 + k] * inverse)),
+                    int(metal::rint(float(weights[block * 32 + k]) * inverse)),
                     -128, 127);
                 packed[offset + 2 + k] = uchar(code);
             }
@@ -761,8 +761,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
+    direct_q8 = normalized == "Q8_0" and weight.dtype in (
+        mx.float16, mx.bfloat16, mx.float32,
+    )
+    kernel_weight = mx.contiguous(weight) if direct_q8 else weight.astype(mx.float32)
     packed = kernel(
-        inputs=[weight.astype(mx.float32)],
+        inputs=[kernel_weight],
         output_shapes=[(rows, columns // block_size * bytes_per_block)],
         output_dtypes=[mx.uint8],
         **launch,
