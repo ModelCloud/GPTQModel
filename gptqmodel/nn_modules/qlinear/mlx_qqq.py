@@ -10,19 +10,23 @@ import mlx.core as mx
 import mlx.nn as nn
 
 
-@lru_cache(maxsize=1)
-def _dynamic_quant_kernel():
+@lru_cache(maxsize=2)
+def _dynamic_quant_kernel(threads):
     """Reduce and quantize each token in one Metal dispatch."""
+    groups = threads // 32
     return mx.fast.metal_kernel(
-        name="gptqmodel_qqq_dynamic_quant",
+        name=(
+            "gptqmodel_qqq_dynamic_quant"
+            if threads == 256 else f"gptqmodel_qqq_dynamic_quant_{threads}"
+        ),
         input_names=["x"],
         output_names=["quantized", "scales"],
         source="""
             uint row = threadgroup_position_in_grid.y;
             uint lane = thread_position_in_threadgroup.x;
-            threadgroup float maxima[8];
+            threadgroup float maxima[MAX_GROUPS];
             float local_max = 0.0f;
-            for (uint col = lane; col < K; col += 256) {
+            for (uint col = lane; col < K; col += THREAD_COUNT) {
                 local_max = metal::max(local_max, metal::abs(float(x[row * K + col])));
             }
             float simd_maximum = simd_max(local_max);
@@ -30,7 +34,7 @@ def _dynamic_quant_kernel():
                 maxima[lane / 32] = simd_maximum;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            float group_maximum = lane < 8 ? maxima[lane] : 0.0f;
+            float group_maximum = lane < GROUP_COUNT ? maxima[lane] : 0.0f;
             group_maximum = simd_max(group_maximum);
             if (lane == 0) {
                 maxima[0] = group_maximum;
@@ -42,21 +46,25 @@ def _dynamic_quant_kernel():
             if (lane == 0) {
                 scales[row] = scale;
             }
-            for (uint col = lane; col < K; col += 256) {
+            for (uint col = lane; col < K; col += THREAD_COUNT) {
                 float value = scale == 0.0f ? 0.0f :
                     metal::rint(float(x[row * K + col]) / scale);
                 quantized[row * K + col] = metal::clamp(value, -128.0f, 127.0f);
             }
-        """,
+        """.replace("MAX_GROUPS", str(groups))
+        .replace("THREAD_COUNT", str(threads))
+        .replace("GROUP_COUNT", str(groups)),
     )
 
 
 def _dynamic_quant(x):
     width = x.shape[-1]
     rows = x.size // width
-    return _dynamic_quant_kernel()(
-        inputs=[x], template=[("K", width)],
-        grid=(256, rows, 1), threadgroup=(256, 1, 1),
+    threads = 512 if width == 17408 else 256
+    return _dynamic_quant_kernel(threads)(
+        inputs=[x],
+        template=[("K", width)],
+        grid=(threads, rows, 1), threadgroup=(threads, 1, 1),
         output_shapes=[x.shape, (*x.shape[:-1], 1)],
         output_dtypes=[mx.float32, mx.float32],
     )
