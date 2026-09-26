@@ -29,21 +29,13 @@ def _positive_values(fmt):
     return values
 
 
-@lru_cache(maxsize=4)
-def _thresholds(fmt):
-    import mlx.core as mx
-
-    values = _positive_values(fmt)
-    return mx.array([(left + right) / 2 for left, right in zip(values, values[1:])], dtype=mx.float32)
-
-
 @lru_cache(maxsize=1)
 def _fp8_encode_kernel():
     import mlx.core as mx
 
     return mx.fast.metal_kernel(
         name="gptqmodel_fp8_encode",
-        input_names=["raw", "thresholds", "scales"],
+        input_names=["raw", "scales"],
         output_names=["codes"],
         source="""
             uint index = thread_position_in_grid.x;
@@ -71,20 +63,36 @@ def _fp8_encode_kernel():
                                      -float(MAXQ), float(MAXQ));
             }
             float magnitude = metal::abs(value);
-            uint low = 0;
-            uint high = COUNT - 1;
-            while (low < high) {
-                uint midpoint = (low + high) / 2;
-                float boundary = thresholds[midpoint];
-                if (magnitude > boundary ||
-                    (magnitude == boundary && (midpoint & 1))) {
-                    low = midpoint + 1;
+            uint encoded_bits = as_type<uint>(magnitude);
+            uint code = 0;
+            if (encoded_bits != 0) {
+                int exponent = int(encoded_bits >> 23) - 127;
+                int target_exponent = exponent + BIAS;
+                if (target_exponent <= 0) {
+                    uint unit_bits = uint(128 - BIAS - MANTISSA) << 23;
+                    float unit = as_type<float>(unit_bits);
+                    code = uint(metal::rint(magnitude / unit));
                 } else {
-                    high = midpoint;
+                    uint significand = (encoded_bits & 0x007fffffu)
+                        | 0x00800000u;
+                    uint shift = 23 - MANTISSA;
+                    uint rounded = significand >> shift;
+                    uint remainder = significand & ((1u << shift) - 1u);
+                    uint halfway = 1u << (shift - 1u);
+                    rounded += remainder > halfway
+                        || (remainder == halfway && (rounded & 1u));
+                    if (rounded == (2u << MANTISSA)) {
+                        rounded >>= 1;
+                        ++target_exponent;
+                    }
+                    code = (uint(target_exponent) << MANTISSA)
+                        | (rounded & ((1u << MANTISSA) - 1u));
                 }
             }
             uint sign = as_type<uint>(value) >> 31;
-            codes[index] = uchar(low | ((sign && (SIGNED_ZERO || low)) ? 128 : 0));
+            code = metal::min(code, uint(COUNT - 1));
+            codes[index] = uchar(
+                code | ((sign && (SIGNED_ZERO || code)) ? 128 : 0));
         """,
     )
 
@@ -147,13 +155,13 @@ def quantize_fp8_weight_mlx(
         )
         scales = inverse_scale(maximum_bits(blocks, axis=(1, 3)))
 
-    thresholds = _thresholds(fmt)
-    _, _, _, count, signed_zero = _FORMATS[fmt]
+    _, mantissa_bits, bias, count, signed_zero = _FORMATS[fmt]
     block_rows, block_cols = block_size if block_size else (1, 1)
     codes = _fp8_encode_kernel()(
-        inputs=[mx.contiguous(matrix), thresholds, mx.contiguous(scales.reshape(-1))],
+        inputs=[mx.contiguous(matrix), mx.contiguous(scales.reshape(-1))],
         template=[
             ("SIZE", weight.size), ("COUNT", count), ("SIGNED_ZERO", int(signed_zero)),
+            ("MANTISSA", mantissa_bits), ("BIAS", bias),
             ("MAXQ", int(fp8_max)),
             ("NAN_CODE", 127 if signed_zero else 128), ("COLS", weight.shape[1]),
             ("MODE", {"tensor": 0, "row": 1, "block": 2}[method]),
