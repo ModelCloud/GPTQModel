@@ -55,6 +55,81 @@ def test_staged_llama_uses_separate_gptq_train_and_validation_documents(tmp_path
     assert not list((tmp_path / "capture" / "layer-00").glob("gsq-*-*"))
 
 
+def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.looper import gsq_training_model as staged
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
+    torch.manual_seed(7)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
+    config._attn_implementation = "sdpa"
+    original = LlamaForCausalLM(config).half().eval()
+    resumed = copy.deepcopy(original)
+    documents = [{"input_ids": list(range(1, 17))}]
+    checkpoint = tmp_path / "checkpoints"
+    first = staged.quantize_llama_gsq_model(
+        original, documents, bits=3, group_size=32, checkpoint_directory=checkpoint)
+    assert first["state"] == "complete"
+    assert (checkpoint / "layer-00.pt").is_file()
+
+    def fail_if_retrained(*args, **kwargs):
+        raise AssertionError("completed GSQ block was retrained")
+
+    monkeypatch.setattr(staged, "quantize_llama_gsq_capture", fail_if_retrained)
+    second = staged.quantize_llama_gsq_model(
+        resumed, documents, bits=3, group_size=32, checkpoint_directory=checkpoint)
+    assert second["blocks"][0]["layer_index"] == first["blocks"][0]["layer_index"]
+    assert set(second["blocks"][0]["stages"]) == set(first["blocks"][0]["stages"])
+    assert isinstance(resumed.model.layers[0].self_attn.q_proj, TorchLinear)
+    ids = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        torch.testing.assert_close(resumed(ids, use_cache=False).logits,
+                                   original(ids, use_cache=False).logits, rtol=0, atol=0)
+
+
+def test_staged_llama_resumes_after_later_block_failure(tmp_path, monkeypatch):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.looper import gsq_training_model as staged
+
+    torch.manual_seed(13)
+    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
+                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=2)
+    config._attn_implementation = "sdpa"
+    interrupted = LlamaForCausalLM(config).half().eval()
+    resumed = copy.deepcopy(interrupted)
+    documents = [{"input_ids": list(range(1, 17))}]
+    checkpoint = tmp_path / "checkpoints"
+    quantize = staged.quantize_llama_gsq_capture
+    calls = 0
+
+    def interrupt_second(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated interruption")
+        return quantize(*args, **kwargs)
+
+    monkeypatch.setattr(staged, "quantize_llama_gsq_capture", interrupt_second)
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        staged.quantize_llama_gsq_model(
+            interrupted, documents, bits=3, group_size=32,
+            checkpoint_directory=checkpoint)
+    assert (checkpoint / "layer-00.pt").is_file()
+    assert not (checkpoint / "layer-01.pt").exists()
+
+    calls = 0
+    second = staged.quantize_llama_gsq_model(
+        resumed, documents, bits=3, group_size=32,
+        checkpoint_directory=checkpoint)
+    assert second["state"] == "complete"
+    assert len(second["blocks"]) == 2
+    assert calls == 1
+    assert (checkpoint / "layer-01.pt").is_file()
+
+
 @pytest.mark.parametrize("mode", ["attention", "mlp"])
 def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path):
     from transformers import LlamaConfig, LlamaForCausalLM

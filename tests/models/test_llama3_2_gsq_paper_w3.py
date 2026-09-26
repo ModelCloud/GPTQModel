@@ -87,12 +87,14 @@ def test_llama3_2_1b_gsq_paper_budget_w3(staged):
                for split in (train, validation, gptq) for document in split)
     capture_root = Path(os.environ.get("GPTQMODEL_GSQ_PAPER_CAPTURE_ROOT",
                                        "/monster/data/model/gsq-paper-capture"))
+    checkpoint_root = os.environ.get("GPTQMODEL_GSQ_PAPER_CHECKPOINT_ROOT") if staged else None
     run = quantize_llama_gsq_model(
         wrapper.model, train if staged else gptq,
         initialization_documents=gptq if staged else None,
         validation_documents=validation if staged else None,
         bits=3, group_size=128, gsq=recipe,
         offload_capture=True, capture_directory=capture_root,
+        checkpoint_directory=checkpoint_root,
     )
     assert run["state"] == "complete" and len(run["blocks"]) == 16
     assert (run["training_documents"], run["initialization_documents"], run["validation_documents"]) == (

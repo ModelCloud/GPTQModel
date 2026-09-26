@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 from pathlib import Path
 import torch
 from ..quantization.gsq_training_config import GSQTrainingConfig
@@ -40,14 +41,19 @@ def staged_documents_from_prepared(prepared):
 
 def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, layer_indices=None,
                              offload_capture=False, capture_directory=None, capture_batch_size=1,
-                             initialization_documents=None, validation_documents=None):
+                             initialization_documents=None, validation_documents=None,
+                             checkpoint_directory=None):
     """Quantize selected Llama blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
     a complete checkpoint or replace GPTQModel.quantize dispatch. The caller
     owns placement and supplies unpadded tokenized documents. Optional GPTQ
     and validation documents are captured separately at every block. Completed
-    blocks and diagnostics remain available if a later block fails.
+    blocks and diagnostics remain available if a later block fails. When a
+    checkpoint directory is supplied, completed packed blocks are saved there
+    atomically and replayed on a later call with the same run configuration.
+    Only load checkpoints created by a trusted local run: they contain pickled
+    PyTorch modules.
     """
     from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
@@ -66,6 +72,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     if capture_directory is not None and not offload_capture:
         raise ValueError('Disk-backed capture requires capture offloading')
     capture_directory = None if capture_directory is None else Path(capture_directory)
+    checkpoint_directory = None if checkpoint_directory is None else Path(checkpoint_directory)
     effective = gsq.to_dict()
     if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
         raise ValueError('Staged model quantization supports W2/W3/W4')
@@ -108,12 +115,36 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     if not hasattr(model, 'gsq_training_runs'):
         model.gsq_training_runs = []
     model.gsq_training_runs.append(run)
+    signature = None
+    if checkpoint_directory is not None:
+        signature = dict(bits=bits, group_size=group_size, gsq_training=effective,
+                         layer_indices=indices, model_config=model.config.to_dict(),
+                         training_documents=len(documents),
+                         initialization_documents=run['initialization_documents'],
+                         validation_documents=run['validation_documents'])
+        checkpoint_directory.mkdir(parents=True, exist_ok=True)
     try:
         for index in indices:
             import logging
 
             logging.getLogger(__name__).info('Staged model block %d/%d', index+1, len(layers))
             run['current_layer'] = index
+            checkpoint = (checkpoint_directory/f'layer-{index:02d}.pt'
+                          if checkpoint_directory is not None else None)
+            if checkpoint is not None and checkpoint.exists():
+                saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
+                if (saved.get('signature') != signature or saved.get('layer_index') != index
+                        or not isinstance(saved.get('packed'), type(layers[index]))):
+                    raise ValueError(f'GSQ block checkpoint does not match this run: {checkpoint}')
+                from ..nn_modules.qlinear.torch import TorchLinear
+
+                if any(not isinstance(saved['packed'].get_submodule(name), TorchLinear) for name in names):
+                    raise ValueError(f'GSQ block checkpoint is not fully packed: {checkpoint}')
+                layers[index] = saved['packed'].to(device).eval()
+                run['blocks'].append(saved['record'])
+                del saved
+                logging.getLogger(__name__).info('Resumed packed GSQ block %d/%d', index+1, len(layers))
+                continue
             capture_options = {}
             if offload_capture:
                 capture_options['offload_to_cpu'] = True
@@ -145,14 +176,25 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 for captured in (cache, initialization_cache, validation_cache):
                     if captured is not None and hasattr(captured, 'cleanup'):
                         captured.cleanup()
+            record = dict(layer_index=index, stages={
+                name: {key: value for key, value in stage.items() if key not in ('weights', 'scales')}
+                for name, stage in result['stages'].items()},
+                initializer_metadata=result['initializer_metadata'])
+            if checkpoint is not None:
+                temporary = checkpoint.with_suffix('.pt.tmp')
+                try:
+                    torch.save(dict(signature=signature, layer_index=index,
+                                    packed=packed.cpu(), record=record), temporary)
+                    os.replace(temporary, checkpoint)
+                finally:
+                    temporary.unlink(missing_ok=True)
+                logging.getLogger(__name__).info('Saved packed GSQ block %d/%d to %s',
+                                                  index+1, len(layers), checkpoint)
             packed = packed.to(device).eval()
             # Installation precedes the next capture: its inputs therefore
             # include both the selected assignments and stored-scale rounding.
             layers[index] = packed
-            stages = {name: {key: value for key, value in stage.items() if key not in ('weights', 'scales')}
-                      for name, stage in result['stages'].items()}
-            run['blocks'].append(dict(layer_index=index, stages=stages,
-                                       initializer_metadata=result['initializer_metadata']))
+            run['blocks'].append(record)
             del result, cache
             if device.type == 'cuda':
                 torch.cuda.empty_cache()
