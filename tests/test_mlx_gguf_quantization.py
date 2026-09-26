@@ -846,6 +846,21 @@ def test_gguf_q4_k_packing_promotes_low_precision_inputs(dtype):
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q4_k_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380024 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q4_K"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q4_k_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
 def test_gguf_q4_k_packing_at_rounding_boundaries():
     rng = np.random.default_rng(101)
     rows = 128
