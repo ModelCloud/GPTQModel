@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # QQQ reference: vLLM, Apache-2.0, https://github.com/vllm-project/vllm
 # GGUF reference: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Compare main Torch MPS and packed MLX QQQ/GGUF at Qwen3.8-27B shapes."""
 
 import argparse

@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX dense matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # bitsandbytes reference: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
-# MXFP8 matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Weight-only FP8 and packed bitsandbytes MLX transfer checked against Torch."""
 
 import numpy as np

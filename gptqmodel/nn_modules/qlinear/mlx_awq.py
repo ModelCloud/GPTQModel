@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # AWQ format reference: ModelCloud.ai, Apache-2.0, GPT-QModel AWQ packers.
 """AWQ MLX inference kernels that preserve FP16/BF16 activation dtype."""
 

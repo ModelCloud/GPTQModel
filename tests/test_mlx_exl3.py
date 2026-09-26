@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # EXL3 format: TurboDerp and ExLlamaV3 contributors, MIT, https://github.com/turboderp-org/exllamav3
-# MLX dense runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """EXL3 Torch decode into MLX dense inference with numerical checks."""
 
 import numpy as np

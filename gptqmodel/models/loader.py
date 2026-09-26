@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-# MLX loader integration references Apple Inc. and MLX-LM contributors (MIT).
 
 from __future__ import annotations
 

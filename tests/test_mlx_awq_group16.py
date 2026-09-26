@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # AWQ format and packing: ModelCloud.ai, Apache-2.0, https://github.com/ModelCloud/GPTQModel
-# MLX Metal runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Validate packed AWQ group-16 decode on every Qwen3.8 projection shape."""
 

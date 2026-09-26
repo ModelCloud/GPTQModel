@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # ParoQuant reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-# MLX Metal runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
-# Shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 """Compare merged and fused ParoQuant MLX rotations on Qwen projection shapes."""
 
 import argparse

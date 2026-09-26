@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # bitsandbytes: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
-# MLX Metal kernel API: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Check packed BitsAndBytes MLX kernels on Qwen3.8-27B projection shapes."""
 

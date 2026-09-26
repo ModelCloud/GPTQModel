@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # QQQ arithmetic reference: vLLM, Apache-2.0, https://github.com/vllm-project/vllm
-# MLX packed matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
-# Shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 """Compare the merged QQQ MLX path with the optimized path on Qwen shapes."""
 
 import argparse

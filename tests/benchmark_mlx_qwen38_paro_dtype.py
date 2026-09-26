@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Qwen3.8-27B shapes: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 # ParoQuant reference: Z Lab, MIT, https://github.com/z-lab/paroquant
-# MLX inference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Benchmark ParoQuant's output dtype correction against merged main."""
 
 import argparse

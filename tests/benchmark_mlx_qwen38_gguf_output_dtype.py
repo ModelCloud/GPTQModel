@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Measure GGUF affine output-dtype preservation against merged main."""
 

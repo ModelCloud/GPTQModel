@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX quantized matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # GPTQ format and packing: ModelCloud.ai, Apache-2.0, https://github.com/ModelCloud/GPTQModel
 """GPTQ MLX inference kernels that preserve FP16/BF16 activation dtype."""
 

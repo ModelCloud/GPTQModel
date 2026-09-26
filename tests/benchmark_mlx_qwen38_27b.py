@@ -1,9 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# Shape source: Qwen/Qwen3.8-27B, Apache-2.0, pinned in qwen38_27b_shapes.py.
 # ParoQuant reference: z-lab, https://github.com/z-lab/paroquant
-# MLX runtime: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Synchronized ParoQuant MPS fallback versus packed MLX at Qwen3.8-27B shapes.
 
 Run with the repository environment's Python. The Torch fallback is the same

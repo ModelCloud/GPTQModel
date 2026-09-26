@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# MLX Metal kernel API: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # bitsandbytes formats: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
 """Packed BitsAndBytes NF4, FP4, and INT8 inference kernels for MLX."""
 

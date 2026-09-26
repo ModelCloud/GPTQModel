@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # GGUF layout reference: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
-# MLX affine packing reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Transcode affine GGUF blocks to exact MLX packed quantized matmul inputs."""
 
 import numpy as np

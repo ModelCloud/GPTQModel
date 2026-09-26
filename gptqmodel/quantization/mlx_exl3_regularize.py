@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # EXL3 quantization formats: TurboDerp and ExLlamaV3 contributors.
-# MLX runtime license: MIT, https://github.com/ml-explore/mlx
 
 """Native MLX fused channel scaling and Hadamard regularization for EXL3."""
 

@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # FP8 E4M3 layout: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
-# MXFP8 matmul: Apple Inc., MIT, https://github.com/ml-explore/mlx
 """Exact E4M3 weight transfer to MLX's native MXFP8 matrix multiplication."""
 
 import mlx.core as mx

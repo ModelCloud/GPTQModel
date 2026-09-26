@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-# MLX quantized matmul interface: Apple Inc., MIT, mlx.core.quantized_matmul.
 """Exact group-16 GPTQ/AWQ inference using two MLX affine matmuls."""
 
 import mlx.core as mx
