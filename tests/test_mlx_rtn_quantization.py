@@ -17,9 +17,9 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.config import RTNConfig
-from gptqmodel.quantization.mlx_rtn import quantize_rtn_weight_mlx
-from gptqmodel.quantization.rtn import RTN
+from gptqmodel.quantization.config import RTNConfig  # noqa: E402
+from gptqmodel.quantization.mlx_rtn import quantize_rtn_weight_mlx  # noqa: E402
+from gptqmodel.quantization.rtn import RTN  # noqa: E402
 
 
 def _compare(weight, bits=4, group_size=128, sym=True):
@@ -69,12 +69,14 @@ def test_rtn_torch_oracle_small(bits, group_size, sym):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bits", range(2, 9))
+@pytest.mark.parametrize("group_size", [-1, 16, 32, 64, 128, 256, 512, 1024])
 @pytest.mark.parametrize("sym", [False, True])
-def test_rtn_low_precision_input_casts(dtype, sym):
-    source = torch.randn(5, 143, generator=torch.Generator().manual_seed(812)).to(dtype)
+def test_rtn_all_bits_groups_and_low_precision_inputs(dtype, bits, group_size, sym):
+    source = torch.randn(3, 2048, generator=torch.Generator().manual_seed(812)).to(dtype)
     source[0] = 0
     source[1, 0] = -0.0
-    _compare(source, bits=4, group_size=32, sym=sym)
+    _compare(source, bits=bits, group_size=group_size, sym=sym)
 
 
 def test_rtn_rounding_boundaries():
@@ -116,12 +118,13 @@ def test_rtn_asymmetric_zero_point_tie_and_endpoints():
 
 
 @pytest.mark.parametrize("name,rows,cols", QWEN38_27B_PROJECTIONS)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("sym", [False, True])
-def test_rtn_qwen38_projection_oracle(name, rows, cols, sym):
+def test_rtn_qwen38_projection_oracle(name, rows, cols, sym, dtype):
     rng = np.random.default_rng(380027 + rows + cols)
     source = torch.from_numpy(
         rng.normal(0, 0.025, (rows, cols)).astype(np.float32)
-    ).bfloat16()
+    ).to(dtype)
     actual, expected = _compare(source, bits=4, group_size=128, sym=sym)
     assert actual[0].shape == (rows, cols), name
     del source, actual, expected
