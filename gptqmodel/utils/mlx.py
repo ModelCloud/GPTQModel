@@ -140,7 +140,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
             group16.add(name)
         elif isinstance(module, TorchLinear):
             gptq_dtype.add(name)
-        elif isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear)):
+        elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
+              and not isinstance(module, ParoLinear)):
             awq_dtype.add(name)
         elif isinstance(module, GGUFTorchLinear):
             gguf_dtype.add(name)
@@ -249,6 +250,15 @@ def _packed_mlx_weights(model, config, lm_head_name):
         ))
     if paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_native or exl3_dtype:
         def replace_custom(path, module):
+            if path in paro:
+                source = paro[path]
+                return MlxParoLinear(
+                    module,
+                    source.pairs.detach().cpu().numpy(),
+                    source.theta.detach().cpu().numpy(),
+                    source.channel_scales.detach().cpu().numpy(),
+                    source.group_size,
+                )
             if path in gptq_dtype:
                 return MlxGPTQLinear(module)
             if path in awq_dtype:
@@ -267,15 +277,6 @@ def _packed_mlx_weights(model, config, lm_head_name):
                     source.in_features, source.out_features,
                     (1.0 / source.weight_scale_inv.detach().float()).cpu().numpy(),
                     None if source.bias is None else source.bias.detach().cpu().numpy(),
-                )
-            if path in paro:
-                source = paro[path]
-                return MlxParoLinear(
-                    module,
-                    source.pairs.detach().cpu().numpy(),
-                    source.theta.detach().cpu().numpy(),
-                    source.channel_scales.detach().cpu().numpy(),
-                    source.group_size,
                 )
             if path in qqq:
                 _, channel_scale = qqq[path]._dequantize_weight_for_torch()
