@@ -1002,6 +1002,14 @@ def test_gguf_q4_k_packing_validates_shape():
         native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "Q4_K")
 
 
+def test_gguf_q4_k_packing_accepts_transposed_weights():
+    source = np.random.default_rng(103).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q4_K")
+    expected = _torch_gguf_q4_k_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
 @pytest.mark.parametrize("rows,width", [(13, 64), (13, 256), (257, 512)])
 def test_gguf_q2_0_packing_matches_torch_oracle(rows, width):
     weight = np.random.default_rng(95).standard_normal((rows, width)).astype(np.float32)
