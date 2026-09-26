@@ -34,10 +34,19 @@ def _exl3_hadamard_kernel(columns: int, axis: int):
                 element = row * COLUMNS + column;
             }
 
-            current[lane] = input[element];
+            float value = input[element];
+
+            for (uint stride = 1; stride < 32; stride <<= 1) {
+                float other = simd_shuffle_xor(value, stride);
+                value = (lane & stride) == 0
+                    ? value + other
+                    : other - value;
+            }
+
+            current[lane] = value;
             threadgroup_barrier(mem_flags::mem_threadgroup);
 
-            for (uint stride = 1; stride < 128; stride <<= 1) {
+            for (uint stride = 32; stride < 128; stride <<= 1) {
                 uint partner = lane ^ stride;
                 float own = current[lane];
                 float other = current[partner];
