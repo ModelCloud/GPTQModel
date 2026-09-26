@@ -41,7 +41,25 @@ def _four_bit_kernel():
             float sums[RTILE];
             for (uint r = 0; r < RTILE; ++r) sums[r] = 0.0f;
             uint weight_offset = column * K;
-            if (EVEN) {
+            if ((K & 3) == 0 && (BLOCK & 3) == 0) {
+                for (uint k = lane * 4; k < K; k += THREADS * 4) {
+                    uint index = weight_offset + k;
+                    uchar first_packed = weight[index >> 1];
+                    uchar second_packed = weight[(index >> 1) + 1];
+                    float scale = scales[index / BLOCK];
+                    float first = float(half(codebook[uint(first_packed >> 4)] * scale));
+                    float second = float(half(codebook[uint(first_packed & 15)] * scale));
+                    float third = float(half(codebook[uint(second_packed >> 4)] * scale));
+                    float fourth = float(half(codebook[uint(second_packed & 15)] * scale));
+                    for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
+                        uint input_offset = (row_base + r) * K + k;
+                        sums[r] = metal::fma(float(x[input_offset]), first, sums[r]);
+                        sums[r] = metal::fma(float(x[input_offset + 1]), second, sums[r]);
+                        sums[r] = metal::fma(float(x[input_offset + 2]), third, sums[r]);
+                        sums[r] = metal::fma(float(x[input_offset + 3]), fourth, sums[r]);
+                    }
+                }
+            } else if (EVEN) {
                 for (uint k = lane * 2; k < K; k += THREADS * 2) {
                     uint index = weight_offset + k;
                     uchar packed = weight[index >> 1];
