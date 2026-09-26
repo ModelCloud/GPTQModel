@@ -48,6 +48,7 @@ try:
 
     from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from ..nn_modules.qlinear.mlx_gptq import MlxGPTQLinear
+    from ..nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from ..nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
     from ..nn_modules.qlinear.mlx_paro import MlxParoLinear
     from ..nn_modules.qlinear.mlx_qqq import MlxQQQLinear
@@ -93,6 +94,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     layer_params = {}
     group16 = set()
     gptq_dtype = set()
+    awq_dtype = set()
     paro = {}
     qqq = {}
     fp8_native = {}
@@ -131,6 +133,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
             group16.add(name)
         elif isinstance(module, TorchLinear):
             gptq_dtype.add(name)
+        elif isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear)):
+            awq_dtype.add(name)
 
     weights = {}
     tied_embeddings = config.get("tie_word_embeddings", False)
@@ -145,7 +149,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
         elif name in layer_params:
             mlx_linear = _mlx_holder_class(module)
             weight, scale, biases, _ = mlx_linear.pack_source(module)
-            prefix = f"{name}.linear" if name in paro or name in qqq or name in fp8_native or name in gptq_dtype else name
+            prefix = f"{name}.linear" if name in paro or name in qqq or name in fp8_native or name in gptq_dtype or name in awq_dtype else name
             weights[f"{prefix}.weight"] = mx.array(weight)
             if name in fp8_native:
                 weights[f"{name}.output_scale"] = mx.array(biases).astype(mx.float32)
@@ -176,7 +180,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 module.weight.detach().to("cpu", torch.float16).numpy()
             )
         if getattr(module, "bias", None) is not None:
-            prefix = f"{name}.linear" if name in paro or name in fp8_dense or name in gptq_dtype else name
+            prefix = f"{name}.linear" if name in paro or name in fp8_dense or name in gptq_dtype or name in awq_dtype else name
             weights[f"{prefix}.bias"] = mx.array(
                 module.bias.detach().to("cpu", torch.float16).numpy()
             )
@@ -223,10 +227,12 @@ def _packed_mlx_weights(model, config, lm_head_name):
         mlx_model.update_modules(tree_map_with_path(
             replace_group16, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
-    if paro or qqq or fp8_native or fp8_dense or gptq_dtype:
+    if paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype:
         def replace_custom(path, module):
             if path in gptq_dtype:
                 return MlxGPTQLinear(module)
+            if path in awq_dtype:
+                return MlxAWQLinear(module)
             if path in fp8_dense:
                 return MlxFP8DenseLinear(module)
             if path in fp8_native:
@@ -258,7 +264,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
             replace_custom, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
     mlx_model.load_weights(list(weights.items()))
-    if group16 or paro or qqq or fp8_native or fp8_dense or gptq_dtype or (dense and layer_params):
+    if group16 or paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or (dense and layer_params):
         # MLX-LM's standard loader reconstructs only native QuantizedLinear.
         # Keep this runtime model instead of round-tripping through that loader.
         mlx_config["_gptqmodel_group16_runtime" if group16 and not paro and not qqq and not dense

@@ -151,6 +151,7 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
     import torch
 
     from gptqmodel.nn_modules.qlinear.mlx import AwqMlxQuantLinear, MlxQuantLinear
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQLinear
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -201,6 +202,9 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
         assert config["_gptqmodel_group16_runtime"]
     elif format == "gptq":
         assert isinstance(model.linear, MlxGPTQLinear)
+        assert config["_gptqmodel_custom_mlx_runtime"]
+    elif format == "awq":
+        assert isinstance(model.linear, MlxAWQLinear)
         assert config["_gptqmodel_custom_mlx_runtime"]
     else:
         assert isinstance(model.linear, mlx_nn.QuantizedLinear)
@@ -388,6 +392,7 @@ def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatc
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
     from gptqmodel.nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQLinear
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     rng = np.random.default_rng(286)
@@ -457,8 +462,8 @@ def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatc
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (TinyModel, ModelArgs))
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     expected_first = (MlxGroup16Linear if first_group_size == 16 else
-                      MlxGPTQLinear if formats[0] == "gptq" else mlx_nn.QuantizedLinear)
-    expected_second = MlxGPTQLinear if formats[1] == "gptq" else mlx_nn.QuantizedLinear
+                      MlxGPTQLinear if formats[0] == "gptq" else MlxAWQLinear)
+    expected_second = MlxGPTQLinear if formats[1] == "gptq" else MlxAWQLinear
     assert isinstance(model.first, expected_first)
     assert isinstance(model.second, expected_second)
     assert config["quantization"]["group_size"] == 32
