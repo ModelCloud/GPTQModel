@@ -92,28 +92,33 @@ def _rotation_metadata(pairs, *, columns: int, group_size: int):
         krot, groups, group_size
     )
     expected = np.arange(group_size)
-    partners = np.empty((krot, columns), dtype=np.int32)
-    pair_indices = np.empty((krot, columns), dtype=np.int32)
-    sine_signs = np.empty((krot, columns), dtype=np.float32)
+    if not np.array_equal(
+        np.sort(pair_groups, axis=2),
+        np.broadcast_to(expected, pair_groups.shape),
+    ):
+        raise ValueError(
+            "each ParoQuant group must contain every local channel index once"
+        )
 
-    for stage in range(krot):
-        for group in range(groups):
-            members = pair_groups[stage, group]
-            if not np.array_equal(np.sort(members), expected):
-                raise ValueError(
-                    "each ParoQuant group must contain every local channel index once"
-                )
-            for pair_index, (left, right) in enumerate(members.reshape(half_group, 2)):
-                left_column = group * group_size + int(left)
-                right_column = group * group_size + int(right)
-                partners[stage, left_column] = int(right)
-                partners[stage, right_column] = int(left)
-                pair_indices[stage, left_column] = pair_index
-                pair_indices[stage, right_column] = pair_index
-                sine_signs[stage, left_column] = 1.0
-                sine_signs[stage, right_column] = -1.0
-
-    return partners, pair_indices, sine_signs
+    paired = pair_groups.reshape(krot, groups, half_group, 2)
+    left, right = paired[..., 0], paired[..., 1]
+    stage_indices = np.arange(krot)[:, None, None]
+    group_indices = np.arange(groups)[None, :, None]
+    indices = np.arange(half_group, dtype=np.int32)[None, None, :]
+    partners = np.empty_like(pair_groups, dtype=np.int32)
+    pair_indices = np.empty_like(pair_groups, dtype=np.int32)
+    sine_signs = np.empty_like(pair_groups, dtype=np.float32)
+    partners[stage_indices, group_indices, left] = right
+    partners[stage_indices, group_indices, right] = left
+    pair_indices[stage_indices, group_indices, left] = indices
+    pair_indices[stage_indices, group_indices, right] = indices
+    sine_signs[stage_indices, group_indices, left] = 1.0
+    sine_signs[stage_indices, group_indices, right] = -1.0
+    return (
+        partners.reshape(krot, columns),
+        pair_indices.reshape(krot, columns),
+        sine_signs.reshape(krot, columns),
+    )
 
 
 def paroquant_rotate_mlx(

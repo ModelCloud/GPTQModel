@@ -18,11 +18,11 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_paroquant import paroquant_pack_weight_mlx
-from gptqmodel.quantization.mlx_paroquant_quant import (
+from gptqmodel.quantization.mlx_paroquant import paroquant_pack_weight_mlx  # noqa: E402
+from gptqmodel.quantization.mlx_paroquant_quant import (  # noqa: E402
     paroquant_quantize_weight_mlx,
 )
-from gptqmodel.quantization.mlx_paroquant_rotation import paroquant_rotate_mlx
+from gptqmodel.quantization.mlx_paroquant_rotation import paroquant_rotate_mlx  # noqa: E402
 
 
 def _pair_schedule(columns, group_size, krot, seed):
@@ -231,13 +231,16 @@ def test_paroquant_rotation_output_can_be_quantized_packed_and_saved(tmp_path):
 
 @pytest.mark.parametrize("inverse", [False, True])
 @pytest.mark.parametrize("name,rows,columns", QWEN38_27B_PROJECTIONS)
-def test_paroquant_rotation_qwen38_projection_oracle(name, rows, columns, inverse):
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+def test_paroquant_rotation_qwen38_projection_oracle(
+    name, rows, columns, inverse, dtype
+):
     group_size, krot = 128, 8
     seed = 8821 + rows + columns
     rng = np.random.default_rng(seed)
-    source = mx.array(rng.normal(0, 0.2, (rows, columns)).astype(np.float32)).astype(
-        mx.bfloat16
-    )
+    source = mx.array(
+        rng.normal(0, 0.2, (rows, columns)).astype(np.float32)
+    ).astype(dtype)
     theta_array = mx.array(
         rng.uniform(-0.35, 0.35, (krot, columns // 2)).astype(np.float32)
     )
