@@ -135,8 +135,9 @@ def test_bnb_four_code_decode_codebook_and_block_boundaries(format_name, dtype):
     )
     x = mx.array(np.resize(boundary, (2, in_features))).astype(dtype)
     internal = _four_bit_unrounded(layer, x)
+    previous = internal.astype(dtype)
     actual = layer(x)
-    mx.eval(internal, actual)
+    mx.eval(internal, previous, actual)
 
     dense = codebook[codes][None, :] * np.repeat(scales, block_size, axis=1)
     dense = dense.astype(np.float16).astype(np.float64)
@@ -147,6 +148,10 @@ def test_bnb_four_code_decode_codebook_and_block_boundaries(format_name, dtype):
     rounded = torch.from_numpy(raw).to(target).float().numpy()
 
     assert actual.dtype == dtype
+    np.testing.assert_array_equal(
+        np.asarray(actual.astype(mx.float32)),
+        np.asarray(previous.astype(mx.float32)),
+    )
     np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(
         np.asarray(actual.astype(mx.float32)), rounded, rtol=2e-3, atol=2e-3,
@@ -185,10 +190,14 @@ def test_bnb_small_decode_all_4bit_block_sizes(format_name, dtype, block_size):
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
-@pytest.mark.parametrize("format_name", ("nf4", "fp4", "int8"))
+@pytest.mark.parametrize(
+    "format_name,rows",
+    (("nf4", 1), ("nf4", 16), ("fp4", 1), ("fp4", 16), ("int8", 1)),
+    ids=("nf4-decode", "nf4-prefill", "fp4-decode", "fp4-prefill", "int8-decode"),
+)
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
 def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
-    name, out_features, in_features, format_name, dtype, record_property,
+    name, out_features, in_features, rows, format_name, dtype, record_property,
 ):
     packed, scales, codebook, dense, row_weight, bits, payload = _weights(
         format_name, out_features, in_features,
@@ -205,12 +214,13 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     del dense
 
     rng = np.random.default_rng(sum(name.encode()) + out_features + in_features + bits)
-    x = mx.array(rng.normal(0, 0.15, (1, in_features)).astype(np.float32)).astype(dtype)
+    x = mx.array(rng.normal(0, 0.15, (rows, in_features)).astype(np.float32)).astype(dtype)
     # Merged main decodes to FP16 dense weights, then preserves activation dtype.
     main_output = main(x).astype(dtype)
     actual = native(x)
     internal = _four_bit_unrounded(native, x) if bits == 4 else None
-    mx.eval(main_output, actual, *(() if internal is None else (internal,)))
+    previous = internal.astype(dtype) if internal is not None else None
+    mx.eval(main_output, actual, *(() if internal is None else (internal, previous)))
     assert actual.dtype == dtype
 
     input_values = np.asarray(x.astype(mx.float32)).astype(np.float64)
@@ -229,10 +239,16 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     record_property("max_abs_native_vs_fp64", float(np.max(np.abs(visible - raw_oracle))))
     if internal is not None:
         internal_values = np.asarray(internal)
+        previous_values = np.asarray(previous.astype(mx.float32))
         record_property(
             "max_abs_internal_fp32",
             float(np.max(np.abs(internal_values - raw_oracle))),
         )
+        record_property(
+            "changed_vs_previous_fp32_then_cast",
+            int(np.count_nonzero(visible != previous_values)),
+        )
+        np.testing.assert_array_equal(visible, previous_values)
         np.testing.assert_allclose(
             internal_values, raw_oracle, rtol=2e-3, atol=2e-3,
         )
