@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# GPTQ method: Elias Frantar et al., https://arxiv.org/abs/2210.17323
+# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Model-scale MLX GPTQ checks with a diagonal inverse Hessian Torch oracle."""
 
@@ -24,23 +26,25 @@ native = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(native)
 
 
+@pytest.mark.parametrize("bits", [2, 4, 8])
+@pytest.mark.parametrize("group_size", [32, 64, 128])
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
 def test_qwen38_27b_gptq_full_projection_diagonal_hessian(
-    name, out_features, in_features,
+    name, out_features, in_features, dtype, group_size, bits,
 ):
-    """Compare every 4-bit code and affine parameter for BF16 input weights."""
+    """Compare every supported GPTQ code and parameter for FP16/BF16 weights."""
     del name
-    bits, group_size = 4, 64
     rng = np.random.default_rng(4500 + out_features + in_features)
     source = rng.normal(0, 0.5, (out_features, in_features)).astype(np.float32)
-    weight = mx.array(source).astype(mx.bfloat16)
+    weight = mx.array(source).astype(dtype)
     mx.eval(weight)
     oracle_weight = torch.from_numpy(np.asarray(weight.astype(mx.float32))).reshape(
         out_features, -1, group_size,
     )
     minimum = oracle_weight.amin(dim=-1)
     maximum = oracle_weight.amax(dim=-1).clamp_min(0)
-    scales = ((maximum - minimum) / 15).clamp_min(1e-7)
+    scales = ((maximum - minimum) / (2**bits - 1)).clamp_min(1e-7)
     use_minimum = minimum.abs() > maximum.abs()
     scales = torch.where(use_minimum, scales, -scales)
     edge = torch.where(use_minimum, minimum, maximum)
@@ -52,10 +56,18 @@ def test_qwen38_27b_gptq_full_projection_diagonal_hessian(
     biases = torch.where(at_zero, torch.zeros_like(edge), edge)
     codes = torch.round(
         (oracle_weight - biases[..., None]) / scales[..., None]
-    ).clamp(0, 15).to(torch.int64)
-    shifts = (torch.arange(8, dtype=torch.int64) * 4).reshape(1, 1, 1, 8)
+    ).clamp(0, 2**bits - 1).to(torch.int64)
+    values_per_word = 32 // bits
+    shifts = (torch.arange(values_per_word, dtype=torch.int64) * bits).reshape(
+        1, 1, 1, values_per_word
+    )
     expected_packed = (
-        (codes.reshape(out_features, -1, group_size // 8, 8) << shifts)
+        (
+            codes.reshape(
+                out_features, -1, group_size // values_per_word, values_per_word
+            )
+            << shifts
+        )
         .sum(dim=-1).reshape(out_features, -1).numpy().astype(np.uint32)
     )
     actual = native.gptq_quantize_weight_mlx(

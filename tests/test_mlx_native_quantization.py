@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# GPTQ method: Elias Frantar et al., https://arxiv.org/abs/2210.17323
 
 """Apple silicon coverage for native MLX GPTQ and AWQ quantization."""
 
@@ -266,6 +267,25 @@ def test_gptq_affine_zero_point_ties_match_torch_bfloat16():
         mx.array(source).astype(mx.bfloat16), mx.eye(64), bits=4, group_size=64,
     )
     expected = _torch_gptq_weight_oracle(source, factor, 4, 64, torch)
+    np.testing.assert_array_equal(np.asarray(actual[0]), expected[0])
+    np.testing.assert_allclose(np.asarray(actual[1]), expected[1], rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(np.asarray(actual[2]), expected[2], rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_fused_gptq_affine_extrema_rows(bits):
+    """Cover zero, positive-only, negative-only, and mixed fused reductions."""
+    torch = pytest.importorskip("torch")
+    source = np.zeros((4, 32), dtype=np.float32)
+    source[1] = np.linspace(0.25, 2.0, 32, dtype=np.float32)
+    source[2] = np.linspace(-3.0, -0.5, 32, dtype=np.float32)
+    source[3] = np.linspace(-2.0, 1.5, 32, dtype=np.float32)
+    actual = native.gptq_quantize_weight_mlx(
+        mx.array(source), mx.eye(32), bits=bits, group_size=32,
+    )
+    expected = _torch_gptq_weight_oracle(
+        source, torch.eye(32), bits, 32, torch,
+    )
     np.testing.assert_array_equal(np.asarray(actual[0]), expected[0])
     np.testing.assert_allclose(np.asarray(actual[1]), expected[1], rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(actual[2]), expected[2], rtol=1e-6, atol=1e-6)
