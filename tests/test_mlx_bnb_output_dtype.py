@@ -136,7 +136,8 @@ def test_bnb_four_code_decode_codebook_and_block_boundaries(format_name, dtype):
     x = mx.array(np.resize(boundary, (2, in_features))).astype(dtype)
     internal = _four_bit_unrounded(layer, x)
     actual = layer(x)
-    mx.eval(internal, actual)
+    main_rounded = internal.astype(dtype)
+    mx.eval(internal, actual, main_rounded)
 
     dense = codebook[codes][None, :] * np.repeat(scales, block_size, axis=1)
     dense = dense.astype(np.float16).astype(np.float64)
@@ -147,6 +148,10 @@ def test_bnb_four_code_decode_codebook_and_block_boundaries(format_name, dtype):
     rounded = torch.from_numpy(raw).to(target).float().numpy()
 
     assert actual.dtype == dtype
+    np.testing.assert_array_equal(
+        np.asarray(actual.astype(mx.float32)),
+        np.asarray(main_rounded.astype(mx.float32)),
+    )
     np.testing.assert_allclose(np.asarray(internal), raw, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(
         np.asarray(actual.astype(mx.float32)), rounded, rtol=2e-3, atol=2e-3,
@@ -210,7 +215,11 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     main_output = main(x).astype(dtype)
     actual = native(x)
     internal = _four_bit_unrounded(native, x) if bits == 4 else None
-    mx.eval(main_output, actual, *(() if internal is None else (internal,)))
+    main_rounded = internal.astype(dtype) if internal is not None else None
+    mx.eval(
+        main_output, actual,
+        *(() if internal is None else (internal, main_rounded)),
+    )
     assert actual.dtype == dtype
 
     input_values = np.asarray(x.astype(mx.float32)).astype(np.float64)
@@ -235,6 +244,9 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
         )
         np.testing.assert_allclose(
             internal_values, raw_oracle, rtol=2e-3, atol=2e-3,
+        )
+        np.testing.assert_array_equal(
+            visible, np.asarray(main_rounded.astype(mx.float32)),
         )
     np.testing.assert_allclose(main_values, rounded_oracle, rtol=2e-3, atol=2e-3)
     np.testing.assert_allclose(visible, rounded_oracle, rtol=2e-3, atol=2e-3)
