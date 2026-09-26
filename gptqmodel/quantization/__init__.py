@@ -54,6 +54,7 @@ from .config import (
 from .foem import FOEM
 from .gptaq import GPTAQ
 from .gptq import GPTQ
+from .gsq_training_config import GSQTrainingConfig
 from .protocol import (
                      ExecutionPlan,
                      ExportSpec,

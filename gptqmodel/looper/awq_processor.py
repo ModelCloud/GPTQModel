@@ -1504,6 +1504,13 @@ class AWQProcessor(LoopProcessor):
             get_op_name(self.model, layer_module_ref) + ".",
         )
 
+        staged_teacher = None
+        staged_gsq = getattr(self.qcfg, "gsq_training", None)
+        if staged_gsq is not None and staged_gsq.enabled:
+            from .gsq_training_awq import capture_awq_staged_teacher
+
+            staged_teacher = capture_awq_staged_teacher(self, layer_module_ref, named_childs, fallback_names)
+
         if self.apply_clip:
             clip_list = self._search_best_clip(
                 layer_module_ref,
@@ -1525,6 +1532,11 @@ class AWQProcessor(LoopProcessor):
         named_childs = {name: named for name, named in named_childs.items() if name in input_feat and name not in fallback_names}
 
         self.apply_quant(named_childs, scales_list)
+
+        if staged_teacher is not None:
+            from .gsq_training_awq import refine_awq_staged_layer
+
+            refine_awq_staged_layer(self, staged_teacher, named_childs, layer_index=layer_index)
 
         if fallback_named_childs:
             log.warning(
@@ -2155,6 +2167,26 @@ class AWQProcessor(LoopProcessor):
             wq, scales, zeros = self.pseudo_quantize_tensor(
                 weight_for_quant
             )
+
+            from ..quantization.gsq_scalar import gsq_enabled_for, refine_affine_scalar
+
+            gsq = getattr(self.qcfg, "gsq", None)
+            if gsq_enabled_for(gsq, named_module.full_name):
+                group_size = self.qcfg.group_size if self.qcfg.group_size > 0 else wq.shape[1]
+                groups = torch.arange(wq.shape[1], device=wq.device, dtype=torch.int32) // group_size
+                fitted = refine_affine_scalar(
+                    wq, scales, zeros, groups, target=weight_for_quant.detach().float(),
+                    bits=int(self.qcfg.bits), config=gsq,
+                    packing={FORMAT.GEMM: "awq_gemm", FORMAT.GEMV: "awq_gemv",
+                             FORMAT.GEMV_FAST: "awq_gemv_fast", FORMAT.LLM_AWQ: "awq_gemv_fast"}[self.qcfg.format],
+                    scale_dtype=(scales.dtype if self.qcfg.format == FORMAT.GEMM and
+                                 scales.dtype in (torch.float16, torch.bfloat16) else torch.float16),
+                )
+                wq, scales, zeros = fitted.weight, fitted.scales, fitted.zeros
+                named_module.state["gsq_diagnostics"] = {
+                    "objective": "weight_mse", "before": fitted.before,
+                    "after": fitted.after, "learn_scales": gsq.learn_scales,
+                }
 
             if pad_cols:
                 wq = wq[:, :original_cols]
