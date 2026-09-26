@@ -431,6 +431,68 @@ def _gguf_tq1_0_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_tq1_0_parallel_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_tq1_0_pack_parallel",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint lane = thread_position_in_threadgroup.x;
+            uint block = threadgroup_position_in_grid.y;
+            float maximum = 0.0f;
+            for (uint k = lane; k < 256; k += 32) {
+                maximum = metal::max(
+                    maximum, metal::abs(weights[block * 256 + k]));
+            }
+            maximum = simd_max(maximum);
+            float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            uint offset = block * 54;
+            uint powers[5] = {81, 27, 9, 3, 1};
+            uint value = 0;
+            for (uint digit = 0; digit < 5; ++digit) {
+                float normalized = weights[
+                    block * 256 + digit * 32 + lane] * inverse;
+                uint code = normalized >= 0.5f
+                    ? 2 : (normalized <= -0.5f ? 0 : 1);
+                value += code * powers[digit];
+            }
+            packed[offset + lane] = uchar((value * 256 + 242) / 243);
+            if (lane < 16) {
+                value = 0;
+                for (uint digit = 0; digit < 5; ++digit) {
+                    float normalized = weights[
+                        block * 256 + 160 + digit * 16 + lane] * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    value += code * powers[digit];
+                }
+                packed[offset + 32 + lane] = uchar(
+                    (value * 256 + 242) / 243);
+            }
+            if (lane < 4) {
+                value = 0;
+                for (uint digit = 0; digit < 4; ++digit) {
+                    float normalized = weights[
+                        block * 256 + 240 + digit * 4 + lane] * inverse;
+                    uint code = normalized >= 0.5f
+                        ? 2 : (normalized <= -0.5f ? 0 : 1);
+                    value += code * powers[digit];
+                }
+                packed[offset + 48 + lane] = uchar(
+                    (value * 256 + 242) / 243);
+            }
+            if (lane == 0) {
+                ushort scale_bits = as_type<ushort>(half(maximum));
+                packed[offset + 52] = uchar(scale_bits & 255);
+                packed[offset + 53] = uchar(scale_bits >> 8);
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_tq2_0_kernel():
     import mlx.core as mx
 
@@ -671,7 +733,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     elif normalized == "Q6_K":
         kernel, bytes_per_block = _gguf_q6_k_kernel(), 210
     elif normalized == "TQ1_0":
-        kernel, bytes_per_block = _gguf_tq1_0_kernel(), 54
+        kernel = (
+            _gguf_tq1_0_parallel_kernel()
+            if blocks >= 65536
+            else _gguf_tq1_0_kernel()
+        )
+        bytes_per_block = 54
     elif normalized == "TQ2_0":
         kernel = (
             _gguf_tq2_0_parallel_kernel()
@@ -690,6 +757,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         if normalized == "Q6_K"
         or normalized.startswith("Q5_K")
         or normalized.startswith("Q4_K")
+        or (normalized == "TQ1_0" and blocks >= 65536)
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
