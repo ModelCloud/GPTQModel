@@ -88,79 +88,80 @@ def _gguf_q5_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint block = thread_position_in_grid.x;
-            float minima[8];
-            float scales[8];
-            float max_scale = 0.0f;
-            float max_minimum = 0.0f;
-            for (uint group = 0; group < 8; ++group) {
-                float low = weights[block * 256 + group * 32];
+            threadgroup float minima[8];
+            threadgroup float scales[8];
+            threadgroup uint scale_codes[8];
+            threadgroup uint min_codes[8];
+            uint lane = thread_position_in_threadgroup.x;
+            uint block = threadgroup_position_in_grid.y;
+            float scale = 0.0f;
+            float minimum = 0.0f;
+            if (lane < 8) {
+                float low = weights[block * 256 + lane * 32];
                 float high = low;
                 for (uint k = 1; k < 32; ++k) {
-                    float value = weights[block * 256 + group * 32 + k];
+                    float value = weights[block * 256 + lane * 32 + k];
                     low = metal::min(low, value);
                     high = metal::max(high, value);
                 }
-                float minimum = metal::max(-low, 0.0f);
-                float scale = (high + minimum) / 31.0f;
-                minima[group] = minimum;
-                scales[group] = scale;
-                max_scale = metal::max(max_scale, scale);
-                max_minimum = metal::max(max_minimum, minimum);
+                minimum = metal::max(-low, 0.0f);
+                scale = (high + minimum) / 31.0f;
+                minima[lane] = minimum;
+                scales[lane] = scale;
             }
+            float max_scale = simd_max(scale);
+            float max_minimum = simd_max(minimum);
             float base = max_scale / 63.0f;
             float min_base = max_minimum / 63.0f;
             uint offset = block * 176;
-            ushort d = as_type<ushort>(half(base));
-            ushort dmin = as_type<ushort>(half(min_base));
-            packed[offset] = uchar(d & 255);
-            packed[offset + 1] = uchar(d >> 8);
-            packed[offset + 2] = uchar(dmin & 255);
-            packed[offset + 3] = uchar(dmin >> 8);
-            uint scale_codes[8];
-            uint min_codes[8];
-            for (uint group = 0; group < 8; ++group) {
-                scale_codes[group] = base > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(scales[group] / base)), 0, 63))
+            if (lane == 0) {
+                ushort d = as_type<ushort>(half(base));
+                ushort dmin = as_type<ushort>(half(min_base));
+                packed[offset] = uchar(d & 255);
+                packed[offset + 1] = uchar(d >> 8);
+                packed[offset + 2] = uchar(dmin & 255);
+                packed[offset + 3] = uchar(dmin >> 8);
+            }
+            if (lane < 8) {
+                scale_codes[lane] = base > 0.0f
+                    ? uint(metal::clamp(int(metal::rint(scales[lane] / base)), 0, 63))
                     : 0;
-                min_codes[group] = min_base > 0.0f
+                min_codes[lane] = min_base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(minima[group] / min_base)), 0, 63))
+                        int(metal::rint(minima[lane] / min_base)), 0, 63))
                     : 0;
             }
-            for (uint k = 0; k < 4; ++k) {
-                packed[offset + 4 + k] = uchar(
-                    (scale_codes[k] & 63) | ((scale_codes[k + 4] & 48) << 2));
-                packed[offset + 8 + k] = uchar(
-                    (min_codes[k] & 63) | ((min_codes[k + 4] & 48) << 2));
-                packed[offset + 12 + k] = uchar(
-                    (scale_codes[k + 4] & 15) | ((min_codes[k + 4] & 15) << 4));
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            if (lane < 4) {
+                packed[offset + 4 + lane] = uchar(
+                    (scale_codes[lane] & 63) | ((scale_codes[lane + 4] & 48) << 2));
+                packed[offset + 8 + lane] = uchar(
+                    (min_codes[lane] & 63) | ((min_codes[lane + 4] & 48) << 2));
+                packed[offset + 12 + lane] = uchar(
+                    (scale_codes[lane + 4] & 15) | ((min_codes[lane + 4] & 15) << 4));
             }
-            for (uint k = 0; k < 32; ++k) {
-                packed[offset + 16 + k] = 0;
-            }
+            uchar high_bits = 0;
             for (uint group = 0; group < 8; group += 2) {
                 float step0 = base * float(scale_codes[group]);
                 float step1 = base * float(scale_codes[group + 1]);
                 float bias0 = min_base * float(min_codes[group]);
                 float bias1 = min_base * float(min_codes[group + 1]);
-                for (uint k = 0; k < 32; ++k) {
-                    float shifted0 = weights[block * 256 + group * 32 + k] + bias0;
-                    float shifted1 = weights[
-                        block * 256 + (group + 1) * 32 + k] + bias1;
-                    uint code0 = step0 > 0.0f
-                        ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 31))
-                        : 0;
-                    uint code1 = step1 > 0.0f
-                        ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 31))
-                        : 0;
-                    packed[offset + 16 + k] |= uchar(
-                        ((code0 >> 4) & 1) << group
-                        | ((code1 >> 4) & 1) << (group + 1));
-                    packed[offset + 48 + group * 16 + k] = uchar(
-                        (code0 & 15) | ((code1 & 15) << 4));
-                }
+                float shifted0 = weights[block * 256 + group * 32 + lane] + bias0;
+                float shifted1 = weights[
+                    block * 256 + (group + 1) * 32 + lane] + bias1;
+                uint code0 = step0 > 0.0f
+                    ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 31))
+                    : 0;
+                uint code1 = step1 > 0.0f
+                    ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 31))
+                    : 0;
+                high_bits |= uchar(
+                    ((code0 >> 4) & 1) << group
+                    | ((code1 >> 4) & 1) << (group + 1));
+                packed[offset + 48 + group * 16 + lane] = uchar(
+                    (code0 & 15) | ((code1 & 15) << 4));
             }
+            packed[offset + 16 + lane] = high_bits;
         """,
     )
 
@@ -638,7 +639,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
     launch = (
         {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-        if normalized == "Q6_K"
+        if normalized == "Q6_K" or normalized.startswith("Q5_K")
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
     packed = kernel(
