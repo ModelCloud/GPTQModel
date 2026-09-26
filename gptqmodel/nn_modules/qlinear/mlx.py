@@ -604,7 +604,7 @@ class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
 
 
 class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
-    """BNB checkpoint holder decoded once for MLX native dense matmul."""
+    """BNB checkpoint holder transferred to packed MLX Metal matmul."""
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.BITSANDBYTES]
@@ -630,5 +630,37 @@ class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
         return (ok, err) if not ok else BitsAndBytesLinear.validate_once()
 
     @classmethod
-    def dense_weight(cls, module):
-        return module.dequantize_weight().detach().to("cpu", torch.float16).contiguous()
+    def native_payload(cls, module):
+        """Return packed codes, decoded scales, codebook, and bias."""
+        if not cls.source_compatible(module):
+            raise ValueError("BitsAndBytes layer cannot be transferred to MLX")
+        if module.bits == 4:
+            state = module._refresh_quant_state()
+            scales = state.absmax
+            if state.state2 is not None:
+                library = __import__("bitsandbytes")
+                scales = library.functional.dequantize_blockwise(scales, quant_state=state.state2)
+                scales = scales + state.offset
+            codebook = state.code
+        else:
+            scales = module.weight_scb
+            codebook = None
+        payload = {
+            "weight": module.weight.detach().cpu().numpy(),
+            "scales": scales.detach().to("cpu", torch.float32).numpy(),
+            "codebook": None if codebook is None else codebook.detach().to("cpu", torch.float32).numpy(),
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "bits": module.bits,
+            "block_size": module.bnb_block_size,
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+        }
+        if module.bits == 8:
+            from .mlx_bitsandbytes import repack_int8_affine
+
+            affine = repack_int8_affine(
+                payload["weight"], payload["scales"], module.in_features, module.out_features,
+            )
+            if affine is not None:
+                payload["weight"], payload["scales"], payload["affine_biases"], payload["block_size"] = affine
+        return payload

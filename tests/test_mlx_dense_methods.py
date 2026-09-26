@@ -4,7 +4,7 @@
 # MLX dense matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
 # bitsandbytes reference: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
 # MXFP8 matmul reference: Apple Inc., MIT, https://github.com/ml-explore/mlx
-"""Weight-only FP8 and bitsandbytes MLX transfer checked against Torch."""
+"""Weight-only FP8 and packed bitsandbytes MLX transfer checked against Torch."""
 
 import numpy as np
 import pytest
@@ -167,7 +167,9 @@ def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, com
     assert BitsAndBytesMlxQuantLinear.source_compatible(source)
     model = _load_dense(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight().detach().to("cpu", torch.float16)
-    np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
+    payload = BitsAndBytesMlxQuantLinear.native_payload(source)
+    np.testing.assert_array_equal(np.asarray(model.linear.weight), np.asarray(payload["weight"]).reshape(model.linear.weight.shape))
+    assert model.linear.weight.nbytes == source.weight.numel() * source.weight.element_size()
     rng = np.random.default_rng(117)
     x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float32)
     mlx_input = mx.array(x).astype(dtype)
@@ -179,3 +181,66 @@ def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, com
         torch.float16 if dtype == mx.float16 else torch.bfloat16,
     ).float().numpy()
     np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=0.002, atol=0.002)
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("block_size", (32, 64, 128, 256, 512, 1024, 2048, 4096))
+@pytest.mark.parametrize("quant_type", ("nf4", "fp4"))
+@pytest.mark.parametrize("compress", (False, True), ids=("plain-scales", "nested-scales"))
+def test_bitsandbytes_mlx_all_4bit_block_sizes(
+    monkeypatch, dtype, block_size, quant_type, compress,
+):
+    pytest.importorskip("bitsandbytes")
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+
+    torch.manual_seed(97 + block_size)
+    linear = torch.nn.Linear(block_size, 8, bias=False).half()
+    source = BitsAndBytesLinear(
+        bits=4, group_size=-1, sym=True, desc_act=False,
+        in_features=block_size, out_features=8, bias=False,
+        dtype=torch.float16, format=quant_type,
+        block_size=block_size, compress_statistics=compress,
+    )
+    source.pack_original(linear, None, None)
+    model = _load_dense(monkeypatch, source, block_size, 8)
+    x = mx.array(np.random.default_rng(block_size).normal(0, 0.2, (2, block_size)).astype(np.float32)).astype(dtype)
+    actual = model(x)
+    mx.eval(actual)
+    assert actual.dtype == dtype
+    reference_weight = source.dequantize_weight().detach().to("cpu", torch.float64)
+    expected = (torch.from_numpy(np.asarray(x.astype(mx.float32))).double() @ reference_weight.T).to(
+        torch.float16 if dtype == mx.float16 else torch.bfloat16,
+    ).float().numpy()
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=2e-3, atol=2e-3)
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("bits,quant_type,compress", (
+    (4, "nf4", False), (4, "fp4", True), (8, "int8", False),
+))
+def test_bitsandbytes_mlx_irregular_shape_fallback(
+    monkeypatch, dtype, bits, quant_type, compress,
+):
+    pytest.importorskip("bitsandbytes")
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+
+    torch.manual_seed(211)
+    linear = torch.nn.Linear(65, 3, bias=True).half()
+    source = BitsAndBytesLinear(
+        bits=bits, group_size=-1, sym=True, desc_act=False,
+        in_features=65, out_features=3, bias=True,
+        dtype=torch.float16, format=quant_type,
+        block_size=32, compress_statistics=compress,
+    )
+    source.pack_original(linear, None, None)
+    model = _load_dense(monkeypatch, source, 65, 3)
+    assert "affine_biases" not in model.linear
+    x = mx.array(np.random.default_rng(211).normal(0, 0.2, (2, 65)).astype(np.float32)).astype(dtype)
+    actual = model(x)
+    mx.eval(actual)
+    reference_weight = source.dequantize_weight().detach().to("cpu", torch.float64)
+    expected = (torch.from_numpy(np.asarray(x.astype(mx.float32))).double() @ reference_weight.T
+                + source.bias.double()).to(
+        torch.float16 if dtype == mx.float16 else torch.bfloat16,
+    ).float().numpy()
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=2e-3, atol=2e-3)
