@@ -1,11 +1,90 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# EXL3 trellis format: TurboDerp and ExLlamaV3 contributors.
+# EXL3 quantization formats: TurboDerp and ExLlamaV3 contributors.
 # MLX runtime license: MIT, https://github.com/ml-explore/mlx
 
-"""Native MLX packing for EXL3 trellis states."""
+"""Native MLX quantization primitives for EXL3 states and trellises."""
 
 from functools import lru_cache
+
+_EXL3_CODEBOOKS = {"3inst": 0, "mcg": 1, "mul1": 2}
+
+
+@lru_cache(maxsize=3)
+def _exl3_decode_kernel(codebook_id: int):
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_exl3_decode_states",
+        input_names=["encoded"],
+        output_names=["decoded"],
+        source="""
+            uint index = thread_position_in_grid.x;
+            uint state = uint(as_type<ushort>(encoded[index]));
+            half result;
+
+            if (CODEBOOK == 0) {
+                uint raw = state * 89226354u + 64248484u;
+                raw = 0x3b603b60u ^ (raw & 0x8fff8fffu);
+                half low = as_type<half>(ushort(raw & 0xffffu));
+                half high = as_type<half>(ushort(raw >> 16));
+                result = low + high;
+            } else if (CODEBOOK == 1) {
+                uint raw = state * 0xcbac1fedu;
+                raw = 0x3b603b60u ^ (raw & 0x8fff8fffu);
+                half low = as_type<half>(ushort(raw & 0xffffu));
+                half high = as_type<half>(ushort(raw >> 16));
+                result = low + high;
+            } else {
+                uint raw = state * 0x83dcd12du;
+                uint byte_sum = (raw & 0xffu)
+                    + ((raw >> 8) & 0xffu)
+                    + ((raw >> 16) & 0xffu)
+                    + ((raw >> 24) & 0xffu);
+                half accumulator = as_type<half>(ushort(byte_sum + 0x6400u));
+                half inverse = as_type<half>(ushort(0x1eeeu));
+                half bias = as_type<half>(ushort(0xc931u));
+                result = metal::fma(accumulator, inverse, bias);
+            }
+            decoded[index] = float(result);
+        """,
+    )
+
+
+def exl3_decode_states_mlx(encoded, *, codebook: str = "mcg"):
+    """Decode EXL3 uint16 state bit patterns into quantized FP32 values.
+
+    ``encoded`` must be a nonempty MLX int16 array whose last dimension is
+    256. Signed values are interpreted by their underlying uint16 bit pattern,
+    exactly as EXL3's CUDA quantizer does. ``codebook`` may be ``"3inst"``,
+    ``"mcg"``, or ``"mul1"``. The output is float32 and has the same shape.
+
+    This reconstructs the codebook-selected values after path search; it does
+    not perform the Viterbi search itself.
+    """
+    import mlx.core as mx
+
+    encoded = mx.array(encoded)
+    if not isinstance(codebook, str) or codebook.lower() not in _EXL3_CODEBOOKS:
+        raise ValueError("EXL3 codebook must be '3inst', 'mcg', or 'mul1'")
+    normalized = codebook.lower()
+    if encoded.ndim < 2 or encoded.shape[-1] != 256:
+        raise ValueError("encoded must have rank at least two with 256 states per tile")
+    if any(dimension == 0 for dimension in encoded.shape):
+        raise ValueError("encoded must be nonempty")
+    if encoded.dtype != mx.int16:
+        raise ValueError("encoded must have int16 dtype")
+
+    decoded = _exl3_decode_kernel(_EXL3_CODEBOOKS[normalized])(
+        inputs=[mx.contiguous(encoded)],
+        template=[("CODEBOOK", _EXL3_CODEBOOKS[normalized])],
+        grid=(encoded.size, 1, 1),
+        threadgroup=(min(encoded.size, 256), 1, 1),
+        output_shapes=[encoded.shape],
+        output_dtypes=[mx.float32],
+    )[0]
+    mx.eval(decoded)
+    return decoded
 
 
 @lru_cache(maxsize=8)
@@ -80,4 +159,4 @@ def exl3_pack_trellis_mlx(encoded, *, bits: int):
     return packed
 
 
-__all__ = ["exl3_pack_trellis_mlx"]
+__all__ = ["exl3_decode_states_mlx", "exl3_pack_trellis_mlx"]
