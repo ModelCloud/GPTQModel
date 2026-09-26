@@ -20,11 +20,12 @@ def _gguf_q1_0_kernel():
             // Match the existing NumPy reference's eight-lane float32 sum.
             float sums[8];
             for (uint lane = 0; lane < 8; ++lane) {
-                sums[lane] = metal::abs(weights[block * 128 + lane]);
+                sums[lane] = metal::abs(float(weights[block * 128 + lane]));
             }
             for (uint k = 8; k < 128; k += 8) {
                 for (uint lane = 0; lane < 8; ++lane) {
-                    sums[lane] += metal::abs(weights[block * 128 + k + lane]);
+                    sums[lane] += metal::abs(
+                        float(weights[block * 128 + k + lane]));
                 }
             }
             float absolute_sum = ((sums[0] + sums[1]) + (sums[2] + sums[3]))
@@ -36,7 +37,8 @@ def _gguf_q1_0_kernel():
             for (uint byte = 0; byte < 16; ++byte) {
                 uchar bits = 0;
                 for (uint bit = 0; bit < 8; ++bit) {
-                    bits |= uchar(weights[block * 128 + byte * 8 + bit] >= 0.0f)
+                    bits |= uchar(
+                        float(weights[block * 128 + byte * 8 + bit]) >= 0.0f)
                         << bit;
                 }
                 packed[offset + 2 + byte] = bits;
@@ -762,7 +764,10 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     )
-    direct_input = normalized in ("Q4_0", "MXFP4", "Q8_0") and weight.dtype in (
+    direct_input = (
+        normalized.startswith("Q1_0")
+        or normalized in ("Q4_0", "MXFP4", "Q8_0")
+    ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
     )
     kernel_weight = (
