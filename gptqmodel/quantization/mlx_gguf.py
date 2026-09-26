@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
 
 """Metal packing kernels for GGUF block formats."""
 
@@ -173,54 +174,57 @@ def _gguf_q6_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint block = thread_position_in_grid.x;
-            float scales[16];
-            float largest_scale = 0.0f;
-            for (uint group = 0; group < 16; ++group) {
+            threadgroup float scales[16];
+            threadgroup uint scale_codes[16];
+            uint lane = thread_position_in_threadgroup.x;
+            uint block = threadgroup_position_in_grid.y;
+            float scale = 0.0f;
+            if (lane < 16) {
                 float maximum = 0.0f;
                 for (uint k = 0; k < 16; ++k) {
                     maximum = metal::max(maximum,
-                        metal::abs(weights[block * 256 + group * 16 + k]));
+                        metal::abs(weights[block * 256 + lane * 16 + k]));
                 }
-                scales[group] = maximum / 31.0f;
-                largest_scale = metal::max(largest_scale, scales[group]);
+                scale = maximum / 31.0f;
+                scales[lane] = scale;
             }
+            float largest_scale = simd_max(scale);
             float base = largest_scale / 127.0f;
             uint offset = block * 210;
-            uint scale_codes[16];
-            for (uint group = 0; group < 16; ++group) {
+            if (lane < 16) {
                 uint code = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(scales[group] / base)), 0, 127))
+                        int(metal::rint(scales[lane] / base)), 0, 127))
                     : 0;
-                scale_codes[group] = code;
-                packed[offset + 192 + group] = uchar(code);
+                scale_codes[lane] = code;
+                packed[offset + 192 + lane] = uchar(code);
             }
-            ushort scale_bits = as_type<ushort>(half(base));
-            packed[offset + 208] = uchar(scale_bits & 255);
-            packed[offset + 209] = uchar(scale_bits >> 8);
+            if (lane == 0) {
+                ushort scale_bits = as_type<ushort>(half(base));
+                packed[offset + 208] = uchar(scale_bits & 255);
+                packed[offset + 209] = uchar(scale_bits >> 8);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
             for (uint segment = 0; segment < 2; ++segment) {
-                for (uint k = 0; k < 32; ++k) {
-                    uint raw[4];
-                    for (uint lane = 0; lane < 4; ++lane) {
-                        uint index = segment * 128 + lane * 32 + k;
-                        uint group = index / 16;
-                        float step = base * float(scale_codes[group]);
-                        int code = step > 0.0f
-                            ? metal::clamp(int(metal::rint(
-                                weights[block * 256 + index] / step)), -32, 31)
-                            : 0;
-                        raw[lane] = uint(code + 32);
-                    }
-                    packed[offset + segment * 64 + k] = uchar(
-                        (raw[0] & 15) | ((raw[2] & 15) << 4));
-                    packed[offset + segment * 64 + 32 + k] = uchar(
-                        (raw[1] & 15) | ((raw[3] & 15) << 4));
-                    packed[offset + 128 + segment * 32 + k] = uchar(
-                        ((raw[0] >> 4) & 3) | (((raw[1] >> 4) & 3) << 2)
-                        | (((raw[2] >> 4) & 3) << 4)
-                        | (((raw[3] >> 4) & 3) << 6));
+                uint raw[4];
+                for (uint value_lane = 0; value_lane < 4; ++value_lane) {
+                    uint index = segment * 128 + value_lane * 32 + lane;
+                    uint group = index / 16;
+                    float step = base * float(scale_codes[group]);
+                    int code = step > 0.0f
+                        ? metal::clamp(int(metal::rint(
+                            weights[block * 256 + index] / step)), -32, 31)
+                        : 0;
+                    raw[value_lane] = uint(code + 32);
                 }
+                packed[offset + segment * 64 + lane] = uchar(
+                    (raw[0] & 15) | ((raw[2] & 15) << 4));
+                packed[offset + segment * 64 + 32 + lane] = uchar(
+                    (raw[1] & 15) | ((raw[3] & 15) << 4));
+                packed[offset + 128 + segment * 32 + lane] = uchar(
+                    ((raw[0] >> 4) & 3) | (((raw[1] >> 4) & 3) << 2)
+                    | (((raw[2] >> 4) & 3) << 4)
+                    | (((raw[3] >> 4) & 3) << 6));
             }
         """,
     )
@@ -632,12 +636,16 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
+    launch = (
+        {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
+        if normalized == "Q6_K"
+        else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
+    )
     packed = kernel(
         inputs=[weight.astype(mx.float32)],
-        grid=(blocks, 1, 1),
-        threadgroup=(min(blocks, 256), 1, 1),
         output_shapes=[(rows, columns // block_size * bytes_per_block)],
         output_dtypes=[mx.uint8],
+        **launch,
     )[0]
     mx.eval(packed)
     return packed
