@@ -51,6 +51,7 @@ try:
     from ..nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from ..nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
     from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear
+    from ..nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
     from ..nn_modules.qlinear.mlx_paro import MlxParoLinear
     from ..nn_modules.qlinear.mlx_qqq import MlxQQQLinear
     MLX_AVAILABLE = True
@@ -95,6 +96,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     layer_params = {}
     group16 = set()
     gguf_dtype = set()
+    bitsandbytes_dtype = set()
     gptq_dtype = set()
     awq_dtype = set()
     paro = {}
@@ -123,6 +125,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
             continue
         elif isinstance(module, BitsAndBytesLinear):
             dense[name] = module
+            bitsandbytes_dtype.add(name)
             continue
         layer_params[name] = mlx_linear.mlx_params(module)
         if isinstance(module, ParoLinear):
@@ -147,7 +150,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
             dense_weight = (module.get_weight_tensor(dtype=torch.float16).T.contiguous()
                             if isinstance(module, ExllamaV3TorchLinear)
                             else _mlx_holder_class(module).dense_weight(module))
-            weights[f"{name}.linear.weight" if name in fp8_dense else f"{name}.weight"] = mx.array(
+            weights[f"{name}.linear.weight" if name in fp8_dense or name in bitsandbytes_dtype else f"{name}.weight"] = mx.array(
                 dense_weight.detach().cpu().numpy()
             )
         elif name in layer_params:
@@ -184,7 +187,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 module.weight.detach().to("cpu", torch.float16).numpy()
             )
         if getattr(module, "bias", None) is not None:
-            prefix = f"{name}.linear" if name in paro or name in fp8_dense or name in gptq_dtype or name in awq_dtype or name in gguf_dtype else name
+            prefix = f"{name}.linear" if name in paro or name in fp8_dense or name in gptq_dtype or name in awq_dtype or name in gguf_dtype or name in bitsandbytes_dtype else name
             weights[f"{prefix}.bias"] = mx.array(
                 module.bias.detach().to("cpu", torch.float16).numpy()
             )
@@ -231,7 +234,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
         mlx_model.update_modules(tree_map_with_path(
             replace_group16, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
-    if paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype:
+    if paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_dtype:
         def replace_custom(path, module):
             if path in gptq_dtype:
                 return MlxGPTQLinear(module)
@@ -239,6 +242,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 return MlxAWQLinear(module)
             if path in gguf_dtype:
                 return MlxGGUFLinear(module)
+            if path in bitsandbytes_dtype:
+                return MlxBitsAndBytesLinear(module)
             if path in fp8_dense:
                 return MlxFP8DenseLinear(module)
             if path in fp8_native:
@@ -270,7 +275,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
             replace_custom, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
     mlx_model.load_weights(list(weights.items()))
-    if group16 or paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or (dense and layer_params):
+    if group16 or paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_dtype or (dense and layer_params):
         # MLX-LM's standard loader reconstructs only native QuantizedLinear.
         # Keep this runtime model instead of round-tripping through that loader.
         mlx_config["_gptqmodel_group16_runtime" if group16 and not paro and not qqq and not dense

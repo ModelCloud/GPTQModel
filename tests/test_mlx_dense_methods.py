@@ -34,7 +34,9 @@ def test_dense_holder_validates_without_affine_group_limits(holder, bits, invali
 
 
 def _load_dense(monkeypatch, source, input_dims, output_dims):
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
+    from gptqmodel.nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
     from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
     from gptqmodel.utils import mlx as mlx_utils
 
@@ -62,6 +64,9 @@ def _load_dense(monkeypatch, source, input_dims, output_dims):
         assert "quantization" not in config
         if isinstance(source, TorchFP8Linear):
             assert isinstance(model.linear, MlxFP8DenseLinear)
+            assert config["_gptqmodel_custom_mlx_runtime"]
+        elif isinstance(source, BitsAndBytesLinear):
+            assert isinstance(model.linear, MlxBitsAndBytesLinear)
             assert config["_gptqmodel_custom_mlx_runtime"]
         else:
             assert isinstance(model.linear, nn.Linear)
@@ -140,11 +145,12 @@ def test_fp8_e8m0_checkpoint_decodes_for_mlx(monkeypatch):
     np.testing.assert_allclose(np.array(output), expected.numpy(), rtol=0.002, atol=0.002)
 
 
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
 @pytest.mark.parametrize("bits,quant_type,compress", [
     (4, "nf4", False), (4, "nf4", True), (4, "fp4", False), (4, "fp4", True),
     (8, "int8", False),
 ])
-def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, compress):
+def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, compress, dtype):
     pytest.importorskip("bitsandbytes")
     from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
     from gptqmodel.nn_modules.qlinear.mlx import BitsAndBytesMlxQuantLinear
@@ -161,10 +167,15 @@ def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, com
     assert BitsAndBytesMlxQuantLinear.source_compatible(source)
     model = _load_dense(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight().detach().to("cpu", torch.float16)
-    np.testing.assert_array_equal(np.array(model.linear.weight), reference_weight.numpy())
+    np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
     rng = np.random.default_rng(117)
-    x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float16)
-    actual = model(mx.array(x))
+    x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float32)
+    mlx_input = mx.array(x).astype(dtype)
+    actual = model(mlx_input)
     mx.eval(actual)
-    expected = torch.from_numpy(x).double() @ reference_weight.double().T + source.bias.double()
-    np.testing.assert_allclose(np.array(actual), expected.numpy(), rtol=0.002, atol=0.002)
+    assert actual.dtype == dtype
+    torch_input = torch.from_numpy(np.asarray(mlx_input.astype(mx.float32))).double()
+    expected = (torch_input @ reference_weight.double().T + source.bias.double()).to(
+        torch.float16 if dtype == mx.float16 else torch.bfloat16,
+    ).float().numpy()
+    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=0.002, atol=0.002)
