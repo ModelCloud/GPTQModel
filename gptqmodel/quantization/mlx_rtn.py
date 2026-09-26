@@ -6,10 +6,15 @@
 from functools import lru_cache
 
 
-@lru_cache(maxsize=1)
-def _rtn_kernel():
+@lru_cache(maxsize=3)
+def _rtn_kernel(output_type="float32"):
     import mlx.core as mx
 
+    output_cast = {
+        "float32": "float",
+        "float16": "half",
+        "bfloat16": "bfloat16_t",
+    }[output_type]
     return mx.fast.metal_kernel(
         name="gptqmodel_rtn_group_parallel",
         input_names=["weight"],
@@ -48,9 +53,10 @@ def _rtn_kernel():
                 float value = float(weight[row * COLS + col]);
                 float code = metal::clamp(metal::rint(value / scale) + zero,
                                           0.0f, float(MAXQ));
-                quantized[row * COLS + col] = scale * (code - zero);
+                float dequantized = scale * (code - zero);
+                quantized[row * COLS + col] = OUTPUT_CAST(dequantized);
             }
-        """,
+        """.replace("OUTPUT_CAST", output_cast),
     )
 
 
@@ -75,7 +81,12 @@ def quantize_rtn_weight_mlx(weight, *, bits=4, group_size=128, sym=True):
     groups = (cols + effective - 1) // effective
     direct_input = weight.dtype in (mx.float16, mx.bfloat16, mx.float32)
     kernel_weight = mx.contiguous(weight) if direct_input else weight.astype(mx.float32)
-    quantized, scales, zeros = _rtn_kernel()(
+    output_type = {
+        mx.float16: "float16",
+        mx.bfloat16: "bfloat16",
+    }.get(weight.dtype, "float32")
+    output_dtype = weight.dtype if direct_input else mx.float32
+    quantized, scales, zeros = _rtn_kernel(output_type)(
         inputs=[kernel_weight],
         template=[
             ("ROWS", rows),
@@ -88,9 +99,10 @@ def quantize_rtn_weight_mlx(weight, *, bits=4, group_size=128, sym=True):
         grid=(32, rows * groups, 1),
         threadgroup=(32, 1, 1),
         output_shapes=[(rows, cols), (rows, groups), (rows, groups)],
-        output_dtypes=[mx.float32, mx.float32, mx.float32],
+        output_dtypes=[output_dtype, mx.float32, mx.float32],
     )
-    quantized = quantized.astype(weight.dtype)
+    if not direct_input:
+        quantized = quantized.astype(weight.dtype)
     indices = mx.arange(cols, dtype=mx.int32) // effective
     mx.eval(quantized, scales, zeros, indices)
     return quantized, scales, zeros, indices
