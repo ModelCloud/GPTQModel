@@ -48,7 +48,7 @@ try:
 
     from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from ..nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
-    from ..nn_modules.qlinear.mlx_awq import MlxAWQLinear
+    from ..nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
     from ..nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
     from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
     from ..nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
@@ -97,6 +97,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     layer_params = {}
     group16 = set()
     gptq_group16 = set()
+    awq_group16 = set()
     gguf_dtype = set()
     gguf_q6_k = set()
     bitsandbytes_native = {}
@@ -144,6 +145,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 gguf_q6_k.add(name)
             elif mlx_linear is MlxQuantLinear:
                 gptq_group16.add(name)
+            elif mlx_linear is AwqMlxQuantLinear:
+                awq_group16.add(name)
         elif isinstance(module, TorchLinear):
             gptq_dtype.add(name)
         elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
@@ -252,6 +255,10 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 return MlxGPTQGroup16Linear(
                     input_dims, output_dims, layer_params[path]["bits"],
                     bias=module.get("bias") is not None,
+                )
+            if path in awq_group16:
+                return MlxAWQGroup16Linear(
+                    input_dims, output_dims, bias=module.get("bias") is not None,
                 )
             if path in gguf_q6_k:
                 return MlxGGUFQ6KLinear(
