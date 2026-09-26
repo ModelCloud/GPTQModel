@@ -110,6 +110,69 @@ def _pack_kernel():
     )
 
 
+@lru_cache(maxsize=1)
+def _subnormal_pack_kernel():
+    return mx.fast.metal_kernel(
+        name="gptqmodel_bnb_4bit_subnormal_pack",
+        input_names=["weight", "absmax", "bounds", "order"],
+        output_names=["packed"],
+        header="""
+            inline bool ratio_greater(uint bits, uint maximum_bits,
+                                      float boundary) {
+                uint mantissa = bits & 0x7fffffffu;
+                uint boundary_bits = as_type<uint>(boundary);
+                uint boundary_magnitude = boundary_bits & 0x7fffffffu;
+                if (boundary_magnitude == 0)
+                    return !(bits >> 31) && mantissa != 0;
+                bool negative = bits >> 31;
+                bool boundary_negative = boundary_bits >> 31;
+                if (negative != boundary_negative) return boundary_negative;
+                uint exponent = (boundary_magnitude >> 23) & 0xffu;
+                ulong significand = ulong(
+                    (boundary_magnitude & 0x007fffffu) | 0x00800000u);
+                ulong left = ulong(mantissa) << (150u - exponent);
+                ulong right = significand * ulong(maximum_bits);
+                return negative ? left < right : left > right;
+            }
+
+            inline uint subnormal_code(uint bits, uint maximum_bits,
+                                       const device float* bounds) {
+                uint low = 0;
+                uint high = 15;
+                while (low < high) {
+                    uint midpoint = (low + high) / 2;
+                    if (ratio_greater(bits, maximum_bits, bounds[midpoint]))
+                        low = midpoint + 1;
+                    else
+                        high = midpoint;
+                }
+                return low;
+            }
+        """,
+        source="""
+            uint pair = thread_position_in_grid.x;
+            if (pair >= PAIRS) return;
+            uint first = pair * 2;
+            uint block0 = first / BLOCK;
+            uint code0 = subnormal_code(
+                as_type<uint>(float(weight[first])),
+                metal::max(absmax[block0], 0x006ce3eeu), bounds);
+            code0 = uint(order[code0]);
+            uint code1 = 0;
+            if (first + 1 < SIZE) {
+                uint block1 = (first + 1) / BLOCK;
+                code1 = subnormal_code(
+                    as_type<uint>(float(weight[first + 1])),
+                    metal::max(absmax[block1], 0x006ce3eeu), bounds);
+                code1 = uint(order[code1]);
+            } else {
+                code1 = uint(order[subnormal_code(0u, 0x006ce3eeu, bounds)]);
+            }
+            packed[pair] = uchar((code0 << 4) | code1);
+        """,
+    )
+
+
 def _block_absmax(weight, block_size, *, clamp_remainder=False):
     flat = weight.reshape(-1)
     padded = (block_size - flat.size % block_size) % block_size
@@ -141,27 +204,94 @@ def _dynamic_codebook():
     return mx.array(lookup), mx.array(code)
 
 
+@lru_cache(maxsize=1)
+def _dynamic_bounds():
+    _, code = _dynamic_lookup_np()
+    return mx.array((code[:-1] + code[1:]) / np.float32(2))
+
+
+@lru_cache(maxsize=1)
+def _subnormal_nested_kernel():
+    return mx.fast.metal_kernel(
+        name="gptqmodel_bnb_subnormal_nested_scales",
+        input_names=["scales", "offset", "maximums", "bounds"],
+        output_names=["codes"],
+        header="""
+            inline bool centered_greater(long delta, ulong maximum,
+                                         float boundary) {
+                uint boundary_bits = as_type<uint>(boundary);
+                uint boundary_magnitude = boundary_bits & 0x7fffffffu;
+                if (boundary_magnitude == 0) return delta > 0;
+                bool negative = delta < 0;
+                bool boundary_negative = boundary_bits >> 31;
+                if (negative != boundary_negative) return boundary_negative;
+                ulong magnitude = ulong(negative ? -delta : delta);
+                uint exponent = (boundary_magnitude >> 23) & 0xffu;
+                ulong significand = ulong(
+                    (boundary_magnitude & 0x007fffffu) | 0x00800000u);
+                uint shift = 150u - exponent;
+                bool overflow = shift >= 64u || magnitude > (~0ul >> shift);
+                if (overflow) return !negative;
+                ulong left = magnitude << shift;
+                ulong right = significand * maximum;
+                return negative ? left < right : left > right;
+            }
+        """,
+        source="""
+            uint i = thread_position_in_grid.x;
+            if (i >= SIZE) return;
+            long delta = long(as_type<uint>(scales[i])) - long(offset);
+            ulong maximum = ulong(maximums[i / BLOCK]);
+            if (maximum == 0) {
+                codes[i] = uchar(0);
+                return;
+            }
+            uint low = 0;
+            uint high = 255;
+            while (low < high) {
+                uint midpoint = (low + high) / 2;
+                if (centered_greater(delta, maximum, bounds[midpoint]))
+                    low = midpoint + 1;
+                else
+                    high = midpoint;
+            }
+            codes[i] = uchar(low);
+        """,
+    )
+
+
 def _subnormal_nested_scales(absmax):
-    raw = np.asarray(absmax).astype(np.float32)
-    offset = np.float32(raw.astype(np.float64).mean())
-    centered = (raw - offset).astype(np.float32)
-    padded = (-centered.size) % 256
-    blocks = np.pad(centered, (0, padded)).reshape(-1, 256)
-    nested_absmax = np.max(np.abs(blocks), axis=1)
-    lookup, code = _dynamic_lookup_np()
-    nested_codes = np.zeros(centered.size, dtype=np.uint8)
-    for block, maximum in enumerate(nested_absmax):
-        start = block * 256
-        end = min(start + 256, centered.size)
-        if maximum:
-            scaled = np.clip(centered[start:end].astype(np.float64) / float(maximum), -1, 1)
-            indices = np.floor((scaled + 1) * 32767.5 + 0.5).astype(np.int32)
-            nested_codes[start:end] = lookup[indices]
+    raw_bits = absmax.view(mx.uint32).astype(mx.uint64)
+    total = mx.sum(raw_bits)
+    quotient = total // raw_bits.size
+    remainder = total % raw_bits.size
+    round_up = (2 * remainder > raw_bits.size) | (
+        (2 * remainder == raw_bits.size) & ((quotient & 1) != 0)
+    )
+    offset_bits = quotient + round_up.astype(mx.uint64)
+    centered_magnitude = mx.abs(
+        raw_bits.astype(mx.int64) - offset_bits.astype(mx.int64)
+    )
+    padded = (-raw_bits.size) % 256
+    if padded:
+        centered_magnitude = mx.pad(centered_magnitude, [(0, padded)])
+    maximum_bits = mx.max(centered_magnitude.reshape(-1, 256), axis=1).astype(
+        mx.uint32
+    )
+    _, code = _dynamic_codebook()
+    nested_codes = _subnormal_nested_kernel()(
+        inputs=[absmax, offset_bits.astype(mx.uint32), maximum_bits, _dynamic_bounds()],
+        template=[("SIZE", raw_bits.size), ("BLOCK", 256)],
+        grid=(raw_bits.size, 1, 1),
+        threadgroup=(256, 1, 1),
+        output_shapes=[(raw_bits.size,)],
+        output_dtypes=[mx.uint8],
+    )[0]
     return {
-        "absmax": mx.array(nested_codes),
-        "nested_absmax": mx.array(nested_absmax),
-        "offset": mx.array(offset),
-        "nested_code": mx.array(code),
+        "absmax": nested_codes,
+        "nested_absmax": maximum_bits.view(mx.float32),
+        "offset": offset_bits.astype(mx.uint32).view(mx.float32),
+        "nested_code": code,
     }
 
 
@@ -225,7 +355,11 @@ def quantize_4bit_weight_mlx(weight, *, quant_type="nf4", block_size=64, compres
     absmax = _block_absmax(weight, block_size, clamp_remainder=True)
     bounds, order = _codebook(quant_type)
     pairs = (flat.size + 1) // 2
-    packed = _pack_kernel()(
+    all_subnormal = weight.dtype == mx.float32 and bool(
+        (mx.max(absmax.view(mx.uint32)) < 0x00800000).item()
+    )
+    pack_kernel = _subnormal_pack_kernel() if all_subnormal else _pack_kernel()
+    packed = pack_kernel(
         inputs=[flat, absmax.view(mx.uint32), bounds, order],
         template=[("SIZE", flat.size), ("PAIRS", pairs), ("BLOCK", block_size)],
         grid=(pairs, 1, 1),
@@ -236,7 +370,7 @@ def quantize_4bit_weight_mlx(weight, *, quant_type="nf4", block_size=64, compres
     if not compress_statistics:
         mx.eval(packed, absmax)
         return packed, absmax
-    if bool((mx.max(absmax.view(mx.uint32)) < 0x00800000).item()):
+    if all_subnormal:
         state = _subnormal_nested_scales(absmax)
         mx.eval(packed)
         return packed, state
