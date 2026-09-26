@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# FP8 encoding semantics: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 
 """Native MLX quantization of dense weights into supported FP8 byte formats."""
 
@@ -51,14 +52,15 @@ def _fp8_encode_kernel():
             uint scale_index = MODE == 0 ? 0 :
                 (MODE == 1 ? row :
                 (row / BLOCK_ROWS) * GROUP_COLS + (index % COLS) / BLOCK_COLS);
-            uint bits = as_type<uint>(raw[index]);
+            float source = float(raw[index]);
+            uint bits = as_type<uint>(source);
             uint magnitude_bits = bits & 0x7fffffffu;
             if (metal::isinf(scales[scale_index])) {
                 codes[index] = magnitude_bits == 0 ? uchar(NAN_CODE) :
                     uchar((COUNT - 1) | ((bits >> 31) << 7));
                 return;
             }
-            float value = raw[index] * scales[scale_index];
+            float value = source * scales[scale_index];
             value = metal::clamp(value, -float(MAXQ), float(MAXQ));
             if (magnitude_bits > 0 && magnitude_bits < 0x00800000u) {
                 // Scale the stored float32 mantissa before restoring its
@@ -116,26 +118,34 @@ def quantize_fp8_weight_mlx(
     if not bool(mx.all(mx.isfinite(weight)).item()):
         raise ValueError("FP8 weight must be finite")
 
-    matrix = weight.astype(mx.float32)
+    matrix = weight
     fp8_max = _positive_values(fmt)[-1]
     tiny = 2.0 ** -126
-    magnitude_bits = matrix.view(mx.uint32) & 0x7fffffff
+
+    def maximum_bits(values, axis=None):
+        if values.dtype == mx.float32:
+            magnitudes = values.view(mx.uint32) & 0x7fffffff
+            return mx.max(magnitudes, axis=axis)
+        maximum = mx.max(mx.abs(values), axis=axis).astype(mx.float32)
+        return maximum.view(mx.uint32)
 
     def inverse_scale(maximum_bits):
         maximum = maximum_bits.view(mx.float32)
         return mx.where(maximum_bits > 0, fp8_max / mx.maximum(maximum, tiny), 1.0)
 
     if method == "tensor":
-        scales = inverse_scale(mx.max(magnitude_bits))
+        scales = inverse_scale(maximum_bits(matrix))
     elif method == "row":
-        scales = inverse_scale(mx.max(magnitude_bits, axis=1))
+        scales = inverse_scale(maximum_bits(matrix, axis=1))
     else:
         block_rows, block_cols = block_size
         rows, cols = matrix.shape
         if rows % block_rows or cols % block_cols:
             raise ValueError("FP8 weight shape must be divisible by weight_block_size")
-        bit_blocks = magnitude_bits.reshape(rows // block_rows, block_rows, cols // block_cols, block_cols)
-        scales = inverse_scale(mx.max(bit_blocks, axis=(1, 3)))
+        blocks = matrix.reshape(
+            rows // block_rows, block_rows, cols // block_cols, block_cols
+        )
+        scales = inverse_scale(maximum_bits(blocks, axis=(1, 3)))
 
     thresholds = _thresholds(fmt)
     _, _, _, count, signed_zero = _FORMATS[fmt]

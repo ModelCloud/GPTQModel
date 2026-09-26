@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# FP8 encoding oracle: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
+# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Torch-oracle and byte-boundary checks for MLX FP8 weight quantization."""
 
@@ -22,6 +24,10 @@ from gptqmodel.quantization.mlx_fp8 import quantize_fp8_weight_mlx  # noqa: E402
 
 
 FORMATS = ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
+SOURCE_DTYPES = (
+    (mx.float16, torch.float16),
+    (mx.bfloat16, torch.bfloat16),
+)
 
 
 def _compare(weight, fmt, method, block_size=None):
@@ -105,18 +111,23 @@ def test_fp8_subnormal_groups_and_infinite_inverse_scale(fmt):
 
 @pytest.mark.parametrize("fmt", FORMATS)
 @pytest.mark.parametrize("method", ["tensor", "row", "block"])
+@pytest.mark.parametrize("mlx_dtype,torch_dtype", SOURCE_DTYPES)
 @pytest.mark.parametrize("name,rows,cols", QWEN38_27B_PROJECTIONS)
-def test_fp8_qwen38_27b_full_projection(fmt, method, name, rows, cols):
-    """Compare every FP8 byte and scale for BF16 checkpoint-size weights."""
+def test_fp8_qwen38_27b_full_projection(
+    fmt, method, mlx_dtype, torch_dtype, name, rows, cols
+):
+    """Compare every FP8 byte and scale for low-precision checkpoint weights."""
     del name
     block_size = (128, 128) if method == "block" else None
     rng = np.random.default_rng(380027 + rows + cols)
-    weight = torch.from_numpy(rng.normal(0, 0.2, (rows, cols)).astype(np.float32)).to(torch.bfloat16)
+    weight = torch.from_numpy(
+        rng.normal(0, 0.2, (rows, cols)).astype(np.float32)
+    ).to(torch_dtype)
     expected, expected_scale = quantize_fp8_weight(
         weight, format=fmt, weight_scale_method=method, weight_block_size=block_size,
     )
     actual, actual_scale = quantize_fp8_weight_mlx(
-        mx.array(weight.float().numpy()).astype(mx.bfloat16),
+        mx.array(weight.float().numpy()).astype(mlx_dtype),
         format=fmt, weight_scale_method=method, weight_block_size=block_size,
     )
     np.testing.assert_array_equal(np.asarray(actual), expected.view(torch.uint8).numpy())
@@ -124,6 +135,32 @@ def test_fp8_qwen38_27b_full_projection(fmt, method, name, rows, cols):
     del weight, expected, expected_scale, actual, actual_scale
     mx.clear_cache()
     gc.collect()
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("method", ["tensor", "row", "block"])
+@pytest.mark.parametrize("mlx_dtype,torch_dtype", SOURCE_DTYPES)
+def test_fp8_transposed_low_precision_input(fmt, method, mlx_dtype, torch_dtype):
+    source = mx.arange(512, dtype=mx.float32).reshape(128, 4).T.astype(mlx_dtype)
+    block_size = (2, 64) if method == "block" else None
+    actual = quantize_fp8_weight_mlx(
+        source,
+        format=fmt,
+        weight_scale_method=method,
+        weight_block_size=block_size,
+    )
+    expected = quantize_fp8_weight(
+        torch.from_numpy(np.asarray(source.astype(mx.float32))).to(torch_dtype),
+        format=fmt,
+        weight_scale_method=method,
+        weight_block_size=block_size,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(actual[0]), expected[0].view(torch.uint8).numpy()
+    )
+    np.testing.assert_allclose(
+        np.asarray(actual[1]), expected[1].numpy(), rtol=1e-6, atol=1e-6
+    )
 
 
 def test_fp8_rejects_invalid_inputs():
