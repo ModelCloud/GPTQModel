@@ -20,7 +20,7 @@ def _paroquant_quantize_kernel():
             uint column = index % COLUMNS;
             uint group = row * GROUPS + column / GROUP_SIZE;
             float scale = metal::clamp(scales[group], 1e-5f, 1e5f);
-            float value = weights[index] / scale;
+            float value = float(weights[index]) / scale;
             float qmin = SYMMETRIC ? -float(1 << (BITS - 1)) : 0.0f;
             float qmax = SYMMETRIC
                 ? float((1 << (BITS - 1)) - 1)
@@ -110,7 +110,7 @@ def paroquant_quantize_weight_mlx(
     kernel = _paroquant_quantize_kernel()
     result = kernel(
         inputs=[
-            mx.contiguous(weight.astype(mx.float32).reshape(-1)),
+            mx.contiguous(weight.reshape(-1)),
             mx.contiguous(scales.reshape(-1)),
             mx.contiguous(zero_points.reshape(-1)),
         ],
