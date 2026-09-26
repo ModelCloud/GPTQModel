@@ -50,6 +50,27 @@ def _mlx_inputs(weight, scales):
     return mx.array(weight.float().numpy()).astype(dtype), mx.array(scales.float().numpy()).astype(dtype)
 
 
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16, mx.float32])
+def test_paroquant_pack_kernel_accepts_integral_float_codes(dtype):
+    out_features, in_features = 32, 8
+    codes = np.arange(out_features * in_features, dtype=np.uint32).reshape(
+        out_features, in_features
+    ) % 16
+    packed = native._paroquant_pack_kernel()(
+        inputs=[mx.array(codes).astype(dtype)],
+        grid=(in_features * (out_features // 8), 1, 1),
+        threadgroup=(32, 1, 1),
+        output_shapes=[(in_features, out_features // 8)],
+        output_dtypes=[mx.int32],
+        template=[("OUT_PACKS", out_features // 8), ("IN_FEATURES", in_features)],
+    )[0]
+    order = np.array([0, 2, 4, 6, 1, 3, 5, 7])
+    grouped = codes.T.reshape(in_features, out_features // 8, 8)[:, :, order]
+    shifts = (np.arange(8, dtype=np.uint32) * 4).reshape(1, 1, 8)
+    expected = np.bitwise_or.reduce(grouped << shifts, axis=2).view(np.int32)
+    np.testing.assert_array_equal(np.asarray(packed), expected)
+
+
 @pytest.mark.parametrize("out_features,in_features,group_size", [
     (32, 64, 16), (64, 128, 32), (96, 256, 64), (128, 256, 128),
     (32, 64, -1),

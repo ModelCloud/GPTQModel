@@ -22,7 +22,7 @@ def _paroquant_pack_kernel():
             uint word = 0;
             for (uint lane = 0; lane < 8; ++lane) {
                 uint output = column * 8 + order[lane];
-                word |= codes[output * IN_FEATURES + row] << (lane * 4);
+                word |= uint(codes[output * IN_FEATURES + row]) << (lane * 4);
             }
             packed[index] = as_type<int>(word);
         """,
@@ -79,7 +79,7 @@ def paroquant_pack_weight_mlx(weight, scales, *, group_size: int):
     kernel = _paroquant_pack_kernel()
     out_packs = out_features // 8
     packed = kernel(
-        inputs=[codes.astype(mx.uint32)],
+        inputs=[codes],
         grid=(in_features * out_packs, 1, 1),
         threadgroup=(min(in_features * out_packs, 256), 1, 1),
         output_shapes=[(in_features, out_packs)],
