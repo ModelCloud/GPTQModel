@@ -20,7 +20,10 @@ if sys.platform != "darwin":
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_exl3_hessian import exl3_finalize_hessian_mlx
+from gptqmodel.quantization.mlx_exl3_hessian import (
+    _validate_transform_size,
+    exl3_finalize_hessian_mlx,
+)
 
 
 @lru_cache(maxsize=2)
@@ -226,6 +229,12 @@ def test_exl3_finalize_hessian_empty_capture_falls_back():
     assert factor is None
     np.testing.assert_array_equal(np.asarray(transformed), np.zeros((128, 128)))
     np.testing.assert_array_equal(np.asarray(diagonal), np.zeros((128,)))
+
+
+def test_exl3_finalize_hessian_checks_metal_index_boundary():
+    _validate_transform_size(65408)
+    with pytest.raises(ValueError, match="too large"):
+        _validate_transform_size(65536)
 
 
 @pytest.mark.parametrize("name,out_features,in_features", QWEN38_27B_PROJECTIONS)
