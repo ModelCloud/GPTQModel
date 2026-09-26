@@ -11,11 +11,21 @@ import mlx.nn as nn
 from .mlx_group16 import MlxGroup16Linear
 
 
-@lru_cache(maxsize=1)
-def _gptq_group16_kernel():
+@lru_cache(maxsize=3)
+def _gptq_group16_kernel(output_dtype):
     """Multiply packed GPTQ codes with exact 16-value affine groups."""
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported GPTQ group-16 activation dtype: {output_dtype}") from exc
+
     return mx.fast.metal_kernel(
-        name="gptqmodel_gptq_group16_matmul",
+        name=f"gptqmodel_gptq_group16_matmul_{output_suffix}",
         input_names=[
             "x", "weight", "scales_even", "scales_odd",
             "biases_even", "biases_odd", "bias",
@@ -61,8 +71,8 @@ def _gptq_group16_kernel():
             reduced = lane < GROUPS ? partials[lane] : 0.0f;
             reduced = simd_sum(reduced);
             if (lane == 0)
-                output[column] = reduced + bias[column];
-        """,
+                output[column] = OUTPUT_TYPE(reduced + bias[column]);
+        """.replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -86,7 +96,7 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
             return super().__call__(x)
         threads = 128 if self.input_dims >= 8192 or output_dims >= 16384 else 64
         bias = self.bias if "bias" in self else self.zero_bias[0]
-        output = _gptq_group16_kernel()(
+        output = _gptq_group16_kernel(x.dtype)(
             inputs=[
                 x, self.weight, self.scales_even, self.scales_odd,
                 self.biases_even, self.biases_odd, bias,
@@ -98,9 +108,9 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
             ],
             grid=(threads, output_dims, 1),
             threadgroup=(threads, 1, 1),
-            output_shapes=[(1, output_dims)], output_dtypes=[mx.float32],
+            output_shapes=[(1, output_dims)], output_dtypes=[x.dtype],
         )[0]
-        return output.reshape(output_shape).astype(x.dtype)
+        return output.reshape(output_shape)
 
 
 class MlxGPTQLinear(nn.Module):
