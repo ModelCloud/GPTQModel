@@ -79,6 +79,24 @@ class MlxGGUFQ6KLinear(MlxGroup16Linear):
         if not bias:
             self.zero_bias = (mx.zeros((output_dims,), dtype=mx.float32),)
 
+    def _packed_matmul(self, x, rows, row_tile, threads, output_dtype=None):
+        output_dims = self.weight.shape[0]
+        output_dtype = x.dtype if output_dtype is None else output_dtype
+        bias = self.bias if "bias" in self else self.zero_bias[0]
+        return _q6_k_kernel(output_dtype)(
+            inputs=[
+                x, self.weight, self.scales_even, self.scales_odd,
+                self.biases_even, self.biases_odd, bias,
+            ],
+            template=[
+                ("K", self.input_dims), ("N", output_dims), ("ROWS", rows),
+                ("RTILE", row_tile), ("THREADS", threads), ("GROUPS", threads // 32),
+            ],
+            grid=(threads, output_dims, (rows + row_tile - 1) // row_tile),
+            threadgroup=(threads, 1, 1),
+            output_shapes=[(rows, output_dims)], output_dtypes=[output_dtype],
+        )[0]
+
     def __call__(self, x):
         if x.shape[-1] != self.input_dims:
             raise ValueError(f"expected input width {self.input_dims}, got {x.shape[-1]}")
@@ -87,28 +105,27 @@ class MlxGGUFQ6KLinear(MlxGroup16Linear):
         if x.size == 0:
             return mx.zeros(output_shape, dtype=x.dtype)
         rows = x.size // self.input_dims
-        if rows != 1:
+        # The packed row tile wins for small-output BF16 prefill only.
+        small_prefill = (
+            x.dtype == mx.bfloat16
+            and 1 < rows <= 16
+            and output_dims <= 2048
+        )
+        if rows != 1 and not small_prefill:
             return super().__call__(x)
-        if self.input_dims >= 8192 or output_dims <= 2048:
+        if small_prefill:
+            row_tile = min(rows, 4)
+            threads = 32
+        elif self.input_dims >= 8192 or output_dims <= 2048:
+            row_tile = 1
             threads = 128
         elif output_dims >= 16384:
+            row_tile = 1
             threads = 32
         else:
+            row_tile = 1
             threads = 64
-        bias = self.bias if "bias" in self else self.zero_bias[0]
-        output = _q6_k_kernel(x.dtype)(
-            inputs=[
-                x, self.weight, self.scales_even, self.scales_odd,
-                self.biases_even, self.biases_odd, bias,
-            ],
-            template=[
-                ("K", self.input_dims), ("N", output_dims), ("ROWS", 1),
-                ("RTILE", 1), ("THREADS", threads), ("GROUPS", threads // 32),
-            ],
-            grid=(threads, output_dims, 1),
-            threadgroup=(threads, 1, 1),
-            output_shapes=[(rows, output_dims)], output_dtypes=[x.dtype],
-        )[0]
+        output = self._packed_matmul(x, rows, row_tile, threads)
         return output.reshape(output_shape)
 
 
