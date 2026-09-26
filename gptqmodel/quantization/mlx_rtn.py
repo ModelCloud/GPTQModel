@@ -23,7 +23,7 @@ def _rtn_kernel():
             float minimum = 0.0f;
             float maximum = 0.0f;
             for (uint col = start + lane; col < end; col += 32) {
-                float value = weight[row * COLS + col];
+                float value = float(weight[row * COLS + col]);
                 minimum = min(minimum, value);
                 maximum = max(maximum, value);
             }
@@ -45,7 +45,7 @@ def _rtn_kernel():
                 zeros[group] = zero;
             }
             for (uint col = start + lane; col < end; col += 32) {
-                float value = weight[row * COLS + col];
+                float value = float(weight[row * COLS + col]);
                 float code = metal::clamp(metal::rint(value / scale) + zero,
                                           0.0f, float(MAXQ));
                 quantized[row * COLS + col] = scale * (code - zero);
@@ -73,8 +73,10 @@ def quantize_rtn_weight_mlx(weight, *, bits=4, group_size=128, sym=True):
     rows, cols = weight.shape
     effective = cols if group_size == -1 else group_size
     groups = (cols + effective - 1) // effective
+    direct_input = weight.dtype in (mx.float16, mx.bfloat16, mx.float32)
+    kernel_weight = mx.contiguous(weight) if direct_input else weight.astype(mx.float32)
     quantized, scales, zeros = _rtn_kernel()(
-        inputs=[weight.astype(mx.float32)],
+        inputs=[kernel_weight],
         template=[
             ("ROWS", rows),
             ("COLS", cols),
