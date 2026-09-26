@@ -11,11 +11,21 @@ import mlx.nn as nn
 from .mlx_group16 import MlxGroup16Linear
 
 
-@lru_cache(maxsize=1)
-def _q6_k_kernel():
+@lru_cache(maxsize=3)
+def _q6_k_kernel(output_dtype):
     """Multiply packed Q6_K codes with their exact 16-value affine groups."""
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported GGUF Q6_K activation dtype: {output_dtype}") from exc
+
     return mx.fast.metal_kernel(
-        name="gptqmodel_gguf_q6_k_matmul",
+        name=f"gptqmodel_gguf_q6_k_matmul_{output_suffix}",
         input_names=[
             "x", "weight", "scales_even", "scales_odd",
             "biases_even", "biases_odd", "bias",
@@ -55,9 +65,9 @@ def _q6_k_kernel():
                 float reduced = lane < GROUPS ? partials[r * GROUPS + lane] : 0.0f;
                 reduced = simd_sum(reduced);
                 if (lane == 0)
-                    output[(row_base + r) * N + column] = reduced + bias[column];
+                    output[(row_base + r) * N + column] = OUTPUT_TYPE(reduced + bias[column]);
             }
-        """,
+        """.replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -86,7 +96,7 @@ class MlxGGUFQ6KLinear(MlxGroup16Linear):
         else:
             threads = 64
         bias = self.bias if "bias" in self else self.zero_bias[0]
-        output = _q6_k_kernel()(
+        output = _q6_k_kernel(x.dtype)(
             inputs=[
                 x, self.weight, self.scales_even, self.scales_odd,
                 self.biases_even, self.biases_odd, bias,
@@ -97,9 +107,9 @@ class MlxGGUFQ6KLinear(MlxGroup16Linear):
             ],
             grid=(threads, output_dims, 1),
             threadgroup=(threads, 1, 1),
-            output_shapes=[(rows, output_dims)], output_dtypes=[mx.float32],
+            output_shapes=[(rows, output_dims)], output_dtypes=[x.dtype],
         )[0]
-        return output.reshape(output_shape).astype(x.dtype)
+        return output.reshape(output_shape)
 
 
 class MlxGGUFLinear(nn.Module):
