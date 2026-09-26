@@ -635,24 +635,25 @@ def _gguf_mxfp4_kernel():
             float multiplier = exponent < 2 ? 0x1p126f : 1.0f;
             float comparison_scale = exponent < 2
                 ? (exponent == 0 ? 0.25f : 0.5f) : scale;
-            float fp4[16] = {
-                0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f,
-                0.0f, -1.0f, -2.0f, -3.0f, -4.0f, -6.0f, -8.0f, -12.0f
+            float fp4[8] = {
+                0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f
             };
             uchar codes[32];
             for (uint k = 0; k < 32; ++k) {
                 float weight = float(weights[block * 32 + k]) * multiplier;
+                uint sign = as_type<uint>(weight) >> 31;
+                float magnitude = metal::abs(weight);
                 uint best = 0;
-                float best_error = metal::abs(weight);
-                for (uint candidate = 1; candidate < 16; ++candidate) {
+                float best_error = magnitude;
+                for (uint candidate = 1; candidate < 8; ++candidate) {
                     float error = metal::abs(
-                        comparison_scale * fp4[candidate] - weight);
+                        comparison_scale * fp4[candidate] - magnitude);
                     if (error < best_error) {
                         best_error = error;
                         best = candidate;
                     }
                 }
-                codes[k] = uchar(best);
+                codes[k] = uchar(best | ((sign && best) ? 8 : 0));
             }
             uint offset = block * 17;
             packed[offset] = uchar(exponent);

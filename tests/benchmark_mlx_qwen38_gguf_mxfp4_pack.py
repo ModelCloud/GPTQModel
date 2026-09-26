@@ -3,7 +3,7 @@
 # GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
-"""Benchmark main's FP32-temporary MXFP4 packer against direct MLX input."""
+"""Benchmark main's signed MXFP4 search against magnitude-only search."""
 
 import argparse
 import gc
@@ -28,7 +28,8 @@ def _main_mxfp4_kernel():
             uint maximum_bits = 0;
             for (uint k = 0; k < 32; ++k) {
                 maximum_bits = metal::max(maximum_bits,
-                    as_type<uint>(weights[block * 32 + k]) & 0x7fffffffu);
+                    as_type<uint>(float(weights[block * 32 + k]))
+                        & 0x7fffffffu);
             }
             int power = int(maximum_bits >> 23) - 127;
             if (maximum_bits == 0) {
@@ -75,7 +76,7 @@ def _main_mxfp4_kernel():
             };
             uchar codes[32];
             for (uint k = 0; k < 32; ++k) {
-                float weight = weights[block * 32 + k] * multiplier;
+                float weight = float(weights[block * 32 + k]) * multiplier;
                 uint best = 0;
                 float best_error = metal::abs(weight);
                 for (uint candidate = 1; candidate < 16; ++candidate) {
@@ -101,7 +102,7 @@ def _main_pack(weight):
     rows, columns = weight.shape
     blocks = rows * columns // 32
     return _main_mxfp4_kernel()(
-        inputs=[weight.astype(mx.float32)],
+        inputs=[mx.contiguous(weight)],
         grid=(blocks, 1, 1),
         threadgroup=(min(blocks, 256), 1, 1),
         output_shapes=[(rows, columns // 32 * 17)],
