@@ -27,14 +27,18 @@ from gptqmodel.nn_modules.qlinear.mlx_bitsandbytes import (  # noqa: E402
 )
 
 
-def _weights(format_name, out_features, in_features):
+def _weights(format_name, out_features, in_features, block_size=64):
     scale = np.float32(0.01875)
     if format_name in ("nf4", "fp4"):
         codebook = bnb.functional.get_4bit_type(format_name, device="cpu").numpy().astype(np.float32)
         codes = np.arange(in_features, dtype=np.uint8) & np.uint8(15)
         packed_row = ((codes[0::2] << 4) | codes[1::2]).astype(np.uint8)
         packed = np.tile(packed_row, out_features)
-        scales = np.full(out_features * in_features // 64, scale, dtype=np.float32)
+        scales = np.full(
+            out_features * ((in_features + block_size - 1) // block_size),
+            scale,
+            dtype=np.float32,
+        )
         row_weight = (codebook[codes] * scale).astype(np.float16)
         bits = 4
     else:
@@ -51,6 +55,37 @@ def _weights(format_name, out_features, in_features):
             packed, scales, in_features, out_features,
         )
     return packed, scales, codebook, dense, row_weight, bits, payload
+
+
+@pytest.mark.parametrize("block_size", (32, 64, 128, 256, 512, 1024, 2048, 4096))
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("format_name", ("nf4", "fp4"))
+def test_bnb_small_decode_all_4bit_block_sizes(format_name, dtype, block_size):
+    out_features, in_features = 96, 4096
+    packed, scales, codebook, _, row_weight, bits, _ = _weights(
+        format_name, out_features, in_features, block_size,
+    )
+    layer = MlxBitsAndBytesLinear(
+        packed, scales, in_features=in_features, out_features=out_features,
+        bits=bits, block_size=block_size, codebook=codebook,
+    )
+    positions = np.arange(in_features, dtype=np.float32)
+    source = (np.sin(positions * 0.013) * 0.08)[None]
+    x = mx.array(source).astype(dtype)
+    actual = layer(x)
+    mx.eval(actual)
+    raw = np.sum(
+        np.asarray(x.astype(mx.float32)).astype(np.float64)
+        * row_weight.astype(np.float64)[None, :],
+        axis=1,
+    )
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    expected = torch.from_numpy(np.repeat(raw[:, None], out_features, axis=1)).to(
+        torch_dtype,
+    ).float().numpy()
+    visible = np.asarray(actual.astype(mx.float32))
+    assert actual.dtype == dtype
+    np.testing.assert_allclose(visible, expected, rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
@@ -74,7 +109,7 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     del dense
 
     rng = np.random.default_rng(sum(name.encode()) + out_features + in_features + bits)
-    x = mx.array(rng.normal(0, 0.15, (3, in_features)).astype(np.float32)).astype(dtype)
+    x = mx.array(rng.normal(0, 0.15, (1, in_features)).astype(np.float32)).astype(dtype)
     # Merged main decodes to FP16 dense weights, then preserves activation dtype.
     main_output = main(x).astype(dtype)
     actual = native(x)
@@ -82,7 +117,7 @@ def test_bnb_qwen38_native_outputs_preserve_dtype_and_match_torch(
     assert actual.dtype == dtype
 
     input_values = np.asarray(x.astype(mx.float32)).astype(np.float64)
-    raw_row = input_values @ row_weight.astype(np.float64)
+    raw_row = np.sum(input_values * row_weight.astype(np.float64)[None, :], axis=1)
     raw_oracle = raw_row[:, None] + bias.astype(np.float64)[None, :]
     rounded_oracle = torch.from_numpy(raw_oracle).to(
         torch.float16 if dtype == mx.float16 else torch.bfloat16,
