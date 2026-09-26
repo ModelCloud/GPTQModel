@@ -56,6 +56,7 @@ from ..quantization.config import (
     VramStrategy,
     configure_dynamic_override_cache_for_model,
     dynamic_get,
+    dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
     resolve_quant_format,
 )
@@ -499,8 +500,29 @@ class BaseQModel(nn.Module):
         # Saving replaces MiMo metadata; decoding still needs the source layout.
         if is_mimo_mixed_source(getattr(model, "config", None)):
             self._source_model_config = copy.deepcopy(model.config)
+        dynamic_cache_prepared = (
+            bool(getattr(quantize_config, "dynamic", None))
+            and getattr(model, "_gptqmodel_dynamic_cache_prepared_for", None) is quantize_config
+        )
+        self._dynamic_cache_stats_before = (
+            getattr(model, "_gptqmodel_dynamic_cache_stats_before")
+            if dynamic_cache_prepared else dynamic_override_cache_stats()
+        )
         self.model = self.after_model_load(model, load_quantized_model=load_quantized_model)
-        configure_dynamic_override_cache_for_model(self.model, quantize_config)
+        if (getattr(quantize_config, "dynamic", None)
+                and hasattr(self.model, "named_modules")
+                and (not dynamic_cache_prepared or self.model is not model
+                     or type(self).after_model_load is not BaseQModel.after_model_load)):
+            planning_layer_modules = self.full_layer_modules(
+                model_config=self.model.config,
+                is_awq_quantize=quantize_config.method == METHOD.AWQ,
+                include_capture_only=True,
+            )
+            configure_dynamic_override_cache_for_model(
+                self.model, quantize_config,
+                layer_modules=planning_layer_modules,
+                layer_prefixes=self.extract_layers_node(),
+            )
         self.turtle_model = turtle_model
         # Captures forward-role auto-decoder choices for regression tests and debug logs.
         self.auto_module_decoder_events: List[Dict[str, Any]] = []
@@ -1164,6 +1186,10 @@ class BaseQModel(nn.Module):
         if self.quantize_config is None or not isinstance(self.quantize_config, BaseQuantizeConfig):
             raise AttributeError("`quantize_config` must be not None")
 
+        dynamic_cache_stats_before = (
+            dynamic_override_cache_stats() if self.quantize_config.dynamic else None
+        )
+
         if os.environ.get("GPTQMODEL_RESUME") == "1":
             raise ValueError("GPTQMODEL_RESUME is retired; use checkpoint=CheckpointConfig(path=...) in a new directory")
         if checkpoint is not None:
@@ -1405,7 +1431,7 @@ class BaseQModel(nn.Module):
 
         _setup_rotation_online_had(self.model, self.quantize_config.rotation)
         if self.quantize_config.dynamic:
-            log_dynamic_override_cache_stats()
+            log_dynamic_override_cache_stats(dynamic_cache_stats_before)
         return result
 
     @staticmethod

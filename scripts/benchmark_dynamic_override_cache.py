@@ -57,8 +57,9 @@ def main():
         parser.error("modules, rules and calls-per-module must be positive")
 
     names = [f"model.layers.{i // 512}.moe.experts.{i % 512}" for i in range(args.modules)]
-    dynamic = {f"+:^unused\\.rule\\.{i}$": {"bits": 3} for i in range(args.rules - 1)}
+    dynamic = {f"+:^unused\\.rule\\.{i}\\..*$": {"bits": 3} for i in range(args.rules - 1)}
     dynamic[r"+:^model\.layers\.\d+\.moe\.experts\.\d+$"] = {"bits": 2}
+    assert all(config._extract_literal_regex_pattern(pattern[2:]) is None for pattern in dynamic)
     cfg = QuantizeConfig(dynamic=dynamic)
 
     adaptive = 1 << (max(8192, (args.modules * 5 + 3) // 4) - 1).bit_length()

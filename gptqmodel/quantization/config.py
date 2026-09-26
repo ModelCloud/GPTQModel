@@ -1783,7 +1783,7 @@ class _BoundedLRUCache(OrderedDict):
         self.peak_size = 0
 
     def ensure_capacity(self, capacity: int) -> None:
-        """Grow without evicting entries needed by another loaded model."""
+        """Grow for the largest configured working set; never shrink later."""
         if capacity < 1:
             raise ValueError("cache capacity must be positive")
         self.maxsize = max(self.maxsize, int(capacity))
@@ -1841,7 +1841,11 @@ _DYNAMIC_CACHE_LOCK = threading.RLock()
 def configure_dynamic_override_cache(*, module_count: int,
                                      layer_count: Optional[int] = None,
                                      expert_count: Optional[int] = None) -> int:
-    """Reserve room for the discovered module working set, with 25% headroom."""
+    """Reserve room for one model's working set, with 25% headroom.
+
+    The process-global LRU may still evict an earlier model's entries when
+    several distinct dynamic configs are active at once.
+    """
     if module_count < 0:
         raise ValueError("module_count must be non-negative")
     target = max(_DYNAMIC_OVERRIDE_CACHE_MAXSIZE, (module_count * 5 + 3) // 4)
@@ -1856,13 +1860,32 @@ def configure_dynamic_override_cache(*, module_count: int,
     return capacity
 
 
-def configure_dynamic_override_cache_for_model(model, quantize_config) -> int:
-    """Size from actual named paths once a model shell exists."""
+def configure_dynamic_override_cache_for_model(
+    model, quantize_config, *, layer_modules=None, layer_prefixes=None,
+) -> int:
+    """Size for physical modules and the expanded dynamic module plan."""
     if not getattr(quantize_config, "dynamic", None) or not hasattr(model, "named_modules"):
         return _DYNAMIC_OVERRIDE_CACHE.maxsize
+    prefixes = set(layer_prefixes or ())
+    seen_containers = set()
+    physical_count = layer_count = 0
     # Include aliased paths: callers address modules by name, not by identity.
-    module_count = sum(bool(name) for name, _ in model.named_modules(remove_duplicate=False))
-    capacity = configure_dynamic_override_cache(module_count=module_count)
+    for name, module in model.named_modules(remove_duplicate=False):
+        physical_count += bool(name)
+        if name in prefixes and id(module) not in seen_containers:
+            seen_containers.add(id(module))
+            layer_count += len(module) if isinstance(module, torch.nn.ModuleList) else 1
+
+    # full_layer_modules() expands MoE placeholders even when Transformers keeps
+    # the experts in fused tensors and named_modules() exposes no expert leaves.
+    relative_names = {
+        name.split(":", 1)[0]
+        for group in (layer_modules or ()) for name in group if name
+    }
+    logical_count = len(relative_names) * (layer_count + 1)
+    working_set = max(physical_count, logical_count)
+    capacity = configure_dynamic_override_cache(module_count=working_set, layer_count=layer_count)
+    log.debug("Dynamic cache: physical modules=%s logical paths=%s", physical_count, logical_count)
     exact_rules = sum(
         _extract_literal_regex_pattern(pattern[2:] if pattern.startswith(("-:", "+:")) else pattern)
         is not None
@@ -1889,13 +1912,17 @@ def dynamic_override_cache_stats() -> Dict[str, int]:
         }
 
 
-def log_dynamic_override_cache_stats() -> None:
+def log_dynamic_override_cache_stats(stats_before: Optional[Dict[str, int]] = None) -> None:
     stats = dynamic_override_cache_stats()
-    lookups = stats["hits"] + stats["misses"]
-    hit_rate = 100 * stats["hits"] / lookups if lookups else 0
-    log.debug("Dynamic cache results: lookups=%s hits=%s misses=%s evictions=%s "
-              "peak_size=%s capacity=%s hit_rate=%.2f%%",
-              lookups, stats["hits"], stats["misses"], stats["evictions"],
+    before = stats_before or {"hits": 0, "misses": 0, "evictions": 0}
+    hits = stats["hits"] - before["hits"]
+    misses = stats["misses"] - before["misses"]
+    evictions = stats["evictions"] - before["evictions"]
+    lookups = hits + misses
+    hit_rate = 100 * hits / lookups if lookups else 0
+    log.debug("Dynamic cache since start: lookups=%s hits=%s misses=%s evictions=%s "
+              "size=%s process_peak_size=%s capacity=%s hit_rate=%.2f%%",
+              lookups, hits, misses, evictions, stats["size"],
               stats["peak_size"], stats["maxsize"], hit_rate)
 
 

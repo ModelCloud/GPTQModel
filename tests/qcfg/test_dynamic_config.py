@@ -3,12 +3,14 @@
 
 import pickle
 from enum import Enum
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pcre
 import pytest
 import torch.nn as nn
 
+from gptqmodel.models.definitions.deepseek_v3 import DeepSeekV3QModel
 from gptqmodel.quantization.config import (
     _DYNAMIC_ALL_EXACT_CACHE,
     _DYNAMIC_EXACT_LOOKUP_CACHE,
@@ -25,6 +27,7 @@ from gptqmodel.quantization.config import (
     configure_dynamic_override_cache,
     configure_dynamic_override_cache_for_model,
     dynamic_override_cache_stats,
+    log_dynamic_override_cache_stats,
 )
 
 
@@ -123,6 +126,56 @@ def test_dynamic_cache_second_pass_avoids_regex_for_120_layer_512_expert_model()
     assert stats["peak_size"] == len(names)
 
 
+def test_dynamic_cache_sizes_fused_moe_from_logical_plan():
+    class FusedMoEModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList(nn.Module() for _ in range(120))
+            self.config = SimpleNamespace(n_routed_experts=512)
+
+    model = FusedMoEModel()
+    plan = DeepSeekV3QModel.full_layer_modules(model.config)
+    physical_count = sum(bool(name) for name, _ in model.named_modules())
+    assert physical_count < 8192
+
+    dynamic = {f"+:^never\\.{i}\\..*$": {"bits": 3} for i in range(15)}
+    dynamic[r"+:^model\.layers\.\d+\.mlp\.experts\.\d+\.gate_proj$"] = {"bits": 2}
+    cfg = QuantizeConfig(dynamic=dynamic)
+    capacity = configure_dynamic_override_cache_for_model(
+        model, cfg, layer_modules=plan, layer_prefixes=DeepSeekV3QModel.extract_layers_node(),
+    )
+    assert capacity == 262144
+
+    names = (
+        f"model.layers.{layer}.mlp.experts.{expert}.gate_proj"
+        for layer in range(120) for expert in range(512)
+    )
+    original_match = pcre.Pattern.match
+    match_calls = 0
+
+    def counted_match(pattern, name):
+        nonlocal match_calls
+        match_calls += 1
+        return original_match(pattern, name)
+
+    with patch.object(pcre.Pattern, "match", counted_match):
+        for name in names:
+            assert cfg.dynamic_get(name, "bits", cfg.bits) == 2
+        first_pass_calls = match_calls
+        for layer in range(120):
+            for expert in range(512):
+                name = f"model.layers.{layer}.mlp.experts.{expert}.gate_proj"
+                assert cfg.dynamic_get(name, "bits", cfg.bits) == 2
+
+    stats = dynamic_override_cache_stats()
+    assert first_pass_calls == 120 * 512 * len(dynamic)
+    assert match_calls == first_pass_calls
+    assert stats["misses"] == 120 * 512
+    assert stats["hits"] == 120 * 512
+    assert stats["evictions"] == 0
+
+
 def test_dynamic_cache_isolated_between_configs_for_same_module():
     module_name = "model.layers.0.mlp.proj"
     cfg_a = QuantizeConfig(dynamic={r"+:^model\.layers\.\d+\.mlp\.proj$": {"bits": 2}})
@@ -131,6 +184,19 @@ def test_dynamic_cache_isolated_between_configs_for_same_module():
     assert cfg_b.dynamic_get(module_name, "bits") == 3
     assert cfg_a.dynamic_get(module_name, "bits") == 2
     assert dynamic_override_cache_stats()["size"] == 2
+
+
+def test_dynamic_cache_log_reports_since_start_counters():
+    cfg = QuantizeConfig(dynamic={r"+:^module\.\d+$": {"bits": 2}})
+    cfg.dynamic_get("module.0")
+    before = dynamic_override_cache_stats()
+    cfg.dynamic_get("module.0")
+    cfg.dynamic_get("module.1")
+
+    with patch("gptqmodel.quantization.config.log.debug") as mock_debug:
+        log_dynamic_override_cache_stats(before)
+
+    assert mock_debug.call_args.args[1:5] == (2, 1, 1, 0)
 
 
 def _exact_pattern(module_name: str) -> str:
