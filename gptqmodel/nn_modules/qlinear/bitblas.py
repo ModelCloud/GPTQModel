@@ -1,6 +1,7 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# BitBLAS reference: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 
 from __future__ import annotations
 
@@ -29,7 +30,7 @@ log = setup_logger()
 MINIMUM_BITBLAS_VERSION = "0.1.0.post1"
 BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
-BITBLAS_SUPPORTED_BITS: List[int] = [1, 2, 4, 8]
+BITBLAS_SUPPORTED_BITS: List[int] = [2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
 # Keep bf16 exposed overall: upstream BitBLAS can successfully compile bf16 for some dtype/shape
 # combinations (for example unsigned low-bit paths used by AWQ). The specific incompatibility we

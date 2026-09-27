@@ -1,4 +1,7 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# BitBLAS reference: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
+
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +10,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasBaseQuantLinear
 
 
-@pytest.mark.parametrize("bits", [1, 2, 4, 8])
+@pytest.mark.parametrize("bits", [2, 4, 8])
 def test_zero_buffer_uses_actual_storage_word_width(bits):
     module = object.__new__(BitblasBaseQuantLinear)
     torch.nn.Module.__init__(module)

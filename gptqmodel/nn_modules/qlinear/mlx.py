@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 # Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
@@ -12,13 +14,15 @@
 import platform
 from importlib import import_module
 
+import numpy as np
 import torch
 
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.mlx_packing import (repack_awq, repack_awq_4bit, repack_awq_gemv,
-                                  repack_awq_gemv_fast, repack_gptq)
+                                  repack_awq_gemv_fast, repack_gptq,
+                                  repack_gptq_bitblas)
 from .torch import TorchLinear
 from .torch_awq import AwqTorchLinear
 from .paroquant import ParoLinear
@@ -28,7 +32,7 @@ from .fp8 import TorchFP8Linear
 from .bitsandbytes import BitsAndBytesLinear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
-from . import BaseQuantLinear
+from . import BaseQuantLinear, GPTQQuantLinear
 
 
 class _MlxLinearContract:
@@ -126,7 +130,11 @@ class MlxQuantLinear(_MlxLinearContract, TorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Loader AUTO selects MLX only for inference; direct backend selection uses this registry entry.
-    SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0, FORMAT.GPTQ_P: 0}
+    SUPPORTS_FORMATS = {
+        FORMAT.GPTQ: 0,
+        FORMAT.GPTQ_V2: 0,
+        FORMAT.GPTQ_P: 0,
+    }
     SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128, 256, 512, 1024]
     SUPPORTS_DESC_ACT = [False]
@@ -160,6 +168,199 @@ class MlxQuantLinear(_MlxLinearContract, TorchLinear):
             return False
         expected = torch.arange(module.in_features, device=module.g_idx.device) // module.group_size
         return torch.equal(module.g_idx, expected)
+
+class GPTQMarlinMlxQuantLinear(_MlxLinearContract, TorchLinear):
+    """Legacy Marlin checkpoint holder transcoded to packed GPTQ MLX inference."""
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.MARLIN: 0}
+    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = [True]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16]
+    REQUIRES_FORMAT_V2 = False
+
+    SOURCE_LINEAR = TorchLinear
+    REPACK = staticmethod(repack_gptq)
+
+    @staticmethod
+    def _source_layout_compatible(module):
+        if module.format != FORMAT.MARLIN or module.qzero_format() == 2:
+            return False
+        groups = module.in_features // module.group_size
+        if (tuple(module.qweight.shape) != (module.in_features * module.bits // 32, module.out_features)
+                or tuple(module.qzeros.shape) != (groups, module.out_features * module.bits // 32)
+                or tuple(module.scales.shape) != (groups, module.out_features)
+                or tuple(module.g_idx.shape) != (module.in_features,)):
+            return False
+        expected = torch.arange(module.in_features, device=module.g_idx.device) // module.group_size
+        return torch.equal(module.g_idx, expected)
+
+    @classmethod
+    def pack_source(cls, module):
+        # Legacy FORMAT.MARLIN checkpoints retain GPTQ-v1's stored
+        # zero-minus-one convention. Marlin CUDA drops qzeros because the
+        # format is symmetric; MLX needs the actual zero.
+        if not cls.source_compatible(module):
+            raise ValueError("GPTQMarlinMlxQuantLinear cannot consume this Marlin checkpoint")
+        qzeros = module.qzeros.detach().to("cpu").numpy().astype(np.uint32)
+        mask = (1 << module.bits) - 1
+        per_word = 32 // module.bits
+        shifts = np.arange(per_word, dtype=np.uint32) * module.bits
+        zeros = ((qzeros[..., None] >> shifts) & mask) + 1
+        repacked_zeros = np.bitwise_or.reduce(
+            (zeros & mask).astype(np.uint32) << shifts,
+            axis=-1,
+        ).astype(np.int32)
+        weight, scales, biases = repack_gptq(
+            module.qweight.detach().to("cpu").numpy(),
+            repacked_zeros,
+            module.scales.detach().to("cpu", torch.float16).numpy(),
+            module.in_features,
+            module.out_features,
+            module.bits,
+            False,
+        )
+        params = cls.mlx_params(module)
+        if module.group_size > params["group_size"]:
+            repeats = module.group_size // params["group_size"]
+            scales = scales.repeat(repeats, axis=1)
+            biases = biases.repeat(repeats, axis=1)
+        return weight, scales, biases, params
+
+
+class GPTQBitBLASMlxQuantLinear(_MlxLinearContract, GPTQQuantLinear):
+    """BitBLAS checkpoint holder transcoded to packed GPTQ MLX inference."""
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.GPTQ]
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 0}
+    SUPPORTS_BITS = [2, 4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16]
+    REQUIRES_FORMAT_V2 = False
+
+    def __init__(
+        self,
+        bits,
+        group_size,
+        sym,
+        desc_act,
+        in_features,
+        out_features,
+        bias=False,
+        pack_dtype=torch.int32,
+        adapter=None,
+        register_buffers=True,
+        **kwargs,
+    ):
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            adapter=adapter,
+            register_buffers=False,
+            format=FORMAT.BITBLAS,
+            **kwargs,
+        )
+        if not register_buffers:
+            return
+        groups = self.in_features // self.group_size
+        self.register_buffer(
+            "qweight",
+            torch.zeros(
+                (self.out_features, self.in_features * self.bits // 8),
+                dtype=torch.int8,
+            ),
+        )
+        self.register_buffer(
+            "scales",
+            torch.zeros((self.out_features, groups), dtype=torch.float16),
+        )
+        zero_shape = (
+            (groups, self.out_features * self.bits // 8)
+            if not self.sym else (0,)
+        )
+        self.register_buffer("qzeros", torch.zeros(zero_shape, dtype=torch.int8))
+        if bias:
+            self.register_buffer("bias", torch.zeros(self.out_features, dtype=torch.float16))
+        else:
+            self.bias = None
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not isinstance(module, cls):
+            return False
+        ok, _ = cls.validate(
+            bits=module.bits,
+            group_size=module.requested_group_size,
+            desc_act=module.desc_act,
+            sym=module.sym,
+            in_features=module.in_features,
+            out_features=module.out_features,
+            pack_dtype=module.pack_dtype,
+            dtype=module.scales.dtype,
+            device=DEVICE.MPS,
+            adapter=module.adapter,
+        )
+        groups = module.in_features // module.group_size
+        zero_shape = (0,) if module.sym else (
+            groups,
+            module.out_features * module.bits // 8,
+        )
+        return ok and (
+            tuple(module.qweight.shape)
+            == (module.out_features, module.in_features * module.bits // 8)
+            and tuple(module.scales.shape) == (module.out_features, groups)
+            and tuple(module.qzeros.shape) == zero_shape
+        )
+
+    @classmethod
+    def pack_source(cls, module):
+        if not cls.source_compatible(module):
+            raise ValueError("BitBLAS GPTQ layout cannot be transferred to MLX")
+        weight, scales, biases = repack_gptq_bitblas(
+            module.qweight.detach().cpu().numpy(),
+            module.qzeros.detach().cpu().numpy(),
+            module.scales.detach().to("cpu", torch.float16).numpy(),
+            module.in_features,
+            module.out_features,
+            module.bits,
+            module.sym,
+        )
+        params = cls.mlx_params(module)
+        if module.group_size > params["group_size"]:
+            repeats = module.group_size // params["group_size"]
+            scales = scales.repeat(repeats, axis=1)
+            biases = biases.repeat(repeats, axis=1)
+        return weight, scales, biases, params
 
 
 class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
