@@ -6,13 +6,13 @@
 from functools import lru_cache
 
 import mlx.core as mx
-import mlx.nn as nn
+from mlx import nn
 
 from ...quantization.mlx_exl3_hadamard import _exl3_hadamard_kernel
 
-
 _CODEBOOK_IDS = {"3inst": 0, "mcg": 1, "mul1": 2}
 _ROW_THREADS = 64
+_FUSED_ROW_THREADS = 128
 _PREFILL_THREADS = 128
 
 
@@ -30,11 +30,23 @@ def _hadamard_128(matrix):
     )[0]
 
 
-@lru_cache(maxsize=24)
-def _exl3_row_matmul_kernel(bits: int, codebook_id: int):
+@lru_cache(maxsize=120)
+def _exl3_row_matmul_kernel(
+    bits: int, codebook_id: int, fused_output: int = 0, output_dtype=mx.float32,
+):
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported EXL3 activation dtype: {output_dtype}") from exc
     return mx.fast.metal_kernel(
-        name=f"gptqmodel_exl3_row_matmul_b{bits}_c{codebook_id}",
-        input_names=["x", "trellis"],
+        name=(f"gptqmodel_exl3_row_matmul_b{bits}_c{codebook_id}"
+              f"_f{int(fused_output)}_{output_suffix}"),
+        input_names=["x", "trellis", "svh", "bias"],
         output_names=["output"],
         header=r"""
             inline uint exl3_row_state(
@@ -82,8 +94,11 @@ def _exl3_row_matmul_kernel(bits: int, codebook_id: int):
         """,
         source=r"""
             uint column = thread_position_in_grid.x;
+            uint lane = thread_position_in_threadgroup.x;
             uint local_column = column & 15u;
             uint output_tile = column >> 4;
+            threadgroup float current[FUSE_OUTPUT ? 128 : 1];
+            threadgroup float next_values[FUSE_OUTPUT ? 128 : 1];
             float sum = 0.0f;
             for (uint input_tile = 0; input_tile < K_TILES; ++input_tile) {
                 uint tile_base = (input_tile * N_TILES + output_tile) * PACKED_WORDS;
@@ -98,8 +113,29 @@ def _exl3_row_matmul_kernel(bits: int, codebook_id: int):
                     sum = metal::fma(x[input_tile * 16u + local_row], weight, sum);
                 }
             }
-            output[column] = sum;
-        """,
+            if (FUSE_OUTPUT) {
+                for (uint stride = 1u; stride < 32u; stride <<= 1u) {
+                    float other = simd_shuffle_xor(sum, stride);
+                    sum = (lane & stride) == 0u ? sum + other : other - sum;
+                }
+                current[lane] = sum;
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+                for (uint stride = 32u; stride < 128u; stride <<= 1u) {
+                    uint partner = lane ^ stride;
+                    float own = current[lane];
+                    float other = current[partner];
+                    next_values[lane] = (lane & stride) == 0u ? own + other : other - own;
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                    current[lane] = next_values[lane];
+                    threadgroup_barrier(mem_flags::mem_threadgroup);
+                }
+                float value = current[lane] * 0.08838834764831845f * svh[column];
+                if (FUSE_OUTPUT == 2) value += bias[column];
+                output[column] = OUTPUT_TYPE(value);
+            } else {
+                output[column] = OUTPUT_TYPE(sum);
+            }
+        """.replace("OUTPUT_TYPE", output_type),
     )
 
 
@@ -266,21 +302,30 @@ class MlxEXL3Linear(nn.Module):
 
         rows = x.size // self.in_features
         padded_rows = ((rows + 15) // 16) * 16
+        fused_row = rows == 1 and self.out_features > self.in_features
+        fused_mode = (2 if "bias" in self else 1) if fused_row else 0
         transformed = _hadamard_128(
             x.reshape(rows, self.in_features).astype(mx.float32) * self.suh,
         )
         kernel = (
-            _exl3_row_matmul_kernel(self.bits, _CODEBOOK_IDS[self.codebook])
+            _exl3_row_matmul_kernel(
+                self.bits, _CODEBOOK_IDS[self.codebook], fused_mode,
+                x.dtype if fused_row else mx.float32,
+            )
             if rows == 1
             else _exl3_matmul_kernel(self.bits, _CODEBOOK_IDS[self.codebook])
         )
         inner = kernel(
-            inputs=[transformed, self.trellis],
+            inputs=([transformed, self.trellis, self.svh,
+                     self.bias if "bias" in self else self.svh]
+                    if rows == 1 else [transformed, self.trellis]),
             template=[
                 ("BITS", self.bits),
                 ("CODEBOOK", _CODEBOOK_IDS[self.codebook]),
+                ("FUSE_OUTPUT", fused_mode),
                 ("PACKED_WORDS", 16 * self.bits),
-                ("THREADS", _ROW_THREADS if rows == 1 else _PREFILL_THREADS),
+                ("THREADS", (_FUSED_ROW_THREADS if fused_row else _ROW_THREADS)
+                            if rows == 1 else _PREFILL_THREADS),
                 ("K", self.in_features), ("N", self.out_features),
                 ("K_TILES", self.in_features // 16),
                 ("N_TILES", self.out_features // 16),
@@ -289,15 +334,16 @@ class MlxEXL3Linear(nn.Module):
             grid=(self.out_features, 1, 1) if rows == 1 else (
                 _PREFILL_THREADS, self.out_features // 16, padded_rows // 16,
             ),
-            threadgroup=(_ROW_THREADS if rows == 1 else _PREFILL_THREADS, 1, 1),
+            threadgroup=((_FUSED_ROW_THREADS if fused_row else _ROW_THREADS)
+                         if rows == 1 else _PREFILL_THREADS, 1, 1),
             output_shapes=[
                 (1, self.out_features) if rows == 1 else (padded_rows, self.out_features),
             ],
-            output_dtypes=[mx.float32],
+            output_dtypes=[x.dtype if fused_row else mx.float32],
         )[0]
         inner = inner[:rows]
-        output = _hadamard_128(inner) * self.svh
-        if "bias" in self:
+        output = inner if fused_row else _hadamard_128(inner) * self.svh
+        if "bias" in self and not fused_row:
             output = output + self.bias
         return output.reshape(output_shape).astype(x.dtype)
 
