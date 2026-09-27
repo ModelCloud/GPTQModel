@@ -42,6 +42,7 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
 )
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
+_MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -123,6 +124,15 @@ def _quantize_4bit_weight_mlx_to_torch(
             dtype=weight.dtype,
         )
     return _mlx_array_to_cpu_tensor(packed), quant_state
+
+
+def _quantize_int8_weight_mlx_to_torch(weight: torch.Tensor):
+    import mlx.core as mx
+
+    from ...quantization.mlx_bitsandbytes import quantize_int8_weight_mlx
+
+    packed, scales = quantize_int8_weight_mlx(mx.from_dlpack(weight))
+    return _mlx_array_to_cpu_tensor(packed), _mlx_array_to_cpu_tensor(scales)
 
 
 BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
@@ -437,10 +447,15 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 self._buffers[_packed_state_key_to_buffer_name(key)] = tensor.contiguous()
             self._refresh_quant_state(force=True)
         else:
-            qweight, scales, outlier_cols = bnb.functional.int8_vectorwise_quant(
-                weight.to(torch.float16),
-                threshold=0.0,
-            )
+            weight = weight.to(torch.float16).contiguous()
+            if _mlx_quantization_available() and weight.numel() >= _MLX_INT8_MIN_ELEMENTS:
+                qweight, scales = _quantize_int8_weight_mlx_to_torch(weight)
+                outlier_cols = None
+            else:
+                qweight, scales, outlier_cols = bnb.functional.int8_vectorwise_quant(
+                    weight,
+                    threshold=0.0,
+                )
             if outlier_cols is not None and outlier_cols.numel() > 0:
                 raise NotImplementedError(
                     "BitsAndBytesLinear only supports the direct int8 vectorwise path without outlier routing."
