@@ -24,7 +24,7 @@ _spec = importlib.util.spec_from_file_location("gptqmodel_mlx_gguf_test", _sourc
 native = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(native)
 
-import gptqmodel.nn_modules.qlinear.gguf as gguf_linear  # noqa: E402
+from gptqmodel.nn_modules.qlinear import gguf as gguf_linear  # noqa: E402
 
 
 GGUF_PROCESSOR_QTYPES = (
