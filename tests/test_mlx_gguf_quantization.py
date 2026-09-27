@@ -6,6 +6,7 @@
 
 import importlib.util
 import sys
+from itertools import pairwise
 from pathlib import Path
 
 import numpy as np
@@ -276,6 +277,63 @@ def _torch_gguf_mxfp4_oracle(weight):
     return packed.numpy().reshape(rows, columns // 32 * 17)
 
 
+def _torch_gguf_nvfp4_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 4, 16)
+    scale_source = (blocks.abs().amax(dim=-1) / 6.0).clamp(0.0, 448.0)
+    bits = scale_source.view(torch.int32)
+    source_exponent = ((bits >> 23) & 0xFF) - 127
+    exponent = source_exponent + 7
+
+    subnormal_mantissa = (scale_source * 512.0 + 0.5).to(torch.int32).clamp(0, 7)
+    subnormal = torch.where(
+        subnormal_mantissa >= 1, subnormal_mantissa, 0
+    )
+    mantissa = ((bits >> 20) & 7) + ((bits >> 19) & 1)
+    overflow = mantissa > 7
+    normal_mantissa = torch.where(overflow, 0, mantissa)
+    normal_exponent = exponent + overflow.to(torch.int32)
+    normal = torch.where(
+        normal_exponent >= 15,
+        0x7E,
+        (normal_exponent << 3) | normal_mantissa,
+    )
+    encoded = torch.where(
+        scale_source <= 0.0,
+        0,
+        torch.where(
+            exponent <= 0,
+            subnormal,
+            torch.where(exponent >= 15, 0x7E, normal),
+        ),
+    ).to(torch.uint8)
+
+    encoded_int = encoded.to(torch.int32)
+    decoded_exponent = (encoded_int >> 3) & 15
+    decoded_mantissa = (encoded_int & 7).to(torch.float32)
+    decoded = torch.where(
+        decoded_exponent == 0,
+        decoded_mantissa * (2.0**-10),
+        (1.0 + decoded_mantissa / 8.0)
+        * torch.pow(2.0, decoded_exponent.to(torch.float32) - 8.0),
+    )
+    decoded = torch.where((encoded == 0) | (encoded == 0x7F), 0.0, decoded)
+
+    codebook = torch.tensor(
+        [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12],
+        dtype=torch.float32,
+    )
+    errors = (
+        decoded[..., None, None] * codebook - blocks[..., None]
+    ).abs()
+    codes = errors.argmin(dim=-1).to(torch.uint8)
+    payload = codes[..., :8] | (codes[..., 8:] << 4)
+    packed = torch.cat(
+        (encoded.reshape(-1, 4), payload.reshape(-1, 32)), dim=-1
+    )
+    return packed.numpy().reshape(rows, columns // 64 * 36)
+
+
 @pytest.mark.parametrize("rows,width", [(9, 32), (13, 256), (129, 512)])
 def test_gguf_mxfp4_packing_matches_torch_oracle(rows, width):
     weight = np.random.default_rng(118).standard_normal((rows, width)).astype(
@@ -412,6 +470,132 @@ def test_gguf_mxfp4_packing_accepts_transposed_weights():
 def test_gguf_mxfp4_packing_validates_shape():
     with pytest.raises(ValueError, match="divisible by 32"):
         native.gguf_quantize_weight_mlx(mx.zeros((2, 31)), "MXFP4")
+
+
+@pytest.mark.parametrize("rows,width", [(9, 64), (13, 256), (129, 512)])
+def test_gguf_nvfp4_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(121).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :64] = -0.0
+    weight[2, :64] = np.linspace(-8, 8, 64, dtype=np.float32)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_nvfp4_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(122).standard_normal((4, 256))).astype(
+        dtype
+    )
+    expected = _torch_gguf_nvfp4_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "NVFP4")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_nvfp4_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380040 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "NVFP4"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_nvfp4_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_nvfp4_packing_at_code_midpoints_and_saturation():
+    rows = []
+    levels = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=np.float32)
+    for sign in (-1, 1):
+        for low, high in pairwise(levels):
+            midpoint = np.float32(sign * (low + high) / 2)
+            for direction in (-np.inf, None, np.inf):
+                value = (
+                    midpoint if direction is None
+                    else np.nextafter(midpoint, np.float32(direction))
+                )
+                group = np.full(16, value, dtype=np.float32)
+                group[0] = 6.0
+                rows.append(np.tile(group, 4))
+    for value in (0.0, -0.0, 2688.0, -2688.0, 1.0e10, -1.0e10):
+        rows.append(np.full(64, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+def test_gguf_nvfp4_packing_matches_canonical_block_bytes():
+    levels = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=np.float32)
+    group = np.concatenate((levels, -levels))
+    weight = np.tile(group, 4)[None, :]
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    payload = np.array(
+        [0x00, 0x91, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7],
+        dtype=np.uint8,
+    )
+    expected = np.concatenate(
+        (np.full(4, 0x38, dtype=np.uint8), np.tile(payload, 4))
+    )[None, :]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_nvfp4_packing_at_ue4m3_scale_boundaries():
+    scale_sources = []
+    for source_exponent in range(-7, 8):
+        for mantissa in range(8):
+            bits = np.uint32((source_exponent + 127) << 23 | mantissa << 20 | 1 << 19)
+            boundary = bits.view(np.float32)
+            scale_sources.extend(
+                np.nextafter(boundary, np.float32(direction))
+                for direction in (-np.inf, boundary, np.inf)
+            )
+    scale_sources.extend(
+        np.nextafter(np.float32((mantissa + 0.5) / 512.0), np.float32(direction))
+        for mantissa in range(8)
+        for direction in (-np.inf, np.float32((mantissa + 0.5) / 512.0), np.inf)
+    )
+    scale_sources.extend(
+        np.nextafter(np.float32(448.0), np.float32(direction))
+        for direction in (-np.inf, np.float32(448.0), np.inf)
+    )
+    rows = []
+    for scale_source in scale_sources:
+        group = np.zeros(16, dtype=np.float32)
+        group[0] = np.float32(scale_source * np.float32(6.0))
+        rows.append(np.tile(group, 4))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+def test_gguf_nvfp4_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy
+
+    weight = np.random.default_rng(124).standard_normal((4, 256)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(packed, _torch_gguf_nvfp4_oracle(weight))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "NVFP4")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_nvfp4_packing_accepts_transposed_weights():
+    weight = np.random.default_rng(125).standard_normal((64, 5)).astype(np.float32)
+    transposed = mx.array(weight).T
+    actual = native.gguf_quantize_weight_mlx(transposed, "NVFP4")
+    expected = _torch_gguf_nvfp4_oracle(weight.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_nvfp4_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 64"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 63)), "NVFP4")
 
 
 @pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])

@@ -665,6 +665,92 @@ def _gguf_mxfp4_kernel():
 
 
 @lru_cache(maxsize=1)
+def _gguf_nvfp4_kernel():
+    import mlx.core as mx
+
+    return mx.fast.metal_kernel(
+        name="gptqmodel_gguf_nvfp4_pack",
+        input_names=["weights"],
+        output_names=["packed"],
+        source="""
+            uint block = thread_position_in_grid.x;
+            uint input_offset = block * 64;
+            uint output_offset = block * 36;
+            float fp4[8] = {
+                0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f
+            };
+            for (uint group = 0; group < 4; ++group) {
+                uint group_offset = input_offset + group * 16;
+                float maximum = 0.0f;
+                for (uint k = 0; k < 16; ++k) {
+                    float magnitude = metal::abs(float(weights[group_offset + k]));
+                    if (maximum < magnitude) maximum = magnitude;
+                }
+
+                float scale_source = maximum / 6.0f;
+                uchar encoded_scale = 0;
+                if (scale_source > 0.0f) {
+                    scale_source = metal::min(scale_source, 448.0f);
+                    uint bits = as_type<uint>(scale_source);
+                    int source_exponent = int((bits >> 23) & 255u) - 127;
+                    int exponent = source_exponent + 7;
+                    if (exponent <= 0) {
+                        int mantissa = int(scale_source * 512.0f + 0.5f);
+                        encoded_scale = uchar(metal::clamp(mantissa, 0, 7));
+                    } else if (exponent >= 15) {
+                        encoded_scale = 0x7e;
+                    } else {
+                        int mantissa = int((bits >> 20) & 7u)
+                            + int((bits >> 19) & 1u);
+                        if (mantissa > 7) {
+                            mantissa = 0;
+                            ++exponent;
+                        }
+                        encoded_scale = exponent >= 15
+                            ? uchar(0x7e)
+                            : uchar((exponent << 3) | mantissa);
+                    }
+                }
+                packed[output_offset + group] = encoded_scale;
+
+                uint exponent = (uint(encoded_scale) >> 3) & 15u;
+                uint mantissa = uint(encoded_scale) & 7u;
+                float scale = encoded_scale == 0 || encoded_scale == 0x7f
+                    ? 0.0f
+                    : (exponent == 0
+                        ? float(mantissa) * 0x1p-10f
+                        : metal::ldexp(
+                            1.0f + float(mantissa) * 0.125f,
+                            int(exponent) - 8));
+                for (uint k = 0; k < 8; ++k) {
+                    uchar codes[2];
+                    for (uint half_index = 0; half_index < 2; ++half_index) {
+                        float weight = float(weights[
+                            group_offset + k + half_index * 8]);
+                        uint sign = as_type<uint>(weight) >> 31;
+                        float magnitude = metal::abs(weight);
+                        uint best = 0;
+                        float best_error = magnitude;
+                        for (uint candidate = 1; candidate < 8; ++candidate) {
+                            float error = metal::abs(
+                                scale * fp4[candidate] - magnitude);
+                            if (error < best_error) {
+                                best_error = error;
+                                best = candidate;
+                            }
+                        }
+                        codes[half_index] = uchar(
+                            best | ((sign && best) ? 8 : 0));
+                    }
+                    packed[output_offset + 4 + group * 8 + k] = uchar(
+                        codes[0] | (codes[1] << 4));
+                }
+            }
+        """,
+    )
+
+
+@lru_cache(maxsize=1)
 def _gguf_q8_0_kernel():
     import mlx.core as mx
 
@@ -703,11 +789,11 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     if normalized not in (
         "Q1_0", "Q1_0_G128", "Q2_0", "Q4_0", "Q4_K", "Q4_K_S", "Q4_K_M",
         "Q5_K", "Q5_K_S", "Q5_K_M", "Q6_K", "TQ1_0", "TQ2_0",
-        "MXFP4", "Q8_0",
+        "MXFP4", "NVFP4", "Q8_0",
     ):
         raise ValueError(
             "MLX GGUF packing supports Q1_0, Q1_0_g128, Q2_0, Q4_0, "
-            "Q4_K, Q5_K, Q6_K, TQ1_0, TQ2_0, MXFP4, and Q8_0"
+            "Q4_K, Q5_K, Q6_K, TQ1_0, TQ2_0, MXFP4, NVFP4, and Q8_0"
         )
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have float16, bfloat16, or float32 dtype")
@@ -717,7 +803,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         "Q6_K", "TQ1_0", "TQ2_0"
     ):
         block_size = 256
-    elif normalized == "Q2_0":
+    elif normalized in ("Q2_0", "NVFP4"):
         block_size = 64
     else:
         block_size = 32
@@ -755,15 +841,15 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         bytes_per_block = 66
     elif normalized == "MXFP4":
         kernel, bytes_per_block = _gguf_mxfp4_kernel(), 17
+    elif normalized == "NVFP4":
+        kernel, bytes_per_block = _gguf_nvfp4_kernel(), 36
     elif normalized == "Q4_0":
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
     launch = (
         {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-        if normalized == "Q6_K"
-        or normalized.startswith("Q5_K")
-        or normalized.startswith("Q4_K")
+        if normalized.startswith(("Q4_K", "Q5_K", "Q6_K"))
         or (normalized == "TQ1_0" and blocks >= 65536)
         or (normalized == "TQ2_0" and blocks >= 65536)
         else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
@@ -771,7 +857,7 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
         or normalized in (
-            "Q2_0", "Q4_0", "Q6_K", "TQ1_0", "TQ2_0", "MXFP4", "Q8_0"
+            "Q2_0", "Q4_0", "Q6_K", "TQ1_0", "TQ2_0", "MXFP4", "NVFP4", "Q8_0"
         )
     ) and weight.dtype in (
         mx.float16, mx.bfloat16, mx.float32,
