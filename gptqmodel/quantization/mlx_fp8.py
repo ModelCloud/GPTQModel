@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# FP8 encoding semantics: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 
 """Native MLX quantization of dense weights into supported FP8 byte formats."""
 
