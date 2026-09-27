@@ -15,8 +15,7 @@ import transformers
 from torch.nn import Module
 from torch.nn.modules.conv import _ConvNd
 
-from ..exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -32,8 +31,12 @@ from ..models.writer import (
 )
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..quantization import QuantizeConfig
-from ..quantization.config import EXL3Config, FORMAT, GPTQConfig, METHOD
+from ..quantization.config import FORMAT, METHOD, EXL3Config, GPTQConfig
 from ..quantization.gptq import GPTQ
+from ..quantization.mlx_exl3_pipeline import (
+    exl3_mlx_quantization_available,
+    exl3_quantize_weight_mlx_to_torch,
+)
 from ..utils.device import get_device
 from ..utils.exllamav3 import create_exllamav3_module
 from ..utils.logger import setup_logger
@@ -249,7 +252,11 @@ class EXL3Processor(LoopProcessor):
 
         target_device = device or get_device(module.module)
         target_device = torch.device(target_device)
-        if target_device.type != "cuda":
+        use_mlx = (
+            target_device.type in {"cpu", "mps"}
+            and exl3_mlx_quantization_available()
+        )
+        if target_device.type != "cuda" and not use_mlx:
             raise ValueError("EXL3 quantization requires CUDA/HIP execution.")
 
         start_time = time.perf_counter()
@@ -260,20 +267,37 @@ class EXL3Processor(LoopProcessor):
         if capture.nsamples <= 0:
             raise RuntimeError(f"EXL3 captured no calibration activations for module `{module.full_name}`.")
 
-        h_data = {
-            "H": hessian,
-            "count": capture.nsamples,
-            "finalized": False,
-        }
-
-        quant_args = self._build_quant_args(module, module_qcfg, target_device)
         input_weight = self._quant_input_weight(capture, target_device)
-        weight_q, proxy_err, out_tensors = quantize_exl3(
-            weight=input_weight,
-            H_data=h_data,
-            quant_args=quant_args,
-            return_weight_q=True,
-        )
+        if use_mlx:
+            weight_q, proxy_err, out_tensors = exl3_quantize_weight_mlx_to_torch(
+                input_weight,
+                hessian,
+                sample_count=capture.nsamples,
+                bits=self._target_bits(module, module_qcfg),
+                codebook=module_qcfg.codebook,
+                force_output_scales=_OUT_SCALES_TO_ARG.get(
+                    module_qcfg.out_scales, None
+                ),
+                sigma_reg=_EXL3_SIGMA_REG,
+                seed=787,
+            )
+        else:
+            from ..exllamav3.modules.quant.exl3_lib.quantize import quantize_exl3
+
+            h_data = {
+                "H": hessian,
+                "count": capture.nsamples,
+                "finalized": False,
+            }
+            quant_args = self._build_quant_args(
+                module, module_qcfg, target_device
+            )
+            weight_q, proxy_err, out_tensors = quantize_exl3(
+                weight=input_weight,
+                H_data=h_data,
+                quant_args=quant_args,
+                return_weight_q=True,
+            )
         duration = time.perf_counter() - start_time
 
         stream_payload = dict(out_tensors)
