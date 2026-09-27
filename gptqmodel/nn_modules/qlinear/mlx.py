@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
@@ -16,7 +17,7 @@ import torch
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.mlx_packing import (repack_awq_4bit, repack_awq_gemv,
+from ...utils.mlx_packing import (repack_awq, repack_awq_4bit, repack_awq_gemv,
                                   repack_awq_gemv_fast, repack_gptq)
 from .torch import TorchLinear
 from .torch_awq import AwqTorchLinear
@@ -167,7 +168,7 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True, False]
@@ -184,7 +185,7 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
     REQUIRES_FORMAT_V2 = False
 
     SOURCE_LINEAR = AwqTorchLinear
-    REPACK = staticmethod(repack_awq_4bit)
+    REPACK = staticmethod(repack_awq)
 
     @staticmethod
     def _source_layout_compatible(module):
@@ -192,8 +193,12 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
             return False
         groups = module.in_features // module.group_size
         return (
-            tuple(module.qweight.shape) == (module.in_features, module.out_features // 8)
-            and tuple(module.qzeros.shape) == (groups, module.out_features // 8)
+            tuple(module.qweight.shape) == (
+                module.in_features, (module.out_features * module.bits + 31) // 32,
+            )
+            and tuple(module.qzeros.shape) == (
+                groups, (module.out_features * module.bits + 31) // 32,
+            )
             and tuple(module.scales.shape) == (groups, module.out_features)
         )
 

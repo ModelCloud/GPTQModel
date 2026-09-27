@@ -1,14 +1,15 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
 import torch
 
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import dequantize_gemm
+from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
@@ -21,7 +22,7 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_TORCH]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 10}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -29,7 +30,7 @@ class AwqTorchLinear(AWQuantLinear):
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
 
     SUPPORTS_DEVICES = [DEVICE.ALL]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
@@ -106,8 +107,6 @@ class AwqTorchLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        pack_num = 32 // self.bits
-
         intweight = []
         for idx in range(self.in_features):
             intweight.append(
@@ -118,30 +117,7 @@ class AwqTorchLinear(AWQuantLinear):
             )
         intweight = torch.cat(intweight, dim=1).t().contiguous()
 
-        qweight = torch.zeros(
-            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=intweight.device,
-        )
-        qzeros = torch.zeros(
-            (zeros.shape[0], zeros.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=zeros.device,
-        )
-
-        if self.bits != 4:
-            raise NotImplementedError("Only 4-bit are supported for now.")
-        order_map = [0, 2, 4, 6, 1, 3, 5, 7]
-
-        for col in range(intweight.shape[1] // pack_num):
-            for i in range(pack_num):
-                qweight_col = intweight[:, col * pack_num + order_map[i]]
-                qweight[:, col] |= qweight_col << (i * self.bits)
-
-        for col in range(zeros.shape[1] // pack_num):
-            for i in range(pack_num):
-                qzero_col = zeros[:, col * pack_num + order_map[i]].to(torch.int32)
-                qzeros[:, col] |= qzero_col << (i * self.bits)
+        qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)
 
         self.register_buffer("qweight", qweight)
         self.register_buffer("qzeros", qzeros)

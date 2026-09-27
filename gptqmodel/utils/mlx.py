@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
@@ -281,7 +282,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 )
             if path in awq_group16:
                 return MlxAWQGroup16Linear(
-                    input_dims, output_dims, bias=module.get("bias") is not None,
+                    input_dims, output_dims, layer_params[path]["bits"],
+                    bias=module.get("bias") is not None,
                 )
             if path in gguf_q6_k:
                 return MlxGGUFQ6KLinear(

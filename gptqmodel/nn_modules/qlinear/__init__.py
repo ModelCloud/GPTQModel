@@ -1,7 +1,8 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 import copy
 import math
 import os
@@ -1713,12 +1714,12 @@ class AWQuantLinear(PackedGroupedQuantLinear):
         if register_buffers:
             self.register_buffer(
                 "qweight",
-                t.zeros((in_features, out_features // (self.pack_dtype_bits // self.bits)), dtype=self.pack_dtype),
+                t.zeros((in_features, math.ceil(out_features * self.bits / self.pack_dtype_bits)), dtype=self.pack_dtype),
             )
             self.register_buffer(
                 "qzeros",
                 t.zeros(
-                    (in_features // self.group_size, out_features // (self.pack_dtype_bits // self.bits)),
+                    (in_features // self.group_size, math.ceil(out_features * self.bits / self.pack_dtype_bits)),
                     dtype=self.pack_dtype,
                 ),
             )
