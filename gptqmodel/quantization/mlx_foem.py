@@ -6,14 +6,16 @@
 from functools import lru_cache
 
 
-@lru_cache(maxsize=1)
-def _foem_group_kernel():
+@lru_cache(maxsize=2)
+def _foem_group_kernel(return_residuals):
     import mlx.core as mx
 
+    residual_store = "residuals[row * G + k] = residual;" if return_residuals else ""
     return mx.fast.metal_kernel(
-        name="gptqmodel_foem_group_update",
+        name=f"gptqmodel_foem_group_update_{int(return_residuals)}",
         input_names=["weights", "raw", "hinv", "beta"],
-        output_names=["quantized", "errors", "scales", "zeros"],
+        output_names=["quantized", "errors", "scales", "zeros"]
+        + (["residuals"] if return_residuals else []),
         source="""
             uint row = thread_position_in_grid.x;
             float values[G];
@@ -45,8 +47,11 @@ def _foem_group_kernel():
                 float code = metal::clamp(metal::rint(value / scale) + zero,
                                           0.0f, float(MAXQ));
                 float q = scale * (code - zero);
-                float error = ((value - q) - (value - original[k]) * correction)
-                              / hinv[k * G + k];
+                float diagonal = hinv[k * G + k];
+                float residual = value - q;
+                float error = (residual - (value - original[k]) * correction)
+                              / diagonal;
+                __RESIDUAL_STORE__
                 quantized[row * G + k] = q;
                 errors[row * G + k] = error;
                 for (int j = k + 1; j < G; ++j) {
@@ -56,7 +61,7 @@ def _foem_group_kernel():
                     values[k + 1] -= correction * (values[k + 1] - original[k + 1]);
                 }
             }
-        """,
+        """.replace("__RESIDUAL_STORE__", residual_store),
     )
 
 
@@ -68,6 +73,7 @@ def foem_quantize_weight_mlx(
     group_size: int = 128,
     beta: float = 0.2,
     sym: bool = True,
+    return_residuals: bool = False,
 ):
     """Return FOEM's pseudo-quantized weight, scales, and zero points on MLX.
 
@@ -75,6 +81,7 @@ def foem_quantize_weight_mlx(
     This opt-in path implements FOEM with ``alpha=0``, MSE search disabled,
     no activation-order permutation, and ``blocksize=group_size``. The Hessian
     input is the upper Cholesky factor returned by the existing inverse path.
+    ``return_residuals`` adds the per-weight residuals used for loss accounting.
     """
     import mlx.core as mx
 
@@ -86,14 +93,18 @@ def foem_quantize_weight_mlx(
     if bits not in (2, 3, 4, 5, 6, 7, 8):
         raise ValueError("FOEM bits must be between 2 and 8")
     if group_size not in (16, 32, 64, 128) or columns % group_size:
-        raise ValueError("FOEM group_size must be 16, 32, 64, or 128 and divide input width")
+        raise ValueError(
+            "FOEM group_size must be 16, 32, 64, or 128 and divide input width"
+        )
     if inverse_hessian.shape != (columns, columns):
         raise ValueError("inverse_hessian must match the input width")
     if weight.dtype not in (mx.float16, mx.bfloat16, mx.float32):
         raise ValueError("weight must have a supported floating dtype")
     if inverse_hessian.dtype != mx.float32:
         raise ValueError("inverse_hessian must have float32 dtype")
-    if not isinstance(sym, bool) or not isinstance(beta, (float, int)) or not 0 <= beta <= 1:
+    if not isinstance(sym, bool) or not isinstance(return_residuals, bool):
+        raise TypeError("sym and return_residuals must be bool")
+    if not isinstance(beta, (float, int)) or not 0 <= beta <= 1:
         raise ValueError("sym must be bool and beta must be in [0, 1]")
     if not bool(mx.all(mx.isfinite(weight)).item()):
         raise ValueError("weight must be finite")
@@ -105,32 +116,42 @@ def foem_quantize_weight_mlx(
     raw = weight.astype(mx.float32)
     beta_input = mx.array(beta, dtype=mx.float32)
     remaining = raw
-    quantized_groups, scales, zeros = [], [], []
-    kernel = _foem_group_kernel()
+    quantized_groups, scales, zeros, residuals = [], [], [], []
+    kernel = _foem_group_kernel(return_residuals)
     for start in range(0, columns, group_size):
         end = start + group_size
         group = mx.contiguous(remaining[:, :group_size])
         original = mx.contiguous(raw[:, start:end])
         factor = mx.contiguous(inverse_hessian[start:end, start:end])
-        q, error, scale, zero = kernel(
+        outputs = kernel(
             inputs=[group, original, factor, beta_input],
             template=[
-                ("G", group_size), ("BITS", bits),
-                ("MAXQ", 2**bits - 1), ("SYM", int(sym)),
+                ("G", group_size),
+                ("BITS", bits),
+                ("MAXQ", 2**bits - 1),
+                ("SYM", int(sym)),
             ],
             grid=(rows, 1, 1),
             threadgroup=(min(rows, 64), 1, 1),
             output_shapes=[
-                (rows, group_size), (rows, group_size), (rows, 1), (rows, 1),
-            ],
-            output_dtypes=[mx.float32, mx.float32, mx.float32, mx.float32],
+                (rows, group_size),
+                (rows, group_size),
+                (rows, 1),
+                (rows, 1),
+            ]
+            + ([(rows, group_size)] if return_residuals else []),
+            output_dtypes=[mx.float32] * (5 if return_residuals else 4),
         )
+        q, error, scale, zero = outputs[:4]
         quantized_groups.append(q)
         scales.append(scale)
         zeros.append(zero)
+        if return_residuals:
+            residuals.append(outputs[4])
         if end < columns:
             remaining = remaining[:, group_size:] - _accurate_matmul_mlx(
-                error, inverse_hessian[start:end, end:],
+                error,
+                inverse_hessian[start:end, end:],
             )
             mx.eval(remaining)
 
@@ -139,5 +160,7 @@ def foem_quantize_weight_mlx(
         mx.concatenate(scales, axis=1),
         mx.concatenate(zeros, axis=1),
     )
+    if return_residuals:
+        result = (*result, mx.concatenate(residuals, axis=1))
     mx.eval(*result)
     return result

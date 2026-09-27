@@ -7,7 +7,10 @@
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
 import math
+import platform
+import sys
 import time
+from functools import lru_cache
 from typing import Optional
 
 import torch
@@ -18,6 +21,83 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
+
+_MLX_FOEM_MIN_ELEMENTS = 256 * 1024
+
+
+@lru_cache(maxsize=1)
+def _mlx_foem_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx_array_to_torch(value, device: torch.device) -> torch.Tensor:
+    return torch.from_dlpack(value).to(device=device).contiguous()
+
+
+def _quantize_foem_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    inverse_hessian: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    beta: float,
+    sym: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, float]:
+    import mlx.core as mx
+
+    from .mlx_foem import foem_quantize_weight_mlx
+
+    if weight.device.type == "mps":
+        torch.mps.synchronize()
+    result = foem_quantize_weight_mlx(
+        mx.from_dlpack(weight.contiguous()),
+        mx.from_dlpack(inverse_hessian.contiguous()),
+        bits=bits,
+        group_size=group_size,
+        beta=beta,
+        sym=sym,
+        return_residuals=True,
+    )
+    tensors = tuple(_mlx_array_to_torch(value, weight.device) for value in result[:3])
+    residuals = _mlx_array_to_torch(result[3], torch.device("cpu"))
+    diagonal = torch.diag(inverse_hessian).cpu()
+    loss_terms = residuals.square() / diagonal.square().unsqueeze(0) / 2
+    loss_sum = torch.sum(loss_terms, dtype=torch.float64)
+    return *tensors, float(loss_sum.float().item())
+
+
+def _should_use_mlx_foem_quantization(
+    weight: torch.Tensor,
+    inverse_hessian: torch.Tensor,
+    qcfg: QuantizeConfig,
+    *,
+    blocksize: int,
+) -> bool:
+    group_size = qcfg.group_size
+    return (
+        _mlx_foem_quantization_available()
+        and weight.device.type in {"cpu", "mps"}
+        and inverse_hessian.device == weight.device
+        and weight.ndim == 2
+        and weight.numel() >= _MLX_FOEM_MIN_ELEMENTS
+        and qcfg.foem is not None
+        and qcfg.foem.alpha == 0
+        and 0 <= qcfg.foem.beta <= 1
+        and not qcfg.desc_act
+        and not qcfg.static_groups
+        and not qcfg.mse
+        and isinstance(qcfg.bits, int)
+        and 2 <= qcfg.bits <= 8
+        and group_size in {16, 32, 64, 128}
+        and weight.shape[1] % group_size == 0
+        and blocksize == group_size
+    )
 
 
 class FOEM(GPTQ):
@@ -192,6 +272,44 @@ class FOEM(GPTQ):
         if self.gptaq:
             P = self.qcfg.foem.alpha * ((self.dXXT @ Hinv.T).triu(diagonal=1)) @ Hinv
             del self.dXXT
+
+        if _should_use_mlx_foem_quantization(
+            W,
+            Hinv,
+            self.qcfg,
+            blocksize=blocksize,
+        ):
+            Q, scale, zero, loss_sum = _quantize_foem_weight_mlx_to_torch(
+                W,
+                Hinv,
+                bits=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
+                beta=self.qcfg.foem.beta,
+                sym=self.qcfg.sym,
+            )
+            del Hinv, W_raw
+            torch_sync()
+            avg_loss = loss_sum / self.nsamples
+            if math.isnan(avg_loss):
+                raise ValueError(f"Quantization: Failed due to `NaN` loss for `{self.name}`")
+            g_idx = torch.arange(
+                self.columns,
+                dtype=torch.int32,
+                device=Q.device,
+            ) // self.qcfg.group_size
+            if isinstance(self.module, transformers.Conv1D):
+                Q = Q.t()
+            Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            return (
+                Q,
+                scale,
+                zero,
+                g_idx,
+                time.time() - start,
+                avg_loss,
+                damp,
+                self.nsamples,
+            )
 
         for i1 in range(0, self.columns, blocksize):
             i2 = min(i1 + blocksize, self.columns)
