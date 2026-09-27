@@ -57,7 +57,7 @@ print(model.tokenizer.decode(tokens, skip_special_tokens=True))
 
 ## A unified quantization platform
 
-GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, and FOEM across supported hardware and runtime integrations.
+GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, FOEM, and GSQ refinement for scalar GPTQ across supported hardware and runtime integrations.
 
 Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
 
@@ -79,8 +79,11 @@ Every quantization method shares a common lifecycle—calibrate, quantize, valid
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
+| GSQ (GPTQ scalar refinement) | ✅       | GPTQ format† | GPTQ format† | GPTQ format† | GPTQ format† |
 
 `GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+
+† GSQ runs during quantization and saves an existing GPTQ format. Each external runtime or training integration supports the GPTQ formats it already accepts.
 
 SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
 
@@ -90,7 +93,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 
 | Quant Method | Formats | Backends / Kernels |
 | --- | --- | --- |
-| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
+| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.GPTQ_P`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_P`: `BACKEND.GPTQ_TORCH`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
 | `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
@@ -101,12 +104,14 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
+GSQ is an opt-in refinement within `METHOD.GPTQ` for calibrated linear layers saved as `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.GPTQ_P`. Its checkpoints use the listed GPTQ formats and backends.
+
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
 ## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
-* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for scalar GPTQ.
 * ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. Prism Bonsai `Q1_0_g128` remains accepted as a compatibility alias for the official 128-element `Q1_0` layout.
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -736,6 +741,25 @@ FOEM (First-order error matters) adds first-order error compensation for GPTQ-st
 # FOEM default hyperparameters are alpha=0.0 and beta=0.2
 quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
 ```
+
+#### Using GSQ scalar refinement
+
+[GSQ by Dadgarnia et al. at IST-DASLab](https://arxiv.org/abs/2604.18556) motivates an optional Gumbel-Softmax refinement of GPTQ's scalar code assignments and group scales. This implementation minimizes a local calibration-Hessian reconstruction objective after GPTQ, and keeps the original GPTQ result unless the hard codes improve that objective after checkpoint rounding. It uses existing GPTQ checkpoint formats and inference kernels. It does **not** implement the paper's complete block-training schedule or imply a model-level accuracy improvement.
+
+In the paper's dense-model schedule, query and key projections are trained separately, value and output projections jointly against attention output, and MLP projections against the full block output. Each finished block is frozen before training the next with inputs from the quantized prefix; the 2-bit Llama runs also fine-tune scales at the end. Here each selected GPTQ linear is refined independently against its saved calibration Hessian. Group scales are fixed unless `learn_scales=True`, and the optimizer uses Adam with temperature annealing instead of the paper's Lion training and temperature/logit-scale schedules. These differences mean the paper's reported quality gains do not transfer automatically to this option.
+
+```py
+from gptqmodel.quantization import GSQConfig, QuantizeConfig
+
+quant_config = QuantizeConfig(
+    bits=4,
+    group_size=128,
+    gsq=GSQConfig(enabled=True, steps=100, candidates=16, learn_scales=False),
+)
+```
+
+GSQ currently applies to calibrated linear layers in the scalar GPTQ, GPTQ_V2, and GPTQ_P formats; `modules=(r"q_proj$",)` can restrict it by module name. It supports 2–8 bits and all GPTQ group sizes. `max_candidate_bytes` bounds the code-candidate bank per output-row chunk (64 MiB by default); the optimizer and temporary tensors need additional memory. Refinement increases quantization time. `learn_scales=True` also tunes per-group scales while keeping zero points and group membership fixed. Measure downstream quality on your target workload before using it broadly.
+
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
@@ -758,6 +782,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The scalar refinement above is inspired by this work and is a narrower implementation.
 
 ## Citations 📖
 
@@ -780,6 +805,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   journal={arXiv preprint arXiv:2210.17323},
   year={2022}
   
+}
+
+# GSQ
+@article{dadgarnia2026gsq,
+  title={GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
+  author={Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2604.18556},
+  year={2026}
 }
 
 # AWQ
