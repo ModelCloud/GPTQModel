@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # Format references: ParoQuant (z-lab), QQQ (vLLM, Apache-2.0), GGUF (ggml-org),
 # and bitsandbytes (Tim Dettmers and contributors); their licenses are noted
 # in the source implementations and method-specific runtime modules.
@@ -541,7 +542,7 @@ class _MlxDenseContract(_MlxLinearContract):
 
 
 class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
-    """FP8 holder with exact native MXFP8 for E4M3 row/tensor scales."""
+    """FP8 holder for native MXFP8 and general packed Metal inference."""
 
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.FP8]
@@ -600,6 +601,26 @@ class FP8MlxQuantLinear(_MlxDenseContract, TorchFP8Linear):
         scales = np.full((module.out_features, module.in_features // 32), 127, dtype=np.uint8)
         output_scale = (1.0 / module.weight_scale_inv.detach().float()).cpu().numpy()
         return packed, scales, output_scale, cls.mlx_params(module)
+
+    @classmethod
+    def packed_payload(cls, module):
+        """Return exact checkpoint bytes, scales, and a format decode table."""
+        import numpy as np
+
+        if not cls.source_compatible(module):
+            raise ValueError("FP8 layer cannot be transferred to MLX")
+        codes = module.weight.detach().contiguous().view(torch.uint8).cpu().numpy()
+        codebook = torch.arange(256, dtype=torch.uint8).view(module.fp8_dtype).float().numpy()
+        return {
+            "weight": np.ascontiguousarray(codes),
+            "scales": module.weight_scale_inv.detach().to("cpu", torch.float32).numpy(),
+            "codebook": codebook,
+            "bias": None if module.bias is None else module.bias.detach().to("cpu", torch.float32).numpy(),
+            "in_features": module.in_features,
+            "out_features": module.out_features,
+            "scale_method": module.weight_scale_method,
+            "block_size": module.weight_block_size,
+        }
 
 
 class BitsAndBytesMlxQuantLinear(_MlxDenseContract, BitsAndBytesLinear):
