@@ -111,10 +111,12 @@ def _packed_fp8_kernel(output_dtype):
     )
 
 
-@lru_cache(maxsize=1)
-def _packed_fp8_prefill_kernel():
+@lru_cache(maxsize=2)
+def _packed_fp8_prefill_kernel(tile_columns=32):
+    if tile_columns not in (16, 32):
+        raise ValueError("Packed FP8 prefill supports 16- or 32-column tiles")
     return mx.fast.metal_kernel(
-        name="gptqmodel_fp8_packed_matmul_r16",
+        name=f"gptqmodel_fp8_packed_matmul_r16_n{tile_columns}",
         input_names=["x", "weight", "scales", "codebook"],
         output_names=["output"],
         header="#include <metal_simdgroup_matrix>\n",
@@ -123,15 +125,17 @@ def _packed_fp8_prefill_kernel():
             uint simdgroup = physical >> 5;
             uint output_tile = threadgroup_position_in_grid.y;
             uint row_base = threadgroup_position_in_grid.z * 16u;
-            threadgroup float tile_weight[1024];
+            threadgroup float tile_weight[64 * TILE_COLUMNS];
             threadgroup float tile_input[1024];
             simdgroup_float8x8 accumulator = make_filled_simdgroup_matrix<float, 8>(0.0f);
 
             for (uint input_tile = 0; input_tile < K_TILES; ++input_tile) {
-                for (uint position = physical; position < 1024u; position += THREADS) {
-                    uint local_k = position >> 4;
-                    uint local_n = position & 15u;
-                    uint column = output_tile * 16u + local_n;
+                for (uint position = physical;
+                     position < 64u * TILE_COLUMNS;
+                     position += THREADS) {
+                    uint local_k = position / TILE_COLUMNS;
+                    uint local_n = position % TILE_COLUMNS;
+                    uint column = output_tile * TILE_COLUMNS + local_n;
                     uint k = input_tile * 64u + local_k;
                     uint scale_index = (column / BLOCK_ROWS) * SCALE_COLS
                         + k / BLOCK_COLS;
@@ -140,7 +144,8 @@ def _packed_fp8_prefill_kernel():
                         : 1.0f / scales[scale_index]);
                     tile_weight[position] =
                         codebook[uint(weight[column * K + k])] * scale;
-
+                }
+                for (uint position = physical; position < 1024u; position += THREADS) {
                     uint input_row = position >> 6;
                     uint input_k = input_tile * 64u + (position & 63u);
                     tile_input[position] = row_base + input_row < ROWS
@@ -148,9 +153,9 @@ def _packed_fp8_prefill_kernel():
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
 
-                if (simdgroup < 4u) {
-                    uint input_row = (simdgroup >> 1) * 512u;
-                    uint weight_column = (simdgroup & 1u) * 8u;
+                if (simdgroup < SIMD_GROUPS) {
+                    uint input_row = (simdgroup / COLUMN_GROUPS) * 512u;
+                    uint weight_column = (simdgroup % COLUMN_GROUPS) * 8u;
                     simdgroup_float8x8 input_fragment;
                     simdgroup_float8x8 weight_fragment;
                     for (uint part = 0; part < 8u; ++part) {
@@ -159,8 +164,8 @@ def _packed_fp8_prefill_kernel():
                         );
                         simdgroup_load(
                             weight_fragment,
-                            tile_weight + part * 128u + weight_column,
-                            16u
+                            tile_weight + part * 8u * TILE_COLUMNS + weight_column,
+                            TILE_COLUMNS
                         );
                         simdgroup_multiply_accumulate(
                             accumulator, input_fragment, weight_fragment, accumulator
@@ -170,11 +175,12 @@ def _packed_fp8_prefill_kernel():
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }
 
-            if (simdgroup < 4u) {
+            if (simdgroup < SIMD_GROUPS) {
                 simdgroup_store(
                     accumulator,
-                    output + (row_base + (simdgroup >> 1) * 8u) * N
-                        + output_tile * 16u + (simdgroup & 1u) * 8u,
+                    output + (row_base + simdgroup / COLUMN_GROUPS * 8u) * N
+                        + output_tile * TILE_COLUMNS
+                        + simdgroup % COLUMN_GROUPS * 8u,
                     N
                 );
             }
@@ -236,6 +242,29 @@ class MlxFP8PackedLinear(nn.Module):
         )
         self.freeze()
 
+    def _prefill(self, x, rows, tile_columns=32):
+        padded_rows = ((rows + 15) // 16) * 16
+        threads = tile_columns * 8
+        block_rows, block_cols = self.block_size
+        mode = {"tensor": 0, "row": 1, "block": 2}[self.scale_method]
+        return _packed_fp8_prefill_kernel(tile_columns)(
+            inputs=[x, self.weight, self.scales, self.codebook],
+            template=[
+                ("K", self.in_features), ("N", self.out_features),
+                ("ROWS", rows), ("K_TILES", self.in_features // 64),
+                ("THREADS", threads), ("MODE", mode),
+                ("BLOCK_ROWS", block_rows), ("BLOCK_COLS", block_cols),
+                ("SCALE_COLS", self.in_features // block_cols),
+                ("TILE_COLUMNS", tile_columns),
+                ("COLUMN_GROUPS", tile_columns // 8),
+                ("SIMD_GROUPS", threads // 32),
+            ],
+            grid=(threads, self.out_features // tile_columns, padded_rows // 16),
+            threadgroup=(threads, 1, 1),
+            output_shapes=[(padded_rows, self.out_features)],
+            output_dtypes=[mx.float32],
+        )[0][:rows]
+
     def __call__(self, x):
         if x.shape[-1] != self.in_features:
             raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}")
@@ -248,22 +277,8 @@ class MlxFP8PackedLinear(nn.Module):
         block_rows, block_cols = self.block_size
         mode = {"tensor": 0, "row": 1, "block": 2}[self.scale_method]
         if (rows != 1 and self.in_features <= 8192 and self.out_features >= 8192
-                and self.in_features % 64 == 0 and self.out_features % 16 == 0):
-            padded_rows = ((rows + 15) // 16) * 16
-            output = _packed_fp8_prefill_kernel()(
-                inputs=[x, self.weight, self.scales, self.codebook],
-                template=[
-                    ("K", self.in_features), ("N", self.out_features),
-                    ("ROWS", rows), ("K_TILES", self.in_features // 64),
-                    ("THREADS", 128), ("MODE", mode),
-                    ("BLOCK_ROWS", block_rows), ("BLOCK_COLS", block_cols),
-                    ("SCALE_COLS", self.in_features // block_cols),
-                ],
-                grid=(128, self.out_features // 16, padded_rows // 16),
-                threadgroup=(128, 1, 1),
-                output_shapes=[(padded_rows, self.out_features)],
-                output_dtypes=[mx.float32],
-            )[0][:rows]
+                and self.in_features % 64 == 0 and self.out_features % 32 == 0):
+            output = self._prefill(x, rows)
             return (output + self.bias).reshape(output_shape).astype(x.dtype)
         row_tile = 1 if rows == 1 else min(rows, 16)
         threads = 64

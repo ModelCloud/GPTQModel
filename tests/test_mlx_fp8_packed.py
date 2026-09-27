@@ -168,3 +168,41 @@ def test_fp8_packed_qwen38_27b_shapes(projection, fmt, method, rows, dtype):
     del layer, actual
     mx.clear_cache()
     gc.collect()
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize(
+    "projection",
+    [
+        projection for projection in QWEN38_27B_PROJECTIONS
+        if projection[2] <= 8192 and projection[1] >= 8192
+    ],
+    ids=[
+        projection[0] for projection in QWEN38_27B_PROJECTIONS
+        if projection[2] <= 8192 and projection[1] >= 8192
+    ],
+)
+def test_fp8_wide_prefill_tile_is_exact_to_main(projection, dtype):
+    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8PackedLinear
+
+    _, out_features, in_features = projection
+    base = (np.arange(in_features, dtype=np.uint32) % 120).astype(np.uint8)
+    weight = np.broadcast_to(base, (out_features, in_features))
+    codebook = torch.arange(256, dtype=torch.uint8).view(torch.float8_e5m2).float().numpy()
+    scales = 600000 + np.arange(out_features, dtype=np.float32) % 10000
+    layer = MlxFP8PackedLinear(
+        weight, scales, codebook,
+        in_features=in_features, out_features=out_features, scale_method="row",
+    )
+    inputs = mx.array(
+        np.random.default_rng(3816 + in_features + out_features).normal(
+            0, 0.01, (16, in_features),
+        ).astype(np.float32),
+    ).astype(dtype)
+    main = (layer._prefill(inputs, 16, tile_columns=16) + layer.bias).astype(dtype)
+    actual = layer(inputs)
+    mx.eval(main, actual)
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(
+        np.asarray(actual.astype(mx.float32)), np.asarray(main.astype(mx.float32)),
+    )
