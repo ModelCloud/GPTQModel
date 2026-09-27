@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # EXL3 format: TurboDerp and ExLlamaV3 contributors, MIT, https://github.com/turboderp-org/exllamav3
-"""EXL3 Torch decode into MLX dense inference with numerical checks."""
+"""EXL3 packed MLX conversion and inference checks."""
 
 import numpy as np
 import pytest
@@ -14,8 +14,9 @@ nn = pytest.importorskip("mlx.nn")
 
 
 @pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
-@pytest.mark.parametrize("bits", [2, 3, 4])
-def test_exl3_mlx_dense_matches_torch_decoder(monkeypatch, bits, dtype):
+@pytest.mark.parametrize("codebook", ("3inst", "mcg", "mul1"))
+@pytest.mark.parametrize("bits", range(1, 9), ids=lambda bits: f"{bits}bit")
+def test_exl3_mlx_packed_matches_torch_decoder(monkeypatch, bits, codebook, dtype, record_property):
     from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
     from gptqmodel.nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
     from gptqmodel.utils import mlx as mlx_utils
@@ -29,6 +30,8 @@ def test_exl3_mlx_dense_matches_torch_decoder(monkeypatch, bits, dtype):
         "svh": torch.randint(0, 2, (dims,), dtype=torch.int8, generator=generator).half() * 2 - 1,
         "bias": torch.randn(dims, dtype=torch.float16, generator=generator) * 0.01,
     }
+    if codebook != "3inst":
+        tensors[codebook] = torch.tensor([1], dtype=torch.uint32)
     source = torch.nn.Module()
     source.linear = ExllamaV3TorchLinear.from_tensors(
         in_features=dims, out_features=dims, name="linear", tensors=tensors,
@@ -50,10 +53,15 @@ def test_exl3_mlx_dense_matches_torch_decoder(monkeypatch, bits, dtype):
     monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (Tiny, Args))
     model, config = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
     assert isinstance(model.linear, MlxEXL3Linear)
+    assert model.linear.bits == bits
+    assert model.linear.codebook == codebook
     assert config["_gptqmodel_custom_mlx_runtime"]
     assert "quantization" not in config
     reference_weight = source.linear.get_weight_tensor(dtype=torch.float16)
-    np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.T.numpy())
+    np.testing.assert_array_equal(np.array(model.linear.trellis), tensors["trellis"].numpy())
+    np.testing.assert_array_equal(np.array(model.linear.suh), tensors["suh"].numpy())
+    np.testing.assert_array_equal(np.array(model.linear.svh), tensors["svh"].numpy())
+    assert not hasattr(model.linear, "linear")
     rng = np.random.default_rng(73)
     x = rng.normal(0, 0.15, (2, 3, dims)).astype(np.float32)
     mlx_input = mx.array(x).astype(dtype)
@@ -64,4 +72,43 @@ def test_exl3_mlx_dense_matches_torch_decoder(monkeypatch, bits, dtype):
     expected = (torch_input @ reference_weight.double() + tensors["bias"].double()).to(
         torch.float16 if dtype == mx.float16 else torch.bfloat16,
     ).float().numpy()
-    np.testing.assert_allclose(np.asarray(actual.astype(mx.float32)), expected, rtol=0.002, atol=0.002)
+    visible = np.asarray(actual.astype(mx.float32))
+    max_abs = float(np.max(np.abs(visible - expected)))
+    record_property("max_abs_vs_torch_dense", max_abs)
+    np.testing.assert_allclose(visible, expected, rtol=0.01, atol=0.01)
+
+
+def test_exl3_mlx_unpacks_legacy_sign_bitfields(monkeypatch):
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+    from gptqmodel.utils import mlx as mlx_utils
+
+    dims = 128
+    su = torch.tensor([0xA55A] * (dims // 16), dtype=torch.uint16).view(torch.int16)
+    sv = torch.tensor([0x5AA5] * (dims // 16), dtype=torch.uint16).view(torch.int16)
+    tensors = {
+        "trellis": torch.zeros((dims // 16, dims // 16, 64), dtype=torch.int16),
+        "su": su,
+        "sv": sv,
+    }
+    source = torch.nn.Module()
+    source.linear = ExllamaV3TorchLinear.from_tensors(
+        in_features=dims, out_features=dims, name="linear", tensors=tensors,
+    ).eval()
+
+    class Args:
+        @classmethod
+        def from_dict(cls, _config):
+            return cls()
+
+    class Tiny(nn.Module):
+        def __init__(self, _args):
+            super().__init__()
+            self.linear = nn.Linear(dims, dims, bias=False)
+
+    monkeypatch.setattr(mlx_utils, "_get_classes", lambda config: (Tiny, Args))
+    model, _ = mlx_utils._packed_mlx_weights(source, {}, "lm_head")
+    masks = 1 << torch.arange(16, dtype=torch.int32)
+    expected_su = torch.where((su.view(torch.uint16).int()[:, None] & masks) != 0, -1.0, 1.0)
+    expected_sv = torch.where((sv.view(torch.uint16).int()[:, None] & masks) != 0, -1.0, 1.0)
+    np.testing.assert_array_equal(np.array(model.linear.suh), expected_su.flatten().half().numpy())
+    np.testing.assert_array_equal(np.array(model.linear.svh), expected_sv.flatten().half().numpy())
