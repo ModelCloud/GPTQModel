@@ -4,6 +4,8 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 # FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
 
@@ -19,6 +21,7 @@ from ..models import BaseQModel
 from ..nn_modules.qlinear.mlx import (AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
                                       AwqMlxQuantLinear, BitsAndBytesMlxQuantLinear,
                                       FP8MlxQuantLinear, GGUFMlxQuantLinear,
+                                      GPTQBitBLASMlxQuantLinear, GPTQMarlinMlxQuantLinear,
                                       LLMAwqMlxQuantLinear, MlxQuantLinear,
                                       ParoMlxQuantLinear, QQQMlxQuantLinear)
 from ..nn_modules.qlinear.paroquant import ParoLinear
@@ -77,6 +80,10 @@ def _exl3_signs(module, unpacked_name, packed_name, size):
 
 
 def _mlx_holder_class(module):
+    if isinstance(module, GPTQBitBLASMlxQuantLinear):
+        return GPTQBitBLASMlxQuantLinear
+    if isinstance(module, GPTQMarlinMlxQuantLinear):
+        return GPTQMarlinMlxQuantLinear
     if isinstance(module, ParoLinear):
         return ParoMlxQuantLinear
     if isinstance(module, QQQTorchLinear):
@@ -101,7 +108,8 @@ def _mlx_holder_class(module):
 def _packed_mlx_weights(model, config, lm_head_name):
     """Transfer exact packed layers or decoded weight-only layers to MLX."""
     quantized = [(name, module) for name, module in model.named_modules()
-                 if isinstance(module, (TorchLinear, AwqTorchLinear, QQQTorchLinear,
+                 if isinstance(module, (TorchLinear, GPTQBitBLASMlxQuantLinear,
+                                        AwqTorchLinear, QQQTorchLinear,
                                         GGUFTorchLinear, TorchFP8Linear, BitsAndBytesLinear,
                                         ExllamaV3TorchLinear, AwqGEMVLinear,
                                         AwqGEMVFastLinear))]
@@ -154,10 +162,12 @@ def _packed_mlx_weights(model, config, lm_head_name):
             group16.add(name)
             if isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K":
                 gguf_q6_k.add(name)
-            elif mlx_linear is MlxQuantLinear:
+            elif mlx_linear in (MlxQuantLinear, GPTQMarlinMlxQuantLinear):
                 gptq_group16.add(name)
             elif mlx_linear is AwqMlxQuantLinear:
                 awq_group16.add(name)
+        elif isinstance(module, GPTQBitBLASMlxQuantLinear):
+            gptq_dtype.add(name)
         elif isinstance(module, TorchLinear):
             gptq_dtype.add(name)
         elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
@@ -374,6 +384,7 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
         raise ValueError("MLX conversion supports 1 through 8 integer bits for these formats")
     if quant_format not in [FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.GEMM,
                             FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ,
+                            FORMAT.MARLIN, FORMAT.BITBLAS,
                             FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                             FORMAT.BITSANDBYTES, FORMAT.EXL3]:
         raise ValueError("MLX conversion requires a supported GPT-QModel quantization format")
@@ -401,7 +412,8 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
         return packed
     if quant_format in (FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                         FORMAT.BITSANDBYTES, FORMAT.EXL3, FORMAT.GEMV,
-                        FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                        FORMAT.GEMV_FAST, FORMAT.LLM_AWQ, FORMAT.MARLIN,
+                        FORMAT.BITBLAS):
         raise ValueError(f"{quant_format} MLX inference requires transferable packed weights and runtime state")
 
     # Requantization needs an MLX-supported group size.

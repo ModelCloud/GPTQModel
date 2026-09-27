@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 """Transfer supported GPTQ/AWQ weights into MLX's affine quantized layout."""
 
 import numpy as np
@@ -83,6 +85,39 @@ def repack_gptq(qweight, qzeros, scales, in_features, out_features, bits, planar
 def repack_gptq_4bit(qweight, qzeros, scales, in_features, out_features):
     """Return (weight, scales, biases) for a GPTQ v2 linear layer."""
     return repack_gptq(qweight, qzeros, scales, in_features, out_features, 4)
+
+
+def repack_gptq_bitblas(qweight, qzeros, scales, in_features, out_features, bits, sym):
+    """Transcode portable BitBLAS row-packed GPTQ state to MLX affine rows."""
+    if bits not in (2, 4, 8) or in_features % 32 or out_features % 32:
+        raise ValueError("BitBLAS to MLX requires 2/4/8-bit, 32-aligned features")
+    groups = scales.shape[1]
+    if scales.shape[0] != out_features:
+        raise ValueError("Unsupported BitBLAS scales shape")
+    if qweight.shape != (out_features, in_features * bits // 8):
+        raise ValueError("Unsupported or transformed BitBLAS qweight shape")
+
+    per_byte = 8 // bits
+    shifts = np.arange(per_byte, dtype=np.uint8) * bits
+    codes = (
+        (qweight.view(np.uint8)[..., None] >> shifts) & ((1 << bits) - 1)
+    ).reshape(out_features, in_features).astype(np.uint32)
+    mlx_scales = np.ascontiguousarray(scales.astype(np.float16))
+    if sym:
+        midpoint = 1 << (bits - 1)
+        # BitBLAS stores signed intN two's-complement codes. Flip the sign bit
+        # to obtain monotonically biased unsigned codes for MLX affine math.
+        codes ^= midpoint
+        zeros = np.full((out_features, groups), midpoint, dtype=np.uint32)
+    else:
+        expected = (groups, out_features * bits // 8)
+        if qzeros.shape != expected:
+            raise ValueError("Unsupported BitBLAS qzeros shape")
+        zeros = (
+            (qzeros.view(np.uint8)[..., None] >> shifts) & ((1 << bits) - 1)
+        ).reshape(groups, out_features).T.astype(np.uint32)
+    biases = -zeros.astype(np.float32) * mlx_scales.astype(np.float32)
+    return _pack_rows(codes, bits), mlx_scales, biases
 
 
 def _unpack_awq_stream(packed, bits, count):

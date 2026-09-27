@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 
 from __future__ import annotations
 
@@ -1604,11 +1606,14 @@ def ModelLoader(cls):
             # format marlin requires marlin kernel
             expected_marlin_backend = BACKEND.AWQ_MARLIN if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_MARLIN
             expected_marlin_backends = [expected_marlin_backend]
-            if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
+            if backend == BACKEND.MLX and qcfg.quant_method == METHOD.GPTQ:
+                pass
+            elif backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
                 )
-            backend = expected_marlin_backend
+            else:
+                backend = expected_marlin_backend
 
         # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
         # check for marlin compat for cuda device only
@@ -1622,11 +1627,14 @@ def ModelLoader(cls):
         if format_code == FORMAT.BITBLAS:
             # format bitblas requires bitblas kernel
             expected_backend = BACKEND.AWQ_BITBLAS if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_BITBLAS
-            if backend != expected_backend and backend != BACKEND.AUTO:
+            if backend == BACKEND.MLX and qcfg.quant_method == METHOD.GPTQ:
+                pass
+            elif backend != expected_backend and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
                 )
-            backend = expected_backend
+            else:
+                backend = expected_backend
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
