@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 
 import sys
 from types import SimpleNamespace
@@ -142,7 +143,8 @@ def test_packed_4bit_matches_source_codes(format, group_size):
 
 
 @pytest.mark.parametrize("format,bits,planar", [("gptq", bits, bits in (5, 6, 7)) for bits in (2, 3, 4, 5, 6, 7, 8)]
-                         + [("gptq", 3, True), ("awq", 4, False)])
+                         + [("gptq", 3, True)]
+                         + [("awq", bits, False) for bits in (2, 3, 4, 5, 6, 7, 8)])
 @pytest.mark.parametrize("holder", ["torch", "mlx"])
 @pytest.mark.parametrize("group_size", [16, 32, 64, 128])
 def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits, planar, holder, group_size):
@@ -214,7 +216,7 @@ def test_packed_layers_load_into_mlx_quantized_linear(monkeypatch, format, bits,
         expected = source.linear.dequantize_weight().float().sum(dim=0).numpy()
     else:
         expected = dequantize_gemm(source.linear.qweight, source.linear.qzeros,
-                                   source.linear.scales, 4, source.linear.group_size).float().sum(dim=0).numpy()
+                                   source.linear.scales, bits, source.linear.group_size).float().sum(dim=0).numpy()
     output = model(x)
     mlx.eval(output)
     np.testing.assert_allclose(np.array(output)[0], expected, rtol=0.002, atol=0.002)
@@ -299,7 +301,8 @@ def test_awq_tensor_group_maps_to_mlx_128():
 @pytest.mark.parametrize("dtype", [mlx.float16, mlx.bfloat16])
 @pytest.mark.parametrize("format,bits,planar", [("gptq", bits, bits in (5, 6, 7))
                                                for bits in (2, 3, 4, 5, 6, 7, 8)]
-                         + [("gptq", 3, True), ("awq", 4, False)])
+                         + [("gptq", 3, True)]
+                         + [("awq", bits, False) for bits in (2, 3, 4, 5, 6, 7, 8)])
 def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format, bits, planar, dtype):
     import mlx.nn as mlx_nn
     import torch
@@ -333,7 +336,7 @@ def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format
             source.linear.qzero_format(2)
         qweight = _oracle_words(codes.T, bits, planar).T.copy()
         qzeros = _oracle_words(zeros, bits, planar)
-    else:
+    elif bits == 4:
         order = [0, 2, 4, 6, 1, 3, 5, 7]
         shifts = np.arange(8, dtype=np.uint32) * 4
         qweight = np.bitwise_or.reduce(
@@ -342,6 +345,9 @@ def test_group16_mlx_linear_matches_independent_torch_oracle(monkeypatch, format
         qzeros = np.bitwise_or.reduce(
             zeros.reshape(-1, out_features // 8, 8)[:, :, order] << shifts, axis=-1,
         )
+    else:
+        qweight = _oracle_words(codes, bits)
+        qzeros = _oracle_words(zeros, bits)
     source.linear.qweight.copy_(torch.from_numpy(qweight.astype(np.int32)))
     source.linear.qzeros.copy_(torch.from_numpy(qzeros.astype(np.int32)))
     source.linear.scales.copy_(torch.from_numpy(scales))
@@ -533,6 +539,11 @@ def test_mlx_quant_linear_registry_validates_capabilities(format):
     assert validate_quant_linear(linear_class, **(contract | {"group_size": 16}))[0]
     assert validate_quant_linear(linear_class, **(contract | {"group_size": -1}))[0]
     assert not validate_quant_linear(linear_class, **(contract | {"group_size": -1, "in_features": 96}))[0]
+    for bits in (2, 3, 4, 5, 6, 7, 8):
+        for group_size in (16, 32, 64, 128):
+            assert validate_quant_linear(
+                linear_class, **(contract | {"bits": bits, "group_size": group_size})
+            )[0]
     if format == "gptq":
         for bits in (2, 3, 4, 5, 6, 7, 8):
             for group_size in (16, 32, 64, 128, 256, 512, 1024):
@@ -546,8 +557,7 @@ def test_mlx_quant_linear_registry_validates_capabilities(format):
                     backend=BACKEND.MLX, format=FORMAT.GPTQ_P, quant_method=METHOD.GPTQ,
                 ) is MlxQuantLinear
     for change in (
-        *(({"bits": 2}, {"bits": 3}, {"bits": 5}, {"bits": 6}, {"bits": 8}) if format == "awq" else ()),
-        *(({"bits": 7}, {"group_size": 256}) if format == "awq" else ()),
+        *(({"group_size": 256},) if format == "awq" else ()),
         {"group_size": 16, "in_features": 112},
         {"desc_act": True},
         {"pack_dtype": torch.int16}, {"dtype": torch.float32},
@@ -617,7 +627,7 @@ def test_auto_selects_mlx_only_for_compatible_models():
         qcfg.bits = bits
         assert select() == BACKEND.MLX
         assert select(format_code=FORMAT.GPTQ_P) == BACKEND.MLX
-        assert select(method=METHOD.AWQ, format_code=FORMAT.GEMM) == (BACKEND.MLX if bits == 4 else BACKEND.AUTO)
+        assert select(method=METHOD.AWQ, format_code=FORMAT.GEMM) == BACKEND.MLX
     qcfg.bits = 4
     qcfg.group_size = -1
     assert select() == BACKEND.MLX

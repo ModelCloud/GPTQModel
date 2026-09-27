@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# AWQ format and packing: ModelCloud.ai, Apache-2.0, https://github.com/ModelCloud/GPTQModel
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
+# Extended AWQ packing: ModelCloud.ai, Apache-2.0, GPT-QModel.
 # Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 """Benchmark main and direct-dtype AWQ group-16 decode on Qwen3.8-27B shapes."""
 
@@ -43,7 +44,8 @@ def main_decode(layer, x):
             layer.biases_even, layer.biases_odd, bias,
         ],
         template=[
-            ("K", layer.input_dims), ("THREADS", threads),
+            ("K", layer.input_dims), ("BITS", 4), ("MASK", 15),
+            ("WORDS", 2), ("THREADS", threads),
             ("GROUPS", threads // 32),
         ],
         grid=(threads, output_dims, 1),
