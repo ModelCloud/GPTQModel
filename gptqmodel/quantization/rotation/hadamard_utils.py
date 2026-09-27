@@ -118,6 +118,78 @@ class _FastHadamardTransform:
         return hadamard_transform(x, scale)
 
 
+class _TorchHadamardTransform:
+    """Portable Walsh Hadamard fallback when no compiled CUDA op is present."""
+
+    @staticmethod
+    def hadamard_transform(x, scale=1.0):
+        n = x.shape[-1]
+        if not is_pow2(n):
+            raise ValueError(f"Torch Hadamard fallback requires a power-of-two width, got {n}.")
+        original_shape = x.shape
+        result = x.contiguous()
+        stride = 1
+        while stride < n:
+            pairs = result.reshape(*original_shape[:-1], -1, 2, stride)
+            left = pairs[..., 0, :]
+            right = pairs[..., 1, :]
+            result = torch.cat((left + right, left - right), dim=-1).reshape(original_shape)
+            stride *= 2
+        return result * torch.as_tensor(scale, device=x.device, dtype=x.dtype)
+
+
+class _TritonHadamardTransform:
+    """Fused CUDA fallback built from TorchAO's BSD Triton transform.
+
+    TorchAO's kernel transforms at most 256 columns at once.  A power-of-two
+    Walsh matrix factors as ``H_(a*b) = H_a (x) H_b``.  Transform contiguous
+    256-column tiles, transpose the tile axes, then transform the remaining
+    tile axis.  The two normalized passes equal one normalized transform over
+    the original width and preserve the ordering used by the portable
+    butterfly implementation.
+    """
+
+    _TILE = 256
+
+    @staticmethod
+    def hadamard_transform(x, scale=1.0):
+        n = x.shape[-1]
+        if (
+            not x.is_cuda
+            or x.dtype not in (torch.bfloat16, torch.float16)
+            or not is_pow2(n)
+            or n > _TritonHadamardTransform._TILE ** 2
+        ):
+            return _TorchHadamardTransform.hadamard_transform(x, scale)
+
+        from torchao.prototype.attention.quantization.triton_hadamard_utils import (
+            inverse_hadamard_transform,
+        )
+
+        original_shape = x.shape
+        rows = x.numel() // n
+        inner = min(n, _TritonHadamardTransform._TILE)
+        outer = n // inner
+
+        # The Triton helper expects [B, H, S, D] and applies H_D/sqrt(D)
+        # independently to each S row.
+        result = inverse_hadamard_transform(
+            x.contiguous().reshape(rows, 1, outer, inner),
+        ).reshape(rows, outer, inner)
+
+        if outer > 1:
+            result = result.transpose(1, 2).contiguous()
+            result = inverse_hadamard_transform(
+                result.reshape(rows, 1, inner, outer),
+            ).reshape(rows, inner, outer)
+            result = result.transpose(1, 2).contiguous()
+
+        # The two passes already contribute 1/sqrt(n).  The package/native
+        # API accepts an arbitrary multiplier for the unnormalized transform.
+        multiplier = float(scale) * math.sqrt(n)
+        return result.reshape(original_shape) * multiplier
+
+
 fast_hadamard_transform = None
 
 
@@ -136,11 +208,21 @@ def import_fast_hadamard_transform():
         if hadamard_available():
             fast_hadamard_transform = _FastHadamardTransform()
         else:
-            log.error(
-                "Package: `fast_hadamard_transform` is not installed and the GPT-QModel JIT Hadamard extension "
-                "is unavailable. Install `fast_hadamard_transform` or ensure CUDA is available."
-            )
-            raise
+            try:
+                from torchao.prototype.attention.quantization.triton_hadamard_utils import (  # noqa: F401
+                    inverse_hadamard_transform,
+                )
+
+                fast_hadamard_transform = _TritonHadamardTransform()
+                log.info.once(
+                    "Package: native fast Hadamard is unavailable; using the fused TorchAO Triton fallback."
+                )
+            except (ImportError, RuntimeError):
+                log.warn.once(
+                    "Package: `fast_hadamard_transform` is not installed and the GPT-QModel JIT Hadamard "
+                    "extension and TorchAO Triton fallback are unavailable; using the portable Torch transform."
+                )
+                fast_hadamard_transform = _TorchHadamardTransform()
 
 def matmul_hadU_cuda(X, hadK, K):
     import_fast_hadamard_transform()

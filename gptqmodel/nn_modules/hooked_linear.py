@@ -254,6 +254,21 @@ class HookedLinear(torch.nn.Linear):
         custom_linear.had_dim = getattr(linear, "had_dim", -1)
         custom_linear.had_K = getattr(linear, "had_K", None)
         custom_linear.K = getattr(linear, "K", 1)
+        # W4A calibration installs its policy before the layer looper replaces
+        # dense modules with HookedLinear. Preserve the policy explicitly;
+        # PyTorch forward hooks belong to the replaced module and do not move
+        # with its parameters.
+        custom_linear._w4a_stream_replay_mode = getattr(linear, "_w4a_stream_replay_mode", None)
+        custom_linear._w4a_stream_replay_recipe = getattr(linear, "_w4a_stream_replay_recipe", None)
+        custom_linear._w4a_stream_replay_version = getattr(
+            linear, "_w4a_stream_replay_version", 2
+        )
+        custom_linear._w4a_stream_replay_pre_hook = getattr(
+            linear, "_w4a_stream_replay_pre_hook", False
+        )
+        custom_linear._w4a_rotation_preapplied = getattr(
+            linear, "_w4a_rotation_preapplied", False
+        )
         return custom_linear
 
     @torch.inference_mode()
@@ -270,19 +285,37 @@ class HookedLinear(torch.nn.Linear):
         )
         if original_device != target_device:
             input = input.to(device=target_device)
-        input = apply_online_hadamard(
-            input,
-            online_full_had=getattr(self, "online_full_had", False),
-            online_partial_had=getattr(self, "online_partial_had", False),
-            had_K=getattr(self, "had_K", None),
-            K=getattr(self, "K", 1),
-            had_dim=getattr(self, "had_dim", -1),
-        )
+        replay_mode = getattr(self, "_w4a_stream_replay_mode", None)
+        replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)
+        replay_version = getattr(self, "_w4a_stream_replay_version", 2)
+        rotation_preapplied = bool(getattr(self, "_w4a_rotation_preapplied", False))
+        if replay_mode is not None:
+            from .qlinear.w4a_llama_replay import round_w4a_activation
+        if replay_mode is not None and not rotation_preapplied:
+            input = round_w4a_activation(input, replay_mode, replay_recipe)
+        if not rotation_preapplied:
+            input = apply_online_hadamard(
+                input,
+                online_full_had=getattr(self, "online_full_had", False),
+                online_partial_had=getattr(self, "online_partial_had", False),
+                had_K=getattr(self, "had_K", None),
+                K=getattr(self, "K", 1),
+                had_dim=getattr(self, "had_dim", -1),
+            )
+        # A rotated down projection consumes a newly encoded hardware operand.
+        # The incoming W4A carrier has already been rounded at the nonlinear
+        # boundary, so replay the decode -> Hadamard -> encode sequence exactly.
+        if replay_mode is not None and not rotation_preapplied and (
+            getattr(self, "online_full_had", False) or getattr(self, "online_partial_had", False)
+        ):
+            input = round_w4a_activation(input, replay_mode, replay_recipe)
         output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
+        if replay_mode is not None and replay_version == 2:
+            output = round_w4a_activation(output, replay_mode, replay_recipe)
         return _restore_output_device(output, original_device)
 
 

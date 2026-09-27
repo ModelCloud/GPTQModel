@@ -472,6 +472,8 @@ procedures, and operational gotchas.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
+Experimental GB10 GPTQ INT4 checkpoints with per-token FP8 activation streams are described in [the W4A guide](docs/gptq-w4a-gb10.md). Selected Llama decoder operators pass encoded activations and scales across module and layer boundaries.
+
 ##### Preprocessors 🧹
 
 `preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.

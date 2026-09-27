@@ -397,6 +397,45 @@ def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
     ) is False
 
 
+def test_stage_layer_forces_sync_finalizers_for_w4a():
+    for activation in ("w4afp8",):
+        looper = types.SimpleNamespace(
+            gptq_model=types.SimpleNamespace(
+                quantize_config=QuantizeConfig(
+                    bits=4,
+                    group_size=128,
+                    activation=activation,
+                    wait_for_submodule_finalizers=False,
+                )
+            ),
+            _quant_devices=[torch.device("cuda:0")],
+        )
+
+        assert _should_drain_finalize_futures_synchronously(
+            looper,
+            finalize_tasks=[(types.SimpleNamespace(), None, None, None, None)],
+        ) is True
+
+
+def test_stage_layer_releases_cache_after_w4a_finalize():
+    for activation in ("w4afp8",):
+        looper = types.SimpleNamespace(
+            gptq_model=types.SimpleNamespace(
+                quantize_config=QuantizeConfig(
+                    bits=4,
+                    group_size=128,
+                    activation=activation,
+                    offload_to_disk=False,
+                )
+            )
+        )
+
+        assert _should_empty_cache_after_sync_finalize(
+            looper,
+            finalize_tasks=[(types.SimpleNamespace(), None, None, None, None)],
+        ) is True
+
+
 def test_stage_layer_forces_sync_finalizers_for_multi_device_generic_processor():
     looper = types.SimpleNamespace(
         gptq_model=types.SimpleNamespace(

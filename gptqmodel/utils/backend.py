@@ -21,6 +21,7 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    GPTQ_W4AFP8 = "gptq_w4afp8"  # INT4 GPTQ weights, token-scaled FP8 input on SM12x
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
@@ -174,6 +175,18 @@ def normalize_backend(
     if method is None:
         return resolved
     return _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
+
+
+def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:
+    """Bind a saved W4A policy to its matching kernel, including AUTO loads."""
+    if activation_mode is None:
+        return backend
+    expected = {
+        "w4afp8": BACKEND.GPTQ_W4AFP8,
+    }[activation_mode]
+    if backend in (None, BACKEND.AUTO, expected):
+        return expected
+    raise ValueError(f"Activation policy `{activation_mode}` requires backend `{expected.value}`, got `{backend}`.")
 
 
 def normalize_profile(profile: Optional[Union[str, int, PROFILE]]) -> PROFILE:

@@ -6,6 +6,7 @@
 import copy
 import threading
 import time
+from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -30,6 +31,7 @@ from ..models.writer import (
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.activation_floatx import fp8_token_qdq
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -53,6 +55,28 @@ def snapshot_eora_reconstructed_weight(weight: torch.Tensor) -> torch.Tensor:
     """
 
     return weight.detach().to(device=CPU, copy=True)
+
+
+def enable_w4afp8_replay(linear: torch.nn.Module) -> None:
+    """Apply input FP8 QDQ after the target GPTQ weight has been solved.
+
+    The instance is replaced by a packed qlinear during finalization. Its
+    original forward is left intact until then so Hessian capture sees the
+    unquantized input of the current target.
+    """
+    if not isinstance(linear, torch.nn.Linear):
+        raise NotImplementedError("W4AFP8 replay currently supports torch.nn.Linear targets only.")
+    if getattr(linear, "_w4afp8_replay_enabled", False):
+        return
+    original_forward = linear.forward
+
+    def quantized_input_forward(self, x):
+        # Version 2 replay installs a pre-hook before GPTQ Hessian capture.
+        # Applying another QDQ here would round the same input twice.
+        return original_forward(x if getattr(self, "_w4a_stream_replay_pre_hook", False) else fp8_token_qdq(x))
+
+    linear.forward = MethodType(quantized_input_forward, linear)
+    linear._w4afp8_replay_enabled = True
 
 
 def clone_gptq_config_for_module(
@@ -599,6 +623,8 @@ class GPTQProcessor(LoopProcessor):
 
         # single largest deallocation of vram happens here
         module.weight.data = wq
+        if self.qcfg.activation_mode == "w4afp8":
+            enable_w4afp8_replay(module.module)
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):

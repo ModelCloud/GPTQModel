@@ -3044,6 +3044,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     # Serialized/exported checkpoint layout. This is the authoritative post-quantization format.
     format: FORMAT = field(default=FORMAT.GPTQ)
 
+    # Input quantization for selected GPTQ Linear modules. Saved weights remain
+    # ordinary INT32-packed GPTQ tensors; this only selects the activation path.
+    activation: Optional[Union[str, Dict[str, Any]]] = field(default=None)
+
     # properties that do not directly contribute to quantization or inference should be placed in meta
     meta: Optional[Dict] = field(default=None)
 
@@ -3164,6 +3168,18 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
     @property
     def runtime_bits(self):
         return self.bits
+
+    @property
+    def activation_mode(self) -> Optional[str]:
+        return self.activation["mode"] if self.activation else None
+
+    @property
+    def activation_version(self) -> Optional[int]:
+        return self.activation["version"] if self.activation else None
+
+    @property
+    def activation_recipe(self) -> Optional[str]:
+        return None
 
     def __setattr__(self, name, value):
         # Wrap assignment as well as construction so later ``config.dynamic =``
@@ -3294,6 +3310,36 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.desc_act = self.default_desc_act()
         elif not isinstance(self.desc_act, bool):
             self.desc_act = bool(self.desc_act)
+
+        if self.activation is not None:
+            if isinstance(self.activation, str):
+                activation = {"version": 3, "mode": self.activation}
+            else:
+                activation = self.activation
+            if not isinstance(activation, dict) or not {"version", "mode"}.issubset(activation):
+                raise ValueError("QuantizeConfig: `activation` must contain `version` and `mode`.")
+            if activation["version"] not in {2, 3} or activation["mode"] not in {"w4afp8"}:
+                raise ValueError(
+                    "QuantizeConfig: W4A activation stream requires policy version 2 or 3. "
+                    "Version 1 used input-only rounding and must be explicitly migrated and revalidated. "
+                    "Version 3 uses consumer-driven carriers and avoids rounding Linear outputs that are "
+                    "immediately consumed by wider attention, MLP, or residual arithmetic."
+                )
+            if set(activation) != {"version", "mode"}:
+                raise ValueError("QuantizeConfig: W4AFP8 activation policy has unsupported fields.")
+            if (self.method != METHOD.GPTQ or format_family not in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
+                    or self.bits != 4 or self.group_size != 128 or not self.sym
+                    or self.desc_act or self.pack_dtype != torch.int32 or self.lm_head):
+                raise ValueError(
+                    "QuantizeConfig: W4A activation stream requires GPTQ INT4, symmetric group_size=128, "
+                    "desc_act=False, INT32 packing, GPTQ/GPTQ_V2 format, and lm_head=False."
+                )
+            for layer, override in (self.dynamic or {}).items():
+                if override is False:
+                    continue
+                if isinstance(override, dict) and any(key in override for key in ("bits", "sym", "group_size", "desc_act")):
+                    raise ValueError(f"QuantizeConfig: W4A activation stream does not support weight-layout override `{layer}`.")
+            self.activation = dict(activation)
 
         if self.meta is not None:
             if not isinstance(self.meta, dict):
@@ -3697,6 +3743,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             "group_size": self.group_size,
             "desc_act": self.desc_act,
             "lm_head": self.lm_head,
+            "activation": self.activation,
             METHOD_FIELD_CODE: self.method,
             QUANT_METHOD_FIELD: self.method,
             FORMAT_FIELD_CODE: self.format,
