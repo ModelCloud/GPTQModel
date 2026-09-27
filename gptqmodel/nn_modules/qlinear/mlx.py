@@ -20,8 +20,8 @@ import torch
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from ...utils.mlx_packing import (repack_awq, repack_awq_4bit, repack_awq_gemv,
-                                  repack_awq_gemv_fast, repack_gptq,
+from ...utils.mlx_packing import (repack_awq, repack_awq_4bit, repack_awq_bitblas,
+                                  repack_awq_gemv, repack_awq_gemv_fast, repack_gptq,
                                   repack_gptq_bitblas)
 from .torch import TorchLinear
 from .torch_awq import AwqTorchLinear
@@ -32,7 +32,7 @@ from .fp8 import TorchFP8Linear
 from .bitsandbytes import BitsAndBytesLinear
 from .gemv_awq import AwqGEMVLinear
 from .gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
-from . import BaseQuantLinear, GPTQQuantLinear
+from . import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 
 
 class _MlxLinearContract:
@@ -402,6 +402,151 @@ class AwqMlxQuantLinear(_MlxLinearContract, AwqTorchLinear):
             )
             and tuple(module.scales.shape) == (groups, module.out_features)
         )
+
+
+class AWQMarlinMlxQuantLinear(AwqMlxQuantLinear):
+    """AWQ Marlin checkpoint holder transcoded to packed MLX inference."""
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.MARLIN: 0}
+    SUPPORTS_BITS = [4, 8]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [8]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [8]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16]
+
+
+class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
+    """AWQ BitBLAS checkpoint holder transcoded to packed MLX inference."""
+
+    SUPPORTS_BACKENDS = [BACKEND.MLX]
+    SUPPORTS_METHODS = [METHOD.AWQ]
+    SUPPORTS_FORMATS = {FORMAT.BITBLAS: 0}
+    SUPPORTS_BITS = [4]
+    SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
+    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_SYM = [True, False]
+    SUPPORTS_SHARDS = True
+    SUPPORTS_TRAINING = False
+    SUPPORTS_AUTO_PADDING = False
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [16]
+    SUPPORTS_DEVICES = [DEVICE.MPS]
+    SUPPORTS_PLATFORM = [PLATFORM.DARWIN]
+    SUPPORTS_PACK_DTYPES = [torch.int32]
+    SUPPORTS_ADAPTERS = []
+    SUPPORTS_DTYPES = [torch.float16]
+    REQUIRES_FORMAT_V2 = False
+
+    def __init__(
+        self,
+        bits,
+        group_size,
+        sym,
+        desc_act,
+        in_features,
+        out_features,
+        bias=False,
+        pack_dtype=torch.int32,
+        adapter=None,
+        register_buffers=True,
+        **kwargs,
+    ):
+        super().__init__(
+            bits=bits,
+            group_size=group_size,
+            sym=sym,
+            desc_act=desc_act,
+            in_features=in_features,
+            out_features=out_features,
+            bias=bias,
+            pack_dtype=pack_dtype,
+            adapter=adapter,
+            register_buffers=False,
+            **kwargs,
+        )
+        self.format = FORMAT.BITBLAS
+        if not register_buffers:
+            return
+        groups = self.in_features // self.group_size
+        self.register_buffer(
+            "qweight",
+            torch.zeros(
+                (self.out_features, self.in_features * self.bits // 8),
+                dtype=torch.int8,
+            ),
+        )
+        self.register_buffer(
+            "qzeros",
+            torch.zeros(
+                (groups, self.out_features * self.bits // 8),
+                dtype=torch.int8,
+            ),
+        )
+        self.register_buffer(
+            "scales",
+            torch.zeros((self.out_features, groups), dtype=torch.float16),
+        )
+        if bias:
+            self.register_buffer(
+                "bias", torch.zeros(self.out_features, dtype=torch.float16),
+            )
+        else:
+            self.bias = None
+
+    @classmethod
+    def source_compatible(cls, module):
+        if not isinstance(module, cls):
+            return False
+        ok, _ = cls.validate(
+            bits=module.bits,
+            group_size=module.requested_group_size,
+            desc_act=module.desc_act,
+            sym=module.sym,
+            in_features=module.in_features,
+            out_features=module.out_features,
+            pack_dtype=module.pack_dtype,
+            dtype=module.scales.dtype,
+            device=DEVICE.MPS,
+            adapter=module.adapter,
+        )
+        groups = module.in_features // module.group_size
+        return ok and (
+            tuple(module.qweight.shape)
+            == (module.out_features, module.in_features * module.bits // 8)
+            and tuple(module.qzeros.shape)
+            == (groups, module.out_features * module.bits // 8)
+            and tuple(module.scales.shape) == (module.out_features, groups)
+        )
+
+    @classmethod
+    def pack_source(cls, module):
+        if not cls.source_compatible(module):
+            raise ValueError("AWQ BitBLAS layout cannot be transferred to MLX")
+        weight, scales, biases = repack_awq_bitblas(
+            module.qweight.detach().cpu().numpy(),
+            module.qzeros.detach().cpu().numpy(),
+            module.scales.detach().to("cpu", torch.float16).numpy(),
+            module.in_features,
+            module.out_features,
+            module.bits,
+        )
+        params = cls.mlx_params(module)
+        if module.group_size > params["group_size"]:
+            repeats = module.group_size // params["group_size"]
+            scales = scales.repeat(repeats, axis=1)
+            biases = biases.repeat(repeats, axis=1)
+        return weight, scales, biases, params
 
 
 class AwqGemvMlxQuantLinear(_MlxLinearContract, AwqGEMVLinear):

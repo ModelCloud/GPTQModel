@@ -18,7 +18,8 @@ from huggingface_hub import snapshot_download
 from transformers import PreTrainedModel
 
 from ..models import BaseQModel
-from ..nn_modules.qlinear.mlx import (AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
+from ..nn_modules.qlinear.mlx import (AWQBitBLASMlxQuantLinear, AWQMarlinMlxQuantLinear,
+                                      AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
                                       AwqMlxQuantLinear, BitsAndBytesMlxQuantLinear,
                                       FP8MlxQuantLinear, GGUFMlxQuantLinear,
                                       GPTQBitBLASMlxQuantLinear, GPTQMarlinMlxQuantLinear,
@@ -80,6 +81,10 @@ def _exl3_signs(module, unpacked_name, packed_name, size):
 
 
 def _mlx_holder_class(module):
+    if isinstance(module, AWQBitBLASMlxQuantLinear):
+        return AWQBitBLASMlxQuantLinear
+    if isinstance(module, AWQMarlinMlxQuantLinear):
+        return AWQMarlinMlxQuantLinear
     if isinstance(module, GPTQBitBLASMlxQuantLinear):
         return GPTQBitBLASMlxQuantLinear
     if isinstance(module, GPTQMarlinMlxQuantLinear):
@@ -109,6 +114,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     """Transfer exact packed layers or decoded weight-only layers to MLX."""
     quantized = [(name, module) for name, module in model.named_modules()
                  if isinstance(module, (TorchLinear, GPTQBitBLASMlxQuantLinear,
+                                        AWQBitBLASMlxQuantLinear,
                                         AwqTorchLinear, QQQTorchLinear,
                                         GGUFTorchLinear, TorchFP8Linear, BitsAndBytesLinear,
                                         ExllamaV3TorchLinear, AwqGEMVLinear,
@@ -164,13 +170,12 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 gguf_q6_k.add(name)
             elif mlx_linear in (MlxQuantLinear, GPTQMarlinMlxQuantLinear):
                 gptq_group16.add(name)
-            elif mlx_linear is AwqMlxQuantLinear:
+            elif mlx_linear in (AwqMlxQuantLinear, AWQMarlinMlxQuantLinear):
                 awq_group16.add(name)
-        elif isinstance(module, GPTQBitBLASMlxQuantLinear):
+        elif isinstance(module, (GPTQBitBLASMlxQuantLinear, TorchLinear)):
             gptq_dtype.add(name)
-        elif isinstance(module, TorchLinear):
-            gptq_dtype.add(name)
-        elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
+        elif (isinstance(module, (AwqTorchLinear, AWQBitBLASMlxQuantLinear,
+                                  AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
               and not isinstance(module, ParoLinear)):
             awq_dtype.add(name)
         elif isinstance(module, GGUFTorchLinear):

@@ -120,6 +120,13 @@ def repack_gptq_bitblas(qweight, qzeros, scales, in_features, out_features, bits
     return _pack_rows(codes, bits), mlx_scales, biases
 
 
+def repack_awq_bitblas(qweight, qzeros, scales, in_features, out_features, bits=4):
+    """Transcode unsigned AWQ BitBLAS state to MLX affine rows."""
+    return repack_gptq_bitblas(
+        qweight, qzeros, scales, in_features, out_features, bits, False,
+    )
+
+
 def _unpack_awq_stream(packed, bits, count):
     """Decode AWQ's continuous little-endian row streams."""
     blocks = (count + 31) // 32
