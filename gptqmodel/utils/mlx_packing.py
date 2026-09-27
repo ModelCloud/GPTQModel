@@ -124,7 +124,6 @@ def repack_awq_bitblas(qweight, qzeros, scales, in_features, out_features, bits=
     """Transcode continuous 2-through-8-bit AWQ BitBLAS rows to MLX."""
     if bits not in (2, 3, 4, 5, 6, 7, 8) or in_features % 32:
         raise ValueError("AWQ BitBLAS to MLX requires 2-through-8-bit, 32-aligned inputs")
-    groups = scales.shape[1]
     if scales.shape[0] != out_features:
         raise ValueError("Unsupported AWQ BitBLAS scales shape")
 
