@@ -7,7 +7,7 @@
 from functools import lru_cache
 
 import mlx.core as mx
-import mlx.nn as nn
+from mlx import nn
 
 
 @lru_cache(maxsize=2)
@@ -70,6 +70,35 @@ def _dynamic_quant(x):
     )
 
 
+@lru_cache(maxsize=3)
+def _finalize_kernel(output_dtype):
+    """Apply QQQ output scales, FP16 rounding, bias, and dtype storage."""
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported QQQ activation dtype: {output_dtype}") from exc
+    return mx.fast.metal_kernel(
+        name=f"gptqmodel_qqq_finalize_{output_suffix}",
+        input_names=["raw", "input_scale", "channel_scale", "bias"],
+        output_names=["output"],
+        source="""
+            uint index = thread_position_in_grid.x;
+            uint column = index % N;
+            uint row = index / N;
+            half value = half(
+                float(raw[index]) * input_scale[row] * channel_scale[column]
+            );
+            if (HAS_BIAS) value = half(value + half(bias[column]));
+            output[index] = OUTPUT_TYPE(value);
+        """.replace("OUTPUT_TYPE", output_type),
+    )
+
+
 class MlxQQQLinear(nn.Module):
     """Preserve QQQ's per-token input scale and per-channel output scale."""
 
@@ -79,6 +108,8 @@ class MlxQQQLinear(nn.Module):
         self.channel_scale = mx.array(channel_scale)
         if bias is not None:
             self.bias = mx.array(bias)
+        else:
+            self.zero_bias = (mx.zeros((linear.weight.shape[0],), dtype=mx.float16),)
         self.freeze()
 
     def __call__(self, x):
@@ -87,7 +118,24 @@ class MlxQQQLinear(nn.Module):
             return mx.zeros((*x.shape[:-1], self.linear.weight.shape[0]), dtype=original_dtype)
         x = x.astype(mx.float16)
         quantized, input_scale = _dynamic_quant(x)
-        output = self.linear(quantized) * input_scale * self.channel_scale
+        raw = self.linear(quantized)
+        rows = x.size // x.shape[-1]
+        if rows == 1:
+            output_dims = self.linear.weight.shape[0]
+            return _finalize_kernel(original_dtype)(
+                inputs=[
+                    raw,
+                    input_scale,
+                    self.channel_scale,
+                    self.bias if "bias" in self else self.zero_bias[0],
+                ],
+                template=[("N", output_dims), ("HAS_BIAS", "bias" in self)],
+                grid=(rows * output_dims, 1, 1),
+                threadgroup=(256, 1, 1),
+                output_shapes=[(*x.shape[:-1], output_dims)],
+                output_dtypes=[original_dtype],
+            )[0]
+        output = raw * input_scale * self.channel_scale
         output = output.astype(mx.float16)
         if "bias" in self:
             output = output + self.bias
