@@ -33,7 +33,7 @@ from torch import nn
 from torch.nn import Module
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models.writer import (
@@ -43,20 +43,24 @@ from ..models.writer import (
     PROCESS_LOG_NAME,
     PROCESS_LOG_TIME,
     PROCESS_USED_MEMORY,
+    QUANT_LOG_DAMP,
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
-    QUANT_LOG_DAMP,
 )
 from ..nn_modules.hooked_linear import HookedLinear
 from ..nn_modules.qlinear.paroquant import ParoLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.mlx_paroquant_optimize import (
+    optimize_paroquant_linear_mlx_to_torch,
+    paroquant_mlx_optimization_available,
+)
 from ..quantization.paroquant.optimization import (
-    _ParoQuantOptimLinear,
     _activate_stage_params,
     _normalize_group_size,
     _normalize_opt_impl,
     _normalize_opt_optimizer,
     _normalize_quantizer_impl,
+    _ParoQuantOptimLinear,
     _quantizer_sym_for_impl,
     _resolve_best_state_snapshot_dtype,
     _result_from_model,
@@ -79,6 +83,7 @@ from ..utils.model import (
 from ..utils.module_locks import parent_module_lock
 from ..utils.paroquant import prewarm_paroquant_rotation_extension
 from ..utils.torch import CPU, torch_empty_cache
+
 
 log = setup_logger()
 
@@ -457,6 +462,62 @@ class ParoQuantProcessor(LoopProcessor):
         if inputs.numel() == 0:
             inputs = torch.empty((0, weight.shape[1]), dtype=weight.dtype, device=weight.device)
         module_seed = self._module_seed(module.layer_index, module.full_name)
+
+        use_mlx = (
+            inputs.numel() > 0
+            and weight.device.type in {"cpu", "mps"}
+            and paroquant_mlx_optimization_available()
+            and self._opt_scope_mode() == "module"
+            and self.qcfg.opt_stage_impl == "fast"
+            and not self._gradient_checkpointing_enabled()
+        )
+        if use_mlx:
+            normalized_group_size = _normalize_group_size(group_size, weight.shape[1])
+            normalized_pair_impl = _normalize_opt_impl(self.qcfg.opt_pair_impl, field="pair_impl")
+            pair_builder = (
+                build_random_rotation_buffers_reference
+                if normalized_pair_impl == "reference"
+                else build_random_rotation_buffers
+            )
+            pairs, theta_mask = pair_builder(
+                in_features=weight.shape[1],
+                group_size=normalized_group_size,
+                krot=self.qcfg.krot,
+                pair_ratio=self.qcfg.opt_pair_ratio,
+                seed=module_seed,
+                device=weight.device,
+            )
+            result = optimize_paroquant_linear_mlx_to_torch(
+                weight=weight,
+                bias=bias,
+                inputs=inputs,
+                pairs=pairs,
+                theta_mask=theta_mask,
+                bits=bits,
+                group_size=normalized_group_size,
+                symmetric=_quantizer_sym_for_impl(sym, self.qcfg.opt_quantizer_impl),
+                train_rows=self.qcfg.opt_train_samples,
+                val_rows=self.qcfg.opt_validation_samples,
+                batch_size=self.qcfg.opt_batch_size,
+                rotation_epochs=self.qcfg.opt_rotation_epochs,
+                finetune_epochs=self.qcfg.opt_finetune_epochs,
+                rotation_lr=self.qcfg.opt_rotation_lr,
+                weight_lr=self.qcfg.opt_weight_lr,
+                quantizer_lr=self.qcfg.opt_quantizer_lr,
+                optimizer_name=getattr(self.qcfg, "opt_optimizer", "adamw"),
+                optimizer_weight_decay=float(getattr(self.qcfg, "opt_weight_decay", 0.01)),
+                optimizer_betas=tuple(getattr(self.qcfg, "opt_betas", (0.9, 0.95))),
+                optimizer_eps=float(getattr(self.qcfg, "opt_eps", 1e-10)),
+                optimizer_amsgrad=bool(getattr(self.qcfg, "opt_amsgrad", False)),
+                sgd_momentum=float(getattr(self.qcfg, "opt_sgd_momentum", 0.0)),
+                sgd_dampening=float(getattr(self.qcfg, "opt_sgd_dampening", 0.0)),
+                sgd_nesterov=bool(getattr(self.qcfg, "opt_sgd_nesterov", False)),
+                best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
+                scale_clamp_min=self.qcfg.opt_channel_scale_clamp_min,
+                scale_clamp_max=self.qcfg.opt_channel_scale_clamp_max,
+            )
+            self._apply_optimization_result(module, result, original_weight)
+            return result.train_loss, result.val_loss
 
         with torch.inference_mode(False), torch.enable_grad():
             result = optimize_paroquant_linear(
