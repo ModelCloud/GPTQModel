@@ -28,13 +28,23 @@ from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 FORMAT_CASES = (
     ("marlin", 4, AWQMarlinMlxQuantLinear),
     ("marlin", 8, AWQMarlinMlxQuantLinear),
-    ("bitblas", 4, AWQBitBLASMlxQuantLinear),
+    *(("bitblas", bits, AWQBitBLASMlxQuantLinear) for bits in range(2, 9)),
 )
 
 
 def _repeated_word(code, bits):
     value = sum(int(code) << shift for shift in range(0, 32, bits))
     return np.asarray(value, dtype=np.uint32).view(np.int32).item()
+
+
+def _pack_bytes(codes, bits):
+    code_bits = (
+        codes.astype(np.uint16)[..., None]
+        >> np.arange(bits, dtype=np.uint16)
+    ) & 1
+    return np.packbits(
+        code_bits.reshape(*codes.shape[:-1], -1), axis=-1, bitorder="little",
+    ).view(np.int8)
 
 
 def _source(fmt, bits, source_cls, in_features, out_features):
@@ -59,11 +69,19 @@ def _source(fmt, bits, source_cls, in_features, out_features):
         source.qzeros.fill_(_repeated_word(zero, bits))
         source.scales.fill_(0.002)
     else:
-        source.qweight.fill_(
-            np.asarray(low | (high << 4), dtype=np.uint8).view(np.int8).item(),
+        weight_row = np.resize(
+            np.asarray((low, high), dtype=np.uint8), in_features,
+        )[None, :]
+        zero_row = np.full((1, out_features), zero, dtype=np.uint8)
+        source.qweight.copy_(
+            torch.from_numpy(np.broadcast_to(
+                _pack_bytes(weight_row, bits), source.qweight.shape,
+            ).copy()),
         )
-        source.qzeros.fill_(
-            np.asarray(zero | (zero << 4), dtype=np.uint8).view(np.int8).item(),
+        source.qzeros.copy_(
+            torch.from_numpy(np.broadcast_to(
+                _pack_bytes(zero_row, bits), source.qzeros.shape,
+            ).copy()),
         )
         source.scales.fill_(0.002)
     source.bias.copy_(
@@ -102,7 +120,19 @@ def _measure_pair(main_fn, format_fn, samples):
     return median(timings[0]), median(timings[1])
 
 
-def run(samples):
+def _rounded_oracle(x, bias, in_features, dtype):
+    values = torch.tensor((-0.002, 0.002), dtype=torch.float64).repeat(
+        in_features // 2,
+    )
+    projection = torch.from_numpy(
+        np.asarray(x.astype(mx.float32)),
+    ).double() @ values
+    output = projection[:, None] + bias.double()[None, :]
+    target = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    return output.to(target).float().numpy()
+
+
+def run(samples, summary_only=False):
     mx.random.seed(3234)
     results = []
     for fmt, bits, source_cls in FORMAT_CASES:
@@ -117,9 +147,15 @@ def run(samples):
                 main_output = main_layer(x)
                 format_output = format_layer(x)
                 mx.eval(main_output, format_output)
+                if main_output.dtype != dtype or format_output.dtype != dtype:
+                    raise AssertionError("AWQ MLX benchmark output dtype changed")
                 difference = mx.abs(
                     main_output.astype(mx.float32)
                     - format_output.astype(mx.float32),
+                )
+                expected = _rounded_oracle(x, source.bias, in_features, dtype)
+                oracle_difference = np.abs(
+                    np.asarray(format_output.astype(mx.float32)) - expected,
                 )
                 main_ms, format_ms = _measure_pair(
                     lambda layer=main_layer, x=x: layer(x),
@@ -135,9 +171,11 @@ def run(samples):
                     "format_ms": format_ms,
                     "runtime_ratio": main_ms / format_ms,
                     "max_abs_vs_main_runtime": float(mx.max(difference).item()),
+                    "max_abs_vs_rounded_torch": float(oracle_difference.max()),
                 }
                 results.append(result)
-                print(json.dumps(result), flush=True)
+                if not summary_only:
+                    print(json.dumps(result), flush=True)
                 del source, main_layer, format_layer, x, main_output, format_output
                 mx.clear_cache()
                 gc.collect()
@@ -167,6 +205,9 @@ def run(samples):
                 "max_abs_vs_main_runtime": max(
                     row["max_abs_vs_main_runtime"] for row in group
                 ),
+                "max_abs_vs_rounded_torch": max(
+                    row["max_abs_vs_rounded_torch"] for row in group
+                ),
             }), flush=True)
     print(json.dumps({
         "summary": "overall",
@@ -179,10 +220,15 @@ def run(samples):
         "max_abs_vs_main_runtime": max(
             row["max_abs_vs_main_runtime"] for row in results
         ),
+        "max_abs_vs_rounded_torch": max(
+            row["max_abs_vs_rounded_torch"] for row in results
+        ),
     }), flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, default=301)
-    run(parser.parse_args().samples)
+    parser.add_argument("--summary-only", action="store_true")
+    args = parser.parse_args()
+    run(args.samples, args.summary_only)
