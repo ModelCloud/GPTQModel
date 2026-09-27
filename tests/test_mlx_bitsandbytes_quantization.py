@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# bitsandbytes: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
-# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Independent bitsandbytes CPU-oracle checks for MLX weight quantization."""
 
@@ -20,6 +18,7 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 bnb = pytest.importorskip("bitsandbytes")
 
+import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_linear  # noqa: E402
 from gptqmodel.quantization.mlx_bitsandbytes import (  # noqa: E402
     _FP4,
     _NF4,
@@ -28,7 +27,6 @@ from gptqmodel.quantization.mlx_bitsandbytes import (  # noqa: E402
     quantize_4bit_weight_mlx,
     quantize_int8_weight_mlx,
 )
-
 
 BLOCK_SIZES = (32, 64, 128, 256, 512, 1024, 2048, 4096)
 SOURCE_DTYPES = (torch.float16, torch.bfloat16)
@@ -260,6 +258,95 @@ def test_int8_zero_rows_and_rounding_boundaries():
     source[1, :6] = torch.tensor([1.48046875, 2.9609375, -1.48046875, -2.9609375, 0, -0.0])
     source[2, :4] = torch.tensor([1.376953125, 2.75390625, -1.376953125, -2.75390625])
     _check_int8(source)
+
+
+@pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
+@pytest.mark.parametrize("compressed", [False, True])
+@pytest.mark.parametrize("dtype", SOURCE_DTYPES)
+def test_4bit_processor_uses_mlx_with_exact_serialized_state(
+    monkeypatch, quant_type, compressed, dtype
+):
+    code = bnb.functional.get_4bit_type(quant_type, device="cpu")
+    sorted_code = code.sort().values
+    midpoints = (sorted_code[:-1] + sorted_code[1:]) / 2
+    values = torch.cat(
+        [
+            torch.tensor([1.0, -1.0, 0.0, -0.0]),
+            torch.nextafter(midpoints, torch.full_like(midpoints, -float("inf"))),
+            midpoints,
+            torch.nextafter(midpoints, torch.full_like(midpoints, float("inf"))),
+        ]
+    )
+    source = (
+        torch.cat([values, torch.zeros(128 - values.numel())])
+        .reshape(2, 64)
+        .to(dtype)
+    )
+    expected_weight, expected_state = bnb.functional.quantize_4bit(
+        source,
+        quant_type=quant_type,
+        blocksize=64,
+        compress_statistics=compressed,
+        quant_storage=torch.uint8,
+    )
+    expected_payload = expected_state.as_dict(packed=True)
+
+    linear = torch.nn.Linear(64, 2, bias=False, dtype=dtype)
+    linear.weight.data.copy_(source)
+    kernel = bnb_linear.BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+        format=quant_type,
+        block_size=64,
+        compress_statistics=compressed,
+        dtype=dtype,
+    )
+    monkeypatch.setattr(bnb_linear, "_MLX_4BIT_MIN_ELEMENTS", 0)
+
+    def reject_torch_quantization(*args, **kwargs):
+        raise AssertionError("processor fell back to bitsandbytes quantization")
+
+    monkeypatch.setattr(bnb.functional, "quantize_4bit", reject_torch_quantization)
+    kernel.pack_original(linear, None, None)
+
+    torch.testing.assert_close(kernel.weight, expected_weight, rtol=0, atol=0)
+    for key, expected in expected_payload.items():
+        actual = kernel._buffers[bnb_linear._packed_state_key_to_buffer_name(key)]
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_4bit_processor_keeps_torch_path_below_mlx_crossover(monkeypatch):
+    linear = torch.nn.Linear(64, 2, bias=False, dtype=torch.float16)
+    kernel = bnb_linear.BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=64,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+        format="nf4",
+        block_size=64,
+        compress_statistics=True,
+        dtype=torch.float16,
+    )
+
+    def reject_mlx_quantization(*args, **kwargs):
+        raise AssertionError("small processor weight used the slower MLX path")
+
+    monkeypatch.setattr(
+        bnb_linear,
+        "_quantize_4bit_weight_mlx_to_torch",
+        reject_mlx_quantization,
+    )
+    kernel.pack_original(linear, None, None)
 
 
 @pytest.mark.parametrize("quant_type", ["nf4", "fp4"])

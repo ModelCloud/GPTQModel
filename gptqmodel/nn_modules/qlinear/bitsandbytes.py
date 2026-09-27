@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import platform
+import sys
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
@@ -23,7 +25,6 @@ from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
 
-
 log = setup_logger()
 
 MINIMUM_BITSANDBYTES_VERSION = "0.49.0"
@@ -40,6 +41,7 @@ _BITSANDBYTES_4BIT_STATE_BUFFER_NAMES = (
     "weight_quant_state",
 )
 _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
+_MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -58,6 +60,69 @@ def import_bitsandbytes():
     if version.parse(bnb.__version__) < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
     return bnb
+
+
+@lru_cache(maxsize=1)
+def _mlx_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx_array_to_cpu_tensor(value) -> torch.Tensor:
+    return torch.from_dlpack(value).cpu().contiguous()
+
+
+def _quantize_4bit_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    *,
+    bnb,
+    quant_type: str,
+    block_size: int,
+    compress_statistics: bool,
+):
+    import mlx.core as mx
+
+    from ...quantization.mlx_bitsandbytes import quantize_4bit_weight_mlx
+
+    packed, absmax = quantize_4bit_weight_mlx(
+        mx.from_dlpack(weight),
+        quant_type=quant_type,
+        block_size=block_size,
+        compress_statistics=False,
+    )
+    absmax = _mlx_array_to_cpu_tensor(absmax)
+    code = bnb.functional.get_4bit_type(quant_type, device="cpu")
+    if compress_statistics:
+        offset = absmax.mean()
+        nested_absmax, nested_state = bnb.functional.quantize_blockwise(
+            absmax - offset,
+            blocksize=256,
+        )
+        quant_state = bnb.functional.QuantState(
+            absmax=nested_absmax,
+            shape=weight.shape,
+            code=code,
+            blocksize=block_size,
+            quant_type=quant_type,
+            dtype=weight.dtype,
+            offset=offset,
+            state2=nested_state,
+        )
+    else:
+        quant_state = bnb.functional.QuantState(
+            absmax=absmax,
+            shape=weight.shape,
+            code=code,
+            blocksize=block_size,
+            quant_type=quant_type,
+            dtype=weight.dtype,
+        )
+    return _mlx_array_to_cpu_tensor(packed), quant_state
 
 
 BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
@@ -348,13 +413,25 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
         if self.is_4bit:
             weight = weight.to(torch.float32 if self.compute_dtype == torch.float32 else self.compute_dtype)
-            qweight, quant_state = bnb.functional.quantize_4bit(
-                weight,
-                blocksize=self.bnb_block_size,
-                compress_statistics=self.bnb_compress_statistics,
-                quant_type=self.bnb_format,
-                quant_storage=torch.uint8,
-            )
+            if (
+                _mlx_quantization_available()
+                and weight.numel() >= _MLX_4BIT_MIN_ELEMENTS
+            ):
+                qweight, quant_state = _quantize_4bit_weight_mlx_to_torch(
+                    weight,
+                    bnb=bnb,
+                    quant_type=self.bnb_format,
+                    block_size=self.bnb_block_size,
+                    compress_statistics=self.bnb_compress_statistics,
+                )
+            else:
+                qweight, quant_state = bnb.functional.quantize_4bit(
+                    weight,
+                    blocksize=self.bnb_block_size,
+                    compress_statistics=self.bnb_compress_statistics,
+                    quant_type=self.bnb_format,
+                    quant_storage=torch.uint8,
+                )
             self._buffers["weight"] = qweight.contiguous()
             for key, tensor in quant_state.as_dict(packed=True).items():
                 self._buffers[_packed_state_key_to_buffer_name(key)] = tensor.contiguous()
