@@ -121,10 +121,33 @@ def repack_gptq_bitblas(qweight, qzeros, scales, in_features, out_features, bits
 
 
 def repack_awq_bitblas(qweight, qzeros, scales, in_features, out_features, bits=4):
-    """Transcode unsigned AWQ BitBLAS state to MLX affine rows."""
-    return repack_gptq_bitblas(
-        qweight, qzeros, scales, in_features, out_features, bits, False,
-    )
+    """Transcode continuous 2-through-8-bit AWQ BitBLAS rows to MLX."""
+    if bits not in (2, 3, 4, 5, 6, 7, 8) or in_features % 32:
+        raise ValueError("AWQ BitBLAS to MLX requires 2-through-8-bit, 32-aligned inputs")
+    if scales.shape[0] != out_features:
+        raise ValueError("Unsupported AWQ BitBLAS scales shape")
+
+    def unpack(packed, count):
+        expected_bytes = count * bits // 8
+        if packed.shape[-1] != expected_bytes:
+            raise ValueError("Unsupported AWQ BitBLAS packed stream shape")
+        raw = packed.view(np.uint8)
+        padded = np.pad(raw, (*((0, 0),) * (raw.ndim - 1), (0, 1)))
+        bit_offsets = np.arange(count, dtype=np.uint32) * bits
+        byte_offsets = bit_offsets >> 3
+        shifts = bit_offsets & 7
+        windows = (
+            padded[..., byte_offsets].astype(np.uint16)
+            | padded[..., byte_offsets + 1].astype(np.uint16) << 8
+        )
+        return ((windows >> shifts) & ((1 << bits) - 1)).astype(np.uint32)
+
+    codes = unpack(qweight, in_features)
+    zeros = unpack(qzeros, out_features).T
+    mlx_scales = np.ascontiguousarray(scales.astype(np.float16))
+    biases = -zeros.astype(np.float32) * mlx_scales.astype(np.float32)
+    target_bits = 8 if bits == 7 else bits
+    return _pack_rows(codes, target_bits), mlx_scales, biases
 
 
 def _unpack_awq_stream(packed, bits, count):

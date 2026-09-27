@@ -432,7 +432,7 @@ class AWQBitBLASMlxQuantLinear(_MlxLinearContract, AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.MLX]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.BITBLAS: 0}
-    SUPPORTS_BITS = [4]
+    SUPPORTS_BITS = [2, 3, 4, 5, 6, 7, 8]
     SUPPORTS_GROUP_SIZE = [-1, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]

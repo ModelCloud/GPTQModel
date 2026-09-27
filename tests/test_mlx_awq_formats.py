@@ -23,16 +23,17 @@ nn = pytest.importorskip("mlx.nn")
 FORMAT_CASES = (
     ("marlin", 4, "AWQMarlinMlxQuantLinear"),
     ("marlin", 8, "AWQMarlinMlxQuantLinear"),
-    ("bitblas", 4, "AWQBitBLASMlxQuantLinear"),
+    *(("bitblas", bits, "AWQBitBLASMlxQuantLinear") for bits in range(2, 9)),
 )
 
 
 def _pack_bytes(codes, bits):
-    values = 8 // bits
-    shifts = np.arange(values, dtype=np.uint8) * bits
-    return np.bitwise_or.reduce(
-        codes.reshape(*codes.shape[:-1], -1, values).astype(np.uint8) << shifts,
-        axis=-1,
+    code_bits = (
+        codes.astype(np.uint16)[..., None]
+        >> np.arange(bits, dtype=np.uint16)
+    ) & 1
+    return np.packbits(
+        code_bits.reshape(*codes.shape[:-1], -1), axis=-1, bitorder="little",
     ).view(np.int8)
 
 
@@ -144,7 +145,11 @@ def test_awq_checkpoint_formats_auto_select_mlx(fmt, bits, expected):
     ) == BACKEND.MLX
 
 
-@pytest.mark.parametrize("fmt,bits", (("marlin", 2), ("bitblas", 2), ("bitblas", 8)))
+@pytest.mark.parametrize(
+    "fmt,bits",
+    (("marlin", 2), ("marlin", 3), ("marlin", 5), ("marlin", 6),
+     ("marlin", 7), ("bitblas", 1), ("bitblas", 9)),
+)
 def test_awq_checkpoint_formats_reject_unsupported_bits(fmt, bits):
     from gptqmodel.models._const import DEVICE
     from gptqmodel.quantization import FORMAT, METHOD
@@ -223,9 +228,9 @@ def test_awq_formats_all_capabilities_match_torch(
     from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
 
     assert isinstance(model.linear, MlxAWQLinear)
-    assert (
-        model.linear.linear.weight.nbytes
-        == source.qweight.numel() * source.qweight.element_size()
+    target_bits = 8 if bits == 7 else bits
+    assert model.linear.linear.weight.nbytes == (
+        out_features * in_features * target_bits // 8
     )
     inputs = mx.array(
         rng.normal(0, 0.1, (2, 3, in_features)).astype(np.float32),
@@ -272,10 +277,19 @@ def test_awq_formats_qwen38_projection_accuracy(
         source.qzeros.fill_(_repeated_word(zero, bits))
         source.scales.fill_(0.002)
     else:
-        packed_pair = np.asarray(low | (high << 4), dtype=np.uint8).view(np.int8).item()
-        source.qweight.fill_(packed_pair)
-        source.qzeros.fill_(
-            np.asarray(zero | (zero << 4), dtype=np.uint8).view(np.int8).item(),
+        weight_row = np.resize(
+            np.asarray((low, high), dtype=np.uint8), in_features,
+        )[None, :]
+        zero_row = np.full((1, out_features), zero, dtype=np.uint8)
+        source.qweight.copy_(
+            torch.from_numpy(np.broadcast_to(
+                _pack_bytes(weight_row, bits), source.qweight.shape,
+            ).copy()),
+        )
+        source.qzeros.copy_(
+            torch.from_numpy(np.broadcast_to(
+                _pack_bytes(zero_row, bits), source.qzeros.shape,
+            ).copy()),
         )
         source.scales.fill_(0.002)
     source.bias.copy_(
