@@ -1603,10 +1603,11 @@ def ModelLoader(cls):
             return instance
 
         if format_code == FORMAT.MARLIN:
-            # format marlin requires marlin kernel
+            # CUDA requires the matching Marlin kernel; MLX transcodes AWQ/GPTQ
+            # source packing into the native Metal layout during model loading.
             expected_marlin_backend = BACKEND.AWQ_MARLIN if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_MARLIN
             expected_marlin_backends = [expected_marlin_backend]
-            if backend == BACKEND.MLX and qcfg.quant_method == METHOD.GPTQ:
+            if backend == BACKEND.MLX:
                 pass
             elif backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
@@ -1625,9 +1626,10 @@ def ModelLoader(cls):
         #         )
 
         if format_code == FORMAT.BITBLAS:
-            # format bitblas requires bitblas kernel
+            # CUDA requires BitBLAS; MLX transcodes the portable AWQ/GPTQ
+            # checkpoint tensors without importing the CUDA runtime.
             expected_backend = BACKEND.AWQ_BITBLAS if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_BITBLAS
-            if backend == BACKEND.MLX and qcfg.quant_method == METHOD.GPTQ:
+            if backend == BACKEND.MLX:
                 pass
             elif backend != expected_backend and backend != BACKEND.AUTO:
                 raise TypeError(
