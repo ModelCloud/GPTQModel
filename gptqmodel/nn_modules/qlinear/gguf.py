@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import math
 import os
+import platform
+import sys
 import time
+from functools import lru_cache
 
 import numpy as np
 import torch
@@ -107,6 +110,27 @@ _GGUF_SIGN_ONLY_LUT = (
     np.unpackbits(np.arange(256, dtype=np.uint8)[:, None], axis=1, bitorder="little").astype(np.int8) * 2 - 1
 )
 _GGUF_SIGN_ONLY_TORCH_LUT: dict[str, torch.Tensor] = {}
+_MLX_GGUF_MIN_ELEMENTS = 2 * 1024 * 1024
+
+
+@lru_cache(maxsize=1)
+def _mlx_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _gguf_quantize_weight_mlx_to_torch(weight: torch.Tensor, tensor_qtype: str) -> torch.Tensor:
+    import mlx.core as mx
+
+    from ...quantization.mlx_gguf import gguf_quantize_weight_mlx
+
+    packed = gguf_quantize_weight_mlx(mx.from_dlpack(weight), tensor_qtype)
+    return torch.from_dlpack(packed).cpu().contiguous()
 
 
 def _normalize_gguf_bits(bits) -> tuple[GGUFBits, str]:
@@ -995,7 +1019,11 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         if weight.shape[1] != self.padded_in_features:
             weight = torch.nn.functional.pad(weight, (0, self.padded_in_features - weight.shape[1]))
 
-        quantized = _gguf_quantize(weight.contiguous().numpy(), self.gguf_tensor_qtype)
+        weight = weight.contiguous()
+        if _mlx_quantization_available() and weight.numel() >= _MLX_GGUF_MIN_ELEMENTS:
+            return _gguf_quantize_weight_mlx_to_torch(weight, self.gguf_tensor_qtype)
+
+        quantized = _gguf_quantize(weight.numpy(), self.gguf_tensor_qtype)
         return torch.from_numpy(np.ascontiguousarray(quantized)).to(torch.uint8)
 
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
