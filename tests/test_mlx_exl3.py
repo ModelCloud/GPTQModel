@@ -8,7 +8,6 @@ import numpy as np
 import pytest
 import torch
 
-
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 
@@ -112,3 +111,53 @@ def test_exl3_mlx_unpacks_legacy_sign_bitfields(monkeypatch):
     expected_sv = torch.where((sv.view(torch.uint16).int()[:, None] & masks) != 0, -1.0, 1.0)
     np.testing.assert_array_equal(np.array(model.linear.suh), expected_su.flatten().half().numpy())
     np.testing.assert_array_equal(np.array(model.linear.svh), expected_sv.flatten().half().numpy())
+
+
+@pytest.mark.parametrize("dtype", (mx.float16, mx.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("codebook", ("3inst", "mcg", "mul1"))
+@pytest.mark.parametrize("bits", range(1, 9), ids=lambda bits: f"{bits}bit")
+def test_exl3_mlx_fused_row_matches_torch_decoder(bits, codebook, dtype, record_property):
+    from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
+    from gptqmodel.nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
+
+    generator = torch.Generator(device="cpu").manual_seed(313 + bits)
+    in_features, out_features = 128, 256
+    tensors = {
+        "trellis": torch.randint(
+            -32768, 32767,
+            (in_features // 16, out_features // 16, bits * 16),
+            dtype=torch.int16, generator=generator,
+        ),
+        "suh": torch.randint(
+            0, 2, (in_features,), dtype=torch.int8, generator=generator,
+        ).half() * 2 - 1,
+        "svh": torch.randint(
+            0, 2, (out_features,), dtype=torch.int8, generator=generator,
+        ).half() * 2 - 1,
+        "bias": torch.randn(out_features, dtype=torch.float16, generator=generator) * 0.01,
+    }
+    if codebook != "3inst":
+        tensors[codebook] = torch.tensor([1], dtype=torch.uint32)
+    reference = ExllamaV3TorchLinear.from_tensors(
+        in_features=in_features, out_features=out_features,
+        name="reference", tensors=tensors,
+    )
+    layer = MlxEXL3Linear(in_features, out_features, bits, codebook, bias=True)
+    layer.trellis = mx.array(tensors["trellis"].numpy())
+    layer.suh = mx.array(tensors["suh"].numpy())
+    layer.svh = mx.array(tensors["svh"].numpy())
+    layer.bias = mx.array(tensors["bias"].numpy())
+    x = mx.array(
+        np.random.default_rng(313 + bits).normal(0, 0.15, (1, in_features)).astype(np.float32),
+    ).astype(dtype)
+    actual = layer(x)
+    mx.eval(actual)
+    assert actual.dtype == dtype
+    torch_dtype = torch.float16 if dtype == mx.float16 else torch.bfloat16
+    torch_input = torch.from_numpy(np.asarray(x.astype(mx.float32))).double()
+    expected = (torch_input @ reference.get_weight_tensor(dtype=torch.float32).double()
+                + tensors["bias"].double()).to(torch_dtype).float().numpy()
+    visible = np.asarray(actual.astype(mx.float32))
+    max_abs = float(np.max(np.abs(visible - expected)))
+    record_property("max_abs_vs_torch_dense", max_abs)
+    np.testing.assert_allclose(visible, expected, rtol=0.01, atol=0.01)
