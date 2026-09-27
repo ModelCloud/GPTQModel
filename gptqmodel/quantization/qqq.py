@@ -4,8 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import platform
+import sys
 import threading
 import time
+from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
@@ -26,6 +29,75 @@ from .npu_linalg import npu_inverse_cholesky_factor
 DEBUG = False
 
 log = setup_logger()
+
+_MLX_QQQ_MIN_ELEMENTS = 4_194_304
+
+
+@lru_cache(maxsize=1)
+def _mlx_qqq_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx_array_to_torch(value, device: torch.device) -> torch.Tensor:
+    return torch.from_dlpack(value).to(device=device).contiguous()
+
+
+def _qqq_quantize_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    inverse_hessian: torch.Tensor,
+    *,
+    group_size: int,
+):
+    import mlx.core as mx
+
+    from .mlx_qqq import qqq_quantize_weight_mlx_with_loss
+
+    if weight.device.type == "mps":
+        torch.mps.synchronize()
+    result = qqq_quantize_weight_mlx_with_loss(
+        mx.from_dlpack(weight.contiguous()),
+        mx.from_dlpack(inverse_hessian.contiguous()),
+        group_size=group_size,
+    )
+    return tuple(
+        None if value is None else _mlx_array_to_torch(value, weight.device)
+        for value in result
+    )
+
+
+def _should_use_mlx_qqq_quantization(
+    weight: torch.Tensor,
+    inverse_hessian: Optional[torch.Tensor],
+    quantizer,
+    *,
+    group_size: int,
+    static_groups: bool,
+    blocksize: int,
+) -> bool:
+    expected_maxq = 7 if group_size == -1 else 15
+    return (
+        not DEBUG
+        and inverse_hessian is not None
+        and _mlx_qqq_quantization_available()
+        and weight.device.type in {"cpu", "mps"}
+        and inverse_hessian.device == weight.device
+        and weight.numel() >= _MLX_QQQ_MIN_ELEMENTS
+        and blocksize == 128
+        and group_size in {-1, 128}
+        and (group_size == -1 or weight.shape[1] % group_size == 0)
+        and not static_groups
+        and bool(quantizer.sym)
+        and not bool(quantizer.mse)
+        and int(quantizer.groupsize) == group_size
+        and int(quantizer.maxq.item()) == expected_maxq
+    )
+
 
 def quantize(x, scale, zero, maxq, sym, groupsize):
     if maxq < 0:
@@ -503,7 +575,11 @@ class QQQ:
             blocksize=128,
     ):
         start = time.time()
-        from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
+        from ..utils.fallback import (
+            resolve_fallback_strategy,
+            resolve_threshold,
+            should_use_fallback,
+        )
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
@@ -561,9 +637,6 @@ class QQQ:
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
 
-        Losses = torch.zeros_like(W)
-        Q = torch.zeros_like(W)
-
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=H.device)
         H[diag, diag] += damp
@@ -601,74 +674,104 @@ class QQQ:
             else:
                 raise
 
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
+        use_mlx = _should_use_mlx_qqq_quantization(
+            W,
+            Hinv,
+            self.quantizer,
+            group_size=groupsize,
+            static_groups=static_groups,
+            blocksize=blocksize,
+        )
+        scale_extra = None
+        if use_mlx:
+            Q, mlx_scale, mlx_zero, _, mlx_loss = (
+                _qqq_quantize_weight_mlx_to_torch(
+                    W,
+                    Hinv,
+                    group_size=groupsize,
+                )
+            )
+            scale.append(mlx_scale)
+            zero.append(mlx_zero)
+            loss_sum = float(mlx_loss.item())
+        else:
+            Losses = torch.zeros_like(W)
+            Q = torch.zeros_like(W)
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+                W1 = W[:, i1:i2].clone()
+                Q1 = torch.zeros_like(W1)
+                Err1 = torch.zeros_like(W1)
+                Losses1 = torch.zeros_like(W1)
+                Hinv1 = Hinv[i1:i2, i1:i2]
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+                for i in range(count):
+                    w = W1[:, i]
+                    d = Hinv1[i, i]
 
-                if groupsize != -1:
-                    if not static_groups:
-                        if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i): (i1 + i + groupsize)], weight=True
-                            )
+                    if groupsize != -1:
+                        if not static_groups:
+                            if (i1 + i) % groupsize == 0:
+                                self.quantizer.find_params(
+                                    W[:, (i1 + i): (i1 + i + groupsize)], weight=True
+                                )
 
-                        if ((i1 + i) // groupsize) - now_idx == -1:
-                            scale.append(self.quantizer.scale)
-                            zero.append(self.quantizer.zero)
-                            now_idx += 1
-                    else:
-                        idx = i1 + i
-                        if actorder:
-                            idx = perm[idx]
-                        self.quantizer = groups[idx // groupsize]
+                            if ((i1 + i) // groupsize) - now_idx == -1:
+                                scale.append(self.quantizer.scale)
+                                zero.append(self.quantizer.zero)
+                                now_idx += 1
+                        else:
+                            idx = i1 + i
+                            if actorder:
+                                idx = perm[idx]
+                            self.quantizer = groups[idx // groupsize]
 
-                q = quantize(
-                    w.unsqueeze(1),
-                    self.quantizer.scale,
-                    self.quantizer.zero,
-                    self.quantizer.maxq,
-                    self.quantizer.sym,
-                    self.quantizer.groupsize,
-                ).flatten()
-                Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d ** 2
+                    q = quantize(
+                        w.unsqueeze(1),
+                        self.quantizer.scale,
+                        self.quantizer.zero,
+                        self.quantizer.maxq,
+                        self.quantizer.sym,
+                        self.quantizer.groupsize,
+                    ).flatten()
+                    Q1[:, i] = q
+                    Losses1[:, i] = (w - q) ** 2 / d ** 2
 
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                    err1 = (w - q) / d
+                    W1[:, i:] -= err1.unsqueeze(1).matmul(
+                        Hinv1[i, i:].unsqueeze(0)
+                    )
+                    Err1[:, i] = err1
 
-            Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+                Q[:, i1:i2] = Q1
+                Losses[:, i1:i2] = Losses1 / 2
 
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
-            if DEBUG:
-                self.layer.weight.data[:, :i2] = Q[:, :i2]
-                self.layer.weight.data[:, i2:] = W[:, i2:]
-                print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                print(torch.sum(Losses))
+                if DEBUG:
+                    self.layer.weight.data[:, :i2] = Q[:, :i2]
+                    self.layer.weight.data[:, i2:] = W[:, i2:]
+                    print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+                    print(torch.sum(Losses))
+            loss_sum = torch.sum(Losses).item()
+            del Losses
 
-        torch.cuda.synchronize()
+        if W.device.type == "cuda":
+            torch.cuda.synchronize(W.device)
+        elif W.device.type == "mps":
+            torch.mps.synchronize()
         print("time %.2f" % (time.time() - tick))
-        print("error", torch.sum(Losses).item())
+        print("error", loss_sum)
 
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                avg_loss = loss_sum / self.nsamples
 
                 if math.isnan(avg_loss):
-                    print("Losses sum item:", torch.sum(Losses).item())
+                    print("Losses sum item:", loss_sum)
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
@@ -683,8 +786,6 @@ class QQQ:
                 avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
         else:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
-
-        del Losses
 
         groupsize = groupsize if groupsize != -1 else self.columns
         if static_groups and actorder:
@@ -724,8 +825,7 @@ class QQQ:
         Q = Q.to(device=self.layer.weight.data.device, non_blocking=False)
 
         # post int8 quant
-        scale_extra = None
-        if groupsize != self.columns:
+        if scale_extra is None and groupsize != self.columns:
             quantizer_extra = Quantizer()
             quantizer_extra.configure(
                 bits=8,
