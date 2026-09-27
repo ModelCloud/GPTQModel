@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# QQQ method: Meituan, Ying Zhang et al., https://arxiv.org/abs/2406.09904
-
 """Opt-in native MLX QQQ weight quantization for Apple silicon."""
 
 from functools import lru_cache
@@ -97,7 +95,13 @@ def _qqq_fixed_params(group):
     return (maximum / 7)[:, None], mx.zeros((group.shape[0], 1))
 
 
-def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
+def _qqq_quantize_weight_mlx(
+    weight,
+    inverse_hessian,
+    *,
+    group_size=128,
+    return_loss,
+):
     """Return QQQ pseudo-quantized weights, scales, zeros, and extra scales.
 
     ``group_size=-1`` uses signed 4-bit codes and a single fixed row scale.
@@ -132,7 +136,7 @@ def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
         _qqq_fixed_params(original) if group_size == -1 else (None, None)
     )
     remaining = original
-    quantized, scales, zeros = [], [], []
+    quantized, scales, zeros, losses = [], [], [], []
     kernel = (
         _qqq_group_kernel() if group_size == -1 else _qqq_dynamic_group_kernel()
     )
@@ -161,6 +165,8 @@ def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
                 output_dtypes=[mx.float32] * 4,
             )
         quantized.append(q)
+        if return_loss:
+            losses.append(mx.sum(error * error) / 2)
         if group_size != -1:
             scales.append(scale)
             zeros.append(zero)
@@ -169,14 +175,40 @@ def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
                 error, inverse_hessian[start:end, end:]
             )
             mx.eval(remaining)
-    result = (
-        mx.concatenate(quantized, axis=1),
-        fixed_scale if group_size == -1 else mx.concatenate(scales, axis=1),
-        fixed_zero if group_size == -1 else mx.concatenate(zeros, axis=1),
-        None if group_size == -1 else scale_extra,
+    quantized_out = mx.concatenate(quantized, axis=1)
+    scales_out = (
+        fixed_scale if group_size == -1 else mx.concatenate(scales, axis=1)
     )
+    zeros_out = (
+        fixed_zero if group_size == -1 else mx.concatenate(zeros, axis=1)
+    )
+    scale_extra_out = None if group_size == -1 else scale_extra
+    loss_out = mx.sum(mx.stack(losses)) if return_loss else None
+    result = quantized_out, scales_out, zeros_out, scale_extra_out, loss_out
     mx.eval(*(value for value in result if value is not None))
     return result
 
 
-__all__ = ["qqq_quantize_weight_mlx"]
+def qqq_quantize_weight_mlx(weight, inverse_hessian, *, group_size=128):
+    """Return pseudo-quantized weights and QQQ scale metadata."""
+    return _qqq_quantize_weight_mlx(
+        weight,
+        inverse_hessian,
+        group_size=group_size,
+        return_loss=False,
+    )[:4]
+
+
+def qqq_quantize_weight_mlx_with_loss(
+    weight, inverse_hessian, *, group_size=128
+):
+    """Return QQQ outputs plus the aggregate quantization loss."""
+    return _qqq_quantize_weight_mlx(
+        weight,
+        inverse_hessian,
+        group_size=group_size,
+        return_loss=True,
+    )
+
+
+__all__ = ["qqq_quantize_weight_mlx", "qqq_quantize_weight_mlx_with_loss"]
