@@ -137,20 +137,28 @@ def test_shared_cached_quantization_matches_uncached_and_factors_once(monkeypatc
     for task in cached:
         task.attach_shared_hessian_cache(cache)
 
-    original = torch.linalg.cholesky_ex
+    original_ex = torch.linalg.cholesky_ex
+    original_cholesky = torch.linalg.cholesky
     calls = 0
 
     def counted(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return original(*args, **kwargs)
+        return original_ex(*args, **kwargs)
+
+    def counted_cholesky(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_cholesky(*args, **kwargs)
 
     monkeypatch.setattr(torch.linalg, "cholesky_ex", counted)
+    monkeypatch.setattr(torch.linalg, "cholesky", counted_cholesky)
     cached_results = [task.quantize() for task in cached]
     cached_factor_calls = calls
     uncached_results = [task.quantize() for task in uncached]
 
-    assert cached_factor_calls == 1
+    # One probe Cholesky plus the final Cholesky of the inverse factor.
+    assert cached_factor_calls == 2
     for cached_result, uncached_result in zip(cached_results, uncached_results):
         for cached_value, uncached_value in zip(cached_result[:4], uncached_result[:4]):
             if isinstance(cached_value, torch.Tensor):

@@ -102,9 +102,37 @@ class SharedHessianArtifactCache:
 
     @staticmethod
     def _wait_event(event: Optional[torch.cuda.Event], device: Optional[torch.device]) -> None:
-        if event is None or device is None or device.type != "cuda" or not torch.cuda.is_available():
+        if event is None:
             return
-        torch.cuda.current_stream(device).wait_event(event)
+        if device is not None and device.type == "cuda" and torch.cuda.is_available():
+            torch.cuda.current_stream(device).wait_event(event)
+        elif device is not None and device.type == "cpu":
+            # A host consumer cannot enqueue a stream dependency.  This is a
+            # deliberate CPU boundary, so synchronize only the producer
+            # event, not the whole CUDA device.
+            event.synchronize()
+
+    @staticmethod
+    def _move_artifact(value: Any, device: Optional[torch.device]) -> Any:
+        """Move a cached immutable artifact to its consumer device.
+
+        Shared-input groups can span model-parallel devices.  The producer
+        keeps one canonical factor, while each consumer receives a private
+        copy on the device where its ordered Hessian lives.  Scalars and
+        nested tuples remain unchanged.
+        """
+
+        if device is None:
+            return value
+        if isinstance(value, torch.Tensor):
+            if value.device == device:
+                return value
+            return value.to(device=device, non_blocking=device.type == "cuda")
+        if isinstance(value, tuple):
+            return tuple(SharedHessianArtifactCache._move_artifact(item, device) for item in value)
+        if isinstance(value, list):
+            return [SharedHessianArtifactCache._move_artifact(item, device) for item in value]
+        return value
 
     def _publish(self, future: Future, value: Any) -> None:
         device = self._artifact_device(value)
@@ -153,11 +181,12 @@ class SharedHessianArtifactCache:
                 future.set_exception(exc)
                 raise
         value = future.result()
+        consumer_device = consumer_device or self._artifact_device(value)
         self._wait_event(
             getattr(future, "_gptq_ready_event", None),
-            consumer_device or self._artifact_device(value),
+            consumer_device,
         )
-        return value
+        return self._move_artifact(value, consumer_device)
 
     def disable(self) -> None:
         """Drop all unpublished/in-flight artifacts after a fallback."""
@@ -409,6 +438,11 @@ class GPTQ:
         self._hessian_total_samples: int = 0
         self._hessian_dirty: bool = False
         self._hessian_ready_event: Optional[torch.cuda.Event] = None
+        # Hessians assembled from X.T @ X (including deterministic merges and
+        # follower adoption) are mathematically symmetric.  Keep this bit so
+        # the hot quantization path does not rescan a multi-million-element
+        # matrix before every Cholesky call.
+        self._hessian_trusted_symmetric = False
         # Keep asynchronous source tensors alive until their destination
         # stream has consumed them.  This is required for cross-device partial
         # reductions and leader->follower Hessian copies.
@@ -973,6 +1007,7 @@ class GPTQ:
                 self.nsamples = 0
                 self._hessian_dirty = False
                 self._final_hessian_device_hint = device
+                self._hessian_trusted_symmetric = True
                 self._device_hessian_partials.clear()
                 self._device_sample_counts.clear()
                 self._device_hessian_partial_ready.clear()
@@ -1002,6 +1037,7 @@ class GPTQ:
             self.nsamples = total_samples
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
+            self._hessian_trusted_symmetric = True
             self._device_hessian_partials.clear()
             self._device_hessian_partial_ready.clear()
             self._device_sample_counts.clear()
@@ -1048,6 +1084,7 @@ class GPTQ:
             self._device_sample_counts.clear()
             self._hessian_dirty = False
             self._final_hessian_device_hint = copy.device
+            self._hessian_trusted_symmetric = True
             self._record_hessian_ready(copy.device)
             self._defer_hessian_sources([source], self._hessian_ready_event)
             if self._shared_hessian_cache is None:
@@ -1074,8 +1111,6 @@ class GPTQ:
             self._shared_hessian_cache.generation if self._shared_hessian_cache else None,
             self._shared_hessian_cache.cohort if self._shared_hessian_cache else None,
             self._shared_hessian_cache.leader if self._shared_hessian_cache else None,
-            self.H.device.type if self.H is not None else None,
-            self.H.device.index if self.H is not None else None,
             tuple(self.H.shape) if self.H is not None else None,
             self.H.dtype if self.H is not None else None,
             ordering,
@@ -1088,7 +1123,6 @@ class GPTQ:
             str(hessian.staging_dtype),
             hessian.chunk_size,
             hessian.chunk_bytes,
-            self.H.device.type if self.H is not None else "torch",
         )
 
     def _shared_artifact_or_local(
@@ -1348,8 +1382,10 @@ class GPTQ:
     def hessian_inverse(self, H: torch.Tensor):
         """Return the upper factor of ``H^{-1}`` with bounded recovery.
 
-        CPU/CUDA probing uses ``cholesky_ex(check_errors=False)``.  The full
-        historical additive damping grid is searched monotonically with a
+        Untrusted CPU/CUDA inputs use ``cholesky_ex(check_errors=False)``;
+        internally assembled Hessians use exception-driven ``cholesky`` on
+        the healthy path to avoid synchronizing on the ``info`` tensor.  The
+        full historical additive damping grid is searched monotonically with a
         bounded endpoint/binary-search strategy (at most twelve probes): an
         initially successful point is returned exactly; otherwise the last
         no-floor point is tested and the earliest verified successful grid
@@ -1376,22 +1412,29 @@ class GPTQ:
                 if H.ndim != 2 or H.shape[0] != H.shape[1]:
                     log.error("Quantization: Module `%s` -> Hessian must be square; recovery skipped.", self.name)
                     return None, 1.0
-                if not bool(torch.isfinite(H).all().item()):
-                    log.error("Quantization: Module `%s` -> Hessian contains nonfinite values; recovery skipped.", self.name)
-                    return None, 1.0
+                trusted_hessian = bool(
+                    getattr(self, "_hessian_trusted_symmetric", False)
+                    and H is self.H
+                )
+                if not trusted_hessian:
+                    if not bool(torch.isfinite(H).all().item()):
+                        log.error("Quantization: Module `%s` -> Hessian contains nonfinite values; recovery skipped.", self.name)
+                        return None, 1.0
 
-                # Cholesky consumes one triangle.  Reject materially
-                # asymmetric input instead of silently changing it by
-                # averaging the two triangles.
-                symmetry_scale = max(float(H.detach().abs().max().item()), 1.0)
-                if not torch.allclose(
-                    H,
-                    H.transpose(-1, -2),
-                    rtol=1e-6,
-                    atol=1e-6 * symmetry_scale,
-                ):
-                    log.error("Quantization: Module `%s` -> Hessian is not symmetric; recovery skipped.", self.name)
-                    return None, 1.0
+                    # Cholesky consumes one triangle.  Reject materially
+                    # asymmetric input instead of silently changing it by
+                    # averaging the two triangles.  This validation remains
+                    # for externally supplied/untrusted Hessians; internally
+                    # assembled Hessians are tagged at materialization time.
+                    symmetry_scale = max(float(H.detach().abs().max().item()), 1.0)
+                    if not torch.allclose(
+                        H,
+                        H.transpose(-1, -2),
+                        rtol=1e-6,
+                        atol=1e-6 * symmetry_scale,
+                    ):
+                        log.error("Quantization: Module `%s` -> Hessian is not symmetric; recovery skipped.", self.name)
+                        return None, 1.0
 
                 # Capture a writable view of the Hessian diagonal so we can
                 # restore it between probes and preserve public mutation
@@ -1472,13 +1515,21 @@ class GPTQ:
                     diag_view.add_(damp_value * torch.mean(current_diag))
                     probes += 1
                     try:
-                        chol, info = torch.linalg.cholesky_ex(H, check_errors=False)
+                        if trusted_hessian:
+                            # On the healthy internal path, exception-driven
+                            # Cholesky avoids synchronizing on info.item().
+                            # Recovery still uses cholesky_ex below whenever
+                            # a probe fails or the input is untrusted.
+                            chol = torch.linalg.cholesky(H)
+                            success = True
+                        else:
+                            chol, info = torch.linalg.cholesky_ex(H, check_errors=False)
+                            success = int(info.item()) == 0
                     except RuntimeError as exc:
                         info = None
                         chol = None
+                        success = False
                         log.debug("Hessian Cholesky probe failed: %s", exc)
-
-                    success = info is not None and int(info.item()) == 0
                     # Do not retain a view into H; followers and later probes
                     # may mutate its diagonal before this result is consumed.
                     result = (success, chol, current_diag.detach().clone())
