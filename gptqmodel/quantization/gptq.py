@@ -9,7 +9,9 @@ import contextlib
 import math
 import threading
 import time
-from typing import Dict, Optional, Tuple
+from dataclasses import dataclass
+from concurrent.futures import Future
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,7 +24,6 @@ from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
-from ..utils.torch import torch_sync
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -55,9 +56,115 @@ _WORKSPACE_LOCKS_GUARD = threading.Lock()
 # tensors during Hessian accumulation. Each device retains at most a single
 # workspace; when size or dtype requirements change, the prior buffer is
 # discarded to avoid unbounded cache growth.
+# ``_WORKSPACE_CACHE`` remains a compatibility view of the most recently
+# released tensor.  The actual reusable slots live in ``_WORKSPACE_SLOTS``;
+# unlike the old one-tensor cache, a slot is reusable from another CUDA stream
+# only after that stream waits on the release event.
 _WORKSPACE_CACHE: Dict[Tuple[str, Optional[int]], torch.Tensor] = {}
+_WORKSPACE_SLOTS: Dict[Tuple[Tuple[str, Optional[int]], torch.dtype], list["_WorkspaceSlot"]] = {}
 _WORKSPACE_LOCKS: Dict[Tuple[str, Optional[int]], threading.Lock] = {}
 _BF16_SUPPORT_CACHE: Dict[Tuple[str, Optional[int]], bool] = {}
+
+
+@dataclass
+class _WorkspaceSlot:
+    tensor: torch.Tensor
+    ready_event: Optional[torch.cuda.Event] = None
+
+
+class SharedHessianArtifactCache:
+    """Single-flight, group-scoped cache for immutable Hessian artifacts.
+
+    A cache is created for one shared-input capture cohort by
+    :class:`GPTQProcessor`; it is intentionally never global.  Producers put
+    tensors in the cache only after the computation succeeds.  CUDA consumers
+    use the recorded event rather than synchronizing the host.
+    """
+
+    def __init__(self, generation: int, cohort: str, leader: Optional[str] = None):
+        self.generation = int(generation)
+        self.cohort = str(cohort)
+        self.leader = str(leader if leader is not None else cohort)
+        self._lock = threading.Lock()
+        self._values: Dict[Tuple[Any, ...], Future] = {}
+        self._disabled = False
+
+    @staticmethod
+    def _artifact_device(value: Any) -> Optional[torch.device]:
+        if isinstance(value, torch.Tensor):
+            return value.device
+        if isinstance(value, (tuple, list)):
+            for item in value:
+                device = SharedHessianArtifactCache._artifact_device(item)
+                if device is not None:
+                    return device
+        return None
+
+    @staticmethod
+    def _wait_event(event: Optional[torch.cuda.Event], device: Optional[torch.device]) -> None:
+        if event is None or device is None or device.type != "cuda" or not torch.cuda.is_available():
+            return
+        torch.cuda.current_stream(device).wait_event(event)
+
+    def _publish(self, future: Future, value: Any) -> None:
+        device = self._artifact_device(value)
+        if device is not None and device.type == "cuda" and torch.cuda.is_available():
+            event = torch.cuda.Event(blocking=False, interprocess=False)
+            event.record(torch.cuda.current_stream(device))
+            # Keep the event adjacent to the immutable result without wrapping
+            # the public artifact in a mutable holder.
+            future._gptq_ready_event = event  # type: ignore[attr-defined]
+        future.set_result(value)
+
+    def get_or_compute(
+        self,
+        key: Tuple[Any, ...],
+        producer: Callable[[], Any],
+        *,
+        consumer_device: Optional[torch.device] = None,
+    ) -> Any:
+        with self._lock:
+            disabled = self._disabled
+            if disabled:
+                future = None
+                owner = False
+            else:
+                future = self._values.get(key)
+                if future is None:
+                    future = Future()
+                    self._values[key] = future
+                    owner = True
+                else:
+                    owner = False
+
+        if disabled:
+            return producer()
+
+        if owner:
+            try:
+                self._publish(future, producer())
+            except BaseException as exc:
+                # Failed/OOM computations are never published as artifacts;
+                # remove the failed single-flight so callers can fall back or
+                # retry independently without poisoning the cohort cache.
+                with self._lock:
+                    if self._values.get(key) is future:
+                        del self._values[key]
+                future.set_exception(exc)
+                raise
+        value = future.result()
+        self._wait_event(
+            getattr(future, "_gptq_ready_event", None),
+            consumer_device or self._artifact_device(value),
+        )
+        return value
+
+    def disable(self) -> None:
+        """Drop all unpublished/in-flight artifacts after a fallback."""
+
+        with self._lock:
+            self._disabled = True
+            self._values.clear()
 
 
 def _device_cache_key(device: torch.device) -> Tuple[str, Optional[int]]:
@@ -116,21 +223,54 @@ def _lease_workspace(
 ) -> Tuple[torch.Tensor, bool]:
     key = _workspace_cache_key(device)
     lock = _workspace_lock(key)
+    slot_key = (key, dtype)
     with lock:
-        workspace = _WORKSPACE_CACHE.pop(key, None)
-        reused = workspace is not None and not _needs_workspace_resize(
-            workspace,
-            dtype,
-            required_rows,
-            cols,
+        # Test fixtures and callers historically clear ``_WORKSPACE_CACHE``;
+        # treat that as clearing the event-gated pool too.
+        if key not in _WORKSPACE_CACHE:
+            _WORKSPACE_SLOTS.pop(slot_key, None)
+        slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+        slot_index = next(
+            (
+                idx
+                for idx, candidate in enumerate(slots)
+                if not _needs_workspace_resize(candidate.tensor, dtype, required_rows, cols)
+            ),
+            None,
         )
-        if not reused:
+        if slot_index is None:
             rows = max(required_rows, 1)
             workspace = torch.empty((rows, cols), dtype=dtype, device=device)
+            slot = _WorkspaceSlot(workspace)
+            reused = False
+        else:
+            slot = slots.pop(slot_index)
+            workspace = slot.tensor
+            reused = True
+            if slot.ready_event is not None and torch.device(device).type == "cuda":
+                torch.cuda.current_stream(device).wait_event(slot.ready_event)
     try:
+        if workspace.device.type == "cuda":
+            # ``record_stream`` only extends allocator lifetime.  The event
+            # below is the ordering primitive used for cross-stream reuse.
+            workspace.record_stream(torch.cuda.current_stream(device))
         yield workspace, reused
     finally:
         with lock:
+            if workspace.device.type == "cuda":
+                stream = torch.cuda.current_stream(device)
+                workspace.record_stream(stream)
+                slot.ready_event = torch.cuda.Event(blocking=False, interprocess=False)
+                slot.ready_event.record(stream)
+            else:
+                slot.ready_event = None
+            slots = _WORKSPACE_SLOTS.setdefault(slot_key, [])
+            slots.append(slot)
+            # Keep a small bounded pool (the default CUDA worker pool is four
+            # workers/GPU) while allowing concurrent leases without a host
+            # synchronization.  Extra slots are safe to release.
+            if len(slots) > 8:
+                del slots[:-8]
             _WORKSPACE_CACHE[key] = workspace
 
 
@@ -263,10 +403,19 @@ class GPTQ:
         # Store per-device Hessian contributions so multi-GPU calibration can
         # keep local accumulators and merge only once when quantization begins.
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        self._device_hessian_partial_ready: Dict[torch.device, Optional[torch.cuda.Event]] = {}
         self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
         self._hessian_total_samples: int = 0
         self._hessian_dirty: bool = False
+        self._hessian_ready_event: Optional[torch.cuda.Event] = None
+        # Keep asynchronous source tensors alive until their destination
+        # stream has consumed them.  This is required for cross-device partial
+        # reductions and leader->follower Hessian copies.
+        self._deferred_hessian_sources: list[Tuple[torch.Tensor, Optional[torch.cuda.Event]]] = []
+        self._last_hessian_inverse_diag: Optional[torch.Tensor] = None
+        self._shared_hessian_cache: Optional[SharedHessianArtifactCache] = None
+        self._shared_hessian_cache_disabled = False
 
         self._borrow_workspace_stats = {
             "requests": 0,
@@ -384,7 +533,9 @@ class GPTQ:
                 if existing is None:
                     self._device_embedding_counts[dev] = counts
                 else:
+                    self._wait_partial_ready(dev)
                     existing.add_(counts)
+                self._record_partial_ready(dev)
                 self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + token_count
                 self.nsamples += token_count
                 self._hessian_dirty = True
@@ -403,12 +554,76 @@ class GPTQ:
             if existing is None:
                 self._device_hessian_partials[dev] = xtx
             else:
+                self._wait_partial_ready(dev)
                 existing.add_(xtx)
                 del xtx
+
+            self._record_partial_ready(dev)
 
             self._device_sample_counts[dev] = self._device_sample_counts.get(dev, 0) + batch_token_size
             self.nsamples += batch_token_size
             self._hessian_dirty = True
+
+    @staticmethod
+    def _cuda_event_for(device: torch.device) -> Optional[torch.cuda.Event]:
+        if torch.device(device).type != "cuda" or not torch.cuda.is_available():
+            return None
+        return torch.cuda.Event(blocking=False, interprocess=False)
+
+    def _wait_partial_ready(self, device: torch.device) -> None:
+        event = self._device_hessian_partial_ready.get(torch.device(device))
+        if event is not None:
+            torch.cuda.current_stream(device).wait_event(event)
+
+    def _record_partial_ready(self, device: torch.device) -> None:
+        device = torch.device(device)
+        event = self._cuda_event_for(device)
+        if event is not None:
+            event.record(torch.cuda.current_stream(device))
+        self._device_hessian_partial_ready[device] = event
+
+    def _wait_hessian_ready(self, consumer_device: torch.device) -> None:
+        event = self._hessian_ready_event
+        consumer_device = torch.device(consumer_device)
+        if event is None:
+            return
+        if consumer_device.type == "cuda":
+            # The event may have been recorded on another device.  Enqueue
+            # the dependency on the stream that will consume the Hessian,
+            # never on the producer/ready device's stream.
+            torch.cuda.current_stream(consumer_device).wait_event(event)
+        else:
+            # A CPU consumer cannot enqueue a CUDA-stream dependency.  This
+            # is an explicit cross-device consumption boundary, so wait only
+            # for the producer event (never the whole device).
+            event.synchronize()
+
+    def _record_hessian_ready(self, device: torch.device) -> None:
+        device = torch.device(device)
+        event = self._cuda_event_for(device)
+        if event is not None:
+            event.record(torch.cuda.current_stream(device))
+        self._hessian_ready_event = event
+
+    def _defer_hessian_sources(
+        self,
+        sources: list[torch.Tensor],
+        event: Optional[torch.cuda.Event],
+    ) -> None:
+        if event is None:
+            return
+        self._deferred_hessian_sources.extend((source, event) for source in sources)
+
+    def _reap_deferred_hessian_sources(self) -> None:
+        if not self._deferred_hessian_sources:
+            return
+        pending = []
+        for source, event in self._deferred_hessian_sources:
+            if event is None or event.query():
+                del source
+            else:
+                pending.append((source, event))
+        self._deferred_hessian_sources = pending
 
     def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
@@ -488,8 +703,9 @@ class GPTQ:
                 try:
                     yield staging_view
                 finally:
-                    if device.type == "cuda":
-                        torch.cuda.current_stream(device).synchronize()
+                    # The lease records a completion event; no host wait is
+                    # needed before returning the slot to the pool.
+                    pass
             else:
                 with _lease_workspace(
                     device,
@@ -511,8 +727,7 @@ class GPTQ:
                         fp32_view.copy_(staging_view.to(torch.float32))
                         yield fp32_view
                     finally:
-                        if device.type == "cuda":
-                            torch.cuda.current_stream(device).synchronize()
+                        pass
 
     def compute_hessian_xtx(self, matrix: torch.Tensor) -> torch.Tensor:
         rows = matrix.shape[0]
@@ -528,7 +743,6 @@ class GPTQ:
             mat32 = matrix.to(dtype=torch.float32)
             xtx = torch.matmul(mat32.T, mat32)
             del mat32
-            torch_sync(device=xtx.device)
             return xtx
 
         xtx_accum = torch.zeros((self.columns, self.columns), dtype=torch.float32, device=matrix.device)
@@ -540,7 +754,6 @@ class GPTQ:
                 materialized32 = materialized
                 xtx_accum.add_(torch.matmul(materialized32.T, materialized32))
 
-        torch_sync(device=xtx_accum.device)
         return xtx_accum
 
     def process_batch(self, inp: torch.Tensor) -> Tuple[int, Optional[torch.Tensor], torch.device]:
@@ -666,13 +879,18 @@ class GPTQ:
 
     def materialize_global_hessian(self, target_device: Optional[torch.device] = None) -> None:
         with self.lock:
+            self._reap_deferred_hessian_sources()
             # Select the destination under the same lock as partial-state reads;
             # this closes the GIL=0 window between device selection and merge.
             device = self._select_hessian_target_device(target_device)
             if isinstance(self.module, nn.Embedding):
                 if not self._hessian_dirty and self._H_diag is not None:
+                    self._wait_hessian_ready(device)
                     if self._H_diag.device != device:
+                        source_diag = self._H_diag
                         self._H_diag = self._H_diag.to(device=device)
+                        self._record_hessian_ready(device)
+                        self._defer_hessian_sources([source_diag], self._hessian_ready_event)
                     self.H = None
                     self.nsamples = self._hessian_total_samples
                     self._final_hessian_device_hint = device
@@ -681,6 +899,7 @@ class GPTQ:
                 previous_samples = self._hessian_total_samples
                 new_samples = sum(self._device_sample_counts.values())
                 total_samples = previous_samples + new_samples
+                reduction_sources = list(self._device_embedding_counts.values())
 
                 if self._H_diag is None or self._H_diag.shape != (self.columns,):
                     diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
@@ -697,6 +916,12 @@ class GPTQ:
                         diag.zero_()
                     for partial_device in sorted(self._device_embedding_counts, key=_device_reduction_key):
                         counts = self._device_embedding_counts[partial_device]
+                        partial_event = self._device_hessian_partial_ready.get(torch.device(partial_device))
+                        if partial_event is not None:
+                            if device.type == "cuda":
+                                torch.cuda.current_stream(device).wait_event(partial_event)
+                            else:
+                                partial_event.synchronize()
                         diag.add_(counts.to(device=device, dtype=torch.float32), alpha=2.0 / float(total_samples))
 
                 self._H_diag = diag
@@ -707,14 +932,23 @@ class GPTQ:
                 self._final_hessian_device_hint = device
                 self._device_embedding_counts.clear()
                 self._device_sample_counts.clear()
+                self._device_hessian_partial_ready.clear()
+                self._record_hessian_ready(device)
+                self._defer_hessian_sources(reduction_sources, self._hessian_ready_event)
                 return
 
             if not self._hessian_dirty and self.H is not None:
+                self._wait_hessian_ready(device)
                 if self.H.device != device:
+                    source_hessian = self.H
                     self.H = self.H.to(device=device)
+                    self._record_hessian_ready(device)
+                    self._defer_hessian_sources([source_hessian], self._hessian_ready_event)
                 return
 
             total_samples = sum(self._device_sample_counts.values())
+
+            self._wait_hessian_ready(device)
 
             # Reuse the existing tensor when possible to avoid an extra allocation.
             reuse_buffer = (
@@ -728,7 +962,6 @@ class GPTQ:
                 result_accum = self.H
                 result_accum.zero_()
             else:
-                torch_sync(device) # try to avoid torch.AcceleratorError: CUDA error: unspecified launch failure
                 result_accum = torch.zeros(
                     (self.columns, self.columns),
                     dtype=torch.float32,
@@ -742,26 +975,24 @@ class GPTQ:
                 self._final_hessian_device_hint = device
                 self._device_hessian_partials.clear()
                 self._device_sample_counts.clear()
+                self._device_hessian_partial_ready.clear()
+                self._record_hessian_ready(device)
                 return
 
             # GPU workers can finish in a different order after restart. A
             # stable reduction order avoids changing floating-point rounding.
+            reduction_sources = list(self._device_hessian_partials.values())
             for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
                 partial = self._device_hessian_partials[partial_device]
+                partial_device = torch.device(partial_device)
+                partial_event = self._device_hessian_partial_ready.get(partial_device)
+                if partial_event is not None:
+                    if result_accum.device.type == "cuda":
+                        torch.cuda.current_stream(result_accum.device).wait_event(partial_event)
+                    else:
+                        partial_event.synchronize()
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    # TODO FIXME multi-3090 using P2P is revaling an issue where result_accum and/or partial is not ready for consolidation on the main thread
-                    # when parials are calculated on the individual
-                    try:
-                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                    except Exception:
-                        log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 1/2 in 0.25s")
-                        time.sleep(0.25)
-                        try:
-                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
-                        except Exception:
-                            log.warn(f"Quantization: Module `{self.name}` -> Retry partial.to 2/2 in 0.75s")
-                            time.sleep(0.75)
-                            result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
 
@@ -772,7 +1003,10 @@ class GPTQ:
             self._hessian_dirty = False
             self._final_hessian_device_hint = result_accum.device
             self._device_hessian_partials.clear()
+            self._device_hessian_partial_ready.clear()
             self._device_sample_counts.clear()
+            self._record_hessian_ready(result_accum.device)
+            self._defer_hessian_sources(reduction_sources, self._hessian_ready_event)
             del result_accum
 
     def adopt_hessian_from(self, leader: "GPTQ") -> None:
@@ -799,6 +1033,10 @@ class GPTQ:
                 source = leader.create_H(None)
 
             target_device = self._select_hessian_target_device(getattr(self.module, "target_device", None))
+            # The follower's destination stream consumes ``source``.  Queue
+            # the leader readiness dependency there before an asynchronous
+            # cross-device copy, rather than waiting on the leader stream.
+            leader._wait_hessian_ready(target_device)
             copy = source.detach().to(device=target_device, dtype=torch.float32, copy=True)
 
         with self.lock:
@@ -806,9 +1044,80 @@ class GPTQ:
             self.nsamples = nsamples
             self.fwd_counter = fwd_counter
             self._device_hessian_partials.clear()
+            self._device_hessian_partial_ready.clear()
             self._device_sample_counts.clear()
             self._hessian_dirty = False
             self._final_hessian_device_hint = copy.device
+            self._record_hessian_ready(copy.device)
+            self._defer_hessian_sources([source], self._hessian_ready_event)
+            if self._shared_hessian_cache is None:
+                self._shared_hessian_cache = leader._shared_hessian_cache
+
+    def attach_shared_hessian_cache(self, cache: Optional[SharedHessianArtifactCache]) -> None:
+        """Attach the current layer/group cache to this task."""
+
+        with self.lock:
+            self._shared_hessian_cache = cache
+            self._shared_hessian_cache_disabled = False
+
+    def clear_shared_hessian_cache(self) -> None:
+        with self.lock:
+            self._shared_hessian_cache = None
+            self._shared_hessian_cache_disabled = False
+
+    def _shared_artifact_key(self, kind: str, ordering: str) -> Tuple[Any, ...]:
+        """Return a complete compatibility key for a shared immutable artifact."""
+
+        hessian = self.qcfg.hessian
+        return (
+            kind,
+            self._shared_hessian_cache.generation if self._shared_hessian_cache else None,
+            self._shared_hessian_cache.cohort if self._shared_hessian_cache else None,
+            self._shared_hessian_cache.leader if self._shared_hessian_cache else None,
+            self.H.device.type if self.H is not None else None,
+            self.H.device.index if self.H is not None else None,
+            tuple(self.H.shape) if self.H is not None else None,
+            self.H.dtype if self.H is not None else None,
+            ordering,
+            int(self.qcfg.group_size),
+            bool(self.qcfg.desc_act),
+            bool(self.qcfg.act_group_aware),
+            float(self.qcfg.damp_percent),
+            float(self.qcfg.damp_auto_increment),
+            bool(self.qcfg.mock_quantization),
+            str(hessian.staging_dtype),
+            hessian.chunk_size,
+            hessian.chunk_bytes,
+            self.H.device.type if self.H is not None else "torch",
+        )
+
+    def _shared_artifact_or_local(
+        self,
+        kind: str,
+        ordering: str,
+        producer: Callable[[], Any],
+    ) -> Any:
+        cache = self._shared_hessian_cache
+        if cache is None or self._shared_hessian_cache_disabled:
+            return producer()
+        try:
+            return cache.get_or_compute(
+                self._shared_artifact_key(kind, ordering),
+                producer,
+                consumer_device=self.H.device if self.H is not None else None,
+            )
+        except RuntimeError as exc:
+            # CUDA OOM/CPU fallback paths must not leave a partially computed
+            # artifact visible to sibling tasks.
+            if "out of memory" in str(exc).lower():
+                self._shared_hessian_cache_disabled = True
+                cache.disable()
+            raise
+
+    def _disable_shared_hessian_cache(self) -> None:
+        self._shared_hessian_cache_disabled = True
+        if self._shared_hessian_cache is not None:
+            self._shared_hessian_cache.disable()
 
     def finalize_hessian(self, target_device: Optional[torch.device] = None) -> torch.Tensor:
         self.materialize_global_hessian(target_device=target_device)
@@ -1004,8 +1313,52 @@ class GPTQ:
         self.module.weight.data = Q
         return scale, zero, g_idx, duration, avg_loss, damp_percent
 
+    def _hessian_inverse_npu(self, H: torch.Tensor):
+        """Retain the NPU-specific inverse implementation and retry policy."""
+
+        diag_view = H.diagonal()
+        orig_diag = diag_view.clone()
+        base_abs_max = float(torch.max(orig_diag.abs()).item())
+        if not math.isfinite(base_abs_max) or base_abs_max == 0.0:
+            base_abs_max = 1.0
+        floor_base = base_abs_max * 1e-6
+        for attempt in range(7):
+            if attempt == 0:
+                current_diag = orig_diag
+            else:
+                floor_increment = floor_base * math.pow(10.0, attempt - 1)
+                current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
+            damp = float(self.qcfg.damp_percent)
+            while 0 < damp < 1:
+                diag_view.copy_(current_diag)
+                diag_view.add_(damp * torch.mean(current_diag))
+                try:
+                    result = npu_inverse_cholesky_factor(H)
+                except Exception:
+                    diag_view.copy_(current_diag)
+                    if self.qcfg.damp_auto_increment == 0:
+                        break
+                    damp += self.qcfg.damp_auto_increment
+                    continue
+                diag_view.copy_(current_diag)
+                return result, damp
+        return None, 1.0
+
     @torch.inference_mode()
     def hessian_inverse(self, H: torch.Tensor):
+        """Return the upper factor of ``H^{-1}`` with bounded recovery.
+
+        CPU/CUDA probing uses ``cholesky_ex(check_errors=False)``.  The full
+        historical additive damping grid is searched monotonically with a
+        bounded endpoint/binary-search strategy (at most twelve probes): an
+        initially successful point is returned exactly; otherwise the last
+        no-floor point is tested and the earliest verified successful grid
+        point is binary-searched.  If damping alone fails, the same search is
+        performed over the historical diagonal-floor grid before searching
+        damping at the first viable floor.  When the twelve-probe budget is
+        insufficient to prove the exact earliest point, the smallest
+        verified successful grid upper bound is used and exhaustion is logged.
+        """
         timer = getattr(self, "region_timer", None)
         timer_cm = (
             timer.measure("hessian_inverse")
@@ -1016,7 +1369,34 @@ class GPTQ:
             if _log_hessian_verbose():
                 log.info(f"GPTQ: hessian_inverse begin {self.name} shape={tuple(H.shape)}")
             try:
-                # Capture a writable view of the Hessian diagonal so we can restore it between attempts.
+                if H.device.type == "npu":
+                    # Keep the NPU implementation on its specialized path.
+                    return self._hessian_inverse_npu(H)
+
+                if H.ndim != 2 or H.shape[0] != H.shape[1]:
+                    log.error("Quantization: Module `%s` -> Hessian must be square; recovery skipped.", self.name)
+                    return None, 1.0
+                if not bool(torch.isfinite(H).all().item()):
+                    log.error("Quantization: Module `%s` -> Hessian contains nonfinite values; recovery skipped.", self.name)
+                    return None, 1.0
+
+                # Cholesky consumes one triangle.  Reject materially
+                # asymmetric input instead of silently changing it by
+                # averaging the two triangles.
+                symmetry_scale = max(float(H.detach().abs().max().item()), 1.0)
+                if not torch.allclose(
+                    H,
+                    H.transpose(-1, -2),
+                    rtol=1e-6,
+                    atol=1e-6 * symmetry_scale,
+                ):
+                    log.error("Quantization: Module `%s` -> Hessian is not symmetric; recovery skipped.", self.name)
+                    return None, 1.0
+
+                # Capture a writable view of the Hessian diagonal so we can
+                # restore it between probes and preserve public mutation
+                # semantics (the effective floor remains visible after a
+                # floor succeeds).
                 diag_view = H.diagonal()
                 orig_diag = diag_view.clone()
 
@@ -1030,85 +1410,166 @@ class GPTQ:
                     base_abs_max = 1.0
                 floor_base = base_abs_max * 1e-6
                 max_floor_attempts = 6
-                used_damp = self.qcfg.damp_percent
-                last_error = None
+                max_probes = 12
+                initial_damp = float(self.qcfg.damp_percent)
+                increment = float(self.qcfg.damp_auto_increment)
+                damping_grid = []
+                damp = initial_damp
+                # Keep the complete historical additive grid available to the
+                # endpoint/binary search.  Truncating it could incorrectly
+                # conclude that damping failed for a small custom increment.
+                while 0 < damp < 1:
+                    damping_grid.append(float(damp))
+                    if increment <= 0:
+                        break
+                    next_damp = damp + increment
+                    if next_damp <= damp:
+                        log.error(
+                            "Quantization: Module `%s` -> Damping increment is too small to advance recovery; stopping the grid.",
+                            self.name,
+                        )
+                        break
+                    damp = next_damp
+                if not damping_grid:
+                    log.error("Quantization: Module `%s` -> Invalid damping grid; recovery skipped.", self.name)
+                    return None, 1.0
 
-                attempt = 0
-                while attempt <= max_floor_attempts:
-                    if attempt == 0:
+                floor_grid = [
+                    floor_base * math.pow(10.0, attempt - 1)
+                    for attempt in range(1, max_floor_attempts + 1)
+                ]
+                probes = 0
+                probed: Dict[Tuple[int, int], Tuple[bool, Optional[torch.Tensor], torch.Tensor]] = {}
+
+                def probe(floor_index: int, damp_index: int):
+                    """Probe one original-grid point, retaining a successful chol."""
+
+                    nonlocal probes
+                    key = (floor_index, damp_index)
+                    cached = probed.get(key)
+                    if cached is not None:
+                        return cached
+
+                    if floor_index == 0:
                         current_diag = orig_diag
                     else:
-                        floor_increment = floor_base * math.pow(10.0, attempt - 1)
-                        current_diag = torch.clamp(orig_diag + floor_increment, min=floor_increment)
-                        if attempt == 1:
+                        floor_increment = floor_grid[floor_index - 1]
+                        current_diag = torch.clamp(
+                            orig_diag + floor_increment,
+                            min=floor_increment,
+                        )
+                        if floor_index == 1:
                             log.warn(
-                                f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness.")
+                                f"Quantization: Module `{self.name}` -> Applying Hessian diagonal floor (+{floor_increment:.2e}) to recover positive definiteness."
+                            )
                         else:
                             log.warn(
-                                f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}.")
+                                f"Quantization: Module `{self.name}` -> Increasing Hessian diagonal floor to +{floor_increment:.2e}."
+                            )
 
+                    damp_value = damping_grid[damp_index]
                     diag_view.copy_(current_diag)
-                    mean = torch.mean(current_diag)
-                    damp = self.qcfg.damp_percent
+                    diag_view.add_(damp_value * torch.mean(current_diag))
+                    probes += 1
+                    try:
+                        chol, info = torch.linalg.cholesky_ex(H, check_errors=False)
+                    except RuntimeError as exc:
+                        info = None
+                        chol = None
+                        log.debug("Hessian Cholesky probe failed: %s", exc)
 
-                    damp_recovery_started = False
-                    recovery_initial_damp = None
-                    recovery_last_damp = None
+                    success = info is not None and int(info.item()) == 0
+                    # Do not retain a view into H; followers and later probes
+                    # may mutate its diagonal before this result is consumed.
+                    result = (success, chol, current_diag.detach().clone())
+                    probed[key] = result
+                    diag_view.copy_(current_diag)
+                    return result
 
-                    while 0 < damp < 1:
-                        try:
-                            diag_view.add_(damp * mean)
-                            if H.device.type == "npu":
-                                Hinv_result = npu_inverse_cholesky_factor(H)
-                            else:
-                                H2 = torch.linalg.cholesky(H)
-                                if H.device.type in ("cpu", "cuda"):
-                                    # cholesky_inverse permits the factor as its output.
-                                    # Reuse that buffer while keeping H intact for damp retries.
-                                    torch.cholesky_inverse(H2, out=H2)
-                                    Hinv_result = torch.linalg.cholesky(H2, upper=True)
-                                else:
-                                    Hinv_result = torch.linalg.cholesky(torch.cholesky_inverse(H2), upper=True)
-                                del H2
-                            diag_view.copy_(current_diag)
-                            used_damp = damp
-                            if damp_recovery_started:
-                                log.warn(
-                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={damp:.5f}` "
-                                    f"(started at {recovery_initial_damp:.5f})."
-                                )
-                            return Hinv_result, used_damp
-                        except torch._C._LinAlgError as e:
-                            last_error = e
-                            diag_view.copy_(current_diag)
-                            if self.qcfg.damp_auto_increment != 0:
-                                if not damp_recovery_started:
-                                    damp_recovery_started = True
-                                    recovery_initial_damp = damp
-                                    log.warn(
-                                        f"Quantization: Module `{self.name}` -> Starting damp recovery at "
-                                        f"`damp_percent={damp:.5f}`, increment step `{self.qcfg.damp_auto_increment:.5f}`."
-                                    )
-                                damp += self.qcfg.damp_auto_increment
-                                recovery_last_damp = damp
-                            else:
-                                log.warn(
-                                    f"Quantization: Module `{self.name}` -> Hessian Cholesky failed with `damp_percent={damp:.5f}` and no auto increment configured.")
-                                break
-
-                    if damp_recovery_started:
-                        final_damp = recovery_last_damp if recovery_last_damp is not None else damp
+                def finalize_success(result, *, damp_index: int):
+                    success, chol, effective_diag = result
+                    if not success or chol is None:
+                        return None
+                    diag_view.copy_(effective_diag)
+                    torch.cholesky_inverse(chol, out=chol)
+                    Hinv_result = torch.linalg.cholesky(chol, upper=True)
+                    self._last_hessian_inverse_diag = effective_diag.detach().clone()
+                    used_damp = damping_grid[damp_index]
+                    if damp_index != 0:
                         log.warn(
-                            f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching `damp_percent={final_damp:.5f}`."
+                            f"Quantization: Module `{self.name}` -> Damp recovery succeeded at `damp_percent={used_damp:.5f}`."
+                        )
+                    return Hinv_result, used_damp
+
+                def budget_warning(detail: str):
+                    if probes >= max_probes:
+                        log.warn(
+                            f"Quantization: Module `{self.name}` -> Hessian recovery probe budget exhausted ({max_probes}); {detail}."
                         )
 
-                    attempt += 1
+                # First establish the no-floor bracket.  The first successful
+                # point is returned without probing anything else.
+                initial = probe(0, 0)
+                if initial[0]:
+                    return finalize_success(initial, damp_index=0)
 
-                log.error(
-                    f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after diagonal floor attempts. Last `damp_percent` tried = {damp:.5f}.")
-                if last_error is not None:
-                    log.debug(f"Hessian failure detail: {last_error}")
-                return None, 1.0
+                last_damp_index = len(damping_grid) - 1
+                last_no_floor = probe(0, last_damp_index)
+                if last_no_floor[0]:
+                    low, high = 0, last_damp_index
+                    best = last_no_floor
+                    while high - low > 1 and probes < max_probes:
+                        mid = (low + high) // 2
+                        candidate = probe(0, mid)
+                        if candidate[0]:
+                            high, best = mid, candidate
+                        else:
+                            low = mid
+                    if high - low > 1:
+                        budget_warning("using the smallest verified no-floor damping upper bound")
+                    return finalize_success(best, damp_index=high)
+
+                # Damping alone failed.  Establish a floor bracket at maximum
+                # damping, then binary-search the earliest viable floor.
+                max_floor_index = len(floor_grid)
+                max_floor = probe(max_floor_index, last_damp_index)
+                if not max_floor[0]:
+                    log.error(
+                        f"Quantization: Module `{self.name}` -> Hessian remained non positive-definite after {probes} bounded decomposition probes; "
+                        f"last `damp_percent` tried = {damping_grid[last_damp_index]:.5f}. Recovery budget exhausted."
+                    )
+                    return None, 1.0
+
+                low, high = 0, max_floor_index
+                best_floor = max_floor
+                while high - low > 1 and probes < max_probes:
+                    mid = (low + high) // 2
+                    candidate = probe(mid, last_damp_index)
+                    if candidate[0]:
+                        high, best_floor = mid, candidate
+                    else:
+                        low = mid
+                if high - low > 1:
+                    budget_warning("using the smallest verified floor upper bound")
+
+                # Check the initial damping at the selected floor before
+                # spending remaining probes on the damping binary search.
+                initial_floor = probe(high, 0)
+                if initial_floor[0]:
+                    return finalize_success(initial_floor, damp_index=0)
+
+                low_damp, high_damp = 0, last_damp_index
+                best_damp = best_floor
+                while high_damp - low_damp > 1 and probes < max_probes:
+                    mid = (low_damp + high_damp) // 2
+                    candidate = probe(high, mid)
+                    if candidate[0]:
+                        high_damp, best_damp = mid, candidate
+                    else:
+                        low_damp = mid
+                if high_damp - low_damp > 1:
+                    budget_warning("using the smallest verified floor/damping upper bound")
+                return finalize_success(best_damp, damp_index=high_damp) or (None, 1.0)
             finally:
                 if _log_hessian_verbose():
                     log.info(f"GPTQ: hessian_inverse end {self.name}")
@@ -1201,6 +1662,7 @@ class GPTQ:
 
         self.H = None
         self._device_hessian_partials.clear()
+        self._device_hessian_partial_ready.clear()
         return (
             quantized,
             scale,
@@ -1240,6 +1702,7 @@ class GPTQ:
 
         if fallback_requested:
             use_hessian = False
+            self._disable_shared_hessian_cache()
             threshold_text = str(getattr(self.fallback, "threshold", None))
             threshold_info = f", threshold_raw={threshold_raw}" if threshold_raw is not None and is_percent else ""
             log.warn(
@@ -1253,6 +1716,7 @@ class GPTQ:
             with self.lock:
                 fallback_device = self._select_hessian_target_device(target_device)
                 self._device_hessian_partials.clear()
+                self._device_hessian_partial_ready.clear()
                 self._device_sample_counts.clear()
                 self._hessian_dirty = False
 
@@ -1301,7 +1765,11 @@ class GPTQ:
                 groups.append(quantizer)
 
         if self.qcfg.desc_act and use_hessian:
-            perm = torch.argsort(torch.diag(self.H), descending=True)
+            perm = self._shared_artifact_or_local(
+                "permutation",
+                "desc_act",
+                lambda: torch.argsort(torch.diag(self.H), descending=True),
+            )
             try:
                 W = W[:, perm]
                 self.H = self.H[perm][:, perm]
@@ -1310,6 +1778,7 @@ class GPTQ:
                     raise
 
                 self.log_cpu_fallback("Hessian permutation", self.H.device)
+                self._disable_shared_hessian_cache()
                 cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 perm = perm.to(device=cpu_device)
@@ -1319,18 +1788,26 @@ class GPTQ:
             invperm = torch.argsort(perm)
 
         elif self.qcfg.act_group_aware and use_hessian:
-            diag_h = torch.diag(self.H)
-            local_perms, local_values = compute_local_perms(
-                diag_h, self.qcfg.group_size, return_values=True
+            def _compute_group_permutations():
+                diag_h = torch.diag(self.H)
+                local_perms, local_values = compute_local_perms(
+                    diag_h, self.qcfg.group_size, return_values=True
+                )
+                global_perm = compute_global_perm(
+                    diag_h,
+                    self.qcfg.group_size,
+                    precomputed_values=local_values,
+                )
+                del local_values
+                final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
+                final_perm = extend_perm_with_tail(final_perm, self.columns)
+                return final_perm, global_perm
+
+            final_perm, global_perm = self._shared_artifact_or_local(
+                "permutation",
+                "act_group_aware",
+                _compute_group_permutations,
             )
-            global_perm = compute_global_perm(
-                diag_h,
-                self.qcfg.group_size,
-                precomputed_values=local_values,
-            )
-            del local_values
-            final_perm = compose_final_perm(local_perms, global_perm, self.qcfg.group_size)
-            final_perm = extend_perm_with_tail(final_perm, self.columns)
             try:
                 W = W[:, final_perm]
                 self.H = self.H[final_perm][:, final_perm]
@@ -1339,6 +1816,7 @@ class GPTQ:
                     raise
 
                 self.log_cpu_fallback("act-group Hessian permutation", self.H.device)
+                self._disable_shared_hessian_cache()
                 cpu_fallback_used = True
                 cpu_device = torch.device("cpu")
                 final_perm = final_perm.to(device=cpu_device)
@@ -1348,7 +1826,36 @@ class GPTQ:
 
         if use_hessian:
             try:
-                Hinv, damp = self.hessian_inverse(self.H)
+                ordering = "desc_act" if self.qcfg.desc_act else (
+                    "act_group_aware" if self.qcfg.act_group_aware else "natural"
+                )
+                cache = self._shared_hessian_cache
+                if cache is None or self._shared_hessian_cache_disabled:
+                    Hinv, damp = self.hessian_inverse(self.H)
+                else:
+                    def _compute_shared_inverse():
+                        factor, used_damp = self.hessian_inverse(self.H)
+                        effective_diag = None
+                        if factor is not None:
+                            effective_diag = getattr(self, "_last_hessian_inverse_diag", None)
+                            if effective_diag is None:
+                                effective_diag = self.H.diagonal().detach().clone()
+                            else:
+                                effective_diag = effective_diag.detach().clone()
+                        return factor, used_damp, effective_diag
+
+                    shared_inverse = self._shared_artifact_or_local(
+                        "inverse_factor",
+                        ordering,
+                        _compute_shared_inverse,
+                    )
+                    Hinv, damp, effective_diag = shared_inverse
+                    if effective_diag is not None:
+                        # Each task owns a private ordered H.  Apply the
+                        # producer's post-floor diagonal before capturing the
+                        # retry/mock snapshot so NaN recovery remains exact.
+                        self.H.diagonal().copy_(effective_diag)
+                        self._last_hessian_inverse_diag = effective_diag.detach().clone()
             except RuntimeError as exc:
                 if self.H.device.type != "cuda" or "out of memory" not in str(exc).lower():
                     raise
@@ -1361,6 +1868,7 @@ class GPTQ:
                 self.H = self.H.to(device=cpu_device)
                 W = W.to(device=cpu_device)
                 self.quantizer.find_params(W, weight=True)
+                self._disable_shared_hessian_cache()
                 Hinv, damp = self.hessian_inverse(self.H)
         else:
             Hinv, damp = None, 0.0
@@ -1593,9 +2101,6 @@ class GPTQ:
                 if Hinv is not None:
                     del Hinv1
 
-        # TODO: why is there a torch_sync here? There are no streaming ops here?
-        # torch_sync(device=self.module.target_device)
-
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
@@ -1652,7 +2157,7 @@ class GPTQ:
             temp_zero = [zero[i] for i in inv_global_perm_list]
             temp_zero.extend(zero[reordered_group_count:])
             zero = temp_zero
-            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list, local_perms
+            del final_perm, inv_final, global_perm, inv_global_perm, inv_global_perm_list
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
@@ -1788,7 +2293,15 @@ class GPTQ:
         # The task object outlives free() in processor.tasks until layer
         # end, so no path may leave a Hessian partial behind here.
         with self.lock:
+            # ``free`` is an explicit lifecycle boundary.  Unlike the hot
+            # path, it may synchronously observe completion before releasing
+            # cross-device source references.
+            for _, event in self._deferred_hessian_sources:
+                if event is not None:
+                    event.synchronize()
+            self._deferred_hessian_sources.clear()
             self._device_hessian_partials.clear()
+            self._device_hessian_partial_ready.clear()
             self._device_sample_counts.clear()
             self._hessian_dirty = False
 

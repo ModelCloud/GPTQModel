@@ -29,6 +29,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization.gptq import SharedHessianArtifactCache
 from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -165,6 +166,8 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_plan_owner: Optional[Any] = None
         self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
+        self._shared_input_caches: Dict[str, SharedHessianArtifactCache] = {}
+        self._shared_input_capture_generation = 0
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
 
@@ -258,6 +261,14 @@ class GPTQProcessor(LoopProcessor):
 
         with self.lock:
             self._shared_input_leaders = {}
+            self._shared_input_caches = {}
+            tasks = dict(self.tasks)
+        # A cache belongs to one capture cohort.  Never let a later layer or
+        # subset accidentally reuse artifacts from a prior cohort.
+        for name in subset_names:
+            task = tasks.get(name)
+            if type(task) is GPTQ:
+                task.clear_shared_hessian_cache()
 
         if is_lm_head_module or not self.qcfg.hessian.dedup_shared_inputs:
             return {}
@@ -267,8 +278,9 @@ class GPTQProcessor(LoopProcessor):
             return {}
 
         leaders: Dict[str, str] = {}
+        caches: Dict[str, SharedHessianArtifactCache] = {}
         with self.lock:
-            tasks = dict(self.tasks)
+            self._shared_input_capture_generation += 1
         for group in plan.shared_groups:
             if not group.explicit:
                 continue
@@ -283,6 +295,7 @@ class GPTQProcessor(LoopProcessor):
             leader = members[0]
             columns = tasks[leader].columns
             leader_settings = self._hessian_accumulation_settings(tasks[leader])
+            compatible_members = [leader]
             for follower in members[1:]:
                 if tasks[follower].columns != columns:
                     log.warn(
@@ -298,9 +311,21 @@ class GPTQProcessor(LoopProcessor):
                     )
                     continue
                 leaders[follower] = leader
+                compatible_members.append(follower)
+
+            if len(compatible_members) >= 2:
+                cache = SharedHessianArtifactCache(
+                    self._shared_input_capture_generation,
+                    group.key,
+                    leader=leader,
+                )
+                for member in compatible_members:
+                    tasks[member].attach_shared_hessian_cache(cache)
+                    caches[member] = cache
 
         with self.lock:
             self._shared_input_leaders = leaders
+            self._shared_input_caches = caches
         return dict(leaders)
 
     def end_shared_input_capture(self, subset_names: List[str]) -> Dict[str, Any]:

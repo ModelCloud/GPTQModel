@@ -363,6 +363,8 @@ class TestProcessorLeaderElection:
         proc.preprocess(_named_linear("self_attn.v"))
         names = ["self_attn.q", "self_attn.k", "self_attn.v"]
         assert proc.begin_shared_input_capture(model, names) == {"self_attn.v": "self_attn.q"}
+        assert proc.tasks["self_attn.q"]._shared_hessian_cache is proc.tasks["self_attn.v"]._shared_hessian_cache
+        assert proc.tasks["self_attn.k"]._shared_hessian_cache is None
 
     @pytest.mark.parametrize(
         "override",
@@ -384,6 +386,8 @@ class TestProcessorLeaderElection:
         names = ["self_attn.q", "self_attn.k", "self_attn.v"]
         _setup(proc, names)
         assert proc.begin_shared_input_capture(model, names) == {"self_attn.v": "self_attn.q"}
+        assert proc.tasks["self_attn.q"]._shared_hessian_cache is proc.tasks["self_attn.v"]._shared_hessian_cache
+        assert proc.tasks["self_attn.k"]._shared_hessian_cache is None
 
     def test_equal_non_default_hessian_settings_still_share(self):
         qcfg = QuantizeConfig(
