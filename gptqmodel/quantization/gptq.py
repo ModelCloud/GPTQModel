@@ -595,6 +595,16 @@ class GPTQ:
                 pending.append((source, event))
         self._deferred_hessian_sources = pending
 
+    def _release_deferred_hessian_sources(self) -> None:
+        """Synchronize and release sources before memory-heavy quantization."""
+
+        if not self._deferred_hessian_sources:
+            return
+        for _, event in self._deferred_hessian_sources:
+            if event is not None:
+                event.synchronize()
+        self._deferred_hessian_sources.clear()
+
     def preferred_staging_dtype(self, input_dtype: torch.dtype, device: torch.device) -> torch.dtype:
         device = torch.device(device)
 
@@ -1398,6 +1408,7 @@ class GPTQ:
         target_device = torch.device(target_device)
 
         diag = self.finalize_hessian(target_device=target_device)
+        self._release_deferred_hessian_sources()
         original_weight = self.clone_module(device=target_device)
         weight = original_weight
         inverse_permutation = None
@@ -1538,6 +1549,7 @@ class GPTQ:
         else:
             use_hessian = True
             self.finalize_hessian(target_device=target_device)
+            self._release_deferred_hessian_sources()
 
         if self.qcfg.mock_quantization:
             # Use simplified hessian inverse (identity matrix)
@@ -2089,6 +2101,8 @@ class GPTQ:
                 if event is not None:
                     event.synchronize()
             self._deferred_hessian_sources.clear()
+            self._shared_hessian_cache = None
+            self._shared_hessian_cache_disabled = False
             self._device_hessian_partials.clear()
             self._device_hessian_partial_ready.clear()
             self._device_sample_counts.clear()

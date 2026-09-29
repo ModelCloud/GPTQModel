@@ -4,6 +4,8 @@
 """Focused Hessian pipeline tests for stream-safe reuse and factor caching."""
 
 from concurrent.futures import ThreadPoolExecutor
+import gc
+import weakref
 
 import pytest
 import torch
@@ -71,6 +73,54 @@ def test_shared_factor_cache_does_not_retain_failed_build():
 
     assert calls == 2
     assert torch.equal(factor, torch.eye(2))
+
+
+def test_free_detaches_shared_factor_caches_from_lingering_tasks():
+    tasks = {}
+    factor_refs = []
+
+    for group_index in range(2):
+        cache = SharedHessianFactorCache(generation=group_index, cohort=f"group-{group_index}")
+        factor = torch.full((4, 4), float(group_index + 1))
+        cache.get_or_compute(
+            ("factor", group_index),
+            lambda factor=factor: (factor, 0.01, torch.ones(4)),
+        )
+        factor_refs.append(weakref.ref(factor))
+        for member_index in range(3):
+            task = _task()
+            task.attach_shared_hessian_cache(cache)
+            tasks[f"group-{group_index}-{member_index}"] = task
+        del factor
+
+    del cache
+    for task in tasks.values():
+        task.free()
+    gc.collect()
+
+    assert all(factor_ref() is None for factor_ref in factor_refs)
+
+
+def test_quantize_releases_deferred_sources_before_inverse():
+    task = _task(chunk_size=None)
+    task.quantizer.configure(perchannel=True)
+    task.H = torch.eye(task.columns)
+    task.nsamples = 1
+    task.finalize_hessian = lambda target_device=None: task.H
+
+    class _PendingEvent:
+        synchronized = False
+
+        def synchronize(self):
+            self.synchronized = True
+
+    event = _PendingEvent()
+    task._deferred_hessian_sources.append((torch.ones(2), event))
+
+    task.quantize(blocksize=4)
+
+    assert event.synchronized
+    assert task._deferred_hessian_sources == []
 
 
 def test_cuda_producer_event_is_synchronized_at_cpu_consumption_boundary():
