@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Focused Hessian pipeline tests for bounded recovery and stream-safe reuse."""
+"""Focused Hessian pipeline tests for stream-safe reuse and factor caching."""
 
 from concurrent.futures import ThreadPoolExecutor
 
@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
-from gptqmodel.quantization.gptq import GPTQ, SharedHessianArtifactCache
+from gptqmodel.quantization.gptq import GPTQ, SharedHessianFactorCache
 
 
 def _task(*, chunk_size=3, staging_dtype=torch.float32, qcfg=None, out_features=4):
@@ -38,66 +38,39 @@ def test_hessian_accumulation_matches_float64_oracle():
     assert float(normalized_error) <= 1e-6
 
 
-def test_hessian_inverse_uses_at_most_twelve_cpu_probes(monkeypatch):
-    task = _task(chunk_size=None)
-    hessian = torch.tensor([[0.0, 1.0], [1.0, 0.0]])
-    original = torch.linalg.cholesky_ex
-    probes = 0
-
-    def counted(matrix, *args, **kwargs):
-        nonlocal probes
-        probes += 1
-        return original(matrix, *args, **kwargs)
-
-    monkeypatch.setattr(torch.linalg, "cholesky_ex", counted)
-    inverse, damp = task.hessian_inverse(hessian)
-
-    assert inverse is None
-    assert damp == 1.0
-    assert probes <= 12
-    assert torch.allclose(hessian.diagonal(), torch.full((2,), 0.1))
-
-
-def test_hessian_inverse_binary_searches_beyond_four_damping_steps():
-    task = _task(chunk_size=None)
-    task.qcfg.damp_percent = 0.01
-    task.qcfg.damp_auto_increment = 0.1
-    # The first successful grid point is 0.51 (the sixth additive value).
-    hessian = torch.tensor([[1.0, 1.5], [1.5, 1.0]])
-
-    factor, damp = task.hessian_inverse(hessian)
-
-    assert factor is not None
-    assert damp == pytest.approx(0.51)
-
-
-def test_hessian_inverse_rejects_nonfinite_and_asymmetric_input():
-    task = _task(chunk_size=None)
-    nonfinite = torch.tensor([[1.0, 0.0], [0.0, float("nan")]])
-    nonfinite_original = nonfinite.clone()
-    assert task.hessian_inverse(nonfinite) == (None, 1.0)
-    torch.testing.assert_close(nonfinite, nonfinite_original, equal_nan=True)
-
-    asymmetric = torch.tensor([[2.0, 1.0], [0.0, 2.0]])
-    asymmetric_original = asymmetric.clone()
-    assert task.hessian_inverse(asymmetric) == (None, 1.0)
-    assert torch.equal(asymmetric, asymmetric_original)
-
-
-def test_shared_artifact_cache_is_single_flight_on_cpu():
-    cache = SharedHessianArtifactCache(generation=3, cohort="attn")
+def test_shared_factor_cache_is_single_flight_on_cpu():
+    cache = SharedHessianFactorCache(generation=3, cohort="attn")
     calls = 0
 
     def producer():
         nonlocal calls
         calls += 1
-        return torch.arange(4, dtype=torch.float32)
+        return torch.arange(4, dtype=torch.float32), 0.01, torch.ones(4)
 
     with ThreadPoolExecutor(max_workers=4) as pool:
         values = list(pool.map(lambda _: cache.get_or_compute(("factor", 8), producer), range(8)))
 
     assert calls == 1
-    assert all(torch.equal(values[0], value) for value in values[1:])
+    assert all(torch.equal(values[0][0], value[0]) for value in values[1:])
+
+
+def test_shared_factor_cache_does_not_retain_failed_build():
+    cache = SharedHessianFactorCache(generation=3, cohort="attn")
+    calls = 0
+
+    def producer():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("factor build failed")
+        return torch.eye(2), 0.01, torch.ones(2)
+
+    with pytest.raises(RuntimeError, match="factor build failed"):
+        cache.get_or_compute(("factor", 2), producer)
+    factor, _, _ = cache.get_or_compute(("factor", 2), producer)
+
+    assert calls == 2
+    assert torch.equal(factor, torch.eye(2))
 
 
 def test_cuda_producer_event_is_synchronized_at_cpu_consumption_boundary():
@@ -117,9 +90,15 @@ def test_cuda_producer_event_is_synchronized_at_cpu_consumption_boundary():
     assert event.synchronized
 
 
-def test_shared_cached_quantization_matches_uncached_and_factors_once(monkeypatch):
+@pytest.mark.parametrize("ordering", ["natural", "desc_act", "act_group_aware"])
+def test_shared_cached_quantization_matches_uncached_and_factors_once(monkeypatch, ordering):
     torch.manual_seed(9)
-    config = QuantizeConfig(bits=4, group_size=4, desc_act=True)
+    config = QuantizeConfig(
+        bits=4,
+        group_size=3,
+        desc_act=ordering == "desc_act",
+        act_group_aware=ordering == "act_group_aware",
+    )
     weights = [torch.nn.Linear(8, 6, bias=False) for _ in range(2)]
     cached = [_task(chunk_size=None, qcfg=config, out_features=6) for _ in range(2)]
     uncached = [_task(chunk_size=None, qcfg=config, out_features=6) for _ in range(2)]
@@ -133,32 +112,27 @@ def test_shared_cached_quantization_matches_uncached_and_factors_once(monkeypatc
     samples = torch.randn(24, 8)
     for task in cached + uncached:
         task.add_batch(samples, torch.empty(0))
-    cache = SharedHessianArtifactCache(generation=11, cohort="qkv")
+    cache = SharedHessianFactorCache(generation=11, cohort="qkv")
     for task in cached:
         task.attach_shared_hessian_cache(cache)
 
-    original_ex = torch.linalg.cholesky_ex
     original_cholesky = torch.linalg.cholesky
     calls = 0
-
-    def counted(*args, **kwargs):
-        nonlocal calls
-        calls += 1
-        return original_ex(*args, **kwargs)
 
     def counted_cholesky(*args, **kwargs):
         nonlocal calls
         calls += 1
         return original_cholesky(*args, **kwargs)
 
-    monkeypatch.setattr(torch.linalg, "cholesky_ex", counted)
     monkeypatch.setattr(torch.linalg, "cholesky", counted_cholesky)
     cached_results = [task.quantize() for task in cached]
     cached_factor_calls = calls
     uncached_results = [task.quantize() for task in uncached]
+    uncached_factor_calls = calls - cached_factor_calls
 
     # One probe Cholesky plus the final Cholesky of the inverse factor.
     assert cached_factor_calls == 2
+    assert uncached_factor_calls == 4
     for cached_result, uncached_result in zip(cached_results, uncached_results):
         for cached_value, uncached_value in zip(cached_result[:4], uncached_result[:4]):
             if isinstance(cached_value, torch.Tensor):

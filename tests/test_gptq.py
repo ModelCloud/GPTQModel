@@ -395,6 +395,7 @@ class TestGPTQHessianChunking(ModelTest):
         elapsed = time.perf_counter() - start
         peak_alloc = torch.cuda.max_memory_allocated(device)
         gptq_mod._WORKSPACE_CACHE.clear()
+        gptq_mod._WORKSPACE_SLOTS.clear()
 
         per_batch = elapsed / measured if measured else 0.0
         activation_mb = (batch_size * seq_len * hidden_dim * 2) / (1024**2)
