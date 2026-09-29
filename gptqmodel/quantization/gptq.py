@@ -870,12 +870,17 @@ class GPTQ:
                 new_samples = sum(self._device_sample_counts.values())
                 total_samples = previous_samples + new_samples
                 reduction_sources = list(self._device_embedding_counts.values())
+                source_diag: Optional[torch.Tensor] = None
 
                 if self._H_diag is None or self._H_diag.shape != (self.columns,):
                     diag = torch.zeros(self.columns, dtype=torch.float32, device=device)
                     previous_samples = 0
                 else:
-                    diag = self._H_diag.to(device=device, dtype=torch.float32)
+                    existing_diag = self._H_diag
+                    self._wait_hessian_ready(device)
+                    diag = existing_diag.to(device=device, dtype=torch.float32)
+                    if diag is not existing_diag:
+                        source_diag = existing_diag
 
                 if total_samples == 0:
                     diag.zero_()
@@ -904,6 +909,8 @@ class GPTQ:
                 self._device_sample_counts.clear()
                 self._device_hessian_partial_ready.clear()
                 self._record_hessian_ready(device)
+                if source_diag is not None:
+                    reduction_sources.insert(0, source_diag)
                 self._defer_hessian_sources(reduction_sources, self._hessian_ready_event)
                 return
 

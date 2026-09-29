@@ -179,3 +179,31 @@ def test_cuda_workspace_reuse_across_streams():
         oracle_input = sample.reshape(-1, 8).to(torch.float32)
         oracle = oracle_input.T @ oracle_input
         torch.testing.assert_close(actual, oracle, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cuda_embedding_hessian_materialization_waits_for_prior_stream():
+    device = torch.device("cuda")
+    task = GPTQ(torch.nn.Embedding(8, 4, device=device), QuantizeConfig())
+    stream_a = torch.cuda.Stream(device=device)
+    stream_b = torch.cuda.Stream(device=device)
+
+    first = torch.tensor([[0, 1, 1, 3]], dtype=torch.long)
+    second = torch.tensor([[1, 4]], dtype=torch.long)
+
+    with torch.cuda.stream(stream_a):
+        task.add_batch(first.to(device), None)
+        # Keep the first materialization in flight while the second stream
+        # appends a batch and tries to consume the prior diagonal.
+        torch.cuda._sleep(50_000_000)
+        task.materialize_global_hessian(target_device=device)
+
+    with torch.cuda.stream(stream_b):
+        task.add_batch(second.to(device), None)
+        task.materialize_global_hessian(target_device=device)
+
+    stream_a.synchronize()
+    stream_b.synchronize()
+
+    expected = 2.0 * torch.tensor([1, 3, 0, 1, 1, 0, 0, 0], device=device) / 6.0
+    torch.testing.assert_close(task.finalize_hessian(target_device=device), expected)
