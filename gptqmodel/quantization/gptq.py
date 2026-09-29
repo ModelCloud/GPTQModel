@@ -212,6 +212,7 @@ def _lease_workspace(
             workspace = slot.tensor
             reused = True
             if slot.ready_event is not None and torch.device(device).type == "cuda":
+                # Wait for the stream that released this slot before reusing it.
                 torch.cuda.current_stream(device).wait_event(slot.ready_event)
     try:
         if workspace.device.type == "cuda":
@@ -224,6 +225,7 @@ def _lease_workspace(
             if workspace.device.type == "cuda":
                 stream = torch.cuda.current_stream(device)
                 workspace.record_stream(stream)
+                # Publish completion so a later stream can safely reuse the slot.
                 slot.ready_event = torch.cuda.Event(blocking=False, interprocess=False)
                 slot.ready_event.record(stream)
             else:
@@ -367,6 +369,7 @@ class GPTQ:
         # Store per-device Hessian contributions so multi-GPU calibration can
         # keep local accumulators and merge only once when quantization begins.
         self._device_hessian_partials: Dict[torch.device, torch.Tensor] = {}
+        # Readiness events order stream-local writes before partial or final-H reads.
         self._device_hessian_partial_ready: Dict[torch.device, Optional[torch.cuda.Event]] = {}
         self._device_embedding_counts: Dict[torch.device, torch.Tensor] = {}
         self._device_sample_counts: Dict[torch.device, int] = {}
@@ -543,6 +546,7 @@ class GPTQ:
         event = self._cuda_event_for(device)
         if event is not None:
             event.record(torch.cuda.current_stream(device))
+        # A later update or reduction waits for this partial's completion.
         self._device_hessian_partial_ready[device] = event
 
     def _wait_hessian_ready(self, consumer_device: torch.device) -> None:
@@ -566,6 +570,7 @@ class GPTQ:
         event = self._cuda_event_for(device)
         if event is not None:
             event.record(torch.cuda.current_stream(device))
+        # Consumers use this marker before reading the merged Hessian elsewhere.
         self._hessian_ready_event = event
 
     def _defer_hessian_sources(
@@ -575,6 +580,7 @@ class GPTQ:
     ) -> None:
         if event is None:
             return
+        # Keep sources alive until the consuming stream has finished reading them.
         self._deferred_hessian_sources.extend((source, event) for source in sources)
 
     def _reap_deferred_hessian_sources(self) -> None:
@@ -582,6 +588,7 @@ class GPTQ:
             return
         pending = []
         for source, event in self._deferred_hessian_sources:
+            # Poll completion so the hot path can release sources without syncing.
             if event is None or event.query():
                 del source
             else:
@@ -1036,6 +1043,7 @@ class GPTQ:
             self._shared_hessian_cache.leader if self._shared_hessian_cache else None,
             tuple(self.H.shape) if self.H is not None else None,
             self.H.dtype if self.H is not None else None,
+            # Include device identity so a factor is reused only on its device.
             self.H.device.type if self.H is not None else None,
             self.H.device.index if self.H is not None else None,
             ordering,

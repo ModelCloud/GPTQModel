@@ -328,6 +328,7 @@ class GPTQProcessor(LoopProcessor):
             if follower_task is None or leader_task is None:
                 continue
             follower_task.adopt_hessian_from(leader_task)
+            # Publish the factor cache only after the follower owns its Hessian copy.
             cache = caches.get(leader)
             if cache is None:
                 cache = SharedHessianFactorCache(
