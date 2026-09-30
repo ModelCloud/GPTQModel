@@ -48,6 +48,7 @@ from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
 from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
+from .granitemoe import GraniteMoeQModel
 from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
