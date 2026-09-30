@@ -26,6 +26,7 @@
 
 ## Latest News 🗞️🚀
 
+* 09/30/2026 7.6.0-dev `main`: ✨ Added `smolvlm` quantization support.
 * 09/24/2026 7.6.0-dev `main`: ✨ Added `intervl` quantization support.
 * 09/23/2026 7.6.0-dev `main`: ✨ Added `exaone4_5`, `qwen3_vl_moe` and `olmoe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
@@ -218,6 +219,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | RefinedWeb | `refinedWeb`, `refinedWebModel` |
 | Seed-OSS | `seed_oss` |
 | SmolLM3 | `smollm3` |
+| SmolVLM | `smolvlm` |
 | Solar Open / Open 2 | `solar_open`, `solar_open2` |
 | Spark 2.5 | `spark2_5` |
 | StableLM | `stablelm`, `stablelm_epoch` |
@@ -231,10 +233,6 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Zamba / Zamba2 | `zamba`, `zamba2` |
 | ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
-
-Qwen-Drive support quantizes the Qwen3.5 VLM stored at the checkpoint root. It requires the official [`qwen_drive`](https://github.com/QwenLM/Qwen-Drive-1.0) inference package to register the architecture. The separately released `planner-sft`, `planner-rl`, and `perception` heads are not quantized or copied into the root-VLM output.
-
-Xing4.0 loads the model repository's custom implementation and therefore requires `trust_remote_code=True`. Run its GPU model test in full mode against a freshly measured dense baseline before checking quantized evaluation: `GPTQMODEL_MODEL_TEST_MODE=slow pytest -q tests/models/test_xing4_0.py`.
 
 Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 

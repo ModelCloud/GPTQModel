@@ -198,6 +198,7 @@ from .definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel  # noqa: E
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
+from .definitions.smolvlm import SmolVLMQModel  # noqa: E402
 from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
@@ -244,6 +245,7 @@ MODEL_MAP = {
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
     "smollm3": LlamaQModel,  # llama-compatible quantization module tree
+    "smolvlm": SmolVLMQModel,
     "llama4": Llama4QModel,
     "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
