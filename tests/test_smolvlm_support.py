@@ -5,7 +5,6 @@
 
 from types import SimpleNamespace
 
-import pytest
 import torch
 from torch import nn
 from transformers import AutoConfig, SmolVLMConfig, SmolVLMForConditionalGeneration
