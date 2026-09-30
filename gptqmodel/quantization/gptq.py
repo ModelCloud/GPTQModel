@@ -1543,6 +1543,11 @@ class GPTQ:
                 self._device_sample_counts.clear()
                 self._hessian_dirty = False
 
+            # Shared-input followers may retain a leader Hessian source until
+            # the destination copy completes.  Drain it before the fallback
+            # clones weights and allocates its output buffers.
+            self._release_deferred_hessian_sources()
+
             return self._fallback_quantize(
                 resolved_strategy, blocksize, target_device=fallback_device
             )
