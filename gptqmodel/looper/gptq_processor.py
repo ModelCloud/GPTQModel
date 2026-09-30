@@ -29,6 +29,7 @@ from ..models.writer import (
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
+from ..quantization.gptq import SharedHessianFactorCache
 from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -165,6 +166,7 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_plan_owner: Optional[Any] = None
         self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
+        self._shared_input_capture_generation = 0
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
 
@@ -258,6 +260,13 @@ class GPTQProcessor(LoopProcessor):
 
         with self.lock:
             self._shared_input_leaders = {}
+            tasks = dict(self.tasks)
+        # A cache belongs to one capture cohort.  Never let a later layer or
+        # subset accidentally reuse artifacts from a prior cohort.
+        for name in subset_names:
+            task = tasks.get(name)
+            if type(task) is GPTQ:
+                task.clear_shared_hessian_cache()
 
         if is_lm_head_module or not self.qcfg.hessian.dedup_shared_inputs:
             return {}
@@ -268,7 +277,7 @@ class GPTQProcessor(LoopProcessor):
 
         leaders: Dict[str, str] = {}
         with self.lock:
-            tasks = dict(self.tasks)
+            self._shared_input_capture_generation += 1
         for group in plan.shared_groups:
             if not group.explicit:
                 continue
@@ -312,12 +321,24 @@ class GPTQProcessor(LoopProcessor):
             tasks = dict(self.tasks)
 
         adopted = 0
+        caches: Dict[str, SharedHessianFactorCache] = {}
         for follower, leader in leaders.items():
             follower_task = tasks.get(follower)
             leader_task = tasks.get(leader)
             if follower_task is None or leader_task is None:
                 continue
             follower_task.adopt_hessian_from(leader_task)
+            # Publish the factor cache only after the follower owns its Hessian copy.
+            cache = caches.get(leader)
+            if cache is None:
+                cache = SharedHessianFactorCache(
+                    self._shared_input_capture_generation,
+                    leader,
+                    leader=leader,
+                )
+                caches[leader] = cache
+                leader_task.attach_shared_hessian_cache(cache)
+            follower_task.attach_shared_hessian_cache(cache)
             adopted += 1
 
         with self.lock:
