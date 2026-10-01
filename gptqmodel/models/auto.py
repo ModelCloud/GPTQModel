@@ -117,6 +117,7 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.granitemoe import GraniteMoeQModel
 from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
@@ -357,6 +358,7 @@ MODEL_MAP = {
     "marin": Qwen3QModel,
     "mage_vl": MageVLQModel,
     "granite": LlamaQModel, # 100% llama clone
+    "granitemoe": GraniteMoeQModel,
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
