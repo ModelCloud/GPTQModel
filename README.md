@@ -26,7 +26,7 @@
 
 ## Latest News 🗞️🚀
 
-* 09/30/2026 7.6.0-dev `main`: ✨ Added `smolvlm` quantization support.
+* 09/30/2026 7.6.0-dev `main`: ✨ Added `smolvlm` and `granitemoe` quantization support.
 * 09/24/2026 7.6.0-dev `main`: ✨ Added `intervl` quantization support.
 * 09/23/2026 7.6.0-dev `main`: ✨ Added `exaone4_5`, `qwen3_vl_moe` and `olmoe` quantization support.
 * 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
@@ -170,7 +170,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | GPT-Neo / GPT-NeoX | `gpt_neo`, `gpt_neox` |
 | GPT-OSS | `gpt_oss` |
 | GPT-J | `gptj` |
-| Granite / Granite MoE Hybrid | `granite`, `granitemoehybrid` |
+| Granite / Granite MoE / Granite MoE Hybrid | `granite`, `granitemoe`, `granitemoehybrid` |
 | GRIN-MoE | `grinmoe` |
 | HRM | `hrm_text` |
 | Hunyuan V1 / VL / OCR | `hunyuan_v1_dense`, `hunyuan_v1_moe`, `hunyuan_vl` |
