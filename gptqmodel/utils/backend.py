@@ -22,6 +22,7 @@ class BACKEND(str, Enum):
     GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_W4AFP8 = "gptq_w4afp8"  # INT4 GPTQ weights, token-scaled FP8 input on SM12x
+    GPTQ_W4A_NVFP4 = "gptq_w4a_nvfp4"  # INT4 GPTQ weights, NVFP4 input on SM12x
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
 
@@ -183,6 +184,7 @@ def backend_for_activation(activation_mode: Optional[str], backend: Optional[BAC
         return backend
     expected = {
         "w4afp8": BACKEND.GPTQ_W4AFP8,
+        "w4a_nvfp4": BACKEND.GPTQ_W4A_NVFP4,
     }[activation_mode]
     if backend in (None, BACKEND.AUTO, expected):
         return expected

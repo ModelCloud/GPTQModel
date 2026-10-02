@@ -4,12 +4,15 @@
 set -euo pipefail
 
 if (( $# < 1 )); then
-    printf 'Usage: %s TEST_PATH | quality-eval ARGS | dtype-audit ARGS | benchmark\n' "$0" >&2
+    printf 'Usage: %s TEST_PATH | quality-eval ARGS | dtype-audit ARGS | layer-trace ARGS | boundary-trace ARGS | norm-qat ARGS | scale-reconstruct ARGS | scale-qad ARGS | weight-qad ARGS | calibration-data ARGS | producer-calibrate ARGS | benchmark\n' "$0" >&2
     exit 2
 fi
 
 case "$1" in
-    tests/models/test_llama3_2_w4afp8.py|tests/models/test_llama3_2_w4a16_reference.py|tests/models/test_w4a_tiny_llama_lifecycle.py|tests/models/test_w4a_replay_stream.py|tests/kernels/test_w4a_stream.py|tests/kernels/test_w4afp8_gb10.py)
+    tests/models/test_w4a_hardware_forward.py)
+        if (( $# != 1 )); then exit 2; fi
+        run_kind=pytest ;;
+    tests/models/test_llama3_2_w4afp8.py|tests/models/test_llama3_2_w4a_nvfp4.py|tests/models/test_llama3_2_w4a16_reference.py|tests/models/test_w4a_tiny_llama_lifecycle.py|tests/models/test_w4a_replay_stream.py|tests/models/test_w4a_weight_qad.py|tests/models/test_w4a_producer_calibration.py|tests/kernels/test_w4a_stream.py|tests/kernels/test_w4afp8_gb10.py|tests/kernels/test_w4a_nvfp4_gb10.py)
         if (( $# != 1 )); then
             printf 'Unexpected arguments after test path.\n' >&2
             exit 2
@@ -21,6 +24,36 @@ case "$1" in
     dtype-audit)
         shift
         run_kind=dtype_audit ;;
+    layer-trace)
+        shift
+        run_kind=layer_trace ;;
+    boundary-trace)
+        shift
+        run_kind=boundary_trace ;;
+    norm-qat)
+        shift
+        run_kind=norm_qat ;;
+    scale-reconstruct)
+        shift
+        run_kind=scale_reconstruct ;;
+    scale-qad)
+        shift
+        run_kind=scale_qad ;;
+    weight-qad)
+        shift
+        run_kind=weight_qad ;;
+    weight-replay-audit)
+        shift
+        run_kind=weight_replay_audit ;;
+    calibration-data)
+        shift
+        run_kind=calibration_data ;;
+    producer-calibrate)
+        shift
+        run_kind=producer_calibrate ;;
+    producer-reconstruct)
+        shift
+        run_kind=producer_reconstruct ;;
     benchmark)
         shift
         if (( $# != 0 )); then
@@ -47,7 +80,26 @@ elif [[ $run_kind == dtype_audit ]]; then
     run_command=("$python_bin" -m tests.models.w4a_dtype_audit "$@")
 elif [[ $run_kind == benchmark ]]; then
     run_command=("$python_bin" tests/benchmark/benchmark_w4a_gb10.py)
-
+elif [[ $run_kind == layer_trace ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_layer_trace "$@")
+elif [[ $run_kind == boundary_trace ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_boundary_trace "$@")
+elif [[ $run_kind == scale_reconstruct ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_nvfp4_scale_reconstruct "$@")
+elif [[ $run_kind == scale_qad ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_nvfp4_scale_qad "$@")
+elif [[ $run_kind == weight_qad ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_nvfp4_weight_qad "$@")
+elif [[ $run_kind == weight_replay_audit ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_weight_replay_audit "$@")
+elif [[ $run_kind == calibration_data ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_calibration_data "$@")
+elif [[ $run_kind == producer_calibrate ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_nvfp4_calibrate "$@")
+elif [[ $run_kind == producer_reconstruct ]]; then
+    run_command=("$python_bin" -m tests.models.w4a_producer_reconstruct "$@")
+else
+    run_command=("$python_bin" -m tests.models.w4a_nvfp4_norm_qat "$@")
 fi
 budget=$("$python_bin" tests/models/w4a_gb10_memory.py --budget)
 read -r hard_limit soft_limit <<<"$budget"

@@ -1815,10 +1815,11 @@ def ModelLoader(cls):
                     BACKEND.GPTQ_TORCH,
                     BACKEND.GPTQ_TRITON,
                     BACKEND.GPTQ_W4AFP8,
+                    BACKEND.GPTQ_W4A_NVFP4,
                 ):
                     raise NotImplementedError(
                         "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
-                        f"or `gptq_w4afp8` backend, got `{backend}`."
+                        f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                     )
 
             if format_code == FORMAT.EXL3:

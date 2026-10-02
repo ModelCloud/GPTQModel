@@ -6,6 +6,7 @@ import torch
 from triton.testing import do_bench_cudagraph
 
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
 
 def main():
@@ -16,7 +17,7 @@ def main():
     for rows in (1, 128):
         x = torch.randn((rows, k), device="cuda", dtype=torch.bfloat16)
         dense = torch.randn((n, k), device="cuda", dtype=torch.bfloat16)
-        for cls in (W4AFP8Linear,):
+        for cls in (W4AFP8Linear, W4ANVFP4Linear):
             module = cls(
                 bits=4, group_size=128, sym=True, desc_act=False,
                 in_features=k, out_features=n, bias=False,
@@ -24,6 +25,8 @@ def main():
             module.qweight.random_(0, 0x7FFFFFFF)
             module.qzeros.fill_(0x77777777)
             module.scales.fill_(0.125)
+            if isinstance(module, W4ANVFP4Linear):
+                module.activation_global_scale.fill_(0.03125)
             module.post_init()
             module(x)
             latency_ms = do_bench_cudagraph(lambda: module(x), rep=20)

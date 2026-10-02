@@ -193,6 +193,33 @@ class _TritonHadamardTransform:
 fast_hadamard_transform = None
 
 
+class _HadamardAutograd(torch.autograd.Function):
+    """Preserve the backend forward and supply the symmetric Walsh derivative.
+
+    The TorchAO Triton helper and some native operators do not register an
+    autograd formula. An online rotation must not detach QAD's MLP branch.
+    Backward uses portable FP64 butterfly arithmetic before one final cast;
+    no inference values or backend selection change.
+    """
+
+    @staticmethod
+    def forward(ctx, x, scale, transform):
+        ctx.scale = scale
+        return transform(x, scale)
+
+    @staticmethod
+    def backward(ctx, gradient):
+        transformed = _TorchHadamardTransform.hadamard_transform(gradient.double(), ctx.scale)
+        return transformed.to(gradient.dtype), None, None
+
+
+def _hadamard_with_grad(x, scale):
+    transform = fast_hadamard_transform.hadamard_transform
+    if torch.is_grad_enabled() and x.requires_grad:
+        return _HadamardAutograd.apply(x, float(scale), transform)
+    return transform(x, scale)
+
+
 def import_fast_hadamard_transform():
     global fast_hadamard_transform
     if fast_hadamard_transform is not None:
@@ -229,13 +256,13 @@ def matmul_hadU_cuda(X, hadK, K):
 
     n = X.shape[-1]
     if K == 1:
-        return fast_hadamard_transform.hadamard_transform( # noqa: F821
+        return _hadamard_with_grad(
             X.contiguous(), 1.0 / torch.tensor(n).sqrt()
         )
     # if transpose:
     #     hadK = hadK.T.contiguous()
     input = X.view(-1, K, n // K)
-    input = fast_hadamard_transform.hadamard_transform( # noqa: F821
+    input = _hadamard_with_grad(
         input.contiguous(), 1.0 / torch.tensor(n).sqrt()
     )
     input = hadK.to(input.device).to(input.dtype) @ input

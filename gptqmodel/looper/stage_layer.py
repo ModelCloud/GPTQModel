@@ -110,7 +110,7 @@ def _should_drain_finalize_futures_synchronously(
     # allocations with the next layer's Hessians and activation replay cache;
     # on unified-memory devices that overlap can exceed the process cgroup even
     # though either lifecycle phase fits on its own.
-    if looper.gptq_model.quantize_config.activation_mode in {"w4afp8"}:
+    if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
         return True
 
     quant_devices = getattr(looper, "_quant_devices", None) or []
@@ -144,7 +144,7 @@ def _should_empty_cache_after_sync_finalize(
     W4A therefore always releases the allocator cache at its already
     synchronous layer boundary.
     """
-    if looper.gptq_model.quantize_config.activation_mode in {"w4afp8"}:
+    if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
         return True
     if not getattr(looper.gptq_model.quantize_config, "offload_to_disk", False):
         return False
@@ -591,6 +591,11 @@ def run_layer_stage(
         )
 
         for p_index, processor in enumerate(looper.processors):
+            if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+                from .native_processor import NativeProcessor
+                from ..nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
+
+                set_w4a_replay_enabled(module, not isinstance(processor, NativeProcessor))
             # Each processor contributes a quantization phase; walk them in
             # order so their caches and side effects line up with the pipeline.
             processor.log_call_count = 0  # reset
@@ -1043,6 +1048,7 @@ def run_layer_stage(
                         ):
                             is_w4a = looper.gptq_model.quantize_config.activation_mode in {
                                 "w4afp8",
+                                "w4a_nvfp4",
                             }
                             torch_empty_cache(device=cur_layer_device, gc=is_w4a, sync=True)
                     else:

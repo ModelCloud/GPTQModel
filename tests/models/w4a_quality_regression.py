@@ -12,10 +12,12 @@ status of a comparison run.
 from __future__ import annotations
 
 import argparse
+import copy
+import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 
@@ -39,11 +41,15 @@ def prepare_stream_view(checkpoint: Path, view: Path) -> Path:
     config = json.loads((source / "quantize_config.json").read_text())
     activation = config.get("activation")
     if (not isinstance(activation, dict) or activation.get("version") not in {1, 2}
-            or activation.get("mode") not in {"w4afp8"}):
+            or activation.get("mode") not in {"w4afp8", "w4a_nvfp4"}):
         raise ValueError("Expected a version 1 or version 2 W4A checkpoint.")
     if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
         raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
     migrated = {"version": 3, "mode": activation["mode"]}
+    if activation["mode"] == "w4a_nvfp4":
+        from gptqmodel.quantization.activation_floatx import normalize_nvfp4_recipe
+
+        migrated["recipe"] = normalize_nvfp4_recipe(activation.get("recipe", "four_six"))
     config["activation"] = migrated
     view.mkdir(parents=True, exist_ok=True)
     for item in source.iterdir():
@@ -112,7 +118,7 @@ def prepare_reference(checkpoint: Path, reference: Path) -> Path:
     config = json.loads(config_path.read_text())
     if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
         raise ValueError("The source must contain native INT32-packed GPTQ INT4 weights.")
-    if config.get("activation", {}).get("mode") not in {"w4afp8"}:
+    if config.get("activation", {}).get("mode") not in {"w4afp8", "w4a_nvfp4"}:
         raise ValueError("The source must be a W4A float activation checkpoint.")
     config.pop("activation")
     reference.mkdir(parents=True, exist_ok=True)
@@ -133,6 +139,107 @@ def prepare_reference(checkpoint: Path, reference: Path) -> Path:
     if (reference / "model.safetensors").resolve() != (source / "model.safetensors").resolve():
         raise AssertionError("W4A16 must use the identical packed weight tensor file.")
     return reference
+
+
+def prepare_attention_split_view(checkpoint: Path, view: Path,
+                                 attention_mode: str = "w4afp8") -> Path:
+    """Create a metadata-only mixed FP8-attention / NVFP4-MLP view.
+
+    The packed GPTQ INT4 weights and every tokenizer artifact are linked
+    unchanged. Only the activation policy gains an ``attention`` sub-policy, so
+    the saved weight format is untouched and the same-weight paired gate stays
+    valid.
+    """
+    if attention_mode not in {"w4afp8", "w4a_nvfp4"}:
+        raise ValueError("Attention mode must be `w4afp8` or `w4a_nvfp4`.")
+    source = checkpoint.resolve()
+    if source == view.resolve():
+        raise ValueError("The split view must be separate from its source checkpoint.")
+    config = json.loads((source / "quantize_config.json").read_text())
+    activation = config.get("activation")
+    if not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4":
+        raise ValueError("The attention split requires an NVFP4 W4A checkpoint.")
+    if activation.get("version") not in {3, 4}:
+        raise ValueError("The attention split requires activation version 3 or 4.")
+    if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
+        raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
+    attention = {"mode": attention_mode}
+    if attention_mode == "w4a_nvfp4":
+        attention["recipe"] = activation.get("recipe", "least_squares")
+    split = dict(activation)
+    split["attention"] = attention
+    config["activation"] = split
+    view.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        if not item.is_file() or item.name == "quantize_config.json":
+            continue
+        target = view / item.name
+        if target.is_symlink() and target.resolve() == item.resolve():
+            continue
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f"Split view artifact differs: {target}")
+        target.symlink_to(item.resolve())
+    target = view / "quantize_config.json"
+    payload = json.dumps(config, indent=2) + "\n"
+    if target.exists() and target.read_text() != payload:
+        raise ValueError(f"Split config differs: {target}")
+    target.write_text(payload)
+    if not (view / "model.safetensors").samefile(source / "model.safetensors"):
+        raise AssertionError("The split view must preserve the exact packed-weight tensor file.")
+    print(json.dumps({"source": str(source), "view": str(view), "attention": attention}))
+    return view
+
+
+def prepare_mlp_override_view(checkpoint: Path, view: Path,
+                              layers: Sequence[int]) -> Path:
+    """Create a metadata-only per-layer FP8-MLP view.
+
+    Selected decoder layers carry FP8 on their MLP boundaries while every other
+    layer keeps the NVFP4 stream default. The packed GPTQ INT4 weights and all
+    tokenizer artifacts are linked unchanged, so a paired same-weight gate
+    stays valid.
+    """
+    layers = tuple(sorted(layers))
+    if not layers or any(isinstance(index, bool) or not isinstance(index, int) or index < 0
+                         for index in layers):
+        raise ValueError("The MLP override requires unique non-negative decoder layer indices.")
+    if len(set(layers)) != len(layers):
+        raise ValueError("The MLP override requires unique decoder layer indices.")
+    source = checkpoint.resolve()
+    if source == view.resolve():
+        raise ValueError("The MLP view must be separate from its source checkpoint.")
+    config = json.loads((source / "quantize_config.json").read_text())
+    activation = config.get("activation")
+    if not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4":
+        raise ValueError("The MLP override requires an NVFP4 W4A checkpoint.")
+    if activation.get("version") not in {3, 4}:
+        raise ValueError("The MLP override requires activation version 3 or 4.")
+    if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
+        raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
+    if "mlp" in activation:
+        raise ValueError("The source already carries an MLP override; start from the stream default.")
+    override = dict(activation)
+    override["mlp"] = {"mode": "w4afp8", "layers": list(layers)}
+    config["activation"] = override
+    view.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        if not item.is_file() or item.name == "quantize_config.json":
+            continue
+        target = view / item.name
+        if target.is_symlink() and target.resolve() == item.resolve():
+            continue
+        if target.exists() or target.is_symlink():
+            raise FileExistsError(f"MLP view artifact differs: {target}")
+        target.symlink_to(item.resolve())
+    target = view / "quantize_config.json"
+    payload = json.dumps(config, indent=2) + "\n"
+    if target.exists() and target.read_text() != payload:
+        raise ValueError(f"MLP view config differs: {target}")
+    target.write_text(payload)
+    if not (view / "model.safetensors").samefile(source / "model.safetensors"):
+        raise AssertionError("The MLP view must preserve the exact packed-weight tensor file.")
+    print(json.dumps({"source": str(source), "view": str(view), "mlp": override["mlp"]}))
+    return view
 
 
 def verify_tokenizer(native: Path, checkpoint: Path, reference: Path) -> None:
@@ -178,8 +285,47 @@ def verify_tokenizer(native: Path, checkpoint: Path, reference: Path) -> None:
     print(json.dumps(report, indent=2))
 
 
+def paired_eval_batch_size(checkpoint: Path, baseline_result: Path, task: str,
+                           requested: int | None = None) -> int:
+    """Reject an incompatible paired run before model loading or generation."""
+    baseline = json.loads(baseline_result.read_text())
+    if len(baseline["tests"]) != 1 or baseline["tests"][0]["name"] != task:
+        raise ValueError("The frozen baseline must contain the requested task")
+    test = baseline["tests"][0]
+    if len(test["samples"]) != EXPECTED_TEST_ROWS[task]:
+        raise ValueError("The frozen baseline must contain every test row")
+    engine = baseline["engine"]
+    fixed = {"seed": 42, "dtype": "bfloat16", "padding_side": "left"}
+    if task == "gsm8k_platinum_cot":
+        fixed["max_new_tokens"] = 256
+    for key, value in fixed.items():
+        if engine.get(key) != value:
+            raise ValueError(f"Frozen baseline uses unsupported engine setting {key}: {engine.get(key)}")
+    batch = engine.get("batch_size")
+    if isinstance(batch, bool) or not isinstance(batch, int) or batch < 1:
+        raise ValueError("Frozen baseline batch size must be a positive integer")
+    if requested is not None and requested != batch:
+        raise ValueError(f"Requested batch size {requested} differs from frozen baseline {batch}")
+    reference = Path(baseline["model"]["path"])
+    if not (checkpoint / "model.safetensors").samefile(reference / "model.safetensors"):
+        raise ValueError("Paired evaluation requires the exact frozen baseline weight file")
+    for name in ("chat_template.jinja", "tokenizer.json", "tokenizer_config.json"):
+        if (checkpoint / name).read_bytes() != (reference / name).read_bytes():
+            raise ValueError(f"Paired evaluation tokenizer artifact differs: {name}")
+    return batch
+
+
 def evaluate_full_rows(checkpoint: Path, variant: str, task: str, output: Path,
-                       reference: Path | None = None, batch_size: int = 8) -> None:
+                       reference: Path | None = None, batch_size: int | None = None,
+                       baseline_result: Path | None = None) -> None:
+    if output.exists():
+        raise FileExistsError(f"Evaluation output already exists: {output}")
+    if baseline_result is not None:
+        batch_size = paired_eval_batch_size(checkpoint, baseline_result, task, batch_size)
+        print(json.dumps({"paired_baseline": str(baseline_result), "batch_size": batch_size,
+                          "preflight": "matched_weights_tokenizer_and_engine"}), flush=True)
+    elif batch_size is None:
+        batch_size = 8
     from datasets import load_dataset
     from gptqmodel import BACKEND
     from tests.eval import evaluate
@@ -194,7 +340,8 @@ def evaluate_full_rows(checkpoint: Path, variant: str, task: str, output: Path,
         model_path = checkpoint
         backend = {
             "w4afp8": BACKEND.GPTQ_W4AFP8,
-            }[variant]
+            "w4a_nvfp4": BACKEND.GPTQ_W4A_NVFP4,
+        }[variant]
 
     dataset_path, dataset_name, metric = TASKS[task]
     if batch_size < 1:
@@ -225,6 +372,17 @@ def compare(reference_result: Path, quantized_result: Path, task: str,
             allowed_drop_pp: float, metric_name: str | None = None) -> dict:
     base_run = json.loads(reference_result.read_text())
     quant_run = json.loads(quantized_result.read_text())
+    summary = _compare_runs(base_run, quant_run, task, allowed_drop_pp, metric_name)
+    print(json.dumps(summary, indent=2))
+    return summary
+
+
+def _compare_runs(base_run, quant_run, task, allowed_drop_pp, metric_name=None,
+                  *, same_weights=True):
+    if not math.isfinite(allowed_drop_pp) or not 0 <= allowed_drop_pp <= 100:
+        raise ValueError("Allowed drop must be finite and between 0 and 100 percentage points")
+    if len(base_run["tests"]) != 1 or len(quant_run["tests"]) != 1:
+        raise ValueError("Paired results must contain exactly one test")
     base = base_run["tests"][0]
     quant = quant_run["tests"][0]
     metric = metric_name or TASKS[task][2]
@@ -237,13 +395,22 @@ def compare(reference_result: Path, quantized_result: Path, task: str,
             raise ValueError(f"The paired evaluations differ in engine setting {key}.")
     left_model = Path(base_run["model"]["path"]) / "model.safetensors"
     right_model = Path(quant_run["model"]["path"]) / "model.safetensors"
-    if not left_model.samefile(right_model):
+    if same_weights and not left_model.samefile(right_model):
         raise ValueError("The paired results must use the same packed-weight tensor file.")
     left, right = base["samples"], quant["samples"]
     if len(left) != len(right) or not left:
         raise ValueError("The paired results have different or empty row sets.")
     if len(left) != EXPECTED_TEST_ROWS[task]:
         raise ValueError(f"The paired results do not contain every {task} test row.")
+    for test in (base, quant):
+        if {row["index"] for row in test["samples"]} != set(range(EXPECTED_TEST_ROWS[task])):
+            raise ValueError("Result indices must cover every test row exactly once")
+        scores = [float(row["scores"][metric]) for row in test["samples"]]
+        if any(value not in (0., 1.) for value in scores):
+            raise ValueError("Classification scores must be finite binary values")
+        if not math.isclose(float(test["metrics"][metric]), sum(scores) / len(scores),
+                            rel_tol=0, abs_tol=1e-12):
+            raise ValueError("Aggregate score differs from the saved per-row scores")
     differences = []
     losses = gains = 0
     extracted_changes = 0
@@ -293,8 +460,74 @@ def compare(reference_result: Path, quantized_result: Path, task: str,
         "statistically_detectable_drop": delta + half_width < 0,
         "material_regression": acceptance_task and statistical_verdict == "confirmed_regression",
     }
-    print(json.dumps(summary, indent=2))
     return summary
+
+
+def _engine_protocol(run):
+    engine = copy.deepcopy(run["engine"])
+    engine.pop("backend", None)
+    execution = engine.get("execution", {})
+    execution.pop("quantized_backend", None)
+    execution.pop("runtime_format", None)
+    return engine
+
+
+def compare_adapted(frozen_reference: Path, candidate_reference: Path,
+                    candidate_float: Path, allowed_drop_pp: float = 2.0) -> dict:
+    """Keep a degraded weight-only control from hiding activation regression.
+
+    The same-weight activation comparison retains its original gate. An
+    additional paired comparison uses the frozen original reference, and the
+    candidate A16 point score must not fall below that reference. The native
+    confidence interval is reported separately; a point floor is not a claim
+    of statistically proven native noninferiority.
+    """
+    paths = (frozen_reference, candidate_reference, candidate_float)
+    runs = [json.loads(path.read_text()) for path in paths]
+    frozen, native, quant = runs
+    for run in runs:
+        model_path = Path(run["model"]["path"])
+        if not (model_path / "model.safetensors").is_file():
+            raise ValueError("Evaluation checkpoint weights are missing")
+        cfg = json.loads((model_path / "quantize_config.json").read_text())
+        if cfg.get("bits") != 4 or cfg.get("pack_dtype") != "int32":
+            raise ValueError("Adapted acceptance requires native INT32-packed GPTQ INT4")
+        activation = cfg.get("activation", {}).get("mode")
+        if run is quant:
+            if activation not in {"w4afp8", "w4a_nvfp4"}:
+                raise ValueError("Candidate activation result must use a W4A float policy")
+            expected_backend = {"w4afp8": "gptq_w4afp8", "w4a_nvfp4": "gptq_w4a_nvfp4"}[activation]
+            if (run["engine"].get("backend") != expected_backend
+                    or run["engine"].get("execution", {}).get("quantized_backend") != expected_backend):
+                raise ValueError("Candidate execution backend differs from its activation policy")
+        elif activation is not None:
+            raise ValueError("Native reference results must have activation quantization disabled")
+        if _engine_protocol(run) != _engine_protocol(frozen):
+            raise ValueError("Adapted comparisons require identical evaluation engine settings")
+        if run.get("versions", {}) != frozen.get("versions", {}):
+            raise ValueError("Evaluation software versions differ")
+    if native["engine"].get("backend") != frozen["engine"].get("backend"):
+        raise ValueError("Native preservation requires the same evaluation backend")
+    task = "gsm8k_platinum_cot"
+    paired = _compare_runs(native, quant, task, allowed_drop_pp)
+    original = _compare_runs(frozen, quant, task, allowed_drop_pp, same_weights=False)
+    preservation = _compare_runs(frozen, native, task, 0., same_weights=False)
+    metric = TASKS[task][2]
+    counts = [sum(int(row["scores"][metric]) for row in run["tests"][0]["samples"])
+              for run in runs]
+    native_floor = counts[1] >= counts[0]
+    accepted = (native_floor and paired["verdict"] == "within_budget"
+                and original["verdict"] == "within_budget")
+    return {
+        "task": task, "rows": EXPECTED_TEST_ROWS[task], "allowed_drop_pp": allowed_drop_pp,
+        "frozen_native_correct": counts[0], "candidate_native_correct": counts[1],
+        "candidate_float_correct": counts[2], "native_point_floor_met": native_floor,
+        "same_weight_activation": paired, "frozen_reference_activation": original,
+        "native_preservation": preservation, "accepted": accepted,
+        "verdict": "accepted" if accepted else "not_accepted",
+        "result_sha256": {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
+                          for path in paths},
+    }
 
 
 def main() -> None:
@@ -311,13 +544,24 @@ def main() -> None:
     stream = sub.add_parser("stream-view")
     stream.add_argument("--checkpoint", type=Path, required=True)
     stream.add_argument("--view", type=Path, required=True)
+    split = sub.add_parser("split-view")
+    split.add_argument("--checkpoint", type=Path, required=True)
+    split.add_argument("--view", type=Path, required=True)
+    split.add_argument("--attention-mode", choices=("w4afp8", "w4a_nvfp4"), default="w4afp8")
+    mlp = sub.add_parser("mlp-view")
+    mlp.add_argument("--checkpoint", type=Path, required=True)
+    mlp.add_argument("--view", type=Path, required=True)
+    mlp.add_argument("--layers", type=int, nargs="+", required=True)
     run = sub.add_parser("eval")
     run.add_argument("--checkpoint", type=Path, required=True)
     run.add_argument("--reference", type=Path)
-    run.add_argument("--variant", choices=("w4a16", "w4afp8"), required=True)
+    run.add_argument("--variant", choices=("w4a16", "w4afp8", "w4a_nvfp4"), required=True)
     run.add_argument("--task", choices=tuple(TASKS), required=True)
     run.add_argument("--output", type=Path, required=True)
-    run.add_argument("--batch-size", type=int, default=8)
+    run.add_argument("--batch-size", type=int,
+                     help="Default: inherit --baseline-result batch size, otherwise 8.")
+    run.add_argument("--baseline-result", type=Path,
+                     help="Preflight a frozen same-weight baseline and inherit its batch size.")
     analysis = sub.add_parser("compare")
     analysis.add_argument("--w4a16", type=Path, required=True)
     analysis.add_argument("--w4a-float", type=Path, required=True)
@@ -325,6 +569,12 @@ def main() -> None:
     analysis.add_argument("--metric")
     analysis.add_argument("--allowed-drop-pp", type=float, default=2.0)
     analysis.add_argument("--output", type=Path)
+    adapted = sub.add_parser("accept-adapted")
+    adapted.add_argument("--frozen-w4a16", type=Path, required=True)
+    adapted.add_argument("--w4a16", type=Path, required=True)
+    adapted.add_argument("--w4a-float", type=Path, required=True)
+    adapted.add_argument("--allowed-drop-pp", type=float, default=2.0)
+    adapted.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     if args.command == "prepare":
         reference = prepare_reference(args.checkpoint, args.reference)
@@ -335,6 +585,10 @@ def main() -> None:
         prepare_dated_view(args.checkpoint, args.view, args.baseline)
     elif args.command == "stream-view":
         prepare_stream_view(args.checkpoint, args.view)
+    elif args.command == "split-view":
+        prepare_attention_split_view(args.checkpoint, args.view, args.attention_mode)
+    elif args.command == "mlp-view":
+        prepare_mlp_override_view(args.checkpoint, args.view, args.layers)
     elif args.command == "eval":
         evaluate_full_rows(
             args.checkpoint,
@@ -343,7 +597,17 @@ def main() -> None:
             args.output,
             args.reference,
             args.batch_size,
+            args.baseline_result,
         )
+    elif args.command == "accept-adapted":
+        if args.output.exists():
+            raise FileExistsError(args.output)
+        summary = compare_adapted(args.frozen_w4a16, args.w4a16, args.w4a_float, args.allowed_drop_pp)
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(json.dumps(summary, indent=2) + "\n")
+        print(json.dumps(summary, indent=2))
+        if not summary["accepted"]:
+            raise SystemExit(1)
     else:
         summary = compare(args.w4a16, args.w4a_float, args.task, args.allowed_drop_pp, args.metric)
         if args.output:

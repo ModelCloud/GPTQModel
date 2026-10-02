@@ -258,16 +258,27 @@ class HookedLinear(torch.nn.Linear):
         # dense modules with HookedLinear. Preserve the policy explicitly;
         # PyTorch forward hooks belong to the replaced module and do not move
         # with its parameters.
+        custom_linear._w4a_replay_disabled = getattr(linear, "_w4a_replay_disabled", False)
+        custom_linear._w4a_norm_preapplied = getattr(linear, "_w4a_norm_preapplied", False)
         custom_linear._w4a_stream_replay_mode = getattr(linear, "_w4a_stream_replay_mode", None)
         custom_linear._w4a_stream_replay_recipe = getattr(linear, "_w4a_stream_replay_recipe", None)
+        custom_linear._w4a_replay_model_dtype = getattr(linear, "_w4a_replay_model_dtype", linear.weight.dtype)
         custom_linear._w4a_stream_replay_version = getattr(
             linear, "_w4a_stream_replay_version", 2
         )
         custom_linear._w4a_stream_replay_pre_hook = getattr(
             linear, "_w4a_stream_replay_pre_hook", False
         )
+        # Module replacement does not copy the dense module's actual hooks.
+        custom_linear._w4a_replay_input_hook_active = False
         custom_linear._w4a_rotation_preapplied = getattr(
             linear, "_w4a_rotation_preapplied", False
+        )
+        custom_linear._w4a_activation_global_scale = getattr(
+            linear, "_w4a_activation_global_scale", None
+        )
+        custom_linear._w4a_headroom_probe = getattr(
+            linear, "_w4a_headroom_probe", False
         )
         return custom_linear
 
@@ -285,14 +296,20 @@ class HookedLinear(torch.nn.Linear):
         )
         if original_device != target_device:
             input = input.to(device=target_device)
-        replay_mode = getattr(self, "_w4a_stream_replay_mode", None)
+        replay_mode = (None if getattr(self, "_w4a_replay_disabled", False)
+                       else getattr(self, "_w4a_stream_replay_mode", None))
         replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)
         replay_version = getattr(self, "_w4a_stream_replay_version", 2)
+        replay_scale = getattr(self, "_w4a_activation_global_scale", None)
+        headroom_probe = bool(getattr(self, "_w4a_headroom_probe", False))
         rotation_preapplied = bool(getattr(self, "_w4a_rotation_preapplied", False))
         if replay_mode is not None:
-            from .qlinear.w4a_llama_replay import round_w4a_activation
-        if replay_mode is not None and not rotation_preapplied:
-            input = round_w4a_activation(input, replay_mode, replay_recipe)
+            from .qlinear.w4a_llama_replay import round_w4a_activation, round_w4a_replay_operand
+        if (replay_mode is not None and not rotation_preapplied and not headroom_probe
+                and not getattr(self, "_w4a_norm_preapplied", False)
+                and not getattr(self, "_w4a_replay_input_hook_active", False)):
+            input = round_w4a_replay_operand(input, replay_mode, replay_recipe, replay_scale,
+                                             version=replay_version, rounder=round_w4a_activation)
         if not rotation_preapplied:
             input = apply_online_hadamard(
                 input,
@@ -305,11 +322,17 @@ class HookedLinear(torch.nn.Linear):
         # A rotated down projection consumes a newly encoded hardware operand.
         # The incoming W4A carrier has already been rounded at the nonlinear
         # boundary, so replay the decode -> Hadamard -> encode sequence exactly.
-        if replay_mode is not None and not rotation_preapplied and (
+        if replay_mode is not None and not headroom_probe and not rotation_preapplied and (
             getattr(self, "online_full_had", False) or getattr(self, "online_partial_had", False)
         ):
-            input = round_w4a_activation(input, replay_mode, replay_recipe)
-        output = super().forward(input)
+            input = round_w4a_replay_operand(input, replay_mode, replay_recipe,
+                                             version=replay_version, rounder=round_w4a_activation)
+        if replay_mode is not None and replay_version == 4:
+            output = torch.nn.functional.linear(input.float(), self.weight.float(),
+                                                 self.bias.float() if self.bias is not None else None)
+            output = output.to(getattr(self, "_w4a_replay_model_dtype", self.weight.dtype))
+        else:
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:

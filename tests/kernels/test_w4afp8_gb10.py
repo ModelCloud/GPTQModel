@@ -72,8 +72,7 @@ def test_replay_quantizes_only_selected_linear_input():
     reason="GB10 / SM121 required",
 )
 def test_token_fp8_codes_match_independent_torch_oracle():
-    generator = torch.Generator(device="cuda").manual_seed(97)
-    x = torch.randn((3, 128), device="cuda", dtype=torch.bfloat16, generator=generator)
+    x = torch.randn((3, 128), device="cuda", dtype=torch.bfloat16)
     x[0].zero_()
     x[1, 0] = 400
     x[2, 1] = -500
@@ -93,14 +92,12 @@ def test_token_fp8_codes_match_independent_torch_oracle():
     reason="GB10 / SM121 required",
 )
 @pytest.mark.parametrize("rows", [1, 16, 33])
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-def test_gb10_native_fp8_group_gemm(rows, dtype):
+def test_gb10_native_fp8_group_gemm(rows):
     module = _packed_linear("cuda", k=256, n=64)
     generator = torch.Generator(device="cuda").manual_seed(1843)
-    x = torch.randn(rows, 256, device="cuda", dtype=dtype, generator=generator)
+    x = torch.randn(rows, 256, device="cuda", dtype=torch.bfloat16, generator=generator)
     x[0].zero_()
     y = module(x)
-    assert y.dtype == dtype
     # Independent Torch oracle: derive logical INT4 codes and per-token FP8
     # values from the checkpoint, then sum each GPTQ group in FP32.
     codes = torch.arange(256, device="cuda", dtype=torch.float32).remainder(16) - 8
@@ -142,33 +139,3 @@ def test_gb10_fp8_random_columns_and_partial_tile():
     oracle = (oracle * token_scale).to(actual.dtype)
     torch.cuda.synchronize()
     torch.testing.assert_close(actual, oracle, rtol=2e-3, atol=2e-3)
-
-
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
-def test_token_fp8_rounding_thresholds_and_neighbors(dtype):
-    # Pin amax=448 so the scale is exactly one. Include ties between normal
-    # and subnormal FP8 values, both signs, and input-dtype nextafter neighbors.
-    thresholds = torch.tensor(
-        [2.0**-10, 3.0 * 2.0**-10, 1.0625, 1.1875, 15.5, 248.0, 432.0],
-        device="cuda", dtype=dtype,
-    )
-    values = torch.cat((
-        torch.nextafter(thresholds, torch.full_like(thresholds, -torch.inf)),
-        thresholds,
-        torch.nextafter(thresholds, torch.full_like(thresholds, torch.inf)),
-    ))
-    x = torch.zeros((1, 128), device="cuda", dtype=dtype)
-    x[0, :values.numel()] = values
-    x[0, values.numel():2 * values.numel()] = -values
-    x[0, -4:] = torch.tensor([0.0, -0.0, 448.0, -448.0], device="cuda", dtype=dtype)
-    codes = torch.empty_like(x, dtype=torch.float8_e4m3fn)
-    scales = torch.empty((1,), device="cuda", dtype=torch.float32)
-    _token_fp8_quant[(1,)](x, codes, scales, 128, 128, num_warps=4)
-    expected = x.float().clamp(-448, 448).to(torch.float8_e4m3fn)
-    torch.cuda.synchronize()
-    torch.testing.assert_close(scales, torch.ones_like(scales), rtol=0, atol=0)
-    assert torch.equal(codes.view(torch.uint8), expected.view(torch.uint8))

@@ -31,7 +31,13 @@ from ..models.writer import (
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import GPTAQConfig, FOEMConfig, HessianConfig, METHOD, QuantizeConfig, resolve_quant_format
-from ..quantization.activation_floatx import fp8_token_qdq
+from ..quantization.activation_floatx import (
+    NVFP4ActivationHeadroom,
+    fp8_token_qdq,
+    nvfp4_block_qdq,
+    nvfp4_global_scale,
+    nvfp4_uses_headroom,
+)
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -77,6 +83,25 @@ def enable_w4afp8_replay(linear: torch.nn.Module) -> None:
 
     linear.forward = MethodType(quantized_input_forward, linear)
     linear._w4afp8_replay_enabled = True
+
+
+def enable_w4a_nvfp4_replay(linear: torch.nn.Module, global_scale: float,
+                             recipe: str = "least_squares") -> None:
+    """Replay a solved target's input with calibrated NVFP4 block rounding."""
+    if not isinstance(linear, torch.nn.Linear):
+        raise NotImplementedError("W4A NVFP4 replay currently supports torch.nn.Linear targets only.")
+    if getattr(linear, "_w4a_nvfp4_replay_enabled", False):
+        return
+    original_forward = linear.forward
+
+    def quantized_input_forward(self, x):
+        return original_forward(
+            x if getattr(self, "_w4a_stream_replay_pre_hook", False)
+            else nvfp4_block_qdq(x, global_scale, recipe)
+        )
+
+    linear.forward = MethodType(quantized_input_forward, linear)
+    linear._w4a_nvfp4_replay_enabled = True
 
 
 def clone_gptq_config_for_module(
@@ -191,6 +216,75 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_leaders: Dict[str, str] = {}
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
+        self._activation_amax: Dict[str, float] = {}
+        self._activation_headroom: Dict[str, NVFP4ActivationHeadroom] = {}
+        self._activation_global_scales: Dict[str, float] = {}
+        self._activation_headroom_probe = False
+
+    @staticmethod
+    def _activation_key(name: str, module: torch.nn.Module | None = None) -> str:
+        return (getattr(module, "_w4a_activation_key", None)
+                or getattr(module, "module_name", None) or name)
+
+    def _record_activation_amax(self, name: str, inp: torch.Tensor,
+                                module: torch.nn.Module | None = None) -> None:
+        if self.qcfg.activation_mode != "w4a_nvfp4" or not torch.is_tensor(inp):
+            return
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+        if (
+            torch.is_tensor(keep_mask) and inp.ndim >= 3 and keep_mask.ndim == 2
+            and keep_mask.shape == inp.shape[:2]
+        ):
+            inp = inp[keep_mask.to(device=inp.device, dtype=torch.bool)]
+        if inp.numel() == 0:
+            return
+        key = self._activation_key(name, module)
+        if nvfp4_uses_headroom(self.qcfg.activation_recipe):
+            if self._activation_headroom_probe:
+                collector = self._activation_headroom.get(key)
+                if collector is None:
+                    raise RuntimeError(f"Missing NVFP4 headroom collector for `{key}`.")
+                collector.collect(inp)
+            return
+        current = float(inp.detach().abs().amax().item())
+        if not torch.isfinite(torch.tensor(current)):
+            raise ValueError(f"NVFP4 calibration input for `{name}` contains NaN or infinity.")
+        with self.lock:
+            self._activation_amax[key] = max(current, self._activation_amax.get(key, 0.0))
+
+    def begin_activation_scale_probe(self, subset, layer=None) -> bool:
+        """Start the calibration-only pass required by NVIDIA headroom scales."""
+        if not nvfp4_uses_headroom(self.qcfg.activation_recipe):
+            return False
+        self._activation_headroom_probe = True
+        del layer
+        for name, named in subset.items():
+            target = named.module if isinstance(named, NamedModule) else named
+            key = getattr(named, "full_name", None) or self._activation_key(name, target)
+            target._w4a_activation_key = key
+            self._activation_headroom[key] = NVFP4ActivationHeadroom()
+            target._w4a_headroom_probe = True
+            target._w4a_activation_global_scale = None
+        return True
+
+    def end_activation_scale_probe(self, subset, layer=None) -> None:
+        """Freeze the probed scale before the GPTQ Hessian capture pass."""
+        if not self._activation_headroom_probe:
+            return
+        for name, named in subset.items():
+            target = named.module if isinstance(named, NamedModule) else named
+            key = getattr(named, "full_name", None) or self._activation_key(name, target)
+            collector = self._activation_headroom.pop(key, None)
+            if collector is None:
+                raise RuntimeError(f"Missing NVFP4 headroom statistics for `{key}`.")
+            scale = float(nvfp4_global_scale(
+                collector.compute_amax(), recipe=self.qcfg.activation_recipe
+            ))
+            self._activation_global_scales[key] = scale
+            target._w4a_activation_global_scale = scale
+            target._w4a_headroom_probe = False
+        del layer
+        self._activation_headroom_probe = False
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -379,6 +473,7 @@ class GPTQProcessor(LoopProcessor):
             def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
                 """Follower of a shared-input group: the leader collects this module's Hessian."""
 
+                self._record_activation_amax(name, inp[0], module)
                 del module, inp, out
             return skip
 
@@ -388,6 +483,10 @@ class GPTQProcessor(LoopProcessor):
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
+            self._record_activation_amax(name, inp_tensor, module)
+            if self._activation_headroom_probe:
+                del inp, out
+                return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
 
             if (
@@ -625,6 +724,23 @@ class GPTQProcessor(LoopProcessor):
         module.weight.data = wq
         if self.qcfg.activation_mode == "w4afp8":
             enable_w4afp8_replay(module.module)
+        elif self.qcfg.activation_mode == "w4a_nvfp4":
+            if nvfp4_uses_headroom(self.qcfg.activation_recipe):
+                try:
+                    scale = self._activation_global_scales.pop(module.full_name)
+                except KeyError as exc:
+                    raise RuntimeError(
+                        f"Missing calibrated NVFP4 headroom scale for `{module.full_name}`."
+                    ) from exc
+            else:
+                observed = self._activation_amax.get(
+                    module.full_name, self._activation_amax.get(module.name, 0.0)
+                )
+                scale = float(nvfp4_global_scale(
+                    observed, recipe=self.qcfg.activation_recipe or "least_squares"
+                ))
+            module.state["activation_global_scale"] = scale
+            enable_w4a_nvfp4_replay(module.module, scale, self.qcfg.activation_recipe or "least_squares")
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -691,6 +807,8 @@ class GPTQProcessor(LoopProcessor):
 
         # pack module
         qmodule = model.model.get_submodule(module.full_name)
+        if self.qcfg.activation_mode == "w4a_nvfp4":
+            qmodule.activation_global_scale.fill_(module.state.pop("activation_global_scale"))
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, (model.qlinear_kernel, TorchQuantEmbeddings))

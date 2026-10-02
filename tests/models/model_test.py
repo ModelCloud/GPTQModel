@@ -1689,7 +1689,7 @@ class ModelTest(unittest.TestCase):
                         # guarded processes so their peaks cannot overlap.
                         return None, tokenizer, None
 
-                    if quantize_config.activation_mode in {"w4afp8"}:
+                    if quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
                         # The 1B GB10 test otherwise keeps the freshly
                         # quantized model while reloading a second copy for
                         # post-save validation and full-row evaluation.

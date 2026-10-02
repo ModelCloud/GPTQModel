@@ -1158,6 +1158,24 @@ class BaseQModel(nn.Module):
             logger=log,
         )
 
+    def calibrate_activations(self, samples: List[torch.Tensor], *, progress=None) -> Dict[str, Any]:
+        """Calibrate a loaded version-4 NVFP4 stream without a GPTQ weight solve.
+
+        Samples are unpadded one-dimensional token-ID tensors from a corpus
+        disjoint from downstream evaluation. The caller is responsible for
+        checking dataset separation; our W4A tooling requires an audited data
+        artifact. This updates both runtime scales and the configuration used
+        by save(). The model must already be in evaluation mode and every
+        decoder layer must use the encoded NVFP4 stream.
+        """
+        if not self.quantized or self.quantize_config is None:
+            raise ValueError("Activation calibration requires an already quantized model")
+        from ..quantization.activation_calibration import calibrate_nvfp4_producers
+
+        return calibrate_nvfp4_producers(
+            self.model, samples, quantize_config=self.quantize_config, progress=progress,
+        )
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -1393,10 +1411,11 @@ class BaseQModel(nn.Module):
                 BACKEND.GPTQ_TORCH,
                 BACKEND.GPTQ_TRITON,
                 BACKEND.GPTQ_W4AFP8,
+                BACKEND.GPTQ_W4A_NVFP4,
             ):
                 raise NotImplementedError(
                     "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
-                    f"or `gptq_w4afp8` backend, got `{backend}`."
+                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                 )
 
         if self.quantize_config.uses_weight_only_lifecycle():
@@ -1431,7 +1450,7 @@ class BaseQModel(nn.Module):
         # restore cross-branch aliases (for example DiffusionGemma's decoder).
         self.after_quantize()
 
-        if self.quantize_config.activation_mode in {"w4afp8"}:
+        if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             from ..nn_modules.qlinear.w4a_floatx import W4AFP8Linear
             from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
 
@@ -1445,6 +1464,9 @@ class BaseQModel(nn.Module):
                 self.model, self.quantize_config.activation_mode,
                 self.quantize_config.activation_recipe,
                 self.quantize_config.activation_version,
+                attention_mode=self.quantize_config.activation_attention_mode,
+                attention_recipe=self.quantize_config.activation_attention_recipe,
+                mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,
             )
 
         timer = getattr(self, "quant_region_timer", None)
@@ -1695,7 +1717,7 @@ class BaseQModel(nn.Module):
 
         checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
         with gc_context, checkpoint_context as extension:
-            if self.quantize_config.activation_mode in {"w4afp8"}:
+            if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
                 from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 
                 install_w4a_llama_replay(self.model, self.quantize_config)
@@ -2539,7 +2561,7 @@ class BaseQModel(nn.Module):
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
-        if self.quantize_config.activation_mode in {"w4afp8"}:
+        if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
             # GB10 can stall in the pageable CUDA device-to-host copy used by
             # Module.to('cpu') during post-quant layer offload. Stage each copy
             # through a small pinned host buffer before placing it in ordinary

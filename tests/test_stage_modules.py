@@ -398,7 +398,7 @@ def test_stage_layer_keeps_async_finalizers_for_non_paroquant_when_unset():
 
 
 def test_stage_layer_forces_sync_finalizers_for_w4a():
-    for activation in ("w4afp8",):
+    for activation in ("w4afp8", "w4a_nvfp4"):
         looper = types.SimpleNamespace(
             gptq_model=types.SimpleNamespace(
                 quantize_config=QuantizeConfig(
@@ -418,7 +418,7 @@ def test_stage_layer_forces_sync_finalizers_for_w4a():
 
 
 def test_stage_layer_releases_cache_after_w4a_finalize():
-    for activation in ("w4afp8",):
+    for activation in ("w4afp8", "w4a_nvfp4"):
         looper = types.SimpleNamespace(
             gptq_model=types.SimpleNamespace(
                 quantize_config=QuantizeConfig(

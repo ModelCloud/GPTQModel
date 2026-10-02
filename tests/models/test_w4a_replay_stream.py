@@ -5,21 +5,263 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from types import SimpleNamespace
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+from gptqmodel.looper.gptq_processor import GPTQProcessor
+from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.quantization.activation_floatx import nvfp4_block_qdq
 from gptqmodel.quantization.config import QuantizeConfig
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("hooked", [False, True])
+def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hooked):
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import llama_nvfp4_boundaries
+    from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
+
+    torch.manual_seed(9721)
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    scales = {key: .01234567 for _, _, key in llama_nvfp4_boundaries(model.model.layers, [True, True])}
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=scales)
+    ids = torch.arange(17)[None]
+    source = model.model.embed_tokens(ids).detach()
+    decoded = _independent_nvfp4_qdq(source, torch.tensor(.01234567))
+    expected_norm = decoded * torch.rsqrt(decoded.square().mean(-1, keepdim=True) + config.rms_norm_eps)
+    install_w4a_llama_replay(model, qcfg)
+    if hooked:
+        for layer in model.model.layers:
+            for parent in (layer.self_attn, layer.mlp):
+                for name, child in list(parent.named_children()):
+                    if isinstance(child, torch.nn.Linear):
+                        setattr(parent, name, HookedLinear.from_linear(child))
+    captured = {}
+    model.model.layers[0].self_attn.q_proj.register_forward_pre_hook(
+        lambda _m, args: captured.update(norm=args[0].detach().clone()))
+    model.model.layers[0].self_attn.q_proj.register_forward_hook(
+        lambda _m, _args, value: captured.update(projection_dtype=value.dtype))
+    model.model.layers[1].register_forward_pre_hook(
+        lambda _m, args: captured.update(layer_input_dtype=args[0].dtype))
+    model.model.norm.register_forward_pre_hook(
+        lambda _m, args: captured.update(exit_dtype=args[0].dtype))
+    with torch.no_grad():
+        output = model(input_ids=ids, use_cache=False)
+    assert captured["norm"].dtype == torch.float32
+    torch.testing.assert_close(captured["norm"], expected_norm, rtol=1e-6, atol=1e-6)
+    assert captured["projection_dtype"] == captured["exit_dtype"] == dtype
+    assert captured["layer_input_dtype"] == torch.float32
+    assert torch.isfinite(output.logits).all()
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_v4_disabled_replay_preserves_native_model_precision(dtype):
+    import copy
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
+
+    torch.manual_seed(9732)
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    native = copy.deepcopy(model)
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=None)
+    install_w4a_llama_replay(model, qcfg)
+    set_w4a_replay_enabled(model, False)
+    with torch.no_grad():
+        actual = model(input_ids=torch.arange(11)[None], use_cache=False).logits
+        expected = native(input_ids=torch.arange(11)[None], use_cache=False).logits
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_v4_replay_decodes_at_an_unselected_layer():
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).bfloat16().eval()
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4,
+                           dynamic_get=lambda layer_name: False if layer_name.startswith("model.layers.1.") else None,
+                           activation_global_scales=None)
+    install_w4a_llama_replay(model, qcfg)
+    captured = []
+    model.model.layers[1].register_forward_pre_hook(lambda _m, args: captured.append(args[0].dtype))
+    with torch.no_grad():
+        model(input_ids=torch.arange(7)[None], use_cache=False)
+    assert captured == [torch.bfloat16]
+
+
+def test_v4_install_preserves_existing_hooked_linear_capture():
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).bfloat16().eval()
+    linear = HookedLinear.from_linear(model.model.layers[0].self_attn.q_proj)
+    model.model.layers[0].self_attn.q_proj = linear
+    captured = []
+    linear.forward_hook = lambda _m, args, result: captured.append((args[0].dtype, result.dtype))
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=None)
+    install_w4a_llama_replay(model, qcfg)
+    with torch.no_grad():
+        model(input_ids=torch.arange(7)[None], use_cache=False)
+    assert captured == [(torch.float32, torch.bfloat16)]
+
+
+def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).bfloat16().eval()
+    for layer in model.model.layers:
+        for parent in (layer.self_attn, layer.mlp):
+            for name, child in list(parent.named_children()):
+                if isinstance(child, torch.nn.Linear):
+                    setattr(parent, name, HookedLinear.from_linear(child))
+    calls = []
+    def rounded(value, *args):
+        calls.append(value.shape)
+        return value
+    monkeypatch.setattr(replay, "_round", rounded)
+    monkeypatch.setattr(replay, "round_w4a_activation", rounded)
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=None)
+    replay.install_w4a_llama_replay(model, qcfg)
+    with torch.no_grad():
+        model(input_ids=torch.arange(7)[None], use_cache=False)
+    assert len(calls) == 9
+
+
+def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypatch):
+    from types import MethodType
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).bfloat16().eval()
+    linear = model.model.layers[0].self_attn.q_proj
+    latent = torch.nn.Parameter(linear.weight.detach().float().clone())
+    linear.register_parameter("weight", None)
+    linear.register_parameter("latent", latent)
+    def custom(self, x):
+        return F.linear(x.float(), self.latent)
+    linear.forward = MethodType(custom, linear)
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=None)
+    replay.install_w4a_llama_replay(model, qcfg)
+    def straight_through(x, mode, recipe=None, scale=None):
+        value = replay.round_w4a_activation(x.detach(), mode, recipe, scale)
+        return x + (value - x).detach()
+    monkeypatch.setattr(replay, "_round", straight_through)
+    model(input_ids=torch.arange(7)[None], use_cache=False).logits.float().square().mean().backward()
+    assert latent.grad is not None and torch.isfinite(latent.grad).all()
+    assert latent.grad.abs().max() > 0
+
+
+def test_replay_requires_complete_producer_scale_coverage():
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config)
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales={"model.layers.0.input": .01})
+    with pytest.raises(ValueError, match="Incomplete NVFP4 producer scales"):
+        install_w4a_llama_replay(model, qcfg)
+    assert not hasattr(model.model.layers[0], "_w4a_replay_mode")
+
+
+def test_replay_uses_frozen_producer_scale_at_each_boundary(monkeypatch):
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import llama_nvfp4_boundaries
+
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
+    model = LlamaForCausalLM(config).eval()
+    specs = list(llama_nvfp4_boundaries(model.model.layers, [True, True]))
+    scales = {key: .001 * (index + 1) for index, (_, _, key) in enumerate(specs)}
+    qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           activation_global_scales=scales)
+    calls = []
+    def rounded(value, _mode, _recipe=None, global_scale=None):
+        calls.append(global_scale)
+        return value
+    monkeypatch.setattr(replay, "_round", rounded)
+    install_w4a_llama_replay(model, qcfg)
+    # A down projection without Hadamard still receives the already rounded
+    # MLP product; it must not be quantized again by its pre-hook.
+    with torch.no_grad():
+        model(input_ids=torch.arange(8)[None], use_cache=False)
+    assert calls == list(scales.values())
 
 
 def _independent_round(x: torch.Tensor, mode: str) -> torch.Tensor:
     blocks = x.float()
-    maxima = blocks.abs().amax(dim=-1, keepdim=True)
-    scale = torch.where(maxima > 0, maxima / 448.0, torch.ones_like(maxima))
-    return ((blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale).to(x.dtype)
+    if mode == "w4afp8":
+        maxima = blocks.abs().amax(dim=-1, keepdim=True)
+        scale = torch.where(maxima > 0, maxima / 448.0, torch.ones_like(maxima))
+        return ((blocks / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale).to(x.dtype)
+    global_max = blocks.abs().amax()
+    global_scale = torch.where(global_max > 0, global_max / 1792.0, torch.ones_like(global_max))
+    global_scale = global_scale.to(x.dtype).float()
+    values = blocks.reshape(*x.shape[:-1], x.shape[-1] // 16, 16)
+    maxima = values.abs().amax(dim=-1)
+    codebook = torch.tensor((0., -1., 1., -2., 2., -4., 4., -.5, .5, -1.5, 1.5, -3., 3., -6., 6.),
+                            device=x.device)
+    best_error = torch.full_like(maxima, torch.inf)
+    best_reconstructed = torch.zeros_like(values)
+    best_values = torch.zeros_like(values)
+    seeds = []
+
+    def evaluate(local):
+        scale = local[..., None] * global_scale
+        nearest = (values[..., None] / scale[..., None] - codebook).abs().argmin(dim=-1)
+        quantized = codebook[nearest]
+        reconstructed = quantized * scale
+        return quantized, reconstructed, (reconstructed - values).square().sum(dim=-1)
+
+    def refine(quantized):
+        denominator = quantized.square().sum(dim=-1)
+        optimal = (values * quantized).sum(dim=-1) / denominator.clamp_min(1.0)
+        inverse = optimal / global_scale
+        return torch.where(
+            denominator > 0,
+            inverse.clamp(min=2.0**-9, max=448.0),
+            torch.ones_like(inverse),
+        ).to(torch.float8_e4m3fn).float()
+
+    for bound in (4.0, 6.0):
+        local = torch.where(
+            maxima > 0,
+            (maxima / (bound * global_scale)).clamp(min=2.0**-9, max=448.0),
+            torch.ones_like(maxima),
+        ).to(torch.float8_e4m3fn).float()
+        quantized, reconstructed, error = evaluate(local)
+        seeds.append(quantized)
+        use = error < best_error
+        best_error = torch.where(use, error, best_error)
+        best_reconstructed = torch.where(use[..., None], reconstructed, best_reconstructed)
+        best_values = torch.where(use[..., None], quantized, best_values)
+    for quantized in seeds:
+        quantized, reconstructed, error = evaluate(refine(quantized))
+        use = error < best_error
+        best_error = torch.where(use, error, best_error)
+        best_reconstructed = torch.where(use[..., None], reconstructed, best_reconstructed)
+        best_values = torch.where(use[..., None], quantized, best_values)
+    _quantized, reconstructed, error = evaluate(refine(best_values))
+    result = torch.where((error < best_error)[..., None], reconstructed, best_reconstructed)
+    return result.reshape_as(x).to(x.dtype)
 
 
-@pytest.mark.parametrize("mode", ["w4afp8"])
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("skip_first", [False, True])
 @pytest.mark.parametrize("version", [2, 3])
 def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
@@ -34,6 +276,7 @@ def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
             "version": version, "mode": mode,
+            **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
         dynamic={"-:^model.layers\\.0\\.": {}} if skip_first else None,
@@ -63,7 +306,7 @@ def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
     assert getattr(model.model.layers[1], "_w4a_replay_round_input", None) is (True if skip_first else False)
 
 
-@pytest.mark.parametrize("mode", ["w4afp8"])
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("rotated", [False, True])
 @pytest.mark.parametrize("version", [2, 3])
 def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated, version):
@@ -71,7 +314,7 @@ def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated, v
     torch.manual_seed(704)
     dense = torch.nn.Linear(128, 128, bias=True, dtype=torch.float32).eval()
     dense._w4a_stream_replay_mode = mode
-    dense._w4a_stream_replay_recipe = None
+    dense._w4a_stream_replay_recipe = "least_squares" if mode == "w4a_nvfp4" else None
     dense._w4a_stream_replay_version = version
     dense._w4a_stream_replay_pre_hook = True
     dense.online_full_had = rotated
@@ -105,17 +348,17 @@ def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated, v
     assert hooked._w4a_stream_replay_version == version
     assert hooked._w4a_stream_replay_pre_hook is True
     assert len(seen) == 1
-    atol = 0
+    atol = 6e-7 if mode == "w4a_nvfp4" and version == 3 else (3e-7 if mode == "w4a_nvfp4" else 0)
     torch.testing.assert_close(seen[0], expected_input, rtol=0, atol=atol)
     torch.testing.assert_close(actual, expected_output, rtol=0, atol=atol)
 
 
-@pytest.mark.parametrize("mode", ["w4afp8"])
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("version", [2, 3])
 def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mode, version):
     dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
     dense._w4a_stream_replay_mode = mode
-    dense._w4a_stream_replay_recipe = None
+    dense._w4a_stream_replay_recipe = "least_squares" if mode == "w4a_nvfp4" else None
     dense._w4a_stream_replay_version = version
     dense._w4a_stream_replay_pre_hook = True
     dense._w4a_rotation_preapplied = True
@@ -141,11 +384,11 @@ def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mod
 
     assert hooked._w4a_rotation_preapplied is True
     torch.testing.assert_close(seen[0], operand, rtol=0, atol=0)
-    atol = 0
+    atol = 3e-7 if mode == "w4a_nvfp4" else 0
     torch.testing.assert_close(actual, expected, rtol=0, atol=atol)
 
 
-@pytest.mark.parametrize("mode", ["w4afp8"])
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("version", [2, 3])
 def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode, version):
     """The MLP wrapper and generic Linear pre-hook must not both QDQ down input."""
@@ -165,6 +408,7 @@ def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
             "version": version, "mode": mode,
+            **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
     )
@@ -189,3 +433,113 @@ def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode
     # input and output. Version 3 rounds only the three GEMM inputs.
     assert len(calls) == (6 if version == 2 else 3)
     assert sum(shape[-1] == 256 for shape in calls) == (3 if version == 2 else 1)
+
+
+def test_nvidia_headroom_probe_freezes_scale_before_hessian_capture():
+    processor = GPTQProcessor.__new__(GPTQProcessor)
+    processor.qcfg = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="nvidia_headroom"
+    )
+    processor._activation_amax = {}
+    processor._activation_headroom = {}
+    processor._activation_global_scales = {}
+    processor._activation_headroom_probe = False
+
+    dense = HookedLinear(128, 128)
+    dense.weight = torch.nn.Parameter(torch.eye(128))
+    dense.bias = None
+    named = NamedModule(
+        dense, "self_attn.q_proj", "model.layers.0.self_attn.q_proj", 0
+    )
+    subset = {"self_attn.q_proj": named}
+
+    assert processor.begin_activation_scale_probe(subset)
+    source = torch.full((8, 128), 0.5)
+    processor._record_activation_amax("self_attn.q_proj", source, dense)
+    processor.end_activation_scale_probe(subset)
+
+    scale = processor._activation_global_scales[named.full_name]
+    assert scale == pytest.approx(8192.0 / (6.0 * 448.0), rel=0.06)
+    assert dense._w4a_activation_global_scale == scale
+    assert dense._w4a_headroom_probe is False
+
+
+def test_hooked_linear_uses_frozen_nvidia_headroom_input_scale():
+    dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
+    dense.weight.data.copy_(torch.eye(128))
+    dense._w4a_stream_replay_mode = "w4a_nvfp4"
+    dense._w4a_stream_replay_recipe = "nvidia_headroom"
+    dense._w4a_activation_global_scale = 0.25
+    hooked = HookedLinear.from_linear(dense).eval()
+    seen = []
+    hooked.forward_hook = lambda _module, args, _output: seen.append(args[0].clone())
+    x = torch.linspace(-20, 20, 256).reshape(2, 128)
+
+    with torch.inference_mode():
+        hooked(x)
+
+    expected = nvfp4_block_qdq(x, 0.25, "nvidia_headroom")
+    torch.testing.assert_close(seen[0], expected, rtol=0, atol=0)
+
+
+def test_hooked_linear_v4_preserves_norm_input_without_requantizing(monkeypatch):
+    dense = torch.nn.Linear(128, 32, bias=False)
+    dense._w4a_stream_replay_mode = "w4a_nvfp4"
+    dense._w4a_stream_replay_version = 4
+    dense._w4a_norm_preapplied = True
+    hooked = HookedLinear.from_linear(dense)
+    monkeypatch.setattr(
+        "gptqmodel.nn_modules.qlinear.w4a_llama_replay.round_w4a_activation",
+        lambda *_: (_ for _ in ()).throw(AssertionError("normalization operand rounded again")),
+    )
+    generator = torch.Generator().manual_seed(9772)
+    x = torch.randn((2, 128), generator=generator)
+    torch.testing.assert_close(hooked(x), dense(x), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("version", [2, 3, 4])
+def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch, version):
+    import copy
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
+
+    torch.manual_seed(9780)
+    config = LlamaConfig(vocab_size=128, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+                         max_position_embeddings=128)
+    model = LlamaForCausalLM(config).float().eval()
+    reference = copy.deepcopy(model)
+    qcfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard",
+                          activation={"mode": "w4a_nvfp4", "version": version, "recipe": "least_squares"})
+    install_w4a_llama_replay(model, qcfg)
+    for layer in model.model.layers:
+        set_w4a_replay_enabled(layer, False)
+    def reject_round(*_args, **_kwargs):
+        raise AssertionError("Native reference inputs were activation-quantized")
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.w4a_llama_replay._round", reject_round)
+    ids = torch.tensor([[1, 7, 3]])
+    with torch.inference_mode():
+        expected = reference(input_ids=ids, use_cache=False).logits
+        actual = model(input_ids=ids, use_cache=False).logits
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+    for layer in model.model.layers:
+        set_w4a_replay_enabled(layer, True)
+    with pytest.raises(AssertionError, match="Native reference inputs"):
+        model(input_ids=ids, use_cache=False)
+
+
+def test_hooked_linear_preserves_native_capture_switch(monkeypatch):
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
+
+    dense = torch.nn.Linear(128, 32)
+    dense._w4a_stream_replay_mode = "w4a_nvfp4"
+    dense._w4a_stream_replay_version = 2
+    set_w4a_replay_enabled(dense, False)
+    hooked = HookedLinear.from_linear(dense)
+    def reject_round(*_args):
+        raise AssertionError("Native capture rounded a HookedLinear operand")
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.w4a_llama_replay.round_w4a_activation", reject_round)
+    x = torch.randn((2, 128), generator=torch.Generator().manual_seed(9781))
+    torch.testing.assert_close(hooked(x), dense(x), rtol=0, atol=0)
+    set_w4a_replay_enabled(hooked, True)
+    with pytest.raises(AssertionError, match="Native capture rounded"):
+        hooked(x)
