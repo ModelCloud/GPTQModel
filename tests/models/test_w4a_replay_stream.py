@@ -2,16 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Check GPTQ capture sees rounded inputs without a second input rounding."""
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
-from types import SimpleNamespace
 from transformers import LlamaConfig, LlamaForCausalLM
 
-from gptqmodel.nn_modules.hooked_linear import HookedLinear
-from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 from gptqmodel.looper.gptq_processor import GPTQProcessor
 from gptqmodel.looper.named_module import NamedModule
+from gptqmodel.nn_modules.hooked_linear import HookedLinear
+from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 from gptqmodel.quantization.activation_floatx import nvfp4_block_qdq
 from gptqmodel.quantization.config import QuantizeConfig
 
@@ -62,6 +63,7 @@ def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hook
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_v4_disabled_replay_preserves_native_model_precision(dtype):
     import copy
+
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
 
     torch.manual_seed(9732)
@@ -141,6 +143,7 @@ def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
 
 def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypatch):
     from types import MethodType
+
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
 
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
@@ -500,6 +503,7 @@ def test_hooked_linear_v4_preserves_norm_input_without_requantizing(monkeypatch)
 @pytest.mark.parametrize("version", [2, 3, 4])
 def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch, version):
     import copy
+
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
 
     torch.manual_seed(9780)

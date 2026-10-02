@@ -50,7 +50,7 @@ def _write(tmp_path, state, sharded=False):
     for shard, keys in enumerate((names[:midpoint], names[midpoint:])):
         filename = f"model-{shard:05d}.safetensors"
         save_file({key: state[key] for key in keys}, str(tmp_path / filename))
-        mapping.update({key: filename for key in keys})
+        mapping.update(dict.fromkeys(keys, filename))
     path = tmp_path / "model.safetensors.index.json"
     path.write_text(json.dumps({"weight_map": mapping}))
     return str(path)

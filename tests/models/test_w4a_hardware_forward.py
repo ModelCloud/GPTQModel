@@ -26,8 +26,9 @@ def test_hardware_value_rejects_broadcasting():
 
 def _pair(dtype, parameterization="physical_weight"):
     from transformers import LlamaForCausalLM
-    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
     from tests.models.test_w4a_producer_calibration import _tiny_stream
     from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
 
@@ -189,12 +190,14 @@ def test_code_refresh_and_frame_lifetime(parameterization):
 @pytest.mark.parametrize("parameterization", ["physical_weight", "code_cell"])
 def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtype, parameterization, monkeypatch):
     import copy
+
     from transformers import LlamaConfig, LlamaForCausalLM
-    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+    from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from tests.models.w4a_native_forward import NativeForward
-    from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
     from tests.models.w4a_nvfp4_scale_qad import _logit_distillation_loss
+    from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
 
     torch.manual_seed(9117)
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,

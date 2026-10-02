@@ -8,6 +8,7 @@ import pytest
 
 from gptqmodel.quantization.config import QuantizeConfig
 
+
 NVFP4 = "w4a_nvfp4"
 FP8 = "w4afp8"
 

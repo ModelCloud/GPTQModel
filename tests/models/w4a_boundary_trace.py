@@ -53,8 +53,8 @@ def profile(checkpoint: Path, prompt_result: Path, output: Path) -> dict:
 
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear import w4a_activation as activation_module
-    from gptqmodel.nn_modules.qlinear import w4a_llama_stream as stream_module
     from gptqmodel.nn_modules.qlinear import w4a_boundary as boundary_module
+    from gptqmodel.nn_modules.qlinear import w4a_llama_stream as stream_module
 
     model = GPTQModel.load(
         str(checkpoint), backend=BACKEND.GPTQ_W4A_NVFP4,

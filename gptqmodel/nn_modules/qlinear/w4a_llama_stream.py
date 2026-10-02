@@ -13,11 +13,13 @@ from types import MethodType
 import torch
 
 from .w4a_activation import W4AActivation, pack_activation
+from .w4a_boundary import (
+    NVFP4BoundaryQuantizer,
+    llama_nvfp4_boundaries,
+    pack_boundary,
+)
 from .w4a_floatx import W4AFP8Linear
 from .w4a_nvfp4 import W4ANVFP4Linear
-from .w4a_boundary import (
-    NVFP4BoundaryQuantizer, llama_nvfp4_boundaries, pack_boundary, validate_producer_scales,
-)
 
 
 def _headroom_scale(recipe: str | None, consumer=None, explicit=None):
@@ -135,7 +137,9 @@ def _final_norm_forward(self, hidden_states: torch.Tensor | W4AActivation) -> to
 def _attention_forward(self, hidden_states: W4AActivation, position_embeddings=None,
                        attention_mask=None, past_key_values=None, **kwargs):
     from transformers.models.llama.modeling_llama import (
-        ALL_ATTENTION_FUNCTIONS, apply_rotary_pos_emb, eager_attention_forward,
+        ALL_ATTENTION_FUNCTIONS,
+        apply_rotary_pos_emb,
+        eager_attention_forward,
     )
 
     if not isinstance(hidden_states, W4AActivation):

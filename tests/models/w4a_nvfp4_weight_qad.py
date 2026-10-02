@@ -561,8 +561,8 @@ def _weight_qad_loss(result, target: dict, *, objective: str,
 
 def straight_through_activation_round(x, mode, recipe=None, global_scale=None):
     """The shared forward used by weight adaptation and its runtime audit."""
-    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
 
     if mode == "w4a_nvfp4":
         if global_scale is not None:

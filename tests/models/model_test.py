@@ -120,13 +120,6 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from tests.eval import (  # noqa: E402
-    evaluate,
-    format_eval_result_table,
-    get_eval_task_results,
-    resolve_eval_metric_alias,
-)
-
 from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
@@ -151,6 +144,12 @@ from gptqmodel.quantization.config import (  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
 
 
 RAND_SEED = 898

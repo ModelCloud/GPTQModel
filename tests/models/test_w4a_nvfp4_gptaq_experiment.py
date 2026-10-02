@@ -19,12 +19,11 @@ import os
 from pathlib import Path
 
 from safetensors import safe_open
+from w4a_gb10_memory import require_w4a_test_headroom
 
 from gptqmodel.quantization.config import GPTAQConfig
-
 from tests.models.test_llama3_2_w4a_nvfp4 import TestLlama3_2_W4ANVFP4
 from tests.models.w4a_calibration_data import load_calibration_artifact
-from w4a_gb10_memory import require_w4a_test_headroom
 
 
 def gptaq_alpha() -> float:

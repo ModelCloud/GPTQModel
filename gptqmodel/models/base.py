@@ -151,9 +151,7 @@ class _QuantizedCheckpointSource:
         from safetensors import safe_open
 
         with safe_open(single_shard, framework="pt", device="cpu") as handler:
-            self._weight_map = {
-                tensor_name: "model.safetensors" for tensor_name in handler.keys()
-            }
+            self._weight_map = dict.fromkeys(handler.keys(), "model.safetensors")
 
 
 class _ClassPropertyDescriptor:

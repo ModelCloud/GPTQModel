@@ -6,8 +6,14 @@ import json
 import pytest
 
 from tests.models.w4a_calibration_data import (
-    EXCLUSIONS, QuestionExclusionIndex, _wikitext_articles,
-    file_digest, load_calibration_artifact, save_artifact, select_records, text_digest,
+    EXCLUSIONS,
+    QuestionExclusionIndex,
+    _wikitext_articles,
+    file_digest,
+    load_calibration_artifact,
+    save_artifact,
+    select_records,
+    text_digest,
 )
 
 
@@ -89,8 +95,9 @@ def test_round_trip_checks_fit_and_selection(artifact):
 
 
 def test_procedural_arithmetic_has_exact_independent_answers():
-    from fractions import Fraction
     import random
+    from fractions import Fraction
+
     from tests.models.w4a_arithmetic_calibration import KINDS, problem
 
     for seed in range(50):
@@ -217,7 +224,8 @@ def test_rejects_missing_benchmark(artifact):
 
 def test_evaluation_registry_is_covered_by_the_exclusion_registry():
     from tests.models.w4a_calibration_data import (
-        evaluated_dataset_configs, excluded_dataset_configs,
+        evaluated_dataset_configs,
+        excluded_dataset_configs,
     )
 
     covered, required = excluded_dataset_configs(), evaluated_dataset_configs()
@@ -437,8 +445,8 @@ def test_weight_qad_preflight_records_exact_disjoint_article_ids(artifact, weigh
 
 def test_weight_qad_tokenizes_the_same_verified_snapshot(artifact, weight_qad_paths, monkeypatch):
     from tests.models import w4a_calibration_data as data
-    from tests.models.w4a_nvfp4_weight_qad import weight_qad_preflight
     from tests.models.w4a_nvfp4_norm_qat import _calibration_ids_from_verified_records
+    from tests.models.w4a_nvfp4_weight_qad import weight_qad_preflight
 
     teacher, source, output, cache = weight_qad_paths
     calls = []
@@ -501,6 +509,7 @@ def test_calibration_format_rejects_unsupported_inputs(text_format):
 @pytest.mark.parametrize("rendered", [None, "", [1, 2]])
 def test_chat_calibration_rejects_invalid_template_output(rendered):
     from types import SimpleNamespace
+
     from tests.models.w4a_nvfp4_norm_qat import _calibration_ids_from_verified_records
 
     tokenizer = SimpleNamespace(apply_chat_template=lambda *args, **kwargs: rendered)
@@ -516,8 +525,8 @@ def test_chat_preflight_requires_audited_arithmetic_and_pins_template(artifact, 
     from tests.models.w4a_nvfp4_weight_qad import weight_qad_preflight
 
     teacher, source, output, cache = weight_qad_paths
-    options = dict(rows=3, validation_rows=1, teacher_cache_dir=cache,
-                   calibration_format="chat_worked_examples")
+    options = {"rows": 3, "validation_rows": 1, "teacher_cache_dir": cache,
+                   "calibration_format": "chat_worked_examples"}
     with pytest.raises(ValueError, match="audited arithmetic"):
         weight_qad_preflight(teacher, source, artifact, output, **options)
     arithmetic = tmp_path / "chat_arithmetic"

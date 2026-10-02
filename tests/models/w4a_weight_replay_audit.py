@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """Construct the weight-adaptation forward from a saved native INT4 checkpoint."""
 
-from contextlib import contextmanager
 import argparse
 import gc
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,6 +19,7 @@ def weight_replay_model(checkpoint: Path, *, hardware_forward: bool = False):
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+
     from .w4a_nvfp4_norm_qat import _ROTATION_FIELDS, _activation_replay_config, _dequantize_for_replay
     from .w4a_nvfp4_weight_qad import _install_trainable_gptq_codes, straight_through_activation_round
     from .w4a_quality_regression import prepare_reference
@@ -76,11 +77,13 @@ def trace_first_layer(checkpoint: Path, calibration: Path, output: Path, sequenc
     """Locate the first differing operand using the same held-out input IDs."""
     from safetensors.torch import save_file
     from transformers import AutoTokenizer
+
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
+
+    from .w4a_calibration_data import file_digest
     from .w4a_gb10_memory import require_w4a_test_headroom
     from .w4a_nvfp4_norm_qat import _calibration_ids
-    from .w4a_calibration_data import file_digest
 
     require_w4a_test_headroom(require_scope=True)
     if output.exists():

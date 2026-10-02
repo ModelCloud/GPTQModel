@@ -2,14 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 import torch
-from types import SimpleNamespace
 
 from tests.models.w4a_dtype_audit import (
-    _assert_carrier_transport, _audit_handoffs, _nvfp4_decode_reference, _nvfp4_linear_reference,
-    _scale_layout_probe_rows, _checkpoint_fingerprint, _verify_checkpoint_fingerprint,
+    _assert_carrier_transport,
+    _audit_handoffs,
+    _checkpoint_fingerprint,
+    _nvfp4_decode_reference,
+    _nvfp4_linear_reference,
+    _scale_layout_probe_rows,
+    _verify_checkpoint_fingerprint,
 )
 
 

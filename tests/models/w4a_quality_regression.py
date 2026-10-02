@@ -244,8 +244,8 @@ def prepare_mlp_override_view(checkpoint: Path, view: Path,
 
 def verify_tokenizer(native: Path, checkpoint: Path, reference: Path) -> None:
     """Check the dense and two quantized lanes render identical input IDs."""
-    from transformers import AutoTokenizer
     from tokenicer import Tokenicer
+    from transformers import AutoTokenizer
 
     paths = (native, checkpoint, reference)
     prompts = (
@@ -327,6 +327,7 @@ def evaluate_full_rows(checkpoint: Path, variant: str, task: str, output: Path,
     elif batch_size is None:
         batch_size = 8
     from datasets import load_dataset
+
     from gptqmodel import BACKEND
     from tests.eval import evaluate
 

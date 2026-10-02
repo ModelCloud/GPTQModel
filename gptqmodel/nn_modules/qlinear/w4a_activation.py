@@ -105,8 +105,8 @@ def pack_activation(x: torch.Tensor, mode: str, *, global_scale: torch.Tensor | 
         return W4AActivation(mode, codes, scales, shape, model_dtype,
                              rotation_applied=rotation_applied, reference=reference)
     if mode == "w4a_nvfp4":
-        from .w4a_nvfp4_triton import nvfp4_pack_and_swizzle
         from ...quantization.activation_floatx import normalize_nvfp4_recipe, nvfp4_global_scale
+        from .w4a_nvfp4_triton import nvfp4_pack_and_swizzle
         recipe = normalize_nvfp4_recipe(recipe or "least_squares")
         if global_scale is None:
             if rows:

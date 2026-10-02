@@ -53,6 +53,7 @@ class W4AFP8Linear(PackableQuantLinear):
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         try:
             import triton  # noqa: F401
+
             from . import w4a_triton  # noqa: F401
         except (ImportError, OSError) as exc:
             return False, RuntimeError(f"{cls.__name__} needs Triton with FP8 support: {exc}")

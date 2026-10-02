@@ -147,6 +147,7 @@ def run(checkpoint: Path, reference: Path, calibration: Path, output: Path, *, r
         if (checkpoint / name).read_bytes() != (reference / name).read_bytes():
             raise ValueError(f"Teacher tokenizer differs: {name}")
     from transformers import AutoTokenizer
+
     from gptqmodel import BACKEND, GPTQModel
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)

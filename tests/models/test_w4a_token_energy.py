@@ -55,8 +55,8 @@ def test_invalid_inputs_fail(source, decoded):
 
 @pytest.mark.parametrize("scope,count", [("all", 5), ("residual", 3)])
 def test_hooks_preserve_carrier_storage_and_are_removable(monkeypatch, scope, count):
-    from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
     from gptqmodel.nn_modules.qlinear import w4a_boundary
+    from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 
     keys = ["model.layers.0.input", "model.layers.0.self_attn.o_proj.input",
             "model.layers.0.post_attention_residual", "model.layers.0.mlp.down_proj.input",

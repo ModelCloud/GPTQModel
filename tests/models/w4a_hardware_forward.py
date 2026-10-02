@@ -156,6 +156,7 @@ class HardwareForward:
     @contextmanager
     def frame(self, input_ids, *, logits_to_keep=0):
         from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+
         from .w4a_nvfp4_weight_qad import straight_through_activation_round
 
         if self.active:

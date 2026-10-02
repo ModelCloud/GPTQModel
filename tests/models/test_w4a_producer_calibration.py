@@ -9,7 +9,11 @@ from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer, llama_nvfp4_boundaries
 from gptqmodel.nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
-from gptqmodel.quantization.activation_calibration import BoundaryMaximum, calibrate_nvfp4_producers, measure_nvfp4_producers
+from gptqmodel.quantization.activation_calibration import (
+    BoundaryMaximum,
+    calibrate_nvfp4_producers,
+    measure_nvfp4_producers,
+)
 from gptqmodel.quantization.config import QuantizeConfig
 from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
 
@@ -111,6 +115,7 @@ def _tiny_stream(scales=None, dtype=torch.bfloat16):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_v4_replay_norm_operand_matches_actual_encoded_runtime_and_independent_oracle(dtype):
     from types import SimpleNamespace
+
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 
     runtime = _tiny_stream(dtype=dtype)
@@ -157,9 +162,10 @@ def test_v4_replay_norm_operand_matches_actual_encoded_runtime_and_independent_o
 def test_v4_weight_adaptation_replay_matches_encoded_decoder_outputs(dtype, fixed_scales, monkeypatch):
     """Exercise the zero-update training function through two complete layers."""
     from types import SimpleNamespace
+
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
     from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes, straight_through_activation_round
-    from gptqmodel.nn_modules.qlinear import w4a_llama_replay
 
     monkeypatch.setattr(w4a_llama_replay, "_round", straight_through_activation_round)
 

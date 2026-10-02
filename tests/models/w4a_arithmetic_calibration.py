@@ -11,16 +11,23 @@ chat templates or introduce benchmark prompts into fitting.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import hashlib
 import json
-from pathlib import Path
 import random
+from collections import Counter
+from pathlib import Path
 
 from .w4a_calibration_data import (
-    ARITHMETIC_CORPUS, QuestionExclusionIndex, article_partition, file_digest, load_calibration_artifact,
-    save_artifact, select_records, text_digest,
+    ARITHMETIC_CORPUS,
+    QuestionExclusionIndex,
+    article_partition,
+    file_digest,
+    load_calibration_artifact,
+    save_artifact,
+    select_records,
+    text_digest,
 )
+
 
 KINDS = ("inventory", "bundles", "shares", "production", "discount", "ratio", "change", "distance")
 ITEMS = ("tiles", "beads", "markers", "bolts", "stickers", "tickets")

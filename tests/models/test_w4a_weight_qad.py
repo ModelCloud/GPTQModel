@@ -59,7 +59,9 @@ def test_gradient_coverage_does_not_accept_stale_or_other_lane_gradients():
 
 def test_changed_codes_by_module_reports_only_serialized_code_changes():
     from tests.models.w4a_nvfp4_weight_qad import (
-        _changed_code_count, _changed_codes_by_module, _install_trainable_gptq_codes,
+        _changed_code_count,
+        _changed_codes_by_module,
+        _install_trainable_gptq_codes,
     )
 
     core = torch.nn.Sequential(torch.nn.Linear(256, 128), torch.nn.Linear(128, 128))
@@ -122,6 +124,7 @@ def test_diagnostic_candidate_restores_previous_state_when_snapshot_fails():
 
 def test_strict_and_diagnostic_native_exports_are_independent(tmp_path):
     from safetensors.torch import load_file, save_file
+
     from tests.models.w4a_nvfp4_weight_qad import _export_code_candidate
 
     source = tmp_path / 'source'
@@ -166,6 +169,7 @@ def test_strict_and_diagnostic_native_exports_are_independent(tmp_path):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_dequantize_replay_preserves_rope_and_other_non_linear_buffers(dtype):
     from types import SimpleNamespace
+
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from tests.models.w4a_nvfp4_norm_qat import _dequantize_for_replay
 
@@ -252,7 +256,9 @@ def test_master_cell_radius_rejects_invalid_values(radius):
 @pytest.mark.parametrize("radius", [.25, .49])
 def test_master_cell_radius_installer_keeps_original_snapshot(parameterization, radius):
     from tests.models.w4a_nvfp4_weight_qad import (
-        _install_trainable_gptq_codes, _latent_codes, _snapshot_codes,
+        _install_trainable_gptq_codes,
+        _latent_codes,
+        _snapshot_codes,
     )
 
     core = torch.nn.Sequential(torch.nn.Linear(128, 8, bias=False))
@@ -309,6 +315,7 @@ def test_master_rotation_recovery_is_independent_of_rng():
 
 def test_master_rotation_recovery_rejects_unrelated_embeddings():
     import pytest
+
     from tests.models.w4a_nvfp4_weight_qad import _recover_hadamard_rotation
 
     generator = torch.Generator().manual_seed(9008)
@@ -320,6 +327,7 @@ def test_master_rotation_recovery_rejects_unrelated_embeddings():
 
 def test_qad_replay_uses_the_exported_checkpoint_policy(tmp_path):
     import json
+
     from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
 
     for version, recipe in [(2, 'four_six'), (3, 'least_squares'), (4, 'least_squares_grid')]:
@@ -334,7 +342,9 @@ def test_qad_replay_uses_the_exported_checkpoint_policy(tmp_path):
 
 def test_qad_rejects_norm_training_that_breaks_v4_contract(tmp_path):
     import json
+
     import pytest
+
     from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
 
     (tmp_path / 'quantize_config.json').write_text(json.dumps({
@@ -348,8 +358,8 @@ def test_qad_rejects_norm_training_that_breaks_v4_contract(tmp_path):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("trainable", ["weights", "code_cells", "scales"])
 def test_trainable_gptq_forward_matches_groupwise_fp32_oracle(dtype, trainable, device):
-    from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
     from tests.models.w4a_nvfp4_scale_qad import _install_trainable_gptq_scales
+    from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
 
     generator = torch.Generator(device=device).manual_seed(9010)
     core = torch.nn.Sequential(torch.nn.Linear(256, 128, bias=True, dtype=dtype, device=device))
@@ -379,7 +389,10 @@ def test_trainable_gptq_forward_matches_groupwise_fp32_oracle(dtype, trainable, 
 
 def test_code_cell_gradient_clamp_regularizer_and_snapshot_independent_oracle():
     from tests.models.w4a_nvfp4_weight_qad import (
-        _clamp_latent_codes, _install_trainable_gptq_codes, _snapshot_codes, _weight_regularizer,
+        _clamp_latent_codes,
+        _install_trainable_gptq_codes,
+        _snapshot_codes,
+        _weight_regularizer,
     )
 
     core = torch.nn.Sequential(torch.nn.Linear(256, 128, bias=False))
@@ -436,6 +449,7 @@ def test_teacher_disk_cache_is_lossless_and_preserves_hidden_order(tmp_path):
 
 def test_teacher_disk_cache_syncs_before_release_and_returns_owned_tensors(tmp_path, monkeypatch):
     import os
+
     from tests.models import w4a_nvfp4_weight_qad as qad
 
     if not hasattr(os, "posix_fadvise"):
@@ -472,6 +486,7 @@ def test_teacher_disk_cache_syncs_before_release_and_returns_owned_tensors(tmp_p
 
 def test_teacher_disk_cache_without_posix_advice_remains_lossless(tmp_path, monkeypatch):
     import os
+
     from tests.models.w4a_nvfp4_weight_qad import DiskTeacherTargets
 
     monkeypatch.delattr(os, "posix_fadvise", raising=False)
@@ -487,7 +502,9 @@ def test_teacher_disk_cache_without_posix_advice_remains_lossless(tmp_path, monk
     not torch.cuda.is_available(), reason="CUDA required"))])
 def test_nonreentrant_checkpointing_preserves_replay_outputs_and_latent_gradients(monkeypatch, dtype, rounded, device):
     from types import SimpleNamespace
+
     from transformers import LlamaConfig, LlamaForCausalLM
+
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
     from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
 

@@ -394,6 +394,7 @@ def test_nvfp4_random_columns_and_scales(n, dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_norm_preserves_codes_and_scales_against_oracle(dtype):
     from types import SimpleNamespace
+
     from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
     from gptqmodel.nn_modules.qlinear.w4a_llama_stream import _norm_forward
 

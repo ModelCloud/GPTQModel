@@ -1,14 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import json
+import os
 from pathlib import Path
 
 import torch
-from safetensors import safe_open
-
 from model_test import ModelTest
+from safetensors import safe_open
 from w4a_gb10_memory import require_w4a_test_headroom
 
 from gptqmodel import BACKEND

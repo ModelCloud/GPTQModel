@@ -5,9 +5,8 @@
 import os
 from pathlib import Path
 
-from safetensors import safe_open
-
 from model_test import ModelTest
+from safetensors import safe_open
 from w4a_gb10_memory import require_w4a_test_headroom
 
 from gptqmodel import BACKEND

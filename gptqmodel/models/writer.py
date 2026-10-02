@@ -22,6 +22,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
@@ -39,7 +40,6 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     resolve_quant_format,
 )
-from ..nn_modules.qlinear import BaseQuantLinear
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (

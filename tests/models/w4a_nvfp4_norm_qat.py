@@ -14,8 +14,8 @@ from types import MethodType, SimpleNamespace
 import torch
 from safetensors.torch import load_file, save_file
 
-from .w4a_gb10_memory import require_w4a_test_headroom
 from .w4a_calibration_data import load_calibration_artifact
+from .w4a_gb10_memory import require_w4a_test_headroom
 
 
 _ROTATION_FIELDS = (

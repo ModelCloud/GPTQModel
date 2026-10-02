@@ -222,6 +222,7 @@ def test_saved_acceptance_rejects_wrong_consumer_audit(saved_acceptance_bundle, 
 
 def test_saved_acceptance_rejects_changed_frozen_artifact(saved_acceptance_bundle):
     from pathlib import Path
+
     from tests.models.w4a_saved_acceptance import validate_saved_nvfp4_acceptance
 
     data = json.loads(saved_acceptance_bundle[0].read_text())
@@ -246,8 +247,9 @@ def test_nvfp4_full_gsm8k_saved_acceptance():
     """Opt-in e2e evidence gate; missing artifacts are never reported as a pass."""
     import os
     from pathlib import Path
-    from tests.models.w4a_saved_acceptance import validate_saved_nvfp4_acceptance
+
     from tests.models.w4a_dtype_audit import _verify_checkpoint_fingerprint
+    from tests.models.w4a_saved_acceptance import validate_saved_nvfp4_acceptance
 
     names = ('GPTQMODEL_W4A_FROZEN_MANIFEST', 'GPTQMODEL_W4A16_FULL_RESULT',
              'GPTQMODEL_W4A4_FULL_RESULT', 'GPTQMODEL_W4A4_CONSUMER_AUDIT')
@@ -267,6 +269,7 @@ def test_nvfp4_full_gsm8k_saved_acceptance():
 @pytest.mark.parametrize('mutation', ['none', 'changed_weights', 'missing_hashes'])
 def test_full_saved_entrypoint_requires_current_checkpoint_hashes(saved_acceptance_bundle, monkeypatch, mutation):
     from pathlib import Path
+
     from tests.models.w4a_dtype_audit import _checkpoint_fingerprint
 
     audit_path = saved_acceptance_bundle[3]

@@ -12,7 +12,9 @@ from pathlib import Path
 import torch
 
 from .w4a_calibration_data import (
-    evaluated_dataset_configs, file_digest, load_calibration_artifact,
+    evaluated_dataset_configs,
+    file_digest,
+    load_calibration_artifact,
 )
 from .w4a_gb10_memory import require_w4a_test_headroom
 from .w4a_nvfp4_norm_qat import _calibration_ids, _copy_checkpoint_shell, _tensor_digest
@@ -49,6 +51,7 @@ def run(checkpoint: Path, calibration: Path, output: Path, *, rows: int,
     required_evaluations = evaluated_dataset_configs()
     _, data_manifest = load_calibration_artifact(calibration, required_evaluations=required_evaluations)
     from transformers import AutoTokenizer
+
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.quantization.activation_calibration import measure_nvfp4_producers
 

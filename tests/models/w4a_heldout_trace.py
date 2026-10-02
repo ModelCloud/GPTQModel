@@ -5,9 +5,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from collections import defaultdict
 from contextlib import ExitStack, nullcontext
-import json
 from pathlib import Path
 
 import torch
@@ -42,10 +42,12 @@ def trace_heldout(checkpoint: Path, variant: str, calibration: Path, output: Pat
     if output.exists():
         raise FileExistsError(output)
     partitions, data = load_calibration_artifact(calibration)
-    from transformers import AutoTokenizer
     import transformers
+    from transformers import AutoTokenizer
+
     from gptqmodel import BACKEND, GPTQModel
     from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
+
     from .w4a_nvfp4_norm_qat import _calibration_ids
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint, local_files_only=True)

@@ -29,7 +29,7 @@ def main():
                 module.activation_global_scale.fill_(0.03125)
             module.post_init()
             module(x)
-            latency_ms = do_bench_cudagraph(lambda: module(x), rep=20)
+            latency_ms = do_bench_cudagraph(lambda m=module: m(x), rep=20)
             print(f"rows={rows} {cls.__name__}: {latency_ms * 1000:.2f} us", flush=True)
             del module
         latency_ms = do_bench_cudagraph(lambda: torch.nn.functional.linear(x, dense), rep=20)
