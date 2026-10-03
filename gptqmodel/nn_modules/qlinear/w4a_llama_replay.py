@@ -112,16 +112,60 @@ def _replay_mlp_forward(self, x: torch.Tensor) -> torch.Tensor:
     return down(product)
 
 
+def _replay_norm_operand(norm: torch.nn.Module, pristine: torch.Tensor,
+                         rounded: torch.Tensor) -> torch.Tensor:
+    """Version-4 RMSNorm shortcut over the deployed encoded stream.
+
+    The encoded stream keeps the residual value in compute precision and only
+    rounds the GEMM operand. Its fused RMSNorm therefore rescales the rounded
+    carrier by the inverse RMS of the pristine residual instead of
+    re-quantizing a normed value. The replay must reproduce that exactly or its
+    captured Hessians and QAD signal describe a function the checkpoint never
+    executes.
+    """
+    variance = pristine.float().square().mean(dim=-1, keepdim=True)
+    inv_rms = torch.rsqrt(variance + norm.variance_epsilon)
+    return (rounded.float() * inv_rms).to(pristine.dtype)
+
+
 def _replay_layer_forward(self, hidden_states: torch.Tensor,
                           attention_mask=None, position_ids=None, past_key_values=None,
                           use_cache=False, position_embeddings=None, **kwargs) -> torch.Tensor:
     mode = self._w4a_replay_mode
     recipe = self._w4a_replay_recipe
     disabled = getattr(self, "_w4a_replay_disabled", False)
+    version = getattr(self, "_w4a_replay_version", 3)
+    if version == 4 and not disabled:
+        # Version-4 carries the residual stream in compute precision. The
+        # rounded operand is rebuilt from the pristine value at each boundary,
+        # reproducing the deployed stream's "rounded numerator, pristine
+        # denominator" RMSNorm without holding cross-layer state that reverse
+        # order recomputation would corrupt.
+        pristine = hidden_states.float()
+        # A stream entry packs the raw model-dtype input; an interior layer
+        # rebuilds the previous layer's rounded output from the same producer
+        # dtype so the dynamic grid selection still matches the runtime.
+        rounded = round_w4a_replay_operand(
+            hidden_states, mode, recipe, getattr(self, "_w4a_replay_input_global_scale", None),
+            version=version)
+        x = _replay_norm_operand(self.input_layernorm, pristine, rounded)
+        x, _ = self.self_attn(
+            hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, use_cache=use_cache,
+            position_embeddings=position_embeddings, **kwargs,
+        )
+        summed = pristine + x.float()
+        rounded = round_w4a_replay_operand(
+            summed, mode, recipe, self._w4a_replay_global_scales.get("post_attention_residual"),
+            version=version)
+        x = _replay_norm_operand(self.post_attention_layernorm, summed, rounded)
+        x = self.mlp(x)
+        return summed + x.float()
+
     def rounded(value, boundary):
         return value if disabled else round_w4a_replay_operand(
             value, mode, recipe, self._w4a_replay_global_scales.get(boundary),
-            version=self._w4a_replay_version)
+            version=version)
     x = rounded(hidden_states, "input") if self._w4a_replay_round_input else hidden_states
     residual = x
     x = self.input_layernorm(x)
@@ -196,7 +240,15 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
             for boundary in ("input", "post_attention_residual", "output")
             if global_scales is not None and f"model.layers.{index}.{boundary}" in global_scales
         }
-        layer._w4a_replay_round_input = index == 0 or not selected[index - 1]
+        round_input = index == 0 or not selected[index - 1]
+        layer._w4a_replay_round_input = round_input
+        # Version 4 receives the previous layer's output carrier unchanged, so
+        # its input rounding must reuse that layer's calibrated output scale
+        # instead of the (absent) per-layer input scale.
+        layer._w4a_replay_input_global_scale = (
+            global_scales.get(f"model.layers.{index}.input") if round_input
+            else global_scales.get(f"model.layers.{index - 1}.output")
+        ) if global_scales is not None else None
         _bind_forward(layer, _replay_layer_forward)
         layer.mlp._w4a_replay_mode = mode
         layer.mlp._w4a_replay_recipe = recipe

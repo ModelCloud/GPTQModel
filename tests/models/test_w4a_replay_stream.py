@@ -34,7 +34,10 @@ def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hook
     ids = torch.arange(17)[None]
     source = model.model.embed_tokens(ids).detach()
     decoded = _independent_nvfp4_qdq(source, torch.tensor(.01234567))
-    expected_norm = decoded * torch.rsqrt(decoded.square().mean(-1, keepdim=True) + config.rms_norm_eps)
+    # The deployed stream rescales the rounded carrier by the inverse RMS of
+    # the pristine residual, so the denominator stays unquantized.
+    expected_norm = decoded * torch.rsqrt(source.float().square().mean(-1, keepdim=True)
+                                          + config.rms_norm_eps)
     install_w4a_llama_replay(model, qcfg)
     if hooked:
         for layer in model.model.layers:
@@ -138,7 +141,10 @@ def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
     replay.install_w4a_llama_replay(model, qcfg)
     with torch.no_grad():
         model(input_ids=torch.arange(7)[None], use_cache=False)
-    assert len(calls) == 9
+    # Four producers per layer: the stream entry (or rebuilt predecessor
+    # output), the attention output, the post-attention residual, and the MLP
+    # product. The terminal layer output feeds only the pristine final norm.
+    assert len(calls) == 8
 
 
 def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypatch):
@@ -203,7 +209,10 @@ def test_replay_uses_frozen_producer_scale_at_each_boundary(monkeypatch):
     # MLP product; it must not be quantized again by its pre-hook.
     with torch.no_grad():
         model(input_ids=torch.arange(8)[None], use_cache=False)
-    assert calls == list(scales.values())
+    # Interior layers reuse the predecessor's frozen output scale when they
+    # rebuild their input operand, and the terminal output boundary never
+    # feeds a GEMM, so the last producer scale is intentionally unused.
+    assert calls == list(scales.values())[:-1]
 
 
 def _independent_round(x: torch.Tensor, mode: str) -> torch.Tensor:

@@ -12,6 +12,17 @@ from contextlib import contextmanager
 import torch
 
 
+def _pristine(value):
+    """Layer boundaries carry the compute-precision residual, not the operand.
+
+    The encoded stream's fused RMSNorm and unquantized head consume the
+    pristine value retained on the carrier; only GEMM inputs see the decoded
+    operand. Surrogates that substitute layer boundaries must therefore capture
+    the pristine value.
+    """
+    return value.exact(torch.float32) if hasattr(value, "exact") else value.detach()
+
+
 class _ForwardValue(torch.autograd.Function):
     @staticmethod
     def forward(ctx, surrogate, actual):
@@ -97,7 +108,7 @@ class HardwareForward:
                     self.producer_keys.append(module.key)
                     def capture_boundary(module, _args, value):
                         if self.capture_active:
-                            self.values[("producer", module.key)] = decoded(value)
+                            self.values[("producer", module.key)] = _pristine(value)
                     self.handles.append(module.register_forward_hook(capture_boundary))
             for index, layer in enumerate(student.model.layers):
                 prefix = f"model.layers.{index}"

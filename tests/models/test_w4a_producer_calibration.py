@@ -133,7 +133,10 @@ def test_v4_replay_norm_operand_matches_actual_encoded_runtime_and_independent_o
     ids = torch.arange(17, device="cuda")[None]
     source = runtime.model.embed_tokens(ids).detach()
     independent = _independent_nvfp4_qdq(source, torch.tensor(.01234567, device="cuda"))
-    expected = independent * torch.rsqrt(independent.square().mean(-1, keepdim=True) + runtime.config.rms_norm_eps)
+    # The deployed stream rescales the rounded carrier by the inverse RMS of the
+    # pristine residual, so the oracle keeps the unquantized denominator.
+    expected = independent * torch.rsqrt(source.float().square().mean(-1, keepdim=True)
+                                         + runtime.config.rms_norm_eps)
     captured = []
     class Captured(Exception):
         pass
@@ -202,7 +205,9 @@ def test_v4_weight_adaptation_replay_matches_encoded_decoder_outputs(dtype, fixe
     for model_index, model in enumerate((runtime, replay)):
         for index, layer in enumerate(model.model.layers):
             def capture(_module, _args, value, *, model_index=model_index, index=index):
-                value = value.decode(torch.float32) if isinstance(value, W4AActivation) else value
+                # Layer boundaries expose the compute-precision residual; the
+                # decoded operand only exists inside the GEMM consumers.
+                value = value.exact(torch.float32) if isinstance(value, W4AActivation) else value
                 observed[model_index][index] = value.detach().clone()
             handles.append(layer.register_forward_hook(capture))
     try:

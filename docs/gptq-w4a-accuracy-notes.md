@@ -753,11 +753,16 @@ dtype, residual replay casts to `residual.dtype`, and ordinary RMSNorm returns
 that same dtype. Inference instead preserves the FP32 product of FP4 codes,
 E4M3 block scales, global scale, and token scale until projection output.
 The existing version-4 checks ensure norm inputs are not quantized twice but
-do not establish numerical equality of this decoded representation.
+do not establish numerical equality with the deployed stream.
 
-A deterministic CPU probe using an independent NVFP4 codebook search and
-FP32 unit-RMSNorm arithmetic reproduces the discrepancy at 17 tokens × 2,048
-channels with global scale 0.01234567:
+The deployed version-4 stream keeps the residual value in compute precision.
+Its fused RMSNorm rescales the *rounded* carrier by the inverse RMS of the
+*pristine* residual, so the norm denominator is never quantized. A replay that
+instead normalizes the decoded value produces a different operand and a
+different Hessian. An earlier deterministic CPU probe using an independent
+NVFP4 codebook search and FP32 unit-RMSNorm arithmetic measured that
+decoded-denominator mismatch at 17 tokens × 2,048 channels with global scale
+0.01234567:
 
 | Model dtype | Norm max absolute error | Relative L2 error | Elements beyond rtol=atol=1e-6 |
 | --- | ---: | ---: | ---: |
@@ -765,50 +770,52 @@ channels with global scale 0.01234567:
 | FP16 | 0.00224638 | 0.00029587 | 32,121 / 34,816 |
 
 Evidence: `/root/models/w4a-quality/nvfp4_v4_replay_precision_probe.json`.
-This is an identified lifecycle mismatch, not proof of the downstream
+This is an identified replay mismatch, not proof of the downstream
 regression's magnitude or sole cause. Producer maximum and reconstruction
-trials above used the actual encoded runtime and are unaffected by this
-replay defect. Before more GPTQ/QAD work, version-4 replay must retain FP32
-decoded values across encoded boundaries, let dense/HookedLinear consumers
-accept them, and round projection outputs and unquantized stream exits at the
-same places as inference. Disabled native replay and older activation
-versions must retain their original behavior. Tests must cover numerical
-norm operands, full decoder boundaries, HookedLinear replacement, and the
-actual quantize/save/reload lifecycle.
+trials above used the actual encoded runtime and are unaffected by it.
 
 ### Version-4 replay precision correction and fresh audited quantization
 
-Version-4 replay now retains the FP32 decoded activation across encoded
-boundaries. Its global-scale grid is selected from the original producer
-dtype before promoting the input to FP32. Dense and HookedLinear consumers
-accept FP32 operands, compute in FP32, and return the model dtype at projection
-outputs. An explicit exit cast matches inference at an unselected decoder
-layer or final norm. Existing custom INT4 adaptation forwards remain in use;
-their output is cast at the same projection boundary. Replacing a dense
-module with HookedLinear preserves the policy, and installing replay on an
-existing HookedLinear retains capture hooks without a second input rounding.
+Version-4 replay now reproduces the deployed stream operator for operator. It
+carries the pristine residual in FP32 and rebuilds the rounded GEMM operand at
+each producer, so its RMSNorm uses a rounded numerator with a pristine
+denominator exactly like inference. The dynamic global-scale grid is selected
+from the original producer dtype — the raw model-dtype stream entry, FP32 once
+a residual sum has promoted the value — before promoting the operand to FP32.
+Dense and HookedLinear consumers accept FP32 operands, compute in FP32, and
+return the model dtype at projection outputs. An explicit exit cast matches
+inference at an unselected decoder layer or final norm. Existing custom INT4
+adaptation forwards remain in use; their output is cast at the same projection
+boundary. Replacing a dense module with HookedLinear preserves the policy, and
+installing replay on an existing HookedLinear retains capture hooks without a
+second input rounding.
+
+Each interior layer rebuilds its input operand from the pristine value instead
+of retaining a rounded tensor across layers, so reverse-order recomputation
+under non-reentrant gradient checkpointing cannot corrupt it.
 
 The adaptation tools now disable the entire replay policy for their A16
 preservation pass, including its precision changes. Replacing only the round
 function with identity is insufficient for version 4. Native disabled replay
 matches the BF16 and FP16 reference model exactly in the CPU fixtures.
 
-Validation completed:
+Validation completed on GB10 (SM121) through the guarded harness:
 
 | Coverage | Result |
 | --- | --- |
-| Replay and layer-stage CPU checks | 75 passed |
-| Audited dataset and 1B fit-only loader checks | 24 passed |
-| GB10 producer/oracle checks | 29 passed |
-| GB10 adaptation checks | 15 passed |
-| GB10 quantize/save/reload lifecycle | 10 passed, 4 expected skips |
+| `tests/models/test_w4a_producer_calibration.py` | 36 passed |
+| `tests/models/test_w4a_hardware_forward.py` | 32 passed |
+| `tests/models/test_w4a_replay_stream.py` | 43 passed |
+| Full W4A suite (kernels, policy, lifecycle, diagnostics) | 608 passed, 5 skipped |
 
-The new GB10 norm checks compare the replay Tensor, an actual encoded NVFP4
+The GB10 norm checks compare the replay Tensor, an actual encoded NVFP4
 carrier, and an independent codebook/FP32 normalization oracle at
 rtol=atol=1e-6 for both BF16 and FP16 models. CPU tests cover projection and
 layer boundary dtypes, native bypass, an unselected-layer exit, HookedLinear
 replacement, capture preservation, single quantization per producer, and
-finite nonzero gradients through a custom adaptation forward. This closes
+finite nonzero gradients through a custom adaptation forward. The oracle keeps
+the pristine denominator, matching the deployed stream; a bit-exact probe
+confirms the replay now equals the runtime at the norm operand. This closes
 the demonstrated norm-operand mismatch; it does not prove that this defect
 accounts for the entire model-level accuracy gap.
 
