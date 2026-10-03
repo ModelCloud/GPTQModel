@@ -111,12 +111,16 @@ def _calibration_ids_from_verified_records(
             text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
             if not isinstance(text, str) or not text:
                 raise ValueError("Calibration chat template returned empty or non-text output")
-        if callable(tokenizer):
-            ids = tokenizer(text, add_special_tokens=text_format == "plain",
-                            truncation=True, max_length=sequence_length)["input_ids"]
+        encode = getattr(tokenizer, "encode", None)
+        if callable(encode):
+            ids = encode(text, add_special_tokens=(text_format == "plain"),
+                         truncation=True, max_length=sequence_length)
         else:
-            ids = tokenizer.encode(text, add_special_tokens=text_format == "plain",
-                                   truncation=True, max_length=sequence_length)
+            call = getattr(tokenizer, "__call__", None)
+            if not callable(call):
+                raise TypeError("Calibration tokenizer must provide `encode` or be callable.")
+            ids = call(text, add_special_tokens=(text_format == "plain"),
+                       truncation=True, max_length=sequence_length)["input_ids"]
         if not ids:
             raise ValueError(f"Empty tokenized calibration article: {record['article_id']}")
         samples.append(torch.tensor(ids[:sequence_length], dtype=torch.long))
