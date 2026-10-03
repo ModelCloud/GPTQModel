@@ -84,6 +84,7 @@ class HardwareForward:
                 def use_input(module, args, *, name=name):
                     if not getattr(module, "_w4a_replay_disabled", False):
                         return (self.replace(args[0], ("input", name)), *args[1:])
+                    return None
                 def use_output(module, _args, value, *, name=name):
                     if not getattr(module, "_w4a_replay_disabled", False):
                         return self.replace(value, ("output", name))

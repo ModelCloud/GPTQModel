@@ -55,6 +55,7 @@ class NativeForward:
                 def use_input(module, args, *, name=name):
                     if getattr(module, "_w4a_replay_disabled", False):
                         return (self.replace(args[0], ("input", name)), *args[1:])
+                    return None
 
                 def use_output(module, _args, output, *, name=name):
                     return (self.replace(output, ("output", name))

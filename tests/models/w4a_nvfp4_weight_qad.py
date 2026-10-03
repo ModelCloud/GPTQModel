@@ -516,7 +516,6 @@ def _weight_qad_loss(result, target: dict, *, objective: str,
         if hidden_weight == 0:
             from .w4a_nvfp4_scale_qad import _logit_distillation_loss
             logits = _logit_distillation_loss(result.logits, target["logits"], temperature)
-            hidden = logits.new_zeros(())
             total = logit_weight * logits
             return total, {
                 "hidden": 0.0,

@@ -21,9 +21,6 @@ from . import PackableQuantLinear
 from .w4a_floatx import W4AFP8Linear
 
 
-_FP4_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
-
-
 def _fp4_codes(value: torch.Tensor) -> torch.Tensor:
     """Round to E2M1, nearest even; return the four bit code per scalar."""
     magnitude = value.float().abs().clamp(max=6.0)

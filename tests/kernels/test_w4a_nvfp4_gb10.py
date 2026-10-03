@@ -111,11 +111,9 @@ def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch
         best_reconstructed = torch.where(use[..., None], reconstructed, best_reconstructed)
         best_values = torch.where(use[..., None], values, best_values)
     local = refine(best_values)
-    _values, reconstructed, error = evaluate(local)
+    _, reconstructed, error = evaluate(local)
     use = error < best_error
-    best_error = torch.where(use, error, best_error)
     best_reconstructed = torch.where(use[..., None], reconstructed, best_reconstructed)
-    best_values = torch.where(use[..., None], _values, best_values)
     return best_reconstructed.reshape_as(x)
 
 

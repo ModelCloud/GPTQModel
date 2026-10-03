@@ -442,7 +442,7 @@ def test_teacher_disk_cache_is_lossless_and_preserves_hidden_order(tmp_path):
     assert torch.count_nonzero(store[0]['logits']) == 34
     assert store[1]['hidden_states'] == ()
     with pytest.raises(IndexError):
-        store[2]
+        _ = store[2]
     with pytest.raises(FileExistsError):
         DiskTeacherTargets(tmp_path / 'targets')
 
