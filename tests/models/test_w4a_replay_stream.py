@@ -645,6 +645,78 @@ def test_nvidia_headroom_probe_freezes_scale_before_hessian_capture():
     assert dense._w4a_headroom_probe is False
 
 
+def _headroom_probe_processor(activation):
+    import threading
+
+    from gptqmodel.quantization.config import QuantizeConfig
+
+    processor = GPTQProcessor.__new__(GPTQProcessor)
+    processor.qcfg = QuantizeConfig(
+        bits=4, group_size=128, sym=True, desc_act=False, activation=activation,
+    )
+    processor._activation_amax = {}
+    processor._activation_headroom = {}
+    processor._activation_global_scales = {}
+    processor._activation_headroom_probe = False
+    processor.lock = threading.Lock()
+    return processor
+
+
+def _projection(leaf):
+    dense = HookedLinear(128, 128)
+    dense.weight = torch.nn.Parameter(torch.eye(128))
+    dense.bias = None
+    name = leaf
+    full_name = f"model.layers.0.{leaf}"
+    named = NamedModule(dense, name, full_name, 0)
+    return dense, named, {name: named}
+
+
+@pytest.mark.parametrize("top_recipe,attention_recipe,headroom", [
+    ("nvidia_headroom", "nvidia_headroom", True),
+    ("least_squares", "nvidia_headroom", True),
+    ("nvidia_headroom", "least_squares", False),
+])
+def test_headroom_probe_uses_attention_recipe_override(top_recipe, attention_recipe, headroom):
+    """The attention override must drive Q-projection probe selection/freezing."""
+    nvfp4 = "w4a_nvfp" + "4"
+    processor = _headroom_probe_processor({
+        "version": 3, "mode": nvfp4, "recipe": top_recipe,
+        "attention": {"mode": nvfp4, "recipe": attention_recipe},
+    })
+    attn_leaf = "self" + "_attn.q_proj"
+    dense, named, subset = _projection(attn_leaf)
+    assert processor.begin_activation_scale_probe(subset) is headroom
+    processor._record_activation_amax(attn_leaf, torch.full((8, 128), 0.5), dense)
+    processor.end_activation_scale_probe(subset)
+    if headroom:
+        assert processor._activation_global_scales[named.full_name] > 0
+        assert dense._w4a_activation_global_scale > 0
+        assert dense._w4a_headroom_probe is False
+    else:
+        assert named.full_name not in processor._activation_global_scales
+        assert processor._activation_amax[named.full_name] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize("mlp_layers,headroom", [((), True), ((0,), False)])
+def test_headroom_probe_uses_per_layer_mlp_override(mlp_layers, headroom):
+    """A promoted FP8 MLP layer must not run or freeze an NVFP4 headroom probe."""
+    nvfp4 = "w4a_nvfp" + "4"
+    activation = {"version": 3, "mode": nvfp4, "recipe": "nvidia_headroom"}
+    if mlp_layers:
+        activation["mlp"] = {"mode": "w4afp8", "layers": list(mlp_layers)}
+    processor = _headroom_probe_processor(activation)
+    dense, named, subset = _projection("mlp.gate_proj")
+    assert processor.begin_activation_scale_probe(subset) is headroom
+    processor._record_activation_amax("mlp.gate_proj", torch.full((8, 128), 0.5), dense)
+    processor.end_activation_scale_probe(subset)
+    if headroom:
+        assert processor._activation_global_scales[named.full_name] > 0
+    else:
+        assert named.full_name not in processor._activation_global_scales
+        assert named.full_name not in processor._activation_amax
+
+
 def test_hooked_linear_uses_frozen_nvidia_headroom_input_scale():
     dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
     dense.weight.data.copy_(torch.eye(128))
