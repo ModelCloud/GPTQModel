@@ -327,7 +327,10 @@ class HookedLinear(torch.nn.Linear):
         ):
             input = round_w4a_replay_operand(input, replay_mode, replay_recipe,
                                              version=replay_version, rounder=round_w4a_activation)
-        if replay_mode is not None and replay_version == 4:
+        if replay_mode is not None:
+            # Every replay version carries a compute-precision operand, so the
+            # GEMM runs in FP32 and returns the model dtype instead of relying
+            # on a matching-dtype `super().forward`.
             output = torch.nn.functional.linear(input.float(), self.weight.float(),
                                                  self.bias.float() if self.bias is not None else None)
             output = output.to(getattr(self, "_w4a_replay_model_dtype", self.weight.dtype))

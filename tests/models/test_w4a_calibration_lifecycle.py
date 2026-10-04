@@ -96,3 +96,43 @@ def test_mismatched_save_policy_fails_before_observing(monkeypatch):
 def test_public_api_requires_quantized_weights():
     with pytest.raises(ValueError, match="already quantized"):
         BaseQModel.calibrate_activations(SimpleNamespace(quantized=False), [torch.arange(2)])
+
+
+def test_calibration_export_preserves_mixed_sub_policies(tmp_path):
+    """The export CLI must keep attention/MLP sub-policies while fitting scales.
+
+    Replacing the whole activation dict with an all-NVFP4 policy made reload
+    expect producer scales that calibration never fitted.
+    """
+    import json
+
+    from tests.models.w4a_nvfp4_calibrate import export_view
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "model.safetensors").write_bytes(b"native-weight-fixture")
+    config = {
+        "bits": 4, "group_size": 128, "sym": True, "desc_act": False,
+        "pack_dtype": "int32", "quant_method": "gptq", "rotation": "hadamard",
+        "activation": {
+            "version": 3, "mode": "w4a_nvfp4", "recipe": "least_squares",
+            "attention": {"mode": "w4afp8"},
+            "mlp": {"mode": "w4afp8", "layers": [0]},
+        },
+    }
+    (source / "quantize_config.json").write_text(json.dumps(config))
+    (source / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    scales = {"model.layers.0.output": .0123, "model.layers.1.output": .0456}
+    output = tmp_path / "output"
+    export_view(source, output, None, scales, "least_squares")
+    exported = json.loads((output / "quantize_config.json").read_text())
+    activation = exported["activation"]
+    assert activation["attention"] == {"mode": "w4afp8"}
+    assert activation["mlp"] == {"mode": "w4afp8", "layers": [0]}
+    assert activation["global_scales"] == scales
+    # The exported metadata must round-trip into the same mixed policy the
+    # runtime installer resolves, without inventing extra NVFP4 producers.
+    reloaded = QuantizeConfig.from_quant_config(exported)
+    assert reloaded.activation_attention_mode == "w4afp8"
+    assert reloaded.activation_attention_recipe is None
+    assert reloaded.activation_mlp_fp8_layers == (0,)

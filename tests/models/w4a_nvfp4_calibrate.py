@@ -24,7 +24,13 @@ def export_view(source: Path, output: Path, calibration: Path, scales: dict, rec
     from gptqmodel.quantization.config import QuantizeConfig
 
     qconfig = json.loads((source / "quantize_config.json").read_text())
-    qconfig["activation"] = {"version": 4, "mode": "w4a_nvfp4", "recipe": recipe, "global_scales": scales}
+    # Preserve the source's attention and per-layer MLP sub-policies. Calibration
+    # only fits the active NVFP4 producers, so replacing the whole dict with an
+    # all-NVFP4 policy would make reload expect scales that were never fitted.
+    activation = dict(qconfig.get("activation") or {})
+    activation.update({"version": 4, "mode": "w4a_nvfp4", "recipe": recipe,
+                       "global_scales": scales})
+    qconfig["activation"] = activation
     QuantizeConfig.from_quant_config(qconfig)
     _copy_checkpoint_shell(source, output, calibration=calibration)
     (output / "model.safetensors").symlink_to((source / "model.safetensors").resolve())

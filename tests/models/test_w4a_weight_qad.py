@@ -340,6 +340,72 @@ def test_qad_replay_uses_the_exported_checkpoint_policy(tmp_path):
         assert policy.dynamic_get(layer_name='model.layers.0.self_attn.q_proj') is None
 
 
+def test_qad_replay_config_forwards_mixed_policies(tmp_path):
+    import json
+
+    from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
+
+    config = {
+        'rotation': 'hadamard',
+        'activation': {
+            'version': 4, 'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
+            'attention': {'mode': 'w4afp8'},
+            'mlp': {'mode': 'w4afp8', 'layers': [0]},
+        },
+    }
+    (tmp_path / 'quantize_config.json').write_text(json.dumps(config))
+    policy = _activation_replay_config(tmp_path)
+    # The adapter used by weight/scale distillation must not collapse a mixed
+    # stream back to all-NVFP4, or installation expects scales never fitted.
+    assert policy.activation_attention_mode == 'w4afp8'
+    assert policy.activation_attention_recipe is None
+    assert policy.activation_mlp_fp8_layers == (0,)
+
+
+def test_qad_replay_config_installs_mixed_policy_from_checkpoint(tmp_path):
+    import json
+
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import (
+        llama_nvfp4_boundaries,
+        nvfp4_producer_specs,
+    )
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+    from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
+
+    model = LlamaForCausalLM(LlamaConfig(
+        vocab_size=32, hidden_size=128, intermediate_size=256,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+    )).to(torch.bfloat16).eval()
+    layers = model.model.layers
+    selected = [True, True]
+    attention_mode, mlp_fp8_layers = 'w4afp8', (0,)
+    # A valid mixed stream owns scales only for its NVFP4 producers.
+    subset = {key: .0123 for _, _, key in nvfp4_producer_specs(
+        layers, selected, attention_mode=attention_mode, mode='w4a_nvfp4',
+        recipe='least_squares', mlp_fp8_layers=mlp_fp8_layers)}
+    all_keys = {key for _, _, key in llama_nvfp4_boundaries(layers, selected)}
+    assert set(subset) < all_keys
+    (tmp_path / 'quantize_config.json').write_text(json.dumps({
+        'rotation': 'hadamard',
+        'activation': {
+            'version': 4, 'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
+            'attention': {'mode': attention_mode},
+            'mlp': {'mode': attention_mode, 'layers': list(mlp_fp8_layers)},
+            'global_scales': subset,
+        },
+    }))
+    policy = _activation_replay_config(tmp_path)
+    # Before the fix this raised ``Incomplete NVFP4 producer scales`` because
+    # the adapter dropped the mixed sub-policies and expected every boundary.
+    install_w4a_llama_replay(model, policy)
+    assert model._w4a_replay_attention_mode == attention_mode
+    assert model._w4a_replay_mlp_fp8_layers == mlp_fp8_layers
+    assert layers[0]._w4a_replay_mlp_mode == 'w4afp8'
+    assert layers[1]._w4a_replay_mlp_mode == 'w4a_nvfp4'
+
+
 def test_qad_rejects_norm_training_that_breaks_v4_contract(tmp_path):
     import json
 

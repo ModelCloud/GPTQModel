@@ -57,10 +57,20 @@ def _activation_replay_config(source_checkpoint: Path, *, train_norms: bool = Fa
             raise ValueError("Version 4 QAD requires a rotated source with fused norms.")
         if train_norms:
             raise ValueError("Version 4 requires unit fused norms; norm-only QAT cannot preserve this contract.")
+    # Forward the mixed-stream sub-policies. The corrected installer resolves
+    # attention and per-layer MLP boundaries from these, and its producer-scale
+    # validation covers only the NVFP4 subset they select.
+    attention = activation.get("attention") or {}
+    mlp = activation.get("mlp") or {}
+    attention_mode = attention.get("mode")
+    attention_recipe = attention.get("recipe") if attention_mode == "w4a_nvfp4" else None
     return SimpleNamespace(
         activation_mode="w4a_nvfp4", activation_recipe=recipe,
         activation_version=version, dynamic_get=lambda **_kwargs: None,
         activation_global_scales=activation.get("global_scales"),
+        activation_attention_mode=attention_mode,
+        activation_attention_recipe=attention_recipe,
+        activation_mlp_fp8_layers=tuple(mlp["layers"]) if mlp.get("layers") else None,
     )
 
 

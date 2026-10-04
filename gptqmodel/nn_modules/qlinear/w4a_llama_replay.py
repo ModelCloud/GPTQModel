@@ -49,8 +49,12 @@ def round_w4a_replay_operand(x: torch.Tensor, mode: str, recipe=None, global_sca
     under different policies.
     """
     rounder = _round if rounder is None else rounder
-    if version == 4 and mode == "w4a_nvfp4":
-        if global_scale is None:
+    if version == 4:
+        # Version 4 carries the decoded operand in FP32 for every carrier, not
+        # only NVFP4. The deployed FP8 GEMM consumes codes and FP32 token
+        # scales directly, so an FP16/BF16 round-trip here would teach a
+        # different function than inference.
+        if mode == "w4a_nvfp4" and global_scale is None:
             global_scale = nvfp4_global_scale(x.detach().abs().amax(), grid_dtype=x.dtype,
                                                recipe=recipe or "least_squares")
         x = x.float()
@@ -190,20 +194,31 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         x = self.mlp(x)
         return summed + x.float()
 
-    def rounded(value, boundary):
-        if disabled:
-            return value
-        # Attention and MLP boundaries may carry different policies in a mixed
-        # stream; the input and layer output feed attention, the post-attention
-        # residual feeds the MLP.
-        policy_mode, policy_recipe = (
-            (attention_mode, attention_recipe) if boundary in {"input", "output"}
-            else (mlp_mode, mlp_recipe)
+    if disabled:
+        # Pristine teacher pass: reproduce the unmodified decoder forward so
+        # GPTAQ/FOEM see native values.
+        x = hidden_states
+        residual = x
+        x = self.input_layernorm(x)
+        x, _ = self.self_attn(
+            hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
+            past_key_values=past_key_values, use_cache=use_cache,
+            position_embeddings=position_embeddings, **kwargs,
         )
-        return round_w4a_replay_operand(
-            value, policy_mode, policy_recipe, self._w4a_replay_global_scales.get(boundary),
-            version=version)
-    x = rounded(hidden_states, "input") if self._w4a_replay_round_input else hidden_states
+        x = residual + x
+        residual = x
+        x = self.post_attention_layernorm(x)
+        x = self.mlp(x)
+        return residual + x
+
+    # Versions 2 and 3 keep the residual stream in compute precision exactly
+    # like version 4: runtime's ``_add_stream`` and ``_norm_forward`` consume
+    # ``exact(torch.float32)`` for every stream version, so only GEMM operands
+    # are quantized (by the Linear pre-hooks and the MLP wrapper). Rounding the
+    # residual here would calibrate against a different norm/residual function
+    # than inference, which for the default ``w4afp8`` path is the only
+    # contract.
+    x = hidden_states.float()
     residual = x
     x = self.input_layernorm(x)
     x, _ = self.self_attn(
@@ -211,11 +226,11 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         past_key_values=past_key_values, use_cache=use_cache,
         position_embeddings=position_embeddings, **kwargs,
     )
-    x = rounded(residual.float() + x.float(), "post_attention_residual").to(residual.dtype)
+    x = residual + x.float()
     residual = x
     x = self.post_attention_layernorm(x)
     x = self.mlp(x)
-    return rounded(residual.float() + x.float(), "output").to(residual.dtype)
+    return residual + x.float()
 
 
 def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
@@ -284,7 +299,10 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
     replay_handles = []
     for index, (layer, enabled) in enumerate(zip(layers, selected)):
         if not enabled:
-            if version == 4 and index and selected[index - 1]:
+            # A layer that follows a selected one consumes its predecessor's
+            # compute-precision residual; runtime casts that to the model dtype
+            # at the unselected-layer edge (`_decode_input`), so replay does too.
+            if index and selected[index - 1]:
                 layer._w4a_replay_boundary_dtype = model_dtype
                 replay_handles.append(layer.register_forward_pre_hook(_replay_exit))
             continue
@@ -367,16 +385,20 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
             linear._w4a_stream_replay_version = version
             linear._w4a_replay_model_dtype = model_dtype
             linear._w4a_stream_replay_pre_hook = True
-            if version == 4:
-                linear._w4a_replay_original_forward = getattr(linear, "_old_forward", linear.forward)
-                linear._w4a_replay_custom_forward = (
-                    getattr(linear._w4a_replay_original_forward, "__func__", None) is not torch.nn.Linear.forward)
-                _bind_forward(linear, _replay_linear_forward)
+            # All replay versions now carry a compute-precision operand, so the
+            # linear must compute in FP32 and return the model dtype rather than
+            # relying on a matching-dtype `F.linear`.
+            linear._w4a_replay_original_forward = getattr(linear, "_old_forward", linear.forward)
+            linear._w4a_replay_custom_forward = (
+                getattr(linear._w4a_replay_original_forward, "__func__", None) is not torch.nn.Linear.forward)
+            _bind_forward(linear, _replay_linear_forward)
             # The MLP wrapper handles rotation (when enabled) and quantization.
             # Even an identity rotation must not trigger a second input QDQ.
             if path == "mlp.down_proj":
                 linear._w4a_rotation_preapplied = True
-    if version == 4 and selected[-1]:
+    if selected[-1]:
+        # Runtime's final norm consumes the compute-precision residual through
+        # `exact()`, which returns the model dtype, so cast at the same edge.
         decoder.norm._w4a_replay_boundary_dtype = model_dtype
         replay_handles.append(decoder.norm.register_forward_pre_hook(_replay_exit))
     model._w4a_replay_handles = replay_handles

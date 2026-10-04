@@ -383,6 +383,79 @@ def test_v4_mixed_replay_matches_runtime_operands(dtype):
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
                     reason="GB10 required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_v4_fp8_boundary_operands_keep_fp32(dtype):
+    """o_proj/down_proj operands must not round-trip through the model dtype.
+
+    The deployed FP8 GEMMs consume E4M3 codes plus FP32 token scales. The
+    pre-fix replay cast the decoded operand back to BF16/FP16, so the attention
+    output feeding ``o_proj`` and the promoted MLP product feeding ``down_proj``
+    described a different function than inference.
+    """
+    from types import SimpleNamespace
+
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import nvfp4_producer_specs
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    keys = [key for _, _, key in llama_nvfp4_boundaries(packed.model.layers, [True, True])]
+    scales = dict.fromkeys(keys, .01234567)
+    attention_mode, mlp_fp8_layers = "w4afp8", (0,)
+    subset = {key: scales[key] for _, _, key in nvfp4_producer_specs(
+        packed.model.layers, [True, True], attention_mode=attention_mode, mode="w4a_nvfp4",
+        recipe="least_squares", mlp_fp8_layers=mlp_fp8_layers)}
+    model = LlamaForCausalLM(packed.config).to(device="cuda", dtype=dtype).eval()
+    layer = model.model.layers[0]
+    # Pristine operands: the o_proj pre-hook registered before installation
+    # sees the unrounded attention output; the MLP product is rebuilt from the
+    # gate/up outputs that feed the down-projection rounding.
+    pristine = {"o": []}
+    layer.self_attn.o_proj.register_forward_pre_hook(
+        lambda _module, args: pristine["o"].append(args[0].detach().clone()))
+    gate_out, up_out = [], []
+    layer.mlp.gate_proj.register_forward_hook(
+        lambda _module, _args, out: gate_out.append(out.detach().clone()))
+    layer.mlp.up_proj.register_forward_hook(
+        lambda _module, _args, out: up_out.append(out.detach().clone()))
+    qcfg = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares", activation_version=4,
+        activation_global_scales=subset, activation_attention_mode=attention_mode,
+        activation_attention_recipe=None, activation_mlp_fp8_layers=mlp_fp8_layers,
+        dynamic_get=lambda **_kwargs: None,
+    )
+    install_w4a_llama_replay(model, qcfg)
+    rounded = {"o": [], "down": []}
+    layer.self_attn.o_proj.register_forward_pre_hook(
+        lambda _module, args: rounded["o"].append(args[0].detach().clone()))
+    layer.mlp.down_proj.register_forward_pre_hook(
+        lambda _module, args: rounded["down"].append(args[0].detach().clone()))
+    ids = torch.arange(17, device="cuda")[None]
+    with torch.inference_mode():
+        model(input_ids=ids, use_cache=False)
+
+    def fp8_fp32_oracle(x):
+        x32 = x.float()
+        amax = x32.abs().amax(dim=-1, keepdim=True)
+        scale = torch.where(amax > 0, amax / 448.0, torch.ones_like(amax))
+        codes = (x32 / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
+        return codes.float() * scale
+
+    assert len(pristine["o"]) == len(rounded["o"]) == 1
+    assert len(gate_out) == len(up_out) == len(rounded["down"]) == 1
+    operands = {
+        "o": (pristine["o"][0], rounded["o"][0]),
+        "down": (layer.mlp.act_fn(gate_out[0]) * up_out[0], rounded["down"][0]),
+    }
+    for key, (raw, actual) in operands.items():
+        assert actual.dtype == torch.float32, key
+        expected = fp8_fp32_oracle(raw)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0,
+                                   msg=lambda message, key=key: f"{key}: {message}")
+        assert not torch.equal(actual, expected.to(dtype).float()), key
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_token_global_packing_matches_oracle_and_is_independent_of_other_rows(dtype):
     from tests.models.w4a_token_global import pack_token_global
 
