@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from ..nn_modules.qlinear.w4a_activation import W4AActivation
-from ..nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer, llama_nvfp4_boundaries
+from ..nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer, nvfp4_producer_specs
 from .activation_floatx import nvfp4_global_scale
 
 
@@ -22,7 +22,8 @@ def _move(value, device):
         return value.detach().to(device)
     if isinstance(value, W4AActivation):
         return replace(value, codes=_move(value.codes, device), scales=_move(value.scales, device),
-                       global_scale=_move(value.global_scale, device), token_scale=_move(value.token_scale, device))
+                       global_scale=_move(value.global_scale, device), token_scale=_move(value.token_scale, device),
+                       reference=_move(value.reference, device))
     if isinstance(value, dict):
         return {key: _move(item, device) for key, item in value.items()}
     if isinstance(value, tuple):
@@ -115,7 +116,17 @@ def calibrate_nvfp4_producers(core, samples, *, quantize_config=None, progress=N
             or quantize_config.activation_version != 4
             or quantize_config.activation_recipe != recipe):
         raise ValueError("The save configuration must match the installed producer policy")
-    specs = list(llama_nvfp4_boundaries(layers, [True] * len(layers)))
+    # Enumerate only the boundaries the installed policy actually stages as
+    # NVFP4. A mixed stream keeps FP8 on attention or on promoted MLP layers;
+    # those boundaries own no calibrated scale and no quantizer module.
+    stream_mode = getattr(core, "_w4a_stream_mode", None)
+    specs = nvfp4_producer_specs(
+        layers, [True] * len(layers),
+        attention_mode=getattr(core, "_w4a_stream_attention_mode", None) or stream_mode,
+        mode=stream_mode,
+        recipe=getattr(core, "_w4a_stream_recipe", None),
+        mlp_fp8_layers=tuple(getattr(core, "_w4a_stream_mlp_fp8_layers", None) or ()),
+    )
     producers = [(key, getattr(owner, f"_w4a_{name}_quantizer")) for owner, name, key in specs]
     if any(not isinstance(module, NVFP4BoundaryQuantizer) or module.observer is not None
            for _, module in producers):

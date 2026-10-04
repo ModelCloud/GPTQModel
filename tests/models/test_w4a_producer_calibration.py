@@ -32,6 +32,26 @@ def test_maximum_scale_fp32_and_zero():
         maximum.observe(torch.full((1, 128), float("nan")))
 
 
+def test_move_moves_the_reference_with_the_carrier():
+    """A cached carrier must not retain its full residual on the source device."""
+    from gptqmodel.quantization.activation_calibration import _move
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    value = W4AActivation(
+        "w4a_nvfp4",
+        torch.zeros((2, 8), dtype=torch.uint8, device=device),
+        torch.zeros((1, 16), dtype=torch.float8_e4m3fn, device=device),
+        (2, 128), torch.bfloat16,
+        global_scale=torch.ones((), device=device),
+        reference=torch.zeros((2, 128), device=device),
+    )
+    moved = _move(value, "cpu")
+    assert moved.codes.device.type == "cpu"
+    assert moved.reference.device.type == "cpu"
+    assert moved.reference is not value.reference
+    assert moved.exact().device.type == "cpu"
+
+
 @pytest.mark.parametrize("value", [0, -1, True, float("nan"), float("inf"), 1e-60, 1e60])
 def test_config_rejects_invalid_global_scale(value):
     with pytest.raises(ValueError, match="scale"):
@@ -86,7 +106,8 @@ def test_fixed_producer_scale_preserves_exact_representable_codes():
     torch.testing.assert_close(encoded.decode(torch.float32), x.float(), rtol=0, atol=0)
 
 
-def _tiny_stream(scales=None, dtype=torch.bfloat16):
+def _tiny_packed_nvfp4(dtype=torch.bfloat16):
+    """Build a packed NVFP4 Llama without installing a runtime stream."""
     torch.manual_seed(840)
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
@@ -106,6 +127,11 @@ def _tiny_stream(scales=None, dtype=torch.bfloat16):
                 linear.activation_global_scale.fill_(0.01)
                 linear.post_init()
                 setattr(parent, name, linear)
+    return core
+
+
+def _tiny_stream(scales=None, dtype=torch.bfloat16):
+    core = _tiny_packed_nvfp4(dtype=dtype)
     install_w4a_llama_stream(core, "w4a_nvfp4", "least_squares", version=4, global_scales=scales)
     return core
 
@@ -225,6 +251,135 @@ def test_v4_weight_adaptation_replay_matches_encoded_decoder_outputs(dtype, fixe
             handle.remove()
 
 
+def _mixed_replay(dtype, attention_mode, mlp_fp8_layers, scales, packed):
+    """Build a dense replay model under the requested mixed activation policy."""
+    from types import SimpleNamespace
+
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import nvfp4_producer_specs
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+
+    model = LlamaForCausalLM(packed.config).to(device="cuda", dtype=dtype).eval()
+    subset = {key: scales[key] for _, _, key in nvfp4_producer_specs(
+        model.model.layers, [True, True], attention_mode=attention_mode or "w4a_nvfp4",
+        mode="w4a_nvfp4", recipe="least_squares", mlp_fp8_layers=tuple(mlp_fp8_layers))}
+    qcfg = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares", activation_version=4,
+        activation_global_scales=subset, activation_attention_mode=attention_mode,
+        activation_attention_recipe=None,
+        activation_mlp_fp8_layers=tuple(mlp_fp8_layers) or None,
+        dynamic_get=lambda **_kwargs: None,
+    )
+    install_w4a_llama_replay(model, qcfg)
+    return model
+
+
+def _capture_first_operand(model, path, *, decode):
+    parent, leaf = path.rsplit(".", 1)
+    module = getattr(model.model.layers[0].get_submodule(parent), leaf)
+    seen = {}
+
+    def hook(_module, args):
+        value = args[0]
+        seen["x"] = value.decode(torch.float32) if decode and isinstance(value, W4AActivation) else value
+
+    handle = module.register_forward_pre_hook(hook)
+    try:
+        with torch.inference_mode():
+            model(input_ids=torch.arange(17, device="cuda")[None], use_cache=False)
+    finally:
+        handle.remove()
+    return seen["x"]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_v4_mixed_replay_applies_attention_and_mlp_policies(dtype):
+    """Attention FP8 and per-layer MLP promotion must reach the replay operands."""
+    from gptqmodel.quantization.activation_floatx import fp8_token_qdq
+
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    scales = {key: .01234567 for _, _, key in llama_nvfp4_boundaries(packed.model.layers, [True, True])}
+
+    uniform_q = _capture_first_operand(_mixed_replay(dtype, None, (), scales, packed),
+                                       "self_attn.q_proj", decode=False)
+    mixed_q = _capture_first_operand(_mixed_replay(dtype, "w4afp8", (), scales, packed),
+                                     "self_attn.q_proj", decode=False)
+    assert not torch.equal(uniform_q, mixed_q)
+
+    mixed = _mixed_replay(dtype, "w4afp8", (), scales, packed)
+    q_fp8 = _capture_first_operand(mixed, "self_attn.q_proj", decode=False)
+    source = mixed.model.embed_tokens(torch.arange(17, device="cuda")[None]).detach()
+    inv_rms = torch.rsqrt(source.float().square().mean(-1, keepdim=True) + mixed.config.rms_norm_eps)
+    expected = fp8_token_qdq(source.float() * inv_rms)
+    torch.testing.assert_close(q_fp8, expected, rtol=1e-6, atol=1e-6)
+
+    uniform_gate = _capture_first_operand(_mixed_replay(dtype, None, (), scales, packed),
+                                          "mlp.gate_proj", decode=False)
+    promoted_gate = _capture_first_operand(_mixed_replay(dtype, None, (0,), scales, packed),
+                                           "mlp.gate_proj", decode=False)
+    assert not torch.equal(uniform_gate, promoted_gate)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_v4_mixed_replay_matches_runtime_operands(dtype):
+    """Mixed-policy replay must consume the same operands as the deployed stream."""
+    from types import SimpleNamespace
+
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import nvfp4_producer_specs
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+    from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
+
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    keys = [key for _, _, key in llama_nvfp4_boundaries(packed.model.layers, [True, True])]
+    scales = dict.fromkeys(keys, .01234567)
+    attention_mode, mlp_fp8_layers = "w4afp8", (0,)
+    subset = {key: scales[key] for _, _, key in nvfp4_producer_specs(
+        packed.model.layers, [True, True], attention_mode=attention_mode, mode="w4a_nvfp4",
+        recipe="least_squares", mlp_fp8_layers=mlp_fp8_layers)}
+    install_w4a_llama_stream(packed, "w4a_nvfp4", "least_squares", version=4, global_scales=subset,
+                             attention_mode=attention_mode, mlp_fp8_layers=mlp_fp8_layers)
+
+    replay = LlamaForCausalLM(packed.config).to(device="cuda", dtype=dtype).eval()
+    packed_modules = dict(packed.named_modules())
+    with torch.no_grad():
+        for name, parameter in replay.named_parameters():
+            owner, leaf = name.rsplit(".", 1)
+            if not isinstance(packed_modules[owner], W4ANVFP4Linear):
+                parameter.copy_(getattr(packed_modules[owner], leaf))
+    codes, weight_scales = {}, {}
+    for name, module in packed_modules.items():
+        if isinstance(module, W4ANVFP4Linear):
+            shifts = (torch.arange(8, device="cuda", dtype=torch.int64) * 4)[None, :, None]
+            codes[name] = (((module.qweight.long()[:, None, :] >> shifts) & 15)
+                           .reshape(module.in_features, module.out_features) - 8).to(torch.int8)
+            weight_scales[name] = module.scales.float().clone()
+    _install_trainable_gptq_codes(replay, codes, weight_scales)
+    qcfg = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares", activation_version=4,
+        activation_global_scales=subset, activation_attention_mode=attention_mode,
+        activation_attention_recipe=None, activation_mlp_fp8_layers=mlp_fp8_layers,
+        dynamic_get=lambda **_kwargs: None,
+    )
+    install_w4a_llama_replay(replay, qcfg)
+
+    # The layer-0 attention operand depends only on the embedding and norm, so
+    # it must match the deployed carrier to quantization precision.
+    torch.testing.assert_close(
+        _capture_first_operand(replay, "self_attn.q_proj", decode=False),
+        _capture_first_operand(packed, "self_attn.q_proj", decode=True),
+        rtol=1e-6, atol=1e-6, msg=lambda message: f"attention operand: {message}",
+    )
+    # The runtime must stage the promoted MLP boundary as an FP8 carrier. The
+    # replay's own MLP operand is asserted against the uniform policy in
+    # test_v4_mixed_replay_applies_attention_and_mlp_policies; here the operand
+    # would depend on the divergent attention GEMM path.
+    runtime_gate = _capture_first_operand(packed, "mlp.gate_proj", decode=False)
+    assert isinstance(runtime_gate, W4AActivation) and runtime_gate.mode == "w4afp8"
+
+
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
                     reason="GB10 required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -338,6 +493,29 @@ def test_calibration_failure_rolls_back_scales_and_observers():
 def test_missing_producer_scales_rejected():
     with pytest.raises(ValueError, match="Incomplete"):
         _tiny_stream({"model.layers.0.input": 1.0})
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+def test_producer_calibration_supports_mixed_policy_stream():
+    """Calibration must target only the boundaries the installed policy keeps NVFP4."""
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import nvfp4_producer_specs
+
+    core = _tiny_packed_nvfp4()
+    attention_mode, mlp_fp8_layers = "w4afp8", (0,)
+    install_w4a_llama_stream(core, "w4a_nvfp4", "least_squares", version=4, global_scales=None,
+                             attention_mode=attention_mode, mlp_fp8_layers=mlp_fp8_layers)
+    expected = {key for _, _, key in nvfp4_producer_specs(
+        core.model.layers, [True, True], attention_mode=attention_mode, mode="w4a_nvfp4",
+        recipe="least_squares", mlp_fp8_layers=mlp_fp8_layers)}
+    assert expected == {"model.layers.1.post_attention_residual", "model.layers.1.mlp.down_proj.input"}
+    samples = [torch.arange(17) % 32, torch.arange(23) % 32]
+    report = calibrate_nvfp4_producers(core, samples)
+    assert set(report["global_scales"]) == expected
+    assert all(value > 0 for value in report["global_scales"].values())
+    assert not any(".self_attn." in key for key in report["global_scales"])
+    statistics = measure_nvfp4_producers(core, [samples[0]])
+    assert set(statistics) == expected
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

@@ -25,6 +25,44 @@ def llama_nvfp4_boundaries(layers, selected):
         yield layer, "output", f"{prefix}.output"
 
 
+def boundary_group(boundary: str) -> str:
+    """Map a producer boundary to the projection group that consumes it."""
+    return "mlp" if boundary in {"attention_residual", "product"} else "attention"
+
+
+def layer_mlp_policy(layer_index: int, mode: str, recipe: str | None,
+                     mlp_fp8_layers) -> tuple[str, str | None]:
+    """Return the MLP transport policy for one decoder layer.
+
+    A mixed stream keeps NVFP4 on the MLP by default and promotes the named
+    layers to FP8. The same rule must drive runtime installation, replay, and
+    producer calibration or they describe different operands.
+    """
+    return ("w4afp8", None) if layer_index in mlp_fp8_layers else (mode, recipe)
+
+
+def boundary_is_nvfp4(boundary: str, key: str, *, attention_mode: str, mode: str,
+                      recipe: str | None, mlp_fp8_layers) -> bool:
+    """Return whether a producer boundary carries an NVFP4 carrier.
+
+    Only NVFP4 producers own a calibrated global scale. FP8 boundaries pack
+    dynamically, so a mixed stream owns a subset of the boundary keys.
+    """
+    if boundary_group(boundary) == "mlp":
+        layer_index = int(key.split(".")[2])
+        return layer_mlp_policy(layer_index, mode, recipe, mlp_fp8_layers)[0] == "w4a_nvfp4"
+    return attention_mode == "w4a_nvfp4"
+
+
+def nvfp4_producer_specs(layers, selected, *, attention_mode: str, mode: str,
+                         recipe: str | None, mlp_fp8_layers):
+    """Yield only the producer boundaries that carry an NVFP4 carrier."""
+    return [(owner, boundary, key)
+            for owner, boundary, key in llama_nvfp4_boundaries(layers, selected)
+            if boundary_is_nvfp4(boundary, key, attention_mode=attention_mode, mode=mode,
+                                 recipe=recipe, mlp_fp8_layers=mlp_fp8_layers)]
+
+
 def validate_producer_scales(boundaries, scales):
     if scales is None:
         return

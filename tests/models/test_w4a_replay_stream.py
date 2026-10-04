@@ -85,6 +85,42 @@ def test_v4_disabled_replay_preserves_native_model_precision(dtype):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 / SM121 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_runtime_install_removes_the_replay_exit_hook(dtype):
+    """Inference must work on the freshly quantized object before save/reload."""
+    from gptqmodel.nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+    from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+    from tests.models.test_w4a_producer_calibration import _tiny_packed_nvfp4
+
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    model = LlamaForCausalLM(packed.config).to(device="cuda", dtype=dtype).eval()
+    qcfg = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares", activation_version=4,
+        activation_global_scales=None, activation_attention_mode=None,
+        activation_attention_recipe=None, activation_mlp_fp8_layers=None,
+        dynamic_get=lambda **_kwargs: None,
+    )
+    install_w4a_llama_replay(model, qcfg)
+    # The replay dtype-exit hook is installed on the final norm.
+    assert model.model.norm._forward_pre_hooks
+
+    # The looper replaces dense projections with packed modules in place; the
+    # replay hook on the final norm is not touched by that replacement.
+    for name, module in dict(packed.named_modules()).items():
+        if isinstance(module, W4ANVFP4Linear):
+            parent_name, leaf = name.rsplit(".", 1)
+            setattr(model.get_submodule(parent_name), leaf, module)
+
+    install_w4a_llama_stream(model, "w4a_nvfp4", "least_squares", version=4, global_scales=None)
+    assert not model.model.norm._forward_pre_hooks
+    ids = torch.arange(17, device="cuda")[None]
+    with torch.inference_mode():
+        logits = model(input_ids=ids, use_cache=False).logits
+    assert torch.isfinite(logits).all()
+
+
 def test_v4_replay_decodes_at_an_unselected_layer():
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)

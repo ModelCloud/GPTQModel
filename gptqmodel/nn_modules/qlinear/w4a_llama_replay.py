@@ -13,6 +13,7 @@ from __future__ import annotations
 import torch
 
 from ...quantization.activation_floatx import fp8_token_qdq, nvfp4_block_qdq, nvfp4_global_scale
+from .w4a_boundary import layer_mlp_policy
 from .w4a_llama_stream import _bind_forward
 
 
@@ -40,11 +41,15 @@ _round = round_w4a_activation
 
 def round_w4a_replay_operand(x: torch.Tensor, mode: str, recipe=None, global_scale=None,
                              *, version: int = 3, rounder=None) -> torch.Tensor:
-    """Keep the decoded version-4 carrier in FP32, using the source scale grid."""
+    """Round one replay operand with the precision of its deployed carrier.
+
+    Version 4 keeps an NVFP4 carrier in FP32 and uses the source scale grid.
+    FP8 boundaries carry no calibrated scale and keep the ordinary per-token
+    dynamic rounding, so a mixed stream can round attention and MLP operands
+    under different policies.
+    """
     rounder = _round if rounder is None else rounder
-    if version == 4:
-        if mode != "w4a_nvfp4":
-            raise ValueError("Version-4 replay requires NVFP4")
+    if version == 4 and mode == "w4a_nvfp4":
         if global_scale is None:
             global_scale = nvfp4_global_scale(x.detach().abs().amax(), grid_dtype=x.dtype,
                                                recipe=recipe or "least_squares")
@@ -67,9 +72,10 @@ def _replay_linear_forward(self, x):
 
 def _replay_exit(_module, args):
     """Match the decode at an unquantized layer or final-norm boundary."""
-    if args:
-        return (args[0].to(_module._w4a_replay_boundary_dtype), *args[1:])
-    return None
+    if not args or not isinstance(args[0], torch.Tensor):
+        # A runtime encoded carrier already owns its dtype contract.
+        return None
+    return (args[0].to(_module._w4a_replay_boundary_dtype), *args[1:])
 
 
 def set_w4a_replay_enabled(module: torch.nn.Module, enabled: bool) -> None:
@@ -128,6 +134,21 @@ def _replay_norm_operand(norm: torch.nn.Module, pristine: torch.Tensor,
     return (rounded.float() * inv_rms).to(pristine.dtype)
 
 
+def _replay_norm(norm: torch.nn.Module, pristine: torch.Tensor, rounded: torch.Tensor,
+                 mode: str, recipe: str | None) -> torch.Tensor:
+    """Reproduce one deployed RMSNorm boundary for its carrier policy.
+
+    NVFP4 boundaries use the version-4 token rescale over the pristine
+    denominator. FP8 boundaries repack a dynamically scaled normed value,
+    because the deployed stream does not retain FP8 codes across a norm.
+    """
+    if mode == "w4a_nvfp4":
+        return _replay_norm_operand(norm, pristine, rounded)
+    variance = pristine.float().square().mean(dim=-1, keepdim=True)
+    y = (pristine.float() * torch.rsqrt(variance + norm.variance_epsilon)).to(pristine.dtype)
+    return _round(y, mode, recipe)
+
+
 def _replay_layer_forward(self, hidden_states: torch.Tensor,
                           attention_mask=None, position_ids=None, past_key_values=None,
                           use_cache=False, position_embeddings=None, **kwargs) -> torch.Tensor:
@@ -135,20 +156,26 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
     recipe = self._w4a_replay_recipe
     disabled = getattr(self, "_w4a_replay_disabled", False)
     version = getattr(self, "_w4a_replay_version", 3)
+    attention_mode = getattr(self, "_w4a_replay_attention_mode", mode)
+    attention_recipe = getattr(self, "_w4a_replay_attention_recipe", recipe)
+    mlp_mode = getattr(self, "_w4a_replay_mlp_mode", mode)
+    mlp_recipe = getattr(self, "_w4a_replay_mlp_recipe", recipe)
     if version == 4 and not disabled:
         # Version-4 carries the residual stream in compute precision. The
         # rounded operand is rebuilt from the pristine value at each boundary,
         # reproducing the deployed stream's "rounded numerator, pristine
         # denominator" RMSNorm without holding cross-layer state that reverse
-        # order recomputation would corrupt.
+        # order recomputation would corrupt. Attention and MLP boundaries may
+        # carry different policies, so each is resolved independently.
         pristine = hidden_states.float()
         # A stream entry packs the raw model-dtype input; an interior layer
         # rebuilds the previous layer's rounded output from the same producer
         # dtype so the dynamic grid selection still matches the runtime.
         rounded = round_w4a_replay_operand(
-            hidden_states, mode, recipe, getattr(self, "_w4a_replay_input_global_scale", None),
+            hidden_states, attention_mode, attention_recipe,
+            getattr(self, "_w4a_replay_input_global_scale", None),
             version=version)
-        x = _replay_norm_operand(self.input_layernorm, pristine, rounded)
+        x = _replay_norm(self.input_layernorm, pristine, rounded, attention_mode, attention_recipe)
         x, _ = self.self_attn(
             hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
             past_key_values=past_key_values, use_cache=use_cache,
@@ -156,15 +183,25 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         )
         summed = pristine + x.float()
         rounded = round_w4a_replay_operand(
-            summed, mode, recipe, self._w4a_replay_global_scales.get("post_attention_residual"),
+            summed, mlp_mode, mlp_recipe,
+            self._w4a_replay_global_scales.get("post_attention_residual"),
             version=version)
-        x = _replay_norm_operand(self.post_attention_layernorm, summed, rounded)
+        x = _replay_norm(self.post_attention_layernorm, summed, rounded, mlp_mode, mlp_recipe)
         x = self.mlp(x)
         return summed + x.float()
 
     def rounded(value, boundary):
-        return value if disabled else round_w4a_replay_operand(
-            value, mode, recipe, self._w4a_replay_global_scales.get(boundary),
+        if disabled:
+            return value
+        # Attention and MLP boundaries may carry different policies in a mixed
+        # stream; the input and layer output feed attention, the post-attention
+        # residual feeds the MLP.
+        policy_mode, policy_recipe = (
+            (attention_mode, attention_recipe) if boundary in {"input", "output"}
+            else (mlp_mode, mlp_recipe)
+        )
+        return round_w4a_replay_operand(
+            value, policy_mode, policy_recipe, self._w4a_replay_global_scales.get(boundary),
             version=version)
     x = rounded(hidden_states, "input") if self._w4a_replay_round_input else hidden_states
     residual = x
@@ -195,10 +232,24 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
     global_scales = getattr(qcfg, "activation_global_scales", None)
     if global_scales is not None and (version != 4 or mode != "w4a_nvfp4"):
         raise ValueError("Calibrated producer scales require version-4 NVFP4")
+    # A mixed stream declares its policy per boundary; resolve the same
+    # attention and per-layer MLP policies the runtime installs.
+    attention_mode = getattr(qcfg, "activation_attention_mode", None) or mode
+    attention_recipe = getattr(qcfg, "activation_attention_recipe", None)
+    if attention_mode == "w4a_nvfp4":
+        from ...quantization.activation_floatx import normalize_nvfp4_recipe
+
+        attention_recipe = normalize_nvfp4_recipe(attention_recipe if attention_recipe is not None else recipe)
+    else:
+        attention_recipe = None
+    mlp_fp8_layers = tuple(getattr(qcfg, "activation_mlp_fp8_layers", None) or ())
     if getattr(model, "_w4a_replay_mode", None) == mode:
         if (getattr(model, "_w4a_replay_recipe", None) != recipe
                 or getattr(model, "_w4a_replay_version", None) != version
-                or getattr(model, "_w4a_replay_global_scales", None) != global_scales):
+                or getattr(model, "_w4a_replay_global_scales", None) != global_scales
+                or getattr(model, "_w4a_replay_attention_mode", None) != attention_mode
+                or getattr(model, "_w4a_replay_attention_recipe", None) != attention_recipe
+                or getattr(model, "_w4a_replay_mlp_fp8_layers", None) != mlp_fp8_layers):
             raise ValueError("A different W4A replay policy is already installed.")
         return
     if getattr(model, "_w4a_replay_mode", None) is not None:
@@ -222,19 +273,29 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
                     raise ValueError("W4A replay requires every selected projection output width divisible by 128.")
         selected.append(all(chosen))
     if global_scales is not None:
-        from .w4a_boundary import llama_nvfp4_boundaries, validate_producer_scales
+        from .w4a_boundary import nvfp4_producer_specs, validate_producer_scales
 
-        validate_producer_scales(list(llama_nvfp4_boundaries(layers, selected)), global_scales)
+        validate_producer_scales(
+            nvfp4_producer_specs(layers, selected, attention_mode=attention_mode, mode=mode,
+                                 recipe=recipe, mlp_fp8_layers=mlp_fp8_layers),
+            global_scales,
+        )
     model_dtype = decoder.embed_tokens.weight.dtype
+    replay_handles = []
     for index, (layer, enabled) in enumerate(zip(layers, selected)):
         if not enabled:
             if version == 4 and index and selected[index - 1]:
                 layer._w4a_replay_boundary_dtype = model_dtype
-                layer.register_forward_pre_hook(_replay_exit)
+                replay_handles.append(layer.register_forward_pre_hook(_replay_exit))
             continue
+        layer_mlp_mode, layer_mlp_recipe = layer_mlp_policy(index, mode, recipe, mlp_fp8_layers)
         layer._w4a_replay_mode = mode
         layer._w4a_replay_recipe = recipe
         layer._w4a_replay_version = version
+        layer._w4a_replay_attention_mode = attention_mode
+        layer._w4a_replay_attention_recipe = attention_recipe
+        layer._w4a_replay_mlp_mode = layer_mlp_mode
+        layer._w4a_replay_mlp_recipe = layer_mlp_recipe
         layer._w4a_replay_global_scales = {
             boundary: global_scales[f"model.layers.{index}.{boundary}"]
             for boundary in ("input", "post_attention_residual", "output")
@@ -250,19 +311,27 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
             else global_scales.get(f"model.layers.{index - 1}.output")
         ) if global_scales is not None else None
         _bind_forward(layer, _replay_layer_forward)
-        layer.mlp._w4a_replay_mode = mode
-        layer.mlp._w4a_replay_recipe = recipe
+        layer.mlp._w4a_replay_mode = layer_mlp_mode
+        layer.mlp._w4a_replay_recipe = layer_mlp_recipe
         layer.mlp._w4a_replay_version = version
         _bind_forward(layer.mlp, _replay_mlp_forward)
         for path in required:
             parent, child = path.split(".")
             linear = getattr(getattr(layer, parent), child)
-            if global_scales is not None and path in {"self_attn.o_proj", "mlp.down_proj"}:
-                linear._w4a_activation_global_scale = global_scales[f"model.layers.{index}.{path}.input"]
+            linear_mode, linear_recipe = (
+                (attention_mode, attention_recipe) if parent == "self_attn"
+                else (layer_mlp_mode, layer_mlp_recipe)
+            )
+            producer_key = f"model.layers.{index}.{path}.input"
+            if (global_scales is not None and path in {"self_attn.o_proj", "mlp.down_proj"}
+                    and producer_key in global_scales):
+                # A boundary promoted to FP8 owns no calibrated NVFP4 scale.
+                linear._w4a_activation_global_scale = global_scales[producer_key]
             if not isinstance(linear, torch.nn.Linear):
                 raise TypeError(f"W4A replay expects a dense Linear at model.layers.{index}.{path}.")
 
-            def before(_module, args, *, replay_mode=mode, replay_recipe=recipe, replay_version=version):
+            def before(_module, args, *, replay_mode=linear_mode, replay_recipe=linear_recipe,
+                       replay_version=version):
                 if getattr(_module, "_w4a_replay_disabled", False):
                     return None
                 if getattr(_module, "_w4a_norm_preapplied", False):
@@ -281,20 +350,20 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
                     version=replay_version,
                 ), *args[1:])
 
-            def after(_module, _args, output, *, replay_mode=mode, replay_recipe=recipe):
+            def after(_module, _args, output, *, replay_mode=linear_mode, replay_recipe=linear_recipe):
                 if getattr(_module, "_w4a_replay_disabled", False):
                     return output
                 return _round(output, replay_mode, replay_recipe)
 
-            linear.register_forward_pre_hook(before)
+            replay_handles.append(linear.register_forward_pre_hook(before))
             linear._w4a_replay_input_hook_active = True
             if version == 2:
-                linear.register_forward_hook(after)
+                replay_handles.append(linear.register_forward_hook(after))
             linear._w4a_norm_preapplied = version == 4 and path in {
                 "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "mlp.gate_proj", "mlp.up_proj"
             }
-            linear._w4a_stream_replay_mode = mode
-            linear._w4a_stream_replay_recipe = recipe
+            linear._w4a_stream_replay_mode = linear_mode
+            linear._w4a_stream_replay_recipe = linear_recipe
             linear._w4a_stream_replay_version = version
             linear._w4a_replay_model_dtype = model_dtype
             linear._w4a_stream_replay_pre_hook = True
@@ -309,8 +378,52 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
                 linear._w4a_rotation_preapplied = True
     if version == 4 and selected[-1]:
         decoder.norm._w4a_replay_boundary_dtype = model_dtype
-        decoder.norm.register_forward_pre_hook(_replay_exit)
+        replay_handles.append(decoder.norm.register_forward_pre_hook(_replay_exit))
+    model._w4a_replay_handles = replay_handles
     model._w4a_replay_mode = mode
     model._w4a_replay_recipe = recipe
     model._w4a_replay_version = version
     model._w4a_replay_global_scales = dict(global_scales) if global_scales is not None else None
+    model._w4a_replay_attention_mode = attention_mode
+    model._w4a_replay_attention_recipe = attention_recipe
+    model._w4a_replay_mlp_fp8_layers = mlp_fp8_layers
+
+
+_REPLAY_MODEL_ATTRS = (
+    "_w4a_replay_handles", "_w4a_replay_mode", "_w4a_replay_recipe",
+    "_w4a_replay_version", "_w4a_replay_global_scales",
+    "_w4a_replay_attention_mode", "_w4a_replay_attention_recipe",
+    "_w4a_replay_mlp_fp8_layers",
+)
+
+_REPLAY_LAYER_ATTRS = (
+    "_w4a_replay_mode", "_w4a_replay_recipe", "_w4a_replay_version",
+    "_w4a_replay_attention_mode", "_w4a_replay_attention_recipe",
+    "_w4a_replay_mlp_mode", "_w4a_replay_mlp_recipe",
+    "_w4a_replay_global_scales", "_w4a_replay_input_global_scale",
+    "_w4a_replay_round_input", "_w4a_replay_boundary_dtype",
+)
+
+
+def uninstall_w4a_llama_replay(model: torch.nn.Module) -> None:
+    """Remove replay hooks and policy metadata before runtime stream installation.
+
+    Quantization installs replay on the dense model and the looper later
+    replaces those Linears with packed modules. The replay's dtype-exit hooks
+    live on the decoder layers and final norm, which are not replaced, so they
+    must be removed explicitly. Otherwise a runtime carrier reaches
+    ``_replay_exit`` and fails on a missing ``.to``.
+    """
+    for handle in getattr(model, "_w4a_replay_handles", None) or ():
+        handle.remove()
+    for attr in _REPLAY_MODEL_ATTRS:
+        if hasattr(model, attr):
+            delattr(model, attr)
+    decoder = getattr(model, "model", None)
+    for layer in getattr(decoder, "layers", None) or ():
+        for attr in _REPLAY_LAYER_ATTRS:
+            if hasattr(layer, attr):
+                delattr(layer, attr)
+    norm = getattr(decoder, "norm", None)
+    if norm is not None and hasattr(norm, "_w4a_replay_boundary_dtype"):
+        delattr(norm, "_w4a_replay_boundary_dtype")

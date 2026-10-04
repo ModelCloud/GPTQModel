@@ -15,7 +15,9 @@ import torch
 from .w4a_activation import W4AActivation, pack_activation
 from .w4a_boundary import (
     NVFP4BoundaryQuantizer,
+    layer_mlp_policy,
     llama_nvfp4_boundaries,
+    nvfp4_producer_specs,
     pack_boundary,
 )
 from .w4a_floatx import W4AFP8Linear
@@ -62,15 +64,6 @@ def _boundary_policy(owner, boundary: str) -> tuple[str, str | None]:
     if mode is None:
         raise RuntimeError(f"W4A boundary {boundary!r} has no activation policy installed.")
     return mode, getattr(owner, f"_w4a_{boundary}_recipe", None)
-
-
-def _boundary_group(owner, boundary: str) -> str:
-    """Map a producer boundary to the projection group that consumes it.
-
-    In a Llama decoder only the post-attention residual and the MLP product
-    feed the MLP; every other boundary feeds attention.
-    """
-    return "mlp" if boundary in {"attention_residual", "product"} else "attention"
 
 
 def _decode(value: torch.Tensor | W4AActivation,
@@ -300,7 +293,7 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
 
     def mlp_policy(layer_index: int) -> tuple[str, str | None]:
         """Return the MLP transport policy for one decoder layer."""
-        return ("w4afp8", None) if layer_index in fp8_mlp_layers else (mode, recipe)
+        return layer_mlp_policy(layer_index, mode, recipe, fp8_mlp_layers)
 
     decoder = getattr(model, "model", None)
     layers = getattr(decoder, "layers", None)
@@ -351,13 +344,10 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         # pack dynamically, so a mixed stream needs a subset of the keys. The
         # subset follows the per-layer MLP policy, so a layer promoted to FP8
         # stops requiring an NVFP4 producer scale.
-        def boundary_is_nvfp4(boundary: str, key: str) -> bool:
-            if _boundary_group(None, boundary) == "mlp":
-                return mlp_policy(int(key.split(".")[2]))[0] == "w4a_nvfp4"
-            return attention_mode == "w4a_nvfp4"
-
-        nvfp4_boundaries = [(owner, boundary, key) for owner, boundary, key in boundaries
-                            if boundary_is_nvfp4(boundary, key)]
+        nvfp4_boundaries = nvfp4_producer_specs(
+            layers, selected, attention_mode=attention_mode, mode=mode, recipe=recipe,
+            mlp_fp8_layers=fp8_mlp_layers,
+        )
         if global_scales is not None:
             unknown = set(global_scales) - {key for _, _, key in boundaries}
             if unknown:
@@ -373,6 +363,13 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
                 key, device, global_scales[key] if global_scales is not None else None,
             ))
 
+    # Quantization installs the calibration replay on the dense model. Its
+    # dtype-exit hooks live on decoder layers and the final norm, which the
+    # packed-module replacement does not touch, so clear them before binding
+    # the runtime stream or a runtime carrier reaches `_replay_exit`.
+    from .w4a_llama_replay import uninstall_w4a_llama_replay
+
+    uninstall_w4a_llama_replay(model)
     for index, (layer, enabled) in enumerate(zip(layers, selected)):
         if not enabled:
             continue
