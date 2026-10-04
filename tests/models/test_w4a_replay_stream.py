@@ -734,7 +734,7 @@ def test_installed_norm_replay_uses_frozen_headroom_scale(monkeypatch, activatio
     pack with the same frozen scale during capture, or the GPTQ Hessian learns
     a different operand than deployment executes.
     """
-    import gptqmodel.nn_modules.qlinear.w4a_llama_replay as replay
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
 
     model = _headroom_replay_model(activation, dtype)
     processor = _headroom_probe_processor(activation)
