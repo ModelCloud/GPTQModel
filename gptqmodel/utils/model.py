@@ -1444,6 +1444,18 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
+    if quantize_config is not None and quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+        from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+
+        install_w4a_llama_stream(
+            model, quantize_config.activation_mode, quantize_config.activation_recipe,
+            quantize_config.activation_version,
+            global_scales=quantize_config.activation_global_scales,
+            attention_mode=quantize_config.activation_attention_mode,
+            attention_recipe=quantize_config.activation_attention_recipe,
+            mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
+        )
+
     torch_empty_cache()
 
     return model

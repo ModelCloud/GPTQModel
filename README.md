@@ -470,6 +470,8 @@ procedures, and operational gotchas.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
+Experimental W4A streams on NVIDIA GB10 (SM121) keep GPTQ INT4 weights and quantize the *activations*: E4M3 FP8 with a per-token scale, or E2M1 NVFP4 with E4M3 block scales. Selected Llama decoder operators pass encoded activations and scales across module and layer boundaries instead of decoding to BF16. See the **[W4A guide](docs/gptq-w4a-gb10.md)** for the policy reference, and the [accuracy appendix](docs/gptq-w4a-accuracy-notes.md) for measured quality.
+
 ##### Preprocessors 🧹
 
 `preprocessors=[...]` adds optional module-weight preparation steps before quantization or repacking. They are available on `GPTQConfig`, `AWQConfig`, `ParoConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, and `BitsAndBytesConfig`.
@@ -572,6 +574,51 @@ model = GPTQModel.load(model_id, qcfg)
 model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V3)
 model.save(quant_path)
 ```
+
+##### W4A Example: Llama 3.2 1B Instruct (GB10)
+
+W4A quantizes activations while leaving the saved GPTQ checkpoint in its native
+INT32-packed INT4 layout. It requires NVIDIA GB10 (SM121), a Llama decoder
+model, `bits=4`, `group_size=128`, `sym=True`, `desc_act=False`,
+`pack_dtype="int32"`, `lm_head=False`, and Triton.
+
+```py
+import torch
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import QuantizeConfig
+
+model_id = "unsloth/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-W4A"
+
+qcfg = QuantizeConfig(
+    bits=4, group_size=128, sym=True, desc_act=False,
+    pack_dtype="int32", rotation="hadamard", offload_to_disk=False,
+    activation={
+        "version": 4,
+        "mode": "w4a_nvfp4",
+        "recipe": "least_squares_grid",
+        "attention": {"mode": "w4afp8"},
+    },
+)
+
+model = GPTQModel.load(model_id, qcfg, device="cuda", dtype=torch.bfloat16)
+model.quantize(calibration, backend=BACKEND.GPTQ_W4A_NVFP4)
+model.save(quant_path)
+
+loaded = GPTQModel.load(quant_path, backend=BACKEND.AUTO, device="cuda", dtype=torch.bfloat16)
+```
+
+`activation` accepts a bare mode string as shorthand for a version-3 stream
+(`activation="w4afp8"` or `activation="w4a_nvfp4"`). The dict form adds
+`recipe`, `attention`, `mlp`, and `global_scales`; see the
+**[activation policy reference](docs/gptq-w4a-gb10.md#activation-policy-reference)**
+for every field and its validation rules.
+
+Two configurations are worth calling out. `activation="w4afp8"` is the highest
+accuracy option and matches W4A16 within noise. The balanced NVFP4-MLP /
+FP8-attention config above is the accepted W4A4 operating point; it costs about
+2.3 percentage points against W4A16 on full GSM8K Platinum, which is the
+measured price of the 4-bit activation grid on this model.
 
 #### MoE Quantization 🧩
 

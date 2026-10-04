@@ -120,13 +120,6 @@ except Exception:  # pragma: no cover - availability check
     def is_flash_attn_2_available():  # type: ignore
         return False
 
-from tests.eval import (  # noqa: E402
-    evaluate,
-    format_eval_result_table,
-    get_eval_task_results,
-    resolve_eval_metric_alias,
-)
-
 from gptqmodel import BACKEND, DEBUG_ON, GPTQModel  # noqa: E402
 from gptqmodel.looper.module_looper import StopMainLoop  # noqa: E402
 from gptqmodel.models.base import BaseQModel  # noqa: E402
@@ -151,6 +144,12 @@ from gptqmodel.quantization.config import (  # noqa: E402
 from gptqmodel.utils.logger import render_table  # noqa: E402
 from gptqmodel.utils.model import MODALITY  # noqa: E402
 from gptqmodel.utils.torch import torch_empty_cache  # noqa: E402
+from tests.eval import (  # noqa: E402
+    evaluate,
+    format_eval_result_table,
+    get_eval_task_results,
+    resolve_eval_metric_alias,
+)
 
 
 RAND_SEED = 898
@@ -210,6 +209,8 @@ class ModelTest(unittest.TestCase):
     METHOD = METHOD.GPTQ
     BITS = 4
     GROUP_SIZE = 128
+    ACTIVATION = None
+    ROTATION = None
     DESC_ACT = False
     SYM = True
     GPTAQ: Optional[GPTAQConfig] = None
@@ -1344,6 +1345,15 @@ class ModelTest(unittest.TestCase):
 
     @classmethod
     def load_dataset(cls, tokenizer=None, rows: int = 0):
+        calibration_file = os.environ.get("GPTQMODEL_CALIBRATION_PARQUET")
+        if calibration_file:
+            if not Path(calibration_file).is_file():
+                raise FileNotFoundError(f"Calibration parquet not found at {calibration_file}")
+            if hf_load_dataset is not None:
+                dataset = hf_load_dataset("parquet", data_files=calibration_file, split="train")
+            else:
+                dataset = cls._load_calibration_parquet()
+            return dataset.select(range(min(rows, len(dataset)))) if rows > 0 else dataset
         if hf_load_dataset is None:
             log.warning("datasets.load_dataset unavailable; falling back to local parquet: %s", DATASETS_IMPORT_ERROR)
             dataset = cls._load_calibration_parquet()
@@ -1360,7 +1370,10 @@ class ModelTest(unittest.TestCase):
 
     @staticmethod
     def _load_calibration_parquet():
-        parquet_path = Path("/monster/data/model/dataset/nm-calibration/llm.parquet").expanduser()
+        parquet_path = Path(os.environ.get(
+            "GPTQMODEL_CALIBRATION_PARQUET",
+            "/monster/data/model/dataset/nm-calibration/llm.parquet",
+        )).expanduser()
         if not parquet_path.exists():
             raise FileNotFoundError(f"Calibration parquet not found at {parquet_path}")
 
@@ -1517,6 +1530,8 @@ class ModelTest(unittest.TestCase):
             format=self.FORMAT,
             bits=self.BITS,
             group_size=self.GROUP_SIZE,
+            activation=self.ACTIVATION,
+            rotation=self.ROTATION,
             desc_act=self.DESC_ACT if not self.ACT_GROUP_AWARE else False,
             act_group_aware=self.ACT_GROUP_AWARE,
             fallback=self.FALLBACK,
@@ -1537,8 +1552,10 @@ class ModelTest(unittest.TestCase):
             offload_to_disk=self._mode_specific_test_setting("OFFLOAD_TO_DISK"),
         )
 
-    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, **kwargs):
+    def quantModel(self, model_id_or_path, trust_remote_code=False, dtype="auto", need_eval=True, batch_size: int = QUANT_BATCH_SIZE, call_perform_post_quant_validation: bool = True, reload_after_save: bool = True, **kwargs):
         """Return `(model, tokenizer, processor)`; `processor` is `None` for text-only models."""
+        if not reload_after_save and not self.SAVE_PATH:
+            raise ValueError("reload_after_save=False requires a persistent SAVE_PATH")
         quantize_config = self._build_quantize_config()
 
         log.info(f"Quant config: {quantize_config}")
@@ -1594,8 +1611,9 @@ class ModelTest(unittest.TestCase):
             dataset_concat_size,
         )
 
+        is_quantized = model.quantized
         is_image_to_text_model = MODALITY.IMAGE_TO_TEXT in model.modality
-        if quantize_config.requires_calibration_dataset():
+        if not is_quantized and quantize_config.requires_calibration_dataset():
             calibration_dataset = (
                 get_calib_dataset(model)
                 if is_image_to_text_model
@@ -1610,7 +1628,6 @@ class ModelTest(unittest.TestCase):
         if hasattr(model.config, "eos_token_id") and not model.config.eos_token_id:
             model.config.eos_token_id = tokenizer.eos_token_id or 0
 
-        is_quantized = model.quantized
         self._loaded_model_was_prequantized = bool(is_quantized)
 
         # Some image-to-text checkpoints do not provide an AutoProcessor implementation.
@@ -1665,6 +1682,18 @@ class ModelTest(unittest.TestCase):
 
                     model.save(path, split_by=self.SPLIT_BY)
                     self._print_post_quant_artifacts(path)
+
+                    if not reload_after_save:
+                        # Keep the quantization and reload phases in separate
+                        # guarded processes so their peaks cannot overlap.
+                        return None, tokenizer, None
+
+                    if quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+                        # The 1B GB10 test otherwise keeps the freshly
+                        # quantized model while reloading a second copy for
+                        # post-save validation and full-row evaluation.
+                        model = None
+                        torch_empty_cache()
 
                     reuse_candidates = {}
                     eval_records = {}
@@ -2000,7 +2029,9 @@ class ModelTest(unittest.TestCase):
                     )
                     with self.model_compat_test_context():
                         task_results = self.evaluate_model(
-                            model=self.SAVE_PATH if self.SAVE_PATH else self.model,
+                            # Reuse the loaded checkpoint so a prequantized test
+                            # does not hold two model copies in shared GB10 RAM.
+                            model=self.model,
                             trust_remote_code=self.TRUST_REMOTE_CODE,
                             delete_quantized_model=False,
                         )
