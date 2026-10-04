@@ -1,6 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
 
 """Torch-oracle checks for Metal GGUF block packing."""
 
@@ -24,6 +23,20 @@ _source = Path(__file__).resolve().parents[1] / "gptqmodel/quantization/mlx_gguf
 _spec = importlib.util.spec_from_file_location("gptqmodel_mlx_gguf_test", _source)
 native = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(native)
+
+from gptqmodel.nn_modules.qlinear import gguf as gguf_linear  # noqa: E402
+
+
+GGUF_PROCESSOR_QTYPES = (
+    ("q1_0", "Q1_0"),
+    ("q1_0_g128", "Q1_0_g128"),
+    ("q2_0", "Q2_0"),
+    ("q4_0", "Q4_0"),
+    ("q8_0", "Q8_0"),
+    ("q4_k", "Q4_K"),
+    ("q5_k", "Q5_K"),
+    ("q6_k", "Q6_K"),
+)
 
 
 def _torch_gguf_q4_0_oracle(weight):
@@ -1666,3 +1679,65 @@ def test_gguf_q8_0_bytes_are_accepted_by_existing_runtime():
     dequantized = _dequantize_gguf_tensor_numpy(packed, "Q8_0")
     assert dequantized.shape == weight.shape
     assert np.isfinite(dequantized).all()
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("bits,tensor_qtype", GGUF_PROCESSOR_QTYPES)
+def test_gguf_processor_uses_mlx_with_exact_serialized_bytes(
+    monkeypatch,
+    dtype,
+    bits,
+    tensor_qtype,
+):
+    torch.manual_seed(8238)
+    source = torch.randn((2, 256), dtype=torch.float32).to(dtype)
+    expected = gguf_linear._quantize_gguf_tensor_numpy(
+        source.float().numpy(),
+        tensor_qtype,
+    )
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
+    linear.weight.data.copy_(source)
+    kernel = gguf_linear.GGUFTorchLinear(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    monkeypatch.setattr(gguf_linear, "_MLX_GGUF_MIN_ELEMENTS", 0)
+    monkeypatch.setattr(gguf_linear, "_mlx_quantization_available", lambda: True)
+
+    def reject_cpu_quantization(*args, **kwargs):
+        raise AssertionError("processor fell back to CPU GGUF quantization")
+
+    monkeypatch.setattr(gguf_linear, "_gguf_quantize", reject_cpu_quantization)
+    kernel.pack_original(linear, None, None)
+    np.testing.assert_array_equal(kernel.qweight.numpy(), expected)
+
+
+def test_gguf_processor_keeps_cpu_path_below_mlx_crossover(monkeypatch):
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.float16)
+    kernel = gguf_linear.GGUFTorchLinear(
+        bits="q4_k",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    monkeypatch.setattr(gguf_linear, "_mlx_quantization_available", lambda: True)
+
+    def reject_mlx_quantization(*args, **kwargs):
+        raise AssertionError("small processor weight used the slower MLX path")
+
+    monkeypatch.setattr(
+        gguf_linear,
+        "_gguf_quantize_weight_mlx_to_torch",
+        reject_mlx_quantization,
+    )
+    kernel.pack_original(linear, None, None)

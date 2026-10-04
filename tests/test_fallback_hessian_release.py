@@ -3,6 +3,8 @@ partials add_batch accumulated; before, only materialize_global_hessian did,
 and the task object lingers in processor.tasks until layer end. CPU-only.
 """
 
+import weakref
+
 import pytest
 import torch
 import torch.nn as nn
@@ -54,6 +56,51 @@ def _assert_partials_released(task: GPTQ) -> None:
 
 
 class TestFallbackReleasesPartials:
+    def test_shared_input_fallback_releases_adopted_source_before_clone(self, monkeypatch):
+        class _FakeEvent:
+            def __init__(self):
+                self.synchronized = False
+
+            def query(self):
+                return False
+
+            def record(self, _stream):
+                pass
+
+            def synchronize(self):
+                self.synchronized = True
+
+        leader = _task(rows_fed=FALLBACK_ROWS)
+        follower = _task(rows_fed=FALLBACK_ROWS)
+        monkeypatch.setattr(GPTQ, "_cuda_event_for", staticmethod(lambda _device: _FakeEvent()))
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: object())
+        follower.adopt_hessian_from(leader)
+        follower.expected_nsamples = EXPECTED_ROWS
+
+        follower_event = follower._deferred_hessian_sources[0][1]
+        source_ref = weakref.ref(follower._deferred_hessian_sources[0][0])
+        leader.free()
+        assert source_ref() is not None
+        assert not follower_event.synchronized
+
+        boundary = {}
+        original_clone = follower.clone_module
+
+        def _clone_at_fallback_boundary(*args, **kwargs):
+            boundary["event_synchronized"] = follower_event.synchronized
+            boundary["deferred_sources"] = len(follower._deferred_hessian_sources)
+            boundary["source_alive"] = source_ref() is not None
+            return original_clone(*args, **kwargs)
+
+        monkeypatch.setattr(follower, "clone_module", _clone_at_fallback_boundary)
+        follower.quantize(blocksize=GROUP_SIZE)
+
+        assert boundary == {
+            "event_synchronized": True,
+            "deferred_sources": 0,
+            "source_alive": False,
+        }
+
     def test_fixture_is_on_the_fallback_branch(self):
         task = _task(rows_fed=FALLBACK_ROWS)
         assert should_use_fallback(task.fallback, float(task.nsamples), task.expected_nsamples)

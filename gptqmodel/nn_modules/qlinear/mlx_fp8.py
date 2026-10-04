@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# FP8 E4M3 layout: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
-"""Exact E4M3 weight transfer to MLX's native MXFP8 matrix multiplication."""
+# FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
+"""Packed FP8 inference kernels for MLX with FP16/BF16 outputs."""
+
+from functools import lru_cache
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -32,13 +34,270 @@ class MlxFP8Linear(nn.Module):
         return result.astype(x.dtype)
 
 
-class MlxFP8DenseLinear(nn.Module):
-    """Keep the activation dtype for FP8 formats decoded to FP16 weights."""
+@lru_cache(maxsize=3)
+def _packed_fp8_kernel(output_dtype):
+    output_types = {
+        mx.float16: ("fp16", "half"),
+        mx.bfloat16: ("bf16", "bfloat16_t"),
+        mx.float32: ("fp32", "float"),
+    }
+    try:
+        output_suffix, output_type = output_types[output_dtype]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported FP8 activation dtype: {output_dtype}") from exc
+    return mx.fast.metal_kernel(
+        name=f"gptqmodel_fp8_packed_matmul_{output_suffix}",
+        input_names=["x", "weight", "scales", "codebook", "bias"],
+        output_names=["output"],
+        source="""
+            uint lane = thread_position_in_threadgroup.x;
+            uint column = threadgroup_position_in_grid.y;
+            uint row_base = threadgroup_position_in_grid.z * RTILE;
+            threadgroup float partials[RTILE * GROUPS];
+            float sums[RTILE];
+            for (uint r = 0; r < RTILE; ++r) sums[r] = 0.0f;
+            uint weight_offset = column * K;
+            float output_scale = MODE == 0 ? 1.0f / scales[0] :
+                (MODE == 1 ? 1.0f / scales[column] : 1.0f);
+            if ((K & 3) == 0) {
+                for (uint k = lane * 4u; k < K; k += THREADS * 4u) {
+                    uint packed = *reinterpret_cast<const device uint *>(
+                        weight + weight_offset + k
+                    );
+                    for (uint item = 0; item < 4u; ++item) {
+                        uint input_column = k + item;
+                        uint scale_index = (column / BLOCK_ROWS) * SCALE_COLS
+                            + input_column / BLOCK_COLS;
+                        float scale = MODE == 2 ? 1.0f / scales[scale_index]
+                            : output_scale;
+                        float value = codebook[(packed >> (item * 8u)) & 255u] * scale;
+                        for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
+                            sums[r] = metal::fma(
+                                float(x[(row_base + r) * K + input_column]),
+                                value, sums[r]
+                            );
+                        }
+                    }
+                }
+            } else {
+                for (uint k = lane; k < K; k += THREADS) {
+                    uint scale_index = (column / BLOCK_ROWS) * SCALE_COLS
+                        + k / BLOCK_COLS;
+                    float scale = MODE == 2 ? 1.0f / scales[scale_index]
+                        : output_scale;
+                    float value = codebook[uint(weight[weight_offset + k])] * scale;
+                    for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
+                        sums[r] = metal::fma(
+                            float(x[(row_base + r) * K + k]), value, sums[r]
+                        );
+                    }
+                }
+            }
+            for (uint r = 0; r < RTILE; ++r) {
+                float reduced = simd_sum(sums[r]);
+                if ((lane & 31u) == 0)
+                    partials[r * GROUPS + (lane >> 5)] = reduced;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint r = 0; r < RTILE && row_base + r < ROWS; ++r) {
+                float reduced = lane < GROUPS ? partials[r * GROUPS + lane] : 0.0f;
+                reduced = simd_sum(reduced);
+                if (lane == 0)
+                    output[(row_base + r) * N + column] = OUTPUT_TYPE(
+                        reduced + bias[column]
+                    );
+            }
+        """.replace("OUTPUT_TYPE", output_type),
+    )
 
-    def __init__(self, linear):
+
+@lru_cache(maxsize=2)
+def _packed_fp8_prefill_kernel(tile_columns=32):
+    if tile_columns not in (16, 32):
+        raise ValueError("Packed FP8 prefill supports 16- or 32-column tiles")
+    return mx.fast.metal_kernel(
+        name=f"gptqmodel_fp8_packed_matmul_r16_n{tile_columns}",
+        input_names=["x", "weight", "scales", "codebook"],
+        output_names=["output"],
+        header="#include <metal_simdgroup_matrix>\n",
+        source="""
+            uint physical = thread_position_in_threadgroup.x;
+            uint simdgroup = physical >> 5;
+            uint output_tile = threadgroup_position_in_grid.y;
+            uint row_base = threadgroup_position_in_grid.z * 16u;
+            threadgroup float tile_weight[64 * TILE_COLUMNS];
+            threadgroup float tile_input[1024];
+            simdgroup_float8x8 accumulator = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+            for (uint input_tile = 0; input_tile < K_TILES; ++input_tile) {
+                for (uint position = physical;
+                     position < 64u * TILE_COLUMNS;
+                     position += THREADS) {
+                    uint local_k = position / TILE_COLUMNS;
+                    uint local_n = position % TILE_COLUMNS;
+                    uint column = output_tile * TILE_COLUMNS + local_n;
+                    uint k = input_tile * 64u + local_k;
+                    uint scale_index = (column / BLOCK_ROWS) * SCALE_COLS
+                        + k / BLOCK_COLS;
+                    float scale = MODE == 0 ? 1.0f / scales[0] :
+                        (MODE == 1 ? 1.0f / scales[column]
+                        : 1.0f / scales[scale_index]);
+                    tile_weight[position] =
+                        codebook[uint(weight[column * K + k])] * scale;
+                }
+                for (uint position = physical; position < 1024u; position += THREADS) {
+                    uint input_row = position >> 6;
+                    uint input_k = input_tile * 64u + (position & 63u);
+                    tile_input[position] = row_base + input_row < ROWS
+                        ? float(x[(row_base + input_row) * K + input_k]) : 0.0f;
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (simdgroup < SIMD_GROUPS) {
+                    uint input_row = (simdgroup / COLUMN_GROUPS) * 512u;
+                    uint weight_column = (simdgroup % COLUMN_GROUPS) * 8u;
+                    simdgroup_float8x8 input_fragment;
+                    simdgroup_float8x8 weight_fragment;
+                    for (uint part = 0; part < 8u; ++part) {
+                        simdgroup_load(
+                            input_fragment, tile_input + input_row + part * 8u, 64u
+                        );
+                        simdgroup_load(
+                            weight_fragment,
+                            tile_weight + part * 8u * TILE_COLUMNS + weight_column,
+                            TILE_COLUMNS
+                        );
+                        simdgroup_multiply_accumulate(
+                            accumulator, input_fragment, weight_fragment, accumulator
+                        );
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+
+            if (simdgroup < SIMD_GROUPS) {
+                simdgroup_store(
+                    accumulator,
+                    output + (row_base + simdgroup / COLUMN_GROUPS * 8u) * N
+                        + output_tile * TILE_COLUMNS
+                        + simdgroup % COLUMN_GROUPS * 8u,
+                    N
+                );
+            }
+        """,
+    )
+
+
+class MlxFP8PackedLinear(nn.Module):
+    """Multiply activations by FP8 checkpoint bytes without dense expansion."""
+
+    def __init__(
+        self,
+        weight,
+        scales,
+        codebook,
+        *,
+        in_features,
+        out_features,
+        scale_method,
+        block_size=None,
+        bias=None,
+    ):
         super().__init__()
-        self.linear = linear
+        if scale_method not in {"tensor", "row", "block"}:
+            raise ValueError(f"Unsupported FP8 scale method: {scale_method}")
+        if scale_method == "block" and block_size is None:
+            raise ValueError("FP8 block scaling requires a block size")
+        self.in_features = int(in_features)
+        self.out_features = int(out_features)
+        self.scale_method = scale_method
+        self.block_size = (1, 1) if block_size is None else tuple(map(int, block_size))
+        self.weight = (
+            mx.zeros((self.out_features, self.in_features), dtype=mx.uint8)
+            if weight is None else mx.array(weight).astype(mx.uint8).reshape(
+                self.out_features, self.in_features,
+            )
+        )
+        if scales is None:
+            block_rows, block_cols = self.block_size
+            if scale_method == "tensor":
+                scale_count = 1
+            elif scale_method == "row":
+                scale_count = self.out_features
+            else:
+                scale_count = (
+                    (self.out_features // block_rows)
+                    * (self.in_features // block_cols)
+                )
+            self.scales = mx.zeros((scale_count,), dtype=mx.float32)
+        else:
+            self.scales = mx.array(scales).astype(mx.float32).reshape(-1)
+        self.codebook = (
+            mx.zeros((256,), dtype=mx.float32)
+            if codebook is None else mx.array(codebook).astype(mx.float32).reshape(256)
+        )
+        self.bias = (
+            mx.zeros((self.out_features,), dtype=mx.float32)
+            if bias is None else mx.array(bias).astype(mx.float32)
+        )
         self.freeze()
 
+    def _prefill(self, x, rows, tile_columns=32):
+        padded_rows = ((rows + 15) // 16) * 16
+        threads = tile_columns * 8
+        block_rows, block_cols = self.block_size
+        mode = {"tensor": 0, "row": 1, "block": 2}[self.scale_method]
+        return _packed_fp8_prefill_kernel(tile_columns)(
+            inputs=[x, self.weight, self.scales, self.codebook],
+            template=[
+                ("K", self.in_features), ("N", self.out_features),
+                ("ROWS", rows), ("K_TILES", self.in_features // 64),
+                ("THREADS", threads), ("MODE", mode),
+                ("BLOCK_ROWS", block_rows), ("BLOCK_COLS", block_cols),
+                ("SCALE_COLS", self.in_features // block_cols),
+                ("TILE_COLUMNS", tile_columns),
+                ("COLUMN_GROUPS", tile_columns // 8),
+                ("SIMD_GROUPS", threads // 32),
+            ],
+            grid=(threads, self.out_features // tile_columns, padded_rows // 16),
+            threadgroup=(threads, 1, 1),
+            output_shapes=[(padded_rows, self.out_features)],
+            output_dtypes=[mx.float32],
+        )[0][:rows]
+
     def __call__(self, x):
-        return self.linear(x).astype(x.dtype)
+        if x.shape[-1] != self.in_features:
+            raise ValueError(f"expected input width {self.in_features}, got {x.shape[-1]}")
+        if x.dtype not in (mx.float16, mx.bfloat16, mx.float32):
+            raise ValueError(f"Unsupported FP8 activation dtype: {x.dtype}")
+        output_shape = (*x.shape[:-1], self.out_features)
+        if x.size == 0:
+            return mx.zeros(output_shape, dtype=x.dtype)
+        rows = x.size // self.in_features
+        block_rows, block_cols = self.block_size
+        mode = {"tensor": 0, "row": 1, "block": 2}[self.scale_method]
+        if (rows != 1 and self.in_features <= 8192 and self.out_features >= 8192
+                and self.in_features % 64 == 0 and self.out_features % 32 == 0):
+            output = self._prefill(x, rows)
+            return (output + self.bias).reshape(output_shape).astype(x.dtype)
+        row_tile = 1 if rows == 1 else min(rows, 16)
+        threads = 64
+        output = _packed_fp8_kernel(x.dtype)(
+            inputs=[x, self.weight, self.scales, self.codebook, self.bias],
+            template=[
+                ("K", self.in_features), ("N", self.out_features),
+                ("ROWS", rows), ("RTILE", row_tile),
+                ("THREADS", threads), ("GROUPS", threads // 32),
+                ("MODE", mode),
+                ("BLOCK_ROWS", block_rows), ("BLOCK_COLS", block_cols),
+                ("SCALE_COLS", self.in_features // block_cols),
+            ],
+            grid=(threads, self.out_features, (rows + row_tile - 1) // row_tile),
+            threadgroup=(threads, 1, 1),
+            output_shapes=[(rows, self.out_features)],
+            output_dtypes=[x.dtype],
+        )[0]
+        return output.reshape(output_shape)
+
+
+__all__ = ["MlxFP8Linear", "MlxFP8PackedLinear"]

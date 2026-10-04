@@ -9,9 +9,7 @@ import gc
 import numpy as np
 import pytest
 import torch
-
 from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
-
 
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
@@ -180,8 +178,12 @@ def test_qwen38_k_projection_merged_gptq_all_bit_rates(bits):
 
 @pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)
 @pytest.mark.parametrize("bits", [4, 8])
-def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_dims, bits):
-    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16], ids=["fp16", "bf16"])
+@pytest.mark.parametrize("use_bias", [False, True], ids=["no_bias", "bias"])
+def test_qwen38_projection_qqq_dynamic_input_accuracy(
+    name, output_dims, input_dims, bits, dtype, use_bias, record_property,
+):
+    from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear, _dynamic_quant
 
     phase = np.arange(output_dims, dtype=np.uint8)[:, None] % 16
     index = np.arange(input_dims, dtype=np.uint8)[None, :] % 16
@@ -201,22 +203,54 @@ def test_qwen38_projection_qqq_dynamic_input_accuracy(name, output_dims, input_d
         ("scales", mx.full((output_dims, input_dims // 128), 16 if bits == 4 else 1, dtype=mx.float32)),
         ("biases", mx.full((output_dims, input_dims // 128), -128, dtype=mx.float32)),
     ])
-    layer = MlxQQQLinear(native, np.full((1, output_dims), 0.001, dtype=np.float32))
+    bias = (np.sin(np.arange(output_dims) * 0.1) * 0.002).astype(np.float16)
+    layer = MlxQQQLinear(
+        native,
+        np.full((1, output_dims), 0.001, dtype=np.float32),
+        bias if use_bias else None,
+    )
     if bits == 8:
         np.testing.assert_array_equal(np.asarray(layer.linear.weight).view(np.uint8).reshape(codes.shape), codes)
     else:
         np.testing.assert_array_equal(np.asarray(layer.linear.weight), packed)
     torch.manual_seed(380027)
-    x = (torch.randn(3, input_dims) * 0.05).half()
-    actual = layer(mx.array(x.numpy()))
-    mx.eval(actual)
+    source = (torch.randn(1, input_dims) * 0.05).half()
+    mlx_input = mx.array(source.numpy()).astype(dtype)
+    actual = layer(mlx_input)
+    half = mlx_input.astype(mx.float16)
+    quantized_mlx, input_scale_mlx = _dynamic_quant(half)
+    previous = native(quantized_mlx) * input_scale_mlx * layer.channel_scale
+    previous = previous.astype(mx.float16)
+    if use_bias:
+        previous = previous + layer.bias
+    previous = previous.astype(dtype)
+    mx.eval(actual, previous)
+    assert actual.dtype == dtype
+    np.testing.assert_array_equal(
+        np.asarray(actual.astype(mx.float32)),
+        np.asarray(previous.astype(mx.float32)),
+    )
+
+    x = torch.from_numpy(np.asarray(half)).half()
     input_scale = (x.abs().amax(dim=-1, keepdim=True) / 127).float()
     quantized = (x / input_scale).round().clamp(-128, 127).float()
     pattern = (torch.arange(input_dims)[None, :] + torch.arange(16)[:, None]).remainder(16).float() - 8
-    expected_by_phase = ((quantized @ pattern.T) * (16 if bits == 4 else 1)
-                         * input_scale * 0.001).half().numpy()
+    expected_by_phase = (
+        (quantized @ pattern.T) * (16 if bits == 4 else 1)
+        * input_scale * 0.001
+    ).half()
     expected = expected_by_phase[:, np.arange(output_dims) % 16]
-    np.testing.assert_allclose(np.asarray(actual), expected, rtol=0.002, atol=0.002, err_msg=name)
+    if use_bias:
+        expected = expected + torch.from_numpy(bias)
+    if dtype == mx.bfloat16:
+        expected = expected.bfloat16()
+    visible = np.asarray(actual.astype(mx.float32))
+    expected = expected.float().numpy()
+    max_abs = float(np.max(np.abs(visible - expected)))
+    record_property("max_abs_vs_rounded_torch", max_abs)
+    np.testing.assert_allclose(
+        visible, expected, rtol=0.002, atol=0.002, err_msg=name,
+    )
 
 
 @pytest.mark.parametrize("name,output_dims,input_dims", QWEN38_27B_PROJECTIONS)

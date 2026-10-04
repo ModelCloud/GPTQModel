@@ -349,6 +349,72 @@ def test_4bit_processor_keeps_torch_path_below_mlx_crossover(monkeypatch):
     kernel.pack_original(linear, None, None)
 
 
+@pytest.mark.parametrize("dtype", SOURCE_DTYPES)
+def test_int8_processor_uses_mlx_with_exact_serialized_state(monkeypatch, dtype):
+    torch.manual_seed(8235)
+    source = torch.randn((2, 128), dtype=torch.float32).to(dtype)
+    quant_source = source.to(torch.float16)
+    expected_weight, expected_scales, expected_outliers = (
+        bnb.functional.int8_vectorwise_quant(quant_source, threshold=0.0)
+    )
+    assert expected_outliers is None or expected_outliers.numel() == 0
+
+    linear = torch.nn.Linear(128, 2, bias=False, dtype=dtype)
+    linear.weight.data.copy_(source)
+    kernel = bnb_linear.BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+        format="int8",
+        dtype=dtype,
+    )
+    monkeypatch.setattr(bnb_linear, "_MLX_INT8_MIN_ELEMENTS", 0)
+
+    def reject_torch_quantization(*args, **kwargs):
+        raise AssertionError("processor fell back to bitsandbytes INT8 quantization")
+
+    monkeypatch.setattr(
+        bnb.functional,
+        "int8_vectorwise_quant",
+        reject_torch_quantization,
+    )
+    kernel.pack_original(linear, None, None)
+
+    torch.testing.assert_close(kernel.weight, expected_weight, rtol=0, atol=0)
+    torch.testing.assert_close(kernel.weight_scb, expected_scales, rtol=1e-6, atol=1e-6)
+
+
+def test_int8_processor_keeps_torch_path_below_mlx_crossover(monkeypatch):
+    linear = torch.nn.Linear(128, 2, bias=False, dtype=torch.float16)
+    kernel = bnb_linear.BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+        format="int8",
+        dtype=torch.float16,
+    )
+
+    def reject_mlx_quantization(*args, **kwargs):
+        raise AssertionError("small processor weight used the slower MLX INT8 path")
+
+    monkeypatch.setattr(
+        bnb_linear,
+        "_quantize_int8_weight_mlx_to_torch",
+        reject_mlx_quantization,
+    )
+    kernel.pack_original(linear, None, None)
+
+
 @pytest.mark.parametrize("quant_type", ["nf4", "fp4"])
 @pytest.mark.parametrize("compressed", [False, True])
 @pytest.mark.parametrize("dtype", SOURCE_DTYPES)

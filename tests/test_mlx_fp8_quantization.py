@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# FP8 encoding oracle: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
-# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Torch-oracle and byte-boundary checks for MLX FP8 weight quantization."""
 
@@ -12,7 +10,7 @@ import numpy as np
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.fp8 import quantize_fp8_weight
+from gptqmodel.nn_modules.qlinear import fp8 as fp8_linear
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 if sys.platform != "darwin":
@@ -21,6 +19,9 @@ if sys.platform != "darwin":
 mx = pytest.importorskip("mlx.core")
 
 from gptqmodel.quantization.mlx_fp8 import quantize_fp8_weight_mlx  # noqa: E402
+
+
+quantize_fp8_weight = fp8_linear.quantize_fp8_weight
 
 
 FORMATS = ("float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz")
@@ -170,6 +171,86 @@ def test_fp8_transposed_low_precision_input(fmt, method, mlx_dtype, torch_dtype)
     np.testing.assert_allclose(
         np.asarray(actual[1]), expected[1].numpy(), rtol=1e-6, atol=1e-6
     )
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("method", ["tensor", "row", "block"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16], ids=["fp16", "bf16"])
+def test_fp8_processor_uses_mlx_with_exact_serialized_state(
+    monkeypatch, fmt, method, dtype
+):
+    torch.manual_seed(8239)
+    source = torch.randn((4, 256), dtype=torch.float32).to(dtype)
+    block_size = (2, 64) if method == "block" else None
+    expected_weight, expected_scale = quantize_fp8_weight(
+        source.float(),
+        format=fmt,
+        weight_scale_method=method,
+        weight_block_size=block_size,
+    )
+    linear = torch.nn.Linear(256, 4, bias=False, dtype=dtype)
+    linear.weight.data.copy_(source)
+    kernel = fp8_linear.TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=4,
+        bias=False,
+        register_buffers=False,
+        format=fmt,
+        weight_scale_method=method,
+        weight_block_size=block_size,
+    )
+    monkeypatch.setattr(fp8_linear, "_MLX_FP8_MIN_ELEMENTS", source.numel())
+    monkeypatch.setattr(fp8_linear, "_mlx_quantization_available", lambda: True)
+
+    def reject_torch_quantization(*args, **kwargs):
+        raise AssertionError("processor fell back to Torch FP8 quantization")
+
+    monkeypatch.setattr(fp8_linear, "quantize_fp8_weight", reject_torch_quantization)
+    kernel.pack_original(linear, None, None)
+
+    torch.testing.assert_close(
+        kernel.weight.view(torch.uint8),
+        expected_weight.view(torch.uint8),
+        rtol=0,
+        atol=0,
+    )
+    torch.testing.assert_close(kernel.weight_scale_inv, expected_scale, rtol=1e-6, atol=1e-6)
+
+
+def test_fp8_processor_keeps_torch_path_below_mlx_crossover(monkeypatch):
+    linear = torch.nn.Linear(256, 4, bias=False, dtype=torch.float16)
+    kernel = fp8_linear.TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=4,
+        bias=False,
+        register_buffers=False,
+        format="float8_e4m3fn",
+        weight_scale_method="row",
+    )
+    monkeypatch.setattr(fp8_linear, "_mlx_quantization_available", lambda: True)
+    monkeypatch.setattr(
+        fp8_linear,
+        "_MLX_FP8_MIN_ELEMENTS",
+        linear.weight.numel() + 1,
+    )
+
+    def reject_mlx_quantization(*args, **kwargs):
+        raise AssertionError("small processor weight used the slower MLX path")
+
+    monkeypatch.setattr(
+        fp8_linear,
+        "_quantize_fp8_weight_mlx_to_torch",
+        reject_mlx_quantization,
+    )
+    kernel.pack_original(linear, None, None)
 
 
 def test_fp8_rejects_invalid_inputs():

@@ -182,3 +182,79 @@ def test_gemma4_capture_kwargs_preserve_all_per_layer_inputs():
 
     assert "__gptqmodel_gemma4_all_per_layer_inputs" in captured
     assert captured["__gptqmodel_gemma4_all_per_layer_inputs"].shape == (1, 4, 3, 2)
+
+
+def _tiny_gemma4_causal_lm(num_kv_shared_layers):
+    from transformers import Gemma4ForCausalLM, Gemma4TextConfig
+
+    config = Gemma4TextConfig(
+        vocab_size=64,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=4,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        num_global_key_value_heads=1,
+        head_dim=16,
+        global_head_dim=16,
+        layer_types=["sliding_attention", "full_attention", "sliding_attention", "full_attention"],
+        sliding_window=4,
+        num_kv_shared_layers=num_kv_shared_layers,
+        hidden_size_per_layer_input=0,
+    )
+    return Gemma4ForCausalLM(config).eval()
+
+
+def _text_model_def(model):
+    model_def = object.__new__(Gemma4TextQModel)
+    nn.Module.__init__(model_def)
+    model_def.model = model
+    return model_def
+
+
+def _store_flags(model):
+    return [layer.self_attn.store_full_length_kv for layer in model.model.layers]
+
+
+def test_gemma4_disables_unused_full_length_kv_store():
+    model = _tiny_gemma4_causal_lm(num_kv_shared_layers=0)
+
+    # Transformers flags the last layer of each attention type even without a KV-shared tail.
+    assert _store_flags(model) == [False, False, True, True]
+    assert not any(layer.self_attn.is_kv_shared_layer for layer in model.model.layers)
+
+    _text_model_def(model).pre_quantize_generate_hook_start()
+
+    assert _store_flags(model) == [False, False, False, False]
+
+
+def test_gemma4_unused_kv_store_no_longer_grows_captured_shared_kv_states():
+    model = _tiny_gemma4_causal_lm(num_kv_shared_layers=0)
+    input_ids = torch.randint(0, model.config.vocab_size, (1, 6))
+
+    # Cached replay reuses one captured dict per batch; before the fix every
+    # storing layer leaves its full-length K/V behind in it.
+    captured = {}
+    with torch.no_grad():
+        model(input_ids=input_ids, shared_kv_states=captured, use_cache=False)
+    assert set(captured) == {"sliding_attention", "full_attention"}
+
+    _text_model_def(model).pre_quantize_generate_hook_start()
+
+    captured = {}
+    with torch.no_grad():
+        reference = model(input_ids=input_ids, use_cache=False).logits
+        replayed = model(input_ids=input_ids, shared_kv_states=captured, use_cache=False).logits
+    assert captured == {}
+    assert torch.equal(reference, replayed)
+
+
+def test_gemma4_keeps_kv_store_for_kv_shared_variants():
+    # Layers 2-3 read the K/V stored by layers 0-1, so the store must stay enabled.
+    model = _tiny_gemma4_causal_lm(num_kv_shared_layers=2)
+    flags_before = _store_flags(model)
+    assert flags_before == [True, True, False, False]
+
+    _text_model_def(model).pre_quantize_generate_hook_start()
+
+    assert _store_flags(model) == flags_before

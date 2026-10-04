@@ -1,8 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
+# FP8 encoding oracle: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
 # bitsandbytes reference: Tim Dettmers et al., MIT, https://github.com/bitsandbytes-foundation/bitsandbytes
-"""Weight-only FP8 and packed bitsandbytes MLX transfer checked against Torch."""
+"""Packed FP8 and bitsandbytes MLX transfer checked against Torch."""
 
 import numpy as np
 import pytest
@@ -31,11 +32,11 @@ def test_dense_holder_validates_without_affine_group_limits(holder, bits, invali
     assert not cls.validate(bits=invalid_bits, **params)[0]
 
 
-def _load_dense(monkeypatch, source, input_dims, output_dims):
+def _load_weight_only(monkeypatch, source, input_dims, output_dims):
     from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
     from gptqmodel.nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
-    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
+    from gptqmodel.nn_modules.qlinear.mlx_fp8 import MlxFP8Linear, MlxFP8PackedLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     class Args:
@@ -61,7 +62,7 @@ def _load_dense(monkeypatch, source, input_dims, output_dims):
     else:
         assert "quantization" not in config
         if isinstance(source, TorchFP8Linear):
-            assert isinstance(model.linear, MlxFP8DenseLinear)
+            assert isinstance(model.linear, MlxFP8PackedLinear)
             assert config["_gptqmodel_custom_mlx_runtime"]
         elif isinstance(source, BitsAndBytesLinear):
             assert isinstance(model.linear, MlxBitsAndBytesLinear)
@@ -73,7 +74,7 @@ def _load_dense(monkeypatch, source, input_dims, output_dims):
 
 @pytest.mark.parametrize("fp8_format", ["float8_e4m3fn", "float8_e5m2", "float8_e4m3fnuz", "float8_e5m2fnuz"])
 @pytest.mark.parametrize("scale_method,block_size", [("tensor", None), ("row", None), ("block", (16, 32))])
-def test_fp8_mlx_dense_matches_torch(monkeypatch, fp8_format, scale_method, block_size):
+def test_fp8_mlx_runtime_matches_torch(monkeypatch, fp8_format, scale_method, block_size):
     from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
     from gptqmodel.nn_modules.qlinear.mlx import FP8MlxQuantLinear
 
@@ -87,14 +88,20 @@ def test_fp8_mlx_dense_matches_torch(monkeypatch, fp8_format, scale_method, bloc
     )
     source.pack_original(linear, None, None)
     assert FP8MlxQuantLinear.source_compatible(source)
-    model = _load_dense(monkeypatch, source, 128, 64)
-    reference_weight = source.dequantize_weight(device="cpu", dtype=torch.float16).T
+    model = _load_weight_only(monkeypatch, source, 128, 64)
+    reference_weight = source.dequantize_weight(device="cpu", dtype=torch.float32).T
     if scale_method in {"row", "tensor"} and fp8_format == "float8_e4m3fn":
         packed, scales, _, _ = FP8MlxQuantLinear.pack_source(source)
         np.testing.assert_array_equal(np.array(model.linear.linear.weight), packed)
         np.testing.assert_array_equal(np.array(model.linear.linear.scales), scales)
     else:
-        np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
+        np.testing.assert_array_equal(
+            np.array(model.linear.weight), source.weight.view(torch.uint8).numpy(),
+        )
+        np.testing.assert_array_equal(
+            np.array(model.linear.scales), source.weight_scale_inv.reshape(-1).numpy(),
+        )
+        assert model.linear.weight.nbytes == source.weight.numel()
     rng = np.random.default_rng(210)
     x = rng.normal(0, 0.2, (2, 3, 128)).astype(np.float16)
     actual = model(mx.array(x))
@@ -115,7 +122,7 @@ def test_fp8_mlx_preserves_bfloat16_activation(monkeypatch, fp8_format, scale_me
         weight_scale_method=scale_method, weight_block_size=block_size,
     )
     source.pack_original(torch.nn.Linear(128, 64, bias=True).half(), None, None)
-    model = _load_dense(monkeypatch, source, 128, 64)
+    model = _load_weight_only(monkeypatch, source, 128, 64)
     actual = model(mx.ones((2, 128), dtype=mx.bfloat16))
     mx.eval(actual)
     assert actual.dtype == mx.bfloat16
@@ -134,9 +141,11 @@ def test_fp8_e8m0_checkpoint_decodes_for_mlx(monkeypatch):
     source.weight.copy_(torch.full((64, 128), 127, dtype=torch.uint8).view(torch.float8_e8m0fnu))
     source.weight_scale_inv.fill_(2)
     source.bias.fill_(0.01)
-    model = _load_dense(monkeypatch, source, 128, 64)
+    model = _load_weight_only(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight(device="cpu", dtype=torch.float16).T
-    np.testing.assert_array_equal(np.array(model.linear.linear.weight), reference_weight.numpy())
+    np.testing.assert_array_equal(
+        np.array(model.linear.weight), source.weight.view(torch.uint8).numpy(),
+    )
     output = model(mx.ones((1, 128), dtype=mx.float16))
     mx.eval(output)
     expected = torch.ones((1, 128), dtype=torch.float64) @ reference_weight.double().T + source.bias.double()
@@ -163,7 +172,7 @@ def test_bitsandbytes_mlx_dense_matches_torch(monkeypatch, bits, quant_type, com
     )
     source.pack_original(linear, None, None)
     assert BitsAndBytesMlxQuantLinear.source_compatible(source)
-    model = _load_dense(monkeypatch, source, 128, 64)
+    model = _load_weight_only(monkeypatch, source, 128, 64)
     reference_weight = source.dequantize_weight().detach().to("cpu", torch.float16)
     payload = BitsAndBytesMlxQuantLinear.native_payload(source)
     np.testing.assert_array_equal(np.asarray(model.linear.weight), np.asarray(payload["weight"]).reshape(model.linear.weight.shape))
@@ -200,7 +209,7 @@ def test_bitsandbytes_mlx_all_4bit_block_sizes(
         block_size=block_size, compress_statistics=compress,
     )
     source.pack_original(linear, None, None)
-    model = _load_dense(monkeypatch, source, block_size, 8)
+    model = _load_weight_only(monkeypatch, source, block_size, 8)
     x = mx.array(np.random.default_rng(block_size).normal(0, 0.2, (2, block_size)).astype(np.float32)).astype(dtype)
     actual = model(x)
     mx.eval(actual)
@@ -231,7 +240,7 @@ def test_bitsandbytes_mlx_irregular_shape_fallback(
         block_size=32, compress_statistics=compress,
     )
     source.pack_original(linear, None, None)
-    model = _load_dense(monkeypatch, source, 65, 3)
+    model = _load_weight_only(monkeypatch, source, 65, 3)
     assert "affine_biases" not in model.linear
     x = mx.array(np.random.default_rng(211).normal(0, 0.2, (2, 65)).astype(np.float32)).astype(dtype)
     actual = model(x)

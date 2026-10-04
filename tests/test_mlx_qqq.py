@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# QQQ reference: vLLM contributors, Apache-2.0, https://github.com/vllm-project/vllm
 """QQQ packed INT8 transfer and dynamic activation arithmetic on Metal."""
 
 import numpy as np

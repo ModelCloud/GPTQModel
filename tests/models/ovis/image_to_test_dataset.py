@@ -29,6 +29,7 @@ from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
+from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 
 
@@ -250,6 +251,7 @@ def get_calib_dataset(model):
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, LFM2VLQModel)
         or isinstance(model, MuseGlimmerQModel)
+        or isinstance(model, SmolVLMQModel)
         or isinstance(model, ZDTaichu5QModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)

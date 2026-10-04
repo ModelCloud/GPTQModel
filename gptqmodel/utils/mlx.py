@@ -2,6 +2,10 @@
 # SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
+# FP8 encoding layouts: PyTorch contributors, BSD-3-Clause, https://github.com/pytorch/pytorch
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 # Quantization format references: ParoQuant, QQQ, GGUF, bitsandbytes, and EXL3;
 # format-specific credit and licenses are recorded in their converter modules.
 
@@ -14,9 +18,11 @@ from huggingface_hub import snapshot_download
 from transformers import PreTrainedModel
 
 from ..models import BaseQModel
-from ..nn_modules.qlinear.mlx import (AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
+from ..nn_modules.qlinear.mlx import (AWQBitBLASMlxQuantLinear, AWQMarlinMlxQuantLinear,
+                                      AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear,
                                       AwqMlxQuantLinear, BitsAndBytesMlxQuantLinear,
                                       FP8MlxQuantLinear, GGUFMlxQuantLinear,
+                                      GPTQBitBLASMlxQuantLinear, GPTQMarlinMlxQuantLinear,
                                       LLMAwqMlxQuantLinear, MlxQuantLinear,
                                       ParoMlxQuantLinear, QQQMlxQuantLinear)
 from ..nn_modules.qlinear.paroquant import ParoLinear
@@ -47,7 +53,7 @@ try:
     from ..nn_modules.qlinear.mlx_group16 import MlxGroup16Linear
     from ..nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
     from ..nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
-    from ..nn_modules.qlinear.mlx_fp8 import MlxFP8DenseLinear, MlxFP8Linear
+    from ..nn_modules.qlinear.mlx_fp8 import MlxFP8Linear, MlxFP8PackedLinear
     from ..nn_modules.qlinear.mlx_gguf import MlxGGUFLinear, MlxGGUFQ6KLinear
     from ..nn_modules.qlinear.mlx_bitsandbytes import MlxBitsAndBytesLinear
     from ..nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
@@ -75,6 +81,14 @@ def _exl3_signs(module, unpacked_name, packed_name, size):
 
 
 def _mlx_holder_class(module):
+    if isinstance(module, AWQBitBLASMlxQuantLinear):
+        return AWQBitBLASMlxQuantLinear
+    if isinstance(module, AWQMarlinMlxQuantLinear):
+        return AWQMarlinMlxQuantLinear
+    if isinstance(module, GPTQBitBLASMlxQuantLinear):
+        return GPTQBitBLASMlxQuantLinear
+    if isinstance(module, GPTQMarlinMlxQuantLinear):
+        return GPTQMarlinMlxQuantLinear
     if isinstance(module, ParoLinear):
         return ParoMlxQuantLinear
     if isinstance(module, QQQTorchLinear):
@@ -99,7 +113,9 @@ def _mlx_holder_class(module):
 def _packed_mlx_weights(model, config, lm_head_name):
     """Transfer exact packed layers or decoded weight-only layers to MLX."""
     quantized = [(name, module) for name, module in model.named_modules()
-                 if isinstance(module, (TorchLinear, AwqTorchLinear, QQQTorchLinear,
+                 if isinstance(module, (TorchLinear, GPTQBitBLASMlxQuantLinear,
+                                        AWQBitBLASMlxQuantLinear,
+                                        AwqTorchLinear, QQQTorchLinear,
                                         GGUFTorchLinear, TorchFP8Linear, BitsAndBytesLinear,
                                         ExllamaV3TorchLinear, AwqGEMVLinear,
                                         AwqGEMVFastLinear))]
@@ -119,8 +135,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
     paro = {}
     qqq = {}
     fp8_native = {}
-    fp8_dense = set()
-    dense = {}
+    fp8_packed = {}
     for name, module in quantized:
         if isinstance(module, ExllamaV3TorchLinear):
             if module.in_features <= 0 or module.out_features <= 0 or getattr(module, "trellis", None) is None:
@@ -137,8 +152,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
         if isinstance(module, TorchFP8Linear) and mlx_linear.native_compatible(module):
             fp8_native[name] = module
         elif isinstance(module, TorchFP8Linear):
-            fp8_dense.add(name)
-            dense[name] = module
+            fp8_packed[name] = mlx_linear.packed_payload(module)
             continue
         elif isinstance(module, BitsAndBytesLinear):
             bitsandbytes_native[name] = BitsAndBytesMlxQuantLinear.native_payload(module)
@@ -154,13 +168,14 @@ def _packed_mlx_weights(model, config, lm_head_name):
             group16.add(name)
             if isinstance(module, GGUFTorchLinear) and module.gguf_tensor_qtype == "Q6_K":
                 gguf_q6_k.add(name)
-            elif mlx_linear is MlxQuantLinear:
+            elif mlx_linear in (MlxQuantLinear, GPTQMarlinMlxQuantLinear):
                 gptq_group16.add(name)
-            elif mlx_linear is AwqMlxQuantLinear:
+            elif mlx_linear in (AwqMlxQuantLinear, AWQMarlinMlxQuantLinear):
                 awq_group16.add(name)
-        elif isinstance(module, TorchLinear):
+        elif isinstance(module, (GPTQBitBLASMlxQuantLinear, TorchLinear)):
             gptq_dtype.add(name)
-        elif (isinstance(module, (AwqTorchLinear, AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
+        elif (isinstance(module, (AwqTorchLinear, AWQBitBLASMlxQuantLinear,
+                                  AwqGEMVLinear, AwqGEMVFastLinear, LLMAwqLinear))
               and not isinstance(module, ParoLinear)):
             awq_dtype.add(name)
         elif isinstance(module, GGUFTorchLinear):
@@ -190,10 +205,14 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 weights[f"{name}.codebook"] = mx.array(payload["codebook"]).astype(mx.float32).reshape(-1)
             if payload.get("affine_biases") is not None:
                 weights[f"{name}.affine_biases"] = mx.array(payload["affine_biases"]).astype(mx.float32)
-        elif name in dense:
-            dense_weight = _mlx_holder_class(module).dense_weight(module)
-            weights[f"{name}.linear.weight" if name in fp8_dense else f"{name}.weight"] = mx.array(
-                dense_weight.detach().cpu().numpy()
+        elif name in fp8_packed:
+            payload = fp8_packed[name]
+            weights[f"{name}.weight"] = mx.array(payload["weight"]).astype(mx.uint8)
+            weights[f"{name}.scales"] = mx.array(payload["scales"]).astype(mx.float32).reshape(-1)
+            weights[f"{name}.codebook"] = mx.array(payload["codebook"]).astype(mx.float32).reshape(256)
+            weights[f"{name}.bias"] = (
+                mx.zeros((module.out_features,), dtype=mx.float32)
+                if payload["bias"] is None else mx.array(payload["bias"]).astype(mx.float32)
             )
         elif name in layer_params:
             mlx_linear = _mlx_holder_class(module)
@@ -228,8 +247,9 @@ def _packed_mlx_weights(model, config, lm_head_name):
             weights[f"{name}.weight"] = mx.array(
                 module.weight.detach().to("cpu", torch.float16).numpy()
             )
-        if getattr(module, "bias", None) is not None and name not in bitsandbytes_native:
-            prefix = f"{name}.linear" if name in paro or name in fp8_dense or name in gptq_dtype or name in awq_dtype or name in gguf_dtype else name
+        if (getattr(module, "bias", None) is not None
+                and name not in bitsandbytes_native and name not in fp8_packed):
+            prefix = f"{name}.linear" if name in paro or name in gptq_dtype or name in awq_dtype or name in gguf_dtype else name
             weights[f"{prefix}.bias"] = mx.array(
                 module.bias.detach().to("cpu", torch.float16).numpy()
             )
@@ -277,7 +297,8 @@ def _packed_mlx_weights(model, config, lm_head_name):
                 )
             if path in awq_group16:
                 return MlxAWQGroup16Linear(
-                    input_dims, output_dims, bias=module.get("bias") is not None,
+                    input_dims, output_dims, layer_params[path]["bits"],
+                    bias=module.get("bias") is not None,
                 )
             if path in gguf_q6_k:
                 return MlxGGUFQ6KLinear(
@@ -289,7 +310,7 @@ def _packed_mlx_weights(model, config, lm_head_name):
         mlx_model.update_modules(tree_map_with_path(
             replace_group16, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
-    if paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_native or exl3_native:
+    if paro or qqq or fp8_native or fp8_packed or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_native or exl3_native:
         def replace_custom(path, module):
             if path in paro:
                 source = paro[path]
@@ -315,8 +336,15 @@ def _packed_mlx_weights(model, config, lm_head_name):
                     source._bits_per_weight(), source._codebook_name(),
                     bias=source.bias is not None,
                 )
-            if path in fp8_dense:
-                return MlxFP8DenseLinear(module)
+            if path in fp8_packed:
+                payload = fp8_packed[path]
+                return MlxFP8PackedLinear(
+                    None, None, None,
+                    in_features=payload["in_features"],
+                    out_features=payload["out_features"],
+                    scale_method=payload["scale_method"],
+                    block_size=payload["block_size"],
+                )
             if path in fp8_native:
                 source = fp8_native[path]
                 return MlxFP8Linear(
@@ -337,10 +365,10 @@ def _packed_mlx_weights(model, config, lm_head_name):
             replace_custom, mlx_model.leaf_modules(), is_leaf=nn.Module.is_module,
         ))
     mlx_model.load_weights(list(weights.items()))
-    if group16 or paro or qqq or fp8_native or fp8_dense or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_native or exl3_native or (dense and layer_params):
+    if group16 or paro or qqq or fp8_native or fp8_packed or gptq_dtype or awq_dtype or gguf_dtype or bitsandbytes_native or exl3_native:
         # MLX-LM's standard loader reconstructs only native QuantizedLinear.
         # Keep this runtime model instead of round-tripping through that loader.
-        mlx_config["_gptqmodel_group16_runtime" if group16 and not paro and not qqq and not dense
+        mlx_config["_gptqmodel_group16_runtime" if group16 and not paro and not qqq and not fp8_packed
                    else "_gptqmodel_custom_mlx_runtime"] = True
     return mlx_model, mlx_config
 
@@ -361,6 +389,7 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
         raise ValueError("MLX conversion supports 1 through 8 integer bits for these formats")
     if quant_format not in [FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P, FORMAT.GEMM,
                             FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ,
+                            FORMAT.MARLIN, FORMAT.BITBLAS,
                             FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                             FORMAT.BITSANDBYTES, FORMAT.EXL3]:
         raise ValueError("MLX conversion requires a supported GPT-QModel quantization format")
@@ -388,7 +417,8 @@ def _convert_gptq_to_mlx_weights(model_id_or_path, model, gptq_config, lm_head_n
         return packed
     if quant_format in (FORMAT.PAROQUANT, FORMAT.QQQ, FORMAT.GGUF, FORMAT.FP8,
                         FORMAT.BITSANDBYTES, FORMAT.EXL3, FORMAT.GEMV,
-                        FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                        FORMAT.GEMV_FAST, FORMAT.LLM_AWQ, FORMAT.MARLIN,
+                        FORMAT.BITBLAS):
         raise ValueError(f"{quant_format} MLX inference requires transferable packed weights and runtime state")
 
     # Requantization needs an MLX-supported group size.

@@ -4,25 +4,35 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import sys
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import DEVICE
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
 from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
 from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.fallback import normalize_fallback
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
-from ..utils.logger import setup_logger, log_time_block
+from ..utils.fallback import normalize_fallback
+from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, move_to, pack_module
 from ..utils.torch import CPU
+
 
 log = setup_logger()
 
@@ -60,6 +70,8 @@ class QQQProcessor(LoopProcessor):
         self.avg_losses = []
 
     def _quant_linear_kernel(self):
+        if sys.platform == "darwin":
+            return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
         if isinstance(device, DEVICE):
             return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device == DEVICE.NPU else (QQQLinear, BACKEND.QQQ)

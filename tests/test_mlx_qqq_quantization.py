@@ -1,7 +1,5 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-# QQQ method: Meituan, Ying Zhang et al., https://arxiv.org/abs/2406.09904
-# Qwen projection shapes: Qwen Team, Apache-2.0, https://huggingface.co/Qwen
 
 """Independent Torch-oracle checks for native MLX QQQ quantization."""
 
@@ -14,12 +12,16 @@ import torch
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
 mx = pytest.importorskip("mlx.core")
 
-from gptqmodel.quantization.mlx_qqq import qqq_quantize_weight_mlx  # noqa: E402
+from gptqmodel.quantization.mlx_qqq import (  # noqa: E402
+    qqq_quantize_weight_mlx,
+    qqq_quantize_weight_mlx_with_loss,
+)
 
 
 def _params(group, group_size):
@@ -35,7 +37,7 @@ def _params(group, group_size):
     return (maximum - minimum) / 15, torch.full_like(maximum, 8)
 
 
-def _torch_oracle(source, factor, group_size):
+def _torch_oracle(source, factor, group_size, *, return_loss=False):
     weight = torch.from_numpy(source.copy())
     hinv = torch.from_numpy(factor.copy())
     rows, columns = weight.shape
@@ -50,6 +52,7 @@ def _torch_oracle(source, factor, group_size):
     )
     fixed = _params(weight, -1) if group_size == -1 else None
     scales, zeros = [], []
+    loss = torch.zeros((), dtype=torch.float32)
     block = 128 if group_size == -1 else group_size
     for start in range(0, columns, block):
         end = min(start + block, columns)
@@ -65,32 +68,48 @@ def _torch_oracle(source, factor, group_size):
             q = scale * (code - zero)
             result[:, column] = q
             error = (value - q) / hinv[column, column]
+            loss += torch.sum(error * error) / 2
             errors[:, column - start] = error
             weight[:, column:end] -= error[:, None] * hinv[column, column:end]
         if end < columns:
             weight[:, end:] -= errors @ hinv[start:end, end:]
     if fixed is not None:
         scale, zero = fixed
-        return result.numpy(), scale[:, None].numpy(), zero[:, None].numpy(), None
-    return (
-        result.numpy(),
-        torch.cat(scales, axis=1).numpy(),
-        torch.cat(zeros, axis=1).numpy(),
-        scale_extra.numpy(),
+        quantized_out = result.numpy()
+        scales_out = scale[:, None].numpy()
+        zeros_out = zero[:, None].numpy()
+        scale_extra_out = None
+    else:
+        quantized_out = result.numpy()
+        scales_out = torch.cat(scales, axis=1).numpy()
+        zeros_out = torch.cat(zeros, axis=1).numpy()
+        scale_extra_out = scale_extra.numpy()
+    loss_out = loss.numpy() if return_loss else None
+    return quantized_out, scales_out, zeros_out, scale_extra_out, loss_out
+
+
+def _observe(weight, factor, group_size, *, return_loss=False):
+    function = (
+        qqq_quantize_weight_mlx_with_loss
+        if return_loss
+        else qqq_quantize_weight_mlx
     )
-
-
-def _observe(weight, factor, group_size):
+    result = function(
+        weight,
+        mx.array(factor),
+        group_size=group_size,
+    )
+    if not return_loss:
+        quantized, scales, zeros, scale_extra = result
+        result = quantized, scales, zeros, scale_extra, None
     return tuple(
         None if value is None else np.asarray(value)
-        for value in qqq_quantize_weight_mlx(
-            weight, mx.array(factor), group_size=group_size
-        )
+        for value in result
     )
 
 
 def _codes(result, group_size):
-    quantized, scales, zeros, _ = result
+    quantized, scales, zeros, _ = result[:4]
     repeats = quantized.shape[1] if group_size == -1 else 128
     return np.rint(
         quantized / np.repeat(scales, repeats, axis=1)
@@ -145,6 +164,24 @@ def test_qqq_group_updates_match_torch(group_size):
             )
 
 
+@pytest.mark.parametrize("group_size", [-1, 128])
+def test_qqq_loss_matches_torch(group_size):
+    rng = np.random.default_rng(745)
+    source = rng.normal(0, 0.3, (7, 256)).astype(np.float32)
+    factor = np.eye(256, dtype=np.float32)
+    factor += np.triu(rng.normal(0, 0.001, (256, 256)).astype(np.float32), 1)
+    expected = _torch_oracle(source, factor, group_size, return_loss=True)
+    actual = _observe(
+        mx.array(source), factor, group_size, return_loss=True
+    )
+    for index in range(4):
+        if expected[index] is not None:
+            np.testing.assert_allclose(
+                actual[index], expected[index], atol=1e-6, rtol=1e-6
+            )
+    np.testing.assert_allclose(actual[4], expected[4], atol=1e-6, rtol=1e-6)
+
+
 def test_qqq_dynamic_fused_extrema_rows():
     source = np.zeros((4, 128), dtype=np.float32)
     source[1] = np.linspace(0.25, 2.0, 128, dtype=np.float32)
@@ -157,7 +194,7 @@ def test_qqq_dynamic_fused_extrema_rows():
         np.testing.assert_array_equal(actual[index], expected[index])
 
 
-def _torch_banded_oracle(source, group_size):
+def _torch_banded_oracle(source, group_size, *, return_loss=False):
     """Torch oracle specialized to unit diagonal and one 0.05 superdiagonal."""
     weight = torch.from_numpy(source.copy())
     columns = weight.shape[1]
@@ -172,6 +209,7 @@ def _torch_banded_oracle(source, group_size):
         / 127
     )
     scales, zeros = [], []
+    loss = torch.zeros((), dtype=torch.float32)
     for start in range(0, columns, 128):
         end = min(start + 128, columns)
         scale, zero = fixed if fixed is not None else _params(weight[:, start:end], 128)
@@ -185,18 +223,24 @@ def _torch_banded_oracle(source, group_size):
             )
             q = scale * (code - zero)
             output[:, column] = q
+            error = value - q
+            loss += torch.sum(error * error) / 2
             if column + 1 < columns:
-                weight[:, column + 1] -= (value - q) * 0.05
+                weight[:, column + 1] -= error * 0.05
             weight[:, column] = q
     if fixed is not None:
         scale, zero = fixed
-        return output.numpy(), scale[:, None].numpy(), zero[:, None].numpy(), None
-    return (
-        output.numpy(),
-        torch.cat(scales, dim=1).numpy(),
-        torch.cat(zeros, dim=1).numpy(),
-        scale_extra.numpy(),
-    )
+        quantized_out = output.numpy()
+        scales_out = scale[:, None].numpy()
+        zeros_out = zero[:, None].numpy()
+        scale_extra_out = None
+    else:
+        quantized_out = output.numpy()
+        scales_out = torch.cat(scales, dim=1).numpy()
+        zeros_out = torch.cat(zeros, dim=1).numpy()
+        scale_extra_out = scale_extra.numpy()
+    loss_out = loss.numpy() if return_loss else None
+    return quantized_out, scales_out, zeros_out, scale_extra_out, loss_out
 
 
 def _boundary_margin(source_row, quantized_row, scale, column):
