@@ -131,9 +131,7 @@ class W4AFP8Linear(PackableQuantLinear):
                 x.codes, x.scales, self._weight_e4m3, self.scales, self.bias, torch.float32,
             )
             result = result.reshape(x.shape[:-1] + (self.out_features,))
-            if not getattr(self, "_w4a_output_encoded", True):
-                return result.to(x.model_dtype)
-            return pack_activation(result, "w4afp8", model_dtype=x.model_dtype)
+            return result.to(x.model_dtype)
         if getattr(self, "_require_activation_stream", False):
             raise TypeError("This W4AFP8 Linear requires encoded FP8 input with token scales.")
 

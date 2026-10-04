@@ -32,7 +32,7 @@ def validate_saved_nvfp4_acceptance(frozen_manifest: Path, native_result: Path,
     audit = json.loads(consumer_audit.read_text())
     if Path(audit['checkpoint']).resolve() != checkpoint:
         raise ValueError('Consumer audit belongs to a different activation checkpoint')
-    if (audit.get('variant') != 'w4a_nvfp4' or audit.get('activation_version') != 4
+    if (audit.get('variant') != 'w4a_nvfp4' or audit.get('fused_norms') is not True
             or audit.get('full_coverage') is not True
             or audit.get('handoffs_checked') != 381
             or audit.get('independent_decode_checks') != 720
@@ -40,10 +40,10 @@ def validate_saved_nvfp4_acceptance(frozen_manifest: Path, native_result: Path,
             or audit.get('counts', {}).get('decoder_layer') != 16
             or audit.get('counts', {}).get('w4a_linear') != 112
             or audit.get('selected_layers') != [f'model.layers.{i}' for i in range(16)]):
-        raise ValueError('Expected the complete version-4 NVFP4 consumer audit')
+        raise ValueError('Expected the complete fused-norm NVFP4 consumer audit')
     config = json.loads((checkpoint / 'quantize_config.json').read_text())
-    if config.get('activation', {}).get('mode') != 'w4a_nvfp4' or config['activation'].get('version') != 4:
-        raise ValueError('Saved accuracy acceptance requires a version-4 NVFP4 checkpoint')
+    if config.get('activation', {}).get('mode') != 'w4a_nvfp4' or not config.get('rotation'):
+        raise ValueError('Saved accuracy acceptance requires a fused-norm NVFP4 checkpoint')
     from gptqmodel.quantization.activation_floatx import normalize_nvfp4_recipe
 
     if normalize_nvfp4_recipe(audit.get('activation_recipe')) != normalize_nvfp4_recipe(

@@ -45,18 +45,14 @@ def _activation_replay_config(source_checkpoint: Path, *, train_norms: bool = Fa
 
     config = json.loads((source_checkpoint / "quantize_config.json").read_text())
     activation = config.get("activation")
-    if (not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4"
-            or activation.get("version") not in {2, 3, 4}):
+    if not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4":
         raise ValueError("QAD source must declare a supported NVFP4 activation policy.")
-    version = activation["version"]
-    recipe = normalize_nvfp4_recipe(activation.get("recipe", "four_six" if version == 2 else "least_squares"))
+    recipe = normalize_nvfp4_recipe(activation.get("recipe", "least_squares"))
     if recipe not in {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
         raise ValueError("QAD currently requires a dynamic NVFP4 recipe; frozen headroom replay is unsupported.")
-    if version == 4:
-        if config.get("rotation") not in {"hadamard", "random"}:
-            raise ValueError("Version 4 QAD requires a rotated source with fused norms.")
-        if train_norms:
-            raise ValueError("Version 4 requires unit fused norms; norm-only QAT cannot preserve this contract.")
+    rotation = config.get("rotation")
+    if train_norms and rotation in {"hadamard", "random"}:
+        raise ValueError("Fused-norm NVFP4 requires unit RMSNorm weights; norm-only QAT cannot preserve it.")
     # Forward the mixed-stream sub-policies. The corrected installer resolves
     # attention and per-layer MLP boundaries from these, and its producer-scale
     # validation covers only the NVFP4 subset they select.
@@ -66,7 +62,7 @@ def _activation_replay_config(source_checkpoint: Path, *, train_norms: bool = Fa
     attention_recipe = attention.get("recipe") if attention_mode == "w4a_nvfp4" else None
     return SimpleNamespace(
         activation_mode="w4a_nvfp4", activation_recipe=recipe,
-        activation_version=version, dynamic_get=lambda **_kwargs: None,
+        rotation=rotation, dynamic_get=lambda **_kwargs: None,
         activation_global_scales=activation.get("global_scales"),
         activation_attention_mode=attention_mode,
         activation_attention_recipe=attention_recipe,

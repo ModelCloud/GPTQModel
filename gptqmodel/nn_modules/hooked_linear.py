@@ -263,9 +263,6 @@ class HookedLinear(torch.nn.Linear):
         custom_linear._w4a_stream_replay_mode = getattr(linear, "_w4a_stream_replay_mode", None)
         custom_linear._w4a_stream_replay_recipe = getattr(linear, "_w4a_stream_replay_recipe", None)
         custom_linear._w4a_replay_model_dtype = getattr(linear, "_w4a_replay_model_dtype", linear.weight.dtype)
-        custom_linear._w4a_stream_replay_version = getattr(
-            linear, "_w4a_stream_replay_version", 2
-        )
         custom_linear._w4a_stream_replay_pre_hook = getattr(
             linear, "_w4a_stream_replay_pre_hook", False
         )
@@ -299,7 +296,6 @@ class HookedLinear(torch.nn.Linear):
         replay_mode = (None if getattr(self, "_w4a_replay_disabled", False)
                        else getattr(self, "_w4a_stream_replay_mode", None))
         replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)
-        replay_version = getattr(self, "_w4a_stream_replay_version", 2)
         replay_scale = getattr(self, "_w4a_activation_global_scale", None)
         headroom_probe = bool(getattr(self, "_w4a_headroom_probe", False))
         rotation_preapplied = bool(getattr(self, "_w4a_rotation_preapplied", False))
@@ -309,7 +305,7 @@ class HookedLinear(torch.nn.Linear):
                 and not getattr(self, "_w4a_norm_preapplied", False)
                 and not getattr(self, "_w4a_replay_input_hook_active", False)):
             input = round_w4a_replay_operand(input, replay_mode, replay_recipe, replay_scale,
-                                             version=replay_version, rounder=round_w4a_activation)
+                                             rounder=round_w4a_activation)
         if not rotation_preapplied:
             input = apply_online_hadamard(
                 input,
@@ -326,11 +322,11 @@ class HookedLinear(torch.nn.Linear):
             getattr(self, "online_full_had", False) or getattr(self, "online_partial_had", False)
         ):
             input = round_w4a_replay_operand(input, replay_mode, replay_recipe,
-                                             version=replay_version, rounder=round_w4a_activation)
+                                             rounder=round_w4a_activation)
         if replay_mode is not None:
-            # Every replay version carries a compute-precision operand, so the
-            # GEMM runs in FP32 and returns the model dtype instead of relying
-            # on a matching-dtype `super().forward`.
+            # Replay carries a compute-precision operand, so the GEMM runs in
+            # FP32 and returns the model dtype instead of relying on a
+            # matching-dtype `super().forward`.
             output = torch.nn.functional.linear(input.float(), self.weight.float(),
                                                  self.bias.float() if self.bias is not None else None)
             output = output.to(getattr(self, "_w4a_replay_model_dtype", self.weight.dtype))
@@ -340,8 +336,6 @@ class HookedLinear(torch.nn.Linear):
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:
                 raise STOP_FORWARD_EXCEPTION.with_traceback(None)
-        if replay_mode is not None and replay_version == 2:
-            output = round_w4a_activation(output, replay_mode, replay_recipe)
         return _restore_output_device(output, original_device)
 
 

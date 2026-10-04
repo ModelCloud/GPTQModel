@@ -17,6 +17,7 @@ from .w4a_boundary import (
     NVFP4BoundaryQuantizer,
     layer_mlp_policy,
     llama_nvfp4_boundaries,
+    norm_codes_fused,
     nvfp4_producer_specs,
     pack_boundary,
 )
@@ -227,11 +228,12 @@ def _bind_forward(module, function) -> None:
 
 
 def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
-                             recipe: str | None = None, version: int = 3,
+                             recipe: str | None = None,
                              global_scales: dict[str, float] | None = None,
                              attention_mode: str | None = None,
                              attention_recipe: str | None = None,
-                             mlp_fp8_layers: tuple[int, ...] | None = None) -> None:
+                             mlp_fp8_layers: tuple[int, ...] | None = None,
+                             fused_norms: bool = False) -> None:
     """Install an encoded stream on complete W4A Llama decoder layers.
 
     ``mode``/``recipe`` describe the MLP operand. ``attention_mode`` defaults to
@@ -243,6 +245,11 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
     instead of the wide-range operand. Per-layer precision selection is how
     ModelOpt keeps the few most sensitive blocks out of the 4-bit activation
     grid; every other layer keeps the stream default.
+
+    ``fused_norms`` states that the rotation folded the RMSNorm weights into
+    the projections and reset the norms to unit weights. Only then does the
+    NVFP4 stream reuse the incoming codes and rescale the token multiplier
+    instead of repacking a freshly normed operand.
 
     A partial decoder selection is rejected so its remaining projections
     cannot silently convert the stream back to ordinary BF16 tensors.
@@ -264,12 +271,8 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         from ...quantization.activation_floatx import normalize_nvfp4_recipe
 
         recipe = normalize_nvfp4_recipe(recipe)
-    if version not in {2, 3, 4}:
-        raise ValueError(f"Unsupported W4A activation stream version: {version}.")
-    if version == 4 and mode != "w4a_nvfp4":
-        raise ValueError("Version 4 token-scale RMSNorm currently requires NVFP4.")
-    if global_scales is not None and (version != 4 or mode != "w4a_nvfp4"):
-        raise ValueError("Calibrated producer scales require version-4 NVFP4")
+    if global_scales is not None and mode != "w4a_nvfp4":
+        raise ValueError("Calibrated producer scales require NVFP4")
     if mode == "w4afp8" and recipe is not None:
         raise ValueError("W4AFP8 does not use an NVFP4 scale recipe.")
     if mode == "w4a_nvfp4" and recipe not in {
@@ -307,7 +310,7 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
                 or getattr(model, "_w4a_stream_attention_mode", None) != attention_mode
                 or getattr(model, "_w4a_stream_attention_recipe", None) != attention_recipe
                 or getattr(model, "_w4a_stream_mlp_fp8_layers", None) != mlp_fp8_layers
-                or getattr(model, "_w4a_stream_version", None) != version
+                or getattr(model, "_w4a_stream_fused_norms", None) != fused_norms
                 or getattr(model, "_w4a_stream_global_scales", None) != global_scales):
             raise ValueError("A different W4A stream policy is already installed.")
         return
@@ -329,16 +332,19 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
             raise ValueError("A W4A activation stream requires all seven projections in a selected Llama layer.")
         if all(present) and any(module.out_features % 128 for module in modules):
             raise ValueError("W4A activation transport requires every selected projection output width divisible by 128.")
-        if all(present) and version == 4:
+        if all(present) and fused_norms:
             for norm in (layer.input_layernorm, layer.post_attention_layernorm):
-                if not bool((norm.weight == 1).all()):
-                    raise ValueError("Version 4 requires RMSNorm weights fused into the GPTQ projections.")
+                if not norm_codes_fused(norm):
+                    raise ValueError(
+                        "NVFP4 RMSNorm code reuse requires RMSNorm weights fused into the "
+                        "GPTQ projections."
+                    )
         selected.append(all(present))
     if not any(selected):
         raise ValueError("No complete W4A decoder layer was found.")
 
     boundaries = []
-    if version == 4:
+    if mode == "w4a_nvfp4":
         boundaries = list(llama_nvfp4_boundaries(layers, selected))
         # Only NVFP4 producers own a calibrated global scale; FP8 boundaries
         # pack dynamically, so a mixed stream needs a subset of the keys. The
@@ -381,11 +387,6 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
             linear._w4a_activation_recipe = (
                 attention_recipe if parent == "self_attn" else layer_mlp_recipe
             )
-            # Version 2 encoded every Linear output and often decoded it at
-            # the very next BF16-only operator. Version 3 emits model dtype
-            # directly for those branches and packs once at the next actual
-            # FP8/FP4 consumer or decoder-layer boundary.
-            linear._w4a_output_encoded = version == 2
         # Declare the transport policy at each producer boundary. Attention
         # boundaries may name a different mode than the MLP boundaries, which
         # is how a mixed FP8-attention / NVFP4-MLP stream is expressed.
@@ -398,7 +399,6 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         _set_boundary_policy(layer.post_attention_layernorm, "norm", layer_mlp_mode, layer_mlp_recipe)
         layer._w4a_stream_mode = mode
         layer._w4a_stream_recipe = recipe
-        layer._w4a_stream_version = version
         layer._w4a_stream_require_input = index > 0 and selected[index - 1]
         # A headroom boundary needs the frozen global scale of the projections
         # that consume its normed operand. Attention and MLP carry independent
@@ -433,9 +433,13 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         _bind_forward(layer, _layer_forward)
         _bind_forward(layer.self_attn, _attention_forward)
         _bind_forward(layer.mlp, _mlp_forward)
-        layer.input_layernorm._w4a_preserve_norm_codes = version == 4 and attention_mode == "w4a_nvfp4"
+        layer.input_layernorm._w4a_preserve_norm_codes = (
+            fused_norms and attention_mode == "w4a_nvfp4"
+            and norm_codes_fused(layer.input_layernorm)
+        )
         layer.post_attention_layernorm._w4a_preserve_norm_codes = (
-            version == 4 and layer_mlp_mode == "w4a_nvfp4"
+            fused_norms and layer_mlp_mode == "w4a_nvfp4"
+            and norm_codes_fused(layer.post_attention_layernorm)
         )
         _bind_forward(layer.input_layernorm, _norm_forward)
         _bind_forward(layer.post_attention_layernorm, _norm_forward)
@@ -454,5 +458,5 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
     model._w4a_stream_attention_mode = attention_mode
     model._w4a_stream_attention_recipe = attention_recipe
     model._w4a_stream_mlp_fp8_layers = mlp_fp8_layers
-    model._w4a_stream_version = version
+    model._w4a_stream_fused_norms = fused_norms
     model._w4a_stream_global_scales = dict(global_scales) if global_scales is not None else None

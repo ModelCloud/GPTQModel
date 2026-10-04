@@ -23,7 +23,7 @@ def test_legacy_recipe_names_load_and_export_expanded_names(tmp_path, legacy, ca
     import json
 
     config = QuantizeConfig(bits=4, group_size=128, sym=True, desc_act=False,
-                           activation={"version": 3, "mode": "w4a_nvfp4", "recipe": canonical})
+                           activation={"mode": "w4a_nvfp4", "recipe": canonical})
     config.save_pretrained(str(tmp_path))
     path = tmp_path / "quantize_config.json"
     saved = json.loads(path.read_text())
@@ -163,30 +163,29 @@ def test_nvfp4_config_and_exact_weight_planes(tmp_path):
     )
     config.save_pretrained(str(tmp_path))
     loaded = QuantizeConfig.from_pretrained(str(tmp_path))
-    assert loaded.activation == {"version": 3, "mode": "w4a_nvfp4", "recipe": "least_squares"}
-    assert loaded.activation_version == 3
+    assert loaded.activation == {"mode": "w4a_nvfp4", "recipe": "least_squares"}
     assert loaded.activation_recipe == "least_squares"
     legacy = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 2, "mode": "w4a_nvfp4"}, offload_to_disk=False,
+        activation={"mode": "w4a_nvfp4"}, offload_to_disk=False,
     )
-    assert legacy.activation == {"version": 2, "mode": "w4a_nvfp4", "recipe": "four_six"}
-    assert legacy.activation_recipe == "four_six"
+    assert legacy.activation == {"mode": "w4a_nvfp4", "recipe": "least_squares"}
+    assert legacy.activation_recipe == "least_squares"
     nvidia = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 2, "mode": "w4a_nvfp4", "recipe": "nvidia"},
+        activation={"mode": "w4a_nvfp4", "recipe": "nvidia"},
         offload_to_disk=False,
     )
     assert nvidia.activation_recipe == "nvidia"
     headroom = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 2, "mode": "w4a_nvfp4", "recipe": "nvidia_headroom"},
+        activation={"mode": "w4a_nvfp4", "recipe": "nvidia_headroom"},
         offload_to_disk=False,
     )
     assert headroom.activation_recipe == "nvidia_headroom"
     least_squares_headroom = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 2, "mode": "w4a_nvfp4", "recipe": "least_squares_headroom"},
+        activation={"mode": "w4a_nvfp4", "recipe": "least_squares_headroom"},
         offload_to_disk=False,
     )
     assert least_squares_headroom.activation_recipe == "least_squares_headroom"
@@ -430,11 +429,12 @@ def test_nvfp4_norm_preserves_codes_and_scales_against_oracle(dtype):
     torch.testing.assert_close(output, output_reference.to(dtype), rtol=2e-3, atol=2e-3)
 
 
-def test_nvfp4_v4_config_requires_fused_rotation(tmp_path):
-    with pytest.raises(ValueError, match="requires NVFP4 and rotation"):
+def test_nvfp4_config_rejects_legacy_version_field(tmp_path):
+    with pytest.raises(ValueError, match="unsupported field"):
         QuantizeConfig(bits=4, group_size=128,
                        activation={"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares"})
     cfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard",
-                         activation={"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares"})
+                         activation={"mode": "w4a_nvfp4", "recipe": "least_squares"})
     cfg.save_pretrained(str(tmp_path))
-    assert QuantizeConfig.from_pretrained(str(tmp_path)).activation_version == 4
+    assert QuantizeConfig.from_pretrained(str(tmp_path)).activation == {
+        "mode": "w4a_nvfp4", "recipe": "least_squares"}

@@ -403,7 +403,7 @@ def train_scales(
     report = {
         "checkpoint": str(checkpoint.resolve()),
         "source_checkpoint": str(source_checkpoint.resolve()),
-        "activation_policy": {"version": qcfg.activation_version,
+        "activation_policy": {"fused_norms": bool(getattr(qcfg, "rotation", None)),
                               "mode": qcfg.activation_mode, "recipe": qcfg.activation_recipe},
         "output": str(output.resolve()),
         "rows": len(samples),

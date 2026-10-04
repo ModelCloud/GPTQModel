@@ -1449,11 +1449,11 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
 
         install_w4a_llama_stream(
             model, quantize_config.activation_mode, quantize_config.activation_recipe,
-            quantize_config.activation_version,
             global_scales=quantize_config.activation_global_scales,
             attention_mode=quantize_config.activation_attention_mode,
             attention_recipe=quantize_config.activation_attention_recipe,
             mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
+            fused_norms=bool(quantize_config.rotation),
         )
 
     torch_empty_cache()

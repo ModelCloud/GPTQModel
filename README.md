@@ -594,7 +594,6 @@ qcfg = QuantizeConfig(
     bits=4, group_size=128, sym=True, desc_act=False,
     pack_dtype="int32", rotation="hadamard", offload_to_disk=False,
     activation={
-        "version": 4,
         "mode": "w4a_nvfp4",
         "recipe": "least_squares_grid",
         "attention": {"mode": "w4afp8"},
@@ -608,7 +607,7 @@ model.save(quant_path)
 loaded = GPTQModel.load(quant_path, backend=BACKEND.AUTO, device="cuda", dtype=torch.bfloat16)
 ```
 
-`activation` accepts a bare mode string as shorthand for a version-3 stream
+`activation` accepts a bare mode string as shorthand for that stream
 (`activation="w4afp8"` or `activation="w4a_nvfp4"`). The dict form adds
 `recipe`, `attention`, `mlp`, and `global_scales`; see the
 **[activation policy reference](docs/gptq-w4a-gb10.md#activation-policy-reference)**

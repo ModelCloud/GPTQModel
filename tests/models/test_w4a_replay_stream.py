@@ -19,7 +19,7 @@ from gptqmodel.quantization.config import QuantizeConfig
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("hooked", [False, True])
-def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hooked):
+def test_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hooked):
     from gptqmodel.nn_modules.qlinear.w4a_boundary import llama_nvfp4_boundaries
     from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
 
@@ -29,7 +29,8 @@ def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hook
     model = LlamaForCausalLM(config).to(dtype).eval()
     scales = {key: .01234567 for _, _, key in llama_nvfp4_boundaries(model.model.layers, [True, True])}
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           rotation="hadamard",
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=scales)
     ids = torch.arange(17)[None]
     source = model.model.embed_tokens(ids).detach()
@@ -62,9 +63,8 @@ def test_v4_replay_preserves_fp32_norm_operand_and_model_dtype_exits(dtype, hook
     assert captured["layer_input_dtype"] == torch.float32
     assert torch.isfinite(output.logits).all()
 
-
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_v4_disabled_replay_preserves_native_model_precision(dtype):
+def test_disabled_replay_preserves_native_model_precision(dtype):
     import copy
 
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
@@ -75,7 +75,7 @@ def test_v4_disabled_replay_preserves_native_model_precision(dtype):
     model = LlamaForCausalLM(config).to(dtype).eval()
     native = copy.deepcopy(model)
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=None)
     install_w4a_llama_replay(model, qcfg)
     set_w4a_replay_enabled(model, False)
@@ -84,10 +84,9 @@ def test_v4_disabled_replay_preserves_native_model_precision(dtype):
         expected = native(input_ids=torch.arange(11)[None], use_cache=False).logits
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
-
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
-def test_v4_fp8_replay_operand_stays_fp32(dtype):
-    """A version-4 FP8 operand must skip the model-dtype round-trip.
+def test_fp8_replay_operand_stays_fp32(dtype):
+    """An FP8 replay operand must skip the model-dtype round-trip.
 
     The deployed FP8 GEMM consumes E4M3 codes plus FP32 token scales, so
     casting the decoded value back to BF16/FP16 before the GEMM (the pre-fix
@@ -97,7 +96,7 @@ def test_v4_fp8_replay_operand_stays_fp32(dtype):
 
     torch.manual_seed(17)
     x = (torch.randn(17, 128) * 3).to(dtype)
-    actual = round_w4a_replay_operand(x, "w4afp8", None, None, version=4)
+    actual = round_w4a_replay_operand(x, "w4afp8", None, None)
     assert actual.dtype == torch.float32
     # Independent oracle: per-token FP8 QDQ in FP32 with no cast back.
     x32 = x.float()
@@ -108,7 +107,6 @@ def test_v4_fp8_replay_operand_stays_fp32(dtype):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     # The model-dtype round-trip the fix removed is observably different.
     assert not torch.equal(actual, expected.to(dtype).float())
-
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
                     reason="GB10 / SM121 required")
@@ -122,7 +120,7 @@ def test_runtime_install_removes_the_replay_exit_hook(dtype):
     packed = _tiny_packed_nvfp4(dtype=dtype)
     model = LlamaForCausalLM(packed.config).to(device="cuda", dtype=dtype).eval()
     qcfg = SimpleNamespace(
-        activation_mode="w4a_nvfp4", activation_recipe="least_squares", activation_version=4,
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares",
         activation_global_scales=None, activation_attention_mode=None,
         activation_attention_recipe=None, activation_mlp_fp8_layers=None,
         dynamic_get=lambda **_kwargs: None,
@@ -138,20 +136,19 @@ def test_runtime_install_removes_the_replay_exit_hook(dtype):
             parent_name, leaf = name.rsplit(".", 1)
             setattr(model.get_submodule(parent_name), leaf, module)
 
-    install_w4a_llama_stream(model, "w4a_nvfp4", "least_squares", version=4, global_scales=None)
+    install_w4a_llama_stream(model, "w4a_nvfp4", "least_squares", global_scales=None)
     assert not model.model.norm._forward_pre_hooks
     ids = torch.arange(17, device="cuda")[None]
     with torch.inference_mode():
         logits = model(input_ids=ids, use_cache=False).logits
     assert torch.isfinite(logits).all()
 
-
-def test_v4_replay_decodes_at_an_unselected_layer():
+def test_nvfp4_replay_decodes_at_an_unselected_layer():
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
     model = LlamaForCausalLM(config).bfloat16().eval()
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4,
+
                            dynamic_get=lambda layer_name: False if layer_name.startswith("model.layers.1.") else None,
                            activation_global_scales=None)
     install_w4a_llama_replay(model, qcfg)
@@ -161,10 +158,8 @@ def test_v4_replay_decodes_at_an_unselected_layer():
         model(input_ids=torch.arange(7)[None], use_cache=False)
     assert captured == [torch.bfloat16]
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
-@pytest.mark.parametrize("version", [2, 3])
-def test_v2_v3_replay_decodes_at_an_unselected_layer(mode, version):
+def test_replay_decodes_at_an_unselected_layer(mode):
     """The compute-precision residual is cast back to the model dtype at an edge."""
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
@@ -172,7 +167,6 @@ def test_v2_v3_replay_decodes_at_an_unselected_layer(mode, version):
     qcfg = SimpleNamespace(
         activation_mode=mode,
         activation_recipe="least_squares" if mode == "w4a_nvfp4" else None,
-        activation_version=version,
         dynamic_get=lambda layer_name: False if layer_name.startswith("model.layers.1.") else None,
         activation_global_scales=None,
     )
@@ -183,8 +177,7 @@ def test_v2_v3_replay_decodes_at_an_unselected_layer(mode, version):
         model(input_ids=torch.arange(7)[None], use_cache=False)
     assert captured == [torch.bfloat16]
 
-
-def test_v4_install_preserves_existing_hooked_linear_capture():
+def test_install_preserves_existing_hooked_linear_capture():
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
     model = LlamaForCausalLM(config).bfloat16().eval()
@@ -193,15 +186,14 @@ def test_v4_install_preserves_existing_hooked_linear_capture():
     captured = []
     linear.forward_hook = lambda _m, args, result: captured.append((args[0].dtype, result.dtype))
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=None)
     install_w4a_llama_replay(model, qcfg)
     with torch.no_grad():
         model(input_ids=torch.arange(7)[None], use_cache=False)
     assert captured == [(torch.float32, torch.bfloat16)]
 
-
-def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
+def test_existing_hooked_linears_round_each_producer_once(monkeypatch):
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
 
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
@@ -219,7 +211,8 @@ def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
     monkeypatch.setattr(replay, "_round", rounded)
     monkeypatch.setattr(replay, "round_w4a_activation", rounded)
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           rotation="hadamard",
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=None)
     replay.install_w4a_llama_replay(model, qcfg)
     with torch.no_grad():
@@ -229,8 +222,7 @@ def test_v4_existing_hooked_linears_round_each_producer_once(monkeypatch):
     # product. The terminal layer output feeds only the pristine final norm.
     assert len(calls) == 8
 
-
-def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypatch):
+def test_replay_preserves_custom_int4_training_forward_and_gradients(monkeypatch):
     from types import MethodType
 
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
@@ -246,7 +238,7 @@ def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypa
         return F.linear(x.float(), self.latent)
     linear.forward = MethodType(custom, linear)
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=None)
     replay.install_w4a_llama_replay(model, qcfg)
     def straight_through(x, mode, recipe=None, scale=None):
@@ -257,18 +249,16 @@ def test_v4_replay_preserves_custom_int4_training_forward_and_gradients(monkeypa
     assert latent.grad is not None and torch.isfinite(latent.grad).all()
     assert latent.grad.abs().max() > 0
 
-
 def test_replay_requires_complete_producer_scale_coverage():
     config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
                          num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4)
     model = LlamaForCausalLM(config)
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales={"model.layers.0.input": .01})
     with pytest.raises(ValueError, match="Incomplete NVFP4 producer scales"):
         install_w4a_llama_replay(model, qcfg)
     assert not hasattr(model.model.layers[0], "_w4a_replay_mode")
-
 
 def test_replay_uses_frozen_producer_scale_at_each_boundary(monkeypatch):
     from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
@@ -280,7 +270,8 @@ def test_replay_uses_frozen_producer_scale_at_each_boundary(monkeypatch):
     specs = list(llama_nvfp4_boundaries(model.model.layers, [True, True]))
     scales = {key: .001 * (index + 1) for index, (_, _, key) in enumerate(specs)}
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, dynamic_get=lambda **_kwargs: None,
+                           rotation="hadamard",
+                           dynamic_get=lambda **_kwargs: None,
                            activation_global_scales=scales)
     calls = []
     def rounded(value, _mode, _recipe=None, global_scale=None):
@@ -296,7 +287,6 @@ def test_replay_uses_frozen_producer_scale_at_each_boundary(monkeypatch):
     # rebuild their input operand, and the terminal output boundary never
     # feeds a GEMM, so the last producer scale is intentionally unused.
     assert calls == list(scales.values())[:-1]
-
 
 def _independent_round(x: torch.Tensor, mode: str) -> torch.Tensor:
     blocks = x.float()
@@ -355,11 +345,9 @@ def _independent_round(x: torch.Tensor, mode: str) -> torch.Tensor:
     result = torch.where((error < best_error)[..., None], reconstructed, best_reconstructed)
     return result.reshape_as(x).to(x.dtype)
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("skip_first", [False, True])
-@pytest.mark.parametrize("version", [2, 3])
-def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
+def test_replay_hessian_input_matches_encoded_stream(mode, skip_first):
     torch.manual_seed(703)
     config = LlamaConfig(
         vocab_size=128, hidden_size=128, intermediate_size=256,
@@ -370,17 +358,20 @@ def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
-            "version": version, "mode": mode,
+            "mode": mode,
             **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
         dynamic={"-:^model.layers\\.0\\.": {}} if skip_first else None,
     )
-    target = model.model.layers[1 if skip_first else 0].self_attn.q_proj
+    layer = model.model.layers[1 if skip_first else 0]
+    target = layer.self_attn.q_proj
     raw = []
     rounded = []
     raw_output = []
     rounded_output = []
+    layer_input = []
+    layer.register_forward_pre_hook(lambda _module, args: layer_input.append(args[0].clone()))
     target.register_forward_pre_hook(lambda _module, args: raw.append(args[0].clone()))
     target.register_forward_hook(lambda _module, _args, out: raw_output.append(out.clone()))
     install_w4a_llama_replay(model, qcfg)
@@ -391,31 +382,32 @@ def test_replay_hessian_input_matches_encoded_stream(mode, skip_first, version):
         result = model(input_ids=ids, use_cache=False)
     assert torch.isfinite(result.logits).all()
     assert len(raw) == len(rounded) == 1
-    # The replay now rounds the pristine FP32 norm operand for every version,
-    # matching runtime's ``_norm_forward``. The independent NVFP4 oracle picks
-    # a neighbouring hardware scale on exact FP4 ties, so it can differ from
-    # the production kernel by one E4M3 ulp; FP8 remains bit-exact.
+    assert torch.equal(raw[0], rounded[0])
+    # The replay rounds the pristine FP32 norm operand, matching runtime's
+    # ``_norm_forward``. The independent NVFP4 oracle picks a neighbouring
+    # hardware scale on exact FP4 ties, so it can differ from the production
+    # kernel by one E4M3 ulp; FP8 remains bit-exact.
+    residual = layer_input[0].float()
+    variance = residual.square().mean(dim=-1, keepdim=True)
+    pristine = residual * torch.rsqrt(variance + config.rms_norm_eps)
+    pristine = pristine * layer.input_layernorm.weight.float()
     operand_atol = 0 if mode == "w4afp8" else 1e-6
-    torch.testing.assert_close(rounded[0], _independent_round(raw[0], mode),
+    torch.testing.assert_close(rounded[0], _independent_round(pristine, mode),
                                rtol=0, atol=operand_atol)
     assert len(raw_output) == len(rounded_output) == 1
-    expected_output = (
-        _independent_round(raw_output[0], mode) if version == 2 else raw_output[0]
-    )
-    torch.testing.assert_close(rounded_output[0], expected_output, rtol=0, atol=0)
+    # Only GEMM operands are encoded; a projection output stays in the model
+    # dtype until the next actual carrier consumer.
+    torch.testing.assert_close(rounded_output[0], raw_output[0], rtol=0, atol=0)
     assert getattr(model.model.layers[0], "_w4a_replay_round_input", None) is (None if skip_first else True)
     assert getattr(model.model.layers[1], "_w4a_replay_round_input", None) is (True if skip_first else False)
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
-@pytest.mark.parametrize("version", [2, 3])
-def test_v2_v3_replay_preserves_pristine_residual_with_zero_branches(mode, version):
+def test_replay_preserves_pristine_residual_with_zero_branches(mode):
     """Runtime adds residuals in compute precision; older replay must too.
 
     The deployed ``_add_stream`` decodes each carrier to FP32 before summing,
     so a decoder layer whose attention and MLP branches are exactly zero must
-    return its input unchanged. The pre-fix replay rounded the running
-    residual, which is the mismatch the review reproduced on a BF16 FP8 layer.
+    return its input unchanged.
     """
     torch.manual_seed(705)
     config = LlamaConfig(
@@ -427,7 +419,7 @@ def test_v2_v3_replay_preserves_pristine_residual_with_zero_branches(mode, versi
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
-            "version": version, "mode": mode,
+            "mode": mode,
             **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
@@ -449,10 +441,8 @@ def test_v2_v3_replay_preserves_pristine_residual_with_zero_branches(mode, versi
     assert captured[0].dtype == torch.float32
     torch.testing.assert_close(captured[0], source.float(), rtol=0, atol=0)
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
-@pytest.mark.parametrize("version", [2, 3])
-def test_v2_v3_replay_norm_consumes_pristine_residual(mode, version):
+def test_replay_norm_consumes_pristine_residual(mode):
     """The RMSNorm operand must be built from the unrounded residual value."""
     torch.manual_seed(706)
     config = LlamaConfig(
@@ -464,7 +454,7 @@ def test_v2_v3_replay_norm_consumes_pristine_residual(mode, version):
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
-            "version": version, "mode": mode,
+            "mode": mode,
             **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
@@ -480,23 +470,22 @@ def test_v2_v3_replay_norm_consumes_pristine_residual(mode, version):
         model(input_ids=ids, use_cache=False)
     assert len(captured) == 1
     # The capture hook is registered before the replay pre-hook, so it sees the
-    # norm output the GEMM operand is rounded from. It must equal the norm of
-    # the FP32 pristine residual, not the norm of a rounded carrier.
+    # normed operand the GEMM consumes. It must equal the rounded norm of the
+    # FP32 pristine residual, not the norm of a rounded carrier.
     pristine = layer.input_layernorm(source.float())
-    torch.testing.assert_close(captured[0], pristine, rtol=0, atol=0)
+    expected = _independent_round(pristine, mode)
+    atol = 1e-6 if mode == "w4a_nvfp4" else 0
+    torch.testing.assert_close(captured[0], expected, rtol=0, atol=atol)
     assert captured[0].dtype == torch.float32
-
 
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
 @pytest.mark.parametrize("rotated", [False, True])
-@pytest.mark.parametrize("version", [2, 3])
-def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated, version):
-    """The GPTQ stage replacement must retain the versioned replay policy."""
+def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated):
+    """The GPTQ stage replacement must retain the replay policy."""
     torch.manual_seed(704)
     dense = torch.nn.Linear(128, 128, bias=True, dtype=torch.float32).eval()
     dense._w4a_stream_replay_mode = mode
     dense._w4a_stream_replay_recipe = "least_squares" if mode == "w4a_nvfp4" else None
-    dense._w4a_stream_replay_version = version
     dense._w4a_stream_replay_pre_hook = True
     dense.online_full_had = rotated
     dense.online_partial_had = False
@@ -519,28 +508,22 @@ def test_hooked_linear_preserves_w4a_replay_policy(monkeypatch, mode, rotated, v
     first = _independent_round(x, mode)
     expected_input = _independent_round(first.flip(-1), mode) if rotated else first
     expected_output = F.linear(expected_input, dense.weight, dense.bias)
-    if version == 2:
-        expected_output = _independent_round(expected_output, mode)
 
     with torch.inference_mode():
         actual = hooked(x)
 
     assert hooked._w4a_stream_replay_mode == mode
-    assert hooked._w4a_stream_replay_version == version
     assert hooked._w4a_stream_replay_pre_hook is True
     assert len(seen) == 1
-    atol = 6e-7 if mode == "w4a_nvfp4" and version == 3 else (3e-7 if mode == "w4a_nvfp4" else 0)
+    atol = 6e-7 if mode == "w4a_nvfp4" else 0
     torch.testing.assert_close(seen[0], expected_input, rtol=0, atol=atol)
     torch.testing.assert_close(actual, expected_output, rtol=0, atol=atol)
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
-@pytest.mark.parametrize("version", [2, 3])
-def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mode, version):
+def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mode):
     dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
     dense._w4a_stream_replay_mode = mode
     dense._w4a_stream_replay_recipe = "least_squares" if mode == "w4a_nvfp4" else None
-    dense._w4a_stream_replay_version = version
     dense._w4a_stream_replay_pre_hook = True
     dense._w4a_rotation_preapplied = True
     dense.online_full_had = True
@@ -557,8 +540,6 @@ def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mod
     hooked.forward_hook = lambda _module, args, _output: seen.append(args[0].clone())
     operand = _independent_round(torch.randn(2, 3, 128), mode)
     expected = F.linear(operand, dense.weight)
-    if version == 2:
-        expected = _independent_round(expected, mode)
 
     with torch.inference_mode():
         actual = hooked(operand)
@@ -568,10 +549,8 @@ def test_hooked_linear_consumes_pre_rotated_replay_operand_once(monkeypatch, mod
     atol = 3e-7 if mode == "w4a_nvfp4" else 0
     torch.testing.assert_close(actual, expected, rtol=0, atol=atol)
 
-
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
-@pytest.mark.parametrize("version", [2, 3])
-def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode, version):
+def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode):
     """The MLP wrapper and generic Linear pre-hook must not both QDQ down input."""
     config = LlamaConfig(
         vocab_size=128, hidden_size=128, intermediate_size=256,
@@ -588,7 +567,7 @@ def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
-            "version": version, "mode": mode,
+            "mode": mode,
             **({"recipe": "least_squares"} if mode == "w4a_nvfp4" else {}),
         },
         offload_to_disk=False,
@@ -610,11 +589,11 @@ def test_installed_replay_rounds_pre_rotated_down_operand_once(monkeypatch, mode
     with torch.inference_mode():
         model.model.layers[0].mlp(torch.randn(2, 3, 128))
 
-    # Version 2 rounds gate/up inputs and outputs plus the transformed down
-    # input and output. Version 3 rounds only the three GEMM inputs.
-    assert len(calls) == (6 if version == 2 else 3)
-    assert sum(shape[-1] == 256 for shape in calls) == (3 if version == 2 else 1)
-
+    # The layer forward rounds the normed gate/up operand once; calling the MLP
+    # directly bypasses that, so only the MLP product is rounded here. The down
+    # pre-hook must not round the already-encoded product a second time.
+    assert len(calls) == 1
+    assert calls[0][-1] == 256
 
 def test_nvidia_headroom_probe_freezes_scale_before_hessian_capture():
     processor = GPTQProcessor.__new__(GPTQProcessor)
@@ -644,7 +623,6 @@ def test_nvidia_headroom_probe_freezes_scale_before_hessian_capture():
     assert dense._w4a_activation_global_scale == scale
     assert dense._w4a_headroom_probe is False
 
-
 def _headroom_probe_processor(activation):
     import threading
 
@@ -661,7 +639,6 @@ def _headroom_probe_processor(activation):
     processor.lock = threading.Lock()
     return processor
 
-
 def _projection(leaf):
     dense = HookedLinear(128, 128)
     dense.weight = torch.nn.Parameter(torch.eye(128))
@@ -670,7 +647,6 @@ def _projection(leaf):
     full_name = f"model.layers.0.{leaf}"
     named = NamedModule(dense, name, full_name, 0)
     return dense, named, {name: named}
-
 
 @pytest.mark.parametrize("top_recipe,attention_recipe,headroom", [
     ("nvidia_headroom", "nvidia_headroom", True),
@@ -681,7 +657,7 @@ def test_headroom_probe_uses_attention_recipe_override(top_recipe, attention_rec
     """The attention override must drive Q-projection probe selection/freezing."""
     nvfp4 = "w4a_nvfp" + "4"
     processor = _headroom_probe_processor({
-        "version": 3, "mode": nvfp4, "recipe": top_recipe,
+        "mode": nvfp4, "recipe": top_recipe,
         "attention": {"mode": nvfp4, "recipe": attention_recipe},
     })
     attn_leaf = "self" + "_attn.q_proj"
@@ -697,12 +673,11 @@ def test_headroom_probe_uses_attention_recipe_override(top_recipe, attention_rec
         assert named.full_name not in processor._activation_global_scales
         assert processor._activation_amax[named.full_name] == pytest.approx(0.5)
 
-
 @pytest.mark.parametrize("mlp_layers,headroom", [((), True), ((0,), False)])
 def test_headroom_probe_uses_per_layer_mlp_override(mlp_layers, headroom):
     """A promoted FP8 MLP layer must not run or freeze an NVFP4 headroom probe."""
     nvfp4 = "w4a_nvfp" + "4"
-    activation = {"version": 3, "mode": nvfp4, "recipe": "nvidia_headroom"}
+    activation = {"mode": nvfp4, "recipe": "nvidia_headroom"}
     if mlp_layers:
         activation["mlp"] = {"mode": "w4afp8", "layers": list(mlp_layers)}
     processor = _headroom_probe_processor(activation)
@@ -715,7 +690,6 @@ def test_headroom_probe_uses_per_layer_mlp_override(mlp_layers, headroom):
     else:
         assert named.full_name not in processor._activation_global_scales
         assert named.full_name not in processor._activation_amax
-
 
 def test_hooked_linear_uses_frozen_nvidia_headroom_input_scale():
     dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
@@ -734,11 +708,9 @@ def test_hooked_linear_uses_frozen_nvidia_headroom_input_scale():
     expected = nvfp4_block_qdq(x, 0.25, "nvidia_headroom")
     torch.testing.assert_close(seen[0], expected, rtol=0, atol=0)
 
-
-def test_hooked_linear_v4_preserves_norm_input_without_requantizing(monkeypatch):
+def test_hooked_linear_preserves_norm_input_without_requantizing(monkeypatch):
     dense = torch.nn.Linear(128, 32, bias=False)
     dense._w4a_stream_replay_mode = "w4a_nvfp4"
-    dense._w4a_stream_replay_version = 4
     dense._w4a_norm_preapplied = True
     hooked = HookedLinear.from_linear(dense)
     monkeypatch.setattr(
@@ -749,9 +721,7 @@ def test_hooked_linear_v4_preserves_norm_input_without_requantizing(monkeypatch)
     x = torch.randn((2, 128), generator=generator)
     torch.testing.assert_close(hooked(x), dense(x), rtol=0, atol=0)
 
-
-@pytest.mark.parametrize("version", [2, 3, 4])
-def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch, version):
+def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch):
     import copy
 
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
@@ -763,7 +733,7 @@ def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch, v
     model = LlamaForCausalLM(config).float().eval()
     reference = copy.deepcopy(model)
     qcfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard",
-                          activation={"mode": "w4a_nvfp4", "version": version, "recipe": "least_squares"})
+                          activation={"mode": "w4a_nvfp4", "recipe": "least_squares"})
     install_w4a_llama_replay(model, qcfg)
     for layer in model.model.layers:
         set_w4a_replay_enabled(layer, False)
@@ -780,13 +750,11 @@ def test_native_capture_bypasses_activation_rounding_before_gptaq(monkeypatch, v
     with pytest.raises(AssertionError, match="Native reference inputs"):
         model(input_ids=ids, use_cache=False)
 
-
 def test_hooked_linear_preserves_native_capture_switch(monkeypatch):
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
 
     dense = torch.nn.Linear(128, 32)
     dense._w4a_stream_replay_mode = "w4a_nvfp4"
-    dense._w4a_stream_replay_version = 2
     set_w4a_replay_enabled(dense, False)
     hooked = HookedLinear.from_linear(dense)
     def reject_round(*_args):

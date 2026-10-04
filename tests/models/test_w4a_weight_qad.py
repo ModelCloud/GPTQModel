@@ -330,14 +330,13 @@ def test_qad_replay_uses_the_exported_checkpoint_policy(tmp_path):
 
     from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
 
-    for version, recipe in [(2, 'four_six'), (3, 'least_squares'), (4, 'least_squares_grid')]:
-        config = {'rotation': 'hadamard', 'activation': {
-            'version': version, 'mode': 'w4a_nvfp4', 'recipe': recipe}}
-        (tmp_path / 'quantize_config.json').write_text(json.dumps(config))
-        policy = _activation_replay_config(tmp_path)
-        assert policy.activation_version == version
-        assert policy.activation_recipe == recipe
-        assert policy.dynamic_get(layer_name='model.layers.0.self_attn.q_proj') is None
+    config = {'rotation': 'hadamard', 'activation': {
+        'mode': 'w4a_nvfp4', 'recipe': 'least_squares_grid'}}
+    (tmp_path / 'quantize_config.json').write_text(json.dumps(config))
+    policy = _activation_replay_config(tmp_path)
+    assert policy.activation_recipe == 'least_squares_grid'
+    assert policy.rotation == 'hadamard'
+    assert policy.dynamic_get(layer_name='model.layers.0.self_attn.q_proj') is None
 
 
 def test_qad_replay_config_forwards_mixed_policies(tmp_path):
@@ -348,7 +347,7 @@ def test_qad_replay_config_forwards_mixed_policies(tmp_path):
     config = {
         'rotation': 'hadamard',
         'activation': {
-            'version': 4, 'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
+            'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
             'attention': {'mode': 'w4afp8'},
             'mlp': {'mode': 'w4afp8', 'layers': [0]},
         },
@@ -390,7 +389,7 @@ def test_qad_replay_config_installs_mixed_policy_from_checkpoint(tmp_path):
     (tmp_path / 'quantize_config.json').write_text(json.dumps({
         'rotation': 'hadamard',
         'activation': {
-            'version': 4, 'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
+            'mode': 'w4a_nvfp4', 'recipe': 'least_squares',
             'attention': {'mode': attention_mode},
             'mlp': {'mode': attention_mode, 'layers': list(mlp_fp8_layers)},
             'global_scales': subset,
@@ -406,7 +405,7 @@ def test_qad_replay_config_installs_mixed_policy_from_checkpoint(tmp_path):
     assert layers[1]._w4a_replay_mlp_mode == 'w4a_nvfp4'
 
 
-def test_qad_rejects_norm_training_that_breaks_v4_contract(tmp_path):
+def test_qad_rejects_norm_training_without_fused_norms(tmp_path):
     import json
 
     import pytest
@@ -414,8 +413,8 @@ def test_qad_rejects_norm_training_that_breaks_v4_contract(tmp_path):
     from tests.models.w4a_nvfp4_norm_qat import _activation_replay_config
 
     (tmp_path / 'quantize_config.json').write_text(json.dumps({
-        'rotation': 'hadamard', 'activation': {'version': 4, 'mode': 'w4a_nvfp4'}}))
-    with pytest.raises(ValueError, match='unit fused norms'):
+        'rotation': 'hadamard', 'activation': {'mode': 'w4a_nvfp4'}}))
+    with pytest.raises(ValueError, match='Fused-norm'):
         _activation_replay_config(tmp_path, train_norms=True)
 
 
@@ -587,7 +586,7 @@ def test_nonreentrant_checkpointing_preserves_replay_outputs_and_latent_gradient
             scales[name] = torch.full((module.in_features // 128, module.out_features), .002).half().float()
     parameters, _ = _install_trainable_gptq_codes(core, codes, scales)
     qcfg = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                           activation_version=4, activation_global_scales=None,
+                           activation_global_scales=None,
                            dynamic_get=lambda **_kwargs: None)
     replay.install_w4a_llama_replay(core, qcfg)
     original_round = replay.round_w4a_activation

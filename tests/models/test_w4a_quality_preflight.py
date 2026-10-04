@@ -89,7 +89,8 @@ def adapted_results(tmp_path):
             (model / "model.safetensors").write_text(name)
         cfg = {"bits": 4, "pack_dtype": "int32"}
         if name == "float":
-            cfg["activation"] = {"mode": "w4a_nvfp4", "version": 4}
+            cfg["rotation"] = "hadamard"
+            cfg["activation"] = {"mode": "w4a_nvfp4"}
         (model / "quantize_config.json").write_text(json.dumps(cfg))
         samples = [{"index": i, "prompt": f"prompt {i}", "target": str(i),
                     "scores": {"acc,num": int(i < 524)},
@@ -181,7 +182,7 @@ def saved_acceptance_bundle(adapted_results, tmp_path):
         'sha256': {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in required}}))
     audit = tmp_path / 'consumer_audit.json'
     audit.write_text(json.dumps({'checkpoint': json.loads(quant.read_text())['model']['path'],
-        'variant': 'w4a_nvfp4', 'activation_version': 4, 'activation_recipe': 'least_squares',
+        'variant': 'w4a_nvfp4', 'fused_norms': True, 'activation_recipe': 'least_squares',
         'full_coverage': True, 'handoffs_checked': 381, 'independent_decode_checks': 720,
         'independent_gemm_checks': 336, 'counts': {'decoder_layer': 16, 'w4a_linear': 112},
         'selected_layers': [f'model.layers.{i}' for i in range(16)]}))
@@ -206,7 +207,7 @@ def test_saved_acceptance_normalizes_legacy_recipe_names(saved_acceptance_bundle
 
 @pytest.mark.parametrize('field,value', [
     ('full_coverage', False), ('checkpoint', '/different/checkpoint'),
-    ('independent_gemm_checks', 14), ('activation_version', 3),
+    ('independent_gemm_checks', 14), ('fused_norms', False),
     ('selected_layers', ['model.layers.15']), ('activation_recipe', 'four_six'),
 ])
 def test_saved_acceptance_rejects_wrong_consumer_audit(saved_acceptance_bundle, field, value):

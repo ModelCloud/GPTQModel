@@ -1293,11 +1293,6 @@ class HessianConfig:
 # codes with one FP32 scale per token; `w4a_nvfp4` carries E2M1 codes with one
 # E4M3 scale per 16-element block plus one FP32 global scale per tensor.
 W4A_ACTIVATION_MODES: Tuple[str, ...] = ("w4afp8", "w4a_nvfp4")
-# Version 1 was an input-only prototype and is rejected by the stream loader.
-# Version 2 encoded every Linear output. Version 3 uses consumer-driven
-# carriers. Version 4 adds the fused token-scale RMSNorm and calibrated
-# producer global scales.
-W4A_ACTIVATION_VERSIONS: Tuple[int, ...] = (2, 3, 4)
 # Legacy aliases (`lsq`, `lsq_headroom`, `lsq_grid`) are expanded by
 # `normalize_nvfp4_recipe` before this set is applied.
 W4A_NVFP4_RECIPES: Tuple[str, ...] = (
@@ -1411,28 +1406,24 @@ class ActivationConfig:
     Modes:
         `w4afp8`: E4M3 codes with one FP32 scale per token.
         `w4a_nvfp4`: E2M1 codes with one E4M3 scale per 16-element block plus
-            one FP32 global scale per tensor.
+            one FP32 global scale per tensor. The RMSNorm code-reuse shortcut
+            engages only when the norm weights are fused into the projections
+            (Hadamard rotation), which the stream validates at install time.
 
-    A bare string (`activation="w4afp8"`) is shorthand for version 3 with that
-    mode. A dict may add `recipe`, `attention`, `mlp`, and `global_scales`.
+    A bare string (`activation="w4afp8"`) is shorthand for that mode. A dict
+    may add `recipe`, `attention`, `mlp`, and `global_scales`.
 
     Attributes:
-        version: Stream policy version. 3 is the current default. 2 remains
-            readable and reproduces the earlier policy that encoded every
-            Linear output. 4 adds the fused token-scale RMSNorm and calibrated
-            producer scales.
         mode: Default activation format for both projection groups.
         recipe: NVFP4 block-scale recipe. Only valid when `mode="w4a_nvfp4"`.
-            Version-2 checkpoints without a recipe keep `four_six`; everything
-            else defaults to `least_squares`.
+            Defaults to `least_squares`.
         attention: Optional per-group override for attention. See
             `ActivationAttentionConfig`.
         mlp: Optional per-layer override for the MLP. See `ActivationMlpConfig`.
         global_scales: Optional producer-to-scale map of calibrated FP32 global
-            scales. Requires version 4 and NVFP4.
+            scales. Requires NVFP4.
     """
 
-    version: int = 3
     mode: str = "w4afp8"
     recipe: Optional[str] = None
     attention: Optional[ActivationAttentionConfig] = None
@@ -1440,11 +1431,6 @@ class ActivationConfig:
     global_scales: Optional[Dict[str, float]] = None
 
     def __post_init__(self):
-        if self.version not in W4A_ACTIVATION_VERSIONS:
-            raise ValueError(
-                "ActivationConfig: `version` must be 2, 3, or 4. Version 1 used input-only "
-                "rounding and must be explicitly migrated and revalidated."
-            )
         if self.mode not in W4A_ACTIVATION_MODES:
             raise ValueError(
                 f"ActivationConfig: `mode` must be one of {list(W4A_ACTIVATION_MODES)}."
@@ -1455,10 +1441,8 @@ class ActivationConfig:
         else:
             from .activation_floatx import normalize_nvfp4_recipe
 
-            # Pre-recipe version-2 checkpoints used Four-Over-Six. Keep that
-            # behavior on load instead of silently changing numerics.
             if self.recipe is None:
-                self.recipe = "four_six" if self.version == 2 else "least_squares"
+                self.recipe = "least_squares"
             self.recipe = normalize_nvfp4_recipe(self.recipe)
         for name in ("attention", "mlp"):
             if getattr(self, name) is None:
@@ -1467,15 +1451,10 @@ class ActivationConfig:
                 raise ValueError(
                     f"ActivationConfig: `{name}` only refines an NVFP4 activation stream."
                 )
-            if self.version < 3:
-                raise ValueError(
-                    f"ActivationConfig: `{name}` requires activation version 3 or 4 so boundary "
-                    "carriers are not decoded at every Linear output."
-                )
         if self.global_scales is not None:
-            if self.version != 4 or self.mode != "w4a_nvfp4":
+            if self.mode != "w4a_nvfp4":
                 raise ValueError(
-                    "ActivationConfig: calibrated producer scales require version-4 NVFP4."
+                    "ActivationConfig: calibrated producer scales require NVFP4."
                 )
             if self.recipe not in {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
                 raise ValueError(
@@ -1485,7 +1464,7 @@ class ActivationConfig:
             self.global_scales = _normalize_activation_global_scales(self.global_scales)
 
     @classmethod
-    def from_value(cls, value: Any, *, rotation: Any = None) -> Optional["ActivationConfig"]:
+    def from_value(cls, value: Any) -> Optional["ActivationConfig"]:
         """Normalize a string, dict, or existing config into an ActivationConfig.
 
         Returns `None` for `None`, so callers can distinguish "no activation
@@ -1497,41 +1476,36 @@ class ActivationConfig:
         if isinstance(value, cls):
             return value
         if isinstance(value, str):
-            payload: Dict[str, Any] = {"version": 3, "mode": value}
+            payload: Dict[str, Any] = {"mode": value}
             if value == "w4a_nvfp4":
                 payload["recipe"] = "least_squares"
-            return cls.from_dict(payload, rotation=rotation)
+            return cls.from_dict(payload)
         if not isinstance(value, dict):
             raise ValueError(
                 "ActivationConfig: `activation` must be a mode string, a dict, or an ActivationConfig."
             )
-        return cls.from_dict(value, rotation=rotation)
+        return cls.from_dict(value)
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any], *, rotation: Any = None) -> "ActivationConfig":
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ActivationConfig":
         """Validate and normalize a raw `activation` mapping."""
 
-        supported = {"version", "mode", "recipe", "attention", "mlp", "global_scales"}
+        supported = {"mode", "recipe", "attention", "mlp", "global_scales"}
         unknown = sorted(set(payload) - supported)
         if unknown:
             raise ValueError(
                 f"ActivationConfig: unsupported field(s) {unknown}. "
                 f"Supported fields are {sorted(supported)}."
             )
-        if not {"version", "mode"}.issubset(payload):
-            raise ValueError("ActivationConfig: `activation` must contain `version` and `mode`.")
+        if "mode" not in payload:
+            raise ValueError("ActivationConfig: `activation` must contain `mode`.")
 
-        version = payload["version"]
         mode = payload["mode"]
-        if version == 4 and (mode != "w4a_nvfp4" or rotation is None):
-            raise ValueError(
-                "ActivationConfig: version 4 requires NVFP4 and rotation with fused RMSNorm weights."
-            )
 
         recipe = payload.get("recipe")
         resolved_recipe = recipe
         if mode == "w4a_nvfp4" and resolved_recipe is None:
-            resolved_recipe = "four_six" if version == 2 else "least_squares"
+            resolved_recipe = "least_squares"
 
         attention = payload.get("attention")
         if attention is not None:
@@ -1563,7 +1537,6 @@ class ActivationConfig:
             mlp = ActivationMlpConfig(**mlp)
 
         return cls(
-            version=version,
             mode=mode,
             recipe=recipe,
             attention=attention,
@@ -1574,7 +1547,7 @@ class ActivationConfig:
     def to_dict(self) -> Dict[str, Any]:
         """Serialize to the canonical `quantize_config.json` payload."""
 
-        payload: Dict[str, Any] = {"version": self.version, "mode": self.mode}
+        payload: Dict[str, Any] = {"mode": self.mode}
         if self.recipe is not None:
             payload["recipe"] = self.recipe
         if self.attention is not None:
@@ -3491,14 +3464,10 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         return self.activation["mode"] if self.activation else None
 
     @property
-    def activation_version(self) -> Optional[int]:
-        return self.activation["version"] if self.activation else None
-
-    @property
     def activation_recipe(self) -> Optional[str]:
         if not self.activation or self.activation["mode"] != "w4a_nvfp4":
             return None
-        return self.activation.get("recipe", "four_six")
+        return self.activation.get("recipe", "least_squares")
 
     @property
     def activation_attention_mode(self) -> Optional[str]:
@@ -3660,7 +3629,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.desc_act = bool(self.desc_act)
 
         if self.activation is not None:
-            activation = ActivationConfig.from_value(self.activation, rotation=self.rotation)
+            activation = ActivationConfig.from_value(self.activation)
             if (self.method != METHOD.GPTQ or format_family not in (FORMAT.GPTQ, FORMAT.GPTQ_V2)
                     or self.bits != 4 or self.group_size != 128 or not self.sym
                     or self.desc_act or self.pack_dtype != torch.int32 or self.lm_head):

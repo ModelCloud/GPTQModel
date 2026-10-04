@@ -184,10 +184,7 @@ class W4ANVFP4Linear(W4AFP8Linear):
             if (packed.device.type != "cuda" or packed.device != self._weight_both.device or
                     activation_scales.device != packed.device or global_scale.device != packed.device):
                 raise ValueError("NVFP4 codes, scales, and prepared weights must share one CUDA device.")
-            output_dtype = (
-                torch.float32 if getattr(self, "_w4a_output_encoded", True)
-                else x.model_dtype
-            )
+            output_dtype = x.model_dtype
             device = packed.device
         else:
             if x.dtype not in (torch.float16, torch.bfloat16) or x.device.type != "cuda":
@@ -198,10 +195,7 @@ class W4ANVFP4Linear(W4AFP8Linear):
             device = x.device
         if rows == 0:
             if encoded:
-                if not getattr(self, "_w4a_output_encoded", True):
-                    return torch.empty(original_shape, device=device, dtype=x.model_dtype)
-                return pack_activation(torch.empty(original_shape, device=device, dtype=x.model_dtype), x.mode,
-                                       model_dtype=x.model_dtype, recipe=x.recipe)
+                return torch.empty(original_shape, device=device, dtype=x.model_dtype)
             return x.new_empty(original_shape)
         if not encoded:
             x = self._apply_rotation_to_input(x)
@@ -229,10 +223,6 @@ class W4ANVFP4Linear(W4AFP8Linear):
                 token_scale=x.token_scale if encoded else None,
             )
         result = output.reshape(original_shape)
-        if encoded and getattr(self, "_w4a_output_encoded", True):
-            return pack_activation(
-                result, x.mode, model_dtype=x.model_dtype, recipe=x.recipe
-            )
         return result
 
     def _forward_fp8_operand(self, x) -> torch.Tensor:
@@ -259,9 +249,7 @@ class W4ANVFP4Linear(W4AFP8Linear):
             x.codes, x.scales, self._weight_e4m3, self.scales, self.bias, torch.float32,
         )
         result = result.reshape(x.shape[:-1] + (self.out_features,))
-        if not getattr(self, "_w4a_output_encoded", True):
-            return result.to(x.model_dtype)
-        return pack_activation(result, "w4afp8", model_dtype=x.model_dtype)
+        return result.to(x.model_dtype)
 
 
 __all__ = ["W4ANVFP4Linear", "nvfp4_global_scale", "nvfp4_input"]

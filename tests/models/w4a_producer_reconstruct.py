@@ -59,12 +59,12 @@ def reconstruct(core, teacher, samples, *, ratios=(.75, .875, 1., 1.125, 1.25, 1
     from gptqmodel.quantization.activation_calibration import _capture_inputs, _move
 
     if (core.training or teacher.training or not samples
-            or getattr(core, "_w4a_stream_version", None) != 4
+            or not getattr(core, "_w4a_stream_fused_norms", False)
             or getattr(core, "_w4a_stream_mode", None) != "w4a_nvfp4"
             or getattr(teacher, "_w4a_stream_mode", None) is not None):
-        raise ValueError("Expected eval-mode version-4 A4 student, A16 teacher, and fitting samples")
+        raise ValueError("Expected eval-mode fused-norm A4 student, A16 teacher, and fitting samples")
     layers, teacher_layers = core.model.layers, teacher.model.layers
-    if len(layers) != len(teacher_layers) or any(getattr(layer, "_w4a_stream_version", None) != 4 for layer in layers):
+    if len(layers) != len(teacher_layers):
         raise ValueError("Reconstruction requires complete matching decoder coverage")
     specs = list(llama_nvfp4_boundaries(layers, [True] * len(layers)))
     producers = [(key, getattr(owner, f"_w4a_{name}_quantizer")) for owner, name, key in specs]

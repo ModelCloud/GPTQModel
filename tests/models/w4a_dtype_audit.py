@@ -250,7 +250,7 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
                 raise AssertionError(f"{name} received no input")
             operand = args[0] if args else kwargs["hidden_states"]
             samples[name]["input"] = describe(operand)
-            if isinstance(_module, W4ANVFP4Linear) and model.quantize_config.activation_version >= 3:
+            if isinstance(_module, W4ANVFP4Linear):
                 pending_operands[name] = operand
         return hook
 
@@ -348,7 +348,7 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
 
     counts = {}
     expected_recipe = model.quantize_config.activation_recipe
-    activation_version = model.quantize_config.activation_version
+    fused_norms = bool(getattr(model, "_w4a_stream_fused_norms", False))
     if not bool(torch.isfinite(output.logits).all()) or generated.shape[1] != input_ids.shape[1] + 2:
         raise AssertionError("W4A stream forward or cached generation produced invalid output.")
     for name, entry in samples.items():
@@ -358,7 +358,7 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
         counts[kind] = counts.get(kind, 0) + 1
         if entry["selected"]:
             expected_code = "torch.float8_e4m3fn" if variant == "w4afp8" else "torch.float4_e2m1fn_x2"
-            output_encoded = activation_version == 2 or kind in {"decoder_layer", "rms_norm"}
+            output_encoded = kind in {"decoder_layer", "rms_norm"}
             if output_encoded:
                 if entry["output"]["kind"] != "encoded" or entry["output"]["codes"] != expected_code:
                     raise AssertionError(f"Selected W4A carrier boundary is not encoded: {name}: {entry}")
@@ -367,14 +367,14 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
             elif (entry["output"]["kind"] != "tensor"
                   or entry["output"]["dtype"] != "torch.bfloat16"):
                 raise AssertionError(
-                    f"A version-3 Linear/nonlinear branch did not emit model dtype: {name}: {entry}"
+                    f"A Linear/nonlinear branch did not emit model dtype: {name}: {entry}"
                 )
-            if activation_version == 4 and kind == "rms_norm":
+            if kind == "rms_norm" and getattr(model.get_submodule(name), "_w4a_preserve_norm_codes", False):
                 if entry["output"]["token_scale"] != "torch.float32":
-                    raise AssertionError(f"Version 4 norm lost its token multiplier: {name}")
+                    raise AssertionError(f"Fused-norm boundary lost its token multiplier: {name}")
                 for pointer in ("codes_ptr", "scales_ptr"):
                     if entry["input"][pointer] != entry["output"][pointer]:
-                        raise AssertionError(f"Version 4 norm repacked its FP4 operand: {name}")
+                        raise AssertionError(f"Fused-norm boundary repacked its FP4 operand: {name}")
             if kind != "decoder_layer" and (entry["input"]["kind"] != "encoded" or
                                                entry["input"]["codes"] != expected_code):
                 raise AssertionError(f"Selected W4A consumer did not receive encoded input: {name}: {entry}")
@@ -421,7 +421,7 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
         "audit_source_sha256": audit_source_sha256,
         "variant": variant,
         "activation_recipe": expected_recipe,
-        "activation_version": activation_version,
+        "fused_norms": fused_norms,
         "model_dtype": "torch.bfloat16",
         "logits_dtype": str(output.logits.dtype),
         "input_tokens": input_ids.shape[1],

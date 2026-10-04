@@ -18,7 +18,6 @@ def _fixture(monkeypatch):
     class Layer(torch.nn.Module):
         def __init__(self):
             super().__init__()
-            self._w4a_stream_version = 4
             self.self_attn, self.mlp = torch.nn.Module(), torch.nn.Module()
             self.self_attn.q_proj = torch.nn.Module()
             self.self_attn.q_proj.register_buffer("qweight", torch.zeros(1, dtype=torch.int32))
@@ -35,7 +34,7 @@ def _fixture(monkeypatch):
     for owner, name, key in specs:
         owner.add_module(f"_w4a_{name}_quantizer", w4a_boundary.NVFP4BoundaryQuantizer(key, "cpu"))
     core = SimpleNamespace(model=SimpleNamespace(layers=[layer]), config=SimpleNamespace(), training=False,
-                           _w4a_stream_version=4, _w4a_stream_mode="w4a_nvfp4",
+                           _w4a_stream_mode="w4a_nvfp4", _w4a_stream_fused_norms=True,
                            _w4a_stream_recipe="least_squares", _w4a_stream_global_scales=None)
     # The placeholder carrier exercises the metadata transaction only. It
     # deliberately does not claim to represent hardware numeric encoding.
@@ -45,7 +44,7 @@ def _fixture(monkeypatch):
     monkeypatch.setattr(calibration, "_capture_inputs", lambda _core, _samples:
                         [calibration._LayerSample(torch.ones(2, 128), {})])
     qcfg = QuantizeConfig(bits=4, group_size=128, sym=True, desc_act=False, rotation="hadamard",
-                          activation={"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares"})
+                          activation={"mode": "w4a_nvfp4", "recipe": "least_squares"})
     return core, qcfg, specs
 
 
@@ -115,7 +114,7 @@ def test_calibration_export_preserves_mixed_sub_policies(tmp_path):
         "bits": 4, "group_size": 128, "sym": True, "desc_act": False,
         "pack_dtype": "int32", "quant_method": "gptq", "rotation": "hadamard",
         "activation": {
-            "version": 3, "mode": "w4a_nvfp4", "recipe": "least_squares",
+            "mode": "w4a_nvfp4", "recipe": "least_squares",
             "attention": {"mode": "w4afp8"},
             "mlp": {"mode": "w4afp8", "layers": [0]},
         },

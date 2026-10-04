@@ -999,7 +999,7 @@ def train_weights(
         "checkpoint": str(checkpoint.resolve()),
         "source_checkpoint": str(source_checkpoint.resolve()),
         "data_provenance": data_provenance,
-        "activation_policy": {"version": qcfg.activation_version,
+        "activation_policy": {"fused_norms": bool(getattr(qcfg, "rotation", None)),
                               "mode": qcfg.activation_mode, "recipe": qcfg.activation_recipe},
         "master_checkpoint": (
             str(master_checkpoint.resolve()) if master_checkpoint is not None else None

@@ -48,11 +48,12 @@ class HardwareForward:
         from gptqmodel.nn_modules.qlinear.w4a_llama_stream import _bind_forward
         from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
-        if (getattr(student, "_w4a_replay_version", None) != 4
-                or getattr(runtime, "_w4a_stream_version", None) != 4
+        if (getattr(student, "_w4a_replay_mode", None) != "w4a_nvfp4"
+                or getattr(runtime, "_w4a_stream_mode", None) != "w4a_nvfp4"
+                or getattr(student, "_w4a_fused_norms", None) != getattr(runtime, "_w4a_stream_fused_norms", None)
                 or student._w4a_replay_recipe != runtime._w4a_stream_recipe
                 or student._w4a_replay_global_scales != runtime._w4a_stream_global_scales):
-            raise ValueError("Hardware forward requires matching version-4 NVFP4 policies")
+            raise ValueError("Hardware forward requires matching NVFP4 policies")
         if len(student.model.layers) != len(runtime.model.layers):
             raise ValueError("Hardware and surrogate decoder layouts differ")
         if any(layer.self_attn.attention_dropout != 0 for layer in student.model.layers):

@@ -36,11 +36,8 @@ def _tokenizer():
         ("w4a_nvfp4", "nvidia_headroom", BACKEND.GPTQ_W4A_NVFP4, W4ANVFP4Linear),
     ],
 )
-@pytest.mark.parametrize("version", [3, 4])
 @pytest.mark.parametrize("rotation", [None, "hadamard"])
-def test_tiny_llama_quantize_save_reload(tmp_path, activation, recipe, backend, kernel, rotation, version, gptaq=False):
-    if version == 4 and (activation != "w4a_nvfp4" or rotation is None):
-        pytest.skip("Version 4 requires NVFP4 with fused rotated norms")
+def test_tiny_llama_quantize_save_reload(tmp_path, activation, recipe, backend, kernel, rotation, gptaq=False):
     torch.manual_seed(41)
     source = tmp_path / "source"
     saved = tmp_path / "quantized"
@@ -55,7 +52,7 @@ def test_tiny_llama_quantize_save_reload(tmp_path, activation, recipe, backend, 
     tokenizer.save_pretrained(source)
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": version, "mode": activation, **({"recipe": recipe} if recipe else {})},
+        activation={"mode": activation, **({"recipe": recipe} if recipe else {})},
         rotation=rotation, offload_to_disk=False,
         gptaq=GPTAQConfig(alpha=1.0, device="cpu") if gptaq else None,
     )
@@ -147,7 +144,7 @@ def test_tiny_llama_mixed_fp8_attention_nvfp4_mlp(tmp_path):
     tokenizer.save_pretrained(source)
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 3, "mode": "w4a_nvfp4", "attention": {"mode": "w4afp8"}},
+        activation={"mode": "w4a_nvfp4", "attention": {"mode": "w4afp8"}},
         rotation=None, offload_to_disk=False,
     )
     model = GPTQModel.load(str(source), qcfg, device="cuda", dtype=torch.bfloat16)
@@ -214,7 +211,7 @@ def test_tiny_llama_per_layer_mlp_fp8_override(tmp_path):
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
         activation={
-            "version": 3, "mode": "w4a_nvfp4",
+            "mode": "w4a_nvfp4",
             "attention": {"mode": "w4afp8"},
             "mlp": {"mode": "w4afp8", "layers": [0]},
         },
@@ -264,7 +261,7 @@ def test_tiny_llama_per_layer_mlp_fp8_override(tmp_path):
     not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
     reason="GB10 / SM121 required",
 )
-def test_tiny_llama_v4_gptaq_retains_native_reference(tmp_path, monkeypatch):
+def test_tiny_llama_gptaq_retains_native_reference(tmp_path, monkeypatch):
     from gptqmodel.quantization.gptaq import GPTAQ
 
     original = GPTAQ.process_batch
@@ -275,7 +272,7 @@ def test_tiny_llama_v4_gptaq_retains_native_reference(tmp_path, monkeypatch):
     monkeypatch.setattr(GPTAQ, "process_batch", record_cross_term)
     test_tiny_llama_quantize_save_reload(
         tmp_path, "w4a_nvfp4", "least_squares", BACKEND.GPTQ_W4A_NVFP4,
-        W4ANVFP4Linear, "hadamard", 4, gptaq=True,
+        W4ANVFP4Linear, "hadamard", gptaq=True,
     )
     assert len(cross_terms) >= 14
     assert all(value > 0 for value in cross_terms)
@@ -291,7 +288,7 @@ def test_calibrated_producers_survive_standard_model_save(tmp_path):
 
     test_tiny_llama_quantize_save_reload(
         tmp_path, "w4a_nvfp4", "least_squares", BACKEND.GPTQ_W4A_NVFP4,
-        W4ANVFP4Linear, "hadamard", 4,
+        W4ANVFP4Linear, "hadamard",
     )
     source = tmp_path / "quantized"
     calibrated = tmp_path / "calibrated"
@@ -351,7 +348,7 @@ def test_fixed_producer_scales_installed_during_fresh_quantization(tmp_path):
     fixed = dict.fromkeys(keys, 0.01171875)
     qcfg = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
-        activation={"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares",
+        activation={"mode": "w4a_nvfp4", "recipe": "least_squares",
                     "global_scales": fixed},
         rotation="hadamard", offload_to_disk=False,
     )

@@ -28,7 +28,7 @@ def export_view(source: Path, output: Path, calibration: Path, scales: dict, rec
     # only fits the active NVFP4 producers, so replacing the whole dict with an
     # all-NVFP4 policy would make reload expect scales that were never fitted.
     activation = dict(qconfig.get("activation") or {})
-    activation.update({"version": 4, "mode": "w4a_nvfp4", "recipe": recipe,
+    activation.update({"mode": "w4a_nvfp4", "recipe": recipe,
                        "global_scales": scales})
     qconfig["activation"] = activation
     QuantizeConfig.from_quant_config(qconfig)

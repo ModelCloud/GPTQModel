@@ -120,7 +120,7 @@ def test_prepacked_linear_matches_independent_torch_oracle(mode, kernel):
     x[0, 0, :16] = 0
     encoded = pack_activation(x, mode)
     actual = layer(encoded)
-    assert isinstance(actual, W4AActivation) and actual.mode == mode
+    assert isinstance(actual, torch.Tensor)
     assert actual.shape == (1, rows, n)
 
     blocks = x.float().reshape(rows, k)
@@ -137,15 +137,11 @@ def test_prepacked_linear_matches_independent_torch_oracle(mode, kernel):
     for group in range(2):
         sl = slice(group * 128, (group + 1) * 128)
         reference += (xq[:, sl] @ weight[sl]) * layer.scales[group].float()
-    if mode == "w4afp8":
-        maxima = reference.abs().amax(dim=-1, keepdim=True)
-        scale = torch.where(maxima > 0, maxima / 448.0, torch.ones_like(maxima))
-        reference = (reference / scale).clamp(-448, 448).to(torch.float8_e4m3fn).float() * scale
-    else:
-        global_scale = torch.where(reference.abs().amax() > 0, reference.abs().amax() / 1792.0, 1.0)
-        reference = _independent_nvfp4_qdq(reference, global_scale)
+    # The Linear returns the model dtype; round the oracle the same way so the
+    # comparison tests the GEMM contract rather than the output cast.
+    reference = reference.to(actual.dtype)
     torch.cuda.synchronize()
-    torch.testing.assert_close(actual.decode(torch.float32).reshape(rows, n), reference, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(actual.reshape(rows, n).float(), reference.float(), rtol=2e-3, atol=2e-3)
 
 
 @pytest.mark.skipif(
@@ -184,7 +180,7 @@ def test_rotated_prepacked_input_is_reencoded_before_gemm(monkeypatch, mode, ker
 
     torch.cuda.synchronize()
     torch.testing.assert_close(
-        actual.decode(torch.float32), expected.decode(torch.float32), rtol=2e-3, atol=2e-3
+        actual.float(), expected.float(), rtol=2e-3, atol=2e-3
     )
 
 
@@ -224,7 +220,6 @@ def test_pre_rotated_carrier_is_consumed_without_second_rounding(monkeypatch, mo
     expected = layer(ordinary)
 
     torch.cuda.synchronize()
-    assert actual.rotation_applied is False
     torch.testing.assert_close(
-        actual.decode(torch.float32), expected.decode(torch.float32), rtol=2e-3, atol=2e-3
+        actual.float(), expected.float(), rtol=2e-3, atol=2e-3
     )

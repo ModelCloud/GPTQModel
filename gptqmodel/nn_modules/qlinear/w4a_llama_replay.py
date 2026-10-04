@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 
 from ...quantization.activation_floatx import fp8_token_qdq, nvfp4_block_qdq, nvfp4_global_scale
-from .w4a_boundary import layer_mlp_policy
+from .w4a_boundary import layer_mlp_policy, norm_codes_fused
 from .w4a_llama_stream import _bind_forward
 
 
@@ -40,25 +40,23 @@ _round = round_w4a_activation
 
 
 def round_w4a_replay_operand(x: torch.Tensor, mode: str, recipe=None, global_scale=None,
-                             *, version: int = 3, rounder=None) -> torch.Tensor:
+                             *, rounder=None) -> torch.Tensor:
     """Round one replay operand with the precision of its deployed carrier.
 
-    Version 4 keeps an NVFP4 carrier in FP32 and uses the source scale grid.
-    FP8 boundaries carry no calibrated scale and keep the ordinary per-token
-    dynamic rounding, so a mixed stream can round attention and MLP operands
-    under different policies.
+    The deployed stream carries every decoded operand in FP32 and consumes the
+    source scale grid, so replay must not round-trip through the model dtype
+    before the GEMM. FP8 boundaries carry no calibrated scale and keep the
+    ordinary per-token dynamic rounding, so a mixed stream can round attention
+    and MLP operands under different policies.
     """
     rounder = _round if rounder is None else rounder
-    if version == 4:
-        # Version 4 carries the decoded operand in FP32 for every carrier, not
-        # only NVFP4. The deployed FP8 GEMM consumes codes and FP32 token
-        # scales directly, so an FP16/BF16 round-trip here would teach a
-        # different function than inference.
-        if mode == "w4a_nvfp4" and global_scale is None:
-            global_scale = nvfp4_global_scale(x.detach().abs().amax(), grid_dtype=x.dtype,
-                                               recipe=recipe or "least_squares")
-        x = x.float()
-    return rounder(x, mode, recipe, global_scale)
+    # The deployed GEMM consumes codes and FP32 scales directly for every
+    # carrier, so an FP16/BF16 round-trip here would teach a different function
+    # than inference.
+    if mode == "w4a_nvfp4" and global_scale is None:
+        global_scale = nvfp4_global_scale(x.detach().abs().amax(), grid_dtype=x.dtype,
+                                          recipe=recipe or "least_squares")
+    return rounder(x.float(), mode, recipe, global_scale)
 
 
 def _replay_linear_forward(self, x):
@@ -117,14 +115,13 @@ def _replay_mlp_forward(self, x: torch.Tensor) -> torch.Tensor:
         product = round_w4a_replay_operand(
             product, self._w4a_replay_mode, self._w4a_replay_recipe,
             getattr(down, "_w4a_activation_global_scale", None),
-            version=self._w4a_replay_version,
         )
     return down(product)
 
 
 def _replay_norm_operand(norm: torch.nn.Module, pristine: torch.Tensor,
                          rounded: torch.Tensor) -> torch.Tensor:
-    """Version-4 RMSNorm shortcut over the deployed encoded stream.
+    """Fused-norm RMSNorm shortcut over the deployed encoded stream.
 
     The encoded stream keeps the residual value in compute precision and only
     rounds the GEMM operand. Its fused RMSNorm therefore rescales the rounded
@@ -139,17 +136,21 @@ def _replay_norm_operand(norm: torch.nn.Module, pristine: torch.Tensor,
 
 
 def _replay_norm(norm: torch.nn.Module, pristine: torch.Tensor, rounded: torch.Tensor,
-                 mode: str, recipe: str | None) -> torch.Tensor:
+                 mode: str, recipe: str | None, *, preserve_codes: bool) -> torch.Tensor:
     """Reproduce one deployed RMSNorm boundary for its carrier policy.
 
-    NVFP4 boundaries use the version-4 token rescale over the pristine
-    denominator. FP8 boundaries repack a dynamically scaled normed value,
-    because the deployed stream does not retain FP8 codes across a norm.
+    An NVFP4 boundary whose norm weights were fused into the projections reuses
+    the incoming codes and rescales only the token multiplier. Every other
+    boundary repacks a freshly normed, weighted value in compute precision,
+    because the deployed stream does not retain codes across such a norm.
     """
-    if mode == "w4a_nvfp4":
+    if preserve_codes:
         return _replay_norm_operand(norm, pristine, rounded)
     variance = pristine.float().square().mean(dim=-1, keepdim=True)
-    y = (pristine.float() * torch.rsqrt(variance + norm.variance_epsilon)).to(pristine.dtype)
+    y = pristine.float() * torch.rsqrt(variance + norm.variance_epsilon)
+    weight = getattr(norm, "weight", None)
+    if weight is not None:
+        y = y * weight.float()
     return _round(y, mode, recipe)
 
 
@@ -159,41 +160,10 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
     mode = self._w4a_replay_mode
     recipe = self._w4a_replay_recipe
     disabled = getattr(self, "_w4a_replay_disabled", False)
-    version = getattr(self, "_w4a_replay_version", 3)
     attention_mode = getattr(self, "_w4a_replay_attention_mode", mode)
     attention_recipe = getattr(self, "_w4a_replay_attention_recipe", recipe)
     mlp_mode = getattr(self, "_w4a_replay_mlp_mode", mode)
     mlp_recipe = getattr(self, "_w4a_replay_mlp_recipe", recipe)
-    if version == 4 and not disabled:
-        # Version-4 carries the residual stream in compute precision. The
-        # rounded operand is rebuilt from the pristine value at each boundary,
-        # reproducing the deployed stream's "rounded numerator, pristine
-        # denominator" RMSNorm without holding cross-layer state that reverse
-        # order recomputation would corrupt. Attention and MLP boundaries may
-        # carry different policies, so each is resolved independently.
-        pristine = hidden_states.float()
-        # A stream entry packs the raw model-dtype input; an interior layer
-        # rebuilds the previous layer's rounded output from the same producer
-        # dtype so the dynamic grid selection still matches the runtime.
-        rounded = round_w4a_replay_operand(
-            hidden_states, attention_mode, attention_recipe,
-            getattr(self, "_w4a_replay_input_global_scale", None),
-            version=version)
-        x = _replay_norm(self.input_layernorm, pristine, rounded, attention_mode, attention_recipe)
-        x, _ = self.self_attn(
-            hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
-            past_key_values=past_key_values, use_cache=use_cache,
-            position_embeddings=position_embeddings, **kwargs,
-        )
-        summed = pristine + x.float()
-        rounded = round_w4a_replay_operand(
-            summed, mlp_mode, mlp_recipe,
-            self._w4a_replay_global_scales.get("post_attention_residual"),
-            version=version)
-        x = _replay_norm(self.post_attention_layernorm, summed, rounded, mlp_mode, mlp_recipe)
-        x = self.mlp(x)
-        return summed + x.float()
-
     if disabled:
         # Pristine teacher pass: reproduce the unmodified decoder forward so
         # GPTAQ/FOEM see native values.
@@ -211,26 +181,40 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         x = self.mlp(x)
         return residual + x
 
-    # Versions 2 and 3 keep the residual stream in compute precision exactly
-    # like version 4: runtime's ``_add_stream`` and ``_norm_forward`` consume
-    # ``exact(torch.float32)`` for every stream version, so only GEMM operands
-    # are quantized (by the Linear pre-hooks and the MLP wrapper). Rounding the
-    # residual here would calibrate against a different norm/residual function
-    # than inference, which for the default ``w4afp8`` path is the only
-    # contract.
-    x = hidden_states.float()
-    residual = x
-    x = self.input_layernorm(x)
+    # The deployed stream carries the residual in compute precision and rebuilds
+    # the rounded operand from the pristine value at each boundary, reproducing
+    # its "rounded numerator, pristine denominator" RMSNorm without holding
+    # cross-layer state that reverse-order recomputation would corrupt.
+    # Attention and MLP boundaries may carry different policies, so each is
+    # resolved independently.
+    pristine = hidden_states.float()
+    # A stream entry packs the raw model-dtype input; an interior layer rebuilds
+    # the previous layer's rounded output from the same producer dtype so the
+    # dynamic grid selection still matches the runtime.
+    rounded = round_w4a_replay_operand(
+        hidden_states, attention_mode, attention_recipe,
+        getattr(self, "_w4a_replay_input_global_scale", None),
+    )
+    x = _replay_norm(
+        self.input_layernorm, pristine, rounded, attention_mode, attention_recipe,
+        preserve_codes=getattr(self, "_w4a_attention_preserve_norm_codes", False),
+    )
     x, _ = self.self_attn(
         hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
         past_key_values=past_key_values, use_cache=use_cache,
         position_embeddings=position_embeddings, **kwargs,
     )
-    x = residual + x.float()
-    residual = x
-    x = self.post_attention_layernorm(x)
+    summed = pristine + x.float()
+    rounded = round_w4a_replay_operand(
+        summed, mlp_mode, mlp_recipe,
+        self._w4a_replay_global_scales.get("post_attention_residual"),
+    )
+    x = _replay_norm(
+        self.post_attention_layernorm, summed, rounded, mlp_mode, mlp_recipe,
+        preserve_codes=getattr(self, "_w4a_mlp_preserve_norm_codes", False),
+    )
     x = self.mlp(x)
-    return residual + x.float()
+    return summed + x.float()
 
 
 def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
@@ -241,12 +225,9 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
         from ...quantization.activation_floatx import normalize_nvfp4_recipe
 
         recipe = normalize_nvfp4_recipe(recipe)
-    version = getattr(qcfg, "activation_version", 3)
-    if version == 4 and mode != "w4a_nvfp4":
-        raise ValueError("Version-4 replay requires NVFP4")
     global_scales = getattr(qcfg, "activation_global_scales", None)
-    if global_scales is not None and (version != 4 or mode != "w4a_nvfp4"):
-        raise ValueError("Calibrated producer scales require version-4 NVFP4")
+    if global_scales is not None and mode != "w4a_nvfp4":
+        raise ValueError("Calibrated producer scales require NVFP4")
     # A mixed stream declares its policy per boundary; resolve the same
     # attention and per-layer MLP policies the runtime installs.
     attention_mode = getattr(qcfg, "activation_attention_mode", None) or mode
@@ -258,13 +239,14 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
     else:
         attention_recipe = None
     mlp_fp8_layers = tuple(getattr(qcfg, "activation_mlp_fp8_layers", None) or ())
+    fused_norms = bool(getattr(qcfg, "rotation", None))
     if getattr(model, "_w4a_replay_mode", None) == mode:
         if (getattr(model, "_w4a_replay_recipe", None) != recipe
-                or getattr(model, "_w4a_replay_version", None) != version
                 or getattr(model, "_w4a_replay_global_scales", None) != global_scales
                 or getattr(model, "_w4a_replay_attention_mode", None) != attention_mode
                 or getattr(model, "_w4a_replay_attention_recipe", None) != attention_recipe
-                or getattr(model, "_w4a_replay_mlp_fp8_layers", None) != mlp_fp8_layers):
+                or getattr(model, "_w4a_replay_mlp_fp8_layers", None) != mlp_fp8_layers
+                or getattr(model, "_w4a_fused_norms", None) != fused_norms):
             raise ValueError("A different W4A replay policy is already installed.")
         return
     if getattr(model, "_w4a_replay_mode", None) is not None:
@@ -309,11 +291,18 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
         layer_mlp_mode, layer_mlp_recipe = layer_mlp_policy(index, mode, recipe, mlp_fp8_layers)
         layer._w4a_replay_mode = mode
         layer._w4a_replay_recipe = recipe
-        layer._w4a_replay_version = version
         layer._w4a_replay_attention_mode = attention_mode
         layer._w4a_replay_attention_recipe = attention_recipe
         layer._w4a_replay_mlp_mode = layer_mlp_mode
         layer._w4a_replay_mlp_recipe = layer_mlp_recipe
+        layer._w4a_attention_preserve_norm_codes = (
+            fused_norms and attention_mode == "w4a_nvfp4"
+            and norm_codes_fused(layer.input_layernorm)
+        )
+        layer._w4a_mlp_preserve_norm_codes = (
+            fused_norms and layer_mlp_mode == "w4a_nvfp4"
+            and norm_codes_fused(layer.post_attention_layernorm)
+        )
         layer._w4a_replay_global_scales = {
             boundary: global_scales[f"model.layers.{index}.{boundary}"]
             for boundary in ("input", "post_attention_residual", "output")
@@ -321,9 +310,9 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
         }
         round_input = index == 0 or not selected[index - 1]
         layer._w4a_replay_round_input = round_input
-        # Version 4 receives the previous layer's output carrier unchanged, so
-        # its input rounding must reuse that layer's calibrated output scale
-        # instead of the (absent) per-layer input scale.
+        # An interior layer receives the previous layer's output carrier
+        # unchanged, so its input rounding must reuse that layer's calibrated
+        # output scale instead of the (absent) per-layer input scale.
         layer._w4a_replay_input_global_scale = (
             global_scales.get(f"model.layers.{index}.input") if round_input
             else global_scales.get(f"model.layers.{index - 1}.output")
@@ -331,7 +320,6 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
         _bind_forward(layer, _replay_layer_forward)
         layer.mlp._w4a_replay_mode = layer_mlp_mode
         layer.mlp._w4a_replay_recipe = layer_mlp_recipe
-        layer.mlp._w4a_replay_version = version
         _bind_forward(layer.mlp, _replay_mlp_forward)
         for path in required:
             parent, child = path.split(".")
@@ -348,8 +336,7 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
             if not isinstance(linear, torch.nn.Linear):
                 raise TypeError(f"W4A replay expects a dense Linear at model.layers.{index}.{path}.")
 
-            def before(_module, args, *, replay_mode=linear_mode, replay_recipe=linear_recipe,
-                       replay_version=version):
+            def before(_module, args, *, replay_mode=linear_mode, replay_recipe=linear_recipe):
                 if getattr(_module, "_w4a_replay_disabled", False):
                     return None
                 if getattr(_module, "_w4a_norm_preapplied", False):
@@ -365,29 +352,20 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
                 return (round_w4a_replay_operand(
                     args[0], replay_mode, replay_recipe,
                     getattr(_module, "_w4a_activation_global_scale", None),
-                    version=replay_version,
                 ), *args[1:])
-
-            def after(_module, _args, output, *, replay_mode=linear_mode, replay_recipe=linear_recipe):
-                if getattr(_module, "_w4a_replay_disabled", False):
-                    return output
-                return _round(output, replay_mode, replay_recipe)
 
             replay_handles.append(linear.register_forward_pre_hook(before))
             linear._w4a_replay_input_hook_active = True
-            if version == 2:
-                replay_handles.append(linear.register_forward_hook(after))
-            linear._w4a_norm_preapplied = version == 4 and path in {
+            linear._w4a_norm_preapplied = path in {
                 "self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "mlp.gate_proj", "mlp.up_proj"
             }
             linear._w4a_stream_replay_mode = linear_mode
             linear._w4a_stream_replay_recipe = linear_recipe
-            linear._w4a_stream_replay_version = version
             linear._w4a_replay_model_dtype = model_dtype
             linear._w4a_stream_replay_pre_hook = True
-            # All replay versions now carry a compute-precision operand, so the
-            # linear must compute in FP32 and return the model dtype rather than
-            # relying on a matching-dtype `F.linear`.
+            # Replay carries a compute-precision operand, so the linear must
+            # compute in FP32 and return the model dtype rather than relying on
+            # a matching-dtype `F.linear`.
             linear._w4a_replay_original_forward = getattr(linear, "_old_forward", linear.forward)
             linear._w4a_replay_custom_forward = (
                 getattr(linear._w4a_replay_original_forward, "__func__", None) is not torch.nn.Linear.forward)
@@ -404,26 +382,27 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
     model._w4a_replay_handles = replay_handles
     model._w4a_replay_mode = mode
     model._w4a_replay_recipe = recipe
-    model._w4a_replay_version = version
     model._w4a_replay_global_scales = dict(global_scales) if global_scales is not None else None
     model._w4a_replay_attention_mode = attention_mode
     model._w4a_replay_attention_recipe = attention_recipe
     model._w4a_replay_mlp_fp8_layers = mlp_fp8_layers
+    model._w4a_fused_norms = fused_norms
 
 
 _REPLAY_MODEL_ATTRS = (
     "_w4a_replay_handles", "_w4a_replay_mode", "_w4a_replay_recipe",
-    "_w4a_replay_version", "_w4a_replay_global_scales",
+    "_w4a_replay_global_scales",
     "_w4a_replay_attention_mode", "_w4a_replay_attention_recipe",
-    "_w4a_replay_mlp_fp8_layers",
+    "_w4a_replay_mlp_fp8_layers", "_w4a_fused_norms",
 )
 
 _REPLAY_LAYER_ATTRS = (
-    "_w4a_replay_mode", "_w4a_replay_recipe", "_w4a_replay_version",
+    "_w4a_replay_mode", "_w4a_replay_recipe",
     "_w4a_replay_attention_mode", "_w4a_replay_attention_recipe",
     "_w4a_replay_mlp_mode", "_w4a_replay_mlp_recipe",
     "_w4a_replay_global_scales", "_w4a_replay_input_global_scale",
     "_w4a_replay_round_input", "_w4a_replay_boundary_dtype",
+    "_w4a_attention_preserve_norm_codes", "_w4a_mlp_preserve_norm_codes",
 )
 
 

@@ -36,12 +36,12 @@ scale is still E4M3. Runtime activation storage and GEMM operands remain one
 FP4 code per value plus the standard E4M3 block scales.
 
 New NVFP4 checkpoints serialize an explicit recipe, for example
-`{"version": 2, "mode": "w4a_nvfp4", "recipe": "least_squares"}`. `nvidia` uses
+`{"mode": "w4a_nvfp4", "recipe": "least_squares"}`. `nvidia` uses
 NVIDIA's max-to-6 block rule, while `four_six` and `least_squares` use the hardware-valid
 block-scale extensions described above. `nvidia_headroom` and `least_squares_headroom`
 add a calibration pass for NVIDIA's percentile headroom global scale before
-GPTQ Hessian capture. Version 2 checkpoints that predate the `recipe` field
-continue to use the original `four_six` packer on load. The recipe is
+GPTQ Hessian capture. `least_squares` is the default when a NVFP4 stream omits
+`recipe`. The recipe is
 propagated through calibration replay, `HookedLinear` Hessian capture, runtime
 carriers, and fused packing so a saved checkpoint cannot silently switch
 scale selection.
@@ -120,11 +120,8 @@ model.save(output_path)
 loaded = GPTQModel.load(output_path, device="cuda", dtype=torch.bfloat16)
 ```
 
-The version 3 stream policy selects its own backend when `backend=AUTO` and is
-stored in `quantize_config.json`. Version 1 represented the input-only
-prototype and is rejected by the stream loader. Version 2 remains loadable and
-reproduces the earlier policy that encoded every Linear output. New string
-configurations select version 3. The stream currently supports
+The stream policy selects its own backend when `backend=AUTO` and is
+stored in `quantize_config.json`. The stream currently supports
 Llama decoder layers on GB10 / SM121 with GPTQ symmetric
 INT4, group size 128, contiguous groups, INT32 packing, a Linear input width
 divisible by 128, and every selected projection output width divisible by 128.
@@ -133,7 +130,7 @@ one global input scale per selected Linear as exact FP32 bits in an INT32
 buffer, preserving it across BF16 model loads. The encoded stream derives a
 global scale for each activation tensor and carries it with the packed codes
 and per-16 scales. The stored per-Linear scale is used by the standalone
-BF16/FP16 Linear compatibility path. Once a version 3 model installs the
+BF16/FP16 Linear compatibility path. Once a model installs the
 stream, its selected W4A Linears reject plain BF16/FP16 inputs so an external
 caller cannot silently bypass the activation contract.
 
@@ -147,40 +144,26 @@ and then carried and applied as FP32. Making this conversion explicit preserves
 the scored BF16 model behavior while keeping all subsequent scale arithmetic
 in FP32. Calibration replay uses the same source-grid rule.
 
-For new version 3 quantization, Llama calibration replay rounds selected
+For a fresh quantization, Llama calibration replay rounds selected
 Linear inputs before GPTQ Hessian capture and propagates rounded projection,
 residual, and layer inputs to downstream calibration without adding a QDQ to
 Linear outputs whose next operator uses the model dtype. It leaves excluded
-decoder layers dense. A version 1 checkpoint migrated through `stream-view`
-retains its old GPTQ weights; the migration changes inference semantics but
-does not rerun calibration. Version 2 checkpoints can be migrated the same
-way. Their quality scores describe the migrated weights, not a freshly
-quantized version 3 model.
+decoder layers dense. The packed GPTQ weights are never modified by the
+activation policy; the stream changes runtime activation semantics only.
 Calibration replay uses Torch quantize/dequantize tensors because GPTQ's
 Hessian collector consumes ordinary tensors; inference passes codes and scales
 directly. Replay includes an extra model-dtype rounding step, so exact
 activation codes can differ slightly between calibration and inference.
 
-To evaluate an existing pre-release version 1 checkpoint under the stream
-contract, create a metadata-only version 2 view. This preserves the original
-checkpoint, all packed weights, and any date-frozen chat template. It changes
-runtime activation semantics, so the migrated view needs new quality scores:
-
-```bash
-"$GPTQMODEL_TEST_PYTHON" -m tests.models.w4a_quality_regression stream-view \
-  --checkpoint /root/models/Llama-3.2-1B-Instruct-W4AFP8-quality-2026-09-25 \
-  --view /root/models/Llama-3.2-1B-Instruct-W4AFP8-stream-v2
-```
-
 ## Activation policy reference
 
 `activation` is validated and normalized by `ActivationConfig` in
-`gptqmodel/quantization/config.py`. A bare mode string is shorthand for a
-version-3 stream with that mode:
+`gptqmodel/quantization/config.py`. A bare mode string is shorthand for that
+mode:
 
 ```python
-activation="w4afp8"     # {"version": 3, "mode": "w4afp8"}
-activation="w4a_nvfp4"  # {"version": 3, "mode": "w4a_nvfp4", "recipe": "least_squares"}
+activation="w4afp8"     # {"mode": "w4afp8"}
+activation="w4a_nvfp4"  # {"mode": "w4a_nvfp4", "recipe": "least_squares"}
 ```
 
 The full form, showing every supported field:
@@ -192,7 +175,6 @@ qcfg = QuantizeConfig(
     bits=4, group_size=128, sym=True, desc_act=False, lm_head=False,
     pack_dtype="int32", rotation="hadamard", offload_to_disk=False,
     activation={
-        "version": 4,
         "mode": "w4a_nvfp4",
         "recipe": "least_squares_grid",
         "attention": {"mode": "w4afp8"},
@@ -206,12 +188,11 @@ qcfg = QuantizeConfig(
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `version` | `int` | `3` | Stream policy version. One of `2`, `3`, `4`. |
 | `mode` | `str` | `"w4afp8"` | Default activation format for both projection groups. `w4afp8` or `w4a_nvfp4`. |
 | `recipe` | `str \| None` | `None` | NVFP4 block-scale recipe. Only valid when `mode="w4a_nvfp4"`. |
 | `attention` | `ActivationAttentionConfig \| None` | `None` | Override for the attention projection group. |
 | `mlp` | `ActivationMlpConfig \| None` | `None` | Per-layer override for the MLP projection group. |
-| `global_scales` | `dict[str, float] \| None` | `None` | Calibrated producer-to-scale map. Requires `version=4` and NVFP4. |
+| `global_scales` | `dict[str, float] \| None` | `None` | Calibrated producer-to-scale map. Requires NVFP4. |
 
 ### Modes
 
@@ -224,16 +205,22 @@ qcfg = QuantizeConfig(
 follows NVIDIA's block-scaled FP4 operand layout. Neither mode changes the
 checkpoint weight codebook.
 
-### Versions
+### Transport contract
 
-| Version | Transport contract |
-| --- | --- |
-| `2` | Legacy. Encodes every Linear output, which often adds a rounding immediately before wider arithmetic. Still loadable and reproduces its original numerics. |
-| `3` | Default. Consumer-driven carriers: an encoded operand is emitted only where an FP8/FP4 GEMM or the next decoder layer actually consumes it. |
-| `4` | Version 3 plus the fused token-scale RMSNorm and calibrated producer global scales. Requires `mode="w4a_nvfp4"` and a configured `rotation`. |
+There is one consumer-driven transport contract for each mode. An encoded
+carrier is emitted only where an FP8/FP4 GEMM or the next decoder layer
+actually consumes it; Linear and nonlinear branches otherwise stay in the
+model dtype. The residual stream is always carried in compute precision and
+only GEMM operands are rounded.
 
-Version 1 was an input-only prototype and is rejected. Migrate such a
-checkpoint with `stream-view` before loading it.
+When `rotation` is configured, the rotation folds the RMSNorm weights into the
+q/k/v and gate/up projections and resets the norms to unit weights. The NVFP4
+stream then reuses the incoming FP4 codes and rescales only the token
+multiplier instead of repacking a freshly normed operand. The stream validates
+the unit-weight precondition at install time; without a rotation the norm
+repacks its operand. The RMSNorm code-reuse policy is therefore keyed off the
+rotation (fused norms) and the per-boundary activation mode, not a policy
+version.
 
 ### Recipes
 
@@ -243,15 +230,15 @@ checkpoint with `stream-view` before loading it.
 | Recipe | Block-scale rule |
 | --- | --- |
 | `nvidia` | NVIDIA's max-to-6 rule. No least-squares refinement. |
-| `four_six` | Legacy two-candidate M=4/M=6 search. Kept for version-2 checkpoints that predate the field. |
-| `least_squares` | M=4/M=6 seeds plus monotone least-squares refinement. Default for versions 3 and 4. |
+| `four_six` | Two-candidate M=4/M=6 search. |
+| `least_squares` | M=4/M=6 seeds plus monotone least-squares refinement. Default. |
 | `least_squares_grid` | `least_squares` plus a bounded search over the positive finite E4M3 bit grid. Reproduces an exhaustive search over all 126 hardware scales. |
 | `nvidia_headroom` | `nvidia` plus a calibrated percentile headroom global scale. |
 | `least_squares_headroom` | `least_squares` plus a calibrated percentile headroom global scale. |
 
 Legacy aliases `lsq`, `lsq_headroom`, and `lsq_grid` are expanded to their
-`least_squares` forms on load. A version-2 checkpoint without a `recipe` keeps
-`four_six` rather than silently switching numerics.
+`least_squares` forms on load. An NVFP4 stream without a `recipe` defaults to
+`least_squares`.
 
 ### `attention`
 
@@ -266,8 +253,8 @@ Legacy aliases `lsq`, `lsq_headroom`, and `lsq_grid` are expanded to their
 | `mode` | `str` | `"w4afp8"` | `w4afp8` or `w4a_nvfp4`. |
 | `recipe` | `str \| None` | `None` | NVFP4 attention only; inherits the stream `recipe` when omitted. |
 
-The sub-policy only refines an NVFP4 stream and requires version 3 or 4. FP8
-attention must not carry a `recipe`.
+The sub-policy only refines an NVFP4 stream. FP8 attention must not carry a
+`recipe`.
 
 The default puts attention on FP8 and the MLP on NVFP4. That split is NVIDIA's
 own `nvfp4_w4a4_mlp_fp8_attn_max` recipe, and it matches every measurement in
@@ -291,8 +278,8 @@ to FP8. The saved INT4 weight tensors are unchanged; only the activation
 staging of those layers moves. Promoting every layer is equivalent to an
 all-FP8 MLP.
 
-Like `attention`, this only refines an NVFP4 stream and requires version 3 or
-4. Indices are validated against the decoder depth at install time.
+Like `attention`, this only refines an NVFP4 stream. Indices are validated
+against the decoder depth at install time.
 
 ### `global_scales`
 
@@ -301,24 +288,23 @@ Like `attention`, this only refines an NVFP4 stream and requires version 3 or
 ```
 
 A producer-to-scale map of calibrated FP32 global scales, keyed by the
-producer boundary that emits the tensor. Requires `version=4` and NVFP4, and
-cannot be combined with the `nvidia_headroom` or `least_squares_headroom`
-recipes. Producer names must start with `model.layers.`, and every scale must
-be finite and strictly positive after rounding through FP32.
+producer boundary that emits the tensor. Requires NVFP4, and cannot be
+combined with the `nvidia_headroom` or `least_squares_headroom` recipes.
+Producer names must start with `model.layers.`, and every scale must be finite
+and strictly positive after rounding through FP32.
 
 ### Validation rules
 
 `ActivationConfig` rejects, with a specific message:
 
-- an unknown top-level field, or a missing `version`/`mode`
-- a `version` outside `{2, 3, 4}` and a `mode` outside the two supported modes
-- `version=4` without NVFP4 and a configured rotation
+- an unknown top-level field, including the removed legacy `version` selector
+- a missing `mode`, or a `mode` outside the two supported modes
 - a `recipe` on an FP8 stream
-- `attention` or `mlp` on a non-NVFP4 stream, or below version 3
+- `attention` or `mlp` on a non-NVFP4 stream
 - an unknown field inside `attention` or `mlp`
 - FP8 attention carrying an NVFP4 recipe
 - an `mlp.mode` other than `w4afp8`, or an empty, duplicate, or negative `layers`
-- `global_scales` outside version 4 / NVFP4, or with an invalid producer name or scale
+- `global_scales` on a non-NVFP4 stream, or with an invalid producer name or scale
 
 `QuantizeConfig` additionally requires the weight layout to be GPTQ INT4:
 `method="gptq"`, `bits=4`, `group_size=128`, `sym=True`, `desc_act=False`,
@@ -342,8 +328,8 @@ packed INT4 weights with activations left at W4A16.
 
 | Goal | `activation` | GSM8K Platinum | vs W4A16 |
 | --- | --- | --- | --- |
-| Maximum accuracy | `{"version": 3, "mode": "w4afp8"}` | 0.41853 | +0.33 pp |
-| Balanced (recommended) | `{"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares_grid", "attention": {"mode": "w4afp8"}}` | 0.39206 | -2.32 pp |
+| Maximum accuracy | `{"mode": "w4afp8"}` | 0.41853 | +0.33 pp |
+| Balanced (recommended) | `{"mode": "w4a_nvfp4", "recipe": "least_squares_grid", "attention": {"mode": "w4afp8"}}` | 0.39206 | -2.32 pp |
 | Per-layer promotion | the balanced config plus `"mlp": {"mode": "w4afp8", "layers": [11, 15]}` | 0.39289 | -2.23 pp |
 
 The balanced configuration is the accepted W4A4 operating point: genuine
@@ -434,7 +420,7 @@ calibration recipe.
 
 ## Paired full-row quality regression
 
-The paired runner compares a saved W4A16 baseline with the version 3 W4A
+The paired runner compares a saved W4A16 baseline with the W4A
 activation stream. Both lanes read the same `model.safetensors`
 file, and the runner checks that rendered prompts, targets, and row order match
 before comparing scores. It evaluates all 1,172 ARC-Challenge rows and all
@@ -486,9 +472,9 @@ W4A16 view prepared from that FP4 checkpoint.
 Keep the W4A16 per-row JSON result as baseline data for subsequent activation
 experiments. The comparison computes its score from that file; it does not use
 an observed score as a fixed pass threshold. Llama's chat template inserts the
-current date into each prompt, so freeze the date before making a version 2
-stream view. The dated view shares the original `model.safetensors` file and
-changes only the date expression in its chat template:
+current date into each prompt, so freeze the date before comparing runs. The
+dated view shares the original `model.safetensors` file and changes only the
+date expression in its chat template:
 
 ```bash
 "$GPTQMODEL_TEST_PYTHON" -m tests.models.w4a_quality_regression freeze-date \
@@ -497,10 +483,9 @@ changes only the date expression in its chat template:
   --baseline "$RESULTS/gsm_w4a16.json"
 ```
 
-Use the dated view as the source for `stream-view`, then evaluate its version 2
-view. Paired
-comparison rejects any row whose rendered prompt or target differs from the
-baseline, including a changed date.
+Evaluate the dated view with `quality-eval`. Paired comparison rejects any row
+whose rendered prompt or target differs from the baseline, including a changed
+date.
 
 ### Encoded-stream results on migrated fast checkpoints
 
@@ -730,7 +715,7 @@ A4 error. Result files use
 `gsm_lsrefine_singlepack_hadamard_b32_full64` under
 `/root/models/w4a-quality/`.
 
-### Consumer-driven version 3 stream
+### Consumer-driven stream
 
 Version 2 still encoded every selected Linear output. Q/K/V were quantized and
 immediately decoded for attention; gate/up were quantized and immediately

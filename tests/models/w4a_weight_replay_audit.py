@@ -25,8 +25,8 @@ def weight_replay_model(checkpoint: Path, *, hardware_forward: bool = False):
     from .w4a_quality_regression import prepare_reference
 
     qcfg = _activation_replay_config(checkpoint)
-    if qcfg.activation_version != 4:
-        raise ValueError("Weight replay audit requires the version-4 NVFP4 stream")
+    if qcfg.activation_mode != "w4a_nvfp4" or not getattr(qcfg, "rotation", None):
+        raise ValueError("Weight replay audit requires the fused-norm NVFP4 stream")
     with TemporaryDirectory(prefix="w4a-weight-replay-") as directory:
         reference = prepare_reference(checkpoint, Path(directory) / "w4a16")
         wrapper = GPTQModel.load(str(reference), backend=BACKEND.GPTQ_TORCH,

@@ -55,7 +55,7 @@ def _pair(dtype, parameterization="physical_weight"):
         student, codes, scales, parameterization=parameterization,
     )
     config = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                             activation_version=4, activation_global_scales=None,
+                             activation_global_scales=None,
                              dynamic_get=lambda **_kwargs: None)
     install_w4a_llama_replay(student, config)
     return student, runtime, params, trainable
@@ -234,7 +234,7 @@ def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtyp
     params, modules = _install_trainable_gptq_codes(student, codes, scales,
                                                   parameterization=parameterization)
     policy = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                             activation_version=4, activation_global_scales=None,
+                             activation_global_scales=None,
                              dynamic_get=lambda **_kwargs: None)
     replay.install_w4a_llama_replay(student, policy)
     proxy = NativeForward(student, runtime, modules)

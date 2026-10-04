@@ -1157,7 +1157,7 @@ class BaseQModel(nn.Module):
         )
 
     def calibrate_activations(self, samples: List[torch.Tensor], *, progress=None) -> Dict[str, Any]:
-        """Calibrate a loaded version-4 NVFP4 stream without a GPTQ weight solve.
+        """Calibrate a loaded NVFP4 stream without a GPTQ weight solve.
 
         Samples are unpadded one-dimensional token-ID tensors from a corpus
         disjoint from downstream evaluation. The caller is responsible for
@@ -1461,11 +1461,11 @@ class BaseQModel(nn.Module):
             install_w4a_llama_stream(
                 self.model, self.quantize_config.activation_mode,
                 self.quantize_config.activation_recipe,
-                self.quantize_config.activation_version,
                 global_scales=self.quantize_config.activation_global_scales,
                 attention_mode=self.quantize_config.activation_attention_mode,
                 attention_recipe=self.quantize_config.activation_attention_recipe,
                 mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,
+                fused_norms=bool(self.quantize_config.rotation),
             )
 
         timer = getattr(self, "quant_region_timer", None)

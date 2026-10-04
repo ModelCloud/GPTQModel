@@ -38,10 +38,9 @@ def test_activation_policy_round_trip(tmp_path):
     assert backend_for_activation(cfg.activation_mode, BACKEND.AUTO) == BACKEND.GPTQ_W4AFP8
     cfg.save_pretrained(str(tmp_path))
     loaded = QuantizeConfig.from_pretrained(str(tmp_path))
-    assert loaded.activation == {"version": 3, "mode": "w4afp8"}
-    assert loaded.activation_version == 3
+    assert loaded.activation == {"mode": "w4afp8"}
     assert loaded.pack_dtype == torch.int32
-    with pytest.raises(ValueError, match="Version 1 used input-only rounding"):
+    with pytest.raises(ValueError, match="unsupported field"):
         QuantizeConfig(
             bits=4, group_size=128, sym=True, desc_act=False,
             offload_to_disk=False, activation={"version": 1, "mode": "w4afp8"},

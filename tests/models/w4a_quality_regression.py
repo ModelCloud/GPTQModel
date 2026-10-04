@@ -28,53 +28,6 @@ TASKS = {
 EXPECTED_TEST_ROWS = {"arc_challenge": 1172, "gsm8k_platinum_cot": 1209}
 
 
-def prepare_stream_view(checkpoint: Path, view: Path) -> Path:
-    """Explicitly migrate an earlier policy to the consumer-driven stream.
-
-    The packed GPTQ weights and all tokenizer files are linked unchanged.
-    This only changes the activation execution contract; callers must repeat
-    their quality evaluation before treating the view as a validated model.
-    """
-    source = checkpoint.resolve()
-    if source == view.resolve():
-        raise ValueError("The stream view must be separate from its source checkpoint.")
-    config = json.loads((source / "quantize_config.json").read_text())
-    activation = config.get("activation")
-    if (not isinstance(activation, dict) or activation.get("version") not in {1, 2}
-            or activation.get("mode") not in {"w4afp8", "w4a_nvfp4"}):
-        raise ValueError("Expected a version 1 or version 2 W4A checkpoint.")
-    if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
-        raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
-    migrated = {"version": 3, "mode": activation["mode"]}
-    if activation["mode"] == "w4a_nvfp4":
-        from gptqmodel.quantization.activation_floatx import normalize_nvfp4_recipe
-
-        migrated["recipe"] = normalize_nvfp4_recipe(activation.get("recipe", "four_six"))
-    config["activation"] = migrated
-    view.mkdir(parents=True, exist_ok=True)
-    for item in source.iterdir():
-        if not item.is_file() or item.name == "quantize_config.json":
-            continue
-        target = view / item.name
-        if target.is_symlink() and target.resolve() == item.resolve():
-            continue
-        if target.exists() or target.is_symlink():
-            raise FileExistsError(f"Stream view artifact differs: {target}")
-        target.symlink_to(item.resolve())
-    target = view / "quantize_config.json"
-    payload = json.dumps(config, indent=2) + "\n"
-    if target.exists() and target.read_text() != payload:
-        raise ValueError(f"Stream config differs: {target}")
-    target.write_text(payload)
-    if not (view / "model.safetensors").samefile(source / "model.safetensors"):
-        raise AssertionError("Stream migration must preserve the exact packed-weight tensor file.")
-    print(json.dumps({
-        "source": str(source), "stream_view": str(view), "mode": activation["mode"],
-        "source_version": activation["version"], "target_version": 3,
-    }))
-    return view
-
-
 def prepare_dated_view(checkpoint: Path, view: Path, baseline_result: Path) -> Path:
     """Reuse a checkpoint with the chat-template date captured by a baseline run."""
     source = checkpoint.resolve()
@@ -159,8 +112,6 @@ def prepare_attention_split_view(checkpoint: Path, view: Path,
     activation = config.get("activation")
     if not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4":
         raise ValueError("The attention split requires an NVFP4 W4A checkpoint.")
-    if activation.get("version") not in {3, 4}:
-        raise ValueError("The attention split requires activation version 3 or 4.")
     if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
         raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
     attention = {"mode": attention_mode}
@@ -212,8 +163,6 @@ def prepare_mlp_override_view(checkpoint: Path, view: Path,
     activation = config.get("activation")
     if not isinstance(activation, dict) or activation.get("mode") != "w4a_nvfp4":
         raise ValueError("The MLP override requires an NVFP4 W4A checkpoint.")
-    if activation.get("version") not in {3, 4}:
-        raise ValueError("The MLP override requires activation version 3 or 4.")
     if config.get("bits") != 4 or config.get("pack_dtype") != "int32":
         raise ValueError("The source must retain INT32-packed GPTQ INT4 weights.")
     if "mlp" in activation:
@@ -542,9 +491,6 @@ def main() -> None:
     dated.add_argument("--checkpoint", type=Path, required=True)
     dated.add_argument("--view", type=Path, required=True)
     dated.add_argument("--baseline", type=Path, required=True)
-    stream = sub.add_parser("stream-view")
-    stream.add_argument("--checkpoint", type=Path, required=True)
-    stream.add_argument("--view", type=Path, required=True)
     split = sub.add_parser("split-view")
     split.add_argument("--checkpoint", type=Path, required=True)
     split.add_argument("--view", type=Path, required=True)
@@ -584,8 +530,6 @@ def main() -> None:
         print(f"W4A16 reference: {reference}")
     elif args.command == "freeze-date":
         prepare_dated_view(args.checkpoint, args.view, args.baseline)
-    elif args.command == "stream-view":
-        prepare_stream_view(args.checkpoint, args.view)
     elif args.command == "split-view":
         prepare_attention_split_view(args.checkpoint, args.view, args.attention_mode)
     elif args.command == "mlp-view":

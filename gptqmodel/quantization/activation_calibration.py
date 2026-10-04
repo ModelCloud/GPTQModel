@@ -100,20 +100,18 @@ def calibrate_nvfp4_producers(core, samples, *, quantize_config=None, progress=N
     On failure all producer scales and policy metadata are restored. Callers
     without a config must export the returned scale map themselves.
     """
-    if (getattr(core, "_w4a_stream_version", None) != 4
-            or getattr(core, "_w4a_stream_mode", None) != "w4a_nvfp4"):
-        raise ValueError("Producer calibration requires an installed version-4 NVFP4 stream")
+    if getattr(core, "_w4a_stream_mode", None) != "w4a_nvfp4":
+        raise ValueError("Producer calibration requires an installed NVFP4 stream")
     if core.training:
         raise ValueError("Producer calibration requires evaluation mode")
     layers = core.model.layers
-    if not samples or any(getattr(layer, "_w4a_stream_version", None) != 4 for layer in layers):
-        raise ValueError("Calibration requires samples and complete version-4 decoder coverage")
+    if not samples:
+        raise ValueError("Calibration requires samples")
     recipe = core._w4a_stream_recipe
     if recipe not in {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
         raise ValueError("Producer calibration cannot use legacy headroom recipes")
     if quantize_config is not None and (
             quantize_config.activation_mode != "w4a_nvfp4"
-            or quantize_config.activation_version != 4
             or quantize_config.activation_recipe != recipe):
         raise ValueError("The save configuration must match the installed producer policy")
     # Enumerate only the boundaries the installed policy actually stages as

@@ -41,6 +41,20 @@ def layer_mlp_policy(layer_index: int, mode: str, recipe: str | None,
     return ("w4afp8", None) if layer_index in mlp_fp8_layers else (mode, recipe)
 
 
+def norm_codes_fused(norm: torch.nn.Module) -> bool:
+    """Return whether an RMSNorm carries unit weights after norm fusion.
+
+    The Hadamard rotation folds the norm weights into q/k/v and gate/up and
+    resets the norm to unit weights. The unit-weight check is only meaningful
+    together with an enabled rotation, because a fresh RMSNorm is also all
+    ones; callers must pass ``fused_norms`` from the rotation policy.
+    """
+    weight = getattr(norm, "weight", None)
+    if weight is None or getattr(weight, "is_meta", False) or weight.device.type == "meta":
+        return False
+    return bool((weight == 1).all())
+
+
 def boundary_is_nvfp4(boundary: str, key: str, *, attention_mode: str, mode: str,
                       recipe: str | None, mlp_fp8_layers) -> bool:
     """Return whether a producer boundary carries an NVFP4 carrier.
