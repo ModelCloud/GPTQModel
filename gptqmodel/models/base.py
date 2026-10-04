@@ -1462,6 +1462,7 @@ class BaseQModel(nn.Module):
                 self.model, self.quantize_config.activation_mode,
                 self.quantize_config.activation_recipe,
                 self.quantize_config.activation_version,
+                global_scales=self.quantize_config.activation_global_scales,
                 attention_mode=self.quantize_config.activation_attention_mode,
                 attention_recipe=self.quantize_config.activation_attention_recipe,
                 mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,

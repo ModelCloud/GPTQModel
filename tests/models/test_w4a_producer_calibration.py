@@ -139,6 +139,78 @@ def _tiny_stream(scales=None, dtype=torch.bfloat16):
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
                     reason="GB10 required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_headroom_norm_scale_follows_attention_and_mlp_policies(dtype):
+    """An FP8 MLP promotion must not drop the attention headroom norm scale.
+
+    The headroom setup previously keyed off the MLP policy alone, so a
+    version-3 stream with NVFP4 headroom attention and a promoted FP8 MLP left
+    the input norm without its global scale and raised on the first norm call.
+    """
+    norm_scale = "_w4a_output_global_" + "scale"
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    install_w4a_llama_stream(
+        packed, "w4a_nvfp4", "nvidia_headroom", version=3,
+        attention_mode="w4a_nvfp4", attention_recipe="nvidia_headroom",
+        mlp_fp8_layers=(0,),
+    )
+    layer0, layer1 = packed.model.layers
+    assert getattr(layer0.input_layernorm, norm_scale, None) is not None
+    assert getattr(layer1.input_layernorm, norm_scale, None) is not None
+    # Layer 0's MLP is FP8, so its post-attention norm owns no NVFP4 scale.
+    assert not hasattr(layer0.post_attention_layernorm, norm_scale)
+    assert getattr(layer1.post_attention_layernorm, norm_scale, None) is not None
+    with torch.inference_mode():
+        logits = packed(input_ids=torch.arange(17, device="cuda")[None], use_cache=False).logits
+    assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_fp8_attention_does_not_demand_qkv_headroom_scales(dtype):
+    """An FP8 attention side must not validate scales it never consumes."""
+    norm_scale = "_w4a_output_global_" + "scale"
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    layer0 = packed.model.layers[0]
+    # Distinct Q/K/V buffers would fail a shared-carrier check if it ran.
+    layer0.self_attn.q_proj.activation_global_scale.fill_(0.01)
+    layer0.self_attn.k_proj.activation_global_scale.fill_(0.02)
+    layer0.self_attn.v_proj.activation_global_scale.fill_(0.03)
+    install_w4a_llama_stream(
+        packed, "w4a_nvfp4", "nvidia_headroom", version=3,
+        attention_mode="w4afp8", attention_recipe=None,
+        mlp_fp8_layers=(),
+    )
+    assert not hasattr(layer0.input_layernorm, norm_scale)
+    assert getattr(layer0.post_attention_layernorm, norm_scale, None) is not None
+    with torch.inference_mode():
+        logits = packed(input_ids=torch.arange(17, device="cuda")[None], use_cache=False).logits
+    assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
+    """NVFP4 headroom attention with a dynamic MLP still owns its norm scale."""
+    norm_scale = "_w4a_output_global_" + "scale"
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    install_w4a_llama_stream(
+        packed, "w4a_nvfp4", "least_squares", version=3,
+        attention_mode="w4a_nvfp4", attention_recipe="nvidia_headroom",
+        mlp_fp8_layers=(),
+    )
+    layer0 = packed.model.layers[0]
+    assert getattr(layer0.input_layernorm, norm_scale, None) is not None
+    assert not hasattr(layer0.post_attention_layernorm, norm_scale)
+    with torch.inference_mode():
+        logits = packed(input_ids=torch.arange(17, device="cuda")[None], use_cache=False).logits
+    assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_v4_replay_norm_operand_matches_actual_encoded_runtime_and_independent_oracle(dtype):
     from types import SimpleNamespace
 

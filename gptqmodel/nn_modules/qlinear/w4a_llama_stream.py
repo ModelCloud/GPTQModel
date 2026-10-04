@@ -400,27 +400,36 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         layer._w4a_stream_recipe = recipe
         layer._w4a_stream_version = version
         layer._w4a_stream_require_input = index > 0 and selected[index - 1]
-        if (layer_mlp_mode == "w4a_nvfp4"
-                and layer_mlp_recipe in {"nvidia_headroom", "least_squares_headroom"}):
+        # A headroom boundary needs the frozen global scale of the projections
+        # that consume its normed operand. Attention and MLP carry independent
+        # policies, so resolve each side from its own policy: a layer promoted
+        # to FP8 must not disable the other side's headroom scale, and an FP8
+        # side must not demand scales it will never consume.
+        attention_headroom = (
+            attention_mode == "w4a_nvfp4"
+            and attention_recipe in {"nvidia_headroom", "least_squares_headroom"}
+        )
+        if attention_headroom:
             qkv_scales = [
                 layer.self_attn.q_proj.activation_global_scale,
                 layer.self_attn.k_proj.activation_global_scale,
                 layer.self_attn.v_proj.activation_global_scale,
             ]
+            if not all(torch.equal(qkv_scales[0], value) for value in qkv_scales[1:]):
+                raise ValueError("Shared Q/K/V NVFP4 carriers require identical calibrated scales.")
+            layer.input_layernorm._w4a_output_global_scale = qkv_scales[0]
+        mlp_headroom = (
+            layer_mlp_mode == "w4a_nvfp4"
+            and layer_mlp_recipe in {"nvidia_headroom", "least_squares_headroom"}
+        )
+        if mlp_headroom:
             gate_up_scales = [
                 layer.mlp.gate_proj.activation_global_scale,
                 layer.mlp.up_proj.activation_global_scale,
             ]
-            if not all(torch.equal(qkv_scales[0], value) for value in qkv_scales[1:]):
-                raise ValueError("Shared Q/K/V NVFP4 carriers require identical calibrated scales.")
             if not torch.equal(gate_up_scales[0], gate_up_scales[1]):
                 raise ValueError("Shared gate/up NVFP4 carriers require identical calibrated scales.")
-            layer.input_layernorm._w4a_output_global_scale = (
-                qkv_scales[0]
-            )
-            layer.post_attention_layernorm._w4a_output_global_scale = (
-                gate_up_scales[0]
-            )
+            layer.post_attention_layernorm._w4a_output_global_scale = gate_up_scales[0]
         _bind_forward(layer, _layer_forward)
         _bind_forward(layer.self_attn, _attention_forward)
         _bind_forward(layer.mlp, _mlp_forward)

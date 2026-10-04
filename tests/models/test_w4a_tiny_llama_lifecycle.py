@@ -315,3 +315,62 @@ def test_calibrated_producers_survive_standard_model_save(tmp_path):
     with torch.inference_mode():
         actual = restored.model(input_ids=samples[0][None].cuda(), use_cache=False).logits.cpu()
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+    reason="GB10 / SM121 required",
+)
+def test_fixed_producer_scales_installed_during_fresh_quantization(tmp_path):
+    """Configured fixed producer scales must reach the post-quantize install.
+
+    The end-of-quantize installation omitted
+    ``global_scales=quantize_config.activation_global_scales``, so the freshly
+    quantized model used dynamic producers while the reloaded checkpoint used
+    the configured map.
+    """
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import (
+        NVFP4BoundaryQuantizer,
+        llama_nvfp4_boundaries,
+    )
+
+    source = tmp_path / "source"
+    saved = tmp_path / "quantized"
+    source.mkdir()
+    tokenizer = _tokenizer()
+    config = LlamaConfig(
+        vocab_size=32, hidden_size=128, intermediate_size=256,
+        num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+        max_position_embeddings=256, bos_token_id=2, eos_token_id=3, pad_token_id=1,
+    )
+    LlamaForCausalLM(config).save_pretrained(source)
+    tokenizer.save_pretrained(source)
+    probe = LlamaForCausalLM(config)
+    keys = [key for _, _, key in llama_nvfp4_boundaries(probe.model.layers, [True, True])]
+    # 0.01171875 = 3 * 2**-8 is exactly representable in FP32.
+    fixed = dict.fromkeys(keys, 0.01171875)
+    qcfg = QuantizeConfig(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        activation={"version": 4, "mode": "w4a_nvfp4", "recipe": "least_squares",
+                    "global_scales": fixed},
+        rotation="hadamard", offload_to_disk=False,
+    )
+    model = GPTQModel.load(str(source), qcfg, device="cuda", dtype=torch.bfloat16)
+    calibration = [
+        "A short calibration sentence about a fox. A short calibration sentence about a fox.",
+        "Another sentence about the moon. Another sentence about the moon.",
+    ]
+    model.quantize(calibration, batch_size=1, backend=BACKEND.GPTQ_W4A_NVFP4)
+    assert model.model._w4a_stream_global_scales == fixed
+    quantizers = [module for module in model.model.modules()
+                  if isinstance(module, NVFP4BoundaryQuantizer)]
+    assert len(quantizers) == len(fixed)
+    assert all(module.calibrated and module.global_scale.item() == 0.01171875
+               for module in quantizers)
+    model.save(str(saved))
+    loaded = GPTQModel.load(str(saved), backend=BACKEND.AUTO, device="cuda", dtype=torch.bfloat16)
+    assert loaded.model._w4a_stream_global_scales == fixed
+    loaded_quantizers = [module for module in loaded.model.modules()
+                         if isinstance(module, NVFP4BoundaryQuantizer)]
+    assert all(module.calibrated and module.global_scale.item() == 0.01171875
+               for module in loaded_quantizers)
