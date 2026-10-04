@@ -430,7 +430,7 @@ def test_replay_preserves_pristine_residual_with_zero_branches(mode):
     layer.self_attn.forward = lambda hidden_states, **_kwargs: (
         torch.zeros_like(hidden_states), None,
     )
-    layer.mlp.forward = lambda hidden_states: torch.zeros_like(hidden_states)
+    layer.mlp.forward = torch.zeros_like
     captured = []
     layer.register_forward_hook(lambda _module, _args, out: captured.append(out))
     ids = torch.tensor([[1, 7, 3]], dtype=torch.long)
