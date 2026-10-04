@@ -24,15 +24,88 @@ def test_hardware_value_rejects_broadcasting():
         hardware_value(torch.zeros(3, 2), torch.zeros(2))
 
 
-def _pair(dtype, parameterization="physical_weight"):
+def test_producer_capture_covers_boundaries_without_nvfp4_quantizers():
+    """A mixed stream stages some residuals as FP8 carriers with no quantizer.
+
+    The student wrapper substitutes the pristine input, post-attention
+    residual, and output for every layer, so the capture must not depend on an
+    NVFP4 quantizer owning the boundary.
+    """
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer
+
+    class _FakeNorm(torch.nn.Module):
+        def forward(self, value):
+            return value
+
+    class _FakeLayer(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.post_attention_layernorm = _FakeNorm()
+
+        def forward(self, hidden_states):
+            self.post_attention_layernorm(hidden_states + 1)
+            return hidden_states + 2
+
+    class _FakeRuntime(torch.nn.Module):
+        def __init__(self, layers):
+            super().__init__()
+            self.model = torch.nn.Module()
+            self.model.layers = torch.nn.ModuleList(layers)
+
+        def forward(self, hidden_states):
+            for layer in self.model.layers:
+                hidden_states = layer(hidden_states)
+            return hidden_states
+
+    proxy = HardwareForward.__new__(HardwareForward)
+    proxy.values = {}
+    proxy.handles = []
+    proxy.capture_active = False
+    proxy.active = False
+    proxy.producer_keys = []
+    runtime = _FakeRuntime([_FakeLayer(), _FakeLayer()])
+    # Only one boundary owns an NVFP4 quantizer; the rest are FP8 in a mixed
+    # stream and must still be captured.
+    runtime.model.layers[0].add_module(
+        "_w4a_attention_residual_quantizer",
+        NVFP4BoundaryQuantizer("model.layers.0.post_attention_residual", "cpu"),
+    )
+    try:
+        proxy._install_producer_capture(runtime)
+        for index in range(2):
+            prefix = f"model.layers.{index}"
+            for suffix in ("input", "post_attention_residual", "output"):
+                assert f"{prefix}.{suffix}" in proxy.producer_keys
+        proxy.capture_active = True
+        ids = torch.arange(4, dtype=torch.float32).reshape(1, 4)
+        runtime(ids)
+        proxy.active = True
+        for index in range(2):
+            prefix = f"model.layers.{index}"
+            for suffix in ("input", "post_attention_residual", "output"):
+                key = ("producer", f"{prefix}.{suffix}")
+                assert key in proxy.values, key
+                surrogate = torch.zeros_like(proxy.values[key])
+                proxy.replace(surrogate, key)
+    finally:
+        for handle in proxy.handles:
+            handle.remove()
+
+
+def _pair(dtype, parameterization="physical_weight", *, attention_mode=None, mlp_fp8_layers=None):
     from transformers import LlamaForCausalLM
 
     from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+    from gptqmodel.nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
     from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
-    from tests.models.test_w4a_producer_calibration import _tiny_stream
+    from tests.models.test_w4a_producer_calibration import _tiny_packed_nvfp4
     from tests.models.w4a_nvfp4_weight_qad import _install_trainable_gptq_codes
 
-    runtime = _tiny_stream(dtype=dtype)
+    runtime = _tiny_packed_nvfp4(dtype=dtype)
+    install_w4a_llama_stream(
+        runtime, "w4a_nvfp4", "least_squares",
+        attention_mode=attention_mode, mlp_fp8_layers=mlp_fp8_layers,
+    )
     student = LlamaForCausalLM(runtime.config).to(device="cuda", dtype=dtype).train()
     for runtime_layer, student_layer in zip(runtime.model.layers, student.model.layers, strict=True):
         runtime_layer.mlp.down_proj.online_full_had = True
@@ -54,9 +127,14 @@ def _pair(dtype, parameterization="physical_weight"):
     params, trainable = _install_trainable_gptq_codes(
         student, codes, scales, parameterization=parameterization,
     )
-    config = SimpleNamespace(activation_mode="w4a_nvfp4", activation_recipe="least_squares",
-                             activation_global_scales=None,
-                             dynamic_get=lambda **_kwargs: None)
+    config = SimpleNamespace(
+        activation_mode="w4a_nvfp4", activation_recipe="least_squares",
+        activation_global_scales=None, rotation=None,
+        activation_attention_mode=attention_mode,
+        activation_attention_recipe=None,
+        activation_mlp_fp8_layers=mlp_fp8_layers,
+        dynamic_get=lambda **_kwargs: None,
+    )
     install_w4a_llama_replay(student, config)
     return student, runtime, params, trainable
 
@@ -181,6 +259,32 @@ def test_code_refresh_and_frame_lifetime(parameterization):
                 with proxy.frame(ids):
                     pass
         assert not proxy.values and proxy.logits is None
+    finally:
+        proxy.close()
+
+
+@GB10
+@pytest.mark.parametrize("override", [
+    {"attention_mode": "w4afp8", "mlp_fp8_layers": None},
+    {"attention_mode": None, "mlp_fp8_layers": (0,)},
+])
+def test_hardware_forward_supports_mixed_stream_boundaries(override):
+    """FP8 attention or MLP boundaries own no NVFP4 quantizer for their layer.
+
+    The student wrapper still requests the pristine input,
+    post-attention-residual, and output values, so the capture must not depend
+    on an NVFP4 quantizer owning the boundary.
+    """
+    student, runtime, _params, trainable = _pair(
+        torch.bfloat16, "physical_weight", **override
+    )
+    proxy = HardwareForward(student, runtime, trainable)
+    ids = torch.arange(17, device="cuda")[None]
+    try:
+        with proxy.frame(ids) as frame:
+            actual = student(input_ids=ids, use_cache=False).logits
+            torch.testing.assert_close(actual, frame.logits, rtol=0, atol=0)
+            actual.float().square().mean().backward()
     finally:
         proxy.close()
 

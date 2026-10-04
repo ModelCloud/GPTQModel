@@ -691,6 +691,102 @@ def test_headroom_probe_uses_per_layer_mlp_override(mlp_layers, headroom):
         assert named.full_name not in processor._activation_global_scales
         assert named.full_name not in processor._activation_amax
 
+
+def _headroom_replay_model(activation, dtype=torch.bfloat16):
+    from transformers import LlamaConfig, LlamaForCausalLM
+
+    config = LlamaConfig(vocab_size=64, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=1, num_attention_heads=4, num_key_value_heads=4,
+                         max_position_embeddings=64)
+    model = LlamaForCausalLM(config).to(dtype).eval()
+    for layer in model.model.layers:
+        for parent in (layer.self_attn, layer.mlp):
+            for name, child in list(parent.named_children()):
+                if isinstance(child, torch.nn.Linear):
+                    setattr(parent, name, HookedLinear.from_linear(child))
+    install_w4a_llama_replay(
+        model,
+        QuantizeConfig(bits=4, group_size=128, sym=True, desc_act=False, activation=activation),
+    )
+    return model
+
+
+@pytest.mark.parametrize("activation,leaves,target_leaf,norm_name", [
+    ({"mode": "w4a_nvfp4", "recipe": "nvidia_headroom"},
+     ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+     "self_attn.q_proj", "input_layernorm"),
+    ({"mode": "w4a_nvfp4", "recipe": "nvidia_headroom"},
+     ("mlp.gate_proj", "mlp.up_proj"), "mlp.gate_proj", "post_attention_layernorm"),
+    ({"mode": "w4a_nvfp4", "recipe": "least_squares",
+      "attention": {"mode": "w4a_nvfp4", "recipe": "nvidia_headroom"}},
+     ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj"),
+     "self_attn.q_proj", "input_layernorm"),
+    ({"mode": "w4a_nvfp4", "recipe": "nvidia_headroom", "attention": {"mode": "w4afp8"}},
+     ("mlp.gate_proj", "mlp.up_proj"), "mlp.gate_proj", "post_attention_layernorm"),
+])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_installed_norm_replay_uses_frozen_headroom_scale(monkeypatch, activation, leaves,
+                                                          target_leaf, norm_name, dtype):
+    """The norm producer must match the deployed headroom operand.
+
+    A headroom probe freezes its scale on the consuming projections. The norm
+    that feeds those projections must bypass rounding while probing and then
+    pack with the same frozen scale during capture, or the GPTQ Hessian learns
+    a different operand than deployment executes.
+    """
+    import gptqmodel.nn_modules.qlinear.w4a_llama_replay as replay
+
+    model = _headroom_replay_model(activation, dtype)
+    processor = _headroom_probe_processor(activation)
+    layer = model.model.layers[0]
+    subset = {}
+    for leaf in leaves:
+        parent, child = leaf.split(".")
+        module = getattr(getattr(layer, parent), child)
+        subset[leaf] = NamedModule(module, leaf, f"model.layers.0.{leaf}", 0)
+    parent, child = target_leaf.split(".")
+    target = getattr(getattr(layer, parent), child)
+    seen = []
+    target.register_forward_pre_hook(lambda _m, args: seen.append(args[0].clone()))
+    ids = torch.arange(16)[None]
+
+    assert processor.begin_activation_scale_probe(subset) is True
+    with torch.no_grad():
+        model(input_ids=ids, use_cache=False)
+    probe_input = seen[-1]
+    for leaf, named in subset.items():
+        processor._record_activation_amax(leaf, seen[-1], named.module)
+    processor.end_activation_scale_probe(subset)
+    scale = processor._activation_global_scales[subset[target_leaf].full_name]
+    assert scale > 0
+    assert getattr(target, "_w4a_headroom_probe") is False
+
+    pristine = {}
+    norm_module = getattr(layer, norm_name)
+    original_norm = replay._replay_norm
+
+    def spy(norm, pristine_value, rounded, mode, recipe, *, preserve_codes, consumers=()):
+        pristine[norm] = pristine_value.detach().clone()
+        return original_norm(norm, pristine_value, rounded, mode, recipe,
+                             preserve_codes=preserve_codes, consumers=consumers)
+
+    monkeypatch.setattr(replay, "_replay_norm", spy)
+    seen.clear()
+    with torch.no_grad():
+        model(input_ids=ids, use_cache=False)
+    capture_input = seen[-1]
+
+    x = pristine[norm_module].float()
+    variance = x.square().mean(dim=-1, keepdim=True)
+    y = x * torch.rsqrt(variance + norm_module.variance_epsilon) * norm_module.weight.float()
+    recipe = processor._target_recipe(subset[target_leaf].full_name, target)
+    reference = nvfp4_block_qdq(y, scale, recipe)
+    torch.testing.assert_close(capture_input.float(), reference, rtol=0, atol=0)
+    # The probe must have collected the true normed operand, not a dynamically
+    # rounded stand-in that happens to share the capture's numerics.
+    assert not torch.equal(probe_input.float(), capture_input.float())
+
+
 def test_hooked_linear_uses_frozen_nvidia_headroom_input_scale():
     dense = torch.nn.Linear(128, 128, bias=False, dtype=torch.float32).eval()
     dense.weight.data.copy_(torch.eye(128))

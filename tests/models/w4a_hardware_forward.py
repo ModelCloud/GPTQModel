@@ -44,7 +44,6 @@ def hardware_value(surrogate, actual):
 class HardwareForward:
     def __init__(self, student, runtime, weight_modules):
         from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
-        from gptqmodel.nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer
         from gptqmodel.nn_modules.qlinear.w4a_llama_stream import _bind_forward
         from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
@@ -104,13 +103,7 @@ class HardwareForward:
                 self.handles.extend([proxy.register_forward_pre_hook(use_input),
                                      proxy.register_forward_hook(use_output)])
             self.producer_keys = []
-            for module in runtime.modules():
-                if isinstance(module, NVFP4BoundaryQuantizer):
-                    self.producer_keys.append(module.key)
-                    def capture_boundary(module, _args, value):
-                        if self.capture_active:
-                            self.values[("producer", module.key)] = _pristine(value)
-                    self.handles.append(module.register_forward_hook(capture_boundary))
+            self._install_producer_capture(runtime)
             for index, layer in enumerate(student.model.layers):
                 prefix = f"model.layers.{index}"
                 original = getattr(layer, "_old_forward", layer.forward)
@@ -141,6 +134,46 @@ class HardwareForward:
         except BaseException:
             self.close()
             raise
+
+    def _install_producer_capture(self, runtime):
+        """Capture pristine residual boundaries independent of the carrier mode.
+
+        A mixed stream stages some residual boundaries as FP8 carriers, which
+        own no NVFP4 quantizer. Capture every layer's input, post-attention
+        residual, and output from the layer forward so the student can
+        substitute the pristine boundary regardless of the per-boundary
+        activation mode. NVFP4 quantizer hooks remain for the packed-carrier
+        value they own.
+        """
+        from gptqmodel.nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer
+
+        for module in runtime.modules():
+            if isinstance(module, NVFP4BoundaryQuantizer):
+                self.producer_keys.append(module.key)
+                def capture_boundary(module, _args, value):
+                    if self.capture_active:
+                        self.values[("producer", module.key)] = _pristine(value)
+                self.handles.append(module.register_forward_hook(capture_boundary))
+        for index, layer in enumerate(runtime.model.layers):
+            prefix = f"model.layers.{index}"
+            self.producer_keys.extend(
+                f"{prefix}.{suffix}" for suffix in ("input", "post_attention_residual", "output")
+            )
+            def capture_layer_input(_module, args, *, prefix=prefix):
+                if self.capture_active and args:
+                    self.values[("producer", f"{prefix}.input")] = _pristine(args[0])
+            def capture_layer_output(_module, _args, value, *, prefix=prefix):
+                if self.capture_active:
+                    self.values[("producer", f"{prefix}.output")] = _pristine(value)
+            def capture_post_attention(_module, args, *, prefix=prefix):
+                if self.capture_active and args:
+                    self.values[("producer", f"{prefix}.post_attention_residual")] = _pristine(args[0])
+            self.handles.extend([
+                layer.register_forward_pre_hook(capture_layer_input),
+                layer.register_forward_hook(capture_layer_output),
+                layer.post_attention_layernorm.register_forward_pre_hook(capture_post_attention),
+            ])
+        self.producer_keys = sorted(set(self.producer_keys))
 
     def replace(self, value, key):
         if not self.active or key not in self.values:
