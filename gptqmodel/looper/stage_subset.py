@@ -955,7 +955,8 @@ def _run_single_subset_pass(
             begin_scale_probe = getattr(processor, "begin_activation_scale_probe", None)
             end_scale_probe = getattr(processor, "end_activation_scale_probe", None)
             probing_scales = bool(
-                callable(begin_scale_probe)
+                getattr(getattr(processor, "qcfg", None), "activation_mode", None) == "w4a_nvfp4"
+                and callable(begin_scale_probe)
                 and begin_scale_probe(subset, layer=module)
             )
             if probing_scales:

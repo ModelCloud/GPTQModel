@@ -171,6 +171,27 @@ directly. Replay retains decoded GEMM operands in FP32 to avoid an extra
 FP16/BF16 round trip before the GEMM. Projection results return to the model
 dtype, matching inference.
 
+## Ordinary quantization compatibility
+
+Omitting `activation` keeps the ordinary GPTQ, AWQ, or weight-only lifecycle.
+The saved config omits that field, backend selection keeps its existing order,
+and the W4A backends have zero AUTO-selection priority. NVFP4 statistics and
+scale probes run only for an explicit NVFP4 policy. The existing kernel
+discovery process may import W4A module definitions; selecting an ordinary
+backend does not activate their calibration, transport, weight caches, or
+export paths.
+
+`tests/models/test_non_w4a_lifecycle.py` guards those opt-in helpers with failing
+sentinels while exercising GPTQ, AWQ, and RTN quantize/save/load/re-export,
+including lazy offload, FP16/BF16, GPTQ act-order, asymmetric weights, and
+rotation. It checks ordinary tensor inputs and outputs, generated tokens,
+saved configuration, native packed weights, and bias handling during dense
+dequantization. The guarded runner accepts this suite:
+
+```bash
+tests/models/run_w4a_gb10_safe.sh tests/models/test_non_w4a_lifecycle.py
+```
+
 ## Activation policy reference
 
 `activation` is validated and normalized by `ActivationConfig` in

@@ -533,11 +533,13 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
 
+        capture_nvfp4 = getattr(getattr(self, "qcfg", None), "activation_mode", None) == "w4a_nvfp4"
         if self.shared_input_leader(name) is not None:
             def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
                 """Follower of a shared-input group: the leader collects this module's Hessian."""
 
-                self._record_activation_amax(name, inp[0], module)
+                if capture_nvfp4:
+                    self._record_activation_amax(name, inp[0], module)
                 del module, inp, out
             return skip
 
@@ -547,10 +549,11 @@ class GPTQProcessor(LoopProcessor):
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
-            self._record_activation_amax(name, inp_tensor, module)
-            if self._activation_headroom_probe:
-                del inp, out
-                return
+            if capture_nvfp4:
+                self._record_activation_amax(name, inp_tensor, module)
+                if self._activation_headroom_probe:
+                    del inp, out
+                    return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
 
             if (
