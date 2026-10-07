@@ -247,9 +247,9 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
     grid; every other layer keeps the stream default.
 
     ``fused_norms`` states that the rotation folded the RMSNorm weights into
-    the projections and reset the norms to unit weights. Only then does the
-    NVFP4 stream reuse the incoming codes and rescale the token multiplier
-    instead of repacking a freshly normed operand.
+    the projections and reset the norms to unit weights. Non-headroom NVFP4
+    recipes can then reuse incoming codes and rescale the token multiplier.
+    Headroom recipes always pack the normalized operand with its frozen scale.
 
     A partial decoder selection is rejected so its remaining projections
     cannot silently convert the stream back to ordinary BF16 tensors.
@@ -433,12 +433,15 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         _bind_forward(layer, _layer_forward)
         _bind_forward(layer.self_attn, _attention_forward)
         _bind_forward(layer.mlp, _mlp_forward)
+        # Headroom probes calibrate the normalized operand. Even fused norms
+        # must pack that value with the frozen scale rather than reuse the
+        # residual producer's dynamically scaled codes.
         layer.input_layernorm._w4a_preserve_norm_codes = (
-            fused_norms and attention_mode == "w4a_nvfp4"
+            fused_norms and attention_mode == "w4a_nvfp4" and not attention_headroom
             and norm_codes_fused(layer.input_layernorm)
         )
         layer.post_attention_layernorm._w4a_preserve_norm_codes = (
-            fused_norms and layer_mlp_mode == "w4a_nvfp4"
+            fused_norms and layer_mlp_mode == "w4a_nvfp4" and not mlp_headroom
             and norm_codes_fused(layer.post_attention_layernorm)
         )
         _bind_forward(layer.input_layernorm, _norm_forward)

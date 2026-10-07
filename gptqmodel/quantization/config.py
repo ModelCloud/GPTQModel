@@ -1406,9 +1406,11 @@ class ActivationConfig:
     Modes:
         `w4afp8`: E4M3 codes with one FP32 scale per token.
         `w4a_nvfp4`: E2M1 codes with one E4M3 scale per 16-element block plus
-            one FP32 global scale per tensor. The RMSNorm code-reuse shortcut
-            engages only when the norm weights are fused into the projections
-            (Hadamard rotation), which the stream validates at install time.
+            one FP32 global scale per tensor. For non-headroom recipes, the
+            RMSNorm code-reuse shortcut engages when the norm weights are
+            fused into the projections (Hadamard rotation), which the stream
+            validates at install time. Headroom recipes pack the normalized
+            operand with its calibrated scale even when the norms are fused.
 
     A bare string (`activation="w4afp8"`) is shorthand for that mode. A dict
     may add `recipe`, `attention`, `mlp`, and `global_scales`.
@@ -1456,7 +1458,10 @@ class ActivationConfig:
                 raise ValueError(
                     "ActivationConfig: calibrated producer scales require NVFP4."
                 )
-            if self.recipe not in {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
+            producer_recipes = {self.recipe}
+            if self.attention is not None and self.attention.mode == "w4a_nvfp4":
+                producer_recipes.add(self.attention.recipe)
+            if not producer_recipes <= {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
                 raise ValueError(
                     "ActivationConfig: producer global_scales cannot be combined with legacy "
                     "headroom recipes."

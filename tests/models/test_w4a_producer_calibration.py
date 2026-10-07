@@ -218,6 +218,115 @@ def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
                     reason="GB10 required")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("fused_norms", [False, True])
+@pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
+@pytest.mark.parametrize("group,mixed", [("self_attn", False), ("mlp", False),
+                                        ("self_attn", True), ("mlp", True)])
+def test_headroom_probe_capture_and_native_norm_share_operands(monkeypatch, dtype, fused_norms,
+                                                               recipe, group, mixed):
+    """Exercise real probe/freeze hooks and hardware packing on identical norm sources."""
+    from gptqmodel.looper.named_module import NamedModule
+    from gptqmodel.nn_modules.hooked_linear import HookedLinear
+    from gptqmodel.nn_modules.qlinear import w4a_llama_replay as replay
+    from gptqmodel.nn_modules.qlinear.w4a_boundary import pack_boundary
+    from tests.models.test_w4a_replay_stream import _headroom_probe_processor
+
+    activation = {"mode": "w4a_nvfp4", "recipe": recipe}
+    if mixed:
+        if group == "self_attn":
+            activation.update(recipe="least_squares", attention={"mode": "w4a_nvfp4", "recipe": recipe},
+                              mlp={"mode": "w4afp8", "layers": [0]})
+        else:
+            activation["attention"] = {"mode": "w4afp8"}
+    processor = _headroom_probe_processor(activation)
+    processor.qcfg.rotation = "hadamard" if fused_norms else None
+    runtime = _tiny_packed_nvfp4(dtype=dtype)
+    torch.manual_seed(194)
+    model = LlamaForCausalLM(runtime.config).to(device="cuda", dtype=dtype).eval()
+    replay.install_w4a_llama_replay(model, processor.qcfg)
+    layer = model.model.layers[0]
+    leaves = ("q_proj", "k_proj", "v_proj") if group == "self_attn" else ("gate_proj", "up_proj")
+    norm_name = "input_layernorm" if group == "self_attn" else "post_attention_layernorm"
+    norm = getattr(layer, norm_name)
+    subset, captured, pristine = {}, {}, {}
+    for leaf in leaves:
+        parent = getattr(layer, group)
+        module = HookedLinear.from_linear(getattr(parent, leaf))
+        setattr(parent, leaf, module)
+        path = f"{group}.{leaf}"
+        subset[path] = NamedModule(module, path, f"model.layers.0.{path}", 0)
+
+        def collect(module, args, output, path=path):
+            captured[path] = args[0].detach().clone()
+            processor._record_activation_amax(path, args[0], module)
+
+        module.forward_hook = collect
+
+    original_norm = replay._replay_norm
+
+    def observe(norm_module, source, rounded, *args, **kwargs):
+        if norm_module is norm:
+            pristine["source"] = source.detach().clone()
+        return original_norm(norm_module, source, rounded, *args, **kwargs)
+
+    monkeypatch.setattr(replay, "_replay_norm", observe)
+    ids = torch.arange(17, device="cuda")[None]
+    with torch.inference_mode():
+        assert processor.begin_activation_scale_probe(subset, layer=layer)
+        model(input_ids=ids, use_cache=False)
+        source = pristine["source"].float()
+        normed = source * torch.rsqrt(source.square().mean(-1, keepdim=True) + norm.variance_epsilon)
+        for value in captured.values():
+            torch.testing.assert_close(value, normed, rtol=0, atol=0)
+        processor.end_activation_scale_probe(subset, layer=layer)
+        model(input_ids=ids, use_cache=False)
+        scale = next(iter(processor._activation_global_scales.values()))
+        assert all(value == scale for value in processor._activation_global_scales.values())
+        source = pristine["source"]
+        normed = source.float() * torch.rsqrt(source.float().square().mean(-1, keepdim=True)
+                                             + norm.variance_epsilon)
+        frozen = torch.tensor(scale, dtype=torch.float32, device="cuda")
+        if recipe == "least_squares_headroom":
+            expected = _independent_nvfp4_qdq(normed, frozen)
+        else:
+            # Independent NVIDIA max-to-6 oracle, with even E2M1 codes first
+            # so codebook search resolves exact ties to even.
+            blocks = normed.reshape(-1, 8, 16)
+            maximum = blocks.abs().amax(-1, keepdim=True)
+            local = torch.where(maximum > 0, (maximum / (6 * frozen)).clamp(2**-9, 448),
+                                torch.ones_like(maximum)).to(torch.float8_e4m3fn).float()
+            codebook = normed.new_tensor((0., -1., 1., -2., 2., -4., 4., -.5, .5,
+                                         -1.5, 1.5, -3., 3., -6., 6.))
+            indices = ((blocks / (local * frozen))[..., None] - codebook).abs().argmin(-1)
+            expected = (codebook[indices] * local * frozen).reshape_as(normed)
+        for value in captured.values():
+            assert value.dtype == torch.float32
+            torch.testing.assert_close(value, expected, rtol=1e-6, atol=1e-6)
+
+        runtime_layer = runtime.model.layers[0]
+        for leaf in leaves:
+            getattr(getattr(runtime_layer, group), leaf).activation_global_scale.fill_(scale)
+        qcfg = processor.qcfg
+        install_w4a_llama_stream(
+            runtime, qcfg.activation_mode, qcfg.activation_recipe, fused_norms=fused_norms,
+            attention_mode=qcfg.activation_attention_mode, attention_recipe=qcfg.activation_attention_recipe,
+            mlp_fp8_layers=qcfg.activation_mlp_fp8_layers,
+        )
+        boundary = "input" if group == "self_attn" else "attention_residual"
+        carrier = pack_boundary(runtime_layer, boundary, source, "w4a_nvfp4", recipe=recipe,
+                                model_dtype=dtype, reference=source)
+        encoded = getattr(runtime_layer, norm_name)(carrier)
+        torch.cuda.synchronize()
+        assert encoded.model_dtype == dtype
+        assert encoded.global_scale.item() == scale
+        torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(encoded.decode(torch.float32), next(iter(captured.values())),
+                                   rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_replay_norm_operand_matches_actual_encoded_runtime_and_independent_oracle(dtype):
     from types import SimpleNamespace
 
@@ -666,6 +775,47 @@ def test_producer_calibration_supports_mixed_policy_stream():
     assert not any(".self_attn." in key for key in report["global_scales"])
     statistics = measure_nvfp4_producers(core, [samples[0]])
     assert set(statistics) == expected
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("recipe,attention_recipe", [("nvidia", "least_squares"), ("least_squares", "nvidia")])
+def test_producer_calibration_uses_each_boundary_recipe_and_round_trips(tmp_path, dtype, recipe,
+                                                                      attention_recipe):
+    core = _tiny_packed_nvfp4(dtype=dtype)
+    qcfg = QuantizeConfig(bits=4, group_size=128, sym=True, desc_act=False, activation={
+        "mode": "w4a_nvfp4", "recipe": recipe,
+        "attention": {"mode": "w4a_nvfp4", "recipe": attention_recipe},
+    })
+    install_w4a_llama_stream(core, "w4a_nvfp4", recipe,
+                             attention_mode="w4a_nvfp4", attention_recipe=attention_recipe)
+    weights = {name: value.clone() for name, value in core.state_dict().items()}
+    samples = [torch.arange(8), torch.arange(11)]
+    report = calibrate_nvfp4_producers(core, samples, quantize_config=qcfg)
+    for key, row in report["boundaries"].items():
+        is_mlp = ".mlp." in key or key.endswith("post_attention_residual")
+        effective = recipe if is_mlp else attention_recipe
+        denominator = 6 if effective == "nvidia" else 4
+        expected = torch.tensor(row["amax"] / (448 * denominator), dtype=torch.float32).item()
+        assert row["global_scale"] == expected, key
+        assert row["recipe"] == effective
+    for name, value in core.state_dict().items():
+        torch.testing.assert_close(value, weights[name], rtol=0, atol=0)
+    qcfg.save_pretrained(str(tmp_path))
+    restored_config = QuantizeConfig.from_pretrained(str(tmp_path))
+    restored = _tiny_packed_nvfp4(dtype=dtype)
+    install_w4a_llama_stream(
+        restored, restored_config.activation_mode, restored_config.activation_recipe,
+        attention_mode=restored_config.activation_attention_mode,
+        attention_recipe=restored_config.activation_attention_recipe,
+        global_scales=restored_config.activation_global_scales,
+    )
+    with torch.inference_mode():
+        expected_logits = core(input_ids=samples[0][None].cuda(), use_cache=False).logits
+        actual = restored(input_ids=samples[0][None].cuda(), use_cache=False).logits
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected_logits, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

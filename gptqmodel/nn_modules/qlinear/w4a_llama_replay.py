@@ -146,22 +146,20 @@ def _probe_active(consumers) -> bool:
     return any(getattr(consumer, "_w4a_headroom_probe", False) for consumer in consumers)
 
 
-def _consumer_global_scale(consumers, fallback=None):
+def _consumer_global_scale(consumers):
     """Resolve the frozen NVFP4 global scale owned by a boundary's consumers.
 
     A headroom probe freezes its scale on the projections that consume the
-    producer operand. The producer must apply that same value during capture
-    and runtime, so a frozen consumer scale takes precedence over the
-    configured calibration map. Shared Q/K/V and gate/up carriers are required
-    to carry identical scales at install time, so the first one is
-    authoritative.
+    normalized operand. The norm producer must apply that same value during
+    capture and runtime. Shared Q/K/V and gate/up carriers are required to
+    carry identical scales at install time, so the first one is authoritative.
     """
 
     for consumer in consumers:
         scale = getattr(consumer, "_w4a_activation_global_scale", None)
         if scale is not None:
             return scale
-    return fallback
+    return None
 
 
 def _replay_norm(norm: torch.nn.Module, pristine: torch.Tensor, rounded: torch.Tensor,
@@ -169,13 +167,11 @@ def _replay_norm(norm: torch.nn.Module, pristine: torch.Tensor, rounded: torch.T
                  consumers=()) -> torch.Tensor:
     """Reproduce one deployed RMSNorm boundary for its carrier policy.
 
-    An NVFP4 boundary whose norm weights were fused into the projections reuses
+    An NVFP4 boundary with fused norm weights and a non-headroom recipe reuses
     the incoming codes and rescales only the token multiplier. Every other
-    boundary repacks a freshly normed, weighted value in compute precision,
-    because the deployed stream does not retain codes across such a norm. A
-    headroom boundary bypasses its rounding while the consumer probe is
-    collecting statistics, then applies the frozen consumer scale so capture
-    matches the deployed operand.
+    boundary packs a freshly normed, weighted value. Headroom scales are
+    calibrated on that normed value, so even fused norms bypass rounding while
+    probing and then pack with the frozen consumer scale during capture.
     """
     if preserve_codes:
         return _replay_norm_operand(norm, pristine, rounded)
@@ -220,32 +216,26 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         x = self.mlp(x)
         return residual + x
 
-    # The deployed stream carries the residual in compute precision and rebuilds
-    # the rounded operand from the pristine value at each boundary, reproducing
-    # its "rounded numerator, pristine denominator" RMSNorm without holding
-    # cross-layer state that reverse-order recomputation would corrupt.
+    # Rebuild each norm's operand from the pristine residual and its boundary
+    # policy without cross-layer state that reverse-order replay could corrupt.
     # Attention and MLP boundaries may carry different policies, so each is
     # resolved independently.
     pristine = hidden_states.float()
     attention_consumers = (self.self_attn.q_proj, self.self_attn.k_proj, self.self_attn.v_proj)
     mlp_consumers = (self.mlp.gate_proj, self.mlp.up_proj)
-    # A stream entry packs the raw model-dtype input; an interior layer rebuilds
-    # the previous layer's rounded output from the same producer dtype so the
-    # dynamic grid selection still matches the runtime.
-    if nvfp4_uses_headroom(attention_recipe) and _probe_active(attention_consumers):
-        # The fused-norm path rescales this operand directly, so the probe must
-        # see the pristine value instead of a dynamically rounded carrier.
-        rounded = pristine
-    else:
+    # Rebuild the incoming carrier only when the norm actually reuses its
+    # codes. Its scale belongs to the residual producer, not the normalized
+    # Q/K/V operand; headroom consumer scales are applied by _replay_norm.
+    attention_preserve_codes = getattr(self, "_w4a_attention_preserve_norm_codes", False)
+    rounded = pristine
+    if attention_preserve_codes:
         rounded = round_w4a_replay_operand(
             hidden_states, attention_mode, attention_recipe,
-            _consumer_global_scale(
-                attention_consumers, getattr(self, "_w4a_replay_input_global_scale", None)
-            ),
+            getattr(self, "_w4a_replay_input_global_scale", None),
         )
     x = _replay_norm(
         self.input_layernorm, pristine, rounded, attention_mode, attention_recipe,
-        preserve_codes=getattr(self, "_w4a_attention_preserve_norm_codes", False),
+        preserve_codes=attention_preserve_codes,
         consumers=attention_consumers,
     )
     x, _ = self.self_attn(
@@ -254,18 +244,16 @@ def _replay_layer_forward(self, hidden_states: torch.Tensor,
         position_embeddings=position_embeddings, **kwargs,
     )
     summed = pristine + x.float()
-    if nvfp4_uses_headroom(mlp_recipe) and _probe_active(mlp_consumers):
-        rounded = summed
-    else:
+    mlp_preserve_codes = getattr(self, "_w4a_mlp_preserve_norm_codes", False)
+    rounded = summed
+    if mlp_preserve_codes:
         rounded = round_w4a_replay_operand(
             summed, mlp_mode, mlp_recipe,
-            _consumer_global_scale(
-                mlp_consumers, self._w4a_replay_global_scales.get("post_attention_residual")
-            ),
+            self._w4a_replay_global_scales.get("post_attention_residual"),
         )
     x = _replay_norm(
         self.post_attention_layernorm, summed, rounded, mlp_mode, mlp_recipe,
-        preserve_codes=getattr(self, "_w4a_mlp_preserve_norm_codes", False),
+        preserve_codes=mlp_preserve_codes,
         consumers=mlp_consumers,
     )
     x = self.mlp(x)
@@ -352,10 +340,12 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
         layer._w4a_replay_mlp_recipe = layer_mlp_recipe
         layer._w4a_attention_preserve_norm_codes = (
             fused_norms and attention_mode == "w4a_nvfp4"
+            and not nvfp4_uses_headroom(attention_recipe)
             and norm_codes_fused(layer.input_layernorm)
         )
         layer._w4a_mlp_preserve_norm_codes = (
             fused_norms and layer_mlp_mode == "w4a_nvfp4"
+            and not nvfp4_uses_headroom(layer_mlp_recipe)
             and norm_codes_fused(layer.post_attention_layernorm)
         )
         layer._w4a_replay_global_scales = {

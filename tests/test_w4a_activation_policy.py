@@ -266,6 +266,16 @@ def test_activation_normalizes_global_scales():
     assert config.global_scales == {"model.layers.0.input": 0.5}
 
 
+@pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom", "lsq_headroom"])
+def test_producer_scales_reject_attention_headroom_override(recipe):
+    with pytest.raises(ValueError, match="global_scales.*headroom"):
+        _config({
+            "mode": NVFP4, "recipe": "least_squares",
+            "attention": {"mode": NVFP4, "recipe": recipe},
+            "global_scales": {"model.layers.0.input": 0.5},
+        })
+
+
 def test_activation_global_scales_reject_unknown_producer():
     with pytest.raises(
         ValueError, match="positive finite global scales"

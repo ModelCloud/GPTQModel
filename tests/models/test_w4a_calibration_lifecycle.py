@@ -84,12 +84,37 @@ def test_failed_config_commit_restores_runtime_and_metadata(monkeypatch, existin
         assert module.global_scale.item() == 1
 
 
-def test_mismatched_save_policy_fails_before_observing(monkeypatch):
+@pytest.mark.parametrize("override", [
+    {"recipe": "nvidia"},
+    {"attention": {"mode": "w4afp8"}},
+    {"attention": {"mode": "w4a_nvfp4", "recipe": "nvidia"}},
+    {"mlp": {"mode": "w4afp8", "layers": [0]}},
+])
+def test_mismatched_save_policy_fails_before_observing(monkeypatch, override):
     core, qcfg, specs = _fixture(monkeypatch)
-    qcfg.activation["recipe"] = "nvidia"
+    qcfg.activation.update(override)
     with pytest.raises(ValueError, match="save configuration"):
         calibration.calibrate_nvfp4_producers(core, [torch.arange(2)], quantize_config=qcfg)
     assert all(not getattr(owner, f"_w4a_{name}_quantizer").calibrated for owner, name, _key in specs)
+
+
+@pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
+def test_attention_headroom_rejected_before_producer_calibration(monkeypatch, recipe):
+    core, qcfg, specs = _fixture(monkeypatch)
+    core._w4a_stream_attention_mode = "w4a_nvfp4"
+    core._w4a_stream_attention_recipe = recipe
+    qcfg.activation["attention"] = {"mode": "w4a_nvfp4", "recipe": recipe}
+
+    def unexpected_capture(*_args):
+        pytest.fail("Headroom policy must be rejected before capturing or mutating scales")
+
+    monkeypatch.setattr(calibration, "_capture_inputs", unexpected_capture)
+    with pytest.raises(ValueError, match="headroom"):
+        calibration.calibrate_nvfp4_producers(core, [torch.arange(2)], quantize_config=qcfg)
+    assert core._w4a_stream_global_scales is None
+    for owner, name, _key in specs:
+        producer = getattr(owner, f"_w4a_{name}_quantizer")
+        assert not producer.calibrated and producer.observer is None
 
 
 def test_public_api_requires_quantized_weights():

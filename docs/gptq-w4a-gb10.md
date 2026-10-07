@@ -218,9 +218,11 @@ q/k/v and gate/up projections and resets the norms to unit weights. The NVFP4
 stream then reuses the incoming FP4 codes and rescales only the token
 multiplier instead of repacking a freshly normed operand. The stream validates
 the unit-weight precondition at install time; without a rotation the norm
-repacks its operand. The RMSNorm code-reuse policy is therefore keyed off the
-rotation (fused norms) and the per-boundary activation mode, not a policy
-version.
+repacks its operand. The `nvidia_headroom` and `least_squares_headroom` recipes
+also repack the normalized operand, even with fused norms: their frozen scales
+are calibrated after normalization and must be applied at that same boundary
+in replay and inference. Code reuse is governed by rotation, activation mode,
+and the boundary's recipe.
 
 ### Recipes
 
@@ -289,7 +291,11 @@ against the decoder depth at install time.
 
 A producer-to-scale map of calibrated FP32 global scales, keyed by the
 producer boundary that emits the tensor. Requires NVFP4, and cannot be
-combined with the `nvidia_headroom` or `least_squares_headroom` recipes.
+combined with the `nvidia_headroom` or `least_squares_headroom` recipes,
+including an attention recipe override. Activation-only calibration uses each
+producer's effective recipe: the attention override for attention boundaries
+and the stream recipe for NVFP4 MLP boundaries. Its report records that recipe
+alongside each fitted scale; FP8 boundaries remain dynamically scaled.
 Producer names must start with `model.layers.`, and every scale must be finite
 and strictly positive after rounding through FP32.
 

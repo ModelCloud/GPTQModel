@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from ..nn_modules.qlinear.w4a_activation import W4AActivation
-from ..nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer, nvfp4_producer_specs
+from ..nn_modules.qlinear.w4a_boundary import NVFP4BoundaryQuantizer, boundary_group, nvfp4_producer_specs
 from .activation_floatx import nvfp4_global_scale
 
 
@@ -93,7 +93,7 @@ def _capture_inputs(core, samples):
 def calibrate_nvfp4_producers(core, samples, *, quantize_config=None, progress=None) -> dict:
     """Freeze FP32 global scales in topological order, keeping every weight fixed.
 
-    Uses maximum calibration with the selected runtime block-scale recipe.
+    Uses maximum calibration with each boundary's runtime block-scale recipe.
     Only one layer's input/output samples are cached in CPU memory at a time.
     The caller must provide data disjoint from its downstream evaluation sets.
     When supplied, quantize_config is updated for ordinary checkpoint saving.
@@ -107,24 +107,35 @@ def calibrate_nvfp4_producers(core, samples, *, quantize_config=None, progress=N
     layers = core.model.layers
     if not samples:
         raise ValueError("Calibration requires samples")
+    stream_mode = core._w4a_stream_mode
     recipe = core._w4a_stream_recipe
-    if recipe not in {"nvidia", "four_six", "least_squares", "least_squares_grid"}:
+    attention_mode = getattr(core, "_w4a_stream_attention_mode", None) or stream_mode
+    attention_recipe = ((getattr(core, "_w4a_stream_attention_recipe", None) or recipe)
+                        if attention_mode == "w4a_nvfp4" else None)
+    mlp_fp8_layers = tuple(getattr(core, "_w4a_stream_mlp_fp8_layers", None) or ())
+    allowed_recipes = {"nvidia", "four_six", "least_squares", "least_squares_grid"}
+    if (recipe not in allowed_recipes
+            or (attention_mode == "w4a_nvfp4" and attention_recipe not in allowed_recipes)):
         raise ValueError("Producer calibration cannot use legacy headroom recipes")
-    if quantize_config is not None and (
-            quantize_config.activation_mode != "w4a_nvfp4"
-            or quantize_config.activation_recipe != recipe):
-        raise ValueError("The save configuration must match the installed producer policy")
+    if quantize_config is not None:
+        saved_attention_mode = quantize_config.activation_attention_mode or quantize_config.activation_mode
+        saved_attention_recipe = ((quantize_config.activation_attention_recipe or quantize_config.activation_recipe)
+                                  if saved_attention_mode == "w4a_nvfp4" else None)
+        if (quantize_config.activation_mode != stream_mode
+                or quantize_config.activation_recipe != recipe
+                or saved_attention_mode != attention_mode
+                or saved_attention_recipe != attention_recipe
+                or tuple(quantize_config.activation_mlp_fp8_layers or ()) != mlp_fp8_layers):
+            raise ValueError("The save configuration must match the installed producer policy")
     # Enumerate only the boundaries the installed policy actually stages as
     # NVFP4. A mixed stream keeps FP8 on attention or on promoted MLP layers;
     # those boundaries own no calibrated scale and no quantizer module.
-    stream_mode = getattr(core, "_w4a_stream_mode", None)
     specs = nvfp4_producer_specs(
-        layers, [True] * len(layers),
-        attention_mode=getattr(core, "_w4a_stream_attention_mode", None) or stream_mode,
-        mode=stream_mode,
-        recipe=getattr(core, "_w4a_stream_recipe", None),
-        mlp_fp8_layers=tuple(getattr(core, "_w4a_stream_mlp_fp8_layers", None) or ()),
+        layers, [True] * len(layers), attention_mode=attention_mode, mode=stream_mode,
+        recipe=recipe, mlp_fp8_layers=mlp_fp8_layers,
     )
+    producer_recipes = {key: attention_recipe if boundary_group(name) == "attention" else recipe
+                        for _, name, key in specs}
     producers = [(key, getattr(owner, f"_w4a_{name}_quantizer")) for owner, name, key in specs]
     if any(not isinstance(module, NVFP4BoundaryQuantizer) or module.observer is not None
            for _, module in producers):
@@ -158,10 +169,11 @@ def calibrate_nvfp4_producers(core, samples, *, quantize_config=None, progress=N
                             raise RuntimeError(f"Producer not reached: {key}")
                 finally:
                     producer.observer = None
-                value = maximum.scale(recipe)
+                producer_recipe = producer_recipes[key]
+                value = maximum.scale(producer_recipe)
                 producer.set_scale(value)
                 scales[key] = value
-                report[key] = {"amax": maximum.amax, "global_scale": value,
+                report[key] = {"recipe": producer_recipe, "amax": maximum.amax, "global_scale": value,
                                "tokens": maximum.tokens, "samples": maximum.calls}
                 if progress is not None:
                     progress(key, report[key])
