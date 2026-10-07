@@ -3,6 +3,10 @@
 """CPU-only validation of the mixed FP8-attention / NVFP4-MLP activation policy."""
 
 import json
+import os
+import subprocess
+import sys
+import textwrap
 
 import pytest
 
@@ -11,6 +15,33 @@ from gptqmodel.quantization.config import QuantizeConfig
 
 NVFP4 = "w4a_nvfp4"
 FP8 = "w4afp8"
+
+
+def test_fp8_replay_import_does_not_require_native_fp4_apis():
+    script = textwrap.dedent("""
+        import torch
+        # Initialize optional third-party integrations with their installed
+        # Torch API first; the capability probe below targets our W4A modules.
+        from transformers import LlamaConfig, LlamaForCausalLM
+        for name in ('scaled_mm', 'ScalingType', 'SwizzleType'):
+            if hasattr(torch.nn.functional, name):
+                delattr(torch.nn.functional, name)
+        from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+        from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+        from gptqmodel.quantization.config import QuantizeConfig
+        core = LlamaForCausalLM(LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                                           num_hidden_layers=1, num_attention_heads=4,
+                                           num_key_value_heads=4)).bfloat16().eval()
+        config = QuantizeConfig(bits=4, group_size=128, sym=True, desc_act=False, activation='w4afp8')
+        install_w4a_llama_replay(core, config)
+        with torch.inference_mode():
+            assert torch.isfinite(core(input_ids=torch.arange(4)[None], use_cache=False).logits).all()
+        valid, error = W4ANVFP4Linear.validate_once()
+        assert not valid and 'block-scaled FP4' in str(error)
+    """)
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                            env={**os.environ, "CUDA_VISIBLE_DEVICES": ""}, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def _config(activation):

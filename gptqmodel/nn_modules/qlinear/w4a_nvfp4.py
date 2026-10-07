@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import torch
-from torch.nn.functional import ScalingType, SwizzleType, scaled_mm
+import torch.nn.functional as F
 
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
@@ -100,6 +100,7 @@ class W4ANVFP4Linear(W4AFP8Linear):
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     QUANT_TYPE = "w4a_nvfp4"
+    _WEIGHT_CACHE_NAMES = ("_weight_e4m3", "_weight_both", "_unit_weight_scales")
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -129,12 +130,6 @@ class W4ANVFP4Linear(W4AFP8Linear):
     @property
     def activation_global_scale(self) -> torch.Tensor:
         return self.activation_global_scale_bits.view(torch.float32)
-
-    def _load_from_state_dict(self, *args, **kwargs):
-        super()._load_from_state_dict(*args, **kwargs)
-        self._weight_both = self._weight_both.new_empty(0)
-        self._unit_weight_scales = self._unit_weight_scales.new_empty(0)
-        self._weight_e4m3 = self._weight_e4m3.new_empty(0)
 
     @torch.no_grad()
     def post_init(self):
@@ -210,10 +205,12 @@ class W4ANVFP4Linear(W4AFP8Linear):
             start = group * 64
             a = packed[:, start:start + 64]
             a_scales = activation_scales[group]
-            both = scaled_mm(
-                a, self._weight_both[start:start + 64], a_scales, ScalingType.BlockWise1x16,
-                self._unit_weight_scales, ScalingType.BlockWise1x16,
-                SwizzleType.SWIZZLE_32_4_4, SwizzleType.SWIZZLE_32_4_4,
+            # Resolve optional FP4 APIs only on the native FP4 path. Importing
+            # FP8 replay/stream support must not require these Torch features.
+            both = F.scaled_mm(
+                a, self._weight_both[start:start + 64], a_scales, F.ScalingType.BlockWise1x16,
+                self._unit_weight_scales, F.ScalingType.BlockWise1x16,
+                F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.SWIZZLE_32_4_4,
                 output_dtype=torch.float32,
             )
             nvfp4_accumulate_group(

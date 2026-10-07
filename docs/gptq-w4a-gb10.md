@@ -12,6 +12,12 @@ do not consume FP8/FP4 operands perform their arithmetic in the model dtype,
 then pack once at the next GEMM or decoder boundary. The embedding, unselected
 decoder layers, and `lm_head` remain in the model dtype.
 
+Device and model-dtype conversions preserve the hardware weight-cache formats
+and bytes without rebuilding them. Repacking or loading native weight tensors
+invalidates every derived cache; call `post_init()` before using the new
+weights. Re-exporting a loaded W4A8 or NVFP4 checkpoint preserves the source
+tensors' values and dtypes, including BF16 tensors outside the FP16 range.
+
 | Policy | Input rounding | One-time weight operand | Group arithmetic |
 | --- | --- | --- | --- |
 | `w4afp8` | E4M3, one dynamic scale per token | Exact E4M3 representation of each centered INT4 code | Apply each original GPTQ group scale to its FP8 MMA partial result |
@@ -142,7 +148,9 @@ metadata or wider activation shadow is carried between operators.
 The dynamic global-scale value is rounded on the source activation dtype grid
 and then carried and applied as FP32. Making this conversion explicit preserves
 the scored BF16 model behavior while keeping all subsequent scale arithmetic
-in FP32. Calibration replay uses the same source-grid rule.
+in FP32. If rounding a positive scale to the source grid would produce zero,
+the valid FP32 scale is retained so small FP16 operands remain encodable.
+Calibration replay uses the same rule.
 
 For a fresh quantization, Llama calibration replay rounds selected
 Linear inputs before GPTQ Hessian capture and propagates rounded projection,

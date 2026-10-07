@@ -169,7 +169,11 @@ def fp8_token_qdq(x: torch.Tensor) -> torch.Tensor:
 
 def nvfp4_global_scale(amax: torch.Tensor | float, *, grid_dtype: torch.dtype | None = None,
                        recipe: str = "least_squares") -> torch.Tensor:
-    """Return an FP32 global scale, optionally rounded on the source tensor grid."""
+    """Return an FP32 global scale, optionally rounded on the source tensor grid.
+
+    Retain a positive FP32 scale when source-grid rounding would underflow it
+    to zero, as can happen for small but representable FP16 activations.
+    """
     value = torch.as_tensor(amax, dtype=torch.float32)
     if not bool(torch.isfinite(value).all()) or bool((value < 0).any()):
         raise ValueError("NVFP4 activation maximum must be finite and nonnegative.")
@@ -185,7 +189,8 @@ def nvfp4_global_scale(amax: torch.Tensor | float, *, grid_dtype: torch.dtype | 
     if grid_dtype is not None:
         if grid_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             raise ValueError("NVFP4 global-scale grid must be FP16, BF16, or FP32.")
-        scale = scale.to(grid_dtype).float()
+        rounded = scale.to(grid_dtype).float()
+        scale = torch.where(rounded > 0, rounded, scale)
     return scale
 
 

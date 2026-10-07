@@ -9,7 +9,7 @@ if (( $# < 1 )); then
 fi
 
 case "$1" in
-    tests/models/test_w4a_hardware_forward.py)
+    tests/models/test_w4a_hardware_forward.py|tests/models/test_w4a_native_writer.py|tests/kernels/test_w4a_cache_lifecycle.py)
         if (( $# != 1 )); then exit 2; fi
         run_kind=pytest ;;
     tests/models/test_llama3_2_w4afp8.py|tests/models/test_llama3_2_w4a_nvfp4.py|tests/models/test_llama3_2_w4a16_reference.py|tests/models/test_w4a_tiny_llama_lifecycle.py|tests/models/test_w4a_replay_stream.py|tests/models/test_w4a_weight_qad.py|tests/models/test_w4a_producer_calibration.py|tests/kernels/test_w4a_stream.py|tests/kernels/test_w4afp8_gb10.py|tests/kernels/test_w4a_nvfp4_gb10.py)

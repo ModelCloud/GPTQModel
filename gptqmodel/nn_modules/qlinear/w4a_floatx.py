@@ -35,6 +35,7 @@ class W4AFP8Linear(PackableQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     REQUIRES_FORMAT_V2 = True
     QUANT_TYPE = "w4afp8"
+    _WEIGHT_CACHE_NAMES = ("_weight_e4m3",)
 
     def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool,
                  in_features: int, out_features: int, bias: bool = False,
@@ -76,15 +77,35 @@ class W4AFP8Linear(PackableQuantLinear):
         return cls.cached_validate_once()
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
+        self._invalidate_weight_cache()
         super().pack(linear, scales, zeros, g_idx, **kwargs)
         # pack() stores logical zero points. Saved GPTQ-v1 conversion is a
         # separate serialization step, reversed by the loader before post_init.
         self.qzero_format(2)
-        self._weight_e4m3 = self._weight_e4m3.new_empty(0)
 
     def _load_from_state_dict(self, *args, **kwargs):
+        self._invalidate_weight_cache()
         super()._load_from_state_dict(*args, **kwargs)
-        self._weight_e4m3 = self._weight_e4m3.new_empty(0)
+
+    def _invalidate_weight_cache(self):
+        for name in self._WEIGHT_CACHE_NAMES:
+            setattr(self, name, getattr(self, name).new_empty(0))
+
+    def _apply(self, fn, recurse=True):
+        # These buffers encode hardware operands, not model-precision values.
+        # Byte views let Module.to()/half()/bfloat16() move them without casting
+        # FP8/FP4 codes or requiring unsupported FP4 numeric conversions. Native
+        # GPTQ scales and ordinary parameters still follow the requested dtype.
+        cache_dtypes = {id(self._buffers[name]): self._buffers[name].dtype
+                        for name in self._WEIGHT_CACHE_NAMES}
+
+        def preserve_weight_format(tensor):
+            cache_dtype = cache_dtypes.get(id(tensor))
+            if cache_dtype is not None:
+                return fn(tensor.view(torch.uint8)).view(cache_dtype)
+            return fn(tensor)
+
+        return super()._apply(preserve_weight_format, recurse=recurse)
 
     @torch.no_grad()
     def post_init(self):

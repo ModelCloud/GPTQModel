@@ -59,6 +59,47 @@ def test_legacy_recipe_names_preserve_gpu_packed_codes_and_scales(legacy, canoni
     assert torch.equal(old.scales.view(torch.uint8), new.scales.view(torch.uint8))
 
 
+@pytest.mark.parametrize("recipe,denominator", [("nvidia", 6), ("least_squares", 4)])
+def test_fp16_global_scale_underflow_boundary_retains_positive_fp32_scale(recipe, denominator):
+    # The first positive FP16 scale is 2**-24. Its midpoint rounds to zero;
+    # exercise the corresponding activation maximum and its FP16 neighbors.
+    midpoint = torch.tensor((2**-25) * 448 * denominator, dtype=torch.float16)
+    below = torch.nextafter(midpoint, torch.tensor(0., dtype=torch.float16))
+    above = torch.nextafter(midpoint, torch.tensor(torch.inf, dtype=torch.float16))
+    maxima = torch.tensor([0., 2**-24, 1e-5, below.item(), midpoint.item(), above.item(), 1.],
+                          dtype=torch.float16)
+    actual = nvfp4_global_scale(maxima, grid_dtype=torch.float16, recipe=recipe)
+    expected = torch.tensor([
+        1., float(maxima[1]) / (448 * denominator), float(maxima[2]) / (448 * denominator),
+        float(below) / (448 * denominator), float(midpoint) / (448 * denominator),
+        2**-24, float(torch.tensor(1. / (448 * denominator), dtype=torch.float16)),
+    ], dtype=torch.float32)
+    assert bool((actual > 0).all()) and bool(torch.isfinite(actual).all())
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-20)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("maximum", [2**-24, 1e-5, 2**-15, 2**-14])
+def test_small_dynamic_nvfp4_operands_match_replay_and_oracle(dtype, maximum):
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+    from gptqmodel.nn_modules.qlinear.w4a_llama_replay import round_w4a_replay_operand
+
+    x = (torch.linspace(-1, 1, 128, device="cuda")[None] * maximum).to(dtype)
+    encoded = pack_activation(x, "w4a_nvfp4")
+    replay = round_w4a_replay_operand(x, "w4a_nvfp4")
+    raw_scale = x.float().abs().amax() / 1792.
+    grid_scale = raw_scale.to(dtype).float()
+    expected_scale = grid_scale if grid_scale > 0 else raw_scale
+    expected = _independent_nvfp4_qdq(x, expected_scale)
+    torch.cuda.synchronize()
+    assert encoded.model_dtype == dtype
+    torch.testing.assert_close(encoded.global_scale, expected_scale, rtol=1e-6, atol=1e-20)
+    torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-12)
+    torch.testing.assert_close(replay, expected, rtol=1e-6, atol=1e-12)
+
+
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
     """Numeric codebook oracle for hardware-scale least-squares refinement."""
     blocks = x.float().reshape(*x.shape[:-1], x.shape[-1] // 16, 16)

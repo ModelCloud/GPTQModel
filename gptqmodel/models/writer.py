@@ -429,17 +429,19 @@ def _resolve_out_of_model_source_files(
     )
 
 
-def _load_native_nvfp4_for_save(model: torch.nn.Module, checkpoint: str) -> None:
+def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activation_mode: str) -> None:
     """Load native checkpoint tensors exactly into a CPU serialization shell.
 
     Generic CPU GPTQ linears do not declare NVFP4 calibration buffers. Register
-    those buffers before loading, and assign tensors rather than casting every
-    checkpoint value to the shell's floating dtype. Runtime FP4 weight planes
-    and producer buffers remain absent from the native checkpoint.
+    those buffers for NVFP4 before loading. Both W4A modes assign tensors rather
+    than casting checkpoint values to the shell's FP16 dtype, which can change
+    or overflow BF16 tensors. Runtime weight caches and producer buffers remain
+    absent from the native checkpoint.
     """
-    for module in model.modules():
-        if isinstance(module, BaseQuantLinear):
-            module.register_buffer("activation_global_scale_bits", torch.ones((), dtype=torch.float32).view(torch.int32))
+    if activation_mode == "w4a_nvfp4":
+        for module in model.modules():
+            if isinstance(module, BaseQuantLinear):
+                module.register_buffer("activation_global_scale_bits", torch.ones((), dtype=torch.float32).view(torch.int32))
     if checkpoint.endswith(".index.json"):
         with open(checkpoint, encoding="utf-8") as handle:
             index = json.load(handle)
@@ -447,16 +449,16 @@ def _load_native_nvfp4_for_save(model: torch.nn.Module, checkpoint: str) -> None
     elif checkpoint.endswith(".safetensors"):
         files = [checkpoint]
     else:
-        raise ValueError("NVFP4 export requires a safetensors file or shard index")
+        raise ValueError("W4A export requires a safetensors file or shard index")
     expected, seen = set(model.state_dict()), set()
     for path in files:
         with safe_open(path, framework="pt", device="cpu") as handle:
             values = {name: handle.get_tensor(name) for name in handle.keys()}
         if seen.intersection(values):
-            raise ValueError("Duplicate native NVFP4 tensor across checkpoint shards")
+            raise ValueError("Duplicate native W4A tensor across checkpoint shards")
         result = model.load_state_dict(values, strict=False, assign=True)
         if result.unexpected_keys:
-            raise ValueError(f"Unrecognized native NVFP4 tensors: {result.unexpected_keys}")
+            raise ValueError(f"Unrecognized native W4A tensors: {result.unexpected_keys}")
         seen.update(values)
     model.tie_weights()
     # A tied tensor can legitimately be omitted from safetensors. Every other
@@ -467,7 +469,7 @@ def _load_native_nvfp4_for_save(model: torch.nn.Module, checkpoint: str) -> None
     restored_storage = {storage_key(state[name]) for name in seen}
     missing = sorted(name for name in expected - seen if storage_key(state[name]) not in restored_storage)
     if missing:
-        raise ValueError(f"Missing native NVFP4 checkpoint tensors: {missing}")
+        raise ValueError(f"Missing native W4A checkpoint tensors: {missing}")
 
 
 def _load_tensors_by_prefixes(
@@ -1291,8 +1293,8 @@ def ModelWriter(cls):
                 device=DEVICE.CPU,
             )
 
-        if qcfg.activation_mode == "w4a_nvfp4":
-            _load_native_nvfp4_for_save(model, self.checkpoint_file_name)
+        if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            _load_native_w4a_for_save(model, self.checkpoint_file_name, activation_mode=qcfg.activation_mode)
         else:
             load_checkpoint_in_model_then_tie_weights(
                 model,
