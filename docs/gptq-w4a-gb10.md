@@ -8,7 +8,7 @@ Both policies keep the saved GPTQ checkpoint in the ordinary INT32-packed
 tensors once and builds nonpersistent GPU operands. The weight cache is never
 serialized. Selected Llama decoder layers carry encoded activations and their
 scales across decoder boundaries and into every selected GEMM. Operators that
-do not consume FP8/FP4 operands perform their arithmetic in the model dtype,
+do not consume FP8/FP4 operands perform their arithmetic in wider precision,
 then pack once at the next GEMM or decoder boundary. The embedding, unselected
 decoder layers, and `lm_head` remain in the model dtype.
 
@@ -58,7 +58,8 @@ Within a selected Llama decoder layer, `W4AActivation` carries codes, scales,
 logical shape, and model dtype. FP8 uses E4M3 codes and one FP32 scale per
 token. NVFP4 uses packed E2M1 codes, swizzled per-16 E4M3 scales, and a global
 scale for that activation. W4A Linears consume these operands directly with
-native FP8 or FP4 GEMM and produce another encoded activation. `q_proj`,
+native FP8 or FP4 GEMM and return the model dtype. Carriers also retain a
+wider reference value for residual arithmetic and normalization. `q_proj`,
 `k_proj`, and `v_proj` share one encoded RMSNorm output; `gate_proj` and
 `up_proj` share another. The saved INT32-packed GPTQ weights are unchanged.
 
@@ -68,14 +69,16 @@ native FP8 or FP4 GEMM and produce another encoded activation. `q_proj`,
 | RMSNorm output → `q_proj`/`k_proj`/`v_proj` | Same encoded input object for all three |
 | Q/K/V GEMMs → attention operator | GEMMs emit model dtype directly; RoPE, attention, and KV cache use wider internal values |
 | Attention output → `o_proj` | Packed once and consumed directly by the GEMM |
-| Attention output → residual add → RMSNorm | Encoded at each module boundary |
+| `o_proj` output → residual add → RMSNorm | Model-dtype branch output; residual sum packed with its wider reference retained |
 | RMSNorm output → `gate_proj`/`up_proj` | Same encoded input object for both |
 | Gate/up GEMMs → SiLU/multiply | GEMMs emit model dtype directly for the wider elementwise math |
 | MLP product → `down_proj` | Rotated when required, packed once, and consumed directly by the GEMM |
-| MLP output → residual add → next selected decoder layer | Encoded FP8 or FP4 with scales; codes and scales are passed directly |
+| `down_proj` output → residual add → next selected decoder layer | Model-dtype branch output; residual sum carries codes, scales, and its wider reference directly to the next layer |
 
-RMSNorm and residual addition decode their inputs for arithmetic and re-encode
-their outputs. RoPE, attention, SiLU, multiplication, and the current KV cache
+RMSNorm and residual addition use the carrier's wider reference for arithmetic;
+the hardware GEMMs consume its codes and scales. Eligible fused NVFP4 norms
+reuse those codes with a token multiplier; other norms pack the normalized
+value. RoPE, attention, SiLU, multiplication, and the current KV cache
 use BF16/FP16 inside the attention or MLP operator. Selected GEMMs return the
 model dtype directly when their next consumer is one of those wider operators;
 they do not quantize an output only for that consumer to decode it immediately.
@@ -102,11 +105,13 @@ tests/models/run_w4a_gb10_safe.sh dtype-audit \
   --output /root/models/w4a-quality/w4a_nvfp4_dtype_audit.json
 ```
 
-On the two saved fast checkpoints, the audit observed encoded FP8 or packed FP4
-at both boundaries of all 14 selected W4A Linears and all selected RMSNorm,
-attention, and MLP modules. Decoder layer 14 emits the encoded stream and
-layer 15 consumes exactly its codes and scales. The other 14 decoder layers
-remain dense BF16; the audit does not claim full-model W4A coverage.
+Those two historical fast checkpoints covered only layers 14 and 15, with 14
+selected W4A Linears. Their earlier audit encoded Linear outputs as well; that
+output behavior predates the current transport contract. The current audit
+checks model-dtype Linear outputs, encoded GEMM inputs, shared Q/K/V and gate/up
+operands, and direct codes/scales handoff between selected layers. Full decoder
+coverage is required by default; the commands above explicitly opt out for
+those partial-model checkpoints.
 
 ## Configuration
 
@@ -143,8 +148,9 @@ caller cannot silently bypass the activation contract.
 NVFP4 calibration and replay use the same M=4/M=6 selection as inference.
 The global scale reserves the E4M3 range needed to map the largest observed
 block to M=4; each local block can still select M=6 when it has lower error.
-The choice is represented entirely by that block's E4M3 scale, so no side
-metadata or wider activation shadow is carried between operators.
+The block-scale choice is represented entirely by that block's E4M3 scale.
+Separately, carriers retain a wider reference for the residual path; native
+GEMMs consume only the encoded operand and its scales.
 The dynamic global-scale value is rounded on the source activation dtype grid
 and then carried and applied as FP32. Making this conversion explicit preserves
 the scored BF16 model behavior while keeping all subsequent scale arithmetic
@@ -153,15 +159,17 @@ the valid FP32 scale is retained so small FP16 operands remain encodable.
 Calibration replay uses the same rule.
 
 For a fresh quantization, Llama calibration replay rounds selected
-Linear inputs before GPTQ Hessian capture and propagates rounded projection,
-residual, and layer inputs to downstream calibration without adding a QDQ to
-Linear outputs whose next operator uses the model dtype. It leaves excluded
-decoder layers dense. The packed GPTQ weights are never modified by the
-activation policy; the stream changes runtime activation semantics only.
+Linear inputs before GPTQ Hessian capture and propagates their effect to
+downstream calibration while preserving the wider residual path. Linear
+outputs whose next operator uses the model dtype receive no extra QDQ.
+Excluded decoder layers remain dense. Fresh GPTQ solves use these replayed
+inputs; applying an activation policy to already packed GPTQ weights does not
+change those weight tensors.
 Calibration replay uses Torch quantize/dequantize tensors because GPTQ's
 Hessian collector consumes ordinary tensors; inference passes codes and scales
-directly. Replay includes an extra model-dtype rounding step, so exact
-activation codes can differ slightly between calibration and inference.
+directly. Replay retains decoded GEMM operands in FP32 to avoid an extra
+FP16/BF16 round trip before the GEMM. Projection results return to the model
+dtype, matching inference.
 
 ## Activation policy reference
 
@@ -281,7 +289,7 @@ projection work in a Llama decoder.
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `mode` | `str` | `"w4afp8"` | Promotion only. `w4afp8` is the sole accepted value. |
-| `layers` | `list[int]` | `[]` | Non-empty decoder layer indices. Sorted and de-duplicated on load. |
+| `layers` | `list[int]` | `[]` (invalid when supplied as an override) | Non-empty, unique decoder layer indices. Sorted on load; duplicates are rejected. |
 
 This promotes the named decoder layers' MLP boundaries from the stream default
 to FP8. The saved INT4 weight tensors are unchanged; only the activation

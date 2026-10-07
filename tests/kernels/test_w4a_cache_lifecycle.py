@@ -15,8 +15,8 @@ def _staged(mode):
     return factory(k=256, n=128, device="cpu")
 
 
-def _cache_names(mode):
-    return ("_weight_e4m3", "_weight_both", "_unit_weight_scales") if mode == "w4a_nvfp4" else ("_weight_e4m3",)
+def _cache_names(mode: str) -> list[str]:
+    return ["_weight_e4m3", "_weight_both", "_unit_weight_scales"] if mode == "w4a_nvfp4" else ["_weight_e4m3"]
 
 
 @pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
