@@ -2943,3 +2943,50 @@ despite point estimates spanning -2.32 to -1.49 pp.
 Resolving a 0.32 pp difference at this effect size would need on the order of
 40,000 paired rows, not 1,209, or a lower-variance metric than exact-answer
 accuracy.
+
+## Full-model validation on 2026-10-07
+
+Runtime commit `7b6814c2` was evaluated on all 1,209 GSM8K Platinum test rows
+for both saved Llama 3.2 1B checkpoints and their same-weight W4A16 controls.
+All 16 decoder layers and 112 projections were selected. Each pair shares
+the exact INT32-packed weight file and tokenizer artifacts. Separate views
+remove the legacy `activation.version` field and freeze the historical prompt
+date. The weight files remain unchanged. This run covers saved-checkpoint
+inference; fresh GPTQ calibration/weight quantization was outside its scope.
+
+| Policy | W4A16 correct / 1,209 | Activation correct / 1,209 | Change (pp) | Paired 95% CI (pp) | Correctness flips |
+| --- | ---: | ---: | ---: | --- | ---: |
+| Balanced A4: FP8 attention, NVFP4 MLP, `least_squares_grid` | 502 (41.52%) | 474 (39.21%) | -2.316 | [-4.729, +0.097] | 222 |
+| Per-token FP8, `w4afp8` | 432 (35.73%) | 438 (36.23%) | +0.496 | [-1.618, +2.611] | 170 |
+
+The two checkpoints contain different GPTQ weights, so their absolute scores
+are not a direct A4-versus-A8 comparison. Both W4A16 controls reproduce all
+1,209 historical responses exactly. A4 also reproduces every historical
+response and the accepted 28-answer loss. Its statistical budget test remains
+`inconclusive`; reproduction of the accepted point score does not establish
+noninferiority at the confidence-interval boundary. FP8 is `within_budget`
+against its same-weight control at the 2 pp budget. It scores three answers
+below its older 441-correct result (-0.248 pp); 675 extracted answers changed,
+with 211 correctness flips relative to that older FP8 run.
+
+Settings match the frozen baselines: eight-shot chat prompts, BF16, seed 42,
+greedy generation, a 256-token cap, and batch sizes 8 (A4) and 32 (FP8).
+The cached dataset revision is `e762492455a1cf7967de89f05b6bef72fc713b66`.
+The guarded sequential runs observed at least 102.01 GiB available memory,
+zero swap use, and no new cgroup OOM or memory-limit events.
+
+The boundary audit now resolves effective attention/MLP policies, including
+inherited defaults, and looks up norms inside the wrapped model. It applies
+the FP4 numerical oracle only to FP4 operands. Both full-model audits pass
+381 handoff checks across prefill and cached decoding. A4 additionally passes
+288 independent decode checks (maximum absolute error `4.77e-7`) and 144
+FP4 GEMM checks (exact output agreement with the FP32 Torch oracle after BF16
+rounding; FP32-versus-FP64 arithmetic drift at most `4.60e-6`). The FP8 audit
+checks transport; its numerical kernel coverage remains in the kernel suite.
+All 75 audit unit/integration tests pass.
+
+The [machine-readable evidence](gptq-w4a-gsm8k-validation.json) records scores,
+policies, package versions, dataset and weight hashes, memory observations,
+and hashes of every result/audit artifact. Full per-row outputs and the frozen
+controls are retained under
+`/root/models/w4a-quality/pr3228-7b6814c2-gsm8k-platinum/` on the GB10 host.

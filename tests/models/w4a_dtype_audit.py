@@ -117,6 +117,21 @@ def _scale_layout_probe_rows(rows: int) -> list[int]:
                    if index < rows})
 
 
+def _boundary_policy(name: str, config) -> tuple[str, str | None]:
+    """Resolve the expected carrier from saved policy, independently of hooks."""
+    parts = name.split(".")
+    if parts[0:2] != ["model", "layers"] or len(parts) < 3:
+        raise ValueError(f"Not a decoder boundary: {name}")
+    is_mlp = len(parts) > 3 and parts[3] in {"mlp", "post_attention_layernorm"}
+    if is_mlp:
+        if int(parts[2]) in (config.activation_mlp_fp8_layers or ()):
+            return "w4afp8", None
+        return config.activation_mode, config.activation_recipe
+    mode = config.activation_attention_mode or config.activation_mode
+    recipe = (config.activation_attention_recipe or config.activation_recipe) if mode == "w4a_nvfp4" else None
+    return mode, recipe
+
+
 def _capture_fp32_output(module, operand):
     """Rerun only a failing Linear and capture its final pre-cast accumulator."""
     from gptqmodel.nn_modules.qlinear import w4a_nvfp4_triton as kernels
@@ -250,7 +265,11 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
                 raise AssertionError(f"{name} received no input")
             operand = args[0] if args else kwargs["hidden_states"]
             samples[name]["input"] = describe(operand)
-            if isinstance(_module, W4ANVFP4Linear):
+            # Mixed-policy NVFP4 modules also consume FP8 carriers. The E2M1
+            # oracle applies only to actual FP4 operands; FP8 handoffs still
+            # undergo the same complete carrier/policy checks below.
+            if (isinstance(_module, W4ANVFP4Linear) and isinstance(operand, W4AActivation)
+                    and operand.mode == "w4a_nvfp4"):
                 pending_operands[name] = operand
         return hook
 
@@ -348,7 +367,7 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
 
     counts = {}
     expected_recipe = model.quantize_config.activation_recipe
-    fused_norms = bool(getattr(model, "_w4a_stream_fused_norms", False))
+    fused_norms = bool(getattr(model.model, "_w4a_stream_fused_norms", False))
     if not bool(torch.isfinite(output.logits).all()) or generated.shape[1] != input_ids.shape[1] + 2:
         raise AssertionError("W4A stream forward or cached generation produced invalid output.")
     for name, entry in samples.items():
@@ -357,28 +376,31 @@ def audit(checkpoint: Path, variant: str, *, require_full_coverage: bool = True,
             raise AssertionError(f"Hook did not run for {entry}")
         counts[kind] = counts.get(kind, 0) + 1
         if entry["selected"]:
-            expected_code = "torch.float8_e4m3fn" if variant == "w4afp8" else "torch.float4_e2m1fn_x2"
+            boundary_mode, boundary_recipe = _boundary_policy(name, model.quantize_config)
+            expected_code = "torch.float8_e4m3fn" if boundary_mode == "w4afp8" else "torch.float4_e2m1fn_x2"
             output_encoded = kind in {"decoder_layer", "rms_norm"}
             if output_encoded:
-                if entry["output"]["kind"] != "encoded" or entry["output"]["codes"] != expected_code:
+                if (entry["output"]["kind"] != "encoded" or entry["output"]["codes"] != expected_code
+                        or entry["output"]["mode"] != boundary_mode):
                     raise AssertionError(f"Selected W4A carrier boundary is not encoded: {name}: {entry}")
-                if entry["output"]["recipe"] != expected_recipe:
+                if entry["output"]["recipe"] != boundary_recipe:
                     raise AssertionError(f"Selected W4A boundary has the wrong scale recipe: {name}: {entry}")
             elif (entry["output"]["kind"] != "tensor"
                   or entry["output"]["dtype"] != "torch.bfloat16"):
                 raise AssertionError(
                     f"A Linear/nonlinear branch did not emit model dtype: {name}: {entry}"
                 )
-            if kind == "rms_norm" and getattr(model.get_submodule(name), "_w4a_preserve_norm_codes", False):
+            if kind == "rms_norm" and getattr(model.model.get_submodule(name), "_w4a_preserve_norm_codes", False):
                 if entry["output"]["token_scale"] != "torch.float32":
                     raise AssertionError(f"Fused-norm boundary lost its token multiplier: {name}")
                 for pointer in ("codes_ptr", "scales_ptr"):
                     if entry["input"][pointer] != entry["output"][pointer]:
                         raise AssertionError(f"Fused-norm boundary repacked its FP4 operand: {name}")
             if kind != "decoder_layer" and (entry["input"]["kind"] != "encoded" or
-                                               entry["input"]["codes"] != expected_code):
+                                               entry["input"]["codes"] != expected_code or
+                                               entry["input"]["mode"] != boundary_mode):
                 raise AssertionError(f"Selected W4A consumer did not receive encoded input: {name}: {entry}")
-            if kind != "decoder_layer" and entry["input"]["recipe"] != expected_recipe:
+            if kind != "decoder_layer" and entry["input"]["recipe"] != boundary_recipe:
                 raise AssertionError(f"Selected W4A consumer received the wrong scale recipe: {name}: {entry}")
         elif name == "model.norm" and getattr(model.model.model.layers[-1], "_w4a_stream_mode", None) == variant:
             if entry["input"]["kind"] != "encoded" or entry["output"].get("dtype") != "torch.bfloat16":

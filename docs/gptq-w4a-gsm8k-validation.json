@@ -1,0 +1,240 @@
+{
+  "date": "2026-10-07",
+  "runtime_commit": "7b6814c21e6774ad1b78b5b723d28d7f187e09d8",
+  "model": "Llama-3.2-1B-Instruct",
+  "scope": "Current runtime on saved full-model GPTQ checkpoints; no fresh weight quantization",
+  "versions": {
+    "torch": "2.11.0+cu130",
+    "transformers": "5.17.0",
+    "triton": "3.6.0",
+    "tokenicer": "0.0.14",
+    "evalution": "0.0.17",
+    "datasets": "5.0.1"
+  },
+  "dataset": {
+    "dataset": "madrylab/gsm8k-platinum",
+    "configuration": "main",
+    "split": "test",
+    "rows": 1209,
+    "fingerprint": "056daafd03ad723e",
+    "canonical_rows_sha256": "8a0fdfe240dcc009ae774af302535ec8066db56e77bf4248957fac30faf0a593",
+    "cache_files": [
+      {
+        "filename": "/root/.cache/huggingface/datasets/madrylab___gsm8k-platinum/main/0.0.0/e762492455a1cf7967de89f05b6bef72fc713b66/gsm8k-platinum-test.arrow"
+      }
+    ]
+  },
+  "protocol": {
+    "seed": 42,
+    "model_dtype": "bfloat16",
+    "padding_side": "left",
+    "num_fewshot": 8,
+    "fewshot_as_multiturn": true,
+    "apply_chat_template": true,
+    "max_new_tokens": 256,
+    "do_sample": false,
+    "rows_per_run": 1209,
+    "runs": 4
+  },
+  "lanes": {
+    "a4": {
+      "native_correct": 502,
+      "activation_correct": 474,
+      "paired": {
+        "task": "gsm8k_platinum_cot",
+        "metric": "acc,num",
+        "rows": 1209,
+        "w4a16": 0.4152191894127378,
+        "w4a_float": 0.3920595533498759,
+        "delta_pp": -2.315963606286187,
+        "paired_95pct_ci_pp": [
+          -4.728926914739927,
+          0.09699970216755296
+        ],
+        "base_only_correct": 125,
+        "float_only_correct": 97,
+        "correctness_flips": 222,
+        "answer_changes": 672,
+        "extracted_field_changes": 672,
+        "mcnemar_exact_p": 0.06972701006096343,
+        "allowed_drop_pp": 2.32,
+        "acceptance_task": true,
+        "verdict": "inconclusive",
+        "statistical_verdict": "inconclusive",
+        "statistically_detectable_drop": false,
+        "material_regression": false
+      },
+      "historical": {
+        "native": {
+          "old_result": "/root/models/w4a-quality/gsm_nvfp4_v4_gptq_full64_w4a16_full.json",
+          "old_correct": 502,
+          "delta_pp": 0.0,
+          "answer_changes": 0,
+          "correctness_flips": 0,
+          "identical_predictions": 1209
+        },
+        "activation": {
+          "old_result": "/root/models/w4a-quality/gsm_nvfp4_v4_gptq_full64_fp8attn_grid_full.json",
+          "old_correct": 474,
+          "delta_pp": 0.0,
+          "answer_changes": 0,
+          "correctness_flips": 0,
+          "identical_predictions": 1209
+        }
+      },
+      "checkpoint": "/root/models/Llama-3.2-1B-Instruct-W4A-NVFP4-v4-gptq-full64-concat2048-quality-2026-09-26-fp8attn-grid",
+      "weight_sha256": "feb36f1837bd8537b056bda11f2f3cb5e72cc4a471585e153ed7cf08cb6cd750",
+      "activation": {
+        "mode": "w4a_nvfp4",
+        "recipe": "least_squares_grid",
+        "attention": {
+          "mode": "w4afp8"
+        }
+      },
+      "batch_size": 8,
+      "audit": {
+        "full_coverage": true,
+        "counts": {
+          "decoder_layer": 16,
+          "attention": 16,
+          "w4a_linear": 112,
+          "mlp": 16,
+          "rms_norm": 33
+        },
+        "fused_norms": true,
+        "handoffs_checked": 381,
+        "independent_decode_checks": 288,
+        "decode_max_abs_error": 4.76837158203125e-07,
+        "independent_gemm_checks": 144,
+        "audit_source_sha256": "4ab9983705ee7854b3aee648baf11e66eadfe987ddadc1b03e678dfa71514692",
+        "checkpoint_sha256": {
+          "model.safetensors": "feb36f1837bd8537b056bda11f2f3cb5e72cc4a471585e153ed7cf08cb6cd750",
+          "config.json": "f6665eaf651ebac7fd01234915958ba28fd50f242e5e468f81a931b72a2d1750",
+          "quantize_config.json": "cc59fd62e84657d8284b24b9802c80d297dcb38848b041eba78802233273f5aa",
+          "tokenizer.json": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+          "tokenizer_config.json": "8994b9f8e4dde2ab66732bfeeaaaafb6e528c41595020cc27db2ecc402a6a27e",
+          "chat_template.jinja": "2a4a2c65126404267629b5d968730333804720fc185f5d0e0f6b96be7c70b156",
+          "generation_config.json": "540fdd89a67ff143fd7dfdd75db1b787d3379db4251a88f63e8e9047f6211042",
+          "special_tokens_map.json": null,
+          "added_tokens.json": null,
+          "tokenizer.model": null
+        },
+        "gemm_output_max_abs_error": 0.0,
+        "fp32_oracle_vs_fp64_max_abs_error": 4.59126631824347e-06
+      }
+    },
+    "a8": {
+      "native_correct": 432,
+      "activation_correct": 438,
+      "paired": {
+        "task": "gsm8k_platinum_cot",
+        "metric": "acc,num",
+        "rows": 1209,
+        "w4a16": 0.3573200992555831,
+        "w4a_float": 0.36228287841191065,
+        "delta_pp": 0.49627791563275436,
+        "paired_95pct_ci_pp": [
+          -1.6181645689392261,
+          2.610720400204735
+        ],
+        "base_only_correct": 82,
+        "float_only_correct": 88,
+        "correctness_flips": 170,
+        "answer_changes": 540,
+        "extracted_field_changes": 540,
+        "mcnemar_exact_p": 0.7014821003407138,
+        "allowed_drop_pp": 2.0,
+        "acceptance_task": true,
+        "verdict": "within_budget",
+        "statistical_verdict": "within_budget",
+        "statistically_detectable_drop": false,
+        "material_regression": false
+      },
+      "historical": {
+        "native": {
+          "old_result": "/root/models/w4a-quality/gsm_fp8_consumer_stream_v3_fresh_full512_concat2048_w4a16.json",
+          "old_correct": 432,
+          "delta_pp": 0.0,
+          "answer_changes": 0,
+          "correctness_flips": 0,
+          "identical_predictions": 1209
+        },
+        "activation": {
+          "old_result": "/root/models/w4a-quality/gsm_fp8_consumer_stream_v3_fresh_full512_concat2048_w4a8.json",
+          "old_correct": 441,
+          "delta_pp": -0.24813895781637718,
+          "answer_changes": 675,
+          "correctness_flips": 211,
+          "identical_predictions": 23
+        }
+      },
+      "checkpoint": "/root/models/Llama-3.2-1B-Instruct-W4AFP8-stream-v3-fresh-full512-concat2048",
+      "weight_sha256": "0a78c493017bac6c6689ba1f3ac129eaf8676cc71dfa84e4089e7af83bc5c098",
+      "activation": {
+        "mode": "w4afp8"
+      },
+      "batch_size": 32,
+      "audit": {
+        "full_coverage": true,
+        "counts": {
+          "decoder_layer": 16,
+          "attention": 16,
+          "w4a_linear": 112,
+          "mlp": 16,
+          "rms_norm": 33
+        },
+        "fused_norms": false,
+        "handoffs_checked": 381,
+        "independent_decode_checks": 0,
+        "decode_max_abs_error": null,
+        "independent_gemm_checks": 0,
+        "audit_source_sha256": "4ab9983705ee7854b3aee648baf11e66eadfe987ddadc1b03e678dfa71514692",
+        "checkpoint_sha256": {
+          "model.safetensors": "0a78c493017bac6c6689ba1f3ac129eaf8676cc71dfa84e4089e7af83bc5c098",
+          "config.json": "ae1578df5626ef4420d41ff4d05e6a71fac2afbd4f4d38be9d27a4c6c940db53",
+          "quantize_config.json": "8fe51305ee4a385a66a40b65aa8d59a1d407e5648c74d82ae99d5bed1afbca9d",
+          "tokenizer.json": "6b9e4e7fb171f92fd137b777cc2714bf87d11576700a1dcd7a399e7bbe39537b",
+          "tokenizer_config.json": "8994b9f8e4dde2ab66732bfeeaaaafb6e528c41595020cc27db2ecc402a6a27e",
+          "chat_template.jinja": "181bb0063bb369e009b5be3f19e2fb44fd01cca8d6334c9c01f6c155b9afaab0",
+          "generation_config.json": "540fdd89a67ff143fd7dfdd75db1b787d3379db4251a88f63e8e9047f6211042",
+          "special_tokens_map.json": null,
+          "added_tokens.json": null,
+          "tokenizer.model": null
+        }
+      }
+    }
+  },
+  "audit_unit_tests": {
+    "passed": 75,
+    "skipped": 0
+  },
+  "memory": {
+    "reserve_bytes": 2147483648,
+    "minimum_observed_available_bytes": 109536626688,
+    "maximum_observed_swap_used_bytes": 0,
+    "root_memory_event_deltas": {
+      "low": 0,
+      "high": 0,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0,
+      "sock_throttled": 0
+    }
+  },
+  "artifact_directory": "/root/models/w4a-quality/pr3228-7b6814c2-gsm8k-platinum",
+  "artifact_sha256": {
+    "manifest.json": "588aba5c27f0397a193960397174dca568f74df6a562a011564b322c89e7ee09",
+    "dataset.json": "325353f25b7cc3afd61eeb16894edf4a5c6b61ff8a51b7dec6b83cca2020b519",
+    "memory.json": "d595be53fade8fa8b1d015065888c2f73b4c09349e9174dfa3b7d5d065376938",
+    "summary.json": "37dab7902b4eaa866d90571339919577b29bf7d48762323ff0702556603e9de9",
+    "a4-w4a16.json": "ca262516337de7db4fab933711d87242fc9c29b632ac2e5b25c979017818524a",
+    "a4.json": "0675c15a31ac21becfef624cd956b98fabd39fbf5bca2761c3734ef08f039f65",
+    "a4-paired.json": "9d7e16c2c7d22b5346f001fde9e8de971ff68d6ad9960b512d1ecf2a88bc9188",
+    "a4-audit.json": "825cc83c3acead62beae9aba0f7bb0da9bd9ca503050329bb4526364e919e044",
+    "a8-w4a16.json": "bf8a821a7f0dd0f83a84173fcfd33f70261a545dbfa820af127dd83198836c1f",
+    "a8.json": "61bf4405f526d83cd9c78e9af70ada8f78b6bfe32e3fc9b06ad229aba97f068a",
+    "a8-paired.json": "2aa27dbcfe083bafd5937128753013bdd5dd06cd99ac453329e32ee91ed9af7a",
+    "a8-audit.json": "a30dcf837080559ebb033082c60d48bf108e6b6425ac6c4e5b553266d61a9e4a"
+  }
+}

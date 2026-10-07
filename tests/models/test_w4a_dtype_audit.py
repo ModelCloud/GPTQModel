@@ -10,12 +10,91 @@ import torch
 from tests.models.w4a_dtype_audit import (
     _assert_carrier_transport,
     _audit_handoffs,
+    _boundary_policy,
     _checkpoint_fingerprint,
     _nvfp4_decode_reference,
     _nvfp4_linear_reference,
     _scale_layout_probe_rows,
     _verify_checkpoint_fingerprint,
 )
+
+
+@pytest.mark.parametrize("name,mode", [
+    ("model.layers.0", "w4afp8"),
+    ("model.layers.0.input_layernorm", "w4afp8"),
+    ("model.layers.0.self_attn.o_proj", "w4afp8"),
+    ("model.layers.0.post_attention_layernorm", "w4afp8"),
+    ("model.layers.0.mlp.down_proj", "w4afp8"),
+    ("model.layers.1.post_attention_layernorm", "w4a_nvfp4"),
+    ("model.layers.1.mlp.gate_proj", "w4a_nvfp4"),
+])
+def test_audit_policy_follows_attention_and_per_layer_mlp_overrides(name, mode):
+    from gptqmodel.quantization import QuantizeConfig
+
+    config = QuantizeConfig(bits=4, group_size=128, desc_act=False, activation={
+        "mode": "w4a_nvfp4", "recipe": "least_squares_grid",
+        "attention": {"mode": "w4afp8"}, "mlp": {"mode": "w4afp8", "layers": [0]},
+    })
+    assert _boundary_policy(name, config) == (mode, "least_squares_grid" if mode == "w4a_nvfp4" else None)
+
+
+@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("name", ["model.layers.0", "model.layers.0.input_layernorm",
+                                 "model.layers.0.self_attn.q_proj", "model.layers.0.mlp.down_proj"])
+def test_audit_policy_inherits_unmodified_stream_defaults(mode, name):
+    from gptqmodel.quantization import QuantizeConfig
+
+    config = QuantizeConfig(bits=4, group_size=128, desc_act=False, activation=mode)
+    assert _boundary_policy(name, config) == (mode, "least_squares" if mode == "w4a_nvfp4" else None)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("attention,promoted", [("w4afp8", ()), ("w4a_nvfp4", (0,)),
+                                              ("w4afp8", (0,)), ("w4afp8", (0, 1)), (None, ())])
+def test_audit_handles_actual_mixed_carriers(fingerprint_checkpoint, monkeypatch, attention, promoted):
+    from transformers import AutoTokenizer
+
+    from gptqmodel import GPTQModel
+    from gptqmodel.nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+    from gptqmodel.quantization import QuantizeConfig
+    from tests.models import w4a_dtype_audit
+    from tests.models.test_w4a_producer_calibration import _tiny_packed_nvfp4
+
+    core = _tiny_packed_nvfp4()
+    core.generation_config.eos_token_id = None
+    activation = {"mode": "w4a_nvfp4"}
+    if attention is not None:
+        activation["attention"] = {"mode": attention}
+    if promoted:
+        activation["mlp"] = {"mode": "w4afp8", "layers": list(promoted)}
+    config = QuantizeConfig(bits=4, group_size=128, desc_act=False, activation=activation)
+    install_w4a_llama_stream(core, "w4a_nvfp4", "least_squares", attention_mode=attention,
+                             mlp_fp8_layers=promoted)
+
+    class Wrapper(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = core
+            self.quantize_config = config
+
+        def forward(self, **kwargs):
+            return core(**kwargs)
+
+    class Tokenizer:
+        pad_token_id = 1
+
+        def __call__(self, *_args, **_kwargs):
+            return {"input_ids": torch.arange(3, 9)[None]}
+
+    monkeypatch.setattr(GPTQModel, "load", lambda *_args, **_kwargs: Wrapper())
+    monkeypatch.setattr(AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: Tokenizer())
+    monkeypatch.setattr(w4a_dtype_audit, "require_w4a_test_headroom", lambda **_kwargs: None)
+    report = w4a_dtype_audit.audit(fingerprint_checkpoint, "w4a_nvfp4")
+    fp4_modules = (0 if attention == "w4afp8" else 8) + 3 * (2 - len(promoted))
+    assert report["full_coverage"] and report["counts"]["w4a_linear"] == 14
+    assert report["independent_gemm_checks"] == fp4_modules * 3
+    assert report["handoffs_checked"] == 45
 
 
 @pytest.fixture
