@@ -261,6 +261,12 @@ are calibrated after normalization and must be applied at that same boundary
 in replay and inference. Code reuse is governed by rotation, activation mode,
 and the boundary's recipe.
 
+Headroom norms read the current calibrated scale from their consuming
+projections, including after device moves, model copies, or buffer replacement
+with `load_state_dict(assign=True)`. Shared Q/K/V and gate/up scales must match;
+installation checks every selected layer before changing forwards, and a
+repeated installation revalidates the current buffers.
+
 ### Recipes
 
 `recipe` selects how the per-block E4M3 hardware scale is chosen. It applies to
@@ -335,6 +341,9 @@ and the stream recipe for NVFP4 MLP boundaries. Its report records that recipe
 alongside each fitted scale; FP8 boundaries remain dynamically scaled.
 Producer names must start with `model.layers.`, and every scale must be finite
 and strictly positive after rounding through FP32.
+Runtime and calibration replay require exactly the keys for the active NVFP4
+producers. Missing keys, unknown keys, and entries for FP8 attention or promoted
+FP8 MLP boundaries are rejected before installation.
 
 ### Validation rules
 

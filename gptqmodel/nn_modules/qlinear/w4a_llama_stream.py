@@ -16,21 +16,19 @@ from .w4a_activation import W4AActivation, pack_activation
 from .w4a_boundary import (
     NVFP4BoundaryQuantizer,
     layer_mlp_policy,
-    llama_nvfp4_boundaries,
     norm_codes_fused,
     nvfp4_producer_specs,
     pack_boundary,
+    validate_producer_scales,
 )
 from .w4a_floatx import W4AFP8Linear
 from .w4a_nvfp4 import W4ANVFP4Linear
 
 
-def _headroom_scale(recipe: str | None, consumer=None, explicit=None):
+def _headroom_scale(recipe: str | None, consumer=None):
     if recipe not in {"nvidia_headroom", "least_squares_headroom"}:
         return None
-    scale = explicit
-    if scale is None and consumer is not None:
-        scale = getattr(consumer, "activation_global_scale", None)
+    scale = getattr(consumer, "activation_global_scale", None)
     if scale is None:
         raise RuntimeError("An NVFP4 headroom boundary is missing its calibrated global scale.")
     return scale
@@ -112,9 +110,10 @@ def _norm_forward(self, hidden_states: W4AActivation) -> W4AActivation:
         return hidden_states.rescale_tokens(inv_rms.reshape(-1))
     y = x * inv_rms
     y = y * self.weight.float()
+    consumers = getattr(self, "_w4a_output_scale_consumers", (None,))
     return pack_activation(
         y, mode,
-        global_scale=_headroom_scale(recipe, explicit=getattr(self, "_w4a_output_global_scale", None)),
+        global_scale=_headroom_scale(recipe, consumers[0]),
         model_dtype=hidden_states.model_dtype, recipe=recipe, reference=y,
     )
 
@@ -305,7 +304,8 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
     out_of_range = sorted(index for index in mlp_fp8_layers if index >= len(layers))
     if out_of_range:
         raise ValueError(f"W4A per-layer MLP overrides exceed the decoder depth: {out_of_range}")
-    if getattr(model, "_w4a_stream_mode", None) == mode:
+    installed_mode = getattr(model, "_w4a_stream_mode", None)
+    if installed_mode == mode:
         if (getattr(model, "_w4a_stream_recipe", None) != recipe
                 or getattr(model, "_w4a_stream_attention_mode", None) != attention_mode
                 or getattr(model, "_w4a_stream_attention_recipe", None) != attention_recipe
@@ -313,14 +313,14 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
                 or getattr(model, "_w4a_stream_fused_norms", None) != fused_norms
                 or getattr(model, "_w4a_stream_global_scales", None) != global_scales):
             raise ValueError("A different W4A stream policy is already installed.")
-        return
-    if getattr(model, "_w4a_stream_mode", None) is not None:
+    elif installed_mode is not None:
         raise ValueError("A different W4A activation stream is already installed.")
 
     required = ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj", "self_attn.o_proj",
                 "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
     selected = []
-    for layer in layers:
+    headroom_norms = []
+    for index, layer in enumerate(layers):
         modules = []
         for path in required:
             parent, child = path.split(".")
@@ -339,13 +339,30 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
                         "NVFP4 RMSNorm code reuse requires RMSNorm weights fused into the "
                         "GPTQ projections."
                     )
+        if all(present):
+            layer_mlp_mode, layer_mlp_recipe = mlp_policy(index)
+            # Validate every shared headroom operand before changing any
+            # forwards or removing calibration replay. Reinstallation must
+            # check the current buffers after a checkpoint replacement too.
+            for norm, consumers, label, norm_mode, norm_recipe in (
+                (layer.input_layernorm,
+                 (layer.self_attn.q_proj, layer.self_attn.k_proj, layer.self_attn.v_proj),
+                 "Q/K/V", attention_mode, attention_recipe),
+                (layer.post_attention_layernorm, (layer.mlp.gate_proj, layer.mlp.up_proj),
+                 "gate/up", layer_mlp_mode, layer_mlp_recipe),
+            ):
+                if (norm_mode == "w4a_nvfp4"
+                        and norm_recipe in {"nvidia_headroom", "least_squares_headroom"}):
+                    scales = [consumer.activation_global_scale for consumer in consumers]
+                    if not all(torch.equal(scales[0], value) for value in scales[1:]):
+                        raise ValueError(f"Shared {label} NVFP4 carriers require identical calibrated scales.")
+                    headroom_norms.append((norm, consumers))
         selected.append(all(present))
     if not any(selected):
         raise ValueError("No complete W4A decoder layer was found.")
 
-    boundaries = []
+    nvfp4_boundaries = []
     if mode == "w4a_nvfp4":
-        boundaries = list(llama_nvfp4_boundaries(layers, selected))
         # Only NVFP4 producers own a calibrated global scale; FP8 boundaries
         # pack dynamically, so a mixed stream needs a subset of the keys. The
         # subset follows the per-layer MLP policy, so a layer promoted to FP8
@@ -354,20 +371,21 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
             layers, selected, attention_mode=attention_mode, mode=mode, recipe=recipe,
             mlp_fp8_layers=fp8_mlp_layers,
         )
-        if global_scales is not None:
-            unknown = set(global_scales) - {key for _, _, key in boundaries}
-            if unknown:
-                raise ValueError(f"Unknown NVFP4 producer scales: {sorted(unknown)}")
-            missing = {key for _, _, key in nvfp4_boundaries} - set(global_scales)
-            if missing:
-                raise ValueError(f"Incomplete NVFP4 producer scales: missing={sorted(missing)}")
-        for owner, boundary, key in nvfp4_boundaries:
-            device = layers[int(key.split(".")[2])].self_attn.q_proj.qweight.device
-            # The module remains movable; these copies are not saved as new
-            # weight tensors. Metadata is the single serialization authority.
-            owner.add_module(f"_w4a_{boundary}_quantizer", NVFP4BoundaryQuantizer(
-                key, device, global_scales[key] if global_scales is not None else None,
-            ))
+        validate_producer_scales(nvfp4_boundaries, global_scales)
+    if installed_mode is not None:
+        return
+    for norm, consumers in headroom_norms:
+        # Keep live consumers, not tensor views that become stale on .to() or
+        # load_state_dict(assign=True). A plain tuple does not register the
+        # projections a second time and deepcopy preserves the model links.
+        norm._w4a_output_scale_consumers = consumers
+    for owner, boundary, key in nvfp4_boundaries:
+        device = layers[int(key.split(".")[2])].self_attn.q_proj.qweight.device
+        # The module remains movable; these copies are not saved as new
+        # weight tensors. Metadata is the single serialization authority.
+        owner.add_module(f"_w4a_{boundary}_quantizer", NVFP4BoundaryQuantizer(
+            key, device, global_scales[key] if global_scales is not None else None,
+        ))
 
     # Quantization installs the calibration replay on the dense model. Its
     # dtype-exit hooks live on decoder layers and the final norm, which the
@@ -400,36 +418,14 @@ def install_w4a_llama_stream(model: torch.nn.Module, mode: str,
         layer._w4a_stream_mode = mode
         layer._w4a_stream_recipe = recipe
         layer._w4a_stream_require_input = index > 0 and selected[index - 1]
-        # A headroom boundary needs the frozen global scale of the projections
-        # that consume its normed operand. Attention and MLP carry independent
-        # policies, so resolve each side from its own policy: a layer promoted
-        # to FP8 must not disable the other side's headroom scale, and an FP8
-        # side must not demand scales it will never consume.
         attention_headroom = (
             attention_mode == "w4a_nvfp4"
             and attention_recipe in {"nvidia_headroom", "least_squares_headroom"}
         )
-        if attention_headroom:
-            qkv_scales = [
-                layer.self_attn.q_proj.activation_global_scale,
-                layer.self_attn.k_proj.activation_global_scale,
-                layer.self_attn.v_proj.activation_global_scale,
-            ]
-            if not all(torch.equal(qkv_scales[0], value) for value in qkv_scales[1:]):
-                raise ValueError("Shared Q/K/V NVFP4 carriers require identical calibrated scales.")
-            layer.input_layernorm._w4a_output_global_scale = qkv_scales[0]
         mlp_headroom = (
             layer_mlp_mode == "w4a_nvfp4"
             and layer_mlp_recipe in {"nvidia_headroom", "least_squares_headroom"}
         )
-        if mlp_headroom:
-            gate_up_scales = [
-                layer.mlp.gate_proj.activation_global_scale,
-                layer.mlp.up_proj.activation_global_scale,
-            ]
-            if not torch.equal(gate_up_scales[0], gate_up_scales[1]):
-                raise ValueError("Shared gate/up NVFP4 carriers require identical calibrated scales.")
-            layer.post_attention_layernorm._w4a_output_global_scale = gate_up_scales[0]
         _bind_forward(layer, _layer_forward)
         _bind_forward(layer.self_attn, _attention_forward)
         _bind_forward(layer.mlp, _mlp_forward)

@@ -156,7 +156,7 @@ def test_headroom_norm_scale_follows_attention_and_mlp_policies(dtype):
     headroom attention with a promoted FP8 MLP left the input norm without its
     global scale and raised on the first norm call.
     """
-    norm_scale = "_w4a_output_global_" + "scale"
+    norm_scale = "_w4a_output_scale_consumers"
     packed = _tiny_packed_nvfp4(dtype=dtype)
     install_w4a_llama_stream(
         packed, "w4a_nvfp4", "nvidia_headroom", attention_mode="w4a_nvfp4", attention_recipe="nvidia_headroom",
@@ -178,7 +178,7 @@ def test_headroom_norm_scale_follows_attention_and_mlp_policies(dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_fp8_attention_does_not_demand_qkv_headroom_scales(dtype):
     """An FP8 attention side must not validate scales it never consumes."""
-    norm_scale = "_w4a_output_global_" + "scale"
+    norm_scale = "_w4a_output_scale_consumers"
     packed = _tiny_packed_nvfp4(dtype=dtype)
     layer0 = packed.model.layers[0]
     # Distinct Q/K/V buffers would fail a shared-carrier check if it ran.
@@ -201,7 +201,7 @@ def test_fp8_attention_does_not_demand_qkv_headroom_scales(dtype):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
     """NVFP4 headroom attention with a dynamic MLP still owns its norm scale."""
-    norm_scale = "_w4a_output_global_" + "scale"
+    norm_scale = "_w4a_output_scale_consumers"
     packed = _tiny_packed_nvfp4(dtype=dtype)
     install_w4a_llama_stream(
         packed, "w4a_nvfp4", "least_squares", attention_mode="w4a_nvfp4", attention_recipe="nvidia_headroom",
@@ -213,6 +213,120 @@ def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
     with torch.inference_mode():
         logits = packed(input_ids=torch.arange(17, device="cuda")[None], use_cache=False).logits
     assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
+                    reason="GB10 required")
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
+@pytest.mark.parametrize("transition", ["assign", "device_move", "deepcopy_assign"])
+def test_headroom_norm_uses_live_consumer_scale_after_buffer_replacement(dtype, recipe, transition, record_property):
+    """Replacing a Linear buffer must not strand RMSNorm on its previous scale."""
+    import copy
+
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+
+    packed = _tiny_packed_nvfp4(dtype=dtype)
+    keys = set(packed.state_dict())
+    install_w4a_llama_stream(packed, "w4a_nvfp4", recipe)
+    assert set(packed.state_dict()) == keys
+    original = packed
+    if transition == "deepcopy_assign":
+        packed = copy.deepcopy(packed)
+    scale = torch.tensor(0.00392157, dtype=torch.float32, device="cuda")
+    if transition == "device_move":
+        packed.cpu()
+        for module in packed.modules():
+            if isinstance(module, W4ANVFP4Linear):
+                module.activation_global_scale.copy_(scale.cpu())
+        packed.cuda()
+    else:
+        state = {key: value.clone() for key, value in packed.state_dict().items()}
+        for key in state:
+            if key.endswith("activation_global_scale_bits"):
+                state[key] = scale.view(torch.int32).clone()
+        packed.load_state_dict(state, assign=True)
+    for module in packed.modules():
+        if isinstance(module, W4ANVFP4Linear):
+            module.post_init()
+    assert set(packed.state_dict()) == keys
+    if transition == "deepcopy_assign":
+        assert original.model.layers[0].self_attn.q_proj.activation_global_scale.item() != scale.item()
+
+    generator = torch.Generator(device="cuda").manual_seed(928)
+    source = torch.randn((17, 128), device="cuda", dtype=dtype, generator=generator)
+    carrier = pack_activation(source, "w4a_nvfp4", recipe=recipe, global_scale=scale, reference=source)
+    max_error = 0.0
+    with torch.inference_mode():
+        for layer in packed.model.layers:
+            for norm, consumer in ((layer.input_layernorm, layer.self_attn.q_proj),
+                                   (layer.post_attention_layernorm, layer.mlp.gate_proj)):
+                encoded = norm(carrier)
+                assert encoded.global_scale.device == consumer.activation_global_scale.device
+                assert encoded.global_scale.data_ptr() == consumer.activation_global_scale.data_ptr()
+                assert encoded.global_scale.item() == scale.item()
+                normed = source.float() * torch.rsqrt(source.float().square().mean(-1, keepdim=True)
+                                                     + norm.variance_epsilon) * norm.weight.float()
+                if recipe == "least_squares_headroom":
+                    expected = _independent_nvfp4_qdq(normed, scale)
+                else:
+                    # Independent max-to-6 oracle; order exact ties by even code.
+                    blocks = normed.reshape(-1, 8, 16)
+                    maximum = blocks.abs().amax(-1, keepdim=True)
+                    local = torch.where(maximum > 0, (maximum / (6 * scale)).clamp(2**-9, 448),
+                                        torch.ones_like(maximum)).to(torch.float8_e4m3fn).float()
+                    codebook = normed.new_tensor((0., -1., 1., -2., 2., -4., 4., -.5, .5,
+                                                 -1.5, 1.5, -3., 3., -6., 6.))
+                    indices = ((blocks / (local * scale))[..., None] - codebook).abs().argmin(-1)
+                    expected = (codebook[indices] * local * scale).reshape_as(normed)
+                assert encoded.model_dtype == dtype
+                decoded = encoded.decode(torch.float32)
+                torch.testing.assert_close(decoded, expected, rtol=1e-6, atol=1e-6)
+                max_error = max(max_error, (decoded - expected).abs().max().item())
+        logits = packed(input_ids=torch.arange(17, device="cuda")[None], use_cache=False).logits
+    assert logits.dtype == dtype and torch.isfinite(logits).all()
+    record_property("norm_max_abs_error", max_error)
+    # Forward must already work without reinstalling; repeated installation
+    # still validates the new buffers and leaves the same policy in place.
+    install_w4a_llama_stream(packed, "w4a_nvfp4", recipe)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("group,leaf,label", [("self_attn", "k_proj", "Q/K/V"), ("mlp", "up_proj", "gate/up")])
+def test_headroom_scale_mismatch_leaves_model_untouched(recipe, installed, group, leaf, label):
+    """Validate all layers before installing hooks, including a repeated install."""
+    packed = _tiny_packed_nvfp4()
+    if installed:
+        install_w4a_llama_stream(packed, "w4a_nvfp4", recipe)
+    # A later-layer failure used to leave earlier layers partially installed.
+    getattr(getattr(packed.model.layers[1], group), leaf).activation_global_scale.mul_(2)
+    modules = dict(packed.named_modules())
+    forwards = {name: module.forward for name, module in modules.items()}
+    flags = {name: getattr(module, "_require_activation_stream", None) for name, module in modules.items()}
+    with pytest.raises(ValueError, match=f"Shared {label} NVFP4 carriers require identical calibrated scales"):
+        install_w4a_llama_stream(packed, "w4a_nvfp4", recipe)
+    assert dict(packed.named_modules()) == modules
+    assert {name: module.forward for name, module in packed.named_modules()} == forwards
+    assert {name: getattr(module, "_require_activation_stream", None)
+            for name, module in packed.named_modules()} == flags
+    assert hasattr(packed, "_w4a_stream_mode") == installed
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("attention_mode,mlp_fp8_layers", [("w4afp8", ()), ("w4a_nvfp4", (0,))])
+def test_runtime_rejects_scales_for_fp8_producers_before_install(attention_mode, mlp_fp8_layers):
+    """Runtime must reject stale FP8 producer entries just as calibration replay does."""
+    packed = _tiny_packed_nvfp4()
+    scales = {key: .01234567 for _, _, key in llama_nvfp4_boundaries(packed.model.layers, [True, True])}
+    modules = dict(packed.named_modules())
+    with pytest.raises(ValueError, match="Incomplete NVFP4 producer scales.*extra="):
+        install_w4a_llama_stream(packed, "w4a_nvfp4", "least_squares", global_scales=scales,
+                                attention_mode=attention_mode, mlp_fp8_layers=mlp_fp8_layers)
+    assert dict(packed.named_modules()) == modules
+    assert not hasattr(packed, "_w4a_stream_mode")
+    assert not any(getattr(module, "_require_activation_stream", False) for module in packed.modules())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
