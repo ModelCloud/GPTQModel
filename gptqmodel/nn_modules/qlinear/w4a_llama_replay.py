@@ -19,7 +19,7 @@ from ...quantization.activation_floatx import (
     nvfp4_uses_headroom,
 )
 from .w4a_boundary import layer_mlp_policy, norm_codes_fused
-from .w4a_llama_stream import _bind_forward
+from .w4a_llama_stream import _bind_forward, _track_bound_forward
 
 
 def round_w4a_activation(x: torch.Tensor, mode: str,
@@ -414,6 +414,9 @@ def install_w4a_llama_replay(model: torch.nn.Module, qcfg) -> None:
             linear._w4a_replay_original_forward = getattr(linear, "_old_forward", linear.forward)
             linear._w4a_replay_custom_forward = (
                 getattr(linear._w4a_replay_original_forward, "__func__", None) is not torch.nn.Linear.forward)
+            # Replay falls back to this forward, so a data-parallel replica must
+            # run its own rather than the original module's bound method.
+            _track_bound_forward(linear, "_w4a_replay_original_forward")
             _bind_forward(linear, _replay_linear_forward)
             # The MLP wrapper handles rotation (when enabled) and quantization.
             # Even an identity rotation must not trigger a second input QDQ.

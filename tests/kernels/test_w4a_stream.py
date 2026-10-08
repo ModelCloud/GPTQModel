@@ -181,6 +181,73 @@ def test_rotated_prepacked_input_is_reencoded_before_gemm(monkeypatch, mode, ker
     )
 
 
+@FP8_HARDWARE
+def test_activation_carrier_moves_as_a_single_operand():
+    """Placement hooks must be able to re-home the carrier as one operand.
+
+    ``accelerate.utils.send_to_device`` only relocates arguments that expose
+    ``to``. A checkpoint sharded over several devices hands this operand to the
+    next device's layer, so the carrier has to follow the module placement the
+    way a plain tensor does; otherwise the next RMSNorm multiplies a cuda:0
+    activation by a cuda:1 weight.
+    """
+    from accelerate.utils import send_to_device
+
+    generator = torch.Generator(device="cuda").manual_seed(909)
+    x = torch.randn((3, 128), device="cuda", dtype=torch.bfloat16, generator=generator)
+    carrier = pack_activation(x, "w4afp8", reference=x)
+    # A hook on a layer that already owns the operand must not copy it.
+    assert send_to_device(carrier, carrier.codes.device) is carrier
+
+    moved = send_to_device(carrier, torch.device("cpu"))
+    assert isinstance(moved, W4AActivation)
+    assert moved.shape == carrier.shape and moved.mode == carrier.mode
+    assert moved.model_dtype == carrier.model_dtype
+    for value in (moved.codes, moved.scales, moved.reference):
+        assert value.device.type == "cpu"
+    assert torch.equal(moved.codes.view(torch.uint8), carrier.codes.view(torch.uint8).cpu())
+    torch.testing.assert_close(moved.scales, carrier.scales.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(moved.decode(torch.float32), carrier.decode(torch.float32).cpu(),
+                               rtol=0, atol=0)
+
+
+@FP8_HARDWARE
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_sharded_layer_launches_kernels_on_its_own_device():
+    """A layer placed on cuda:1 must pack and multiply with cuda:1 pointers.
+
+    Triton launches into the current CUDA context, which stays cuda:0 while a
+    checkpoint sharded over several devices runs later layers on cuda:1.
+    Launching those kernels without switching context fails with "Pointer
+    argument cannot be accessed from Triton (cpu tensor?)".
+    """
+    from gptqmodel.nn_modules.qlinear.w4a_triton import fp8_linear
+
+    k, n, rows = 256, 128, 3
+    layer = W4AFP8Linear(bits=4, group_size=128, sym=True, desc_act=False,
+                         in_features=k, out_features=n, bias=False).cuda()
+    raw = (torch.arange(k, device="cuda")[:, None] + torch.arange(n, device="cuda")[None, :]) % 16
+    shifts = (torch.arange(8, device="cuda", dtype=torch.int32) * 4)[None, :, None]
+    layer.qweight.copy_((raw.reshape(k // 8, 8, n).to(torch.int32) << shifts).sum(dim=1))
+    layer.qzeros.fill_(0x77777777)
+    layer.scales.fill_(0.125)
+    layer.post_init()
+
+    generator = torch.Generator(device="cuda").manual_seed(1717)
+    x = torch.randn((rows, k), device="cuda", dtype=torch.bfloat16, generator=generator)
+    expected = fp8_linear(x, layer._weight_e4m3, layer.scales, None)
+
+    sharded = layer.to("cuda:1")
+    torch.cuda.set_device(0)
+    assert torch.cuda.current_device() == 0
+    actual = fp8_linear(x.to("cuda:1"), sharded._weight_e4m3, sharded.scales, None)
+    assert actual.device == torch.device("cuda:1")
+    # The guard restores the ambient device once the launch is done.
+    assert torch.cuda.current_device() == 0
+    torch.cuda.synchronize()
+    torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("mode,kernel", [
     pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),

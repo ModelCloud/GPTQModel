@@ -8,12 +8,27 @@ FP8 lane of every W4A policy, including the GB10 mixed recipes.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import torch
 import triton
 import triton.language as tl
 from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.ampere import mma_v2
+
+
+def _launch_device(device: torch.device):
+    """Bind a Triton launch to the device that owns the operands.
+
+    Triton launches into the *current* CUDA context, but a checkpoint sharded
+    over several devices hands each layer operands on that layer's device.
+    Without this guard a layer on cuda:1 fails with "Pointer argument cannot
+    be accessed from Triton (cpu tensor?)" while cuda:0 is the current device.
+    """
+    if device.type == "cuda" and torch.cuda.is_available():
+        return torch.cuda.device(device)
+    return nullcontext()
 
 
 @triton.jit
@@ -111,7 +126,8 @@ def fp8_pack(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     q = torch.empty((rows, k), device=x.device, dtype=torch.float8_e4m3fn)
     row_scale = torch.empty((rows,), device=x.device, dtype=torch.float32)
     if rows:
-        _token_fp8_quant[(rows,)](x.contiguous(), q, row_scale, k, triton.next_power_of_2(k), num_warps=4)
+        with _launch_device(x.device):
+            _token_fp8_quant[(rows,)](x.contiguous(), q, row_scale, k, triton.next_power_of_2(k), num_warps=4)
     return q, row_scale
 
 
@@ -133,8 +149,9 @@ def fp8_linear_prepacked(q: torch.Tensor, row_scale: torch.Tensor,
     if not rows:
         return output
     tile_n = 32 if n % 64 else 64
-    _grouped_fp8_gemm[(triton.cdiv(rows, 16), triton.cdiv(n, tile_n))](
-        q, weight_e4m3, scales, row_scale, bias, output,
-        rows, n, k, bias is not None, 16, tile_n, num_warps=4,
-    )
+    with _launch_device(q.device):
+        _grouped_fp8_gemm[(triton.cdiv(rows, 16), triton.cdiv(n, tile_n))](
+            q, weight_e4m3, scales, row_scale, bias, output,
+            rows, n, k, bias is not None, 16, tile_n, num_warps=4,
+        )
     return output

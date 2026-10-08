@@ -25,6 +25,40 @@ from .w4a_floatx import W4AFP8Linear
 from .w4a_nvfp4 import W4ANVFP4Linear
 
 
+# Producer boundaries whose headroom scale lives on the projections they feed.
+# Paths are relative to the owning decoder layer so they can be re-resolved
+# from any replica of it.
+_HEADROOM_NORM_CONSUMERS = (
+    ("input_layernorm", ("self_attn.q_proj", "self_attn.k_proj", "self_attn.v_proj")),
+    ("post_attention_layernorm", ("mlp.gate_proj", "mlp.up_proj")),
+)
+
+
+def _resolve_submodule(module: torch.nn.Module, path: str) -> torch.nn.Module:
+    for part in path.split("."):
+        module = getattr(module, part)
+    return module
+
+
+def _refresh_headroom_consumers(layer: torch.nn.Module) -> None:
+    """Re-point stored headroom consumer references at this layer's projections.
+
+    ``_w4a_output_scale_consumers`` holds live modules rather than tensor views
+    so that replacing an ``activation_global_scale`` buffer is still observed.
+    A data-parallel replica copies ``__dict__`` shallowly, which leaves those
+    references pointing at the original device's projections; re-resolving them
+    from the layer keeps every replica on its own operands. Norms that own no
+    headroom scale never receive the attribute and are skipped.
+    """
+    for norm_name, consumer_paths in _HEADROOM_NORM_CONSUMERS:
+        norm = getattr(layer, norm_name, None)
+        if norm is None or not hasattr(norm, "_w4a_output_scale_consumers"):
+            continue
+        norm._w4a_output_scale_consumers = tuple(
+            _resolve_submodule(layer, path) for path in consumer_paths
+        )
+
+
 def _headroom_scale(recipe: str | None, consumer=None):
     if recipe not in {"nvidia_headroom", "least_squares_headroom"}:
         return None
@@ -197,6 +231,7 @@ def _layer_forward(self, hidden_states: torch.Tensor | W4AActivation,
     mode, recipe = _boundary_policy(self, "input")
     x = _as_stream(hidden_states, mode, recipe, owner=self)
     residual = x
+    _refresh_headroom_consumers(self)
     x = self.input_layernorm(x)
     x, _ = self.self_attn(
         hidden_states=x, attention_mask=attention_mask, position_ids=position_ids,
@@ -216,14 +251,49 @@ def _decode_input(_module, args):
     return None
 
 
+def _replicate_for_data_parallel(self):
+    """Copy this module for one data-parallel replica with its own bindings.
+
+    ``torch.nn.Module._replicate_for_data_parallel`` copies ``__dict__``
+    shallowly, so a replica inherits the original's bound stream forwards and
+    keeps running the original device's parameters. Re-bind every recorded
+    forward to the replica here. Submodules are re-linked by
+    ``torch.nn.parallel.replicate`` only after this returns, so anything read
+    out of the module tree is resolved lazily per forward instead.
+    """
+    base = next(
+        klass.__dict__["_replicate_for_data_parallel"]
+        for klass in type(self).__mro__
+        if "_replicate_for_data_parallel" in klass.__dict__
+    )
+    replica = base(self)
+    for attr in getattr(self, "_w4a_bound_forward_attrs", ()):
+        bound = getattr(self, attr, None)
+        if isinstance(bound, MethodType):
+            setattr(replica, attr, MethodType(bound.__func__, replica))
+    return replica
+
+
+def _track_bound_forward(module, attr: str) -> None:
+    """Record an instance-level bound method and make replicas re-bind it."""
+    attrs = list(getattr(module, "_w4a_bound_forward_attrs", ()))
+    if attr not in attrs:
+        attrs.append(attr)
+    module._w4a_bound_forward_attrs = tuple(attrs)
+    if "_replicate_for_data_parallel" not in module.__dict__:
+        module._replicate_for_data_parallel = MethodType(_replicate_for_data_parallel, module)
+
+
 def _bind_forward(module, function) -> None:
     bound = MethodType(function, module)
     # Accelerate's placement hook wraps `forward` and invokes `_old_forward`.
     # Replacing only `forward` would be bypassed by that wrapper.
     if hasattr(module, "_hf_hook") and hasattr(module, "_old_forward"):
         module._old_forward = bound
+        _track_bound_forward(module, "_old_forward")
     else:
         module.forward = bound
+        _track_bound_forward(module, "forward")
 
 
 def install_w4a_llama_stream(model: torch.nn.Module, mode: str,

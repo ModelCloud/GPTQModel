@@ -15,7 +15,75 @@ from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 from gptqmodel.quantization.activation_floatx import nvfp4_block_qdq
 from gptqmodel.quantization.config import QuantizeConfig
-from tests.w4a_hardware_marks import NVFP4_HARDWARE
+from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
+
+
+def _tiny_packed_fp8(dtype=torch.bfloat16):
+    """Build a packed FP8 Llama without installing a runtime stream."""
+    from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+
+    torch.manual_seed(317)
+    config = LlamaConfig(vocab_size=32, hidden_size=128, intermediate_size=256,
+                         num_hidden_layers=2, num_attention_heads=4, num_key_value_heads=4,
+                         max_position_embeddings=128)
+    core = LlamaForCausalLM(config).to(device="cuda", dtype=dtype).eval()
+    for layer in core.model.layers:
+        for parent in (layer.self_attn, layer.mlp):
+            for name, dense in list(parent.named_children()):
+                if not isinstance(dense, torch.nn.Linear):
+                    continue
+                linear = W4AFP8Linear(bits=4, group_size=128, sym=True, desc_act=False,
+                                      in_features=dense.in_features, out_features=dense.out_features,
+                                      bias=False).to(device="cuda", dtype=dtype)
+                linear.qweight.random_(-(2 ** 31), 2 ** 31 - 1)
+                linear.qzeros.fill_(0x77777777)
+                linear.scales.fill_(0.002)
+                linear.post_init()
+                setattr(parent, name, linear)
+    return core
+
+
+@FP8_HARDWARE
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
+def test_stream_bindings_follow_data_parallel_replicas():
+    """A replica must run its own bound forwards and its own operands.
+
+    ``torch.nn.parallel.replicate`` copies each module's ``__dict__`` shallowly,
+    so the forwards bound at install time stayed attached to the original module
+    and a replica ran the original device's parameters, e.g. a cuda:1 activation
+    against a cuda:0 RMSNorm weight.
+    """
+    from gptqmodel.nn_modules.qlinear.w4a_activation import pack_activation
+    from gptqmodel.nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+    from gptqmodel.utils.looper_helpers import clone_module_for_devices, device_ctx
+
+    core = _tiny_packed_fp8()
+    install_w4a_llama_stream(core, "w4afp8", None)
+    devices = [torch.device("cuda:0"), torch.device("cuda:1")]
+    replicas = clone_module_for_devices(core.model.layers[0], devices)
+    for device in devices:
+        replica = replicas[device]
+        # torch's fast path sets this; without it the shallow-copy binding
+        # problem cannot occur and the assertions below would prove nothing.
+        assert getattr(replica, "_former_parameters", None) is not None
+        for module in (replica, replica.self_attn, replica.mlp,
+                       replica.input_layernorm, replica.post_attention_layernorm):
+            assert getattr(module.forward, "__self__", None) is module
+
+    source = torch.randn((1, 3, 128), generator=torch.Generator().manual_seed(17),
+                         dtype=torch.bfloat16)
+    # The forward workers run under their device context, which the Triton
+    # packing kernels rely on to resolve pointers.
+    def norm_on(device):
+        with device_ctx(device):
+            return replicas[device].input_layernorm(
+                pack_activation(source.to(device), "w4afp8"))
+
+    expected = norm_on(devices[0])
+    actual = norm_on(devices[1])
+    assert actual.decode(torch.float32).device == devices[1]
+    torch.testing.assert_close(actual.decode(torch.float32).cpu(),
+                               expected.decode(torch.float32).cpu(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])

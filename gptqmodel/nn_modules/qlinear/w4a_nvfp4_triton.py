@@ -14,7 +14,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .w4a_triton import _to_e4m3_rn
+from .w4a_triton import _launch_device, _to_e4m3_rn
 
 
 _E4M3_SEARCH_RADIUS = tl.constexpr(8)
@@ -257,16 +257,17 @@ def nvfp4_pack_and_swizzle(x: torch.Tensor, global_scale: torch.Tensor, *, recip
         "least_squares_headroom": _quantize_nvfp4_input,
         "least_squares_grid": _quantize_nvfp4_input,
     }[recipe]
-    if recipe in {"least_squares", "least_squares_headroom", "least_squares_grid"}:
-        kernel[(padded_rows, width // 128)](
-            x, global_scale, packed, scales, rows, width, padded_rows,
-            GRID_SEARCH=recipe == "least_squares_grid", num_warps=4,
-        )
-    else:
-        kernel[(padded_rows, width // 128)](
-            x, global_scale, packed, scales, rows, width, padded_rows,
-            num_warps=4,
-        )
+    with _launch_device(x.device):
+        if recipe in {"least_squares", "least_squares_headroom", "least_squares_grid"}:
+            kernel[(padded_rows, width // 128)](
+                x, global_scale, packed, scales, rows, width, padded_rows,
+                GRID_SEARCH=recipe == "least_squares_grid", num_warps=4,
+            )
+        else:
+            kernel[(padded_rows, width // 128)](
+                x, global_scale, packed, scales, rows, width, padded_rows,
+                num_warps=4,
+            )
     return packed.view(torch.float4_e2m1fn_x2), scales
 
 
@@ -309,9 +310,10 @@ def nvfp4_decode(codes: torch.Tensor, scales: torch.Tensor, global_scale: torch.
         raise ValueError("Malformed NVFP4 block scales.")
     output = torch.empty((rows, width), device=codes.device, dtype=output_dtype)
     if rows:
-        _decode_nvfp4[(rows, width // 128)](
-            codes.view(torch.uint8), scales, global_scale, output, rows, width, padded_rows, num_warps=4,
-        )
+        with _launch_device(codes.device):
+            _decode_nvfp4[(rows, width // 128)](
+                codes.view(torch.uint8), scales, global_scale, output, rows, width, padded_rows, num_warps=4,
+            )
     return output
 
 
@@ -350,11 +352,12 @@ def nvfp4_accumulate_group(both: torch.Tensor, group_scales: torch.Tensor,
     """Fuse exact low/high INT4 planes with one GPTQ group scale."""
     rows, doubled_columns = both.shape
     columns = doubled_columns // 2
-    _accumulate_fp4_planes[(triton.cdiv(rows * columns, 256),)](
-        both, group_scales, global_scale, token_scale, bias, accumulator, output,
-        rows, columns, first, last, bias is not None, token_scale is not None, 256,
-        num_warps=4, enable_fp_fusion=False,
-    )
+    with _launch_device(both.device):
+        _accumulate_fp4_planes[(triton.cdiv(rows * columns, 256),)](
+            both, group_scales, global_scale, token_scale, bias, accumulator, output,
+            rows, columns, first, last, bias is not None, token_scale is not None, 256,
+            num_warps=4, enable_fp_fusion=False,
+        )
 
 
 __all__ = ["nvfp4_pack_and_swizzle", "nvfp4_decode", "nvfp4_accumulate_group"]

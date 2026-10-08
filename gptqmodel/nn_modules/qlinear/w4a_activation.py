@@ -44,6 +44,30 @@ class W4AActivation:
             reference = reference.to(self.model_dtype).reshape(self.shape)
         return replace(self, token_scale=combined.contiguous(), reference=reference)
 
+    def to(self, device: torch.device | str | int, non_blocking: bool = False) -> "W4AActivation":
+        """Move every device-resident field so placement hooks can re-home the carrier.
+
+        ``accelerate.utils.send_to_device`` only relocates arguments that expose
+        ``to``. A checkpoint sharded across several devices hands this operand
+        to the next device's layer, so the carrier has to follow the module
+        placement exactly like a plain tensor. Codes, scales, and the optional
+        global/token multipliers always move together to keep the operand
+        internally consistent on the destination device.
+        """
+        target = torch.device(device)
+        tensors = (self.codes, self.scales, self.global_scale, self.token_scale, self.reference)
+        if all(value is None or value.device == target for value in tensors):
+            return self
+        moved = {
+            "codes": self.codes.to(target, non_blocking=non_blocking),
+            "scales": self.scales.to(target, non_blocking=non_blocking),
+        }
+        for name in ("global_scale", "token_scale", "reference"):
+            value = getattr(self, name)
+            if value is not None:
+                moved[name] = value.to(target, non_blocking=non_blocking)
+        return replace(self, **moved)
+
     def exact(self, dtype: torch.dtype | None = None) -> torch.Tensor:
         """Return the compute-dtype value the hardware operand was packed from.
 
