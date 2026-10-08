@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""GB10 W4AFP8 input quantization and native FP8 group products."""
+"""W4AFP8 input quantization and native FP8 group products.
+
+The E4M3 MMA path needs Ada Lovelace or newer (SM 8.9+). It is shared by the
+FP8 lane of every W4A policy, including the GB10 mixed recipes.
+"""
 
 from __future__ import annotations
 
@@ -13,13 +17,33 @@ from triton.experimental.gluon.language.nvidia.ampere import mma_v2
 
 
 @triton.jit
+def _to_e4m3_rn(value):
+    """Round f32 to E4M3 with round-to-nearest-even on every architecture.
+
+    Triton lowers a plain ``.to(tl.float8e4nv)`` on SM 8.9 to a lossy
+    fp32 ->(rz) fp16 ->(rn) e4m3 pair, which mis-rounds values just above an
+    e4m3 midpoint; SM 9.0+ gets the direct conversion. Emit the direct
+    ``cvt.rn.satfinite.e4m3x2.f32`` (available since SM 8.9) so Ada matches
+    the Torch oracle bit for bit.
+    """
+    return tl.inline_asm_elementwise(
+        "cvt.rn.satfinite.e4m3x2.f32 $0, $2, $1;",
+        "=h,r,r",
+        [value],
+        dtype=tl.float8e4nv,
+        is_pure=True,
+        pack=2,
+    )
+
+
+@triton.jit
 def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     row = tl.program_id(0)
     k = tl.arange(0, BK)
     x = tl.load(X + row * K + k, k < K, other=0).to(tl.float32)
     amax = tl.max(tl.abs(x), 0)
     scale = tl.where(amax > 0, amax / 448.0, 1.0)
-    q = tl.minimum(tl.maximum(x / scale, -448.0), 448.0).to(tl.float8e4nv)
+    q = _to_e4m3_rn(tl.minimum(tl.maximum(x / scale, -448.0), 448.0))
     tl.store(Q + row * K + k, q, k < K)
     tl.store(RowScale + row, scale)
 

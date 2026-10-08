@@ -11,6 +11,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.writer import _load_native_w4a_for_save
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
 
 
 def _shell(tied=False):
@@ -108,9 +109,10 @@ def test_native_writer_rejects_duplicate_shard_entries(tmp_path, mode):
         _load_native_w4a_for_save(_shell(), path, activation_mode=mode)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                    reason="GB10 required")
-@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("mode", [
+    pytest.param("w4afp8", marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
+])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("sharded", [False, True])
 def test_public_load_save_preserves_native_w4a_tensors(tmp_path, mode, dtype, sharded):

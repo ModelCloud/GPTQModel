@@ -1,12 +1,20 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""GB10 NVFP4 activation packing with fused hardware scale swizzling."""
+"""GB10 NVFP4 activation packing with fused hardware scale swizzling.
+
+Block scales are rounded to E4M3 through ``_to_e4m3_rn``: a plain
+``.to(tl.float8e4nv)`` double-rounds on Ada Lovelace, where Triton lowers it to
+a lossy fp32->fp16 truncation followed by an fp16->e4m3 step. The scale is a
+stored format byte, so it has to round identically on every architecture.
+"""
 
 from __future__ import annotations
 
 import torch
 import triton
 import triton.language as tl
+
+from .w4a_triton import _to_e4m3_rn
 
 
 _E4M3_SEARCH_RADIUS = tl.constexpr(8)
@@ -57,8 +65,8 @@ def _quantize_nvfp4_input_four_six(X, GlobalScale, Packed, SwizzledScales,
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
     inverse_six = tl.where(maximum > 0, inverse_six, 1.0)
-    local_four = inverse_four.to(tl.float8e4nv)
-    local_six = inverse_six.to(tl.float8e4nv)
+    local_four = _to_e4m3_rn(inverse_four)
+    local_six = _to_e4m3_rn(inverse_six)
     scale_four = local_four.to(tl.float32)[:, None] * global_scale
     scale_six = local_six.to(tl.float32)[:, None] * global_scale
     codes_four = _e2m1_codes(tl.div_rn(x, scale_four))
@@ -95,7 +103,7 @@ def _quantize_nvfp4_input_nvidia(X, GlobalScale, Packed, SwizzledScales,
         tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0
     )
     inverse = tl.where(maximum > 0, inverse, 1.0)
-    local = inverse.to(tl.float8e4nv)
+    local = _to_e4m3_rn(inverse)
     codes = _e2m1_codes(tl.div_rn(x, local.to(tl.float32)[:, None] * global_scale))
     low, high = tl.split(tl.reshape(codes, (64, 2)))
     offset = tl.arange(0, 64)
@@ -123,8 +131,8 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
     inverse_six = tl.minimum(tl.maximum(tl.div_rn(maximum, 6.0 * global_scale), 2.0**-9), 448.0)
     inverse_four = tl.where(maximum > 0, inverse_four, 1.0)
     inverse_six = tl.where(maximum > 0, inverse_six, 1.0)
-    local_four = inverse_four.to(tl.float8e4nv)
-    local_six = inverse_six.to(tl.float8e4nv)
+    local_four = _to_e4m3_rn(inverse_four)
+    local_six = _to_e4m3_rn(inverse_six)
     scale_four = local_four.to(tl.float32)[:, None] * global_scale
     scale_six = local_six.to(tl.float32)[:, None] * global_scale
     codes_four = _e2m1_codes(tl.div_rn(x, scale_four))
@@ -147,7 +155,7 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         tl.maximum(optimal_four / global_scale, 2.0**-9), 448.0
     )
     inverse_four_refined = tl.where(denominator_four > 0, inverse_four_refined, 1.0)
-    local_four_refined = inverse_four_refined.to(tl.float8e4nv)
+    local_four_refined = _to_e4m3_rn(inverse_four_refined)
     scale_four_refined = local_four_refined.to(tl.float32)[:, None] * global_scale
     codes_four_refined = _e2m1_codes(tl.div_rn(x, scale_four_refined))
     delta_four_refined = x - _e2m1_values(codes_four_refined) * scale_four_refined
@@ -164,7 +172,7 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
         tl.maximum(optimal_six / global_scale, 2.0**-9), 448.0
     )
     inverse_six_refined = tl.where(denominator_six > 0, inverse_six_refined, 1.0)
-    local_six_refined = inverse_six_refined.to(tl.float8e4nv)
+    local_six_refined = _to_e4m3_rn(inverse_six_refined)
     scale_six_refined = local_six_refined.to(tl.float32)[:, None] * global_scale
     codes_six_refined = _e2m1_codes(tl.div_rn(x, scale_six_refined))
     delta_six_refined = x - _e2m1_values(codes_six_refined) * scale_six_refined
@@ -180,7 +188,7 @@ def _quantize_nvfp4_input(X, GlobalScale, Packed, SwizzledScales,
     optimal = tl.sum(x * values, axis=1) / tl.maximum(denominator, 1.0)
     inverse_refined = tl.minimum(tl.maximum(optimal / global_scale, 2.0**-9), 448.0)
     inverse_refined = tl.where(denominator > 0, inverse_refined, 1.0)
-    local_refined = inverse_refined.to(tl.float8e4nv)
+    local_refined = _to_e4m3_rn(inverse_refined)
     scale_refined = local_refined.to(tl.float32)[:, None] * global_scale
     codes_refined = _e2m1_codes(tl.div_rn(x, scale_refined))
     delta_refined = x - _e2m1_values(codes_refined) * scale_refined

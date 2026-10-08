@@ -7,6 +7,7 @@ import pytest
 import torch
 
 from tests.models.w4a_hardware_forward import HardwareForward, hardware_value
+from tests.w4a_hardware_marks import NVFP4_HARDWARE
 
 
 def test_hardware_value_is_exact_and_uses_only_surrogate_gradient():
@@ -139,11 +140,9 @@ def _pair(dtype, parameterization="physical_weight", *, attention_mode=None, mlp
     return student, runtime, params, trainable
 
 
-GB10 = pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                         reason="GB10 required")
-
-
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=GB10)])
+# The CUDA cases below drive the NVFP4 hardware-forward harness, which this
+# release validates on GB10 / SM 12.1 only.
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=NVFP4_HARDWARE)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("width", [128, 256, 2048, 8192])
 def test_online_hadamard_keeps_backend_values_and_walsh_gradient(device, dtype, width, monkeypatch):
@@ -183,7 +182,7 @@ def test_online_hadamard_keeps_backend_values_and_walsh_gradient(device, dtype, 
     torch.testing.assert_close(x.grad, expected_rounded, rtol=1e-6, atol=1e-6)
 
 
-@GB10
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("parameterization", ["physical_weight", "code_cell"])
 def test_encoded_forward_is_exact_and_checkpointed_gradients_match(dtype, parameterization):
@@ -227,7 +226,7 @@ def test_encoded_forward_is_exact_and_checkpointed_gradients_match(dtype, parame
         proxy.close()
 
 
-@GB10
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("parameterization", ["physical_weight", "code_cell"])
 def test_code_refresh_and_frame_lifetime(parameterization):
     student, runtime, _params, trainable = _pair(torch.bfloat16, parameterization)
@@ -263,7 +262,7 @@ def test_code_refresh_and_frame_lifetime(parameterization):
         proxy.close()
 
 
-@GB10
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("override", [
     {"attention_mode": "w4afp8", "mlp_fp8_layers": None},
     {"attention_mode": None, "mlp_fp8_layers": (0,)},
@@ -289,7 +288,7 @@ def test_hardware_forward_supports_mixed_stream_boundaries(override):
         proxy.close()
 
 
-@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=GB10)])
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=NVFP4_HARDWARE)])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("parameterization", ["physical_weight", "code_cell"])
 def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtype, parameterization, monkeypatch):

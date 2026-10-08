@@ -12,6 +12,12 @@ from gptqmodel.quantization.activation_floatx import (
     nvfp4_global_scale,
 )
 from gptqmodel.quantization.config import QuantizeConfig
+from tests.w4a_hardware_marks import NVFP4_HARDWARE
+
+
+# Every CUDA case in this file consumes the NVFP4 carrier, which this release
+# validates on GB10 / SM 12.1 only. The FP8 lane lives in test_w4afp8_gb10.py
+# and runs on Ada+ (SM 8.9).
 
 
 @pytest.mark.parametrize("legacy,canonical", [
@@ -78,8 +84,7 @@ def test_fp16_global_scale_underflow_boundary_retains_positive_fp32_scale(recipe
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-20)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                    reason="GB10 required")
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("maximum", [2**-24, 1e-5, 2**-15, 2**-14])
 def test_small_dynamic_nvfp4_operands_match_replay_and_oracle(dtype, maximum):
@@ -197,6 +202,10 @@ def _module(k=128, n=128, device="cpu"):
     return module
 
 
+# The config round-trip itself is hardware independent, but the test also
+# decodes a live W4ANVFP4Linear whose constructor validates the NVFP4 tensor
+# core floor (SM 12.1), so it can only run on GB10.
+@NVFP4_HARDWARE
 def test_nvfp4_config_and_exact_weight_planes(tmp_path):
     config = QuantizeConfig(
         bits=4, group_size=128, sym=True, desc_act=False,
@@ -272,10 +281,7 @@ def test_nvfp4_headroom_default_clips_a_single_extreme_block():
     assert float(literal.compute_amax()) >= 3e7
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_nvfp4_replay_matches_packed_runtime_input():
     generator = torch.Generator(device="cuda").manual_seed(510)
     x = torch.randn((3, 256), generator=generator, device="cuda", dtype=torch.bfloat16)
@@ -293,10 +299,7 @@ def test_nvfp4_replay_matches_packed_runtime_input():
     torch.testing.assert_close(from_packed.reshape_as(x), oracle.float(), rtol=1e-6, atol=1e-6)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_nvfp4_refined_scale_never_increases_block_sse():
     generator = torch.Generator(device="cuda").manual_seed(2037)
     x = torch.randn((32, 256), generator=generator, device="cuda", dtype=torch.float32)
@@ -313,10 +316,7 @@ def test_nvfp4_refined_scale_never_increases_block_sse():
     assert torch.count_nonzero(refined_sse < baseline_sse).item() > refined_sse.numel() // 4
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_nvfp4_grid_search_never_increases_least_squares_block_sse():
     generator = torch.Generator(device="cuda").manual_seed(2041)
     x = torch.randn((32, 256), generator=generator, device="cuda", dtype=torch.float32)
@@ -331,10 +331,7 @@ def test_nvfp4_grid_search_never_increases_least_squares_block_sse():
     assert torch.count_nonzero(grid_sse < refined_sse).item() > 0
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 @pytest.mark.parametrize(
     "recipe", ["nvidia", "nvidia_headroom", "four_six", "least_squares", "least_squares_headroom", "least_squares_grid"]
 )
@@ -355,10 +352,42 @@ def test_fused_nvfp4_pack_matches_torch_codes_and_scale_layout(rows, width, reci
     assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_nvfp4_block_scale_rounding_holds_at_e4m3_midpoint_neighbours():
+    """E4M3 block scales must round like the Torch oracle on every architecture.
+
+    The packer derives each block scale from ``max / 6 / global_scale``, so the
+    value handed to the E4M3 conversion is a general fp32 number. Lowering
+    ``.to(tl.float8e4nv)`` to an fp16-truncating pair on Ada mis-rounds values
+    within one fp16 step above a midpoint, and the scale is a stored format byte.
+    Candidates are swept against the oracle so the coverage stays real.
+    """
+    # The divisor's odd factor decides how the bf16 maxima lattice lines up with
+    # the E4M3 midpoints; 6 * 0.045 lands enough candidates inside the window.
+    global_scale = torch.tensor(0.045, device="cuda")
+    divisor = 6.0 * float(global_scale)
+    grid = torch.linspace(0.02, 3.0, 8192, dtype=torch.float32).to(torch.bfloat16)
+    pre_round = (grid.float() / divisor).clamp(2.0**-9, 448.0)
+    direct = pre_round.to(torch.float8_e4m3fn)
+    through_fp16 = (pre_round.view(torch.int32) & ~0x1FFF).view(torch.float32).to(torch.float8_e4m3fn)
+    discriminating = grid[direct.view(torch.uint8) != through_fp16.view(torch.uint8)]
+    assert discriminating.numel() >= 16, (
+        "the swept maxima no longer separate the direct E4M3 scale rounding from "
+        "the fp16-truncating one, so this test would be vacuous"
+    )
+    maxima = discriminating[:64]
+
+    x = torch.zeros((maxima.numel(), 128), device="cuda", dtype=torch.bfloat16)
+    x[:, 0] = maxima.to(device="cuda")
+    packed, swizzled = nvfp4_pack_and_swizzle(x, global_scale, recipe="nvidia")
+    reference_codes, reference_scales = nvfp4_input(x, global_scale, recipe="nvidia")
+    expected_scales = torch.stack([_swizzle_scales(reference_scales[:, :8])])
+    torch.cuda.synchronize()
+    assert torch.equal(packed.view(torch.uint8), reference_codes.view(torch.uint8))
+    assert torch.equal(swizzled.view(torch.uint8), expected_scales.view(torch.uint8))
+
+
+@NVFP4_HARDWARE
 def test_nvfp4_forward_can_be_captured_in_cuda_graph():
     module = _module(k=128, n=128, device="cuda")
     x = torch.randn((1, 128), device="cuda", dtype=torch.bfloat16)
@@ -371,10 +400,7 @@ def test_nvfp4_forward_can_be_captured_in_cuda_graph():
     torch.testing.assert_close(captured, expected, rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("rows", [1, 16, 128])
 def test_nvfp4_native_output_against_independent_oracle(rows):
     module = _module(k=256, n=128, device="cuda")
@@ -396,10 +422,7 @@ def test_nvfp4_native_output_against_independent_oracle(rows):
     torch.testing.assert_close(actual, oracle.to(actual.dtype), rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("n", [96, 128])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_random_columns_and_scales(n, dtype):
@@ -425,10 +448,7 @@ def test_nvfp4_random_columns_and_scales(n, dtype):
     torch.testing.assert_close(actual, oracle.to(actual.dtype), rtol=2e-3, atol=2e-3)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_nvfp4_norm_preserves_codes_and_scales_against_oracle(dtype):
     from types import SimpleNamespace

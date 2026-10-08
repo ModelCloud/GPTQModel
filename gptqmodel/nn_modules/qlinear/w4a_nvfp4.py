@@ -100,6 +100,11 @@ class W4ANVFP4Linear(W4AFP8Linear):
     SUPPORTS_ADAPTERS = []
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     QUANT_TYPE = "w4a_nvfp4"
+    # Block-scaled FP4 tensor cores are GB10 / SM 12.1 only in this release.
+    # Override the parent's Ada+ FP8 floor: the FP8 lane of a mixed recipe may
+    # run on Ada, but the NVFP4 operands may not.
+    MIN_COMPUTE_CAPABILITY = (12, 1)
+    HARDWARE_FEATURE = "NVFP4"
     _WEIGHT_CACHE_NAMES = ("_weight_e4m3", "_weight_both", "_unit_weight_scales")
 
     @classmethod

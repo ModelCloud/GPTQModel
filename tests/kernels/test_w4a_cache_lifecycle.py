@@ -8,6 +8,7 @@ import torch
 from tests.kernels.test_w4a_nvfp4_gb10 import _module
 from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
 from tests.kernels.test_w4afp8_gb10 import _packed_linear
+from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
 
 
 def _staged(mode):
@@ -19,7 +20,10 @@ def _cache_names(mode: str) -> list[str]:
     return ["_weight_e4m3", "_weight_both", "_unit_weight_scales"] if mode == "w4a_nvfp4" else ["_weight_e4m3"]
 
 
-@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("mode", [
+    pytest.param("w4afp8", marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
+])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("method", ["to", "cast"])
 def test_model_dtype_conversion_preserves_hardware_cache_bytes(mode, dtype, method):
@@ -43,7 +47,10 @@ def test_model_dtype_conversion_preserves_hardware_cache_bytes(mode, dtype, meth
         assert name not in module.state_dict()
 
 
-@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("mode", [
+    pytest.param("w4afp8", marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
+])
 @pytest.mark.parametrize("operation", ["pack", "load"])
 def test_native_weight_changes_invalidate_every_derived_cache(mode, operation):
     module = _staged(mode)
@@ -65,9 +72,10 @@ def test_native_weight_changes_invalidate_every_derived_cache(mode, operation):
     assert torch.equal(module._weight_e4m3.float(), torch.full((256, 128), float(expected_code)))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                    reason="GB10 required")
-@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("mode", [
+    pytest.param("w4afp8", marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
+])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_cast_and_device_move_consume_native_operands_without_restaging(monkeypatch, mode, dtype):
     module = _staged(mode)

@@ -35,6 +35,11 @@ class W4AFP8Linear(PackableQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
     REQUIRES_FORMAT_V2 = True
     QUANT_TYPE = "w4afp8"
+    # Native E4M3 tensor-core products start with Ada Lovelace (SM 8.9);
+    # Hopper and Blackwell parts qualify as well. Subclasses with a narrower
+    # contract (NVFP4) override these instead of inheriting the FP8 floor.
+    MIN_COMPUTE_CAPABILITY = (8, 9)
+    HARDWARE_FEATURE = "FP8"
     _WEIGHT_CACHE_NAMES = ("_weight_e4m3",)
 
     def __init__(self, bits: int, group_size: int, sym: bool, desc_act: bool,
@@ -61,20 +66,32 @@ class W4AFP8Linear(PackableQuantLinear):
         return True, None
 
     @classmethod
+    def _validate_compute_capability(cls, ordinal: int) -> Tuple[bool, Optional[Exception]]:
+        capability = torch.cuda.get_device_capability(ordinal)
+        if capability < cls.MIN_COMPUTE_CAPABILITY:
+            required = ".".join(str(part) for part in cls.MIN_COMPUTE_CAPABILITY)
+            actual = ".".join(str(part) for part in capability)
+            return False, RuntimeError(
+                f"{cls.__name__} needs a CUDA device with {cls.HARDWARE_FEATURE} tensor cores "
+                f"(compute capability {required}+); device {ordinal} reports {actual}."
+            )
+        return cls.cached_validate_once()
+
+    @classmethod
     def validate(cls, **args) -> Tuple[bool, Optional[Exception]]:
         ok, err = cls._validate(**args)
         if not ok:
             return ok, err
         device = args.get("device")
         if not torch.cuda.is_available():
-            return False, RuntimeError(f"{cls.__name__} needs an NVIDIA GB10 CUDA device.")
+            return False, RuntimeError(
+                f"{cls.__name__} needs a CUDA device with {cls.HARDWARE_FEATURE} tensor cores."
+            )
         if isinstance(device, torch.device):
             ordinal = device.index if device.index is not None else torch.cuda.current_device()
         else:
             ordinal = torch.cuda.current_device()
-        if torch.cuda.get_device_capability(ordinal) != (12, 1):
-            return False, RuntimeError(f"{cls.__name__} is currently validated only for GB10 / SM121.")
-        return cls.cached_validate_once()
+        return cls._validate_compute_capability(ordinal)
 
     def pack(self, linear, scales, zeros, g_idx, **kwargs):
         self._invalidate_weight_cache()

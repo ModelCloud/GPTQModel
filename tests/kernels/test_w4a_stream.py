@@ -8,6 +8,8 @@ import torch
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation, pack_activation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
+from tests.kernels.test_w4afp8_gb10 import _assert_native_gemm_close
+from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
 
 
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
@@ -63,11 +65,10 @@ def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch
     return torch.where((error < best_error)[..., None], reconstructed, best_reconstructed).reshape_as(x)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
-@pytest.mark.parametrize("mode", ["w4afp8", "w4a_nvfp4"])
+@pytest.mark.parametrize("mode", [
+    pytest.param("w4afp8", marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
+])
 @pytest.mark.parametrize("rows,width", [(1, 128), (7, 256), (129, 128)])
 def test_encoded_activation_matches_independent_torch_oracle(mode, rows, width):
     generator = torch.Generator(device="cuda").manual_seed(222 + rows)
@@ -94,12 +95,9 @@ def test_encoded_activation_matches_independent_torch_oracle(mode, rows, width):
     torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-6)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
 @pytest.mark.parametrize("mode,kernel", [
-    ("w4afp8", W4AFP8Linear), ("w4a_nvfp4", W4ANVFP4Linear),
+    pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
 ])
 def test_prepacked_linear_matches_independent_torch_oracle(mode, kernel):
     k, n, rows = 256, 128, 3
@@ -134,22 +132,21 @@ def test_prepacked_linear_matches_independent_torch_oracle(mode, kernel):
 
     weight = raw.float() - 8
     reference = torch.zeros((rows, n), device="cuda", dtype=torch.float32)
+    magnitude = torch.zeros((rows, n), device="cuda", dtype=torch.float32)
     for group in range(2):
         sl = slice(group * 128, (group + 1) * 128)
         reference += (xq[:, sl] @ weight[sl]) * layer.scales[group].float()
+        magnitude += (xq[:, sl].abs() @ weight[sl].abs()) * layer.scales[group].float().abs()
     # The Linear returns the model dtype; round the oracle the same way so the
     # comparison tests the GEMM contract rather than the output cast.
     reference = reference.to(actual.dtype)
     torch.cuda.synchronize()
-    torch.testing.assert_close(actual.reshape(rows, n).float(), reference.float(), rtol=2e-3, atol=2e-3)
+    _assert_native_gemm_close(actual.reshape(rows, n), reference, magnitude)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
 @pytest.mark.parametrize("mode,kernel", [
-    ("w4afp8", W4AFP8Linear), ("w4a_nvfp4", W4ANVFP4Linear),
+    pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
 ])
 def test_rotated_prepacked_input_is_reencoded_before_gemm(monkeypatch, mode, kernel):
     """Online rotation consumes a carrier and produces a fresh hardware operand."""
@@ -184,12 +181,9 @@ def test_rotated_prepacked_input_is_reencoded_before_gemm(monkeypatch, mode, ker
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
 @pytest.mark.parametrize("mode,kernel", [
-    ("w4afp8", W4AFP8Linear), ("w4a_nvfp4", W4ANVFP4Linear),
+    pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
+    pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
 ])
 def test_pre_rotated_carrier_is_consumed_without_second_rounding(monkeypatch, mode, kernel):
     """The MLP producer may rotate before creating the hardware operand."""

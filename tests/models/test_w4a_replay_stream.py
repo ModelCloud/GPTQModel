@@ -15,6 +15,7 @@ from gptqmodel.nn_modules.hooked_linear import HookedLinear
 from gptqmodel.nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
 from gptqmodel.quantization.activation_floatx import nvfp4_block_qdq
 from gptqmodel.quantization.config import QuantizeConfig
+from tests.w4a_hardware_marks import NVFP4_HARDWARE
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
@@ -108,8 +109,10 @@ def test_fp8_replay_operand_stays_fp32(dtype):
     # The model-dtype round-trip the fix removed is observably different.
     assert not torch.equal(actual, expected.to(dtype).float())
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                    reason="GB10 / SM121 required")
+
+# The replay/stream install below consumes NVFP4 producers, which this release
+# validates on GB10 / SM 12.1 only.
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_runtime_install_removes_the_replay_exit_hook(dtype):
     """Inference must work on the freshly quantized object before save/reload."""

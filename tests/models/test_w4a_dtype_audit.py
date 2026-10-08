@@ -17,6 +17,7 @@ from tests.models.w4a_dtype_audit import (
     _scale_layout_probe_rows,
     _verify_checkpoint_fingerprint,
 )
+from tests.w4a_hardware_marks import NVFP4_HARDWARE
 
 
 @pytest.mark.parametrize("name,mode", [
@@ -48,8 +49,9 @@ def test_audit_policy_inherits_unmodified_stream_defaults(mode, name):
     assert _boundary_policy(name, config) == (mode, "least_squares" if mode == "w4a_nvfp4" else None)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-                    reason="GB10 required")
+# The audited stream keeps NVFP4 as its base carrier even when the attention
+# lane is promoted to FP8, so this CUDA case stays GB10 / SM 12.1 only.
+@NVFP4_HARDWARE
 @pytest.mark.parametrize("attention,promoted", [("w4afp8", ()), ("w4a_nvfp4", (0,)),
                                               ("w4afp8", (0,)), ("w4afp8", (0, 1)), (None, ())])
 def test_audit_handles_actual_mixed_carriers(fingerprint_checkpoint, monkeypatch, attention, promoted):

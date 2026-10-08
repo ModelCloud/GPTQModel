@@ -1,6 +1,9 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""Local Llama quantize/save/load smoke test for both GB10 W4A policies."""
+"""Local Llama quantize/save/load smoke test for the W4A policies.
+
+The FP8 lane is validated on Ada+ (SM 8.9); NVFP4 stays GB10 / SM 12.1 only.
+"""
 
 import pytest
 import torch
@@ -12,6 +15,7 @@ from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 from gptqmodel.quantization.config import GPTAQConfig, QuantizeConfig
+from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
 
 
 def _tokenizer():
@@ -24,16 +28,12 @@ def _tokenizer():
     )
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
 @pytest.mark.parametrize(
     "activation,recipe,backend,kernel",
     [
-        ("w4afp8", None, BACKEND.GPTQ_W4AFP8, W4AFP8Linear),
-        ("w4a_nvfp4", None, BACKEND.GPTQ_W4A_NVFP4, W4ANVFP4Linear),
-        ("w4a_nvfp4", "nvidia_headroom", BACKEND.GPTQ_W4A_NVFP4, W4ANVFP4Linear),
+        pytest.param("w4afp8", None, BACKEND.GPTQ_W4AFP8, W4AFP8Linear, marks=FP8_HARDWARE),
+        pytest.param("w4a_nvfp4", None, BACKEND.GPTQ_W4A_NVFP4, W4ANVFP4Linear, marks=NVFP4_HARDWARE),
+        pytest.param("w4a_nvfp4", "nvidia_headroom", BACKEND.GPTQ_W4A_NVFP4, W4ANVFP4Linear, marks=NVFP4_HARDWARE),
     ],
 )
 @pytest.mark.parametrize("rotation", [None, "hadamard"])
@@ -120,10 +120,9 @@ def test_tiny_llama_quantize_save_reload(tmp_path, activation, recipe, backend, 
     assert logits.shape == (1, ids.shape[1], 32)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+# The MLP keeps the NVFP4 carrier, so this mixed recipe stays GB10-only even
+# though its attention lane is FP8.
+@NVFP4_HARDWARE
 def test_tiny_llama_mixed_fp8_attention_nvfp4_mlp(tmp_path):
     """A mixed stream carries FP8 on attention and NVFP4 on the MLP.
 
@@ -186,10 +185,9 @@ def test_tiny_llama_mixed_fp8_attention_nvfp4_mlp(tmp_path):
     assert logits.shape == (1, ids.shape[1], 32)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+# Per-layer promotion only moves named MLPs to FP8; the remaining NVFP4 layers
+# keep this test on GB10.
+@NVFP4_HARDWARE
 def test_tiny_llama_per_layer_mlp_fp8_override(tmp_path):
     """Per-layer MLP promotion carries FP8 on the named layers only.
 
@@ -257,10 +255,7 @@ def test_tiny_llama_per_layer_mlp_fp8_override(tmp_path):
     assert logits.shape == (1, ids.shape[1], 32)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_tiny_llama_gptaq_retains_native_reference(tmp_path, monkeypatch):
     from gptqmodel.quantization.gptaq import GPTAQ
 
@@ -278,10 +273,7 @@ def test_tiny_llama_gptaq_retains_native_reference(tmp_path, monkeypatch):
     assert all(value > 0 for value in cross_terms)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_calibrated_producers_survive_standard_model_save(tmp_path):
     """Cover the ordinary loaded-model writer, not just metadata-view export."""
     from safetensors.torch import load_file
@@ -314,10 +306,7 @@ def test_calibrated_producers_survive_standard_model_save(tmp_path):
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(
-    not torch.cuda.is_available() or torch.cuda.get_device_capability(0) != (12, 1),
-    reason="GB10 / SM121 required",
-)
+@NVFP4_HARDWARE
 def test_fixed_producer_scales_installed_during_fresh_quantization(tmp_path):
     """Configured fixed producer scales must reach the post-quantize install.
 
