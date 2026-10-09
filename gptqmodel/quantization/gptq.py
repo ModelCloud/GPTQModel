@@ -1316,6 +1316,8 @@ class GPTQ:
                         if H.device.type == "npu":
                             return npu_inverse_cholesky_factor(H)
 
+                        # ``cholesky_ex`` reports a non positive-definite input through
+                        # ``info`` instead of raising, so failed probes stay cheap.
                         H2, info = torch.linalg.cholesky_ex(H, check_errors=False)
                         info_value = int(info.item())
                         if info_value != 0:
@@ -1347,6 +1349,8 @@ class GPTQ:
                 def legacy_damp_candidates() -> list[float]:
                     """Materialize the old additive grid without changing float rounding."""
 
+                    # Repeated addition (not one multiply-add) keeps the selected damp
+                    # bit-identical to the former linear walk.
                     values = [float(self.qcfg.damp_percent)]
                     increment = float(self.qcfg.damp_auto_increment)
                     if increment == 0.0:
@@ -1360,7 +1364,10 @@ class GPTQ:
                         values.append(next_damp)
 
                 def log_failure_diagnostics() -> float:
-                    """Run full-matrix diagnostics only after the healthy path failed."""
+                    """Run full-matrix diagnostics only after the healthy path failed.
+
+                    Healthy layers therefore never pay for these matrix-wide scans.
+                    """
 
                     finite = bool(torch.isfinite(H).all().item())
                     if not finite:
@@ -1400,6 +1407,7 @@ class GPTQ:
                     diag_view.copy_(current_diag)
                     mean = torch.mean(current_diag)
                     initial_damp = float(self.qcfg.damp_percent)
+                    # Probe the configured damp first, on the untouched diagonal.
                     Hinv_result = try_damp(current_diag, mean, initial_damp)
                     if Hinv_result is not None:
                         return inverse_factor(Hinv_result), initial_damp
