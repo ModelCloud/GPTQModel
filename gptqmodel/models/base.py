@@ -72,7 +72,7 @@ from ..quantization.dtype import (
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND, normalize_backend
+from ..utils.backend import BACKEND, backend_for_activation, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
@@ -151,9 +151,7 @@ class _QuantizedCheckpointSource:
         from safetensors import safe_open
 
         with safe_open(single_shard, framework="pt", device="cpu") as handler:
-            self._weight_map = {
-                tensor_name: "model.safetensors" for tensor_name in handler.keys()
-            }
+            self._weight_map = dict.fromkeys(handler.keys(), "model.safetensors")
 
 
 class _ClassPropertyDescriptor:
@@ -1158,6 +1156,24 @@ class BaseQModel(nn.Module):
             logger=log,
         )
 
+    def calibrate_activations(self, samples: List[torch.Tensor], *, progress=None) -> Dict[str, Any]:
+        """Calibrate a loaded NVFP4 stream without a GPTQ weight solve.
+
+        Samples are unpadded one-dimensional token-ID tensors from a corpus
+        disjoint from downstream evaluation. The caller is responsible for
+        checking dataset separation; our W4A tooling requires an audited data
+        artifact. This updates both runtime scales and the configuration used
+        by save(). The model must already be in evaluation mode and every
+        decoder layer must use the encoded NVFP4 stream.
+        """
+        if not self.quantized or self.quantize_config is None:
+            raise ValueError("Activation calibration requires an already quantized model")
+        from ..quantization.activation_calibration import calibrate_nvfp4_producers
+
+        return calibrate_nvfp4_producers(
+            self.model, samples, quantize_config=self.quantize_config, progress=progress,
+        )
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -1237,6 +1253,7 @@ class BaseQModel(nn.Module):
 
         requested_backend = backend
         requested_backend = normalize_backend(requested_backend, quant_method=export_quant_method)
+        requested_backend = backend_for_activation(self.quantize_config.activation_mode, requested_backend)
 
         preferred_backend = requested_backend
         if preferred_backend in (None, BACKEND.AUTO):
@@ -1388,9 +1405,15 @@ class BaseQModel(nn.Module):
             backend = normalize_backend(backend, quant_method=self.quantize_config.method)
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GPTQ_TORCH
-            if backend not in (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TRITON):
+            if backend not in (
+                BACKEND.GPTQ_TORCH,
+                BACKEND.GPTQ_TRITON,
+                BACKEND.GPTQ_W4AFP8,
+                BACKEND.GPTQ_W4A_NVFP4,
+            ):
                 raise NotImplementedError(
-                    f"`rotation` is only supported with `gptq_torch` or `gptq_triton` backend, got `{backend}`."
+                    "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                    f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                 )
 
         if self.quantize_config.uses_weight_only_lifecycle():
@@ -1424,6 +1447,26 @@ class BaseQModel(nn.Module):
         # Some definitions need the complete layer stack before they can
         # restore cross-branch aliases (for example DiffusionGemma's decoder).
         self.after_quantize()
+
+        if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            from ..nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+            from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+
+            # The looper packs on CPU and waits for all finalizers before it
+            # returns. Prepare the derived operand for immediate inference;
+            # the ordinary loader performs the same step after checkpoint load.
+            for submodule in self.model.modules():
+                if isinstance(submodule, W4AFP8Linear) and submodule.qweight.device.type != "meta":
+                    submodule.post_init()
+            install_w4a_llama_stream(
+                self.model, self.quantize_config.activation_mode,
+                self.quantize_config.activation_recipe,
+                global_scales=self.quantize_config.activation_global_scales,
+                attention_mode=self.quantize_config.activation_attention_mode,
+                attention_recipe=self.quantize_config.activation_attention_recipe,
+                mlp_fp8_layers=self.quantize_config.activation_mlp_fp8_layers,
+                fused_norms=bool(self.quantize_config.rotation),
+            )
 
         timer = getattr(self, "quant_region_timer", None)
         if timer is not None:
@@ -1673,6 +1716,10 @@ class BaseQModel(nn.Module):
 
         checkpoint_context = checkpoint_session(checkpoint, self) if checkpoint is not None else nullcontext()
         with gc_context, checkpoint_context as extension:
+            if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+                from ..nn_modules.qlinear.w4a_llama_replay import install_w4a_llama_replay
+
+                install_w4a_llama_replay(self.model, self.quantize_config)
             module_looper = ModuleLooper(
                 self, processors=processors, embed_quant_config=embed_quant_config,
                 extensions=(extension,) if extension is not None else (),
@@ -2513,6 +2560,33 @@ class BaseQModel(nn.Module):
 
     def post_quantize(self, module: nn.Module) -> nn.Module:
         #return self.offload_to_disk(module=module)
+        if self.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            # GB10 can stall in the pageable CUDA device-to-host copy used by
+            # Module.to('cpu') during post-quant layer offload. Stage each copy
+            # through a small pinned host buffer before placing it in ordinary
+            # CPU storage. Module._apply retains normal parameter handling.
+            chunk_bytes = 1024 * 1024
+
+            def to_cpu_bounded(tensor: torch.Tensor) -> torch.Tensor:
+                if tensor.device.type != "cuda":
+                    return tensor
+                if not tensor.is_contiguous():
+                    tensor = tensor.contiguous()
+                result = torch.empty(tensor.shape, dtype=tensor.dtype, device=CPU)
+                source = tensor.view(-1)
+                destination = result.view(-1)
+                chunk_elements = max(1, chunk_bytes // tensor.element_size())
+                staging = torch.empty(min(chunk_elements, tensor.numel()), dtype=tensor.dtype, device=CPU, pin_memory=True)
+                stream = torch.cuda.current_stream(tensor.device)
+                for start in range(0, tensor.numel(), chunk_elements):
+                    end = min(start + chunk_elements, tensor.numel())
+                    count = end - start
+                    staging[:count].copy_(source[start:end], non_blocking=True)
+                    stream.synchronize()
+                    destination[start:end].copy_(staging[:count])
+                return result
+
+            return module._apply(to_cpu_bounded)
         return move_to(module, device=CPU)
 
     def after_quantize(self) -> None:

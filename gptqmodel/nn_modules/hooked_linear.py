@@ -254,6 +254,29 @@ class HookedLinear(torch.nn.Linear):
         custom_linear.had_dim = getattr(linear, "had_dim", -1)
         custom_linear.had_K = getattr(linear, "had_K", None)
         custom_linear.K = getattr(linear, "K", 1)
+        # W4A calibration installs its policy before the layer looper replaces
+        # dense modules with HookedLinear. Preserve the policy explicitly;
+        # PyTorch forward hooks belong to the replaced module and do not move
+        # with its parameters.
+        custom_linear._w4a_replay_disabled = getattr(linear, "_w4a_replay_disabled", False)
+        custom_linear._w4a_norm_preapplied = getattr(linear, "_w4a_norm_preapplied", False)
+        custom_linear._w4a_stream_replay_mode = getattr(linear, "_w4a_stream_replay_mode", None)
+        custom_linear._w4a_stream_replay_recipe = getattr(linear, "_w4a_stream_replay_recipe", None)
+        custom_linear._w4a_replay_model_dtype = getattr(linear, "_w4a_replay_model_dtype", linear.weight.dtype)
+        custom_linear._w4a_stream_replay_pre_hook = getattr(
+            linear, "_w4a_stream_replay_pre_hook", False
+        )
+        # Module replacement does not copy the dense module's actual hooks.
+        custom_linear._w4a_replay_input_hook_active = False
+        custom_linear._w4a_rotation_preapplied = getattr(
+            linear, "_w4a_rotation_preapplied", False
+        )
+        custom_linear._w4a_activation_global_scale = getattr(
+            linear, "_w4a_activation_global_scale", None
+        )
+        custom_linear._w4a_headroom_probe = getattr(
+            linear, "_w4a_headroom_probe", False
+        )
         return custom_linear
 
     @torch.inference_mode()
@@ -270,15 +293,45 @@ class HookedLinear(torch.nn.Linear):
         )
         if original_device != target_device:
             input = input.to(device=target_device)
-        input = apply_online_hadamard(
-            input,
-            online_full_had=getattr(self, "online_full_had", False),
-            online_partial_had=getattr(self, "online_partial_had", False),
-            had_K=getattr(self, "had_K", None),
-            K=getattr(self, "K", 1),
-            had_dim=getattr(self, "had_dim", -1),
-        )
-        output = super().forward(input)
+        replay_mode = (None if getattr(self, "_w4a_replay_disabled", False)
+                       else getattr(self, "_w4a_stream_replay_mode", None))
+        replay_recipe = getattr(self, "_w4a_stream_replay_recipe", None)
+        replay_scale = getattr(self, "_w4a_activation_global_scale", None)
+        headroom_probe = bool(getattr(self, "_w4a_headroom_probe", False))
+        rotation_preapplied = bool(getattr(self, "_w4a_rotation_preapplied", False))
+        if replay_mode is not None:
+            from .qlinear.w4a_llama_replay import round_w4a_activation, round_w4a_replay_operand
+        if (replay_mode is not None and not rotation_preapplied and not headroom_probe
+                and not getattr(self, "_w4a_norm_preapplied", False)
+                and not getattr(self, "_w4a_replay_input_hook_active", False)):
+            input = round_w4a_replay_operand(input, replay_mode, replay_recipe, replay_scale,
+                                             rounder=round_w4a_activation)
+        if not rotation_preapplied:
+            input = apply_online_hadamard(
+                input,
+                online_full_had=getattr(self, "online_full_had", False),
+                online_partial_had=getattr(self, "online_partial_had", False),
+                had_K=getattr(self, "had_K", None),
+                K=getattr(self, "K", 1),
+                had_dim=getattr(self, "had_dim", -1),
+            )
+        # A rotated down projection consumes a newly encoded hardware operand.
+        # The incoming W4A carrier has already been rounded at the nonlinear
+        # boundary, so replay the decode -> Hadamard -> encode sequence exactly.
+        if replay_mode is not None and not headroom_probe and not rotation_preapplied and (
+            getattr(self, "online_full_had", False) or getattr(self, "online_partial_had", False)
+        ):
+            input = round_w4a_replay_operand(input, replay_mode, replay_recipe,
+                                             rounder=round_w4a_activation)
+        if replay_mode is not None:
+            # Replay carries a compute-precision operand, so the GEMM runs in
+            # FP32 and returns the model dtype instead of relying on a
+            # matching-dtype `super().forward`.
+            output = torch.nn.functional.linear(input.float(), self.weight.float(),
+                                                 self.bias.float() if self.bias is not None else None)
+            output = output.to(getattr(self, "_w4a_replay_model_dtype", self.weight.dtype))
+        else:
+            output = super().forward(input)
         if self.forward_hook:
             self.forward_hook(self, (input,), output)
             if self.forward_hook_last:

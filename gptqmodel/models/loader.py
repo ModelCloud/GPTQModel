@@ -56,7 +56,7 @@ from ..quantization.config import (
 )
 from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils import internal_gguf
-from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
+from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -1483,6 +1483,7 @@ def ModelLoader(cls):
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
+        backend = backend_for_activation(qcfg.activation_mode, backend)
         backend = _auto_select_mlx_backend(
             backend, device, config, qcfg, export_quant_method, format_code, adapter
         )
@@ -1820,9 +1821,15 @@ def ModelLoader(cls):
                 backend = normalize_backend(backend, quant_method=qcfg.method)
                 if backend == BACKEND.AUTO:
                     backend = BACKEND.GPTQ_TORCH
-                if backend not in (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TRITON):
+                if backend not in (
+                    BACKEND.GPTQ_TORCH,
+                    BACKEND.GPTQ_TRITON,
+                    BACKEND.GPTQ_W4AFP8,
+                    BACKEND.GPTQ_W4A_NVFP4,
+                ):
                     raise NotImplementedError(
-                        f"`rotation` is only supported with `gptq_torch` or `gptq_triton` backend, got `{backend}`."
+                        "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                        f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                     )
 
             if format_code == FORMAT.EXL3:

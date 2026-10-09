@@ -15,6 +15,7 @@ from unittest import mock
 
 import torch
 from model_test import ModelTest
+from transformers.utils import is_flash_attn_2_available
 
 from gptqmodel import GPTQModel
 from gptqmodel.looper.module_looper import StopMainLoop
@@ -169,14 +170,17 @@ class TestMultiVsSingleGPU(ModelTest):
             act_group_aware=self.ACT_GROUP_AWARE,
             fallback=self.FALLBACK,
             sym=self.SYM,
-            v2=self.V2,
             adapter=self.EORA,
             device=target_devices[0],
             mock_quantization=True,
         )
 
         load_kwargs = {}
-        if self.USE_FLASH_ATTN:
+        # Mirror `ModelTest.quantModel`: only request FlashAttention when the
+        # optional package is importable so the parity check still runs in
+        # environments that ship without it. Both device configurations load
+        # with the same attention implementation either way.
+        if self.USE_FLASH_ATTN and is_flash_attn_2_available():
             load_kwargs["attn_implementation"] = "flash_attention_2"
 
         model = GPTQModel.load(
@@ -352,8 +356,10 @@ class TestMultiVsSingleGPU(ModelTest):
 
         original_preprocess = GPTQProcessor.preprocess
 
-        def wrapped_preprocess(self, module, fallback=None):  # type: ignore[override]
-            result = original_preprocess(self, module, fallback=fallback)
+        def wrapped_preprocess(self, module, fallback=None, **kwargs):  # type: ignore[override]
+            # Forward every keyword the looper adds (e.g. region_timer) so the
+            # probe stays signature-compatible with GPTQProcessor.preprocess.
+            result = original_preprocess(self, module, fallback=fallback, **kwargs)
             task = self.tasks.get(module.name)
             if task is not None:
                 primary_handles[module.name] = hex(id(task))
