@@ -1346,6 +1346,25 @@ class GPTQ:
                         upper=True,
                     )
 
+                def try_factor(current_diag: torch.Tensor, mean: torch.Tensor, damp: float):
+                    """Return the finished inverse factor for one grid value, or ``None``.
+
+                    The cheap probe only proves the Cholesky factor exists. The legacy
+                    linear walk also required the inverse step to succeed, which can
+                    fail for Hessians with an extreme dynamic range even when the
+                    factorization itself reports success, so both steps must agree.
+                    """
+
+                    nonlocal last_error
+                    cholesky_result = try_damp(current_diag, mean, damp)
+                    if cholesky_result is None:
+                        return None
+                    try:
+                        return inverse_factor(cholesky_result)
+                    except torch._C._LinAlgError as exc:
+                        last_error = exc
+                        return None
+
                 def legacy_damp_candidates() -> list[float]:
                     """Materialize the old additive grid without changing float rounding."""
 
@@ -1362,6 +1381,31 @@ class GPTQ:
                         if not (values[-1] < next_damp < 1.0):
                             return values
                         values.append(next_damp)
+
+                def finish_damped_candidate(first_success: int, first_cholesky: torch.Tensor):
+                    """Finish the first grid value whose Cholesky factor also inverts.
+
+                    Bisection only checks the cheap factorization probe. If the selected
+                    factor still fails the inverse step, keep walking the legacy grid so
+                    the chosen ``damp`` stays identical to the former linear scan.
+                    """
+
+                    nonlocal last_error
+                    index = first_success
+                    cholesky_result = first_cholesky
+                    while index < len(damp_candidates):
+                        if cholesky_result is None:
+                            cholesky_result = try_damp(current_diag, mean, damp_candidates[index])
+                        if cholesky_result is None:
+                            index += 1
+                            continue
+                        try:
+                            return inverse_factor(cholesky_result), damp_candidates[index]
+                        except torch._C._LinAlgError as exc:
+                            last_error = exc
+                            cholesky_result = None
+                        index += 1
+                    return None
 
                 def log_failure_diagnostics() -> float:
                     """Run full-matrix diagnostics only after the healthy path failed.
@@ -1408,9 +1452,9 @@ class GPTQ:
                     mean = torch.mean(current_diag)
                     initial_damp = float(self.qcfg.damp_percent)
                     # Probe the configured damp first, on the untouched diagonal.
-                    Hinv_result = try_damp(current_diag, mean, initial_damp)
-                    if Hinv_result is not None:
-                        return inverse_factor(Hinv_result), initial_damp
+                    initial_factor = try_factor(current_diag, mean, initial_damp)
+                    if initial_factor is not None:
+                        return initial_factor, initial_damp
 
                     if attempt == 0:
                         # Defer matrix-wide scans and their host decisions until the
@@ -1449,12 +1493,14 @@ class GPTQ:
                                         high = middle
                                         high_cholesky = middle_cholesky
 
-                                used_damp = damp_candidates[high]
-                                log.warn(
-                                    f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
-                                    f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
-                                )
-                                return inverse_factor(high_cholesky), used_damp
+                                selected = finish_damped_candidate(high, high_cholesky)
+                                if selected is not None:
+                                    factor, used_damp = selected
+                                    log.warn(
+                                        f"Quantization: Module `{self.name}` -> Damp recovery succeeded at "
+                                        f"`damp_percent={used_damp:.5f}` (started at {initial_damp:.5f})."
+                                    )
+                                    return factor, used_damp
 
                         log.warn(
                             f"Quantization: Module `{self.name}` -> Damp recovery failed after reaching "
