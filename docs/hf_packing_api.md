@@ -65,15 +65,16 @@ asymmetric (`sym=False`) packing requires explicit zero points.
 
 ```python
 import torch
-from gptqmodel.utils.importer import hf_select_quant_linear
+from gptqmodel.utils.importer import hf_select_quant_linear_v2
 from gptqmodel.utils.packing import hf_pack_layer
 
-kernel_cls = hf_select_quant_linear(
+kernel_cls = hf_select_quant_linear_v2(
     bits=4,
     group_size=128,
     desc_act=False,
     sym=True,
-    checkpoint_format="gptq_v2",
+    format="gptq_v2",
+    quant_method="gptq",
     backend="auto",
     device_map="cpu",
 )
@@ -87,7 +88,10 @@ module = kernel_cls(
     bias=linear.bias is not None,
 )
 
-hf_pack_layer(module, linear, scales, zeros=None, g_idx=g_idx, pack_impl="original")
+hf_pack_layer(
+    module, linear, scales, zeros=None, g_idx=g_idx,
+    pack_impl="original", checkpoint_format="gptq_v2",
+)
 ```
 
 `pack_impl` accepts `"original"`, `"block"`/`"cpu"` and `"gpu"`; block/GPU

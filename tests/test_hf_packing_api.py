@@ -27,7 +27,7 @@ from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.packing import (
     hf_check_best_packing_format,
@@ -35,6 +35,10 @@ from gptqmodel.utils.packing import (
     hf_pack_layer,
     hf_post_init,
     hf_repack_layer,
+)
+from gptqmodel.utils.model import (
+    convert_gptq_v1_to_v2_format_module,
+    convert_gptq_v2_to_v1_format_module,
 )
 
 
@@ -371,16 +375,33 @@ def test_hf_repack_layer_between_compatible_kernels():
 
     linear, scales, zeros, g_idx = _make_inputs(4)
     source = _make_gptq_module()
-    hf_pack_layer(source, linear, scales, zeros, g_idx)
+    hf_pack_layer(source, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
+    # Model packing commonly exports a v1 GPTQ checkpoint after packing.
+    convert_gptq_v2_to_v1_format_module(source, QuantizeConfig(bits=4))
 
     target = hf_repack_layer(source, BACKEND.GPTQ_TORCH_ATEN)
 
     assert isinstance(target, TorchAtenLinear)
-    _assert_packed_equal(source, target)
+    for key in ("qweight", "scales", "g_idx"):
+        assert torch.equal(getattr(source, key), getattr(target, key))
+    assert target.qzero_format() == 2
+
+    # Compare inference with an independently packed v2 reference, rather
+    # than with the v1 checkpoint source itself.
+    reference = _make_gptq_module()
+    hf_pack_layer(
+        reference,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ_V2,
+        post_init=True,
+    )
 
     x = torch.randn(3, 128)
     with torch.no_grad():
-        torch.testing.assert_close(target(x), source(x))
+        torch.testing.assert_close(target(x), reference(x))
 
 
 def test_hf_repack_layer_rejects_unsupported_target():
@@ -454,6 +475,7 @@ def test_hf_repack_layer_aligns_v1_v2_qzero_flavor(monkeypatch):
     linear, scales, zeros, g_idx = _make_inputs(4)
     source = _make_gptq_module()
     hf_pack_layer(source, linear, scales, zeros, g_idx)
+    convert_gptq_v1_to_v2_format_module(source, bits=4, pack_dtype=torch.int32)
 
     # Simulate a v1-native target (like Marlin): the copied v2 qzeros must be
     # converted back to the checkpoint v1 domain.
@@ -463,6 +485,28 @@ def test_hf_repack_layer_aligns_v1_v2_qzero_flavor(monkeypatch):
     expected = source.qzeros - 0b00010001000100010001000100010001
     assert torch.equal(target.qzeros, expected)
     assert target.qzero_format() == 1
+
+
+def test_hf_pack_layer_honors_checkpoint_format():
+    linear, scales, zeros, g_idx = _make_inputs(4)
+    module = _make_gptq_module()
+
+    hf_pack_layer(
+        module,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ_V2,
+    )
+
+    assert module.qzero_format() == 2
+
+
+def test_hf_pack_layer_reports_missing_scales():
+    module = _make_gptq_module(sym=True)
+    with pytest.raises(ValueError, match="scales.*required"):
+        hf_pack_layer(module, nn.Linear(128, 64, bias=False), None, None, None)
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +609,15 @@ def test_hf_repack_layer_to_exllama_v2_with_scratch_space():
     linear, scales, zeros, g_idx = _make_inputs(4, group_size=32)
 
     source = _make_gptq_module(group_size=32)
-    hf_pack_layer(source, linear, scales, zeros, g_idx)
+    hf_pack_layer(
+        source,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ_V2,
+    )
+    convert_gptq_v2_to_v1_format_module(source, QuantizeConfig(bits=4))
     source.to(device)
 
     # ExllamaV2 needs a scratch space sized from the target module, so the
@@ -581,9 +633,20 @@ def test_hf_repack_layer_to_exllama_v2_with_scratch_space():
         scratch_space=ScratchSpace(scratch_bytes=target.temp_dq_size(), dev=device),
     )
 
+    reference = _make_gptq_module(group_size=32)
+    hf_pack_layer(
+        reference,
+        linear,
+        scales,
+        zeros,
+        g_idx,
+        checkpoint_format=FORMAT.GPTQ_V2,
+    )
+    reference.to(device)
+
     x = torch.randn(4, 128, dtype=torch.float16, device=device)
     with torch.no_grad():
-        torch.testing.assert_close(target(x), source(x), atol=2e-2, rtol=2e-2)
+        torch.testing.assert_close(target(x), reference(x), atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.cuda

@@ -136,7 +136,7 @@ def _normalize_pack_impl(pack_impl: Optional[str], module: BaseQuantLinear) -> s
 
 def _resolve_zeros(
     module: BaseQuantLinear,
-    scales: torch.Tensor,
+    scales: Optional[torch.Tensor],
     zeros: Optional[torch.Tensor],
 ) -> torch.Tensor:
     """Return explicit zero points, synthesizing symmetric ones when omitted.
@@ -151,6 +151,10 @@ def _resolve_zeros(
     if not getattr(module, "sym", True):
         raise ValueError(
             "hf_pack_layer: asymmetric packing (`sym=False`) requires explicit `zeros`."
+        )
+    if scales is None:
+        raise ValueError(
+            "hf_pack_layer: `scales` is required when `zeros` is omitted for symmetric packing."
         )
     if scales.dim() != 2:
         raise ValueError(
@@ -328,10 +332,10 @@ def hf_check_packing_feasibility(
             dynamic=dynamic,
             allow_marlin=allow_marlin,
             pack=not repack,
-            multi_select=wants_shape_validation,
+            multi_select=wants_shape_validation or repack,
             is_sharded=is_sharded,
         )
-    except (ValueError, NotImplementedError) as exc:
+    except Exception as exc:
         log.debug(
             "hf_check_packing_feasibility: no kernel for method=%s format=%s backend=%s device=%s: %s",
             method.value,
@@ -491,6 +495,7 @@ def hf_pack_layer(
     scales_extra: Optional[torch.Tensor] = None,
     post_init: bool = False,
     post_init_kwargs: Optional[Dict[str, Any]] = None,
+    checkpoint_format: Optional[Union[str, FORMAT]] = None,
 ) -> BaseQuantLinear:
     """Pack one layer into an already-created quantized kernel module.
 
@@ -521,6 +526,8 @@ def hf_pack_layer(
         post_init: Run ``module.post_init()`` after packing.
         post_init_kwargs: Keyword arguments forwarded to ``module.post_init()``;
             kernels such as ExllamaV2 require a scratch space here.
+        checkpoint_format: GPTQ checkpoint format to leave in the packed
+            module. Defaults to the module's declared format, or ``"gptq"``.
 
     Returns:
         The same ``module`` instance, packed in place.  Packed buffers are
@@ -596,6 +603,30 @@ def hf_pack_layer(
             module.pack_original(
                 linear=linear, scales=scales, zeros=resolved_zeros, g_idx=g_idx
             )
+
+    if isinstance(module, GPTQQuantLinear):
+        requested_format = checkpoint_format
+        if requested_format is None:
+            requested_format = getattr(module, "format", None) or FORMAT.GPTQ
+        requested_format = _normalize_format(requested_format)
+        if requested_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            wanted_qzero_format = 1 if requested_format == FORMAT.GPTQ else 2
+            if module.qzero_format() != wanted_qzero_format:
+                from .model import (
+                    convert_gptq_v1_to_v2_format_module,
+                    convert_gptq_v2_to_v1_format_module,
+                )
+                if wanted_qzero_format == 1:
+                    convert_gptq_v2_to_v1_format_module(
+                        module=module,
+                        quantize_config=QuantizeConfig(bits=module.bits),
+                    )
+                else:
+                    convert_gptq_v1_to_v2_format_module(
+                        module=module,
+                        bits=module.bits,
+                        pack_dtype=getattr(module, "pack_dtype", torch.int32),
+                    )
 
     if post_init:
         module.post_init(**(post_init_kwargs or {}))
@@ -696,6 +727,11 @@ def _copy_packed_state(source: BaseQuantLinear, target: BaseQuantLinear) -> None
     shared = {key: value for key, value in source_state.items() if key in target_state}
     target.load_state_dict(shared, strict=False)
 
+    source_qzero_format = getattr(source, "qzero_format", None)
+    target_qzero_format = getattr(target, "qzero_format", None)
+    if callable(source_qzero_format) and callable(target_qzero_format):
+        target_qzero_format(format=source_qzero_format())
+
 
 def _resolve_single_torch_device(device) -> Optional[torch.device]:
     """Resolve one public device value, or ``None`` for multi-device selectors."""
@@ -724,9 +760,17 @@ def _align_qzero_format(source: BaseQuantLinear, target: BaseQuantLinear) -> boo
     corrected with the same helpers used by the loader/saver, otherwise the
     copied zero points are silently offset.
     """
-    source_v2 = bool(getattr(type(source), "REQUIRES_FORMAT_V2", False))
-    target_v2 = bool(getattr(type(target), "REQUIRES_FORMAT_V2", False))
-    if source_v2 == target_v2:
+    source_qzero_format = getattr(source, "qzero_format", None)
+    target_qzero_format = getattr(target, "qzero_format", None)
+    if not callable(source_qzero_format) or not callable(target_qzero_format):
+        raise NotImplementedError(
+            f"hf_repack_layer: GPTQ qzero format metadata is unavailable for "
+            f"`{type(source).__name__}` or `{type(target).__name__}`."
+        )
+    source_format = source_qzero_format()
+    target_format = 2 if getattr(type(target), "REQUIRES_FORMAT_V2", False) else 1
+    if source_format == target_format:
+        target_qzero_format(format=target_format)
         return False
 
     if not isinstance(target, GPTQQuantLinear):
@@ -741,17 +785,19 @@ def _align_qzero_format(source: BaseQuantLinear, target: BaseQuantLinear) -> boo
         convert_gptq_v2_to_v1_format_module,
     )
 
-    if source_v2:
+    if source_format == 2 and target_format == 1:
         convert_gptq_v2_to_v1_format_module(
             module=target,
             quantize_config=QuantizeConfig(bits=target.bits),
         )
-    else:
+    elif source_format == 1 and target_format == 2:
         convert_gptq_v1_to_v2_format_module(
             module=target,
             bits=target.bits,
             pack_dtype=getattr(target, "pack_dtype", torch.int32),
         )
+    else:
+        raise ValueError(f"hf_repack_layer: unsupported qzero format `{source_format}`.")
     return True
 
 

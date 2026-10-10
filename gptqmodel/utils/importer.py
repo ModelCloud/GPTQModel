@@ -748,7 +748,7 @@ def hf_select_quant_linear(
         sym=sym,
         backend=backend,
         device=device,
-        format=FORMAT.GPTQ,
+        format=FORMAT(checkpoint_format.lower()),
         quant_method=METHOD.GPTQ,
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
