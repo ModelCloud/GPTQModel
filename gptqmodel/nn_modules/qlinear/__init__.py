@@ -277,6 +277,27 @@ class BaseQuantLinear(nn.Module):
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 
+    # public/stable api exposed to external integrations (optimum, auto-round, ...)
+    def hf_pack(
+            self,
+            linear: nn.Module,
+            scales: t.Tensor,
+            zeros: Optional[t.Tensor] = None,
+            g_idx: Optional[t.Tensor] = None,
+            **kwargs,
+    ):
+        """Stable (`hf_`-prefixed) layer packing entry point.
+
+        Wraps :func:`gptqmodel.utils.packing.hf_pack_layer` so external
+        integrators never need to call the internal
+        ``pack``/``pack_block``/``pack_original`` implementations directly.
+        See that function for the full argument contract (``pack_impl``,
+        ``device``, ``post_init``, ...).
+        """
+        from ...utils.packing import hf_pack_layer
+
+        return hf_pack_layer(self, linear, scales, zeros, g_idx, **kwargs)
+
     def clear_autotune(self):
         self._autotune_complete = False
         self._autotune_result = None
