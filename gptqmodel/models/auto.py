@@ -134,6 +134,7 @@ from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
 from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl import InternVLQModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
+from .definitions.jamba import JambaQModel  # noqa: E402
 from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
@@ -285,6 +286,7 @@ MODEL_MAP = {
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
     "hunyuan_vl": HunYuanVLQModel,
     "hy_v3": HYV3QModel,
+    "jamba": JambaQModel,
     "k2_horizon": K2HorizonQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
