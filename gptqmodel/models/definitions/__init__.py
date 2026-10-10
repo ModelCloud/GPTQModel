@@ -118,6 +118,7 @@ from .xing4_0 import Xing4_0QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel
+from .jamba import JambaQModel
 from .zamba import ZambaQModel
 from .zamba2 import Zamba2QModel
 from .zdtaichu5 import ZDTaichu5QModel
