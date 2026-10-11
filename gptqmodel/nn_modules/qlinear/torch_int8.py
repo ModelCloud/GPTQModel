@@ -106,6 +106,7 @@ class TorchInt8Linear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
+    SUPPORTS_RAW_PACKING = False
 
     QUANT_TYPE = "torch_int8"
     GPTQ_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")

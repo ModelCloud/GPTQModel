@@ -325,6 +325,13 @@ def expand_selector_device_family(device: SelectorDevices) -> SelectorDevice | t
 
 
 def _supports_pack_api(cls: Type[BaseQuantLinear]) -> bool:
+    # Some kernels expose a ``pack`` method only because they share the
+    # runtime interface, but deliberately reject raw-weight packing and are
+    # valid only as repack/load targets (for example TorchInt8).  Do not
+    # advertise those classes when ``select_quant_linear(..., pack=True)`` is
+    # used by the public HF packing API.
+    if getattr(cls, "SUPPORTS_RAW_PACKING", True) is False:
+        return False
     return (
         issubclass(cls, PackableQuantLinear)
         or (hasattr(cls, "pack") and callable(getattr(cls, "pack")))
@@ -748,7 +755,7 @@ def hf_select_quant_linear(
         sym=sym,
         backend=backend,
         device=device,
-        format=FORMAT.GPTQ,
+        format=FORMAT(checkpoint_format.lower()),
         quant_method=METHOD.GPTQ,
         pack=pack,
         allow_marlin=True, # TODO: remove this after marlin padding is fixed
