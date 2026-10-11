@@ -605,6 +605,12 @@ def hf_pack_layer(
             )
 
     if isinstance(module, GPTQQuantLinear):
+        # Every raw GPTQ packer writes the checkpoint/v1 qzero layout.  A
+        # caller may reuse a module that was previously converted to v2, so
+        # reset the metadata before deciding whether another conversion is
+        # needed.  Without this, a second pack can skip v1->v2 or apply
+        # v2->v1 to freshly-written v1 words.
+        module.qzero_format(format=1)
         requested_format = checkpoint_format
         if requested_format is None:
             requested_format = getattr(module, "format", None) or FORMAT.GPTQ

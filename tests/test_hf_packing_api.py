@@ -151,6 +151,39 @@ def test_feasibility_repack_targets_include_plain_gptq_kernels():
     )
 
 
+def test_feasibility_rejects_repack_only_int8_kernel_for_raw_packing():
+    assert not hf_check_packing_feasibility(
+        4, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU
+    )
+    assert hf_check_packing_feasibility(
+        4, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU, repack=True
+    )
+
+
+def test_feasibility_rejects_repack_only_awq_int8_kernel_for_raw_packing():
+    assert not hf_check_packing_feasibility(
+        4,
+        32,
+        False,
+        True,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        backend=BACKEND.AWQ_TORCH_INT8,
+        device=DEVICE.CPU,
+    )
+    assert hf_check_packing_feasibility(
+        4,
+        32,
+        False,
+        True,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        backend=BACKEND.AWQ_TORCH_INT8,
+        device=DEVICE.CPU,
+        repack=True,
+    )
+
+
 def test_feasibility_rejects_unsupported_group_size():
     assert not hf_check_packing_feasibility(
         4, 7, False, True, backend=BACKEND.GPTQ_TORCH, device=DEVICE.CPU
@@ -501,6 +534,26 @@ def test_hf_pack_layer_honors_checkpoint_format():
     )
 
     assert module.qzero_format() == 2
+
+
+def test_hf_pack_layer_resets_qzero_format_when_reusing_module():
+    linear, scales, zeros, g_idx = _make_inputs(4)
+
+    reused = _make_gptq_module()
+    hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
+    assert reused.qzero_format() == 2
+
+    # A second raw pack starts from v1 words again and must not inherit the
+    # previous call's v2 metadata.
+    hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ)
+
+    shifts = torch.arange(8, dtype=torch.int64).mul(4).view(1, 1, 8)
+    expected_qzeros = (
+        zeros.T.contiguous().view(zeros.shape[1], zeros.shape[0] // 8, 8).to(torch.int64)
+        << shifts
+    ).sum(dim=-1).to(torch.int32)
+    assert reused.qzero_format() == 1
+    assert torch.equal(reused.qzeros, expected_qzeros)
 
 
 def test_hf_pack_layer_reports_missing_scales():
