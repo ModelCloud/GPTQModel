@@ -10,6 +10,7 @@ packaging>=24.2
 device-smi>=0.5.7
 protobuf>=7.34.0
 pillow>=11.3.0
+requests>=2.32.2
 pypcre>=0.6.2
 tokenicer>=0.0.14
 logbar>=0.4.14
