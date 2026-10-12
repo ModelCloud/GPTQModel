@@ -306,6 +306,7 @@ from .quantization import (
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,
+    RMSNormConfig,
     RTNConfig,
     TelemetryConfig,
     WeightOnlyConfig,
