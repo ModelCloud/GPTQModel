@@ -865,6 +865,7 @@ def test_llama3_linear_bitblas_vs_torch_vs_marlin(_, batch, dtype, dtype_name):
                 "-",
                 "-",
                 "-",
+                "-",
                 "\033[91mERR\033[0m",
             ])
             continue

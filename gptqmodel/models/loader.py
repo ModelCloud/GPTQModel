@@ -770,9 +770,35 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
         return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
-def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
-    if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
-        return dtype
+def _kernel_accepts_quant_config(qlinear, *, qcfg: QuantizeConfig, dtype: torch.dtype) -> bool:
+    """Return whether `qlinear` can run `qcfg` with `dtype`.
+
+    Some kernels advertise a dtype globally through ``SUPPORTS_DTYPES`` but reject it for
+    specific quantization configurations. BitBLAS, for example, cannot compile signed
+    low-bit GPTQ dequantization for ``torch.bfloat16``.
+    """
+    try:
+        valid, _ = qlinear.validate(
+            bits=qcfg.bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            pack_dtype=qcfg.pack_dtype,
+            dtype=dtype,
+            dynamic=qcfg.dynamic,
+        )
+    except Exception as exc:
+        log.debug(
+            "Loading Quantized Model: dtype validation failed for `%s` with `%s`: %s",
+            getattr(qlinear, "__name__", qlinear),
+            dtype,
+            exc,
+        )
+        return False
+    return bool(valid)
+
+
+def _coerce_quantized_kernel_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
     if backend in (None, BACKEND.AUTO, BACKEND.AUTO_TRAINABLE):
         return dtype
     if not isinstance(dtype, torch.dtype):
@@ -784,7 +810,20 @@ def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype
         return dtype
 
     supported_dtypes = getattr(qlinear, "SUPPORTS_DTYPES", None) or []
-    if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
+    if qcfg.quant_method in (METHOD.AWQ, METHOD.PARO):
+        # Keep the historical AWQ/PARO behavior: fall back to fp16 whenever the
+        # requested dtype is not advertised at all.
+        if dtype in supported_dtypes or torch.float16 not in supported_dtypes:
+            return dtype
+        log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
+        return torch.float16
+
+    if dtype not in supported_dtypes or dtype == torch.float16 or torch.float16 not in supported_dtypes:
+        return dtype
+
+    if _kernel_accepts_quant_config(qlinear, qcfg=qcfg, dtype=dtype):
+        return dtype
+    if not _kernel_accepts_quant_config(qlinear, qcfg=qcfg, dtype=torch.float16):
         return dtype
 
     log.info(f"Loading Quantized Model: Auto fix `dtype` to `torch.float16` for `{qlinear.__name__}`")
@@ -1533,7 +1572,10 @@ def ModelLoader(cls):
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
 
-        dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        dtype = _coerce_quantized_kernel_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
+        if isinstance(dtype, torch.dtype) and get_hf_config_dtype(config) != dtype:
+            # Keep config metadata aligned with the dtype we actually materialize.
+            set_hf_config_dtype(config, dtype)
 
         # inject adapter into qcfg
         if adapter is not None:
