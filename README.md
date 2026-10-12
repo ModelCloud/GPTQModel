@@ -26,36 +26,21 @@
 
 ## Latest News 🗞️🚀
 
-* 10/09/2026 7.6.0-dev `main`: ✨ Added `jamba` quantization support.
-* 09/30/2026 7.6.0-dev `main`: ✨ Added `smolvlm` and `granitemoe` quantization support.
-* 09/24/2026 7.6.0-dev `main`: ✨ Added `intervl` quantization support.
-* 09/23/2026 7.6.0-dev `main`: ✨ Added `exaone4_5`, `qwen3_vl_moe` and `olmoe` quantization support.
-* 09/16/2026 7.6.0-dev `main`: ✨ Added `zdtaichu5_0` quantization support.
-* 09/16/2026 7.6.0-dev `main`: ✨ Added `agnes` quantization support.
+* **7.6.0**:
+  * **Model support:** Added Jamba/Jamba2, SmolVLM, Granite MoE, InternVL, EXAONE 4.5, Qwen3-VL MoE, Qwen4-Exp text, OLMoE, ZDTaichu 5.0, Agnes 3.0 Flash, and Xing4.0 quantization support, plus MiMo V2.6 Flash-RL and Pro-RL checkpoint support.
+  * **Apple silicon:** Added native MLX GPTQ/AWQ quantization and an EXL3 weight-quantization pipeline. Expanded Metal quantization and packed inference kernels for ParoQuant, GGUF, FP8, QQQ, and BitsAndBytes, with GPTAQ/FOEM/RTN acceleration, broader GPTQ/AWQ bit-width and group-size support, Marlin/BitBLAS checkpoint loading, and FP16/BF16 output preservation.
+  * **GPTQ performance:** Added fused CUDA block updates for 2–8-bit quantization, faster Hessian collection and factor reuse, lower peak Hessian memory, and faster Cholesky damping recovery.
+  * **Experimental W4A:** Added Llama decoder activation streams using FP8 on NVIDIA SM89+ or NVFP4 on GB10 (SM121), while preserving native packed GPTQ INT4 checkpoints. See the [W4A guide](docs/gptq-w4a-gb10.md) for supported configurations and measured quality.
+  * **Source formats:** Added automatic decoding of native FP8/NVFP4 and OCP MXFP4/MXFP8 source checkpoints for requantization.
+  * **Runtime and integration:** Added stable [`hf_` kernel selection, packing, and repacking APIs](docs/hf_packing_api.md), improved AWQ Triton scheduling, and added opt-in [Marlin scratch-buffer reuse](docs/marlin_scratch.md). Improved SGLang format validation, dtype handling, and generation parameter compatibility.
+  * **Reliability:** Fixed model-tree isolation and dynamic-rule caching/serialization, offloaded tensor device/dtype restoration, fused DeepSeek expert loading, Qwen3.5-MoE multimodal calibration, Gemma4 calibration KV memory retention, ParoQuant positional replay, GLM NoPE configuration handling, and GPTQ damping recovery after inverse-factor failures.
+
 * 09/15/2026 [7.5.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.5.0): ✨ Added K2 Horizon, Qwen-Drive, Nanbeige, and Diffusion Gemma quantization support. Improved GPTQ/AWQ/ParoQuant reliability with device-aware kernel selection, safer CUDA dispatch and empty-input handling, partial packing-word support, correct calibration masks, model-specific Paro layer replay, and hardened Machete runtime caching. Loading and saving now validate GPTQ `qweight` and offload metadata, while InternVL image preprocessing keeps `torchvision` optional. Quantization finalization is faster and startup version reporting is more accurate.
 * 09/07/2026 [7.4.0](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.4.0): 🎉 Added resumable quantization checkpoints, shared-input Hessian deduplication, `lm_head` and embedding requantization, and updated native GGUF support. Added GLM-5.3-Flash, Apertus 1.5, and XHToken `ouro` / `spark2_5` quantization support, plus quantization, JIT cache, and Triton compatibility fixes.
 * 08/31/2026 [7.3.6](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.6): ✨ Added HunyuanOCR, NVIDIA LocateAnything-3B, and Qwen3.8-Flash-Next quantization support. Added tile-misaligned GPTQ/AWQ Marlin support, reduced QQQ packing memory, and improved JIT extension cache reuse.
 * 08/25/2026 [7.3.5](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.5): ✨ Added `lm_head` and embedding quantization lifecycle support; Unlimited-OCR, DeepSeek V3.2, Mage-VL, Muse Glimmer, OLMo 3, and SmolLM3 model support.
 * 08/19/2026 [7.3.4](https://github.com/ModelCloud/GPTQModel/releases/tag/v7.3.4): 🚀🔥⚡ Added the `Swordfish` Blackwell GPTQ/AWQ kernel, planar GPTQ checkpoint formats, native MPS quantization, and Cohere Compass / A.X-K2 model support, with quantization performance and reliability improvements.
 Older releases and development notes: [changelog archive](docs/changelog/archive.md).
-
-## Prism Bonsai GGUF compatibility 📝
-
-GPT-QModel loads Prism/Bonsai GGUF checkpoints through its native GGUF loading path and internal GGUF runtime shim. No external `gguf` PyPI package is required.
-
-```py
-from gptqmodel import GPTQModel
-
-model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf")
-# or: model = GPTQModel.load("prism-ml/Bonsai-1.7B-gguf", profile="low_memory")
-
-tokens = model.generate(
-    "Who wrote Romeo and Juliet?",
-    max_new_tokens=128,
-)[0]
-
-print(model.tokenizer.decode(tokens, skip_special_tokens=True))
-```
 
 ## A unified quantization platform
 
@@ -110,7 +95,7 @@ Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accum
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
-* ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. Prism Bonsai `Q1_0_g128` remains accepted as a compatibility alias for the official 128-element `Q1_0` layout.
+* ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
@@ -236,8 +221,6 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Zamba / Zamba2 | `zamba`, `zamba2` |
 | ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
-
-Prism Bonsai GGUF checkpoints are supported for inference only through GPT-QModel's native GGUF path and internal GGUF runtime. Bonsai checkpoints load through the normal model path or repo argument and do not require the external `gguf` package. Prism model quantization is not included.
 
 ## Platform and HW Support 🖥️
 
