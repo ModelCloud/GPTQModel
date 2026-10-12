@@ -32,11 +32,15 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
-# Keep bf16 exposed overall: upstream BitBLAS can successfully compile bf16 for some dtype/shape
-# combinations (for example unsigned low-bit paths used by AWQ). The specific incompatibility we
-# reproduced is the signed low-bit GPTQ dequant path, which can emit CUDA that tries to construct
-# `cutlass::bfloat16_t(int)` and fails during BitBLAS runtime compilation.
-BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS = frozenset({2, 4, 8})
+# bf16 is exposed as an interface dtype, but the installed BitBLAS build (0.1.0.post1) cannot
+# compile low-bit dequant kernels for bf16 activations: the tilelang backend emits
+# `(cutlass::bfloat16_t)(unsigned int)` dequant casts (ambiguous overload, see cutlass/bfloat16.h)
+# and the tir backend hits a TVM/CUDA 13 `htanh` redefinition. BitBLAS also disables its
+# fast-decoding path for bf16 by design (MatmulConfig.__initialize_fast_decoding). Instead of
+# failing the load, bf16 modules run the BitBLAS operator in fp16 and cast activations/outputs at
+# the module boundary; accumulation stays fp32, so accuracy is bounded by the fp16 activation
+# range rather than by the bf16 compute type.
+BITBLAS_BF16_COMPUTE_DTYPE = torch.float16
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
 BITBLAS_MAX_SUPPORTED_SM = 90
@@ -367,6 +371,19 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
     OPT_FEATURES = BITBLAS_OPTIMIZE_FEATURES
     TORCH_DTYPE = torch.float16
 
+    @property
+    def compute_dtype(self) -> torch.dtype:
+        """Dtype the BitBLAS operator is built with (see `_resolve_compute_dtype`)."""
+        return getattr(self, "_compute_dtype", self.TORCH_DTYPE)
+
+    @classmethod
+    def _resolve_compute_dtype(cls, dtype: torch.dtype) -> torch.dtype:
+        # The installed BitBLAS build cannot compile bf16 low-bit dequant kernels, so bf16
+        # modules run the operator in fp16 and cast at the module boundary. See the module header.
+        if dtype == torch.bfloat16:
+            return BITBLAS_BF16_COMPUTE_DTYPE
+        return dtype
+
     def _build_quant_config(
         self,
         *,
@@ -444,12 +461,19 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             raise ImportError(BITBLAS_INSTALL_HINT)
 
         self.TORCH_DTYPE = dtype
+        self._compute_dtype = self._resolve_compute_dtype(dtype)
+        if self._compute_dtype != dtype:
+            log.warn.once(
+                f"BitBLAS: the installed BitBLAS build cannot compile `{dtype}` low-bit dequant "
+                f"kernels; running `{self.__class__.__name__}` in `{self._compute_dtype}` and "
+                "casting activations/outputs back to the requested dtype."
+            )
         self.quant_config = self._build_quant_config(
             bits=bits,
             group_size=group_size,
             desc_act=desc_act,
             sym=sym,
-            dtype=dtype,
+            dtype=self._compute_dtype,
         )
         self.enable_tuning = enable_tuning
         self.layout = layout
@@ -462,7 +486,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         self._configure_bitblas_matmul(
             in_features,
             out_features,
-            self.TORCH_DTYPE,
+            self.compute_dtype,
             enable_tuning,
             False,
             layout,
@@ -545,6 +569,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
     def _initialize_buffers(self, in_features: int, out_features: int, bias: bool) -> None:
         num_groups = _num_groups(self.group_size, in_features)
         storage_dtype = self.quant_config.torch_storage_dtype
+        compute_dtype = self.compute_dtype
 
         weight_shape = self.bitblas_matmul.retrieve_weight_shape()
         self.register_buffer(
@@ -553,7 +578,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         )
         self.register_buffer(
             "scales",
-            torch.empty((out_features, num_groups), dtype=self.TORCH_DTYPE),
+            torch.empty((out_features, num_groups), dtype=compute_dtype),
         )
 
         if self.quant_config.with_zeros:
@@ -569,7 +594,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             self.register_buffer("qzeros", torch.empty(0, dtype=storage_dtype))
 
         if bias:
-            self.register_buffer("bias", torch.zeros((out_features,), dtype=self.TORCH_DTYPE))
+            self.register_buffer("bias", torch.zeros((out_features,), dtype=compute_dtype))
         else:
             self.bias = None
 
@@ -708,11 +733,11 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         device = self._buffer_device()
 
         self._buffers["qweight"] = self._transform_bitblas_weight(intweight_out_in, device)
-        self._buffers["scales"] = scales_out_group.to(device=device, dtype=self.TORCH_DTYPE).contiguous()
+        self._buffers["scales"] = scales_out_group.to(device=device, dtype=self.compute_dtype).contiguous()
         self._buffers["qzeros"] = self._compress_bitblas_zeros(intzeros_group_out, device)
 
         if self.bias is not None and bias is not None:
-            self._buffers["bias"] = bias.detach().to(device=device, dtype=self.TORCH_DTYPE)
+            self._buffers["bias"] = bias.detach().to(device=device, dtype=self.compute_dtype)
 
         self.zeros = self.qzeros
 
@@ -723,6 +748,10 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
         orig_shape = x.shape[:-1]
         x_2d = x.reshape(-1, x.shape[-1])
+        if x_2d.dtype != self.compute_dtype:
+            # The operator runs in fp16 when bf16 compute is unavailable (see module header);
+            # keep `x` itself in the module dtype for adapters.
+            x_2d = x_2d.to(self.compute_dtype)
 
         args = [x_2d, self.qweight, self.scales]
         if self.quant_config.with_zeros:
@@ -769,41 +798,6 @@ class BitblasLinear(BitblasBaseQuantLinear):
 
     QUANT_TYPE = "gptq_bitblas"
     SUPPORTS_METHODS = [METHOD.GPTQ]
-
-    @classmethod
-    def _bf16_signed_weight_error(cls, bits: int, layer: Optional[str] = None) -> NotImplementedError:
-        location = f" for layer pattern `{layer}`" if layer is not None else ""
-        return NotImplementedError(
-            f"{cls.__name__} does not support `torch.bfloat16` with symmetric `{bits}`-bit GPTQ weights{location}. "
-            "This is blocked by an upstream BitBLAS CUDA codegen failure for signed low-bit dequantization. "
-            "Use `torch.float16`, asymmetric GPTQ/unsigned weights, or a different backend."
-        )
-
-    @classmethod
-    def _validate_kernel_combo(
-        cls,
-        *,
-        bits: int,
-        sym: bool,
-        dtype: Optional[torch.dtype],
-        dynamic: Optional[dict] = None,
-    ) -> Tuple[bool, Optional[Exception]]:
-        if dtype != torch.bfloat16:
-            return True, None
-
-        if sym and bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
-            return False, cls._bf16_signed_weight_error(bits)
-
-        if dynamic is None:
-            return True, None
-
-        for layer, overrides in dynamic.items():
-            layer_bits = overrides.get("bits", bits)
-            layer_sym = overrides.get("sym", sym)
-            if layer_sym and layer_bits in BITBLAS_BF16_UNSUPPORTED_SIGNED_BITS:
-                return False, cls._bf16_signed_weight_error(layer_bits, layer=layer)
-
-        return True, None
 
     def repack_from_gptq(self, gptq_module: BaseQuantLinear) -> None:
         bits = self.bits

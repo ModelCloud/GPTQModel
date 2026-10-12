@@ -131,8 +131,8 @@ def test_bitblas_prefers_float32_accumulation_for_fp16_inputs(monkeypatch):
     assert captured["config"].accum_dtype == "float32"
 
 
-def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
-    """Keep BitBLAS buffers and operator config aligned with bf16 model loads."""
+def test_bitblas_routes_bfloat16_through_float16_compute(monkeypatch):
+    """bf16 modules keep a bf16 interface but build the operator and buffers in fp16."""
 
     captured = {}
 
@@ -170,11 +170,18 @@ def test_bitblas_uses_bfloat16_configuration_when_requested(monkeypatch):
         enable_tuning=False,
     )
 
-    assert captured["config"].A_dtype == "bfloat16"
-    assert captured["config"].out_dtype == "bfloat16"
+    assert captured["config"].A_dtype == "float16"
+    assert captured["config"].out_dtype == "float16"
     assert captured["config"].accum_dtype == "float32"
-    assert layer.scales.dtype == torch.bfloat16
-    assert layer.bias.dtype == torch.bfloat16
+    assert layer.TORCH_DTYPE == torch.bfloat16
+    assert layer.compute_dtype == torch.float16
+    assert layer.scales.dtype == torch.float16
+    assert layer.bias.dtype == torch.float16
+
+
+def test_bitblas_compute_dtype_mapping():
+    assert bitblas_module.BitblasLinear._resolve_compute_dtype(torch.float16) == torch.float16
+    assert bitblas_module.BitblasLinear._resolve_compute_dtype(torch.bfloat16) == torch.float16
 
 
 def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
@@ -314,7 +321,7 @@ def test_bitblas_repack_from_gptq_v2_symmetric_codes_does_not_remap(monkeypatch)
     assert captured["bias"] is None
 
 
-def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
+def test_bitblas_validate_accepts_bf16_gptq():
     valid, err = bitblas_module.BitblasLinear.validate(
         bits=4,
         group_size=128,
@@ -326,32 +333,44 @@ def test_bitblas_validate_rejects_unsupported_bf16_signed_gptq():
         dtype=torch.bfloat16,
     )
 
-    assert valid is False
-    assert isinstance(err, NotImplementedError)
-    assert "signed low-bit dequantization" in str(err)
+    assert valid is True
+    assert err is None
 
 
-def test_bitblas_constructor_rejects_unsupported_bf16_signed_gptq(monkeypatch):
+def test_bitblas_constructor_accepts_bf16_gptq_with_fp16_compute(monkeypatch):
+    """bf16 + signed GPTQ is accepted and routed to the fp16 compute path."""
+
+    class _DummyMatmul:
+        lib = object()
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
     monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
     monkeypatch.setattr(
-        bitblas_module,
-        "import_bitblas",
-        lambda: pytest.fail("unsupported bf16 signed GPTQ should be rejected before BitBLAS import"),
+        bitblas_module.BitblasLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _DummyMatmul(),
     )
 
-    with pytest.raises(NotImplementedError, match="signed low-bit dequantization"):
-        bitblas_module.BitblasLinear(
-            bits=4,
-            group_size=128,
-            desc_act=False,
-            sym=True,
-            in_features=3072,
-            out_features=1024,
-            pack_dtype=torch.int32,
-            dtype=torch.bfloat16,
-            bias=False,
-            enable_tuning=False,
-        )
+    layer = bitblas_module.BitblasLinear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        in_features=3072,
+        out_features=1024,
+        pack_dtype=torch.int32,
+        dtype=torch.bfloat16,
+        bias=False,
+        enable_tuning=False,
+    )
+
+    assert layer.TORCH_DTYPE == torch.bfloat16
+    assert layer.compute_dtype == torch.float16
 
 
 def test_bitblas_validate_rejects_desc_act_gptq():
@@ -701,6 +720,87 @@ def _mock_gptq_linear(bits: int, group_size: int, in_features: int, out_features
     )
 
     return linear, scales, zeros, g_idx
+
+
+# Tolerances are grounded in measured drift against the fp32 Torch oracle below
+# (4 x 512 x 256, 4-bit sym, group_size=32, RTX 4090):
+#   fp16: visible rel ~1.0e-3, arithmetic rel ~9.3e-4, kernel vs TorchLinear = 0.0
+#   bf16: visible rel ~4.3e-3 (bf16 output rounding), arithmetic rel ~7.8e-3 (double rounding),
+#         kernel vs TorchLinear <= 1 bf16 ulp
+BITBLAS_DRIFT_TOLERANCE = {torch.float16: 2e-3, torch.bfloat16: 2e-2}
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@parameterized.expand([
+    ("fp16", torch.float16),
+    ("bf16", torch.bfloat16),
+])
+def test_bitblas_forward_dtype_preservation_and_accuracy(_, dtype):
+    """FP16 and BF16 activations must round-trip and match an independent fp32 Torch oracle.
+
+    bf16 modules run the BitBLAS operator in fp16 because the installed BitBLAS build cannot
+    compile bf16 low-bit dequant kernels; this locks in both the compute route and the
+    visible-output dtype contract.
+    """
+    bits = 4
+    group_size = 32
+    in_features = 512
+    out_features = 256
+
+    torch.manual_seed(0)
+    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
+    device = torch.device("cuda")
+
+    gptq_linear = TorchLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        bias=False,
+    )
+    gptq_linear.pack_block(linear, scales.T, zeros.T, g_idx=g_idx.to(torch.int32))
+
+    layer = bitblas_module.BitblasLinear(
+        bits=bits,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        in_features=in_features,
+        out_features=out_features,
+        pack_dtype=torch.int32,
+        dtype=dtype,
+        bias=False,
+        enable_tuning=False,
+    )
+    layer.repack_from_gptq(gptq_linear)
+    layer = layer.to(device=device).eval()
+    gptq_linear = gptq_linear.to(device=device).eval()
+
+    assert layer.compute_dtype == torch.float16
+    assert layer.scales.dtype == torch.float16
+
+    x = torch.randn((4, in_features), device=device, dtype=dtype)
+    with torch.inference_mode():
+        out = layer(x)
+        # `TorchLinear` stores its dequantized weight transposed as (in_features, out_features).
+        # The fp32 matmul of that weight is the independent oracle; comparing against
+        # `TorchLinear.forward` itself would compare two low-precision compute paths
+        # (TorchLinear runs bf16 matmul with reduced-precision reduction for bf16 inputs).
+        oracle = torch.matmul(x.float(), gptq_linear.dequantize_weight().float())
+
+    assert out.dtype == dtype
+
+    tolerance = BITBLAS_DRIFT_TOLERANCE[dtype]
+    # Visible output error: includes the dtype rounding of the returned tensor.
+    torch.testing.assert_close(out.float(), oracle, rtol=tolerance, atol=tolerance)
+    # Arithmetic error only: both sides are rounded to the visible dtype, which cancels the
+    # output-rounding term and leaves the fp16-compute drift.
+    torch.testing.assert_close(out.float(), oracle.to(dtype).float(), rtol=tolerance, atol=tolerance)
 
 
 def _benchmark(module: nn.Module, x: torch.Tensor, warmup: int = 2, iters: int = 5) -> list[float]:
