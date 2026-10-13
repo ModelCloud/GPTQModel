@@ -32,10 +32,10 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
-# bf16 is exposed as an interface dtype, but the installed BitBLAS build (0.1.0.post1) cannot
-# compile low-bit dequant kernels for bf16 activations: the tilelang backend emits
-# `(cutlass::bfloat16_t)(unsigned int)` dequant casts (ambiguous overload, see cutlass/bfloat16.h)
-# and the tir backend hits a TVM/CUDA 13 `htanh` redefinition. BitBLAS also disables its
+# bf16 stays an interface dtype, but BitBLAS 0.1.0.post1 cannot build low-bit dequant matmuls for
+# bf16 activations on this platform: nvcc rejects the generated dequant cast
+# (`cutlass::bfloat16_t::bfloat16_t(int)` is ambiguous, cutlass/bfloat16.h:132) and `Matmul()`
+# then returns with `lib = None` and `torch_func` unset, without raising. BitBLAS also disables its
 # fast-decoding path for bf16 by design (MatmulConfig.__initialize_fast_decoding). Instead of
 # failing the load, bf16 modules run the BitBLAS operator in fp16 and cast activations/outputs at
 # the module boundary; accumulation stays fp32, so accuracy is bounded by the fp16 activation
