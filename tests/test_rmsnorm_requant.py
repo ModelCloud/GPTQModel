@@ -1,13 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fast CPU coverage for RMSNorm gain tuning through ``requantize(rmsnorm_config=...)``."""
+"""Fast CPU coverage for RMSNorm gain tuning through ``requantize(rmsnorm=...)``."""
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn.functional as F
+from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
@@ -15,7 +17,11 @@ from gptqmodel import RMSNormConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
+from gptqmodel.models.writer import _save_module_replacement_safetensors
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.quantization import FORMAT, QuantizeConfig
 from gptqmodel.quantization.rmsnorm import tune_rmsnorm_gains
+from gptqmodel.utils.model import pack_module
 
 
 def _tiny_qwen3(seed: int = 0) -> Qwen3ForCausalLM:
@@ -115,7 +121,27 @@ def test_tune_rmsnorm_gains_honors_skip():
     assert not any(name.endswith(("q_norm", "k_norm")) for name in stats["modules"])
 
 
-def test_requantize_dispatches_rmsnorm_config_without_embedding_target():
+def test_tune_rmsnorm_gains_escapes_inference_scope_and_clears_stale_gradients():
+    teacher = _tiny_qwen3()
+    student = copy.deepcopy(teacher)
+    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    for name in names:
+        student.get_submodule(name).weight.grad = torch.ones_like(student.get_submodule(name).weight)
+
+    with torch.inference_mode():
+        batches = [{"input_ids": torch.randint(0, 64, (2, 8))}]
+        tune_rmsnorm_gains(
+            student,
+            teacher,
+            batches,
+            names,
+            RMSNormConfig(teacher=teacher, steps=1, lr=1e-2, reg=0.0),
+        )
+
+    assert all(student.get_submodule(name).weight.grad is None for name in names)
+
+
+def test_requantize_dispatches_rmsnorm_without_embedding_target():
     model = _bare(BaseQModel)
     captured = {}
 
@@ -127,17 +153,129 @@ def test_requantize_dispatches_rmsnorm_config_without_embedding_target():
     model._requantize_embeddings = lambda **kwargs: pytest.fail("embedding requant must not run")
     config = RMSNormConfig(teacher="teacher-path", steps=3)
 
-    result = model.requantize(calibration=["sample"], rmsnorm_config=config, batch_size=4)
+    result = model.requantize(calibration=["sample"], rmsnorm=config, batch_size=4)
 
     assert result == {"rmsnorm": {"modules": ["model.norm"]}}
-    assert captured["rmsnorm_config"] is config
+    assert captured["rmsnorm"] is config
     assert captured["batch_size"] == 4
 
 
-def test_rmsnorm_config_validates_arguments():
+def test_rmsnorm_validates_arguments():
     with pytest.raises(ValueError, match="teacher"):
         RMSNormConfig()
     with pytest.raises(ValueError, match="steps"):
         RMSNormConfig(teacher="t", steps=0)
-    with pytest.raises(TypeError, match="rmsnorm_config"):
-        _bare(BaseQModel).requantize(calibration=["sample"], rmsnorm_config={"teacher": "t"})
+    with pytest.raises(TypeError, match="rmsnorm"):
+        _bare(BaseQModel).requantize(calibration=["sample"], rmsnorm={"teacher": "t"})
+
+
+def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path, monkeypatch):
+    import gptqmodel.nn_modules.qlinear.torch as torch_linear_module
+
+    monkeypatch.setattr(torch_linear_module, "torch_compile", lambda fn, **_kwargs: fn)
+
+    class DenseLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(32, 16)
+            self.norm = nn.RMSNorm(16)
+            self.proj = nn.Linear(16, 32, bias=False)
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def forward(self, input_ids, attention_mask=None, use_cache=False):
+            del attention_mask, use_cache
+            return SimpleNamespace(logits=self.proj(self.norm(self.embed(input_ids))))
+
+    class PackedLM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.embed = nn.Embedding(32, 16)
+            self.norm = nn.RMSNorm(16)
+            self.proj = TorchLinear(
+                bits=4,
+                group_size=16,
+                sym=False,
+                desc_act=False,
+                in_features=16,
+                out_features=32,
+                bias=False,
+                format=FORMAT.GPTQ_V2,
+            )
+
+        def get_input_embeddings(self):
+            return self.embed
+
+        def forward(self, input_ids, attention_mask=None, use_cache=False):
+            del attention_mask, use_cache
+            return SimpleNamespace(logits=self.proj(self.norm(self.embed(input_ids))))
+
+    torch.manual_seed(4)
+    teacher = DenseLM().eval()
+    student = PackedLM().eval()
+    student.embed.load_state_dict(teacher.embed.state_dict())
+    student.norm.load_state_dict(teacher.norm.state_dict())
+    scales = torch.full((1, 32), 0.1)
+    zeros = torch.zeros((1, 32))
+    codes = torch.clamp(torch.round(teacher.proj.weight.detach().T / scales), 0, 15)
+    packed_linear = nn.Linear(16, 32, bias=False)
+    packed_linear.weight.data.copy_((codes * scales).T)
+    pack_module(
+        "proj",
+        {"proj": student.proj},
+        scales.T.contiguous(),
+        zeros.T.contiguous(),
+        student.proj.g_idx,
+        {"proj": packed_linear},
+        TorchLinear,
+        None,
+        quantize_config=QuantizeConfig(
+            bits=4,
+            group_size=16,
+            sym=False,
+            format=FORMAT.GPTQ_V2,
+            offload_to_disk=False,
+        ),
+    )
+    student.norm.weight.data.mul_(1.2)
+    packed_before = {name: value.detach().clone() for name, value in student.proj.state_dict().items()}
+    batches = [{"input_ids": torch.randint(0, 32, (2, 8))}]
+    source = tmp_path / "source"
+    saved = tmp_path / "saved"
+    source.mkdir()
+    source_file = source / "model.safetensors"
+    save_file(student.state_dict(), str(source_file))
+    turtle = SimpleNamespace(
+        model_local_path=str(source),
+        _weight_map={name: "model.safetensors" for name in student.state_dict()},
+    )
+
+    tune_rmsnorm_gains(
+        student,
+        teacher,
+        batches,
+        ["norm"],
+        RMSNormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0),
+    )
+
+    _save_module_replacement_safetensors(
+        student,
+        turtle,
+        ["norm"],
+        save_dir=str(saved),
+        metadata={"format": "pt"},
+    )
+
+    source_tensors = load_file(str(source_file))
+    saved_tensors = load_file(str(saved / "model.safetensors"))
+    assert set(saved_tensors) == set(source_tensors)
+    assert saved_tensors["norm.weight"].dtype == source_tensors["norm.weight"].dtype
+    assert not torch.equal(saved_tensors["norm.weight"], source_tensors["norm.weight"])
+    for name, value in packed_before.items():
+        assert torch.equal(saved_tensors[f"proj.{name}"], value)
+
+    reloaded = PackedLM()
+    reloaded.load_state_dict(saved_tensors)
+    for name, value in saved_tensors.items():
+        assert torch.equal(reloaded.state_dict()[name], value)

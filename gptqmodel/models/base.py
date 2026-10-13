@@ -124,7 +124,7 @@ if TYPE_CHECKING:
 class _QuantizedCheckpointSource:
     """Expose an on-disk quantized checkpoint through the shard-map interface.
 
-    Embedding-only saves use this lightweight source when a model was loaded
+    Module-replacement saves use this lightweight source when a model was loaded
     through the regular quantized loader and therefore has no LazyTurtle.
     """
 
@@ -1592,15 +1592,15 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
-        rmsnorm_config: Optional[RMSNormConfig] = None,
+        rmsnorm: Optional[RMSNormConfig] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
-        if rmsnorm_config is not None and not isinstance(rmsnorm_config, RMSNormConfig):
-            raise TypeError("`rmsnorm_config` must be a `RMSNormConfig` instance.")
-        if embed_quant_config is None and rmsnorm_config is None:
-            raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `rmsnorm_config`.")
+        if rmsnorm is not None and not isinstance(rmsnorm, RMSNormConfig):
+            raise TypeError("`rmsnorm` must be a `RMSNormConfig` instance.")
+        if embed_quant_config is None and rmsnorm is None:
+            raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `rmsnorm`.")
 
         result = {}
         if embed_quant_config is not None:
@@ -1617,14 +1617,15 @@ class BaseQModel(nn.Module):
                 calibration_data_min_length=calibration_data_min_length,
                 calibration_concat_separator=calibration_concat_separator,
             )
-        if rmsnorm_config is not None:
+        if rmsnorm is not None:
             result = dict(result or {})
             result["rmsnorm"] = self._requantize_rmsnorm(
                 calibration=calibration,
-                rmsnorm_config=rmsnorm_config,
+                rmsnorm=rmsnorm,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
                 batch_size=batch_size,
+                tokenizer=tokenizer,
                 calibration_data_min_length=calibration_data_min_length,
                 calibration_concat_separator=calibration_concat_separator,
             )
@@ -1634,10 +1635,11 @@ class BaseQModel(nn.Module):
         self,
         *,
         calibration,
-        rmsnorm_config: RMSNormConfig,
+        rmsnorm: RMSNormConfig,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
+        tokenizer: Optional[PreTrainedTokenizerBase],
         calibration_data_min_length: int,
         calibration_concat_separator: Optional[str],
     ) -> Dict[str, Any]:
@@ -1650,6 +1652,17 @@ class BaseQModel(nn.Module):
                 f"{type(self).__name__} declares no `:rmsnorm` modules in its module_tree; RMSNorm tuning is unavailable."
             )
 
+        if tokenizer is not None:
+            if not isinstance(tokenizer, PreTrainedTokenizerBase):
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
+                )
+            self.tokenizer = Tokenicer.load(
+                tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                model_config=getattr(self.model, "config", None),
+            )
+
         batches = self.prepare_dataset(
             calibration_dataset=calibration,
             calibration_dataset_concat_size=calibration_concat_size,
@@ -1659,7 +1672,7 @@ class BaseQModel(nn.Module):
             calibration_concat_separator=calibration_concat_separator,
         )
 
-        teacher = rmsnorm_config.teacher
+        teacher = rmsnorm.teacher
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
@@ -1670,18 +1683,18 @@ class BaseQModel(nn.Module):
                 trust_remote_code=self.trust_remote_code,
             )
         try:
-            stats = tune_rmsnorm_gains(self.model, teacher, batches, names, rmsnorm_config)
+            stats = tune_rmsnorm_gains(self.model, teacher, batches, names, rmsnorm)
         finally:
             if owns_teacher:
                 del teacher
                 torch_empty_cache()
 
         # Persist only the tuned norm tensors; every other checkpoint tensor is kept byte-identical.
-        self._embedding_replacement_prefixes = set(getattr(self, "_embedding_replacement_prefixes", set())) | set(stats["modules"])
+        self._module_replacement_prefixes = set(getattr(self, "_module_replacement_prefixes", set())) | set(stats["modules"])
         if self.load_quantized_model:
-            if self.turtle_model is None and getattr(self, "_embedding_replacement_source", None) is None:
-                self._embedding_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
-            self._model_free_weight_only_embeddings_only = True
+            if self.turtle_model is None and getattr(self, "_module_replacement_source", None) is None:
+                self._module_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
+            self._model_free_weight_only_replacements_only = True
         return stats
 
     def _requantize_embeddings(
@@ -1727,9 +1740,9 @@ class BaseQModel(nn.Module):
 
         # A loaded quantized model may contain inference-repacked or fused
         # modules that cannot safely be serialized as a complete checkpoint.
-        # Preserve the source checkpoint and let the embedding-only writer
+        # Preserve the source checkpoint and let the module-replacement writer
         # replace only the shards owned by the requested endpoints.
-        prefixes = set(getattr(self, "_embedding_replacement_prefixes", set()))
+        prefixes = set(getattr(self, "_module_replacement_prefixes", set()))
         mode = embed_quant_config.embed_quant_mode
         if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             input_name = self.get_input_embeddings_name()
@@ -1739,14 +1752,14 @@ class BaseQModel(nn.Module):
             output_name = self.get_output_embeddings_name() or self.lm_head
             if output_name:
                 prefixes.add(output_name)
-        self._embedding_replacement_prefixes = prefixes
+        self._module_replacement_prefixes = prefixes
 
         if self.load_quantized_model and prefixes:
             if self.turtle_model is None:
                 # Keep the shard-map-only source separate: shell materializers
                 # require a complete LazyTurtle implementation.
-                self._embedding_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
-            self._model_free_weight_only_embeddings_only = True
+                self._module_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
+            self._model_free_weight_only_replacements_only = True
 
         return result
 
@@ -2271,7 +2284,7 @@ class BaseQModel(nn.Module):
                 # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
                 #untie_weights(self.model)
 
-                if getattr(self, "_model_free_weight_only_embeddings_only", False):
+                if getattr(self, "_model_free_weight_only_replacements_only", False):
                     self.save_quantized_embeddings(
                         save_dir=save_dir,
                         safetensors_metadata=safetensors_metadata,

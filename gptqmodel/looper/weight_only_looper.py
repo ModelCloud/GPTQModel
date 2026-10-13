@@ -781,9 +781,9 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 pb.title(f"Weight-only quantizing {label} embeddings").subtitle(module_name).draw()
             named = NamedModule(module, name=module_name, full_name=module_name, layer_index=None)
             self._finalize_subset_modules(self._quantize_subset_modules([named]))
-            prefixes = set(getattr(self.gptq_model, "_embedding_replacement_prefixes", set()))
+            prefixes = set(getattr(self.gptq_model, "_module_replacement_prefixes", set()))
             prefixes.add(module_name)
-            self.gptq_model._embedding_replacement_prefixes = prefixes
+            self.gptq_model._module_replacement_prefixes = prefixes
             quantized_names.add(module_name)
             if pb is not None:
                 pb.current_iter_step = target_index + 1
@@ -809,7 +809,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 "Weight-only input/output embeddings fast quantization currently supports RTNConfig only."
             )
         embed_only = bool(embedding_targets) and self.embed_only
-        self.gptq_model._model_free_weight_only_embeddings_only = False
+        self.gptq_model._model_free_weight_only_replacements_only = False
         if embed_only:
             quant_config.offload_to_disk = False
             log.info("`embed_only` does not support `offload_to_disk=True`; setting `offload_to_disk` to `False`.")
@@ -923,7 +923,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 total_log = {self.processor.name(): self.processor.log}
                 self.gptq_model.quant_log = self.processor.log
                 self.processor.finalize(model=self.gptq_model)
-                self.gptq_model._model_free_weight_only_embeddings_only = True
+                self.gptq_model._model_free_weight_only_replacements_only = True
                 return total_log
 
             # Trailing layers whose tracked modules are all dynamically excluded never

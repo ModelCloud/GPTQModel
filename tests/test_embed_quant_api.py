@@ -58,7 +58,7 @@ def test_requantize_forwards_canonical_embedding_config():
     }
     assert captured["embed_quant_config"] is config
     assert "embed_quant_mode" not in captured
-    assert model._embedding_replacement_prefixes == {"model.embed_tokens", "lm_head"}
+    assert model._module_replacement_prefixes == {"model.embed_tokens", "lm_head"}
 
 
 def test_requantize_keeps_embedding_mode_compatibility():
@@ -114,9 +114,9 @@ def test_requantize_loaded_checkpoint_configures_embedding_only_save_source(tmp_
     )
 
     assert result == {"ok": []}
-    assert model._embedding_replacement_prefixes == {"lm_head"}
-    assert model._model_free_weight_only_embeddings_only is True
-    assert isinstance(model._embedding_replacement_source, _QuantizedCheckpointSource)
-    assert model._embedding_replacement_source._weight_map == {
+    assert model._module_replacement_prefixes == {"lm_head"}
+    assert model._model_free_weight_only_replacements_only is True
+    assert isinstance(model._module_replacement_source, _QuantizedCheckpointSource)
+    assert model._module_replacement_source._weight_map == {
         "lm_head.qweight": "model.safetensors"
     }

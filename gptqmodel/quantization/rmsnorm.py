@@ -53,6 +53,41 @@ def _resolve_gains(model: nn.Module, module_names: List[str], skip) -> Dict[str,
     return gains
 
 
+def _prepare_runtime_for_tuning(model: nn.Module) -> list[tuple[nn.Module, bool, bool, bool, int, Any]]:
+    """Drop inference-only quantized linear caches before enabling autograd."""
+    from ..nn_modules.qlinear.torch import TorchLinear
+
+    states = []
+    for module in model.modules():
+        if not isinstance(module, TorchLinear):
+            continue
+        states.append(
+            (
+                module,
+                module._cache_enabled,
+                module._lookahead_enabled,
+                module._streaming_enabled,
+                module._stream_tile_cols,
+                module._lookahead_next,
+            )
+        )
+        module.clear_weight_cache()
+        module._stream_reset_cache()
+        module._reset_prefetch_state()
+        module.enable_weight_cache(False)
+        module.enable_lookahead(False)
+        module.enable_streaming(False)
+    return states
+
+
+def _restore_runtime_after_tuning(states) -> None:
+    for module, cache_enabled, lookahead_enabled, streaming_enabled, tile_cols, lookahead_next in states:
+        module.enable_weight_cache(cache_enabled)
+        module.enable_streaming(streaming_enabled, tile_cols=tile_cols)
+        module.enable_lookahead(lookahead_enabled)
+        module.set_lookahead_next(lookahead_next)
+
+
 def tune_rmsnorm_gains(
     model: nn.Module,
     teacher: nn.Module,
@@ -69,37 +104,49 @@ def tune_rmsnorm_gains(
     if not batches:
         raise ValueError("RMSNorm tuning requires calibration data.")
 
-    gains = _resolve_gains(model, module_names, config.skip)
-    names = list(gains)
-    params = [gains[name] for name in names]
-    base = [param.detach().float().clone() for param in params]
-    scale = [b.abs().mean().clamp_min(1e-6) for b in base]
-    master = [b.clone().requires_grad_(True) for b in base]
-    optimizer = torch.optim.Adam(master, lr=config.lr)
-
+    runtime_states = _prepare_runtime_for_tuning(model)
     trainable = {param: param.requires_grad for param in model.parameters()}
     model_training, teacher_training = model.training, teacher.training
     # Kernels such as TorchQuantLinear switch packed layouts in train mode;
     # stay in eval mode, autograd still flows through the dequantized matmuls.
-    model.eval()
-    teacher.eval()
-    for param in model.parameters():
-        param.requires_grad_(False)
-    for param in params:
-        param.requires_grad_(True)
-
-    student_device = _module_device(model.get_input_embeddings())
-    teacher_device = _module_device(teacher.get_input_embeddings())
-    rng = random.Random(config.seed)
-    torch.manual_seed(config.seed)
-    log_every = max(1, config.steps // 10)
-    history = []
-    skipped = 0
-    start = time.time()
+    params = []
     try:
         with torch.inference_mode(False), torch.enable_grad():
+            gains = _resolve_gains(model, module_names, config.skip)
+            names = list(gains)
+            params = [gains[name] for name in names]
+            for param in params:
+                param.grad = None
+            base = [param.detach().float().clone() for param in params]
+            scale = [b.abs().mean().clamp_min(1e-6) for b in base]
+            master = [b.clone().requires_grad_(True) for b in base]
+            optimizer = torch.optim.Adam(master, lr=config.lr)
+
+            model.eval()
+            teacher.eval()
+            for param in model.parameters():
+                param.requires_grad_(False)
+            for param in params:
+                param.requires_grad_(True)
+
+            # Calibration tensors may have been created under an outer inference scope.
+            safe_batches = [
+                {
+                    key: value.detach().clone() if isinstance(value, torch.Tensor) else value
+                    for key, value in batch.items()
+                }
+                for batch in batches
+            ]
+            student_device = _module_device(model.get_input_embeddings())
+            teacher_device = _module_device(teacher.get_input_embeddings())
+            rng = random.Random(config.seed)
+            torch.manual_seed(config.seed)
+            log_every = max(1, config.steps // 10)
+            history = []
+            skipped = 0
+            start = time.time()
             for step in range(1, config.steps + 1):
-                batch = batches[rng.randrange(len(batches))]
+                batch = safe_batches[rng.randrange(len(safe_batches))]
                 input_ids = batch["input_ids"]
                 attention_mask = batch.get("attention_mask")
                 if attention_mask is None:
@@ -118,7 +165,10 @@ def tune_rmsnorm_gains(
                 kl.backward()
                 del target, student, token_kl
 
-                penalty = sum(((m - b) / s).square().mean() for m, b, s in zip(master, base, scale))
+                penalty = sum(
+                    (((m - b) / s).square().mean()).to(kl.device)
+                    for m, b, s in zip(master, base, scale)
+                )
                 (config.reg * penalty).backward()
 
                 if step == 1:
@@ -131,6 +181,9 @@ def tune_rmsnorm_gains(
 
                 finite = True
                 for m, param in zip(master, params):
+                    if param.grad is None or m.grad is None:
+                        finite = False
+                        continue
                     m.grad.add_(param.grad.detach().float().to(m.device))
                     finite = finite and bool(torch.isfinite(m.grad).all())
                     param.grad = None
@@ -151,10 +204,13 @@ def tune_rmsnorm_gains(
                         f"penalty={entry['penalty']:.5f} ({time.time() - start:.1f}s)"
                     )
     finally:
+        for param in params:
+            param.grad = None
         for param, flag in trainable.items():
             param.requires_grad_(flag)
         model.train(model_training)
         teacher.train(teacher_training)
+        _restore_runtime_after_tuning(runtime_states)
 
     if skipped:
         log.warn(f"RMSNorm tuning: skipped {skipped} step(s) with non-finite gradients.")
