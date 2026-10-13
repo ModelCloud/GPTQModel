@@ -32,14 +32,12 @@ BITBLAS_OPTIMIZE_FEATURES: List[int] = [1, 16, 32, 64, 128, 256, 512, 1024]
 BITBLAS_SUPPORTED_GROUP_SIZES: List[int] = [-1, 32, 64, 128]
 BITBLAS_SUPPORTED_BITS: List[int] = [2, 4, 8]
 BITBLAS_SUPPORTED_SYM: List[bool] = [False, True]
-# bf16 stays an interface dtype, but BitBLAS 0.1.0.post1 cannot build low-bit dequant matmuls for
-# bf16 activations on this platform: nvcc rejects the generated dequant cast
-# (`cutlass::bfloat16_t::bfloat16_t(int)` is ambiguous, cutlass/bfloat16.h:132) and `Matmul()`
-# then returns with `lib = None` and `torch_func` unset, without raising. BitBLAS also disables its
-# fast-decoding path for bf16 by design (MatmulConfig.__initialize_fast_decoding). Instead of
-# failing the load, bf16 modules run the BitBLAS operator in fp16 and cast activations/outputs at
-# the module boundary; accumulation stays fp32, so accuracy is bounded by the fp16 activation
-# range rather than by the bf16 compute type.
+# bf16 stays an interface dtype, but BitBLAS 0.1.0.post1 cannot compile bf16 low-bit dequant
+# kernels: nvcc rejects the generated `bfloat16_t` cast in the bundled cutlass 3.2.2, and
+# `Matmul()` then returns with `lib = None` and `torch_func` unset without raising. This is a
+# host-side build failure, independent of the GPU and unrelated to runtime crashes (handled by
+# `_invoke_bitblas_matmul`). bf16 modules therefore run the operator in fp16 and cast at the
+# module boundary; accumulation stays fp32.
 BITBLAS_BF16_COMPUTE_DTYPE = torch.float16
 BITBLAS_DEFAULT_ZEROS_MODE = "quantized"
 BITBLAS_PROPAGATE_WEIGHTS = False
@@ -756,7 +754,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
         args = [x_2d, self.qweight, self.scales]
         if self.quant_config.with_zeros:
             args.append(self.qzeros)
-        out_2d = self.bitblas_matmul(*args)
+        out_2d = self._invoke_bitblas_matmul(args)
 
         if self.bias is not None:
             out_2d = out_2d + self.bias
@@ -770,6 +768,18 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
             out = out.to(dtype=input_dtype)
 
         return out
+
+    def _invoke_bitblas_matmul(self, args: List[torch.Tensor]) -> torch.Tensor:
+        # BitBLAS launches its prebuilt CUDA library through ctypes, so the kernel executes in the
+        # CUDA context that is current for this thread. GPT-QModel's default layer-wise device map
+        # spreads the model over every visible GPU; without entering the module's device context,
+        # layers on `cuda:1+` would launch in GPU 0's context while holding pointers to another
+        # GPU's buffers and raise `CUDA error: an illegal memory access was encountered`.
+        device = self.scales.device
+        if device.type == "cuda" and torch.cuda.current_device() != device.index:
+            with torch.cuda.device(device):
+                return self.bitblas_matmul(*args)
+        return self.bitblas_matmul(*args)
 
 
 # BitBLAS repacks incoming GPTQ/AWQ tensors into its own operator layout, so the

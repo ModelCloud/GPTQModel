@@ -184,6 +184,118 @@ def test_bitblas_compute_dtype_mapping():
     assert bitblas_module.BitblasLinear._resolve_compute_dtype(torch.bfloat16) == torch.float16
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
+def test_bitblas_forward_launches_in_module_device_context(monkeypatch):
+    """Raw BitBLAS launches must run in the module's CUDA context, not `current_device()`.
+
+    GPT-QModel's default layer-wise device map spreads a model over every visible GPU while the
+    process-wide current device stays at 0. Launching a cuda:1+ kernel from GPU 0's context with
+    foreign pointers raises an illegal memory access, so the operator call is device-guarded.
+    """
+
+    state = {"guarded": False, "calls": []}
+
+    class _DeviceContext:
+        def __init__(self, device):
+            self.device = device
+
+        def __enter__(self):
+            state["guarded"] = True
+            return self
+
+        def __exit__(self, *exc):
+            state["guarded"] = False
+            return False
+
+    class _DummyMatmul:
+        lib = object()
+        weight_transform = None
+
+        @staticmethod
+        def retrieve_weight_shape():
+            return (1, 1)
+
+        def __call__(self, x, qweight, scales):
+            state["calls"].append(state["guarded"])
+            return torch.zeros(x.shape[:-1] + (32,), dtype=x.dtype, device=x.device)
+
+    monkeypatch.setattr(bitblas_module, "BITBLAS_AVAILABLE", True)
+    monkeypatch.setattr(bitblas_module, "import_bitblas", lambda: None)
+    monkeypatch.setattr(
+        bitblas_module.BitblasLinear,
+        "_get_or_create_bitblas_operator",
+        lambda self, config, enable_tuning: _DummyMatmul(),
+    )
+
+    layer = bitblas_module.BitblasLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        pack_dtype=torch.int32,
+        dtype=torch.float16,
+        bias=False,
+        enable_tuning=False,
+    ).to("cuda:0")
+    x = torch.zeros(2, 32, device="cuda:0", dtype=torch.float16)
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "device", lambda device: _DeviceContext(device))
+
+    layer(x)
+    assert state["calls"] == [True]
+
+    # Already-current device: no redundant context switch.
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    layer(x)
+    assert state["calls"] == [True, False]
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for BitBLAS")
+@pytest.mark.skipif(not bitblas_module.BITBLAS_AVAILABLE, reason="BitBLAS backend is not available")
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires >=2 GPUs")
+def test_bitblas_forward_on_non_current_gpu_uses_module_device_context():
+    """Regression test for the #1192 multi-GPU crash on real hardware.
+
+    The layer lives on `cuda:1` while the process-wide current device stays at 0, which is what
+    GPT-QModel's default layer-wise device map produces on a multi-GPU host. Before
+    `_invoke_bitblas_matmul`, the raw ctypes launch ran in GPU 0's context with cuda:1 pointers
+    and raised `CUDA error: an illegal memory access was encountered`.
+    """
+    bitblas_module.import_bitblas()
+
+    torch.cuda.set_device(0)
+    device = torch.device("cuda:1")
+    assert torch.cuda.current_device() != device.index
+
+    layer = bitblas_module.BitblasLinear(
+        bits=4,
+        group_size=32,
+        desc_act=False,
+        sym=True,
+        in_features=32,
+        out_features=32,
+        bias=False,
+    ).to(device)
+
+    with torch.no_grad():
+        layer.qweight.zero_()
+        layer.scales.zero_()
+        if layer.quant_config.with_zeros:
+            layer.qzeros.zero_()
+
+    x = torch.randn(2, 32, device=device, dtype=layer.TORCH_DTYPE)
+    y = layer(x)
+    torch.cuda.synchronize()
+
+    assert y.device == device
+    assert y.shape == (2, 32)
+    assert torch.allclose(y, torch.zeros_like(y), atol=1e-4, rtol=1e-4)
+
+
 def test_bitblas_repack_from_symmetric_gptq_remaps_signed_codes(monkeypatch):
     class _DummyMatmul:
         lib = object()
