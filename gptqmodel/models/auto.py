@@ -173,6 +173,7 @@ from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
+from .definitions.openvla import OpenVLAQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ouro import OuroQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -369,6 +370,7 @@ MODEL_MAP = {
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
     "olmoe": OlmoeQModel,
+    "openvla": OpenVLAQModel,
     "ouro": OuroQModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,

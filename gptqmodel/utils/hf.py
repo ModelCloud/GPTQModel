@@ -725,6 +725,17 @@ def _patch_transformers_remote_code_compat() -> None:
     except Exception:
         rope_utils = None
 
+    try:
+        import transformers.tokenization_utils as tokenization_utils
+        from transformers.tokenization_utils_base import (
+            PaddingStrategy,
+            PreTokenizedInput,
+            TextInput,
+            TruncationStrategy,
+        )
+    except Exception:
+        tokenization_utils = None
+
     import transformers.utils.generic as generic
     with _MONKEY_PATCH_LOCK:
         if not hasattr(import_utils, "is_torch_fx_available"):
@@ -734,6 +745,19 @@ def _patch_transformers_remote_code_compat() -> None:
                 return hasattr(torch, "fx")
 
             import_utils.is_torch_fx_available = is_torch_fx_available
+
+        if tokenization_utils is not None:
+            # transformers 5.x moved these typing/enum helpers to
+            # `tokenization_utils_base`, but older remote processors still import
+            # them from `tokenization_utils`.
+            for name, value in (
+                ("PaddingStrategy", PaddingStrategy),
+                ("PreTokenizedInput", PreTokenizedInput),
+                ("TextInput", TextInput),
+                ("TruncationStrategy", TruncationStrategy),
+            ):
+                if not hasattr(tokenization_utils, name):
+                    setattr(tokenization_utils, name, value)
 
         if utils is not None and not hasattr(utils, "is_flash_attn_greater_or_equal_2_10"):
             legacy_flash_attn_probe = getattr(utils, "is_flash_attn_greater_or_equal", None)
@@ -1583,6 +1607,123 @@ def register_runtime_automodel_config(config, remote_module, config_attr: str, r
         )
 
 
+class _TimmVersionCompatProxy:
+    """Report a timm 0.9.x version while forwarding to the installed timm module.
+
+    Prismatic-based remote code (OpenVLA) hard-fails on `timm >= 1.0` even
+    though the `timm.create_model` / `get_intermediate_layers` APIs it relies
+    on still exist. The proxy only replaces the remote module's own `timm`
+    reference, so global timm metadata stays untouched.
+    """
+
+    __version__ = "0.9.16"
+
+    def __init__(self, module: Any) -> None:
+        object.__setattr__(self, "_module", module)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(object.__getattribute__(self, "_module"), name)
+
+
+def _patch_prismatic_remote_code(remote_module: Any) -> None:
+    """Patch Prismatic/OpenVLA remote code for the installed timm version."""
+    timm = getattr(remote_module, "timm", None)
+    prismatic_cls = getattr(remote_module, "PrismaticForConditionalGeneration", None)
+
+    if (
+        timm is not None
+        and prismatic_cls is not None
+        and not isinstance(timm, _TimmVersionCompatProxy)
+        and not getattr(prismatic_cls, "_gptqmodel_timm_version_compat", False)
+    ):
+        remote_module.timm = _TimmVersionCompatProxy(timm)
+        prismatic_cls._gptqmodel_timm_version_compat = True
+
+    vision_backbone_cls = getattr(remote_module, "PrismaticVisionBackbone", None)
+    if vision_backbone_cls is not None and not getattr(
+        vision_backbone_cls, "_gptqmodel_timm_intermediate_layers_compat", False
+    ):
+        original_init = vision_backbone_cls.__init__
+
+        def vision_backbone_init_compat(self, *args, _original_init=original_init, **kwargs):
+            _original_init(self, *args, **kwargs)
+            for name in ("featurizer", "fused_featurizer"):
+                featurizer = getattr(self, name, None)
+                if featurizer is None:
+                    continue
+                original_forward = featurizer.forward
+
+                def forward(*fargs, _original_forward=original_forward, **fkwargs):
+                    # timm >= 1.0 returns a list even for a single requested layer,
+                    # while the remote `unpack_tuple()` helper only unwraps tuples.
+                    result = _original_forward(*fargs, **fkwargs)
+                    if isinstance(result, list) and len(result) == 1:
+                        return result[0]
+                    return result
+
+                featurizer.forward = forward
+
+        vision_backbone_cls.__init__ = vision_backbone_init_compat
+        vision_backbone_cls._gptqmodel_timm_intermediate_layers_compat = True
+
+
+def _bridge_legacy_vision2seq_remote_code(model_cls: Any, config: Any) -> Optional[type]:
+    """Bridge legacy `AutoModelForVision2Seq` remote classes onto transformers 5.x.
+
+    OpenVLA/Prismatic checkpoints declare their model under the
+    `AutoModelForVision2Seq` auto-map key, which transformers removed in 5.x.
+    Register the remote class with `AutoModelForImageTextToText` and restore the
+    generation API plus constructor assumptions that the legacy code expects.
+    """
+    if not isinstance(model_cls, type):
+        return None
+
+    with _MONKEY_PATCH_LOCK:
+        if not getattr(model_cls, "_gptqmodel_sdpa_flag_patch", False):
+            # The legacy `_supports_sdpa` property dereferences
+            # `self.language_model`, but transformers 5.x reads the flag inside
+            # `PreTrainedModel.__init__` before that attribute exists.
+            model_cls._supports_sdpa = property(
+                lambda self: getattr(getattr(self, "language_model", None), "_supports_sdpa", True)
+            )
+            model_cls._gptqmodel_sdpa_flag_patch = True
+
+        remote_module = sys.modules.get(model_cls.__module__)
+        if remote_module is not None:
+            _patch_prismatic_remote_code(remote_module)
+
+        bridged_cls = getattr(model_cls, "_gptqmodel_bridged_vision2seq_cls", None)
+        if bridged_cls is None:
+            from transformers.generation.utils import GenerationMixin
+
+            if not issubclass(model_cls, GenerationMixin):
+                # transformers 5.x dropped the implicit `GenerationMixin` base from
+                # `PreTrainedModel`, but `OpenVLAForActionPrediction.predict_action()`
+                # still calls `.generate()`.
+                bridged_cls = type(
+                    model_cls.__name__,
+                    (model_cls, GenerationMixin),
+                    {"__module__": model_cls.__module__, "__qualname__": model_cls.__qualname__},
+                )
+            else:
+                bridged_cls = model_cls
+            model_cls._gptqmodel_bridged_vision2seq_cls = bridged_cls
+        model_cls = bridged_cls
+
+        from transformers import AutoModelForImageTextToText
+
+        try:
+            AutoModelForImageTextToText.register(type(config), model_cls, exist_ok=True)
+        except Exception as exc:
+            log.debug(
+                "HF: failed to register legacy vision2seq remote class `%s`: %s",
+                getattr(model_cls, "__name__", "unknown"),
+                exc,
+            )
+
+        return model_cls
+
+
 def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: Any) -> None:
     if not model_id_or_path:
         return
@@ -1594,6 +1735,12 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     class_ref = auto_map.get("AutoModelForCausalLM")
     if not isinstance(class_ref, str) and getattr(config, "model_type", None) == "locateanything":
         class_ref = auto_map.get("AutoModel")
+    legacy_vision2seq = False
+    if not isinstance(class_ref, str):
+        # OpenVLA/Prismatic checkpoints predate the transformers 5.x rename of
+        # `AutoModelForVision2Seq` to `AutoModelForImageTextToText`.
+        class_ref = auto_map.get("AutoModelForVision2Seq")
+        legacy_vision2seq = isinstance(class_ref, str)
     if not isinstance(class_ref, str):
         return
 
@@ -1604,6 +1751,11 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
     except Exception as exc:
         log.debug("HF: remote model init compat pre-import failed for `%s`: %s", model_id_or_path, exc)
         return
+
+    if legacy_vision2seq:
+        model_cls = _bridge_legacy_vision2seq_remote_code(model_cls, config)
+        if model_cls is None:
+            return
 
     module_root = model_cls.__module__.rsplit(".", maxsplit=1)[0]
     speech_module = sys.modules.get(f"{module_root}.speech_conformer_encoder")
