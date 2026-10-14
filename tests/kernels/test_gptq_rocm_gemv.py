@@ -13,11 +13,13 @@ def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
     the arithmetic the reference Torch and Triton dequant paths both specify.
     The returned tensor excludes bias.
     """
+    pack_factor = 32 // module.bits
+    maxq = (1 << module.bits) - 1
     group_index = module.g_idx.to(torch.int64)
-    shifts = torch.arange(8, device=x.device, dtype=torch.int64) * 4
-    codes = ((module.qweight.to(torch.int64).unsqueeze(1) >> shifts[None, :, None]) & 15)
+    shifts = torch.arange(pack_factor, device=x.device, dtype=torch.int64) * module.bits
+    codes = ((module.qweight.to(torch.int64).unsqueeze(1) >> shifts[None, :, None]) & maxq)
     codes = codes.reshape(module.in_features, module.out_features)
-    zeros = ((module.qzeros.to(torch.int64).unsqueeze(-1) >> shifts[None, None, :]) & 15)
+    zeros = ((module.qzeros.to(torch.int64).unsqueeze(-1) >> shifts[None, None, :]) & maxq)
     zeros = zeros.reshape(module.scales.shape[0], module.out_features)
     weights = ((codes - zeros[group_index]).float() * module.scales[group_index].float()).to(x.dtype)
     weights = weights.double()
@@ -26,9 +28,9 @@ def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
 
 
 def _make_module(in_features: int, out_features: int, dtype: torch.dtype,
-                 group_size: int, desc_act: bool, bias: bool) -> TorchLinear:
+                 group_size: int, desc_act: bool, bias: bool, bits: int = 4) -> TorchLinear:
     module = TorchLinear(
-        bits=4, group_size=group_size, sym=True, desc_act=desc_act,
+        bits=bits, group_size=group_size, sym=True, desc_act=desc_act,
         in_features=in_features, out_features=out_features,
         pack_dtype=torch.int32, bias=bias, register_buffers=True,
     ).to(device="cuda", dtype=dtype).eval()
@@ -57,25 +59,32 @@ def require_gfx950():
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape,group_size,desc_act,bias", [
-    ((896, 128), 128, False, False),
-    ((896, 1280), 128, False, False),
-    ((2048, 1024), 128, False, False),
-    ((4096, 4096), 256, False, True),
-    ((5120, 12288), 128, True, False),
+@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", [
+    ((896, 128), 128, False, False, 4),
+    ((896, 1280), 128, False, False, 4),
+    ((2048, 1024), 128, False, False, 4),
+    ((4096, 4096), 256, False, True, 4),
+    ((5120, 12288), 128, True, False, 4),
+    ((2048, 1024), 128, False, False, 8),
+    ((2048, 1024), 128, True, True, 8),
+    ((2048, 1024), 128, False, False, 2),
+    ((896, 1280), 128, True, False, 2),
 ])
 def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
     dtype: torch.dtype, shape: tuple[int, int], group_size: int,
-    desc_act: bool, bias: bool,
+    desc_act: bool, bias: bool, bits: int,
 ):
     torch.manual_seed(810)
     in_features, out_features = shape
-    module = _make_module(in_features, out_features, dtype, group_size, desc_act, bias)
+    module = _make_module(in_features, out_features, dtype, group_size, desc_act, bias, bits)
     x = torch.randn(1, in_features, device="cuda", dtype=dtype)
     with torch.inference_mode():
         accumulation = _oracle_fp64(x, module)
         visible = module(x)
-        raw = gptq_gemv(x, module.qweight, module.scales, module.qzeros, module.g_idx, out_dtype=torch.float32)
+        raw = gptq_gemv(
+            x, module.qweight, module.scales, module.qzeros, module.g_idx,
+            out_dtype=torch.float32, bits=bits,
+        )
     torch.cuda.synchronize()
     assert visible.dtype == dtype
 
@@ -120,3 +129,10 @@ def test_gfx950_gptq_gemv_falls_back_for_multi_token_or_grad():
     # Narrow projections (e.g. attention k/v) are still faster fused.
     narrow = _make_module(896, 128, torch.float16, 128, False, False)
     assert narrow._can_use_rocm_gemv(torch.randn(1, 896, device="cuda", dtype=torch.float16))
+
+    # 2/8-bit packed weights are fused too; 3-bit uses a different layout.
+    for bits in (2, 8):
+        wide = _make_module(2048, 1024, torch.float16, 128, False, False, bits)
+        assert wide._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16))
+    three_bit = _make_module(2048, 1024, torch.float16, 128, False, False, 3)
+    assert not three_bit._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16))

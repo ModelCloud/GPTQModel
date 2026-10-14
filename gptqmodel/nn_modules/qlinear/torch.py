@@ -342,7 +342,9 @@ class TorchLinear(PackableQuantLinear):
         if self._can_use_rocm_gemv(x):
             from ..triton_utils.gptq_gemv import gptq_gemv
 
-            out = gptq_gemv(x, self.qweight, self.scales, self.qzeros, self.g_idx).reshape(out_shape)
+            out = gptq_gemv(
+                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
+            ).reshape(out_shape)
             if self.bias is not None:
                 out.add_(self.bias)
             if self.adapter:
@@ -379,7 +381,7 @@ class TorchLinear(PackableQuantLinear):
             and not self._cache_enabled
             and not self._lookahead_enabled
             and self._can_use_triton_dequant()
-            and self.bits == 4
+            and self.bits in (2, 4, 8)
             and self.pack_dtype == torch.int32
             and self.qzero_format() == 2
             and self.in_features >= 32
