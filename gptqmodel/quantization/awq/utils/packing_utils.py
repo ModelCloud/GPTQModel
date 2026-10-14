@@ -41,6 +41,30 @@ def pack_awq(iweights: torch.Tensor, izeros: torch.Tensor, bits: int):
     return _pack_contiguous(iweights, bits), _pack_contiguous(izeros, bits)
 
 
+def pack_awq_columns(codes: torch.Tensor, bits: int, order=None) -> torch.Tensor:
+    """Pack code columns into 32-bit words with the classic shift/OR order.
+
+    ``codes`` is ``[rows, columns]``; every ``32 // bits`` consecutive columns
+    collapse into one output word.  ``order`` optionally permutes the codes
+    inside each group (the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave).  The
+    int32 shift semantics (including sign extension for out-of-range codes)
+    match the hand-written per-column loops exactly, so packed output stays
+    bit-identical.  Any trailing columns that do not fill a whole group are
+    ignored, mirroring the loop that iterates ``range(columns // pack_num)``.
+    """
+
+    pack_num = 32 // bits
+    rows, columns = codes.shape
+    columns //= pack_num
+    grouped = codes[:, : columns * pack_num].reshape(rows, columns, pack_num)
+    if order is not None:
+        grouped = grouped[:, :, order]
+    packed = torch.zeros((rows, columns), dtype=torch.int32, device=codes.device)
+    for index in range(pack_num):
+        packed |= grouped[:, :, index] << (index * bits)
+    return packed
+
+
 def _unpack_columnwise(qtensor: torch.Tensor, bits: int, count: int = None) -> torch.Tensor:
     """Unpack continuous words, including codes that cross word boundaries."""
     if bits not in range(2, 9):
