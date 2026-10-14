@@ -33,6 +33,55 @@ def test_awq_gemv_native_contract_checks_tensor_layout_and_device():
         assert contract in source
 
 
+def test_awq_gemm_pack_backend_stays_portable_off_cuda():
+    from gptqmodel.utils.backend import BACKEND, awq_gemm_pack_backend
+
+    # The native AWQ GEMM extension only builds for CUDA, so every other host
+    # (and the weight-only export lifecycle) packs with the portable kernel.
+    assert (
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=False)
+        == BACKEND.AWQ_GEMM
+    )
+    assert (
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=True, weight_only=False)
+        == BACKEND.AWQ_TORCH
+    )
+    assert (
+        awq_gemm_pack_backend(device_type="xpu", is_rocm=False, weight_only=False)
+        == BACKEND.AWQ_TORCH
+    )
+    assert (
+        awq_gemm_pack_backend(device_type="npu", is_rocm=False, weight_only=False)
+        == BACKEND.AWQ_TORCH
+    )
+    assert (
+        awq_gemm_pack_backend(device_type="cpu", is_rocm=False, weight_only=False)
+        == BACKEND.AWQ_TORCH
+    )
+    assert (
+        awq_gemm_pack_backend(device_type="cuda", is_rocm=False, weight_only=True)
+        == BACKEND.AWQ_TORCH
+    )
+
+
+def test_awq_gemm_kernel_is_cuda_only():
+    from gptqmodel.models._const import DEVICE
+    from gptqmodel.nn_modules.qlinear.gemm_awq import AwqGEMMLinear
+
+    assert AwqGEMMLinear.SUPPORTS_DEVICES == [DEVICE.CUDA]
+
+
+def test_awq_gemm_validate_once_reports_rocm_gap(monkeypatch):
+    from gptqmodel.nn_modules.qlinear import gemm_awq
+
+    monkeypatch.setattr(gemm_awq, "IS_ROCM", True)
+    ok, err = gemm_awq.AwqGEMMLinear.validate_once()
+
+    assert ok is False
+    assert isinstance(err, NotImplementedError)
+    assert "ROCm" in str(err)
+
+
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
 def test_awq_gemv_uses_tensor_device_instead_of_current_device():
     from gptqmodel.utils.awq import (
