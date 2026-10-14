@@ -260,6 +260,7 @@ def test_torch_ops_jit_extension_resolves_angle_bracket_local_includes(tmp_path)
 
 
 def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
+    monkeypatch.setattr(swordfish, "IS_ROCM", False)
     monkeypatch.setattr(swordfish.torch, "__version__", "2.9.1+cpu")
 
     error = swordfish._swordfish_static_runtime_error()
@@ -268,6 +269,7 @@ def test_swordfish_static_runtime_error_rejects_older_torch(monkeypatch):
 
 
 def test_swordfish_static_runtime_error_rejects_unparseable_torch(monkeypatch):
+    monkeypatch.setattr(swordfish, "IS_ROCM", False)
     monkeypatch.setattr(swordfish.torch, "__version__", "nightly")
 
     error = swordfish._swordfish_static_runtime_error()
@@ -293,6 +295,7 @@ def test_default_jit_cflags_allow_noopt(monkeypatch):
 def test_default_jit_cuda_cflags_respect_o2_override(monkeypatch):
     """Guard the global override so kernels can be forced onto one explicit optimization level."""
 
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "O2")
 
     flags = cpp_module.default_jit_cuda_cflags(
@@ -310,6 +313,7 @@ def test_default_jit_cuda_cflags_respect_o2_override(monkeypatch):
 def test_default_jit_cuda_cflags_respect_noopt_override(monkeypatch):
     """Guard the noopt override so users can disable every emitted `-O*` flag when needed."""
 
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setenv("GPTQMODEL_NVCC_COMPILE_LEVEL", "NONE")
 
     flags = cpp_module.default_jit_cuda_cflags(
@@ -326,6 +330,7 @@ def test_default_jit_cuda_cflags_respect_noopt_override(monkeypatch):
 def test_default_jit_cuda_cflags_allow_quiet_ptxas(monkeypatch):
     """Guard per-kernel PTXAS verbosity overrides so AWQ can suppress giant compile logs."""
 
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.delenv("GPTQMODEL_NVCC_COMPILE_LEVEL", raising=False)
 
     flags = cpp_module.default_jit_cuda_cflags(
@@ -334,6 +339,42 @@ def test_default_jit_cuda_cflags_allow_quiet_ptxas(monkeypatch):
     )
 
     assert flags[flags.index("-Xptxas") + 1] == "-O3,-dlcm=ca"
+
+
+def test_default_jit_cuda_cflags_use_hipcc_flags_on_rocm(monkeypatch):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", True)
+    flags = cpp_module.default_jit_cuda_cflags(
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+        include_fatbin_compression=True,
+    )
+
+    assert "-O3" in flags
+    assert "-gline-tables-only" in flags
+    assert not any(flag.startswith(("--", "-Xptxas", "-lineinfo")) for flag in flags)
+    assert cpp_module.jit_disable_fma_contraction_flag() == "-ffp-contract=off"
+
+
+def test_rocm_sdk_devel_paths_are_compiler_and_linker_flags(monkeypatch, tmp_path):
+    from torch.utils import cpp_extension
+
+    core = tmp_path / "_rocm_sdk_core"
+    include = tmp_path / "_rocm_sdk_devel" / "include"
+    lib = tmp_path / "_rocm_sdk_devel" / "lib"
+    (include / "thrust").mkdir(parents=True)
+    lib.mkdir(parents=True)
+    (include / "thrust" / "complex.h").touch()
+    (lib / "libamdhip64.so").touch()
+    monkeypatch.setattr(cpp_extension, "ROCM_HOME", str(core))
+    monkeypatch.setattr(cpp_module, "IS_ROCM", True)
+
+    loader = _make_loader(
+        tmp_path, requires_cuda=True, extra_cflags=["-O2"], extra_ldflags=["-lm"]
+    )
+    assert loader._resolved_extra_cflags() == ["-O2", f"-I{include}"]
+    assert loader._resolved_extra_ldflags() == ["-lm", f"-L{lib}"]
+    assert str(include) not in loader._resolved_extra_include_paths()
 
 
 def test_detected_cuda_wheel_include_paths_discovers_merged_and_split_layouts(monkeypatch, tmp_path):
@@ -701,6 +742,7 @@ def test_torch_ops_jit_extension_global_kernel_rebuild_clears_cache(monkeypatch,
 def test_torch_ops_jit_extension_emits_spinner_logs_around_compile(monkeypatch, tmp_path):
     """Guard compile UX so users get explicit progress feedback before and after JIT build stalls."""
 
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     loader = _make_loader(
         tmp_path,
         extra_cflags=["-O3"],

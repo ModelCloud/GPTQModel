@@ -9,6 +9,7 @@ from gptqmodel.utils.cpp import (
     default_jit_cflags,
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
+    jit_disable_fma_contraction_flag,
 )
 
 
@@ -26,7 +27,8 @@ _EXTENSION = TorchOpsJitExtension(
     default_build_root=lambda: default_torch_ops_build_root("gptq_block"),
     display_name="GPTQ block update",
     extra_cflags=default_jit_cflags(),
-    extra_cuda_cflags=lambda: default_jit_cuda_cflags(include_lineinfo=True) + ["--fmad=false"],
+    extra_cuda_cflags=lambda: default_jit_cuda_cflags(include_lineinfo=True)
+    + [jit_disable_fma_contraction_flag()],
     force_rebuild_env="GPTQMODEL_GPTQ_BLOCK_FORCE_REBUILD",
     verbose_env="GPTQMODEL_EXT_VERBOSE",
     requires_cuda=True,

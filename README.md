@@ -241,6 +241,9 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
+ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
+matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
+
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
 
