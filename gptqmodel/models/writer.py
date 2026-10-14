@@ -1061,9 +1061,6 @@ def ModelWriter(cls):
 
         debug_saved_config(save_dir)
 
-        # Save processor related config files. For example: preprocessor_config.json, chat_template.json
-        if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):
-            self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
@@ -1228,6 +1225,14 @@ def ModelWriter(cls):
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
 
+        # Save the processor *after* the tokenizer. `processor.save_pretrained()` re-saves its
+        # tokenizer and then writes the processor-level `chat_template.jinja`; saving in the
+        # reverse order lets a text-only tokenizer template clobber the audio/vision-aware
+        # processor template (e.g. Qwen2-Audio), breaking multimodal chat rendering on reload.
+        if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
+
+        if self.tokenizer:
             # Use source model's tokenizer_class for cross-version compatibility
             # (transformers 5.0 save_pretrained writes "TokenizersBackend" which older versions can't load)
             source_tokenizer_config = get_tokenizer_config(self.model_local_path)

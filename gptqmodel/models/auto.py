@@ -189,6 +189,7 @@ from .definitions.qwen import QwenQModel  # noqa: E402
 from .definitions.qwen2 import Qwen2QModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_5_vl import Qwen2_5_VLQModel  # noqa: E402
+from .definitions.qwen2_audio import Qwen2AudioGPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLQModel  # noqa: E402
 from .definitions.qwen3 import Qwen3QModel  # noqa: E402
@@ -338,6 +339,7 @@ MODEL_MAP = {
     "qwen2_5_vl": Qwen2_5_VLQModel,
     "qwen2_5_vl_text": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
+    "qwen2_audio": Qwen2AudioGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
     "qwen3_vl_moe": Qwen3_VL_MoeQModel,
