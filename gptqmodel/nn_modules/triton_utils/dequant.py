@@ -3,9 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import itertools
-from typing import List
-
 import torch
 import triton
 import triton.language as tl
@@ -14,16 +11,16 @@ from torch.amp import custom_bwd, custom_fwd
 from ...utils.torch import HAS_XPU
 
 
-def make_dequant_configs(block_sizes: List[int], num_warps: List[int], num_stages: List[int]):
-    configs = []
-    for bs, ws, ns in itertools.product(block_sizes, num_warps, num_stages):
-        configs.append(triton.Config({"X_BLOCK": bs}, num_warps=ws, num_stages=ns))
-    return configs
+# Defaults tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128.
+# The dequant is memory-latency bound, not tile-shape bound: a full sweep on
+# gfx950 (X_BLOCK 256..4096, warps 1..8, stages 1..2) found every candidate
+# within 1-2% of this one. Keep it fixed rather than paying the per-call
+# autotune dispatch cost for a single candidate.
+DEQUANT_X_BLOCK = 1024
+DEQUANT_NUM_WARPS = 1
+DEQUANT_NUM_STAGES = 1
 
-# tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128
-DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([1024], [1], [1])
-#DEFAULT_DEQUANT_CONFIGS = make_dequant_configs([128, 256, 512, 1024], [4, 8], [2]) <- slower
-@triton.autotune(DEFAULT_DEQUANT_CONFIGS, key=["numels"])
+
 @triton.jit
 def dequant_kernel(
     g_idx_ptr,
@@ -262,7 +259,7 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     out_dtype = dtype
 
     numels = out.numel()
-    grid = lambda meta: (triton.cdiv(numels, meta["X_BLOCK"]),)  # noqa: E731
+    grid = (triton.cdiv(numels, DEQUANT_X_BLOCK),)
 
     with torch.xpu.device(qweight.device) if HAS_XPU else torch.cuda.device(qweight.device):
         dequant_kernel[grid](
@@ -278,6 +275,9 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
             bits=bits,
             out_features=out_features,
             num_groups=num_groups,
+            X_BLOCK=DEQUANT_X_BLOCK,
+            num_warps=DEQUANT_NUM_WARPS,
+            num_stages=DEQUANT_NUM_STAGES,
         )
     return out
 
