@@ -1,5 +1,12 @@
 #pragma once
 
+// This header is the NVIDIA inline-PTX surface (ldmatrix / mma.sync / cp.async /
+// global barriers). It is only used by the tensor-core GEMM, which has no ROCm
+// implementation yet, so the whole body is compiled out for HIP builds. The
+// portable parts that used to live here have been split out into frag.cuh
+// (tensor-core fragment types) and bitfield.cuh (bfe64 / FSHF_IMM / BFE16_IMM).
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+
 #include "frag.cuh"
 
 // m8n8k4 tensor core matmul (emulated on Ampere and later), don't use
@@ -289,3 +296,5 @@ __device__ __forceinline__ uint64_t globaltimer_ns()
 // Bitfield stuff (bfe64, FSHF_IMM, BFE16_IMM) now lives in bitfield.cuh so the
 // quant decoders can use it without pulling in this CUDA-only header.
 #include "bitfield.cuh"
+
+#endif  // !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)

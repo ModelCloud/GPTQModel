@@ -106,6 +106,15 @@ int exl3_gemm
     block_dim = tr->block_dim;
     shape_idx = tr->shape_idx;
 
+    // On ROCm the tensor-core GEMM kernels are not implemented, so the kernel
+    // tables are populated with null entries (see exl3_kernel_map.cuh). Fail
+    // with an actionable message instead of launching a null pointer.
+    TORCH_CHECK(
+        kernel != nullptr,
+        "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
+        "use the reconstruct + hgemm path (torch_mode) instead."
+    );
+
     // Launch
     if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
     {
