@@ -172,11 +172,14 @@ class QQQLinear(GroupedQuantLinear):
                 torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
                 persistent=False,
             )
-            if bias:
-                self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
-            else:
-                self.bias = None
 
+        # Quantization builds this module with `register_buffers=False`, so the
+        # bias attribute must be initialized outside the buffer preallocation
+        # block or `pack()` cannot tell whether a bias is expected.
+        if bias:
+            self.register_buffer("bias", torch.zeros((self.out_features), dtype=torch.float16))
+        else:
+            self.bias = None
 
         (
             self._perm,
@@ -402,8 +405,10 @@ class QQQLinear(GroupedQuantLinear):
             self.register_buffer("s_channel", packed_s_channel)
         else:
             self.register_buffer("s_channel", packed_s_channel)
-        if linear.bias is not None and self.bias is not None:
-            self.register_buffer("bias", linear.bias.data.to(self.bias.device).to(torch.float16))
+        if linear.bias is not None:
+            self.register_buffer("bias", linear.bias.detach().to(dtype=torch.float16))
+        elif not hasattr(self, "bias"):
+            self.bias = None
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
