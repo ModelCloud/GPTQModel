@@ -244,7 +244,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
 matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
 On gfx950, the Torch GPTQ backend uses a fused Triton GEMV for single-token
-4-bit inference and falls back to the existing path for other shapes. Set
+2/4/8-bit inference and falls back to the existing path for other shapes. Set
 `GPTQ_TORCH_ROCM_GEMV=0` to disable the fused path.
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
