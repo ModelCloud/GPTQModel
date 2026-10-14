@@ -58,6 +58,7 @@ def require_gfx950():
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("shape,group_size,desc_act,bias", [
+    ((896, 128), 128, False, False),
     ((896, 1280), 128, False, False),
     ((2048, 1024), 128, False, False),
     ((4096, 4096), 256, False, True),
@@ -115,3 +116,7 @@ def test_gfx950_gptq_gemv_falls_back_for_multi_token_or_grad():
     assert not module._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16, requires_grad=True))
     module.train()
     assert not module._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16))
+
+    # Narrow projections (e.g. attention k/v) are still faster fused.
+    narrow = _make_module(896, 128, torch.float16, 128, False, False)
+    assert narrow._can_use_rocm_gemv(torch.randn(1, 896, device="cuda", dtype=torch.float16))

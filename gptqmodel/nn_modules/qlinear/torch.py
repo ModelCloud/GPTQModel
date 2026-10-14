@@ -382,9 +382,9 @@ class TorchLinear(PackableQuantLinear):
             and self.bits == 4
             and self.pack_dtype == torch.int32
             and self.qzero_format() == 2
-            and self.in_features >= 256
+            and self.in_features >= 32
             and self.in_features % 32 == 0
-            and self.out_features >= 256
+            and self.out_features >= 32
             and self.out_features % 32 == 0
             and self.g_idx.numel() == self.in_features
             and x.shape == (1, self.in_features)
