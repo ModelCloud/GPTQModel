@@ -1099,7 +1099,7 @@ def pack_module(
                         g_idx=q_g_idx,
                         device=target_device,
                     )
-                except ValueError:
+                except (ValueError, NotImplementedError):
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
             elif effective_impl == "block":
                 try:

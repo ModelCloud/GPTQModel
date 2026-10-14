@@ -1418,6 +1418,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         if not t.cuda.is_available():
             raise RuntimeError("pack_gpu requires CUDA availability but none was detected.")
 
+        # Embeddings use a different (non-transposed) packing layout; keep them on
+        # the CPU packers so callers can fall back safely.
+        if isinstance(linear, nn.Embedding):
+            raise ValueError("pack_gpu does not support embedding layers")
+
         target_device = t.device(device) if device is not None else t.device("cuda")
         if target_device.type != "cuda":
             raise ValueError(f"pack_gpu expected a CUDA device, got `{target_device}`.")
@@ -1446,7 +1451,10 @@ class PackableQuantLinear(GPTQQuantLinear):
         # Align layout with CPU paths: expect [groups, out_features]
         scales_g = scales.T.contiguous()
         zeros_g = zeros.T.contiguous()
-        scale_zeros_g = zeros_g * scales_g
+        # Match the reference CPU packer (pack_block_cpu.cpp), which performs the
+        # quant math in float32 (`zeros.to(float) * scales.to(float)`). Keeping the
+        # same precision here is required for bit-exact qweight/qzeros output.
+        scale_zeros_g = zeros_g.to(t.float32) * scales_g.to(t.float32)
 
         scales_dev = scales_g.to(device=target_device)
         zeros_dev = zeros_g.to(device=target_device)
@@ -1523,7 +1531,8 @@ class PackableQuantLinear(GPTQQuantLinear):
             sz_blk_T = scale_zeros_dev.index_select(0, gsel).T
             s_blk_T = scales_dev.index_select(0, gsel).T
 
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)
+            # float32 math to stay bit-exact with the CPU packer.
+            int_block = t.round((Wblk.to(t.float32) + sz_blk_T.to(t.float32)) / s_blk_T.to(t.float32))
             int_block.clamp_(0, self.maxq)
             int_block = int_block.to(t.int32).T.contiguous()
 
