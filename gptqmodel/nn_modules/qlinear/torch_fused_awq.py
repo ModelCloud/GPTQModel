@@ -217,7 +217,9 @@ class TorchFusedAwqLinear(AWQuantLinear):
                 packed_col = weight[:, col * self.pack_factor + i].to(torch.int32)
                 packed[:, col] |= packed_col << (i * self.bits)
         self.qweight = packed.contiguous()
-        self.qzeros = izeros.contiguous()
+        # unpack_awq() returns int64, but the XPU fused op
+        # `_weight_int4pack_mm_with_scales_and_zeros` requires int8 zero points.
+        self.qzeros = izeros.to(torch.int8).contiguous()
 
     def transform_cpu(self, dtype):
         self.transform_cpu_awq(dtype)

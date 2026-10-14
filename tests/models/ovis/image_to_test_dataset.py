@@ -25,6 +25,7 @@ from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
 from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
+from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
@@ -164,6 +165,20 @@ def format_hunyuan_ocr_dataset(image, assistant):
     ]
 
 
+def format_openvla_dataset(image, assistant):
+    # OpenVLA's calibration prompt is built by OpenVLAQModel from the sample's
+    # instruction text; reuse the caption as the instruction content.
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": assistant},
+            ],
+        },
+    ]
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -214,6 +229,10 @@ def prepare_unlimited_ocr_dataset(n_sample: int = 20) -> list[dict]:
 
 def prepare_locateanything_dataset(n_sample: int = 20) -> list[list[dict]]:
     return prepare_dataset(format_locateanything_dataset, n_sample=n_sample)
+
+
+def prepare_openvla_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_openvla_dataset, n_sample=n_sample)
 
 
 def prepare_hunyuan_ocr_dataset(n_sample: int = 20) -> list[list[dict]]:
@@ -273,6 +292,9 @@ def get_calib_dataset(model):
 
     if isinstance(model, LocateAnythingQModel):
         return prepare_locateanything_dataset(n_sample=20)
+
+    if isinstance(model, OpenVLAQModel):
+        return prepare_openvla_dataset(n_sample=20)
 
     if isinstance(model, HunYuanVLQModel):
         return prepare_hunyuan_ocr_dataset(n_sample=20)

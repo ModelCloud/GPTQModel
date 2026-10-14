@@ -27,6 +27,7 @@
 ## Latest News 🗞️🚀
 
 * 10/14/2026 7.7.0-dev `main`: ✨ Added `qwen2_audio` quantization support.
+* 10/13/2026 7.7.0-dev `main`: ✨ Added `openvla` quantization support.
 
 * **7.6.0**:
   * **Model support:** Added Jamba/Jamba2, SmolVLM, Granite MoE, InternVL, EXAONE 4.5, Qwen3-VL MoE, Qwen4-Exp text, OLMoE, ZDTaichu 5.0, Agnes 3.0 Flash, and Xing4.0 quantization support, plus MiMo V2.6 Flash-RL and Pro-RL checkpoint support.
@@ -197,6 +198,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Nanbeige 4.2 | `nanbeige` |
 | Nemotron NAS / H / H Puzzle / Omni / Labs Diffusion | `nemotron-nas`, `nemotron_h`, `nemotron_h_puzzle`, `nemotronh_nano_omni_reasoning_v3`, `nemotron_labs_diffusion` |
 | OLMo 2 / 3 / OLMoE | `olmo2`, `olmo3`, `olmoe` |
+| OpenVLA | `openvla` |
 | OPT | `opt` |
 | Ouro | `ouro` |
 | Ovis 1.6 / 2 / 2.5 / 2.6 MoE / 2.6 Next | `ovis`, `ovis2`, `ovis2_5`, `ovis2_6_moe`, `ovis2_6_next` |

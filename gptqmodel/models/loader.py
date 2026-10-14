@@ -2043,7 +2043,7 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        if True:
+        if explicit_device_map is None:
             layers, _ = get_layers_with_prefixes(model, extract_layers_node)
             num_gpus = _layerwise_device_count(device)
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
