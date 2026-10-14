@@ -20,6 +20,7 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
 
 
@@ -33,6 +34,19 @@ except Exception:  # pragma: no cover - optional dependency
 
 
 log = setup_logger()
+
+
+_ROCM_ARCH_CACHE: dict[int, str] = {}
+
+
+def _rocm_arch_name(device: torch.device) -> str:
+    """Cache the device architecture string; ``get_device_properties`` is not free."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    arch = _ROCM_ARCH_CACHE.get(index)
+    if arch is None:
+        arch = getattr(torch.cuda.get_device_properties(index), "gcnArchName", "")
+        _ROCM_ARCH_CACHE[index] = arch
+    return arch
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -188,6 +202,7 @@ class TorchLinear(PackableQuantLinear):
             ) and _TRITON_DEQUANT_AVAILABLE
         self._cached_weights = {}
         self._lookahead_enabled = bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0")))
+        self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
         self._lookahead_next = None
         self._prefetched_weights = {}
         self._prefetch_events = {}
@@ -324,6 +339,16 @@ class TorchLinear(PackableQuantLinear):
         return out
 
     def _forward_eager(self, x: torch.Tensor, out_shape):
+        if self._can_use_rocm_gemv(x):
+            from ..triton_utils.gptq_gemv import gptq_gemv
+
+            out = gptq_gemv(x, self.qweight, self.scales, self.qzeros, self.g_idx).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self._consume_prefetched_weights(x.dtype, device=x.device)
         if weights is None:
@@ -345,6 +370,30 @@ class TorchLinear(PackableQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
+
+    def _can_use_rocm_gemv(self, x: torch.Tensor) -> bool:
+        return (
+            IS_ROCM
+            and self._rocm_gemv_enabled
+            and self._triton_dequant_enabled
+            and not self._cache_enabled
+            and not self._lookahead_enabled
+            and self._can_use_triton_dequant()
+            and self.bits == 4
+            and self.pack_dtype == torch.int32
+            and self.qzero_format() == 2
+            and self.in_features >= 256
+            and self.in_features % 32 == 0
+            and self.out_features >= 256
+            and self.out_features % 32 == 0
+            and self.g_idx.numel() == self.in_features
+            and x.shape == (1, self.in_features)
+            and x.is_contiguous()
+            and not x.requires_grad
+            and self.scales.dtype == x.dtype
+            and self.qweight.device == x.device
+            and _rocm_arch_name(x.device).startswith("gfx950")
+        )
 
     def _forward_streaming(self, x: torch.Tensor, out_shape):
         tile = max(64, min(self._stream_tile_cols, self.out_features))
