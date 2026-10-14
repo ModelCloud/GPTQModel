@@ -314,7 +314,10 @@ void quantize_tiles
 
         cudaFuncSetAttribute
         (
-            quantize_tiles_kernel_instances[kernel_idx],
+            // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
+            // template overload that accepts a function pointer directly has no
+            // HIP equivalent. Casting keeps one spelling valid for both runtimes.
+            (const void*) quantize_tiles_kernel_instances[kernel_idx],
             cudaFuncAttributeMaxDynamicSharedMemorySize,
             shmem
         );
