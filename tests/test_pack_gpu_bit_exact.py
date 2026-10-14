@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
+from gptqmodel.utils.packing import _normalize_pack_impl
 
 
 def _make_module(out_features: int, in_features: int, bits: int, group_size: int) -> TorchLinear:
@@ -96,3 +97,18 @@ def test_pack_gpu_rejects_embeddings():
             g_idx=torch.zeros(256, dtype=torch.int32, device="cuda"),
             device="cuda",
         )
+
+
+def test_auto_pack_impl_prefers_accelerator(monkeypatch):
+    module = _make_module(256, 256, 4, 128)
+    linear = nn.Linear(256, 256, bias=False)
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert _normalize_pack_impl("auto", module, linear) == "gpu"
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert _normalize_pack_impl("auto", module, linear) == "block"
+
+    # Embeddings keep the CPU block packer even with an accelerator present.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert _normalize_pack_impl("auto", module, nn.Embedding(256, 256)) == "block"

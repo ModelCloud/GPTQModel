@@ -96,9 +96,34 @@ def _resolve_pack_dtype(
     return torch.int16 if method == METHOD.AWQ and format_value == FORMAT.GEMV_FAST else torch.int32
 
 
-def _normalize_pack_impl(pack_impl: Optional[str], module: BaseQuantLinear) -> str:
+def _auto_pack_impl(module: BaseQuantLinear, linear: Optional[nn.Module] = None) -> str:
+    """Resolve ``pack_impl="auto"`` to the fastest available packer.
+
+    Accelerator packing is preferred whenever a CUDA/ROCm device is present and
+    the module implements it.  Embedding layers keep the CPU block packer because
+    ``pack_gpu`` does not emit their packed layout.
+    """
+    if (
+        not isinstance(linear, nn.Embedding)
+        and torch.cuda.is_available()
+        and hasattr(module, "pack_gpu")
+    ):
+        return "gpu"
+    if hasattr(module, "pack_block"):
+        return "block"
+    return "original"
+
+
+def _normalize_pack_impl(
+    pack_impl: Optional[str],
+    module: BaseQuantLinear,
+    linear: Optional[nn.Module] = None,
+) -> str:
     """Map a user supplied pack implementation to one of gpu/block/original."""
     requested = (pack_impl or "original").strip().lower()
+
+    if requested in {"auto", "default"}:
+        return _auto_pack_impl(module=module, linear=linear)
 
     if requested in {"cpu", "block", "pack_block"}:
         if not hasattr(module, "pack_block"):
@@ -515,10 +540,11 @@ def hf_pack_layer(
             ``[out_features, num_groups]``.  When omitted and the module is
             symmetric (``sym=True``), ``2 ** (bits - 1)`` is used.
         g_idx: Activation-order group index of length ``in_features``.
-        pack_impl: Packing implementation: ``"original"`` (default),
-            ``"block"``/``"cpu"`` or ``"gpu"``.  GPU/block requests fall back to
-            the original packer when unavailable.  Ignored by QQQ and AWQ
-            kernels, which expose a single ``pack()`` implementation.
+        pack_impl: Packing implementation: ``"original"`` (default), ``"auto"``
+            (accelerator pack when available), ``"block"``/``"cpu"`` or
+            ``"gpu"``.  GPU/block requests fall back to the original packer when
+            unavailable.  Ignored by QQQ and AWQ kernels, which expose a single
+            ``pack()`` implementation.
         device: Target CUDA device for ``pack_impl="gpu"``.
         block_in: Input channels per block for ``pack_impl="block"``.
         workers: Worker threads for ``pack_impl="block"``.
@@ -562,7 +588,9 @@ def hf_pack_layer(
             )
 
         resolved_zeros = _resolve_zeros(module=module, scales=scales, zeros=zeros)
-        effective_impl = _normalize_pack_impl(pack_impl=pack_impl, module=module)
+        effective_impl = _normalize_pack_impl(
+            pack_impl=pack_impl, module=module, linear=linear
+        )
 
         if effective_impl == "gpu":
             try:
