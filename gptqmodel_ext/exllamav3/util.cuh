@@ -105,7 +105,11 @@ inline const char* cublasGetErrorString(cublasStatus_t status) {
         case CUBLAS_STATUS_EXECUTION_FAILED:  return "CUBLAS_STATUS_EXECUTION_FAILED";
         case CUBLAS_STATUS_INTERNAL_ERROR:    return "CUBLAS_STATUS_INTERNAL_ERROR";
         case CUBLAS_STATUS_NOT_SUPPORTED:     return "CUBLAS_STATUS_NOT_SUPPORTED";
+        // cuBLAS-only status; HIPBLAS has no equivalent, and HIPify leaves the
+        // token untouched, so it must not reach the HIP compiler.
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
         case CUBLAS_STATUS_LICENSE_ERROR:     return "CUBLAS_STATUS_LICENSE_ERROR";
+#endif
         default:                              return "Unknown cuBLAS status";
     }
 }
