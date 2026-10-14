@@ -1711,11 +1711,15 @@ class AWQProcessor(LoopProcessor):
                 self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
                 cur_out = (input_feat * quant_slice).sum(dim=-1)
 
-                # Evaluate the reconstruction error for the current clamp ratio and keep the best one.
-                err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
-                cur_best_idx = err < min_errs
-                min_errs[cur_best_idx] = err[cur_best_idx]
-                best_max_val[cur_best_idx] = max_val[cur_best_idx]
+                # Evaluate the reconstruction error for the current clamp ratio and keep the best
+                # one. `cur_out` is a private temporary so the difference and square happen in
+                # place, and the winner is chosen with `torch.where` instead of masked scatter
+                # (which launched four gather/scatter kernels per grid step).
+                cur_out.sub_(org_out).pow_(2)
+                err = cur_out.mean(dim=1).view(min_errs.shape)
+                better = err < min_errs
+                min_errs = torch.where(better, err, min_errs)
+                best_max_val = torch.where(better, max_val, best_max_val)
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
