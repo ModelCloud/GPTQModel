@@ -13,7 +13,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import AWQ_ORDER
+from ...quantization.awq.utils.packing_utils import AWQ_ORDER, pack_awq_columns
 from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -30,20 +30,13 @@ def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_a
 def _pack_awq_columns(codes: torch.Tensor, bits: int) -> torch.Tensor:
     """Pack AWQ code columns with the classic shift/OR order.
 
-    Vectorized equivalent of the per-column ``|=`` loop: every 8-wide group of
-    codes is reordered by ``AWQ_ORDER`` and shifted into its 32-bit word.  The
-    int32 shift semantics (including sign extension for out-of-range codes) are
-    preserved so the packed words stay bit-identical.
+    Thin wrapper over the shared :func:`pack_awq_columns` helper that applies
+    the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave.  The vectorized shift/OR
+    (including int32 sign extension for out-of-range codes) stays bit-identical
+    to the previous per-column ``|=`` loop.
     """
 
-    pack_num = 32 // bits
-    rows = codes.shape[0]
-    columns = codes.shape[1] // pack_num
-    grouped = codes.reshape(rows, columns, pack_num)[:, :, AWQ_ORDER]
-    packed = torch.zeros((rows, columns), dtype=torch.int32, device=codes.device)
-    for index in range(pack_num):
-        packed |= grouped[:, :, index] << (index * bits)
-    return packed
+    return pack_awq_columns(codes, bits, order=AWQ_ORDER)
 
 
 class AwqGemmFn(torch.autograd.Function):
