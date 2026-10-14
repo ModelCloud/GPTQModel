@@ -41,6 +41,11 @@ log = setup_logger()
 
 _PROJECT_LOG_DIR = Path("logs")
 
+# Device-SMI handles are process-scoped diagnostic helpers. Once the vendor tool
+# has been proven unable to report for a device the verdict is remembered here so
+# later processors in the same process do not pay the (always failing) probe again.
+_DEVICE_SMI_UNUSABLE: Set[str] = set()
+
 MODULE_FEATURE_COLUMN = "feat: in, out"
 DTYPE_SIZE_COLUMN = "dtype: size"
 
@@ -613,10 +618,32 @@ class LoopProcessor:
         handles: Dict[str, Device] = {}
 
         for device_id in self._discover_accelerator_devices():
+            if device_id in _DEVICE_SMI_UNUSABLE:
+                continue
+
             try:
-                handles[device_id] = Device(device_id)
+                handle = Device(device_id)
             except Exception as exc:  # pragma: no cover - defensive, external tool
                 log.debug(f"Device-SMI initialisation failed for `{device_id}`: {exc}")
+                _DEVICE_SMI_UNUSABLE.add(device_id)
+                continue
+
+            # A live handle starts a background sampler that shells out to the
+            # vendor SMI tool for the whole run. Probe once and drop handles that
+            # cannot report so a broken SMI install does not keep spawning the
+            # tool (tens of ms per probe) during quantization.
+            try:
+                handle.metrics(fast=True)
+            except Exception as exc:  # pragma: no cover - defensive, external tool
+                log.debug(f"Device-SMI metrics unavailable for `{device_id}`: {exc}")
+                _DEVICE_SMI_UNUSABLE.add(device_id)
+                try:
+                    handle.close()
+                except Exception:
+                    log.debug("Failed to close an unusable device telemetry handle.", exc_info=True)
+                continue
+
+            handles[device_id] = handle
 
         return handles
 
@@ -665,12 +692,16 @@ class LoopProcessor:
         """Queries Device-SMI metrics once per device, suppressing repeated failures."""
 
         with self._device_smi_lock:
+            # A device that already failed is not probed again: each probe shells
+            # out to the vendor SMI tool (tens of milliseconds when it fails) and
+            # the snapshots run once per layer and per log row.
+            if device_key in self._device_metric_failures:
+                return None
             try:
                 return handle.metrics(fast=True)
             except Exception as exc:  # pragma: no cover - defensive, external tool
-                if device_key not in self._device_metric_failures:
-                    log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
-                    self._device_metric_failures.add(device_key)
+                log.debug(f"Device-SMI metrics failed for `{device_key}`: {exc}")
+                self._device_metric_failures.add(device_key)
                 return None
 
     def _snapshot_device_memory_gib(self) -> Dict[str, float]:
