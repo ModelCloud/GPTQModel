@@ -21,19 +21,19 @@ from ...utils.gemv import calculate_zeros_width
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
-    # unpacked_qweight: [N, K]
+    # unpacked_qweight: [N, K] int32 codes.  Every permutation runs on the
+    # input device, so packing no longer round-trips through host numpy.
     N = unpacked_qweight.shape[0]
     K = unpacked_qweight.shape[1]
 
-    Packed_Kernel = unpacked_qweight.cpu().numpy().reshape(N, K // 32, 32)
     # np.arange(32).reshape(4, 4, 2).transpose(1, 0, 2) => [0, 1, 8, 9, 16, 17, 24, 25, ...]
-    Packed_Kernel = Packed_Kernel.reshape(N, K // 32, 4, 4, 2).transpose(0, 1, 3, 2, 4)
+    Packed_Kernel = unpacked_qweight.reshape(N, K // 32, 4, 4, 2).permute(0, 1, 3, 2, 4)
     Packed_Kernel = Packed_Kernel.reshape(N, K // 32, 32)
 
     # reorder each 8 weights for fast dequantization
     # [0, 1, 2, 3, 4, 5, 6, 7] => [0, 2, 4, 6, 1, 3, 5, 7]
     Packed_Kernel = Packed_Kernel.reshape(N, K // 32, 4, 8)
-    Packed_Kernel = Packed_Kernel.reshape(N, K // 32, 4, 4, 2).transpose(0, 1, 2, 4, 3)
+    Packed_Kernel = Packed_Kernel.reshape(N, K // 32, 4, 4, 2).permute(0, 1, 2, 4, 3)
     Packed_Kernel = Packed_Kernel.reshape(N, K)
 
     # interleaving every four rows
@@ -41,7 +41,7 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
         N // interleave, interleave, K // kstride, kstride
     )
     # N // 4, K // 64, 4, 64
-    Packed_Kernel = Packed_Kernel.transpose(0, 2, 1, 3)
+    Packed_Kernel = Packed_Kernel.permute(0, 2, 1, 3)
     Packed_Kernel = Packed_Kernel.reshape(
         N // interleave, K // kstride, kstride, interleave
     )
@@ -53,13 +53,7 @@ def pack_intweight(unpacked_qweight, interleave, kstride):
             | (Packed_Kernel[..., 3] << 12)
     )
     # reshape to (N // 4, K), FP16 format
-    Packed_Kernel = Packed_Kernel.reshape(N // interleave, K)
-    qweight = (
-        torch.tensor(Packed_Kernel.astype("int16"))
-        .to(unpacked_qweight.device)
-        .contiguous()
-    )
-    return qweight
+    return Packed_Kernel.reshape(N // interleave, K).to(torch.int16).contiguous()
 
 
 class AwqGEMVFastLinear(AWQuantLinear):
@@ -254,16 +248,13 @@ class AwqGEMVFastLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[:, idx // self.group_size])
-                    / qscales[:, idx // self.group_size]
-                ).to(torch.int)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.to(dtype=torch.int32)
+        # Gather each input column's group scale/zero in a single pass instead
+        # of launching one tiny kernel per input column.
+        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        intweight = torch.round(
+            (linear.weight.data + scale_zeros.index_select(1, group_index))
+            / qscales.index_select(1, group_index)
+        ).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(
             intweight.contiguous(), interleave=4, kstride=64
         ))
