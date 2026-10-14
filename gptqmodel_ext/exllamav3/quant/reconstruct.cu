@@ -122,7 +122,10 @@ void reconstruct
     if (mcg) cbi += 8;
     else if (mul1) cbi += 16;
 
-    reconstruct_kernel_instances[cbi]<<<gridDim, blockDim, 0, stream>>>
+    // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it to
+    // a local identifier before the launch.
+    auto reconstruct_kernel = reconstruct_kernel_instances[cbi];
+    reconstruct_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (half*) unpacked.data_ptr(),
         (const uint16_t*) packed.data_ptr()

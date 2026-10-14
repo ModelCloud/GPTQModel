@@ -320,7 +320,10 @@ void quantize_tiles
         );
         cuda_check(cudaPeekAtLastError());
 
-        quantize_tiles_kernel_instances[kernel_idx]<<<bsz, threads, shmem, stream>>>
+        // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it
+        // to a local identifier before the launch.
+        auto quantize_tiles_kernel = quantize_tiles_kernel_instances[kernel_idx];
+        quantize_tiles_kernel<<<bsz, threads, shmem, stream>>>
         (
             input_tiles_ptr,
             output_tiles_ptr,
