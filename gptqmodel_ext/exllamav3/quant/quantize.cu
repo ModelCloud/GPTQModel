@@ -154,8 +154,10 @@ void quantize_tiles_kernel
         #pragma unroll
         for (int offset = 16; offset > 0; offset >>= 1)
         {
-            half other_min = __shfl_down_sync(0xffffffff, local_min, offset, 32);
-            int other_idx = __shfl_down_sync(0xffffffff, local_idx, offset, 32);
+            // HIP requires a 64-bit shuffle mask; CUDA wants the 32-bit
+            // active-lane mask. __activemask() has the right width on both.
+            half other_min = __shfl_down_sync(__activemask(), local_min, offset, 32);
+            int other_idx = __shfl_down_sync(__activemask(), local_idx, offset, 32);
             if (__hlt(other_min, local_min))
             {
                 local_min = other_min;
@@ -175,8 +177,8 @@ void quantize_tiles_kernel
             #pragma unroll
             for (int offset = 16; offset > 0; offset >>= 1)
             {
-                half other_min = __shfl_down_sync(0xffffffff, local_min, offset, 32);
-                int other_idx = __shfl_down_sync(0xffffffff, local_idx, offset, 32);
+                half other_min = __shfl_down_sync(__activemask(), local_min, offset, 32);
+                int other_idx = __shfl_down_sync(__activemask(), local_idx, offset, 32);
                 if (__hlt(other_min, local_min))
                 {
                     local_min = other_min;
