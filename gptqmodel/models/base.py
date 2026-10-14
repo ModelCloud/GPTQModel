@@ -72,7 +72,7 @@ from ..quantization.dtype import (
 )
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
-from ..utils.backend import BACKEND, backend_for_activation, normalize_backend
+from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
 from ..utils.calibration import prepare_calibration_dataset
 from ..utils.device import get_device
 from ..utils.device_telemetry import emit_device_telemetry, with_quantization_device_telemetry
@@ -89,6 +89,7 @@ from ..utils.model import (
     move_to,
 )
 from ..utils.model_dequant import infer_block_shape
+from ..utils.rocm import IS_ROCM
 from ..utils.structure import (
     LazyTurtle,
     _get_parent_and_leaf_by_path,
@@ -1272,11 +1273,13 @@ class BaseQModel(nn.Module):
                         f"actual format is `{format_code}`."
                     )
                 if format_code == FORMAT.GEMM:
-                    # Weight-only RTN->AWQ export should stay on the portable torch kernel.
-                    preferred_backend = (
-                        BACKEND.AWQ_TORCH
-                        if self.quantize_config.uses_weight_only_lifecycle() or quant_device_type == "npu"
-                        else BACKEND.AWQ_GEMM
+                    # The native AWQ GEMM extension is CUDA-only, so weight-only
+                    # exports and ROCm/XPU/NPU/CPU hosts pack with the portable
+                    # torch kernel, which emits the identical AWQ GEMM layout.
+                    preferred_backend = awq_gemm_pack_backend(
+                        device_type=quant_device_type,
+                        is_rocm=IS_ROCM,
+                        weight_only=self.quantize_config.uses_weight_only_lifecycle(),
                     )
                 elif format_code == FORMAT.BITBLAS:
                     preferred_backend = BACKEND.AWQ_BITBLAS

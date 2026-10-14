@@ -178,6 +178,32 @@ def normalize_backend(
     return _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
 
 
+def awq_gemm_pack_backend(
+    *,
+    device_type: str,
+    is_rocm: bool,
+    weight_only: bool,
+) -> BACKEND:
+    """Return the AWQ GEMM backend used to pack quantized weights.
+
+    The native AWQ GEMM extension is CUDA-only: its sources include
+    ``cusparse.h`` and CUDA-specific inline asm, so it cannot be built on
+    ROCm/XPU/NPU/CPU hosts.  Those hosts pack with the portable torch kernel
+    instead, which emits the identical AWQ GEMM layout for in-range codes.
+
+    Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"xpu"``, ``"npu"``, ``"cpu"``, ...).
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+        weight_only: Whether the quantization lifecycle is weight-only
+            (RTN->AWQ export), which always stays on the portable kernel.
+    """
+
+    if weight_only or is_rocm or device_type != "cuda":
+        return BACKEND.AWQ_TORCH
+    return BACKEND.AWQ_GEMM
+
+
 def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:
     """Bind a saved W4A policy to its matching kernel, including AUTO loads."""
     if activation_mode is None:

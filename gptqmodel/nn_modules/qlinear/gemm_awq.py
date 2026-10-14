@@ -16,6 +16,7 @@ from ...quantization import FORMAT, METHOD
 from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
+from ...utils.rocm import IS_ROCM
 
 
 # Shared runtime default: prefer accuracy first unless the user explicitly opts out.
@@ -123,6 +124,15 @@ class AwqGEMMLinear(AWQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        if IS_ROCM:
+            # The native AWQ GEMM extension is CUDA-only (cusparse.h + CUDA
+            # inline asm), so it never builds on ROCm. Fail fast with an
+            # actionable message instead of attempting a doomed JIT build.
+            return False, NotImplementedError(
+                "AwqGEMMLinear requires the native CUDA AWQ extension, which is not "
+                "available on ROCm. Use the portable AWQ GEMM kernel instead "
+                "(`backend=AUTO` or `BACKEND.AWQ_TORCH`)."
+            )
         if not awq_runtime_available():
             return False, ValueError(awq_runtime_error() or "CUDA AWQ extension not available; cannot select AwqGEMMLinear")
         else:
