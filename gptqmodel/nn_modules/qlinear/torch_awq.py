@@ -107,15 +107,14 @@ class AwqTorchLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[idx // self.group_size])
-                    / self.scales[idx // self.group_size]
-                ).to(torch.int32)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1).t().contiguous()
+        # Gather each input column's group scale/zero in a single pass instead
+        # of launching one tiny kernel per input column.
+        weight = linear.weight.data
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
+        intweight = torch.round(
+            (weight.t() + scale_zeros.index_select(0, group_index))
+            / self.scales.index_select(0, group_index)
+        ).to(torch.int32).contiguous()
 
         qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)
 

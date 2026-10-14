@@ -13,6 +13,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear, empty_linear_output, input_rows
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.utils.packing_utils import AWQ_ORDER
 from ...utils.awq import awq_dequantize_weights, awq_gemm_forward, awq_runtime_available, awq_runtime_error
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
@@ -24,6 +25,25 @@ FP32_ACCUM = env_flag("GPTQMODEL_FP32_ACCUM", default=True)
 
 def _awq_cuda_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum: bool = FP32_ACCUM):
     return awq_gemm_forward(input, qweight, scales, qzeros, split_k_iters, fp32_accum)
+
+
+def _pack_awq_columns(codes: torch.Tensor, bits: int) -> torch.Tensor:
+    """Pack AWQ code columns with the classic shift/OR order.
+
+    Vectorized equivalent of the per-column ``|=`` loop: every 8-wide group of
+    codes is reordered by ``AWQ_ORDER`` and shifted into its 32-bit word.  The
+    int32 shift semantics (including sign extension for out-of-range codes) are
+    preserved so the packed words stay bit-identical.
+    """
+
+    pack_num = 32 // bits
+    rows = codes.shape[0]
+    columns = codes.shape[1] // pack_num
+    grouped = codes.reshape(rows, columns, pack_num)[:, :, AWQ_ORDER]
+    packed = torch.zeros((rows, columns), dtype=torch.int32, device=codes.device)
+    for index in range(pack_num):
+        packed |= grouped[:, :, index] << (index * bits)
+    return packed
 
 
 class AwqGemmFn(torch.autograd.Function):
@@ -243,19 +263,17 @@ class AwqGEMMLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        pack_num = 32 // self.bits
+        if self.bits != 4:
+            raise NotImplementedError("Only 4-bit are supported for now.")
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[idx // self.group_size])
-                    / self.scales[idx // self.group_size]
-                ).to(torch.int)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.t().contiguous()
-        intweight = intweight.to(dtype=torch.int32)
+        # Gather each input column's group scale/zero in a single pass instead
+        # of launching one tiny kernel per input column.
+        weight = linear.weight.data
+        group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
+        intweight = torch.round(
+            (weight.t() + scale_zeros.index_select(0, group_index))
+            / self.scales.index_select(0, group_index)
+        ).to(torch.int32).contiguous()
 
         best_device = str(linear.weight.device)
 
@@ -263,42 +281,14 @@ class AwqGEMMLinear(AWQuantLinear):
         if "mps" in best_device:
             intweight = intweight.to("cpu")
 
-        qweight = torch.zeros(
-            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=intweight.device,
-        )
-
-        for col in range(intweight.shape[1] // pack_num):
-            if self.bits == 4:
-                order_map = [0, 2, 4, 6, 1, 3, 5, 7]
-            else:
-                raise NotImplementedError("Only 4-bit are supported for now.")
-            for i in range(pack_num):
-                qweight_col = intweight[:, col * pack_num + order_map[i]]
-                qweight[:, col] |= qweight_col << (i * self.bits)
-        self.register_buffer("qweight", qweight)
+        self.register_buffer("qweight", _pack_awq_columns(intweight, self.bits))
 
         zeros = zeros.to(dtype=torch.int32, device=best_device)
 
         if "mps" in best_device:
             zeros = zeros.to("cpu")
 
-        qzeros = torch.zeros(
-            (zeros.shape[0], zeros.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=zeros.device,
-        )
-
-        for col in range(zeros.shape[1] // pack_num):
-            if self.bits == 4:
-                order_map = [0, 2, 4, 6, 1, 3, 5, 7]
-            else:
-                raise NotImplementedError("Only 4-bit are supported for now.")
-            for i in range(pack_num):
-                qzero_col = zeros[:, col * pack_num + order_map[i]]
-                qzeros[:, col] |= qzero_col << (i * self.bits)
-        self.register_buffer("qzeros", qzeros)
+        self.register_buffer("qzeros", _pack_awq_columns(zeros, self.bits))
 
 
 
