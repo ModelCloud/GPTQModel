@@ -551,24 +551,34 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                 torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
             )
 
-            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+            # The rotation set is fixed for the whole backward pass, so derive every
+            # per-rotation constant once instead of rebuilding it inside the loop:
+            # the negated thetas, their sin/cos, and the gather index pairs. This
+            # removes krot sin/cos/neg launches and krot strided-slice+add passes.
+            krot = pairs.shape[0]
+            neg_theta_all = theta.neg()
+            sin_all = theta.reshape(krot, num_groups, half_group).sin()
+            cos_all = theta.reshape(krot, num_groups, half_group).cos()
+            pair_view_all = pairs.reshape(krot, num_groups, group_size)
+            idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
+            idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
+
+            for rot_idx in range(krot - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = theta.narrow(0, rot_idx, 1).neg()
+                neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
                 rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
                 grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
 
-                pair_view = pair_row.reshape(num_groups, group_size)
-                idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
-                idx_j = (pair_view[:, 1::2] + offsets).reshape(-1)
+                idx_i = idx_i_all[rot_idx]
+                idx_j = idx_j_all[rot_idx]
 
                 xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
                 xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
                 grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
                 grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
 
-                theta_view = theta.narrow(0, rot_idx, 1).reshape(num_groups, half_group)
-                sin_t = theta_view.sin()
-                cos_t = theta_view.cos()
+                sin_t = sin_all[rot_idx]
+                cos_t = cos_all[rot_idx]
                 grad_theta[rot_idx] = (
                     (
                         (grad_i * xj - grad_j * xi).sum(0) * cos_t
@@ -578,9 +588,10 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     .to(theta.dtype)
                 )
         else:
+            neg_theta_all = theta.neg()
             for rot_idx in range(pairs.shape[0] - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = theta.narrow(0, rot_idx, 1).neg()
+                neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
                 grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
 
         if ctx.has_scale:
