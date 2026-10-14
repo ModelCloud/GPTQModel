@@ -33,6 +33,14 @@ except Exception:  # pragma: no cover - optional dependency
     _TRITON_DEQUANT_AVAILABLE = False
 
 
+try:
+    from ..triton_utils.gptq_gemm import MAX_IN_FEATURES as _ROCM_GEMM_MAX_IN_FEATURES
+    from ..triton_utils.gptq_gemm import SMALL_M_MAX as _ROCM_GEMM_SMALL_M_MAX
+except Exception:  # pragma: no cover - optional dependency
+    _ROCM_GEMM_SMALL_M_MAX = 0
+    _ROCM_GEMM_MAX_IN_FEATURES = 0
+
+
 log = setup_logger()
 
 
@@ -203,6 +211,7 @@ class TorchLinear(PackableQuantLinear):
         self._cached_weights = {}
         self._lookahead_enabled = bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0")))
         self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
+        self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
         self._lookahead_next = None
         self._prefetched_weights = {}
         self._prefetch_events = {}
@@ -351,6 +360,18 @@ class TorchLinear(PackableQuantLinear):
                 out = self.adapter.apply(x=x, out=out)
             return out
 
+        if self._can_use_rocm_gemm(x):
+            from ..triton_utils.gptq_gemm import gptq_gemm
+
+            out = gptq_gemm(
+                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
+            ).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
         num_itr = self.g_idx.shape[0] // x.shape[-1]
         weights = self._consume_prefetched_weights(x.dtype, device=x.device)
         if weights is None:
@@ -375,8 +396,24 @@ class TorchLinear(PackableQuantLinear):
 
     def _can_use_rocm_gemv(self, x: torch.Tensor) -> bool:
         return (
+            self._rocm_gemv_enabled
+            and x.shape == (1, self.in_features)
+            and self._can_use_rocm_fused(x)
+        )
+
+    def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
+        return (
+            self._rocm_gemm_enabled
+            and 2 <= x.shape[0] <= _ROCM_GEMM_SMALL_M_MAX
+            and x.shape[1] == self.in_features
+            and self.in_features <= _ROCM_GEMM_MAX_IN_FEATURES
+            and self._can_use_rocm_fused(x)
+        )
+
+    def _can_use_rocm_fused(self, x: torch.Tensor) -> bool:
+        """Preconditions shared by the fused ROCm GPTQ GEMV / small-M GEMM kernels."""
+        return (
             IS_ROCM
-            and self._rocm_gemv_enabled
             and self._triton_dequant_enabled
             and not self._cache_enabled
             and not self._lookahead_enabled
@@ -389,7 +426,6 @@ class TorchLinear(PackableQuantLinear):
             and self.out_features >= 32
             and self.out_features % 32 == 0
             and self.g_idx.numel() == self.in_features
-            and x.shape == (1, self.in_features)
             and x.is_contiguous()
             and not x.requires_grad
             and self.scales.dtype == x.dtype
