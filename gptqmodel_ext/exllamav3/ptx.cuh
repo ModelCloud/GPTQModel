@@ -1,18 +1,6 @@
 #pragma once
 
-// Tensor core fragments
-
-template <typename T, int n>
-struct Vec
-{
-    T elems[n];
-    __device__ T& operator[](int i) { return elems[i]; }
-};
-
-using FragA = Vec<half2, 4>;
-using FragB = Vec<half2, 2>;
-using FragC = Vec<float, 4>;
-using FragC_h = Vec<half2, 2>;
+#include "frag.cuh"
 
 // m8n8k4 tensor core matmul (emulated on Ampere and later), don't use
 //
@@ -298,17 +286,6 @@ __device__ __forceinline__ uint64_t globaltimer_ns()
     return t;
 }
 
-// Bitfield stuff
-
-static __forceinline__ __device__ uint32_t bfe64(uint32_t lo, uint32_t hi, int offset, int length)
-{
-    uint64_t value = (static_cast<uint64_t>(hi) << 32) | static_cast<uint64_t>(lo);
-    uint64_t result64;
-    asm ("bfe.u64 %0, %1, %2, %3;"
-         : "=l"(result64)
-         : "l"(value), "r"(offset), "r"(length));
-    return static_cast<uint32_t>(result64);
-}
-
-#define FSHF_IMM(dst, lo, hi, imm) asm("shf.r.wrap.b32 %0, %1, %2, " #imm ";" : "=r"(dst) : "r"(lo), "r"(hi))
-#define BFE16_IMM(dst, src, imm) asm("bfe.u32 %0, %1, " #imm ", 16;" : "=r"(dst) : "r"(src))
+// Bitfield stuff (bfe64, FSHF_IMM, BFE16_IMM) now lives in bitfield.cuh so the
+// quant decoders can use it without pulling in this CUDA-only header.
+#include "bitfield.cuh"
