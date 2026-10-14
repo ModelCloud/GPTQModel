@@ -8,10 +8,31 @@
 
 #pragma once
 
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+// ROCm/HIP toolchain. Torch hipifies the rotation.cu translation unit but
+// leaves this shared header in its CUDA spelling, so map the CUDA-only
+// includes and the CUDA bfloat16 spellings onto their HIP equivalents here.
+//
+// HIP has no <cuda.h> (the CUDA driver API header): this file only needs
+// cudaStream_t / cudaGetErrorString, which <hip/hip_runtime.h> provides.
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+
+using __nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat162 = __hip_bfloat162;
+
+// HIP only exposes the __float22bfloat162_rn(float2) spelling; CUDA also has
+// the two-float __floats2bfloat162_rn used below.
+static __device__ __forceinline__ __nv_bfloat162 __floats2bfloat162_rn(float lo, float hi) {
+  return __halves2bfloat162(__float2bfloat16(lo), __float2bfloat16(hi));
+}
+#else
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
 
 template <typename scalar_t> struct RotateAccess;
 
