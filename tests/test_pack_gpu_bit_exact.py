@@ -83,6 +83,48 @@ def test_pack_gpu_matches_cpu_block_packer(bits: int, shape):
     assert torch.equal(gpu_module.g_idx, cpu_module.g_idx)
 
 
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_pack_gpu_batched_multi_block_matches_cpu_block_packer(bits: int):
+    """The vectorized ``pack_gpu`` qweight path must stay bit-exact when the
+    input features span several ``block_in`` chunks.
+
+    Forcing a small ``block_in`` makes ``pack_gpu`` iterate over multiple
+    blocks so the per-block destination-row offset (``base_group``) is
+    exercised; the batched reshape/shift/sum must reproduce the CPU layout.
+    """
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/ROCm device required for GPU packing test")
+
+    torch.cuda.set_device(0)
+    out_features, in_features = 512, 512
+    group_size = 128
+    linear, scales, zeros, g_idx = _inputs(out_features, in_features, bits, group_size)
+
+    cpu_module = _make_module(out_features, in_features, bits, group_size)
+    cpu_module.pack_block(
+        linear=linear,
+        scales=scales.clone(),
+        zeros=zeros.clone(),
+        g_idx=g_idx.clone(),
+        block_in=128,
+        workers=1,
+    )
+
+    gpu_module = _make_module(out_features, in_features, bits, group_size)
+    gpu_module.pack_gpu(
+        linear=linear.to("cuda"),
+        scales=scales.to("cuda").clone(),
+        zeros=zeros.to("cuda").clone(),
+        g_idx=g_idx.to("cuda").clone(),
+        block_in=128,
+        device="cuda",
+    )
+
+    assert torch.equal(gpu_module.qweight, cpu_module.qweight)
+    assert torch.equal(gpu_module.qzeros, cpu_module.qzeros)
+
+
 def test_pack_gpu_rejects_embeddings():
     if not torch.cuda.is_available():
         pytest.skip("CUDA/ROCm device required for GPU packing test")
