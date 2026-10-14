@@ -68,6 +68,7 @@ from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
+from .packing import _auto_pack_impl
 from .torch import HAS_CUDA, torch_empty_cache
 
 
@@ -1063,6 +1064,8 @@ def pack_module(
             effective_impl = "block"
         elif effective_impl in {"original", "pack_original"}:
             effective_impl = "original"
+        elif effective_impl in {"auto", "default"}:
+            effective_impl = _auto_pack_impl(module=module, linear=layer)
         elif effective_impl == "gpu":
             if not HAS_CUDA:
                 log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
