@@ -121,8 +121,6 @@ class AwqGEMVLinear(AWQuantLinear):
 
         self.split_k_iters = 8
 
-        self.bias = None
-
         if register_buffers:
             self.register_buffer(
                 "qweight",
@@ -147,6 +145,8 @@ class AwqGEMVLinear(AWQuantLinear):
 
             if bias:
                 self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+            else:
+                self.bias = None
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
