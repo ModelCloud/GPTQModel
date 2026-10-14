@@ -21,6 +21,7 @@ from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM
 from ..utils import setup_logger
 from ..utils.device import get_device
+from ..utils.env import env_flag
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gptq import get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
@@ -697,6 +698,26 @@ class QQQ:
         else:
             Losses = torch.zeros_like(W)
             Q = torch.zeros_like(W)
+
+            # The eager path issues one tiny launch per column. On CUDA the
+            # shared GPTQ block-update kernel folds the whole 128-column block
+            # into a single launch; it implements the asymmetric `zero` form,
+            # so it is only used for grouped weights.
+            fused_block_update = None
+            if (
+                Hinv is not None
+                and W.device.type == "cuda"
+                and blocksize == 128
+                and groupsize != -1
+                and type(self.quantizer) is Quantizer
+                and not self.qcfg.mock_quantization
+                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+            ):
+                from .gptq_cuda import block_update_available, gptq_block_update
+
+                if block_update_available():
+                    fused_block_update = gptq_block_update
+
             for i1 in range(0, self.columns, blocksize):
                 i2 = min(i1 + blocksize, self.columns)
                 count = i2 - i1
@@ -707,43 +728,95 @@ class QQQ:
                 Losses1 = torch.zeros_like(W1)
                 Hinv1 = Hinv[i1:i2, i1:i2]
 
-                for i in range(count):
-                    w = W1[:, i]
-                    d = Hinv1[i, i]
-
-                    if groupsize != -1:
+                if fused_block_update is not None and count == 128:
+                    # Group parameters depend on W, which the eager column loop
+                    # leaves untouched until the block finishes, so every group
+                    # boundary inside the block can be resolved before launch.
+                    block_scales = []
+                    block_zeros = []
+                    column_groups = []
+                    parameter_indices = {}
+                    for i in range(count):
+                        column = i1 + i
                         if not static_groups:
-                            if (i1 + i) % groupsize == 0:
+                            if column % groupsize == 0:
                                 self.quantizer.find_params(
-                                    W[:, (i1 + i): (i1 + i + groupsize)], weight=True
+                                    W[:, column: column + groupsize], weight=True
                                 )
 
-                            if ((i1 + i) // groupsize) - now_idx == -1:
+                            if (column // groupsize) - now_idx == -1:
                                 scale.append(self.quantizer.scale)
                                 zero.append(self.quantizer.zero)
                                 now_idx += 1
                         else:
-                            idx = i1 + i
+                            idx = column
                             if actorder:
                                 idx = perm[idx]
                             self.quantizer = groups[idx // groupsize]
 
-                    q = quantize(
-                        w.unsqueeze(1),
-                        self.quantizer.scale,
-                        self.quantizer.zero,
-                        self.quantizer.maxq,
-                        self.quantizer.sym,
-                        self.quantizer.groupsize,
-                    ).flatten()
-                    Q1[:, i] = q
-                    Losses1[:, i] = (w - q) ** 2 / d ** 2
+                        key = id(self.quantizer.scale)
+                        group_index = parameter_indices.get(key)
+                        if group_index is None:
+                            group_index = len(block_scales)
+                            parameter_indices[key] = group_index
+                            block_scales.append(self.quantizer.scale.flatten())
+                            block_zeros.append(self.quantizer.zero.flatten())
+                        column_groups.append(group_index)
 
-                    err1 = (w - q) / d
-                    W1[:, i:] -= err1.unsqueeze(1).matmul(
-                        Hinv1[i, i:].unsqueeze(0)
+                    block_scale = torch.stack(block_scales)
+                    block_zero = torch.stack(block_zeros)
+                    column_group = torch.tensor(
+                        column_groups, device=W.device, dtype=torch.int32
                     )
-                    Err1[:, i] = err1
+                    fused_block_update(
+                        W1,
+                        Hinv1,
+                        block_scale,
+                        block_zero,
+                        column_group,
+                        Q1,
+                        Err1,
+                        Losses1,
+                        int(self.quantizer.maxq.item()),
+                    )
+                else:
+                    for i in range(count):
+                        w = W1[:, i]
+                        d = Hinv1[i, i]
+
+                        if groupsize != -1:
+                            if not static_groups:
+                                if (i1 + i) % groupsize == 0:
+                                    self.quantizer.find_params(
+                                        W[:, (i1 + i): (i1 + i + groupsize)], weight=True
+                                    )
+
+                                if ((i1 + i) // groupsize) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if actorder:
+                                    idx = perm[idx]
+                                self.quantizer = groups[idx // groupsize]
+
+                        q = quantize(
+                            w.unsqueeze(1),
+                            self.quantizer.scale,
+                            self.quantizer.zero,
+                            self.quantizer.maxq,
+                            self.quantizer.sym,
+                            self.quantizer.groupsize,
+                        ).flatten()
+                        Q1[:, i] = q
+                        Losses1[:, i] = (w - q) ** 2 / d ** 2
+
+                        err1 = (w - q) / d
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(
+                            Hinv1[i, i:].unsqueeze(0)
+                        )
+                        Err1[:, i] = err1
 
                 Q[:, i1:i2] = Q1
                 Losses[:, i1:i2] = Losses1 / 2
