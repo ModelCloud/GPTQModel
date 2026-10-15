@@ -1072,7 +1072,7 @@ def test_paroquant_fused_affine_ste_matches_composed_reference():
             zero_point_float=actual_zero_point,
             use_ste=True,
         )
-        assert "AffineQuantDequantSTE" in type(actual.grad_fn).__name__
+        assert "AffineQuantDequant" in type(actual.grad_fn).__name__
         actual_grads = torch.autograd.grad(
             actual,
             [actual_weight, actual_scale, actual_zero_point],
@@ -1133,6 +1133,166 @@ def test_paroquant_fused_affine_ste_emits_fewer_kernels_than_composed_reference(
         ((quant - round_zero) * bounded).sum().backward()
 
     assert _kernel_count(_fused) < _kernel_count(_composed)
+
+
+def _paroquant_triton_affine_ste():
+    """Return the Triton affine STE module, or skip when Triton is not installed."""
+    return pytest.importorskip("gptqmodel.quantization.paroquant.modules.triton.affine_ste")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_matches_composed_reference():
+    """Guard both Triton affine STE nodes against the composed reference graph.
+
+    The fused forward runs in one kernel, so every floating point step has to
+    keep the reference rounding: round-to-nearest division, round-half-to-even
+    quantization, and the reference clamp order. The oracle is the composed
+    graph spelled out here, and the forward value plus the weight, scale, and
+    zero-point gradients all have to agree bitwise for the Triton backward and
+    for the hybrid node that keeps the torch elementwise backward.
+    """
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+            quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+            quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        for node in (triton_ste._AffineQuantDequantTritonSTE, triton_ste._AffineQuantDequantHybridSTE):
+            actual_weight = weight.clone().requires_grad_(True)
+            actual_scale = scale.clone().requires_grad_(True)
+            actual_zero_point = zero_point.clone().requires_grad_(True)
+            actual = node.apply(actual_weight, actual_scale, actual_zero_point, qmin, qmax, group_size)
+            actual_grads = torch.autograd.grad(
+                actual,
+                [actual_weight, actual_scale, actual_zero_point],
+                grad_outputs=upstream,
+            )
+
+            assert torch.equal(actual, expected), (shape, node.__name__)
+            for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+                assert torch.equal(actual_grad, expected_grad), (shape, node.__name__)
+            assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
+    """Guard the availability probe, the kill switch, and the routed node."""
+    triton_ste = _paroquant_triton_affine_ste()
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    if not torch.cuda.is_available():
+        # The kernels are CUDA-only; a host without a GPU must still report
+        # availability consistently with the dispatch helper.
+        assert triton_ste.affine_quant_dequant_ste_available() in (True, False)
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+    enabled = triton_ste._AFFINE_STE_TRITON_ENABLED
+    try:
+        triton_ste._AFFINE_STE_TRITON_ENABLED = False
+        assert not triton_ste.affine_quant_dequant_ste_available()
+        assert (
+            triton_ste.affine_quant_dequant_ste(weight, scale, zero_point, qmin=0, qmax=15, group_size=8) is None
+        )
+        # The optimization entry point falls back to the torch fused node.
+        fallback = paroquant_optimization.pseudo_quantize_dequant(
+            weight,
+            bits=4,
+            group_size=8,
+            sym=False,
+            scale=scale,
+            zero_point_float=zero_point,
+            use_ste=True,
+        )
+        assert "_AffineQuantDequantSTEBackward" in type(fallback.grad_fn).__name__
+    finally:
+        triton_ste._AFFINE_STE_TRITON_ENABLED = enabled
+
+    routed = paroquant_optimization.pseudo_quantize_dequant(
+        weight,
+        bits=4,
+        group_size=8,
+        sym=False,
+        scale=scale,
+        zero_point_float=zero_point,
+        use_ste=True,
+    )
+    assert "AffineQuantDequant" in type(routed.grad_fn).__name__
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_emits_fewer_kernels_than_torch_fused():
+    """Guard the launch-count win that motivates the fused Triton kernels."""
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _run(node) -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        node.apply(w, s, z, qmin, qmax, group_size).sum().backward()
+
+    torch_count = _kernel_count(lambda: _run(paroquant_optimization._AffineQuantDequantSTE))
+    triton_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantTritonSTE))
+    hybrid_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantHybridSTE))
+
+    assert triton_count < torch_count
+    assert hybrid_count < torch_count
+    assert triton_count <= hybrid_count
 
 
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):

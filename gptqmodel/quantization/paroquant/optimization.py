@@ -280,6 +280,26 @@ class _AffineQuantDequantSTE(torch.autograd.Function):
         return grad_weight.reshape_as(grad_output), grad_scale, grad_zero_point, None, None, None
 
 
+@lru_cache(maxsize=1)
+def _get_triton_affine_ste():
+    """Import the Triton affine-STE kernels lazily, or ``None`` when unusable.
+
+    Importing Triton costs hundreds of milliseconds and is only worthwhile on the
+    training-time affine path, so the import is deferred until the first fused
+    call and cached for the process.
+    """
+    try:
+        from gptqmodel.quantization.paroquant.modules.triton.affine_ste import (
+            affine_quant_dequant_ste,
+            affine_quant_dequant_ste_available,
+        )
+    except Exception:
+        return None
+    if not affine_quant_dequant_ste_available():
+        return None
+    return affine_quant_dequant_ste
+
+
 def _affine_quant_dequant_ste_fused(
     weight: torch.Tensor,
     scale: torch.Tensor,
@@ -295,6 +315,11 @@ def _affine_quant_dequant_ste_fused(
     per-group ``(groups, 1)`` qparams, and an enabled autograd graph with at
     least one differentiable input. Everything else keeps the eager reference so
     no caller silently changes semantics.
+
+    On hosts with Triton the same arithmetic runs in one kernel per direction
+    instead of twenty launches. ``torch.compile`` keeps the pure-torch node: the
+    compiled large-tensor path already fuses this region, and Inductor is the
+    only tracer that has to agree with the graph.
     """
     if weight.device.type != "cuda" or weight.dtype != torch.float32:
         return None
@@ -310,6 +335,19 @@ def _affine_quant_dequant_ste_fused(
     groups = numel // group_size
     if tuple(scale.shape) != (groups, 1) or tuple(zero_point_float.shape) != (groups, 1):
         return None
+    if not torch.compiler.is_compiling():
+        triton_ste = _get_triton_affine_ste()
+        if triton_ste is not None:
+            fused = triton_ste(
+                weight,
+                scale,
+                zero_point_float,
+                qmin=0,
+                qmax=2**bits - 1,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
     return _AffineQuantDequantSTE.apply(weight, scale, zero_point_float, 0, 2**bits - 1, group_size)
 
 
