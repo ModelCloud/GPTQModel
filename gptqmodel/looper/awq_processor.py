@@ -1841,12 +1841,25 @@ class AWQProcessor(LoopProcessor):
         best_scales = None
         best_error = float("inf")
 
-        # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
-        orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
-            # stash a contiguous FP32 master copy on CPU; avoids tying up GPU memory between ratios
-            fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
-            for fc in linears2scale
-        }
+        # Stash a pristine master copy of every scaled linear once so the per-ratio
+        # quantize/restore cycle never reaches back to host memory. The master stays on
+        # the module device while the group fits the activation budget; larger groups
+        # fall back to a host copy to bound peak device memory.
+        master_bytes = sum(fc.weight.numel() * fc.weight.element_size() for fc in linears2scale)
+        master_to_host = master_bytes > self.max_chunk_memory
+        orig_weights: Dict[nn.Linear, torch.Tensor] = {}
+        for fc in linears2scale:
+            master = fc.weight.detach().to(dtype=fc.weight.dtype, copy=True)
+            if master_to_host:
+                master = master.to("cpu").contiguous()
+            orig_weights[fc] = master
+
+        def restore_weights():
+            for fc in linears2scale:
+                master = orig_weights[fc]
+                if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
+                    master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
+                fc.weight.copy_(master)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -1934,13 +1947,11 @@ class AWQProcessor(LoopProcessor):
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()
-            for fc in linears2scale:
-                fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
+            restore_weights()
 
         # Reset weights one final time so callers always see the pristine FP copy.
-        for fc in linears2scale:
-            fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
-        orig_weights_cpu.clear()
+        restore_weights()
+        orig_weights.clear()
 
         if best_ratio == -1:
             log.debug(history)
