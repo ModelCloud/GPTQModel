@@ -79,6 +79,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         group_size,
         qmin,
         qmax,
+        STORE_INTERMEDIATES: tl.constexpr,
         BLOCK: tl.constexpr,
     ):
         pid = tl.program_id(0).to(tl.int64)
@@ -93,8 +94,11 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         scaled = tl.math.div_rn(weight, bounded_scale)
         quant = tl.minimum(tl.maximum(_libdevice.rint(scaled) + round_zero_point, qmin), qmax)
         centered = quant - round_zero_point
-        tl.store(scaled_ptr + offsets, scaled, mask=mask)
-        tl.store(centered_ptr + offsets, centered, mask=mask)
+        # Value-only callers have no backward to feed, so the two full-size
+        # intermediates stay in registers and the kernel writes one tensor.
+        if STORE_INTERMEDIATES:
+            tl.store(scaled_ptr + offsets, scaled, mask=mask)
+            tl.store(centered_ptr + offsets, centered, mask=mask)
         tl.store(out_ptr + offsets, centered * bounded_scale, mask=mask)
 
 
@@ -153,11 +157,48 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             group_size,
             float(qmin),
             float(qmax),
+            STORE_INTERMEDIATES=True,
             BLOCK=_AFFINE_STE_BLOCK,
         )
         ctx.save_for_backward(scaled, centered, scale)
         ctx.group_size = group_size
         ctx.zero_point_shape = zero_point_float.shape
+        return out.reshape_as(weight)
+
+
+    def _triton_qdq_forward_only(
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        zero_point_float: torch.Tensor,
+        qmin: int,
+        qmax: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        """Run the fused forward kernel for callers that are outside the autograd graph.
+
+        With no backward to feed, the kernel is specialized to skip the two
+        full-size intermediates and the call returns the dequantized weight
+        directly. ``out`` doubles as the unused intermediate pointers, which the
+        compiled kernel never touches.
+        """
+        view = weight.reshape(-1, group_size).contiguous()
+        num_elements = view.numel()
+        out = torch.empty_like(view)
+        grid = (triton.cdiv(num_elements, _AFFINE_STE_BLOCK),)
+        _affine_qdq_forward_kernel[grid](
+            view,
+            scale,
+            zero_point_float,
+            out,
+            out,
+            out,
+            num_elements,
+            group_size,
+            float(qmin),
+            float(qmax),
+            STORE_INTERMEDIATES=False,
+            BLOCK=_AFFINE_STE_BLOCK,
+        )
         return out.reshape_as(weight)
 
 
@@ -248,6 +289,26 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 def affine_quant_dequant_ste_available() -> bool:
     """Report whether the fused Triton affine STE kernels can run on this host."""
     return _AFFINE_STE_TRITON_AVAILABLE and _AFFINE_STE_TRITON_ENABLED
+
+
+def affine_quant_dequant_ste_forward(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    zero_point_float: torch.Tensor,
+    *,
+    qmin: int,
+    qmax: int,
+    group_size: int,
+) -> Optional[torch.Tensor]:
+    """Run the fused Triton affine forward for value-only callers, or return None.
+
+    This is the same arithmetic as ``affine_quant_dequant_ste`` with the autograd
+    node and its two saved intermediates removed, for callers that are already
+    outside the autograd graph.
+    """
+    if not affine_quant_dequant_ste_available():
+        return None
+    return _triton_qdq_forward_only(weight, scale, zero_point_float, qmin, qmax, group_size)
 
 
 def affine_quant_dequant_ste(

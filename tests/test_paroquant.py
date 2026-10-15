@@ -1013,8 +1013,14 @@ def test_paroquant_fused_affine_ste_dispatch_gates():
     assert _dispatch(weight, scale, zero_point.reshape(1, -1)) is None
     # A detached graph has nothing to fuse for.
     assert _dispatch(weight.detach(), scale.detach(), zero_point.detach()) is None
+    # A value-only call has no graph to fuse either, but with Triton it still
+    # takes the fused forward instead of the composed reference's ten launches.
     with torch.no_grad():
-        assert _dispatch(weight, scale, zero_point) is None
+        value_only = _dispatch(weight, scale, zero_point)
+    if paroquant_optimization._get_triton_affine_kernels() is None:
+        assert value_only is None
+    else:
+        assert value_only is not None
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused affine STE requires CUDA.")
@@ -1293,6 +1299,92 @@ def test_paroquant_triton_affine_ste_emits_fewer_kernels_than_torch_fused():
     assert triton_count < torch_count
     assert hybrid_count < torch_count
     assert triton_count <= hybrid_count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_value_only_forward():
+    """Guard the value-only Triton forward used by the no-grad replay evaluations.
+
+    The calibration loop evaluates the replayed model under ``torch.no_grad()``
+    once per epoch, so those calls have no graph to fuse but still pay the
+    composed reference's ten launches each. They take the fused forward instead,
+    and the value has to stay bitwise identical.
+    """
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        with torch.no_grad():
+            expected = paroquant_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+            actual = triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=qmin,
+                qmax=qmax,
+                group_size=group_size,
+            )
+        assert actual is not None
+        assert torch.equal(actual, expected)
+
+    shape, bits, group_size = (896, 4864), 4, 128
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _value_only() -> None:
+        with torch.no_grad():
+            triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=0,
+                qmax=2**bits - 1,
+                group_size=group_size,
+            )
+
+    def _composed() -> None:
+        with torch.no_grad():
+            paroquant_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+
+    assert _kernel_count(_value_only) < _kernel_count(_composed)
 
 
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):

@@ -281,7 +281,7 @@ class _AffineQuantDequantSTE(torch.autograd.Function):
 
 
 @lru_cache(maxsize=1)
-def _get_triton_affine_ste():
+def _get_triton_affine_kernels():
     """Import the Triton affine-STE kernels lazily, or ``None`` when unusable.
 
     Importing Triton costs hundreds of milliseconds and is only worthwhile on the
@@ -289,15 +289,12 @@ def _get_triton_affine_ste():
     call and cached for the process.
     """
     try:
-        from gptqmodel.quantization.paroquant.modules.triton.affine_ste import (
-            affine_quant_dequant_ste,
-            affine_quant_dequant_ste_available,
-        )
+        from gptqmodel.quantization.paroquant.modules.triton import affine_ste
     except Exception:
         return None
-    if not affine_quant_dequant_ste_available():
+    if not affine_ste.affine_quant_dequant_ste_available():
         return None
-    return affine_quant_dequant_ste
+    return affine_ste
 
 
 def _affine_quant_dequant_ste_fused(
@@ -320,14 +317,16 @@ def _affine_quant_dequant_ste_fused(
     instead of twenty launches. ``torch.compile`` keeps the pure-torch node: the
     compiled large-tensor path already fuses this region, and Inductor is the
     only tracer that has to agree with the graph.
+
+    Value-only callers -- the calibration loop evaluates the replayed model under
+    ``torch.no_grad()`` -- have no graph to fuse, but they still pay the composed
+    graph's ten launches per call. Those calls take the fused Triton forward
+    without its autograd node; the value is the same either way, and without
+    Triton the eager reference is already as cheap as the torch node's forward.
     """
     if weight.device.type != "cuda" or weight.dtype != torch.float32:
         return None
     if scale.dtype != torch.float32 or zero_point_float.dtype != torch.float32:
-        return None
-    if not torch.is_grad_enabled():
-        return None
-    if not (weight.requires_grad or scale.requires_grad or zero_point_float.requires_grad):
         return None
     numel = weight.numel()
     if numel == 0 or numel % group_size != 0:
@@ -335,10 +334,26 @@ def _affine_quant_dequant_ste_fused(
     groups = numel // group_size
     if tuple(scale.shape) != (groups, 1) or tuple(zero_point_float.shape) != (groups, 1):
         return None
+    grad_enabled = torch.is_grad_enabled()
+    differentiable = weight.requires_grad or scale.requires_grad or zero_point_float.requires_grad
+    if not grad_enabled or not differentiable:
+        if grad_enabled or torch.compiler.is_compiling():
+            return None
+        kernels = _get_triton_affine_kernels()
+        if kernels is None:
+            return None
+        return kernels.affine_quant_dequant_ste_forward(
+            weight,
+            scale,
+            zero_point_float,
+            qmin=0,
+            qmax=2**bits - 1,
+            group_size=group_size,
+        )
     if not torch.compiler.is_compiling():
-        triton_ste = _get_triton_affine_ste()
-        if triton_ste is not None:
-            fused = triton_ste(
+        kernels = _get_triton_affine_kernels()
+        if kernels is not None:
+            fused = kernels.affine_quant_dequant_ste(
                 weight,
                 scale,
                 zero_point_float,
