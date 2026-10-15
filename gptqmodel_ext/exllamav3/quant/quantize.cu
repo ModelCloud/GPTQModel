@@ -11,6 +11,11 @@
 #define NUM_THREADS 1024
 #define H_INF __ushort_as_half(0x7c00)
 #define H_NINF __ushort_as_half(0xfc00)
+// fp32 +inf for the trellis inner-loop arithmetic. Scalar fp16 arithmetic is
+// emulated (cvt/add/cvt) on AMD GPUs, so the cost/error accumulation runs in
+// fp32 there while the stored costs stay half to keep the shared-memory
+// footprint and layout unchanged.
+#define H_INF_F __int_as_float(0x7f800000)
 
 template <int K, int cb>
 __global__ __launch_bounds__(MIN(NUM_THREADS, 65536 >> K))
@@ -79,46 +84,46 @@ void quantize_tiles_kernel
     // Decoded codebook value for this thread's j-th out-edge and k-th state slot.
     // All indices are compile-time constants after unrolling, so dec_tab stays in
     // registers.
-    auto dec_at = [&](int j, int k, int out_edge_idx) -> half
+    auto dec_at = [&](int j, int k, int out_edge_idx) -> float
     {
-        if constexpr (dec_cache) return dec_tab[j * max_q + k];
-        else return decode_3inst<cb>((k << Kr) | out_edge_idx);
+        if constexpr (dec_cache) return __half2float(dec_tab[j * max_q + k]);
+        else return __half2float(decode_3inst<cb>((k << Kr) | out_edge_idx));
     };
 
     auto forward = [&](int roll, int pre_state)
     {
         int ri = roll % 256;
-        half dh, err, min_err, w;
 
         // temp_costs_inc[z] is the cost/cumulative error of an incoming edge from state (z & edge_mask)
         half* t = temp_costs;
         temp_costs = temp_costs_inc;
         temp_costs_inc = t;
 
+        const float wf = __half2float(sh_input_tile[ri]);
+        const bool constrain = pre_state >= 0;
+
         #pragma unroll
         for (int j = 0; j < n_oe; ++j)
         {
             int out_edge_idx = thread + j * NUM_THREADS;
-            w = sh_input_tile[ri];
-
             int in_edge_idx = out_edge_idx >> K;
-            dh = __hsub(dec_at(j, 0, out_edge_idx), w);
-            err = __hmul(dh, dh);
-            if (pre_state >= 0 && in_edge_idx != pre_state) err = H_INF;
-            min_err = err;
+            float dh = dec_at(j, 0, out_edge_idx) - wf;
+            float err = dh * dh;
+            if (constrain && in_edge_idx != pre_state) err = H_INF_F;
+            float min_err = err;
             int min_in_edge = in_edge_idx;
 
             #pragma unroll
             for (int k = 1; k < max_q; ++k)
             {
                 in_edge_idx = ((k << Kr) | out_edge_idx) >> K;
-                dh = __hsub(dec_at(j, k, out_edge_idx), w);
-                err = __hmul(dh, dh);
-                if (pre_state >= 0 && in_edge_idx != pre_state) err = H_INF;
-                if (__hlt(err, min_err)) { min_err = err; min_in_edge = in_edge_idx; }
+                dh = dec_at(j, k, out_edge_idx) - wf;
+                err = dh * dh;
+                if (constrain && in_edge_idx != pre_state) err = H_INF_F;
+                if (err < min_err) { min_err = err; min_in_edge = in_edge_idx; }
             }
 
-            temp_costs[out_edge_idx] = min_err;
+            temp_costs[out_edge_idx] = __float2half(min_err);
             temp_edges[edges * ri + out_edge_idx] = (uint16_t) min_in_edge;
         }
 
@@ -135,27 +140,27 @@ void quantize_tiles_kernel
             temp_costs = temp_costs_inc;
             temp_costs_inc = t;
 
+            const float wf = __half2float(sh_input_tile[ri]);
+
             #pragma unroll
             for (int j = 0; j < n_oe; ++j)
             {
                 int out_edge_idx = thread + j * NUM_THREADS;
-                w = sh_input_tile[ri];
-
                 int in_edge_idx = out_edge_idx >> K;
-                dh = __hsub(dec_at(j, 0, out_edge_idx), w);
-                min_err = __hfma(dh, dh, temp_costs_inc[in_edge_idx]);
+                float dh = dec_at(j, 0, out_edge_idx) - wf;
+                float min_err = fmaf(dh, dh, __half2float(temp_costs_inc[in_edge_idx]));
                 int min_in_edge = in_edge_idx;
 
                 #pragma unroll
                 for (int k = 1; k < max_q; ++k)
                 {
                     in_edge_idx = ((k << Kr) | out_edge_idx) >> K;
-                    dh = __hsub(dec_at(j, k, out_edge_idx), w);
-                    err = __hfma(dh, dh, temp_costs_inc[in_edge_idx]);
-                    if (__hlt(err, min_err)) { min_err = err; min_in_edge = in_edge_idx; }
+                    dh = dec_at(j, k, out_edge_idx) - wf;
+                    float err = fmaf(dh, dh, __half2float(temp_costs_inc[in_edge_idx]));
+                    if (err < min_err) { min_err = err; min_in_edge = in_edge_idx; }
                 }
 
-                temp_costs[out_edge_idx] = min_err;
+                temp_costs[out_edge_idx] = __float2half(min_err);
                 temp_edges[edges * ri + out_edge_idx] = (uint16_t) min_in_edge;
             }
 
