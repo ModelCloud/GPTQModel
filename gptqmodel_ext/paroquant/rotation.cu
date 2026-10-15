@@ -688,16 +688,114 @@ std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool h
 #undef DISPATCH_CTA_M
 #undef DISPATCH_KROT
 
+// Fused ParoQuant rotation-gradient accumulation.
+//
+// The autograd backward of the fused rotation used to build, for every one of
+// the `krot` rotations, four advanced-index gathers of the (batch, hidden)
+// activation and gradient plus ~11 elementwise/reduce ops on the gathered
+// (batch, groups, half_group) views. On ROCm that is ~21 tiny kernel launches
+// per rotation and 8 rotations per layer, so the backward is launch-bound:
+// profiling the PARO lifecycle showed ~647k kernel launches with ~89% of host
+// time inside kernel dispatch.
+//
+// This op collapses one rotation's whole contribution into a single launch:
+//
+//   out[e] = ( sum_b grad[b, i] * rot[b, j] - grad[b, j] * rot[b, i] ) * cos[e]
+//          - ( sum_b grad[b, i] * rot[b, i] + grad[b, j] * rot[b, j] ) * sin[e]
+//
+// with i = idx_i[e], j = idx_j[e]. The two partial sums are accumulated
+// separately in fp32 and combined after the batch loop, which matches the
+// `(A).sum(0) * cos - (B).sum(0) * sin` form of the torch path.
+constexpr int GRAD_THETA_E_TILE = 128;
+constexpr int GRAD_THETA_B_CHUNK = 32;
+
+__global__ void grad_theta_kernel(const float *__restrict__ rot, const float *__restrict__ grad,
+                                  const int64_t *__restrict__ idx_i,
+                                  const int64_t *__restrict__ idx_j,
+                                  const float *__restrict__ sin_t,
+                                  const float *__restrict__ cos_t, float *__restrict__ out,
+                                  int batch, int hidden, int h) {
+  const int e = blockIdx.x * GRAD_THETA_E_TILE + threadIdx.x;
+  if (e >= h) {
+    return;
+  }
+
+  const int64_t i = idx_i[e];
+  const int64_t j = idx_j[e];
+
+  const int b_begin = blockIdx.y * GRAD_THETA_B_CHUNK;
+  const int b_end = min(batch, b_begin + GRAD_THETA_B_CHUNK);
+
+  float sum_a = 0.0f;
+  float sum_b = 0.0f;
+  for (int b = b_begin; b < b_end; ++b) {
+    const int64_t base = static_cast<int64_t>(b) * hidden;
+    const float gi = grad[base + i];
+    const float gj = grad[base + j];
+    const float xi = rot[base + i];
+    const float xj = rot[base + j];
+    sum_a += gi * xj - gj * xi;
+    sum_b += gi * xi + gj * xj;
+  }
+
+  atomicAdd(out + e, sum_a * cos_t[e] - sum_b * sin_t[e]);
+}
+
+at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Tensor idx_j,
+                      at::Tensor sin_t, at::Tensor cos_t) {
+  TORCH_CHECK(rot.is_cuda() && grad.is_cuda(), "ParoQuant grad_theta expects CUDA tensors.");
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(rot));
+  TORCH_CHECK(rot.dim() == 2 && grad.dim() == 2 && grad.size(0) == rot.size(0) &&
+                  grad.size(1) == rot.size(1),
+              "ParoQuant grad_theta expects rot and grad to share a (batch, hidden) shape.");
+  TORCH_CHECK(rot.is_contiguous() && grad.is_contiguous() && idx_i.is_contiguous() &&
+                  idx_j.is_contiguous() && sin_t.is_contiguous() && cos_t.is_contiguous(),
+              "ParoQuant grad_theta expects contiguous tensors.");
+  TORCH_CHECK(rot.scalar_type() == at::kFloat && grad.scalar_type() == at::kFloat,
+              "ParoQuant grad_theta supports float32 activations.");
+  TORCH_CHECK(idx_i.scalar_type() == at::kLong && idx_j.scalar_type() == at::kLong &&
+                  idx_i.dim() == 1 && idx_j.dim() == 1 && idx_i.size(0) == idx_j.size(0),
+              "ParoQuant grad_theta expects matching 1D int64 index tensors.");
+  TORCH_CHECK(sin_t.scalar_type() == at::kFloat && cos_t.scalar_type() == at::kFloat,
+              "ParoQuant grad_theta expects float32 sin/cos tables.");
+
+  const int64_t h = idx_i.size(0);
+  const int64_t batch = rot.size(0);
+  const int64_t hidden = rot.size(1);
+  TORCH_CHECK(sin_t.numel() == h && cos_t.numel() == h,
+              "ParoQuant grad_theta sin/cos tables must match the index length.");
+
+  at::Tensor out = at::zeros({h}, rot.options());
+  if (h == 0 || batch == 0) {
+    return out;
+  }
+
+  const dim3 grid(static_cast<unsigned>((h + GRAD_THETA_E_TILE - 1) / GRAD_THETA_E_TILE),
+                  static_cast<unsigned>((batch + GRAD_THETA_B_CHUNK - 1) / GRAD_THETA_B_CHUNK));
+  const dim3 block(GRAD_THETA_E_TILE);
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  grad_theta_kernel<<<grid, block, 0, stream>>>(rot.data_ptr<float>(), grad.data_ptr<float>(),
+                                                idx_i.data_ptr<int64_t>(), idx_j.data_ptr<int64_t>(),
+                                                sin_t.data_ptr<float>(), cos_t.data_ptr<float>(),
+                                                out.data_ptr<float>(),
+                                                static_cast<int>(batch), static_cast<int>(hidden),
+                                                static_cast<int>(h));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 TORCH_LIBRARY(gptqmodel_paroquant, m) {
   m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1) -> Tensor");
   m.def("launch_config(Tensor x, int krot=8, bool has_scale=True, int group_size=128, int cta_m=-1, int row_pad=-1) -> int[]");
   m.def("clear_autotune_cache() -> ()");
   m.def("autotune_cache_size() -> int");
+  m.def("grad_theta(Tensor rot, Tensor grad, Tensor idx_i, Tensor idx_j, Tensor sin_t, Tensor cos_t) -> Tensor");
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CUDA, m) {
   m.impl("rotate", &rotate_dynamic);
   m.impl("launch_config", &rotate_launch_config);
+  m.impl("grad_theta", &grad_theta);
 }
 
 TORCH_LIBRARY_IMPL(gptqmodel_paroquant, CatchAll, m) {
