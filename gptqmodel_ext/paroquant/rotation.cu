@@ -22,10 +22,18 @@
 #include <unordered_map>
 #include <vector>
 
+// Sweep the rotations forward (default) or backward.
+//
+// The ParoQuant autograd backward only needs the inverse transform of a single
+// operand whenever the rotation parameters are frozen. Walking the rotations in
+// reverse order with negated thetas is the same sweep the forward kernel already
+// performs, so `reverse` folds that inverse into one launch instead of one
+// launch per rotation. The flag is uniform across the block, so the branch is
+// free and no extra kernel instantiation is needed.
 template <typename scalar_t, int CTA_M, int GROUP_SIZE, int KROT, bool USE_SCALE, int ROW_PAD>
 __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restrict__ out,
                               const int16_t *__restrict__ idx_ij, const scalar_t *__restrict__ theta,
-                              const scalar_t *__restrict__ scales, int s, int h) {
+                              const scalar_t *__restrict__ scales, int s, int h, int reverse) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   __shared__ scalar_t x_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -44,7 +52,9 @@ __global__ void rotate_kernel(const scalar_t *__restrict__ x, scalar_t *__restri
 
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
-    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], reg_theta[r]);
+    const int rr = reverse ? (KROT - 1 - r) : r;
+    RotateAccess<scalar_t>::template apply_one<CTA_M, ROW_STRIDE>(
+        x_grp, reg_idx[rr], reverse ? -reg_theta[rr] : reg_theta[rr]);
     __syncthreads();
   }
 
@@ -58,7 +68,7 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
                                                   const int16_t *__restrict__ idx_ij,
                                                   const __nv_bfloat16 *__restrict__ theta,
                                                   const __nv_bfloat16 *__restrict__ scales, int s,
-                                                  int h) {
+                                                  int h, int reverse) {
   constexpr int ROW_STRIDE = CTA_M + ROW_PAD;
   __shared__ __half x_grp[ROW_STRIDE * GROUP_SIZE];
 
@@ -78,7 +88,9 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
 
 #pragma unroll
   for (int r = 0; r < KROT; r++) {
-    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE>(x_grp, reg_idx[r], reg_theta[r]);
+    const int rr = reverse ? (KROT - 1 - r) : r;
+    RotateAccess<__half>::template apply_one<CTA_M, ROW_STRIDE>(
+        x_grp, reg_idx[rr], reverse ? -reg_theta[rr] : reg_theta[rr]);
     __syncthreads();
   }
 
@@ -94,10 +106,10 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
     if (has_scale) {                                                                                 \
       auto *s_p = reinterpret_cast<CUDA_T *>(scales_cast.data_ptr<TORCH_T>());                       \
       rotate_kernel<CUDA_T, CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(    \
-          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h);                               \
+          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);                      \
     } else {                                                                                         \
       rotate_kernel<CUDA_T, CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(   \
-          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);                           \
+          x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);                  \
     }                                                                                                \
     C10_CUDA_KERNEL_LAUNCH_CHECK();                                                                   \
     break;                                                                                           \
@@ -105,7 +117,8 @@ __global__ void rotate_kernel_bf16_half_workspace(const __nv_bfloat16 *__restric
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_ij,
-                                                  at::Tensor theta, at::Tensor scales) {
+                                                  at::Tensor theta, at::Tensor scales,
+                                                  int reverse) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   int h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
@@ -130,10 +143,10 @@ torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_i
   if (has_scale) {
     auto *s_p = reinterpret_cast<__nv_bfloat16 *>(scales_cast.data_ptr<c10::BFloat16>());
     rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, true, ROW_PAD><<<grid, block, 0, stream>>>(
-        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h);
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, s_p, seq_len, h, reverse);
   } else {
     rotate_kernel_bf16_half_workspace<CTA_M, GROUP_SIZE, KROT, false, ROW_PAD><<<grid, block, 0, stream>>>(
-        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h);
+        x_p, o_p, idx_ij.data_ptr<int16_t>(), t_p, nullptr, seq_len, h, reverse);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
@@ -141,7 +154,7 @@ torch::Tensor rotate_launcher_bf16_half_workspace(at::Tensor x, at::Tensor idx_i
 
 template <int KROT, int CTA_M, int GROUP_SIZE, int ROW_PAD>
 torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
-                              at::Tensor scales) {
+                              at::Tensor scales, int reverse) {
   const at::cuda::OptionalCUDAGuard device_guard(device_of(x));
   int h = x.size(-1);
   TORCH_CHECK(h % GROUP_SIZE == 0, "h must be divisible by GROUP_SIZE");
@@ -168,7 +181,8 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   case at::kHalf:
     LAUNCH_ROTATE(__half, c10::Half)
   case at::kBFloat16:
-    return rotate_launcher_bf16_half_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta, scales);
+    return rotate_launcher_bf16_half_workspace<KROT, CTA_M, GROUP_SIZE, ROW_PAD>(x, idx_ij, theta,
+                                                                                 scales, reverse);
   default:
     TORCH_CHECK(false, "rotate supports Float, Half, and BFloat16, got ", x.scalar_type());
   }
@@ -180,9 +194,9 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
 #define DISPATCH_ROW_PAD(KROT, CTA, GS)                                                              \
   switch (row_pad) {                                                                                 \
   case 2:                                                                                            \
-    return rotate_launcher<KROT, CTA, GS, 2>(x, idx, theta, scales);                                \
+    return rotate_launcher<KROT, CTA, GS, 2>(x, idx, theta, scales, reverse);                       \
   case 0:                                                                                            \
-    return rotate_launcher<KROT, CTA, GS, 0>(x, idx, theta, scales);                                \
+    return rotate_launcher<KROT, CTA, GS, 0>(x, idx, theta, scales, reverse);                       \
   default:                                                                                           \
     TORCH_CHECK(false, "Unsupported ROW_PAD = ", row_pad, "; compiled variants: 0 and 2");          \
   }
@@ -210,7 +224,8 @@ torch::Tensor rotate_launcher(at::Tensor x, at::Tensor idx_ij, at::Tensor theta,
   }
 
 torch::Tensor dispatch_rotate_variant(at::Tensor x, at::Tensor idx, at::Tensor theta, at::Tensor scales,
-                                      int64_t group_size, int64_t krot, int cta_m, int row_pad) {
+                                      int64_t group_size, int64_t krot, int cta_m, int row_pad,
+                                      int reverse) {
   if (group_size == 128) {
     DISPATCH_KROT(128)
   }
@@ -787,7 +802,7 @@ float benchmark_launch_config(const at::Tensor &x, const at::Tensor &idx, const 
                 cudaGetErrorString(start_status));
     for (int i = 0; i < iters; ++i) {
       auto out = dispatch_rotate_variant(x, idx, theta, scales, group_size, krot, config.cta_m,
-                                         config.row_pad);
+                                         config.row_pad, /*reverse=*/0);
       (void)out;
     }
     const cudaError_t end_status = cudaEventRecord(end, stream);
@@ -808,7 +823,7 @@ float benchmark_launch_config(const at::Tensor &x, const at::Tensor &idx, const 
 
   for (int i = 0; i < warmup; ++i) {
     auto out = dispatch_rotate_variant(x, idx, theta, scales, group_size, krot, config.cta_m,
-                                       config.row_pad);
+                                       config.row_pad, /*reverse=*/0);
     (void)out;
   }
   synchronize_stream();
@@ -972,7 +987,8 @@ void validate_rotation_inputs(const at::Tensor &x, const at::Tensor &idx,
 
 torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
                              c10::optional<at::Tensor> scales_opt, int64_t group_size = 128,
-                             int64_t requested_cta_m = -1, int64_t requested_row_pad = -1) {
+                             int64_t requested_cta_m = -1, int64_t requested_row_pad = -1,
+                             int64_t reverse = 0) {
   TORCH_CHECK(x.is_cuda(), "ParoQuant rotation requires a CUDA input tensor.");
   // Autotune and the final launch must run on x's device, not the thread's
   // previously selected CUDA device.
@@ -988,7 +1004,7 @@ torch::Tensor rotate_dynamic(at::Tensor x, at::Tensor idx, at::Tensor theta,
       x, idx, theta, scales, group_size, krot, static_cast<int>(requested_cta_m),
       static_cast<int>(requested_row_pad), has_scale);
   return dispatch_rotate_variant(x, idx, theta, scales, group_size, krot, config.cta_m,
-                                 config.row_pad);
+                                 config.row_pad, reverse != 0 ? 1 : 0);
 }
 
 std::vector<int64_t> rotate_launch_config(at::Tensor x, int64_t krot = 8, bool has_scale = true,
@@ -1148,7 +1164,7 @@ at::Tensor grad_theta(at::Tensor rot, at::Tensor grad, at::Tensor idx_i, at::Ten
 }
 
 TORCH_LIBRARY(gptqmodel_paroquant, m) {
-  m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1) -> Tensor");
+  m.def("rotate(Tensor x, Tensor idx_ij, Tensor theta, Tensor? scales=None, int group_size=128, int cta_m=-1, int row_pad=-1, int reverse=0) -> Tensor");
   m.def("rotate_pair(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor)");
   m.def("rotate_pair_grad(Tensor x, Tensor x2, Tensor idx_ij, Tensor theta, int group_size=128, int cta_m=-1, int row_pad=-1) -> (Tensor, Tensor, Tensor)");
   m.def("launch_config(Tensor x, int krot=8, bool has_scale=True, int group_size=128, int cta_m=-1, int row_pad=-1) -> int[]");
