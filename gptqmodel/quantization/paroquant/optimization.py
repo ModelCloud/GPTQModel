@@ -931,11 +931,21 @@ class _ParoQuantOptimLinear(nn.Module):
             )
         return scales.clamp(min=self.scale_clamp_min, max=self.scale_clamp_max)
 
-    def transformed_weight(self, *, use_ste: bool = True) -> torch.Tensor:
+    def transformed_weight(
+        self,
+        *,
+        use_ste: bool = True,
+        channel_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Project the learnable weight into ParoQuant's transformed domain."""
         # Keep training-time scale updates differentiable while preventing
         # near-zero / exploding channel scales from destabilizing the transform.
-        scaled_weight = self.weight * self._safe_channel_scales(use_ste=use_ste)
+        # `channel_scales` is a pure function of `channel_scales_opt`, so callers
+        # that need it more than once per step can evaluate it once and hand the
+        # same tensor down instead of rebuilding the STE clamp every time.
+        if channel_scales is None:
+            channel_scales = self._safe_channel_scales(use_ste=use_ste)
+        scaled_weight = self.weight * channel_scales
         return _apply_rotation(
             scaled_weight,
             self.pairs,
@@ -945,9 +955,9 @@ class _ParoQuantOptimLinear(nn.Module):
             fused_rotation=self.fused_rotation,
         )
 
-    def quantized_transformed_weight(self) -> torch.Tensor:
+    def quantized_transformed_weight(self, *, channel_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Pseudo-quantize the transformed weight using current learned qparams."""
-        transformed = self.transformed_weight(use_ste=True)
+        transformed = self.transformed_weight(use_ste=True, channel_scales=channel_scales)
         if self.quantizer is None:
             return _maybe_compile_large_train_quant(
                 transformed,
@@ -959,7 +969,8 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def pseudo_weight(self) -> torch.Tensor:
         """Map the transformed-domain quantized weight back to runtime input space."""
-        quantized = self.quantized_transformed_weight()
+        channel_scales = self._safe_channel_scales(use_ste=True)
+        quantized = self.quantized_transformed_weight(channel_scales=channel_scales)
         quantized = _apply_inverse_rotation(
             quantized,
             self.pairs,
@@ -967,7 +978,6 @@ class _ParoQuantOptimLinear(nn.Module):
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
-        channel_scales = self._safe_channel_scales(use_ste=True)
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -979,7 +989,8 @@ class _ParoQuantOptimLinear(nn.Module):
         # Rotate the minibatch instead of reconstructing full pseudo-weights on
         # every step. This preserves the runtime contract while shrinking the
         # per-step rotation work from weight-sized tensors to batch-sized ones.
-        runtime_scales = self._safe_channel_scales(use_ste=True).reciprocal()
+        channel_scales = self._safe_channel_scales(use_ste=True)
+        runtime_scales = channel_scales.reciprocal()
         rotated_inputs = _apply_rotation(
             x_2d,
             self.pairs,
@@ -988,7 +999,11 @@ class _ParoQuantOptimLinear(nn.Module):
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
-        outputs = F.linear(rotated_inputs, self.quantized_transformed_weight(), self.bias)
+        outputs = F.linear(
+            rotated_inputs,
+            self.quantized_transformed_weight(channel_scales=channel_scales),
+            self.bias,
+        )
         if x.dim() > 2:
             return outputs.view(*original_shape[:-1], outputs.shape[-1])
         return outputs

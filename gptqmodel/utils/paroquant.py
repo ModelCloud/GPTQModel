@@ -40,6 +40,14 @@ _ROTATION_LAUNCH_CONFIG_CACHE: dict[tuple[object, ...], tuple[int, int]] = {}
 # from multiple threads racing the same cold shape.
 _ROTATION_LAUNCH_CONFIG_CACHE_LOCK = threading.Lock()
 _ROTATION_AUTOTUNE_SERIALIZE_LOCK = threading.Lock()
+# The requested launch policy is derived from process-static environment
+# overrides, so resolving it once per lifecycle keeps the steady-state rotation
+# path free of repeated ``os.getenv`` calls. ``clear_*`` and the prewarm entry
+# point reset it so a benchmark can still switch policies between runs.
+_ROTATION_LAUNCH_POLICY_CACHE: Optional[tuple[int, int]] = None
+# Latched once the fused rotation extension has loaded successfully in this
+# process. A failed attempt is never latched so a later rebuild can retry.
+_ROTATION_EXTENSION_READY = False
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -167,11 +175,11 @@ def _rotation_kernel_ready(
 ) -> bool:
     """Check whether the fused CUDA rotation kernel can service this call."""
     return (
-        x.device.type == "cuda"
+        x.is_cuda
         and x.dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES
-        and pairs.device.type == "cuda"
-        and theta.device.type == "cuda"
-        and (scales is None or scales.device.type == "cuda")
+        and pairs.is_cuda
+        and theta.is_cuda
+        and (scales is None or scales.is_cuda)
         and int(group_size) in {128}
         and int(theta.shape[0]) in {1, 8}
     )
@@ -226,6 +234,9 @@ def _extension_api():
 def clear_paroquant_rotation_extension_cache() -> None:
     """Delete cached ParoQuant rotation JIT artifacts before the next load attempt."""
 
+    global _ROTATION_EXTENSION_READY
+
+    _ROTATION_EXTENSION_READY = False
     clear_paroquant_rotation_autotune_cache()
     _PAROQUANT_ROTATION_EXTENSION.clear_cache()
 
@@ -233,6 +244,9 @@ def clear_paroquant_rotation_extension_cache() -> None:
 def clear_paroquant_rotation_autotune_cache() -> None:
     """Drop the native launch-plan cache used by fused rotation autotune."""
 
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    _ROTATION_LAUNCH_POLICY_CACHE = None
     with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
         _ROTATION_LAUNCH_CONFIG_CACHE.clear()
     clear_cache = _rotation_native_op_if_loaded("clear_autotune_cache")
@@ -243,7 +257,14 @@ def clear_paroquant_rotation_autotune_cache() -> None:
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
 
-    return _extension_api().is_available("paroquant")
+    global _ROTATION_EXTENSION_READY
+
+    if _ROTATION_EXTENSION_READY:
+        return True
+    loaded = _extension_api().is_available("paroquant")
+    if loaded:
+        _ROTATION_EXTENSION_READY = True
+    return loaded
 
 
 def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
@@ -286,16 +307,39 @@ def _rotation_native_op_if_loaded(op_name: str):
 
 def _rotation_requested_launch() -> tuple[int, int]:
     """Resolve the requested fused launch policy from env overrides or autotune."""
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    cached = _ROTATION_LAUNCH_POLICY_CACHE
+    if cached is not None:
+        return cached
+
     cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
     row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
     if cta_m_override is not None or row_pad_override is not None:
-        return (
+        resolved = (
             -1 if cta_m_override is None else int(cta_m_override),
             -1 if row_pad_override is None else int(row_pad_override),
         )
-    if _rotation_autotune_enabled():
-        return (-2, -2)
-    return (-1, -1)
+    elif _rotation_autotune_enabled():
+        resolved = (-2, -2)
+    else:
+        resolved = (-1, -1)
+    _ROTATION_LAUNCH_POLICY_CACHE = resolved
+    return resolved
+
+
+def _paroquant_rotation_op(op_name: str):
+    """Return a fused-rotation op handle without re-entering the shared loader.
+
+    ``TorchOpsJitExtension.op`` already memoizes handles, so an already loaded
+    namespace only needs that cheap lookup. Going through the shared loader is
+    reserved for the first call, which keeps the load contract (and the ability
+    for tests to swap the handle source) intact while dropping the per-call
+    ``load()`` re-validation from the steady-state rotation path.
+    """
+    if _PAROQUANT_ROTATION_EXTENSION._namespace_cache is not None:
+        return _PAROQUANT_ROTATION_EXTENSION.op(op_name)
+    return _extension_api().op("paroquant", op_name)
 
 
 def _rotation_autotune_cache_size() -> int:
@@ -305,7 +349,7 @@ def _rotation_autotune_cache_size() -> int:
         return int(cache_size())
     if not _load_rotation_extension():
         return 0
-    return int(_extension_api().op("paroquant", "autotune_cache_size")())
+    return int(_paroquant_rotation_op("autotune_cache_size")())
 
 
 def _run_rotation_op(
@@ -319,7 +363,7 @@ def _run_rotation_op(
     row_pad: int,
 ) -> torch.Tensor:
     """Execute the fused rotation op with one requested launch policy."""
-    return _extension_api().op("paroquant", "rotate")(
+    return _paroquant_rotation_op("rotate")(
         x,
         pairs,
         theta,
@@ -340,7 +384,7 @@ def _fused_grad_theta_op():
     case keeps the reference torch path.
     """
     try:
-        return _extension_api().op("paroquant", "grad_theta")
+        return _paroquant_rotation_op("grad_theta")
     except Exception:
         return None
 
@@ -367,7 +411,7 @@ def _fused_rotate_pair_op():
     them into a single launch. Unsupported dtypes/devices keep the two-call path.
     """
     try:
-        return _extension_api().op("paroquant", "rotate_pair")
+        return _paroquant_rotation_op("rotate_pair")
     except Exception:
         return None
 
@@ -423,7 +467,7 @@ def _fused_rotate_pair_grad_op():
     Unsupported dtypes/devices keep the reference torch path.
     """
     try:
-        return _extension_api().op("paroquant", "rotate_pair_grad")
+        return _paroquant_rotation_op("rotate_pair_grad")
     except Exception:
         return None
 
@@ -613,6 +657,11 @@ def prewarm_paroquant_rotation_extension(
     device: Optional[torch.device | str] = None,
 ) -> bool:
     """Eagerly build the fused rotation extension before timed quantization starts."""
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    # A prewarm marks the start of a new lifecycle, so re-read the launch
+    # policy overrides instead of reusing the previous run's resolution.
+    _ROTATION_LAUNCH_POLICY_CACHE = None
     if not fused_rotation:
         return False
     if int(group_size) not in {128}:
