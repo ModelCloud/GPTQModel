@@ -389,9 +389,12 @@ def ldlq(
     """
 
     devices = quant_args["devices"]
-    for device in devices:
-        torch.cuda.synchronize(device)
     main_stream = get_quant_stream(devices[0])
+    # Hand the caller's stream ordering over to the per-thread quant stream
+    # instead of draining the whole device: other modules are quantized
+    # concurrently on their own streams and a device sync would convoy them.
+    outer_stream = torch.cuda.current_stream(devices[0])
+    main_stream.wait_stream(outer_stream)
     with torch.cuda.stream(main_stream):
 
         devices = quant_args["devices"]
@@ -473,9 +476,7 @@ def ldlq(
             b_err = b_weight - b_weight_q
             prod_cache.addmm_(b_L.T, b_err, alpha = 1.0, beta = 1.0)
 
-        for device in devices:
-            torch.cuda.synchronize(device)
-
+    outer_stream.wait_stream(main_stream)
     return weight_q, encoded
 
 
@@ -510,9 +511,9 @@ def fallback_quant(
     """
 
     devices = quant_args["devices"]
-    for device in devices:
-        torch.cuda.synchronize(device)
     main_stream = get_quant_stream(devices[0])
+    outer_stream = torch.cuda.current_stream(devices[0])
+    main_stream.wait_stream(outer_stream)
     with torch.cuda.stream(main_stream):
 
         devices = quant_args["devices"]
@@ -578,9 +579,7 @@ def fallback_quant(
                 weight_q[i:j] = b_weight_q.to(buffer_device)
                 encoded[i // 16 : j // 16] = b_encoded.to(buffer_device)
 
-        for device in devices:
-            torch.cuda.synchronize(device)
-
+    outer_stream.wait_stream(main_stream)
     return weight_q, encoded
 
 
@@ -729,10 +728,9 @@ def g_scale_gss(
     tiles = _sample_gss_tiles(weight_r, width)
 
     devices = quant_args["devices"]
-    for device in devices:
-        torch.cuda.synchronize(device)
-
     main_stream = get_quant_stream(devices[0])
+    outer_stream = torch.cuda.current_stream(devices[0])
+    main_stream.wait_stream(outer_stream)
     # TODO: Figure out why Torch always initializes cuda:0 when exiting this CM, even when it's not used
     with torch.cuda.stream(main_stream):
 
@@ -776,10 +774,7 @@ def g_scale_gss(
         if verbose:
             print(f"     - gss: min = {best_scale:.6f}, mse: {(f1 + f2) / 2:.6f}")
 
-    devices = quant_args["devices"]
-    for device in devices:
-        torch.cuda.synchronize(device)
-
+    outer_stream.wait_stream(main_stream)
     return best_scale, (f1 + f2) / 2
 
 
