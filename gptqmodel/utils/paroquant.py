@@ -361,8 +361,14 @@ def _run_rotation_op(
     *,
     cta_m: int,
     row_pad: int,
+    reverse: bool = False,
 ) -> torch.Tensor:
-    """Execute the fused rotation op with one requested launch policy."""
+    """Execute the fused rotation op with one requested launch policy.
+
+    ``reverse`` walks the rotation rows backward with negated thetas inside the
+    same kernel, which is the inverse transform the autograd backward needs when
+    only the input carries a gradient.
+    """
     return _paroquant_rotation_op("rotate")(
         x,
         pairs,
@@ -371,6 +377,7 @@ def _run_rotation_op(
         int(group_size),
         int(cta_m),
         int(row_pad),
+        int(reverse),
     )
 
 
@@ -627,6 +634,8 @@ def _apply_fused_rotation(
     theta: torch.Tensor,
     scales: Optional[torch.Tensor],
     group_size: int,
+    *,
+    reverse: bool = False,
 ) -> torch.Tensor:
     """Run the fused rotation op with explicit overrides or native autotune sentinels."""
     requested_cta_m, requested_row_pad = _rotation_requested_launch()
@@ -646,6 +655,7 @@ def _apply_fused_rotation(
         group_size,
         cta_m=cta_m,
         row_pad=row_pad,
+        reverse=reverse,
     )
 
 
@@ -835,11 +845,19 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                 if fused_parts is not None:
                     grad_theta = torch.stack(fused_parts, dim=0).reshape(theta.shape).to(theta.dtype)
         else:
-            neg_theta_all = theta.neg()
-            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
-                pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
-                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
+            # Only the input carries a gradient, so the backward is the plain
+            # inverse transform. The inverse sweep is the forward sweep with the
+            # rotation rows walked backward and their thetas negated, which the
+            # native kernel performs in place: one launch instead of a host-side
+            # negate plus one launch per rotation.
+            grad = _apply_fused_rotation(
+                grad,
+                pairs,
+                theta,
+                None,
+                group_size,
+                reverse=True,
+            )
 
         if ctx.has_scale:
             scale_flat = scale_tensor.reshape(-1)

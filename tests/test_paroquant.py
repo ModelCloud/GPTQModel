@@ -2094,10 +2094,10 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
         calls["launch"] += 1
         return (16, 2)
 
-    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
         del pairs, theta, scales, group_size
         calls["rotate"] += 1
-        calls["configs"].append((cta_m, row_pad))
+        calls["configs"].append((cta_m, row_pad, int(reverse)))
         return x.clone()
 
     def fake_op(name):
@@ -2121,7 +2121,7 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
     assert torch.equal(second, x)
     assert calls["launch"] == 1
     assert calls["rotate"] == 2
-    assert calls["configs"] == [(16, 2), (16, 2)]
+    assert calls["configs"] == [(16, 2, 0), (16, 2, 0)]
 
     clear_paroquant_rotation_autotune_cache()
     third = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=128)
@@ -2129,7 +2129,7 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
     assert torch.equal(third, x)
     assert calls["launch"] == 2
     assert calls["rotate"] == 3
-    assert calls["configs"][-1] == (16, 2)
+    assert calls["configs"][-1] == (16, 2, 0)
 
 
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
@@ -5254,7 +5254,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
         calls["load_count"] = calls.get("load_count", 0) + 1
         return True
 
-    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
         calls["x_dtype"] = x.dtype
         calls["pairs_device"] = pairs.device.type
         calls["theta_dtype"] = theta.dtype
@@ -5262,6 +5262,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
         calls["group_size"] = group_size
         calls["cta_m"] = cta_m
         calls["row_pad"] = row_pad
+        calls["reverse"] = int(reverse)
         return x.clone()
 
     monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
@@ -5288,6 +5289,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     assert calls["group_size"] == 128
     assert calls["cta_m"] == 8
     assert calls["row_pad"] == 2
+    assert calls["reverse"] == 0
     assert actual.dtype == torch.bfloat16
     assert torch.equal(actual, x)
 
@@ -5355,6 +5357,96 @@ def test_paroquant_rotation_fused_bf16_uses_fp16_workspace_contract():
     assert actual_fp16_workspace.max().item() < bf16_fp16_workspace.max().item()
     assert actual_fp32.mean().item() <= bf16_fp32.mean().item()
     assert actual_fp32.max().item() <= bf16_fp32.max().item()
+
+
+def test_paroquant_rotation_backward_folds_frozen_theta_sweep_into_one_reverse_launch(monkeypatch):
+    """Guard the frozen-theta backward against one rotation launch per rotation row."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant reverse rotation sweep.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=29,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(5)
+    x = torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    x.requires_grad_(True)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    grad_out = (
+        torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    )
+
+    real_rotate = paroquant_utils_module._paroquant_rotation_op("rotate")
+    rotate_calls = []
+
+    def counting_rotate(*args):
+        rotate_calls.append(int(args[-1]))
+        return real_rotate(*args)
+
+    monkeypatch.setattr(paroquant_utils_module, "_rotation_requested_launch", lambda: (8, 2))
+    monkeypatch.setattr(
+        paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION,
+        "op",
+        lambda name: counting_rotate if name == "rotate" else None,
+    )
+
+    # `theta` never requires grad here, so the backward only needs the inverse
+    # transform of the incoming gradient.
+    assert theta.requires_grad is False
+    rotated = paroquant_utils_module.apply_paroquant_rotation_autograd(
+        x,
+        pairs,
+        theta,
+        group_size=group_size,
+    )
+    rotated.backward(grad_out)
+
+    # One forward sweep plus one fused reverse sweep, and the reverse sweep has to
+    # be the single-launch spelling.
+    assert rotate_calls == [0, 1]
+
+    # The fused reverse sweep has to be bit-equal to the per-rotation loop it
+    # replaced, which is the formulation every earlier release produced.
+    neg_theta_all = theta.neg()
+    looped = grad_out
+    for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+        looped = paroquant_utils_module._apply_fused_rotation(
+            looped,
+            pairs.narrow(0, rot_idx, 1),
+            neg_theta_all.narrow(0, rot_idx, 1),
+            None,
+            group_size,
+        )
+    assert torch.equal(x.grad, looped)
+
+    reference = apply_paroquant_rotation_reference(
+        grad_out,
+        pairs.flip(0),
+        -theta.flip(0),
+        scales=None,
+        group_size=group_size,
+    )
+    assert torch.allclose(x.grad, reference, atol=1e-6, rtol=1e-5)
 
 
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
