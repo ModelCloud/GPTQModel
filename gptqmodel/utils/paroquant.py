@@ -203,7 +203,7 @@ def _rotation_extra_cuda_cflags() -> list[str]:
 _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_paroquant_rotation",
     namespace="gptqmodel_paroquant",
-    required_ops=("rotate", "launch_config", "clear_autotune_cache", "autotune_cache_size"),
+    required_ops=("rotate", "launch_config", "grad_theta", "clear_autotune_cache", "autotune_cache_size"),
     sources=_rotation_sources,
     build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
@@ -327,6 +327,34 @@ def _run_rotation_op(
         int(group_size),
         int(cta_m),
         int(row_pad),
+    )
+
+
+def _fused_grad_theta_op():
+    """Return the fused rotation-gradient op, or None when it cannot be used.
+
+    The autograd backward runs this once per rotation per layer, so the torch
+    formulation costs ~21 tiny kernel launches each. The native op folds the
+    four gathers, the elementwise math and the two batch reductions into a
+    single launch. Only float32 CUDA activations are supported; every other
+    case keeps the reference torch path.
+    """
+    try:
+        return _extension_api().op("paroquant", "grad_theta")
+    except Exception:
+        return None
+
+
+def _fused_grad_theta_ready(rotated: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused rotation-gradient op can service this pair."""
+    return (
+        rotated.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and rotated.is_cuda
+        and grad.is_cuda
+        and rotated.is_contiguous()
+        and grad.is_contiguous()
+        and rotated.shape == grad.shape
     )
 
 
@@ -563,6 +591,14 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
             idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
             idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
 
+            # The fused native op replaces the four gathers plus the elementwise
+            # and reduce ops of one rotation with a single launch. Fall back to
+            # the reference formulation for unsupported dtypes/devices.
+            fused_grad_theta = (
+                _fused_grad_theta_op() if _fused_grad_theta_ready(rotated, grad) else None
+            )
+            fused_parts = [None] * krot if fused_grad_theta is not None else None
+
             for rot_idx in range(krot - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
                 neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
@@ -571,6 +607,17 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
                 idx_i = idx_i_all[rot_idx]
                 idx_j = idx_j_all[rot_idx]
+
+                if fused_grad_theta is not None:
+                    fused_parts[rot_idx] = fused_grad_theta(
+                        rotated,
+                        grad,
+                        idx_i,
+                        idx_j,
+                        sin_all[rot_idx].reshape(-1),
+                        cos_all[rot_idx].reshape(-1),
+                    )
+                    continue
 
                 xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
                 xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
@@ -587,6 +634,9 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                     .reshape(-1)
                     .to(theta.dtype)
                 )
+
+            if fused_parts is not None:
+                grad_theta = torch.stack(fused_parts, dim=0).reshape(theta.shape).to(theta.dtype)
         else:
             neg_theta_all = theta.neg()
             for rot_idx in range(pairs.shape[0] - 1, -1, -1):
