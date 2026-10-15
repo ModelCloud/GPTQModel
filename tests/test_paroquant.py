@@ -491,6 +491,83 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
     assert calls == [expected_use_amp, expected_use_amp]
 
 
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_gptqmodel"],
+)
+def test_paroquant_stage_skips_dead_pre_epoch_train_eval(monkeypatch, stage_runner_name):
+    """Guard that a stage never pays for a train-split eval the first epoch overwrites."""
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 1)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0]], dtype=torch.float32),
+        torch.tensor([[2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0]], dtype=torch.float32),
+        torch.tensor([[0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    seen_splits = []
+
+    def fake_evaluate(_model, inputs, _targets, *, use_amp=False):
+        del use_amp
+        seen_splits.append("train" if inputs is train_inputs else "val")
+        return 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+
+    model = _TinyModel()
+    epochs = 2
+    getattr(paroquant_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    # The train split must not be evaluated before the loop: the first epoch
+    # assigns `last_train_loss` before anything reads it, so such a call is a
+    # full forward pass plus a device sync that no caller can observe.
+    # `_run_stage_gptqmodel` additionally seeds `best_val_loss` with a real
+    # validation pass, which is why the validation count is a lower bound.
+    assert "train" not in seen_splits
+    assert seen_splits.count("val") >= epochs
+
+
 def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
     """Guard the PR-18 fix so validation loss stays inside the CUDA autocast region."""
     state = {"autocast_active": False, "loss_saw_autocast": None}
