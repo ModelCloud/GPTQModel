@@ -442,6 +442,41 @@ __global__ void rotate_pair_grad_kernel(const scalar_t *__restrict__ x,
 // Collapse the per-row-tile partials into one rotation-gradient tensor. The
 // reduction stays deterministic: a fixed tile order per output element, with no
 // atomics, so repeated runs produce identical results.
+//
+// Each output element walks the tile axis with a stride of `hh` floats, so the
+// loop trip count is a runtime value and the compiler cannot unroll it. That
+// leaves one strided load in flight per thread, which is pure memory latency:
+// measured at 334 us for the 1216-tile weight shapes, ~95x off the bandwidth of
+// the same byte volume. Walking the axis in fixed-size batches issues the loads
+// together while the adds still run in ascending tile order, so the sum is
+// bit-identical to the plain sequential loop and only the latency hiding
+// changes.
+//
+// Two batch widths: the wide one buys the most overlap on the long tile axes
+// (weight matrices run 224-1216 tiles), while the narrow one keeps the short
+// activation axes (16-32 tiles) inside a single batch instead of falling
+// through to the scalar tail.
+constexpr int kRotateGradReduceBatchWide = 32;
+constexpr int kRotateGradReduceBatch = 16;
+
+// Stage one batch of strided tile loads, then fold them into `sum` in ascending
+// tile order. The loads run in their own loop so they are all in flight before
+// the first add consumes one.
+template <int BATCH>
+__device__ __forceinline__ float rotate_grad_reduce_batch(const float *__restrict__ src, int tile,
+                                                          int hh, float sum) {
+  float staged[BATCH];
+#pragma unroll
+  for (int k = 0; k < BATCH; k++) {
+    staged[k] = src[static_cast<int64_t>(tile + k) * hh];
+  }
+#pragma unroll
+  for (int k = 0; k < BATCH; k++) {
+    sum += staged[k];
+  }
+  return sum;
+}
+
 __global__ void rotate_grad_reduce_kernel(const float *__restrict__ partials,
                                           float *__restrict__ out, int row_tiles, int hh,
                                           int64_t total) {
@@ -453,7 +488,14 @@ __global__ void rotate_grad_reduce_kernel(const float *__restrict__ partials,
   const int e = static_cast<int>(idx % hh);
   const float *__restrict__ src = partials + static_cast<int64_t>(r) * row_tiles * hh + e;
   float sum = 0.0f;
-  for (int tile = 0; tile < row_tiles; tile++) {
+  int tile = 0;
+  for (; tile + kRotateGradReduceBatchWide <= row_tiles; tile += kRotateGradReduceBatchWide) {
+    sum = rotate_grad_reduce_batch<kRotateGradReduceBatchWide>(src, tile, hh, sum);
+  }
+  for (; tile + kRotateGradReduceBatch <= row_tiles; tile += kRotateGradReduceBatch) {
+    sum = rotate_grad_reduce_batch<kRotateGradReduceBatch>(src, tile, hh, sum);
+  }
+  for (; tile < row_tiles; tile++) {
     sum += src[static_cast<int64_t>(tile) * hh];
   }
   out[idx] = sum;

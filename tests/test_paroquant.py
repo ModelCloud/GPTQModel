@@ -5495,6 +5495,81 @@ def test_paroquant_rotation_backward_folds_frozen_theta_sweep_into_one_reverse_l
     assert torch.allclose(x.grad, reference, atol=1e-6, rtol=1e-5)
 
 
+def test_paroquant_pair_grad_reduce_folds_tiles_in_ascending_order():
+    """Guard the cross-tile rotation-gradient reduce against a re-associated sum.
+
+    The reduce walks the tile axis in fixed-size load batches so the strided
+    loads overlap instead of costing one memory round trip each. That is only
+    legal while every add still runs in ascending tile order, so the batched
+    fold has to stay bit-equal to folding the per-tile rotation gradients one at
+    a time with plain fp32 adds.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant rotation-gradient reduce.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    cta_m = 4
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    def run(x_rows, grad_rows):
+        _x, _grad, grad_theta = pair_grad(
+            x_rows.contiguous(),
+            grad_rows.contiguous(),
+            pairs,
+            theta,
+            group_size,
+            cta_m,
+            0,
+        )
+        return grad_theta
+
+    # 4 tiles only ever hits the scalar tail; 48 tiles runs one wide batch, one
+    # narrow batch and no tail, so every reduce path is covered.
+    for row_tiles in (4, 48):
+        rows = row_tiles * cta_m
+        x = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+        grad = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+
+        fused = run(x, grad)
+        assert fused.shape == (krot, in_features // 2)
+
+        reference = None
+        for tile in range(row_tiles):
+            tile_slice = slice(tile * cta_m, (tile + 1) * cta_m)
+            tile_grad = run(x[tile_slice], grad[tile_slice])
+            reference = tile_grad if reference is None else reference + tile_grad
+        assert torch.equal(fused, reference)
+
+
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
     """Guard that cached BF16 rotation metadata preserves the runtime dtype and values."""
     if not torch.cuda.is_available():
