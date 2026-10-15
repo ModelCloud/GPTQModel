@@ -743,6 +743,136 @@ def test_paroquant_materialized_sym_scale_ste_matches_legacy_gradients():
     torch.testing.assert_close(scale.grad, legacy_scale.grad, atol=0, rtol=0)
 
 
+def _ste_boundary_grid(dtype: torch.dtype) -> torch.Tensor:
+    """Deterministic rounding/clamp boundary values for the straight-through estimators."""
+    finfo = torch.finfo(dtype)
+    values = [
+        -3.5,
+        -2.5,
+        -1.5,
+        -0.5,
+        -0.0,
+        0.0,
+        0.5,
+        1.5,
+        2.5,
+        3.5,
+        -0.5000001,
+        -0.4999999,
+        0.4999999,
+        0.5000001,
+        -1.5000001,
+        -1.4999999,
+        1.4999999,
+        1.5000001,
+        -2.0,
+        -1.0,
+        -0.25,
+        0.25,
+        1.0,
+        2.0,
+        1024.0,
+        -1024.0,
+        float(finfo.eps),
+        -float(finfo.eps),
+        float(finfo.tiny),
+        -float(finfo.tiny),
+        float(finfo.max),
+        -float(finfo.max),
+    ]
+    return torch.tensor(values, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_paroquant_ste_helpers_match_rounding_oracle(dtype):
+    """Guard the autograd-node STEs against the intended round/clamp arithmetic.
+
+    The oracle is the intended arithmetic (a plain ``round``/``clamp``) evaluated
+    independently of the helpers. The legacy ``(f(x) - x).detach() + x`` algebra is
+    deliberately *not* used as the oracle: ``f(x) - x`` cancels catastrophically
+    when ``|x|`` is large relative to the clamp bound, so the legacy form returns
+    wrong values (``clamp(3.4e38, 0, 15)`` evaluates to ``0`` in bfloat16 while the
+    intended result is ``15``). The detach form is still compared so the guards
+    record that the helpers are exact where the legacy algebra is exact and no
+    worse anywhere else.
+    """
+    values = _ste_boundary_grid(dtype)
+    upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+    actual_x = values.clone().requires_grad_(True)
+    legacy_x = values.clone().requires_grad_(True)
+    actual_round = paroquant_optimization._round_ste(actual_x)
+    legacy_round = (legacy_x.round() - legacy_x).detach() + legacy_x
+    assert torch.equal(actual_round.detach(), values.round())
+    assert torch.equal(actual_round.detach(), legacy_round.detach())
+    (actual_round_grad,) = torch.autograd.grad(actual_round, actual_x, grad_outputs=upstream)
+    (legacy_round_grad,) = torch.autograd.grad(legacy_round, legacy_x, grad_outputs=upstream)
+    assert torch.equal(actual_round_grad, legacy_round_grad)
+    assert torch.equal(actual_round_grad, upstream)
+
+    bounds = [
+        (0.0, 15.0),
+        (-7.0, 7.0),
+        (None, 7.0),
+        (-7.0, None),
+        (float(torch.finfo(dtype).tiny), float(torch.finfo(dtype).max)),
+    ]
+    for min_value, max_value in bounds:
+        if min_value is not None and max_value is not None:
+            endpoints = torch.tensor([min_value, max_value], dtype=dtype)
+            step = torch.nextafter(endpoints, torch.full_like(endpoints, float("inf")))
+            values = torch.cat((values, endpoints, step, -step))
+            upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+        actual_x = values.clone().requires_grad_(True)
+        legacy_x = values.clone().requires_grad_(True)
+        actual_clamp = paroquant_optimization._clamp_ste(actual_x, min_value, max_value)
+        legacy_clamp = (legacy_x.clamp(min_value, max_value) - legacy_x).detach() + legacy_x
+        oracle_clamp = values.clamp(min_value, max_value)
+        assert torch.equal(actual_clamp.detach(), oracle_clamp)
+        (actual_clamp_grad,) = torch.autograd.grad(actual_clamp, actual_x, grad_outputs=upstream)
+        (legacy_clamp_grad,) = torch.autograd.grad(legacy_clamp, legacy_x, grad_outputs=upstream)
+        assert torch.equal(actual_clamp_grad, legacy_clamp_grad)
+        assert torch.equal(actual_clamp_grad, upstream)
+
+    # Regression guard for the defect the autograd-node form removes: the legacy
+    # detach algebra cancels catastrophically once |x| dominates the clamp bound.
+    large = torch.tensor([float(torch.finfo(dtype).max)], dtype=dtype)
+    legacy_large = (large.clamp(0.0, 15.0) - large).detach() + large
+    expected_large = torch.full_like(large, 15.0)
+    assert torch.equal(paroquant_optimization._clamp_ste(large.clone(), 0.0, 15.0), expected_large)
+    assert not torch.equal(legacy_large, expected_large)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant STE launch accounting requires CUDA.")
+def test_paroquant_ste_helpers_emit_fewer_kernels_than_detach_algebra():
+    """Guard the launch-count win that motivates the autograd-node STEs."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    base = torch.randn(4096, 512, device=device)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _detach_algebra() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = (value.round() - value).detach() + value
+        clamped = (rounded.clamp(0.0, 15.0) - rounded).detach() + rounded
+        (clamped * clamped).sum().backward()
+
+    def _autograd_node() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = paroquant_optimization._round_ste(value)
+        clamped = paroquant_optimization._clamp_ste(rounded, 0.0, 15.0)
+        (clamped * clamped).sum().backward()
+
+    assert _kernel_count(_autograd_node) < _kernel_count(_detach_algebra)
+
+
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     """Guard that only large CUDA training-time quant calls route into the compiled helper."""
     class _FakeWeight:
