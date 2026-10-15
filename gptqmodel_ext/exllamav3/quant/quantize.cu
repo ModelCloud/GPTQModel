@@ -54,6 +54,37 @@ void quantize_tiles_kernel
     if (thread < 256) sh_input_tile[thread] = __float2half_rn(input_tile[thread]);
     __syncthreads();
 
+    // Codebook decode cache. decode_3inst(state) is a pure function of the 16-bit
+    // state, and this thread revisits exactly the same n_oe * max_q states at every
+    // one of the 256 trellis positions (and again on the tail-biting second pass),
+    // so decoding once per tile instead of once per DP step drops ~5 ALU ops from
+    // the innermost loop. The table is 65536 / NUM_THREADS halfs, i.e. 32 packed
+    // VGPRs at NUM_THREADS = 1024, so it is only materialized for K <= 6 where the
+    // whole state space is 65536. K = 7/8 have one out-edge per thread and would
+    // need 128/256 halfs, so they keep decoding inline.
+    constexpr bool dec_cache = (K <= 6);
+    constexpr int n_oe = (edges + NUM_THREADS - 1) / NUM_THREADS;
+    [[maybe_unused]] half dec_tab[dec_cache ? (n_oe * max_q) : 1];
+    if constexpr (dec_cache)
+    {
+        #pragma unroll
+        for (int j = 0; j < n_oe; ++j)
+        {
+            #pragma unroll
+            for (int k = 0; k < max_q; ++k)
+                dec_tab[j * max_q + k] = decode_3inst<cb>((k << Kr) | (thread + j * NUM_THREADS));
+        }
+    }
+
+    // Decoded codebook value for this thread's j-th out-edge and k-th state slot.
+    // All indices are compile-time constants after unrolling, so dec_tab stays in
+    // registers.
+    auto dec_at = [&](int j, int k, int out_edge_idx) -> half
+    {
+        if constexpr (dec_cache) return dec_tab[j * max_q + k];
+        else return decode_3inst<cb>((k << Kr) | out_edge_idx);
+    };
+
     auto forward = [&](int roll, int pre_state)
     {
         int ri = roll % 256;
@@ -64,13 +95,14 @@ void quantize_tiles_kernel
         temp_costs = temp_costs_inc;
         temp_costs_inc = t;
 
-        for (int out_edge_idx = thread; out_edge_idx < edges; out_edge_idx += NUM_THREADS)
+        #pragma unroll
+        for (int j = 0; j < n_oe; ++j)
         {
+            int out_edge_idx = thread + j * NUM_THREADS;
             w = sh_input_tile[ri];
 
-            int state = out_edge_idx;
-            int in_edge_idx = state >> K;
-            dh = __hsub(decode_3inst<cb>(state), w);
+            int in_edge_idx = out_edge_idx >> K;
+            dh = __hsub(dec_at(j, 0, out_edge_idx), w);
             err = __hmul(dh, dh);
             if (pre_state >= 0 && in_edge_idx != pre_state) err = H_INF;
             min_err = err;
@@ -79,9 +111,8 @@ void quantize_tiles_kernel
             #pragma unroll
             for (int k = 1; k < max_q; ++k)
             {
-                state = (k << Kr) | out_edge_idx;
-                in_edge_idx = state >> K;
-                dh = __hsub(decode_3inst<cb>(state), w);
+                in_edge_idx = ((k << Kr) | out_edge_idx) >> K;
+                dh = __hsub(dec_at(j, k, out_edge_idx), w);
                 err = __hmul(dh, dh);
                 if (pre_state >= 0 && in_edge_idx != pre_state) err = H_INF;
                 if (__hlt(err, min_err)) { min_err = err; min_in_edge = in_edge_idx; }
@@ -104,23 +135,22 @@ void quantize_tiles_kernel
             temp_costs = temp_costs_inc;
             temp_costs_inc = t;
 
-            for (int out_edge_idx = thread; out_edge_idx < edges; out_edge_idx += NUM_THREADS)
+            #pragma unroll
+            for (int j = 0; j < n_oe; ++j)
             {
+                int out_edge_idx = thread + j * NUM_THREADS;
                 w = sh_input_tile[ri];
 
-                int state = out_edge_idx;
-                int in_edge_idx = state >> K;
-                dh = __hsub(decode_3inst<cb>(state), w);
-                err = __hfma(dh, dh, temp_costs_inc[in_edge_idx]);
-                min_err = err;
+                int in_edge_idx = out_edge_idx >> K;
+                dh = __hsub(dec_at(j, 0, out_edge_idx), w);
+                min_err = __hfma(dh, dh, temp_costs_inc[in_edge_idx]);
                 int min_in_edge = in_edge_idx;
 
                 #pragma unroll
                 for (int k = 1; k < max_q; ++k)
                 {
-                    state = (k << Kr) | out_edge_idx;
-                    in_edge_idx = state >> K;
-                    dh = __hsub(decode_3inst<cb>(state), w);
+                    in_edge_idx = ((k << Kr) | out_edge_idx) >> K;
+                    dh = __hsub(dec_at(j, k, out_edge_idx), w);
                     err = __hfma(dh, dh, temp_costs_inc[in_edge_idx]);
                     if (__hlt(err, min_err)) { min_err = err; min_in_edge = in_edge_idx; }
                 }
