@@ -226,6 +226,12 @@ this build`) despite a startup banner that suggests `PYTHON_GIL=0`.
 **Stream primitives are cheap.** `torch.cuda.Stream.wait_stream` and `Event`
 round-trips cost about 5 us even under load.
 
+**Subset-boundary device syncs are free.** A run issues 36
+`torch.cuda.synchronize()` calls (one per subset, plus the per-layer sync in
+`stage_layer`) and waits a total of 0.002 s. The workers' stream brackets have
+already ordered the work by the time each sync is reached, so the syncs are not
+what serializes the subsets.
+
 ## What is left
 
 The kernel is a fixed-latency chain, `ldlq` is irreducibly sequential along
