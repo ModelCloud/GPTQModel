@@ -796,6 +796,48 @@ def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     )
 
 
+def test_paroquant_large_train_quant_compile_falls_back_on_failure(monkeypatch):
+    """A rejected compiled call must degrade to eager instead of aborting the lifecycle."""
+    class _FakeWeight:
+        def __init__(self, numel: int, device_type: str = "cuda"):
+            self._numel = numel
+            self.device = SimpleNamespace(type=device_type)
+
+        def numel(self) -> int:
+            return self._numel
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated dynamo failure")
+
+    monkeypatch.setattr(paroquant_optimization, "_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
+    monkeypatch.setattr(paroquant_optimization, "_LARGE_TRAIN_QUANT_COMPILE_DISABLED", False)
+    monkeypatch.setattr(paroquant_optimization, "env_flag", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(paroquant_optimization, "_get_large_train_quant_compile", lambda: _boom)
+    monkeypatch.setattr(paroquant_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
+
+    with pytest.warns(UserWarning):
+        assert (
+            paroquant_optimization._maybe_compile_large_train_quant(
+                _FakeWeight(32),
+                bits=4,
+                group_size=8,
+                sym=True,
+            )
+            == "eager"
+        )
+    assert paroquant_optimization._LARGE_TRAIN_QUANT_COMPILE_DISABLED is True
+    # The rest of the process must skip the compiled path entirely.
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+
+
 def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):

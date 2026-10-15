@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import math
 import random
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
@@ -44,6 +45,9 @@ _PAROQUANT_OPTIMIZERS: tuple[str, ...] = ("adamw", "adam", "sgd")
 # Best-state snapshots are a separate memory policy from the always-fp32 live optimization path.
 _PAROQUANT_BEST_STATE_DTYPES: tuple[str, ...] = ("fp16", "bf16", "fp32")
 _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
+# Set once if the optional compiled accelerator is rejected at call time so the
+# rest of the process runs the eager reference path instead of aborting.
+_LARGE_TRAIN_QUANT_COMPILE_DISABLED = False
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -804,7 +808,14 @@ def _get_large_train_quant_compile():
     if compile_fn is None:
         return None
     try:
-        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True)
+        # `dynamic=True` builds one shape-generic graph instead of a specialized
+        # graph per layer shape. Transformer layers come in many distinct shapes,
+        # and under `fullgraph=True` every new shape is a Dynamo recompilation, so
+        # a handful of large layers is enough to exhaust the recompile limit and
+        # hard-fail the entire quantization lifecycle. The compiled region here is
+        # elementwise, so the dynamic graph is numerically identical to the
+        # specialized one.
+        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True, dynamic=True)
     except Exception:
         return None
 
@@ -820,8 +831,11 @@ def _maybe_compile_large_train_quant(
     use_ste: bool = True,
 ) -> torch.Tensor:
     """Compile only large training-time quant calls where the compile tax amortizes."""
+    global _LARGE_TRAIN_QUANT_COMPILE_DISABLED
+
     should_compile = (
         bool(use_ste)
+        and not _LARGE_TRAIN_QUANT_COMPILE_DISABLED
         and weight.device.type == "cuda"
         and weight.numel() >= _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL
         and env_flag("GPTQMODEL_PAROQUANT_OPT_LARGE_TRAIN_QUANT_COMPILE", default=True)
@@ -829,15 +843,27 @@ def _maybe_compile_large_train_quant(
     if should_compile:
         compiled = _get_large_train_quant_compile()
         if compiled is not None:
-            return compiled(
-                weight,
-                bits=bits,
-                group_size=group_size,
-                sym=sym,
-                scale=scale,
-                zero_point_float=zero_point_float,
-                use_ste=use_ste,
-            )
+            try:
+                return compiled(
+                    weight,
+                    bits=bits,
+                    group_size=group_size,
+                    sym=sym,
+                    scale=scale,
+                    zero_point_float=zero_point_float,
+                    use_ste=use_ste,
+                )
+            except Exception as exc:
+                # The compiled path is an optional accelerator on top of a
+                # default-on optimization. If Dynamo rejects this call, degrade to
+                # the eager reference for the rest of the process rather than
+                # aborting the quantization lifecycle.
+                _LARGE_TRAIN_QUANT_COMPILE_DISABLED = True
+                warnings.warn(
+                    "ParoQuant: disabling the compiled large-train quant path after "
+                    f"{type(exc).__name__}; falling back to the eager path. Reason: {exc}",
+                    stacklevel=2,
+                )
     return pseudo_quantize_dequant(
         weight,
         bits=bits,
