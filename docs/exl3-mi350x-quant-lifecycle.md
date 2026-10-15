@@ -55,8 +55,16 @@ microbenchmarks against the same `quantize_tiles_kernel<4, 1>` instantiation,
 | --- | --- |
 | 8 | 1.500 ms |
 | 56 | 1.514 ms |
+| 128 | 1.518 ms |
 | 256 | 1.676 ms |
+| 304 | 3.120 ms |
+| 512 | 3.087 ms |
 | 1024 | 6.185 ms |
+
+The step at 304 and 512 is the wave boundary: a launch costs
+`ceil(tiles / 256) * ~1.55 ms`, so a 56-tile launch occupies 56 of 256 CUs for
+exactly as long as a 256-tile launch occupies all of them. Grid size buys
+occupancy, never latency.
 
 56 blocks on a 256-CU device cost the same as 8. The kernel uses 128 VGPRs at
 1024 threads, i.e. the whole 131 072-entry VGPR file, which caps residency at one
@@ -77,6 +85,47 @@ kernels by grid size:
 
 A grid of 8 and a grid of 56 both cost about 1.5 ms; only at 256 does the mean
 rise, and then by less than 60%.
+
+### Why the block takes 1.5 ms
+
+The block is issue-bound, not stall-bound. Emitting gfx950 assembly for
+`quantize_tiles_kernel<4, 1>` and counting the steady-state trellis loop
+(`.LBB12_3`, the `for (int i = 1; i < 256; ++i)` body) gives **526 instructions
+per position iteration**:
+
+| Opcode class | Count | Role |
+| --- | --- | --- |
+| `v_cndmask` | 120 | 2 per relaxation: `min_err`, `min_in_edge` |
+| `v_fma` / `v_fma_mix_f32` | 112 | `dec - wf` and `fmaf(dh, dh, cost)` |
+| `ds_read_u16` | 65 | 1 cost read per relaxation |
+| `v_cmp` | 60 | 1 per relaxation |
+| `s_waitcnt` | 46 | LDS/global scoreboard waits |
+| `v_lshl` / `v_or` | 69 | addressing and `in_edge_idx` |
+| `v_pk_add_f32` / `v_pk_fma_f32` | 8 | packed fp32 pairs |
+| `global_store_short` / `ds_write_b16` | 8 | result and traceback writes |
+
+255 iterations x 2 tail-biting laps x 526 = 268 K instructions per warp. With
+1024 threads that is 8 warps per SIMD, so a SIMD issues 8 x 268 K = 2.15 M
+instructions; at one issue per SIMD-cycle and ~2.2 GHz that is 0.98 ms against
+a measured 1.43 ms, i.e. about 68% issue efficiency. Reducing the thread count
+does not help: 512 threads doubles `n_oe` and therefore doubles the instructions
+per warp while halving the warps per SIMD, leaving the same product.
+
+The compiler is already at the floor for this formulation. Two codegen facts
+matter, and both were confirmed in the assembly:
+
+* The 16 predecessor reads per out-edge are emitted as
+  `ds_read_u16 v97, v96 offset:512` ... `offset:3584`. For `K = 4` the state
+  stride is `1 << (16 - 2K) = 256` halfs = 512 bytes, so the index arithmetic
+  for `temp_costs_inc[((k << Kr) | out_edge_idx) >> K]` collapses into a single
+  base register plus a fixed immediate offset. There is no per-relaxation
+  address computation to remove.
+* `__half2float` is free: `v_fma_mix_f32` takes the f16 operand directly, and
+  where the dependency graph allows it the compiler emits `v_pk_add_f32` /
+  `v_pk_fma_f32`, doing two fp32 lanes per instruction.
+
+The per-relaxation floor is therefore 5 ops (subtract, fma, compare, two
+selects) and the emitted loop is within about one op of it.
 
 ## Measured concurrency is 1.15, and the device can do far better
 
@@ -131,25 +180,36 @@ pool size, is what decides how many chains exist.
 
 ## Launch accounting: 22% of launches are the scale search
 
-`quantize_tiles` is called 5 760 times per run. Instrumenting the call sites
-splits them cleanly:
+`quantize_tiles` is called 4 386 times per run, and those calls issue 5 760
+`quantize_tiles_kernel` launches: the HIP op splits a call into
+`ceil(tiles / 256)` launches of at most 256 blocks. Instrumenting the call sites
+splits both counts cleanly:
 
-| Source | Launches |
-| --- | --- |
-| `ldlq` (one per 16-row block) | 4 512 |
-| `g_scale_gss` (global-scale search) | 1 248 |
-| total | 5 760 |
+| Source | `quantize_tiles` calls | Kernel launches |
+| --- | --- | --- |
+| `ldlq` (one per 16-row block) | 3 840 | 4 512 |
+| `g_scale_gss` (global-scale search) | 546 | 1 248 |
+| total | 4 386 | 5 760 |
 
-`ldlq` issues exactly `size_k / 16` launches per module, and that count is
-invariant under `buf_size_k`: a larger span trades outer iterations for inner
-ones. `mlp.down_proj` is `(4864, 896)` and therefore contributes 304 launches
-per layer, about 35% of the layer's 528 critical-path launches.
+The 5 760 agrees with the 5 759 `quantize_tiles_kernel<4, 1>` records in the
+profiler trace, and the scale search is still 22% of them.
 
-`g_scale_gss` issues `13 * ceil(sample_tiles / 256)` launches. The 13 is not a
-tunable: it is a golden-section search over `[0.1, 1.9]` with `tol = 0.01`,
-which shrinks the bracket by `1/phi` per iteration and needs 11 iterations plus
-2 probes. `sample_tiles` is `max(tiles_k, tiles_n) * 3`, which is 168 for the
-896-square and `(896,128)` modules and 912 for `(896,4864)` and `(4864,896)`.
+`ldlq` calls `quantize_tiles` exactly `size_k / 16` times per module, once per
+16-row block, and that count is invariant under `buf_size_k`: a larger span
+trades outer iterations for inner ones. How many kernel launches those calls
+issue depends on the shape, because the call's grid is `tiles_n`: 56 tiles is
+one launch, and the 304-tile call of a `(896,4864)` module is two.
+`mlp.down_proj` is `(4864, 896)`, so it makes 304 single-launch calls per layer:
+304 of the layer's 752 `ldlq` kernel launches, and every one of them is on the
+critical path because the module is alone in its subset.
+
+`g_scale_gss` calls `quantize_tiles` 13 times per module, and each of those
+calls is `ceil(sample_tiles / 256)` kernel launches -- one for the 168-tile
+sample of the square and `(896,128)` shapes, four for the 912-tile sample of
+`(896,4864)` and `(4864,896)`. The 13 is not a tunable: it is a golden-section
+search over `[0.1, 1.9]` with `tol = 0.01`, which shrinks the bracket by `1/phi`
+per iteration and needs 11 iterations plus 2 probes. `sample_tiles` is
+`max(tiles_k, tiles_n) * 3`.
 
 On an idle device the search is pure launch latency:
 
@@ -165,6 +225,65 @@ off entirely drops the wall from 7.98 s to **6.28 s**, which is the measured
 ceiling for any change that only removes the search. Note that this is a
 ceiling, not a target: the search is what selects the global scale, so removing
 it changes the quantized weights.
+
+## Where the waves go: `ldlq`'s grid is only `tiles_n` wide
+
+`ldlq` walks the weight in 16-row blocks, bottom-up, and calls
+`quantize_tiles_multigpu` once per block with `tiles.shape[0] == tiles_n`. The
+block is a genuine dependency: block `bi` consumes `weight_q[bj:]` produced by
+the blocks above it, so the chain is `size_k / 16` deep and cannot be batched.
+What it *can* be is concurrent, and it is not, because the grid is narrow.
+
+| Shape | `tiles_n` | Chain depth | CU occupancy per launch | GPU time |
+| --- | --- | --- | --- | --- |
+| `(896, 128)` | 8 | 56 | 3% | 84 ms |
+| `(896, 896)` | 56 | 56 | 22% | 84 ms |
+| `(896, 4864)` | 304 | 56 | 100% | 168 ms |
+| `(4864, 896)` | 56 | 304 | 22% | 456 ms |
+
+`mlp.down_proj` is the pathological case: 304 sequential launches of 56 blocks,
+each of which holds a CU for a full 1.5 ms wave. Packed to 256 blocks per wave
+those same 17 024 tiles would need 67 waves, i.e. ~100 ms. The 4.5x difference
+is not recoverable inside one module: the chain is sequential along `size_k`,
+the tile grid is fixed by the weight shape, and splitting a 16x16 tile across
+blocks would need a grid-wide barrier per trellis position.
+
+Counting waves per subset -- one wave is one `ceil(tiles / 256)` kernel launch,
+and 256 blocks cost ~1.55 ms -- and measuring the subset walls on the same run:
+
+| Subset | Modules | Chains | `ldlq` waves | `gss` waves | Measured wall |
+| --- | --- | --- | --- | --- | --- |
+| 1/4 | `q,k,v_proj` | 3 | 168 | 39 | 148 ms |
+| 2/4 | `o_proj` | 1 | 56 | 13 | 120 ms |
+| 3/4 | `gate,up_proj` | 2 | 224 | 104 | 432 ms |
+| 4/4 | `down_proj` | 1 | 304 | 52 | 615 ms |
+| total | | | 752 | 208 | **1.31 s** |
+
+960 waves at 1.55 ms would be 1.49 s if every wave queued behind the last, so
+the subset walls are 1.31 s because the chains that fit inside one wave do share
+it, and only those:
+
+* Subset 1 launches 56, 8 and 8 blocks per step, 72 in all, so its three `ldlq`
+  chains fit in a single wave: 56 waves of wall time carry 168 wave-slots. Its
+  three 168-tile `gss` searches overlap the same way, 26 waves for 39 slots.
+* Subset 3 launches 304 + 304 = 608 blocks per step, three waves' worth, so its
+  two chains cannot share one: the subset pays three waves per step, 168 waves
+  of wall time for its 224 `ldlq` slots. Its two `gss` searches do share: 52
+  waves for 104 slots.
+* Subset 4 is a single 56-block chain, so all 304 of its waves are wall time.
+
+That is 584 `ldlq` wave-slots of wall time (~905 ms) plus 143 `gss` wave-slots
+(~222 ms), and the remaining ~190 ms per layer is `regularize`'s non-`gss` work,
+`finalize_capture_H`, the replay and the subset-boundary syncs. It reconciles
+the measured 1.31 s per layer and the 7.86 s of the 8.00 s wall.
+
+This also explains the `metric_h2d` column in the phase table below. The
+`H.to(device)` copy at the end of the module is a *synchronous* pageable
+host-to-device copy on the quantization stream, so it drains everything already
+enqueued on that stream. For `(4864, 896)` it reports 459 ms of the module's
+603 ms because that is exactly the `ldlq` chain draining, not because the copy
+is expensive. Removing the copy (`EXL3_KEEP_H_DEV=1`) leaves the wall unchanged
+because the GPU work still has to run; the wait simply moves.
 
 ## Per-module phase costs
 
@@ -183,7 +302,8 @@ Summed over the run, 11.78 thread-seconds elapse inside `quantize_exl3` for
 `regularize` work is only ~4 ms per module.
 
 `ldlq`'s column is thread time, not GPU time: the loop only enqueues launches.
-The GPU-side cost of `ldlq` is `1.5 ms * (size_k / 16)`.
+The GPU-side cost of `ldlq` is one wave per launch, i.e.
+`1.5 ms * (size_k / 16) * ceil(tiles_n / 256)`.
 
 ## Negatives that should not be re-derived
 
@@ -195,8 +315,9 @@ a pageable host-to-device copy of the CPU-resident `k x k` Hessian) is 7.98 s of
 the 11.78 thread-seconds, by far the largest single thread-time item, and for
 `(4864, 896)` it is 459 ms of a 603 ms module. It is nonetheless invisible in
 wall time: keeping the Hessian device-resident and skipping the copy entirely
-gives 7.99 s against a 7.98 s baseline with the state hash unchanged. The copy
-overlaps the GPU bottleneck.
+gives 7.99 s against a 7.98 s baseline with the state hash unchanged. The
+reported time is the quantization stream draining in front of the copy, as the
+`ldlq` grid section explains, so removing the copy only moves the wait.
 
 **Worker count does not matter.** 4 workers -> 7.97 s, 8 -> 8.03 s, 16 -> 8.05 s.
 Each worker receives exactly 21 modules. The subset barrier, not the pool,
@@ -216,6 +337,37 @@ launches at once gives no win, because the kernel is latency-bound:
 `dec_cache = false` were each tried. Only `dec_cache = false` moves the needle,
 and it is 2.4x slower, so the decode cache stays.
 
+**Inner-loop restructuring does not pay either.** Removing work in pieces shows
+the loop is balanced and already minimal, and re-deriving the pieces in a
+"cheaper" form makes it slower (grid 56, `K = 4`, `mcg`, 1024 threads, best of
+five):
+
+| Variant | Time | Spill |
+| --- | --- | --- |
+| baseline | 1.425 ms | 60 B |
+| predecessor cost read replaced by a constant | 1.240 ms | 44 B |
+| decode-table read replaced by a constant | 1.147 ms | 0 B |
+| `temp_edges` global store removed | 1.184 ms | 20 B |
+| inner `k` loop collapsed to `k = 0` | 0.251 ms | 0 B |
+| inner `__syncthreads()` removed | 1.394 ms | 60 B |
+| one forward lap instead of two | 0.699 ms | 0 B |
+| permuted cost layout (see below) | 1.513 ms | 60 B |
+| `min_k` tracked instead of `min_in_edge` | 1.460 ms | 156 B |
+| `constrain` check removed | 1.681 ms | 140 B |
+
+The `min_k` variant is bit-exact and still loses: hoisting
+`((k << Kr) | out_edge_idx) >> K` out of the loop frees the `v_or` the compiler
+was folding into an immediate, but it keeps the same two `v_cndmask`s and pushes
+the live range of the loop-carried state across a spill boundary. The
+permutation that makes the 16 predecessors of one out-edge consecutive
+(`slot(x) = (x & state_hi_mask) * max_q + (x >> state_shift)`, which turns every
+cost read into a fixed-immediate LDS offset) also loses, because the compiler
+already emits exactly that addressing and the permutation only adds work to the
+store side and gives it an 8-way shared-memory bank conflict.
+
+The conclusion is that the tile kernel has no headroom left at the instruction
+level. Further gains have to come from occupancy, not from the block.
+
 **The GIL cannot be released.** The interpreter is a GIL build
 (`Fatal Python error: config_read_gil: Disabling the GIL is not supported by
 this build`) despite a startup banner that suggests `PYTHON_GIL=0`.
@@ -234,19 +386,34 @@ what serializes the subsets.
 
 ## What is left
 
-The kernel is a fixed-latency chain, `ldlq` is irreducibly sequential along
+The block is at its instruction floor, `ldlq` is irreducibly sequential along
 `size_k`, and the subset barrier caps concurrent chains at 1-3. The remaining
-headroom is therefore in **raising the number of independent tile chains in
-flight**, not in shortening any single chain:
+headroom is entirely in **occupancy**: putting more independent tile chains in
+flight so a 1.5 ms wave carries more than 56 blocks.
+
+Three things follow from the step accounting above.
 
 * `g_scale_gss` and the non-`gss` parts of `regularize` depend only on the
-  original weight and the finalized Hessian, both of which are available for
-  every module of a layer before the subset loop starts. Hoisting them out of
-  the per-subset critical path would overlap 208 launches per layer that are
-  currently serial, worth roughly 1.6 s.
-* `mlp.down_proj` is a single-module subset contributing 304 launches per layer.
-  Any restructuring that lets the next layer's independent work start while it
-  runs attacks 3.6 s of the 8.0 s directly.
+  original weight and the finalized Hessian, both of which exist for every
+  module of a layer before the subset loop starts. They are 208 waves per layer
+  (~222 ms of wall time) that currently run back-to-back with `ldlq` on the same
+  stream rather than beside it. Hoisting them out of the per-subset critical
+  path is the largest accuracy-preserving opportunity, but the bound is the free
+  CUs, not the 222 ms: in subset 4 `ldlq` leaves 200 CUs idle for 615 ms, so the
+  52 waves of `gss` there (81 ms) can hide completely, while in subset 1 the
+  168-tile searches are wider than the 72 blocks `ldlq` launches there and would
+  contend with it instead.
+* Merging all seven layer modules into one subset removes the subset barriers
+  and takes the wall from 7.97 s to **6.18 s**, verified twice. It is not a free
+  win: it changes the state hash because `true_sequential` replay is what makes
+  subset `N+1` capture against subset `N`'s *quantized* weights, and the code
+  documents that as required for correctness. It needs an accuracy gate (the
+  `logits_mse` / `cosine` end-to-end check) before it could be considered.
+* Subset 4's 456 ms is a floor for a single module. `mlp.down_proj` is a
+  single-module subset contributing 304 launches per layer, and nothing inside
+  it can fill those CUs, so the only way to recover them is to give the chain
+  company from outside the subset: any restructuring that lets the next layer's
+  independent work start while it runs attacks 3.6 s of the 8.0 s directly.
 
-Both are structural changes to the layer/subset schedule rather than to the
-kernel, and both need the state hash to be re-validated.
+All three are changes to the layer/subset schedule rather than to the kernel,
+and each needs the state hash re-validated before it can ship.
