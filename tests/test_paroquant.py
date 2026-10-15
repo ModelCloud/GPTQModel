@@ -247,6 +247,52 @@ def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
         )
 
 
+def test_paroquant_best_state_snapshot_batches_one_copy_per_dtype_group(monkeypatch):
+    """Guard the best-state snapshot so it stays one batched copy per dtype group."""
+    weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+    bias = torch.linspace(-1.0, 1.0, steps=3, dtype=torch.float32)
+    index = torch.arange(6, dtype=torch.int32).view(2, 3)
+    mask = torch.tensor([[True, False, True], [False, True, False]])
+    live = {"weight": weight, "bias": bias, "index": index, "mask": mask}
+    model = SimpleNamespace(state_dict=lambda: dict(live))
+
+    batches = []
+    foreach_copy = torch._foreach_copy_
+
+    def counting_foreach_copy(destinations, sources):
+        batches.append([tuple(tensor.shape) for tensor in destinations])
+        return foreach_copy(destinations, sources)
+
+    monkeypatch.setattr(torch, "_foreach_copy_", counting_foreach_copy)
+
+    snapshot = paroquant_optimization._snapshot_model_state(model, target_dtype=torch.float16)
+
+    # One batch per (device, dtype) group: the float pair, the int buffer and the mask.
+    assert batches == [[(3, 4), (3,)], [(2, 3)], [(2, 3)]]
+    assert list(snapshot) == ["weight", "bias", "index", "mask"]
+    assert snapshot["weight"].dtype == torch.float16
+    assert snapshot["bias"].dtype == torch.float16
+    assert snapshot["index"].dtype == torch.int32
+    assert snapshot["mask"].dtype == torch.bool
+    assert torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert torch.equal(snapshot["bias"], bias.to(torch.float16))
+    assert torch.equal(snapshot["index"], index)
+    assert torch.equal(snapshot["mask"], mask)
+    assert all(not tensor.requires_grad for tensor in snapshot.values())
+
+    # A snapshot has to be immune to later in-place updates of the live state.
+    weight.zero_()
+    bias.add_(1.0)
+    assert not torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert not torch.equal(snapshot["bias"], bias.to(torch.float16))
+
+    # Without a target dtype the snapshot keeps every source dtype as-is.
+    plain = paroquant_optimization._snapshot_model_state(model)
+    assert plain["weight"].dtype == torch.float32
+    assert plain["index"].dtype == torch.int32
+    assert plain["mask"].dtype == torch.bool
+
+
 def test_paroquant_quantize_config_rejects_invalid_optimizer_hyperparameters():
     """Guard optimizer hyperparameter validation against invalid stage settings."""
     with pytest.raises(ValueError, match="opt_betas"):
