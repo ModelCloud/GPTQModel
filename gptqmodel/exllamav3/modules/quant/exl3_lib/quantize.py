@@ -659,6 +659,37 @@ def pack_signs(signs: torch.Tensor, quant_args: dict) -> torch.Tensor:
     return packed
 
 
+def _sample_gss_tiles(weight_r: torch.Tensor, width: int = 3) -> torch.Tensor:
+    """Gather the wrapped-diagonal 16x16 tile sample used by the global scale search.
+
+    This mirrors the original per-tile ``clone().view(256)[perm]`` loop exactly
+    (bit-identical ordering and values) but builds the tile set with a handful of
+    vectorized gathers instead of a Python double loop launching one small kernel
+    per tile. On large projection shapes this removes hundreds of tiny launches
+    per layer, which dominates the global-scale search on otherwise fast devices.
+    """
+    rows = weight_r.shape[0]
+    cols = weight_r.shape[1]
+    tiles_k = rows // 16
+    tiles_n = cols // 16
+    count = max(tiles_k, tiles_n)
+
+    index = torch.arange(count, device = weight_r.device)
+    k_base = (index % tiles_k) * 16
+    w_offsets = torch.arange(width, device = weight_r.device).unsqueeze(0) + index.unsqueeze(1)
+    n_base = (w_offsets % tiles_n) * 16
+
+    row_offsets = torch.arange(16, device = weight_r.device)
+    col_offsets = torch.arange(16, device = weight_r.device)
+    flat = (
+        (k_base[:, None, None, None] + row_offsets[None, None, :, None]) * cols
+        + (n_base[:, :, None, None] + col_offsets[None, None, None, :])
+    )
+    flat = flat.reshape(count, width, 256)
+    flat = flat[..., tensor_core_perm(weight_r.device)]
+    return weight_r.reshape(-1)[flat].reshape(count * width, 256)
+
+
 def g_scale_gss(
     weight_r: torch.Tensor,
     verbose: bool,
@@ -669,18 +700,7 @@ def g_scale_gss(
     # Select a sample of tiles along a wrapped diagonal (sampling from every row and column of tiles, hopefully
     # representative) and search for the global scale within given range that minimizes the direct quantization
     # error
-    tiles = []
-    tiles_k = weight_r.shape[0] // 16
-    tiles_n = weight_r.shape[1] // 16
-    for i in range(max(tiles_k, tiles_n)):
-        for w in range(width):
-            k = (i % tiles_k) * 16
-            n = ((i + w) % tiles_n) * 16
-            tile = weight_r[k : k + 16, n : n + 16].clone()
-            tile = tile.view(256)
-            tile = tile[tensor_core_perm(weight_r.device)]
-            tiles.append(tile)
-    tiles = torch.stack(tiles)
+    tiles = _sample_gss_tiles(weight_r, width)
 
     devices = quant_args["devices"]
     for device in devices:
