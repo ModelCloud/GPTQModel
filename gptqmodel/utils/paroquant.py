@@ -358,6 +358,59 @@ def _fused_grad_theta_ready(rotated: torch.Tensor, grad: torch.Tensor) -> bool:
     )
 
 
+def _fused_rotate_pair_op():
+    """Return the fused two-tensor rotation op, or None when it cannot be used.
+
+    The autograd backward rotates the saved activation and the incoming gradient
+    with the same pair/theta set, which costs two launches per rotation. Both
+    operands share a shape and differ only in storage, so the native op folds
+    them into a single launch. Unsupported dtypes/devices keep the two-call path.
+    """
+    try:
+        return _extension_api().op("paroquant", "rotate_pair")
+    except Exception:
+        return None
+
+
+def _fused_rotate_pair_ready(x: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused two-tensor rotation can service this pair."""
+    return (
+        x.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and x.is_cuda
+        and grad.is_cuda
+        and x.is_contiguous()
+        and grad.is_contiguous()
+        and x.shape == grad.shape
+    )
+
+
+def _apply_fused_rotation_pair(
+    x: torch.Tensor,
+    grad: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    group_size: int,
+    *,
+    op=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate two equal-shaped tensors with one fused launch and a shared launch plan."""
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=None,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    if op is None:
+        op = _fused_rotate_pair_op()
+    if op is None:
+        raise RuntimeError("ParoQuant rotate_pair op is unavailable.")
+    return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
+
+
 def _rotation_launch_cache_key(
     x: torch.Tensor,
     *,
@@ -598,12 +651,27 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
                 _fused_grad_theta_op() if _fused_grad_theta_ready(rotated, grad) else None
             )
             fused_parts = [None] * krot if fused_grad_theta is not None else None
+            # The two backward rotations share a pair/theta set and shape, so the
+            # native two-tensor op can service both operands in one launch.
+            fused_rotate_pair = (
+                _fused_rotate_pair_op() if _fused_rotate_pair_ready(rotated, grad) else None
+            )
 
             for rot_idx in range(krot - 1, -1, -1):
                 pair_row = pairs.narrow(0, rot_idx, 1)
                 neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
-                rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
-                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
+                if fused_rotate_pair is not None:
+                    rotated, grad = _apply_fused_rotation_pair(
+                        rotated,
+                        grad,
+                        pair_row,
+                        neg_theta,
+                        group_size,
+                        op=fused_rotate_pair,
+                    )
+                else:
+                    rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
+                    grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
 
                 idx_i = idx_i_all[rot_idx]
                 idx_j = idx_j_all[rot_idx]
