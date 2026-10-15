@@ -119,23 +119,11 @@ def _resolve_best_state_snapshot_dtype(
     return torch.float32
 
 
-def _snapshot_state_tensor(
-    tensor: torch.Tensor,
-    *,
-    target_device: Optional[torch.device] = None,
-    target_dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    """Clone a state tensor, optionally moving it and casting floating tensors for compact snapshots."""
-    snapshot = tensor.detach()
-    cast_dtype = target_dtype if target_dtype is not None and snapshot.is_floating_point() else None
-    needs_move = target_device is not None and snapshot.device != target_device
-    needs_cast = cast_dtype is not None and snapshot.dtype != cast_dtype
-    if needs_move or needs_cast:
-        snapshot = snapshot.to(
-            device=target_device if target_device is not None else snapshot.device,
-            dtype=cast_dtype if cast_dtype is not None else snapshot.dtype,
-        )
-    return snapshot.clone()
+def _snapshot_state_dtype(tensor: torch.Tensor, target_dtype: Optional[torch.dtype]) -> torch.dtype:
+    """Resolve the snapshot dtype for one state tensor: floats compress, others pass through."""
+    if target_dtype is not None and tensor.is_floating_point():
+        return target_dtype
+    return tensor.dtype
 
 
 def _snapshot_model_state(
@@ -144,11 +132,35 @@ def _snapshot_model_state(
     target_device: Optional[torch.device] = None,
     target_dtype: Optional[torch.dtype] = None,
 ) -> dict[str, torch.Tensor]:
-    """Capture a model state dict with optional float-only dtype compression for best-state snapshots."""
-    return {
-        key: _snapshot_state_tensor(tensor, target_device=target_device, target_dtype=target_dtype)
-        for key, tensor in model.state_dict().items()
-    }
+    """Capture a model state dict with optional float-only dtype compression for best-state snapshots.
+
+    Every entry is a fresh tensor, so later in-place updates of the live state
+    cannot leak into the snapshot. The copies are batched per (device, dtype)
+    group through ``torch._foreach_copy_``, which costs one launch per group
+    instead of one cast plus one clone per tensor.
+    """
+    state = model.state_dict()
+    if not state:
+        return {}
+    keys = list(state)
+    sources = [state[key] for key in keys]
+    snapshots = [
+        torch.empty(
+            tuple(source.shape),
+            dtype=_snapshot_state_dtype(source, target_dtype),
+            device=target_device if target_device is not None else source.device,
+        )
+        for source in sources
+    ]
+    groups: dict[tuple[torch.device, torch.dtype, torch.dtype], list[int]] = {}
+    for index, (source, snapshot) in enumerate(zip(sources, snapshots)):
+        groups.setdefault((snapshot.device, snapshot.dtype, source.dtype), []).append(index)
+    for indices in groups.values():
+        torch._foreach_copy_(
+            [snapshots[index] for index in indices],
+            [sources[index] for index in indices],
+        )
+    return dict(zip(keys, snapshots))
 
 
 def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
