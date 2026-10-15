@@ -82,3 +82,34 @@ def test_awq_clip_consistency(device_name: str, device_str: str):
     tol = 1e-6 if dtype == torch.float32 else 1e-4
     assert torch.allclose(actual.cpu(), expected.cpu(), atol=tol, rtol=tol), \
         f"Inconsistent clip: max diff {(actual - expected).abs().max().item():.3e}"
+
+
+@parameterized.expand([
+    ("cpu", "cpu"),
+    ("cuda", "cuda:0"),
+])
+def test_awq_clip_bound_fast_path_matches_derived(device_name: str, device_str: str):
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise AssertionError("CUDA is not available for the clip bound fast path test")
+
+    dtype = torch.float32 if device_name == "cpu" else torch.float16
+    processor = _ClipTestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
+
+    torch.manual_seed(0)
+    w = torch.randn(256, 512, dtype=dtype, device=device_str).reshape(-1, 128)
+    bound = w.abs().amax(dim=1, keepdim=True)
+
+    # `_compute_best_clip` clamps the block itself and then hands the quantizer the
+    # bound it already knows, instead of letting it re-derive `abs().amax()`. The
+    # supplied bound must reproduce the derived one exactly, for every clip ratio.
+    for shrink in (1.0, 0.5, 0.25):
+        limit = bound * shrink
+        src = w.clamp(-limit, limit)
+        derived = torch.empty_like(src)
+        processor._pseudo_quantize_tensor_into(src.clone(), derived)
+        provided = torch.empty_like(src)
+        processor._pseudo_quantize_tensor_into(src.clone(), provided, abs_max=limit)
+        assert torch.equal(derived.cpu(), provided.cpu()), (
+            f"Bound fast path diverged at shrink {shrink}: "
+            f"max diff {(derived - provided).abs().max().item():.3e}"
+        )

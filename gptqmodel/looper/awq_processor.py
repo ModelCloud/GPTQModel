@@ -1701,6 +1701,11 @@ class AWQProcessor(LoopProcessor):
             min_errs = torch.ones_like(org_max_val) * 1e9
             clamp_slice = scratch_clamp[: w.shape[0]]
             quant_slice = scratch_quant[: w.shape[0]]
+            # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
+            # symmetric magnitude the quantizer re-derives is just `min(|w|.amax(),
+            # max_val)`. Hoisting it here removes an `abs()` and a reduction from
+            # every grid step without changing a single value.
+            clamp_bound = torch.empty_like(org_max_val)
 
             org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
 
@@ -1708,7 +1713,8 @@ class AWQProcessor(LoopProcessor):
                 max_val = org_max_val * (1 - i_s / n_grid)
                 min_val = -max_val
                 torch.clamp(w, min_val, max_val, out=clamp_slice)
-                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
+                torch.minimum(org_max_val, max_val, out=clamp_bound)
+                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice, abs_max=clamp_bound)
                 cur_out = (input_feat * quant_slice).sum(dim=-1)
 
                 # Evaluate the reconstruction error for the current clamp ratio and keep the best
@@ -1776,7 +1782,12 @@ class AWQProcessor(LoopProcessor):
         return w, scales, zeros
 
     @torch.inference_mode()
-    def _pseudo_quantize_tensor_into(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+    def _pseudo_quantize_tensor_into(
+        self,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        abs_max: torch.Tensor = None,
+    ) -> None:
         """Writes pseudo-quantized values into a destination tensor without reallocating."""
 
         # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
@@ -1804,13 +1815,20 @@ class AWQProcessor(LoopProcessor):
             dst_view.sub_(zeros)
             dst_view.mul_(scales)
         else:
-            max_val = src_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+            if abs_max is None:
+                max_val = src_view.abs().amax(dim=1, keepdim=True)
+            else:
+                # The clip search clamps the block by a bound it already knows, so
+                # the symmetric magnitude it needs is `min(|w|.amax(), bound)`. That
+                # skips the `abs()` plus reduction pair on every grid step.
+                max_val = abs_max.reshape(src_view.shape[0], 1)
+            max_val = max_val.clamp(min=1e-5)
             max_int = 2 ** (self.qcfg.bits - 1) - 1
             min_int = -(2 ** (self.qcfg.bits - 1))
             scales = max_val / max_int
 
-            dst_view.copy_(src_view)
-            dst_view.div_(scales)
+            # Divide straight into the destination instead of copying first.
+            torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
             dst_view.clamp_(min_int, max_int)
             dst_view.mul_(scales)
