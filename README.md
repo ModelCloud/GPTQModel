@@ -760,22 +760,40 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 ### Experimental Features 🧪
 
-#### RMSNorm gain tuning
+#### Norm tuning
 
-After quantization, `requantize()` can tune the gains of RMSNorm modules tagged
-by the model definition while leaving packed quantized tensors unchanged. Pass
-an unquantized teacher model (or its Hugging Face path) with the `rmsnorm`
-argument:
+After quantization, `requantize()` can tune the parameters of normalization
+modules tagged by the model definition while leaving packed quantized tensors
+unchanged. Pass an unquantized teacher model (or its Hugging Face path) with the
+`norm` argument:
 
 ```py
-from gptqmodel import BACKEND, GPTQModel, RMSNormConfig
+from gptqmodel import BACKEND, GPTQModel, NormConfig
 
 model = GPTQModel.load("path/to/saved-quantized-model", backend=BACKEND.TORCH)
 model.requantize(
     calibration=calibration,
-    rmsnorm=RMSNormConfig(teacher="Qwen/Qwen3-0.6B", steps=400),
+    norm=NormConfig(teacher="Qwen/Qwen3-0.6B", steps=400),
 )
 ```
+
+`NormConfig.types` selects which normalization families are tuned and defaults
+to `(NormType.RMSNORM,)`, preserving the original RMSNorm-only behavior. Pass
+`NormType.LAYERNORM` (or both) to also tune LayerNorm gains and biases:
+
+```py
+from gptqmodel import BACKEND, GPTQModel, NormConfig, NormType
+
+model.requantize(
+    calibration=calibration,
+    norm=NormConfig(teacher="teacher-model", types=(NormType.RMSNORM, NormType.LAYERNORM)),
+)
+```
+
+Both normalization styles are covered by the underlying method: the
+normalization parameters are distilled against the teacher's next-token
+distribution. Gain parameterizations are detected per module, so
+Gemma-style `1 + weight` gains are handled without extra configuration.
 
 This feature requires a backend with autograd support through the quantized
 linears, such as `BACKEND.TORCH`. After fresh `quantize()`, save and reload
@@ -791,12 +809,16 @@ from gptqmodel import QuantizeEmbed
 model.requantize(calibration=calibration, embed_quant_mode=QuantizeEmbed.OUTPUT)
 model.save("embedding-requantized")
 model = GPTQModel.load("embedding-requantized", backend=BACKEND.TORCH)
-model.requantize(calibration=calibration, rmsnorm=RMSNormConfig(teacher="teacher-model"))
+model.requantize(calibration=calibration, norm=NormConfig(teacher="teacher-model"))
 model.save("norm-tuned")
 ```
 
-A combined embedding/RMSNorm call remains supported for training-capable
-GPTQ-v2 models.
+A combined embedding/Norm call remains supported for training-capable GPTQ-v2
+models.
+
+The first-release names remain available for compatibility: `RMSNormConfig` is
+an alias of `NormConfig`, and the `rmsnorm=` argument is accepted as a
+deprecated synonym for `norm=`. Both emit a deprecation warning.
 
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 

@@ -80,9 +80,9 @@ class TestMarinModuleTree(ModelTest):
             for spec in attention_specs
         }
         self.assertIn("!", attention_flags["q_norm"])
-        self.assertIn("rmsnorm", attention_flags["q_norm"])
+        self.assertIn("norm", attention_flags["q_norm"])
         self.assertIn("!", attention_flags["k_norm"])
-        self.assertIn("rmsnorm", attention_flags["k_norm"])
+        self.assertIn("norm", attention_flags["k_norm"])
 
 
 class TestMarinAwqModuleTree(ModelTest):
@@ -104,9 +104,9 @@ class TestMarinAwqModuleTree(ModelTest):
             for spec in attention_specs
         }
         self.assertIn("!", attention_flags["q_norm"])
-        self.assertIn("rmsnorm", attention_flags["q_norm"])
+        self.assertIn("norm", attention_flags["q_norm"])
         self.assertIn("!", attention_flags["k_norm"])
-        self.assertIn("rmsnorm", attention_flags["k_norm"])
+        self.assertIn("norm", attention_flags["k_norm"])
 
 
 class TestQwen2ModuleTree(ModelTest):
