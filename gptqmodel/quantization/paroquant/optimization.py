@@ -1518,7 +1518,10 @@ def _run_stage_gptqmodel_impl(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+    # The first epoch assigns `last_train_loss` before anything reads it, so
+    # seeding it with an evaluation only buys a full forward pass plus a device
+    # sync that no caller can observe.
+    last_train_loss = 0.0
 
     for _epoch in range(epochs):
         epoch_loss = 0.0
@@ -1612,7 +1615,8 @@ def _run_stage_gptqmodel_cudagraph(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+    # Overwritten by the first epoch before any read; see `_run_stage_gptqmodel_impl`.
+    last_train_loss = 0.0
 
     static_input = torch.empty(
         (batch_size, inputs_train.shape[1]),
@@ -1802,7 +1806,8 @@ def _run_stage_reference(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+    # Overwritten by the first epoch before any read; see `_run_stage_gptqmodel_impl`.
+    last_train_loss = 0.0
 
     for _ in range(epochs):
         epoch_loss = 0.0
