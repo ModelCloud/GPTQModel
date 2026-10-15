@@ -1940,7 +1940,13 @@ class AWQProcessor(LoopProcessor):
                 # Compare chunked reference outputs against chunked quantized outputs
                 # so reconstruction loss is accumulated without assembling the full
                 # output activation on GPU.
-                total_loss = 0.0
+                #
+                # The running sum stays on the device in float64 and is only
+                # materialized once per ratio. Reducing each micro-batch chunk
+                # with `.item()` stalls the stream after every chunk forward and
+                # leaves the GPU idle between them. Accumulating in float64 keeps
+                # the reduction bit-identical to the previous host-side sum.
+                sq_sum = None
                 total_elements = 0
                 for ref_chunk, int_w_output in zip(
                     reference_chunks,
@@ -1949,10 +1955,11 @@ class AWQProcessor(LoopProcessor):
                     int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                     ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
                     diff = (ref_chunk - int_w_output).float()
-                    total_loss += diff.pow(2).sum().item()
+                    chunk_sq = diff.pow(2).sum().double()
+                    sq_sum = chunk_sq if sq_sum is None else sq_sum + chunk_sq
                     total_elements += diff.numel()
 
-                loss = total_loss / max(total_elements, 1)
+                loss = (0.0 if sq_sum is None else sq_sum.item()) / max(total_elements, 1)
             else:
                 # Legacy eager scoring path: compute one dense quantized output tensor
                 # and evaluate loss against the dense FP reference tensor.
