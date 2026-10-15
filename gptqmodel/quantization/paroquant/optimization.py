@@ -215,6 +215,104 @@ def _clamp_ste(
     return _ClampSTE.apply(x, min_value, max_value)
 
 
+class _AffineQuantDequantSTE(torch.autograd.Function):
+    """Fused asymmetric pseudo-quantize/dequantize with straight-through gradients.
+
+    The affine branch of ``pseudo_quantize_dequant`` is the branch ParoQuant
+    actually runs: ``_quantizer_sym_for_impl`` returns ``False`` for the default
+    ``reference`` quantizer implementation, so the composed reference graph
+    (``clamp`` -> ``neg`` -> ``round`` -> ``clamp`` -> ``div`` -> ``round`` ->
+    ``add`` -> ``clamp`` -> ``sub`` -> ``mul`` plus three STE nodes) is what every
+    calibration optimizer step evaluates. Composing it out of a dozen autograd
+    nodes costs fifteen backward kernels per call for what is a per-group
+    elementwise transform, and the group stage runs thousands of those calls.
+
+    Fusing the transform into a single node keeps the forward value and every
+    parameter gradient bitwise identical to the composed graph while collapsing
+    the backward to the kernels the algebra actually needs. With ``s`` the
+    bounded scale, ``rzp`` the rounded zero point, ``d = w / s`` the scaled
+    weight and ``q`` the integer codes, the composed graph's straight-through
+    gradients are::
+
+        grad_w     = (grad_out * s) / s
+        grad_scale = sum(grad_out * (q - rzp)) + sum(grad_out * s * (-d / s))
+        grad_zp    = 0
+
+    ``grad_zero_point_float`` is exactly zero in the composed graph as well: the
+    rounded zero point enters the output once additively (through ``q``) and once
+    subtractively (through ``q - rzp``), and both straight-through paths cancel
+    elementwise. The fused node returns that explicit zero tensor instead of
+    ``None`` so the optimizer still sees a (zero) gradient for the parameter and
+    keeps its weight-decay behavior.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        zero_point_float: torch.Tensor,
+        qmin: int,
+        qmax: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        view = weight.reshape(-1, group_size)
+        bounded_scale = scale.clamp(min=1e-5, max=1e5)
+        round_zero_point = (-zero_point_float).round().clamp(qmin, qmax)
+        scaled = view / bounded_scale
+        quant = (scaled.round() + round_zero_point).clamp(qmin, qmax)
+        centered = quant - round_zero_point
+        ctx.save_for_backward(scaled, bounded_scale, centered)
+        ctx.group_size = group_size
+        ctx.zero_point_shape = zero_point_float.shape
+        return (centered * bounded_scale).reshape_as(weight)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        scaled, bounded_scale, centered = ctx.saved_tensors
+        grad_view = grad_output.reshape(-1, ctx.group_size)
+        grad_scaled = grad_view * bounded_scale
+        grad_weight = grad_scaled / bounded_scale
+        grad_scale = (grad_view * centered).sum(dim=1, keepdim=True) + (grad_scaled * (-scaled / bounded_scale)).sum(
+            dim=1, keepdim=True
+        )
+        grad_zero_point = grad_scale.new_zeros(ctx.zero_point_shape)
+        return grad_weight.reshape_as(grad_output), grad_scale, grad_zero_point, None, None, None
+
+
+def _affine_quant_dequant_ste_fused(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    zero_point_float: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+) -> Optional[torch.Tensor]:
+    """Route the asymmetric STE path through the fused node when it is provably equivalent.
+
+    The fused node reproduces the composed reference graph bit for bit, but only
+    under the shapes and dtypes that graph is spelled for: float32 CUDA tensors,
+    per-group ``(groups, 1)`` qparams, and an enabled autograd graph with at
+    least one differentiable input. Everything else keeps the eager reference so
+    no caller silently changes semantics.
+    """
+    if weight.device.type != "cuda" or weight.dtype != torch.float32:
+        return None
+    if scale.dtype != torch.float32 or zero_point_float.dtype != torch.float32:
+        return None
+    if not torch.is_grad_enabled():
+        return None
+    if not (weight.requires_grad or scale.requires_grad or zero_point_float.requires_grad):
+        return None
+    numel = weight.numel()
+    if numel == 0 or numel % group_size != 0:
+        return None
+    groups = numel // group_size
+    if tuple(scale.shape) != (groups, 1) or tuple(zero_point_float.shape) != (groups, 1):
+        return None
+    return _AffineQuantDequantSTE.apply(weight, scale, zero_point_float, 0, 2**bits - 1, group_size)
+
+
 def _normalize_group_size(group_size: int, in_features: int) -> int:
     """Validate and normalize a ParoQuant group size for a given hidden width."""
     normalized = in_features if group_size == -1 else int(group_size)
@@ -823,6 +921,15 @@ def pseudo_quantize_dequant(
         if scale is None or zero_point_float is None:
             scale, zero_point_float = _calc_affine_qparams(weight, group_size=group_size, bits=bits)
         if use_ste:
+            fused = _affine_quant_dequant_ste_fused(
+                weight,
+                scale,
+                zero_point_float,
+                bits=bits,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             round_zero_point = _clamp_ste(-_round_ste(zero_point_float), qmin, qmax)
             quant = _round_ste(weight_view / scale) + round_zero_point

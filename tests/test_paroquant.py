@@ -979,6 +979,162 @@ def test_paroquant_transformed_weight_fused_scale_fold_matches_premultiplied_pat
             assert torch.equal(actual_grad, expected_grad)
 
 
+def test_paroquant_fused_affine_ste_dispatch_gates():
+    """Guard the conditions under which the fused asymmetric STE engages."""
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    def _dispatch(w, s, z):
+        return paroquant_optimization._affine_quant_dequant_ste_fused(
+            w,
+            s,
+            z,
+            bits=4,
+            group_size=8,
+        )
+
+    # The fused node is a CUDA fast path; CPU tensors keep the eager reference.
+    assert _dispatch(weight, scale, zero_point) is None
+
+    if not torch.cuda.is_available():
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+
+    assert _dispatch(weight, scale, zero_point) is not None
+    # Non-float32 qparams would change the reference rounding, so they fall back.
+    assert _dispatch(weight, scale.half(), zero_point.half()) is None
+    # Only the per-group (groups, 1) qparam layout reproduces the reference sums.
+    assert _dispatch(weight, scale.reshape(-1), zero_point) is None
+    assert _dispatch(weight, scale, zero_point.reshape(1, -1)) is None
+    # A detached graph has nothing to fuse for.
+    assert _dispatch(weight.detach(), scale.detach(), zero_point.detach()) is None
+    with torch.no_grad():
+        assert _dispatch(weight, scale, zero_point) is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused affine STE requires CUDA.")
+def test_paroquant_fused_affine_ste_matches_composed_reference():
+    """Guard the fused asymmetric STE against the composed reference graph.
+
+    The oracle is the composed graph spelled out in this test (the same algebra
+    the reference branch of ``pseudo_quantize_dequant`` evaluates) driven through
+    autograd. The forward value and the weight, scale, and zero-point gradients
+    all have to agree bitwise, and the zero-point gradient has to stay an
+    explicit zero so the optimizer still sees the parameter.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+            quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+            quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        actual_weight = weight.clone().requires_grad_(True)
+        actual_scale = scale.clone().requires_grad_(True)
+        actual_zero_point = zero_point.clone().requires_grad_(True)
+        actual = paroquant_optimization.pseudo_quantize_dequant(
+            actual_weight,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=actual_scale,
+            zero_point_float=actual_zero_point,
+            use_ste=True,
+        )
+        assert "AffineQuantDequantSTE" in type(actual.grad_fn).__name__
+        actual_grads = torch.autograd.grad(
+            actual,
+            [actual_weight, actual_scale, actual_zero_point],
+            grad_outputs=upstream,
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+        assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused affine STE launch accounting requires CUDA.")
+def test_paroquant_fused_affine_ste_emits_fewer_kernels_than_composed_reference():
+    """Guard the launch-count win that motivates the fused asymmetric STE."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _fused() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        out = paroquant_optimization.pseudo_quantize_dequant(
+            w,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=s,
+            zero_point_float=z,
+            use_ste=True,
+        )
+        out.sum().backward()
+
+    def _composed() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        view = w.reshape(-1, group_size)
+        bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+        round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+        quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+        quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+        ((quant - round_zero) * bounded).sum().backward()
+
+    assert _kernel_count(_fused) < _kernel_count(_composed)
+
+
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     """Guard that only large CUDA training-time quant calls route into the compiled helper."""
     class _FakeWeight:
