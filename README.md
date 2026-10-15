@@ -774,6 +774,9 @@ an unquantized teacher model (or its Hugging Face path) with the `rmsnorm`
 argument:
 
 ```py
+from gptqmodel import BACKEND, GPTQModel, RMSNormConfig
+
+model = GPTQModel.load("path/to/saved-quantized-model", backend=BACKEND.TORCH)
 model.requantize(
     calibration=calibration,
     rmsnorm=RMSNormConfig(teacher="Qwen/Qwen3-0.6B", steps=400),
@@ -781,7 +784,25 @@ model.requantize(
 ```
 
 This feature requires a backend with autograd support through the quantized
-linears, such as `BACKEND.TORCH`.
+linears, such as `BACKEND.TORCH`. After fresh `quantize()`, save and reload
+before tuning: the live quantization model may still contain offloaded/meta
+or inference tensors, or checkpoint-format GPTQ-v1 zero points. These states
+are rejected before tuning rather than trained with incorrectly decoded weights.
+
+For GPTQ-v1 embedding requantization, use two separate passes:
+
+```py
+from gptqmodel import QuantizeEmbed
+
+model.requantize(calibration=calibration, embed_quant_mode=QuantizeEmbed.OUTPUT)
+model.save("embedding-requantized")
+model = GPTQModel.load("embedding-requantized", backend=BACKEND.TORCH)
+model.requantize(calibration=calibration, rmsnorm=RMSNormConfig(teacher="teacher-model"))
+model.save("norm-tuned")
+```
+
+A combined embedding/RMSNorm call remains supported for training-capable
+GPTQ-v2 models.
 
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 

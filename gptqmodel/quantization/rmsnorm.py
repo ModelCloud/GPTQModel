@@ -21,7 +21,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from ..utils.logger import setup_logger
-from .config import RMSNormConfig
+from .config import FORMAT, RMSNormConfig
 
 
 log = setup_logger()
@@ -51,6 +51,30 @@ def _resolve_gains(model: nn.Module, module_names: List[str], skip) -> Dict[str,
     if not gains:
         raise ValueError("RMSNorm tuning: no RMSNorm modules selected; tag them with `:rmsnorm` in the model definition.")
     return gains
+
+
+def validate_tuning_model(model: nn.Module) -> None:
+    """Reject packing/offload state before changing gains, modes or caches.
+
+    Packing produces checkpoint-format zero points, while eval-mode TorchLinear
+    consumes v2 zero points. The checkpoint loader owns that conversion. Fresh
+    quantization can also leave meta or inference tensors behind; do not mutate
+    their storage/ownership here merely to make backward possible.
+    """
+    from ..nn_modules.qlinear.torch import TorchLinear
+
+    recovery = "Save the quantized model, then reload it with `backend=BACKEND.TORCH` before RMSNorm tuning."
+    for name, tensor in model.named_parameters():
+        if tensor.is_meta or torch.is_inference(tensor):
+            raise ValueError(f"RMSNorm tuning: `{name}` is an offloaded/meta or inference tensor. {recovery}")
+    for name, tensor in model.named_buffers():
+        if tensor.is_meta:
+            raise ValueError(f"RMSNorm tuning: `{name}` is an offloaded/meta tensor. {recovery}")
+    for name, module in model.named_modules():
+        # Native v2/planar modules need no conversion and may retain the default
+        # qzero_format marker (1); it records conversion, not the export format.
+        if isinstance(module, TorchLinear) and module.format == FORMAT.GPTQ and module.qzero_format() != 2:
+            raise ValueError(f"RMSNorm tuning: `{name}` has checkpoint-format GPTQ-v1 zero points. {recovery}")
 
 
 def _prepare_runtime_for_tuning(model: nn.Module) -> list[tuple[nn.Module, bool, bool, bool, int, Any]]:
@@ -104,6 +128,7 @@ def tune_rmsnorm_gains(
     if not batches:
         raise ValueError("RMSNorm tuning requires calibration data.")
 
+    validate_tuning_model(model)
     runtime_states = _prepare_runtime_for_tuning(model)
     trainable = {param: param.requires_grad for param in model.parameters()}
     model_training, teacher_training = model.training, teacher.training

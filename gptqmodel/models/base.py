@@ -1602,6 +1602,21 @@ class BaseQModel(nn.Module):
         if embed_quant_config is None and rmsnorm is None:
             raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `rmsnorm`.")
 
+        if rmsnorm is not None:
+            from ..quantization.rmsnorm import validate_tuning_model
+
+            # Fail before embedding packing, dataset preparation or teacher loading.
+            # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
+            if embed_quant_config is not None and resolve_quant_format(
+                self.quantize_config.format, self.quantize_config.method
+            ) == FORMAT.GPTQ:
+                raise ValueError(
+                    "RMSNorm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                    "Requantize embeddings separately, save the model, then reload with "
+                    "`backend=BACKEND.TORCH` and call `requantize(rmsnorm=...)`."
+                )
+            validate_tuning_model(self.model)
+
         result = {}
         if embed_quant_config is not None:
             result = self._requantize_embeddings(
@@ -1644,7 +1659,9 @@ class BaseQModel(nn.Module):
         calibration_concat_separator: Optional[str],
     ) -> Dict[str, Any]:
         """Tune tagged RMSNorm gains against an unquantized teacher; packed tensors stay untouched."""
-        from ..quantization.rmsnorm import tune_rmsnorm_gains
+        from ..quantization.rmsnorm import tune_rmsnorm_gains, validate_tuning_model
+
+        validate_tuning_model(self.model)
 
         names = self.rmsnorm_module_names()
         if not names:

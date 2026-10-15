@@ -13,7 +13,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import RMSNormConfig
+from gptqmodel import QuantizeEmbed, RMSNormConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
@@ -142,7 +142,7 @@ def test_tune_rmsnorm_gains_escapes_inference_scope_and_clears_stale_gradients()
 
 
 def test_requantize_dispatches_rmsnorm_without_embedding_target():
-    model = _bare(BaseQModel)
+    model = _bare(BaseQModel, nn.Module())
     captured = {}
 
     def requantize_rmsnorm(**kwargs):
@@ -167,6 +167,42 @@ def test_rmsnorm_validates_arguments():
         RMSNormConfig(teacher="t", steps=0)
     with pytest.raises(TypeError, match="rmsnorm"):
         _bare(BaseQModel).requantize(calibration=["sample"], rmsnorm={"teacher": "t"})
+
+
+@pytest.mark.parametrize("state", ["meta_parameter", "meta_buffer", "inference_parameter", "v1_zeros"])
+def test_unsafe_runtime_rejected_before_tuning_mutates_state(state):
+    student = _tiny_qwen3()
+    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    if state == "meta_parameter":
+        student.model.norm.weight = nn.Parameter(torch.empty(32, device="meta"))
+    elif state == "meta_buffer":
+        student.register_buffer("offloaded", torch.empty(1, device="meta"))
+    elif state == "inference_parameter":
+        with torch.inference_mode():
+            student.model.norm.weight = nn.Parameter(student.model.norm.weight.clone())
+    else:
+        student.lm_head = TorchLinear(bits=4, group_size=16, sym=True, desc_act=False,
+            in_features=32, out_features=64, bias=False, format=FORMAT.GPTQ)
+        student.lm_head.qzero_format(format=1)
+    before = {name: (param, param.requires_grad, param.grad) for name, param in student.named_parameters()}
+    modes = {name: module.training for name, module in student.named_modules()}
+    with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
+        tune_rmsnorm_gains(student, _tiny_qwen3(), [{"input_ids": torch.ones(1, 8, dtype=torch.long)}],
+            names, RMSNormConfig(teacher="unused", steps=1))
+    assert modes == {name: module.training for name, module in student.named_modules()}
+    for name, param in student.named_parameters():
+        old, flag, grad = before[name]
+        assert param is old and param.requires_grad == flag and param.grad is grad
+
+
+def test_combined_v1_call_fails_before_embedding_or_teacher_work():
+    model = _bare(Qwen3QModel, _tiny_qwen3())
+    model.quantize_config = QuantizeConfig(bits=4, group_size=16, format=FORMAT.GPTQ, offload_to_disk=False)
+    model._requantize_embeddings = lambda **kwargs: pytest.fail("must reject before embedding packing")
+    model._requantize_rmsnorm = lambda **kwargs: pytest.fail("must reject before teacher loading")
+    with pytest.raises(ValueError, match="Requantize embeddings separately"):
+        model.requantize(calibration=["sample"], embed_quant_mode=QuantizeEmbed.OUTPUT,
+            rmsnorm=RMSNormConfig(teacher="unused", steps=1))
 
 
 def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path, monkeypatch):
@@ -248,7 +284,7 @@ def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path,
     save_file(student.state_dict(), str(source_file))
     turtle = SimpleNamespace(
         model_local_path=str(source),
-        _weight_map={name: "model.safetensors" for name in student.state_dict()},
+        _weight_map=dict.fromkeys(student.state_dict(), "model.safetensors"),
     )
 
     tune_rmsnorm_gains(
