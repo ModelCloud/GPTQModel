@@ -873,6 +873,112 @@ def test_paroquant_ste_helpers_emit_fewer_kernels_than_detach_algebra():
     assert _kernel_count(_autograd_node) < _kernel_count(_detach_algebra)
 
 
+def test_paroquant_transformed_weight_folds_channel_scales_into_rotation():
+    """Guard that the transform is still defined as ``rotate(weight * channel_scales)``.
+
+    ``transformed_weight`` hands the channel scales to the rotation instead of
+    materializing a scaled copy of the full weight first. The reference rotation
+    applies a per-column scale to its input, so both spellings have to agree on
+    the value and on every parameter gradient.
+    """
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+
+    channel_scales = model._safe_channel_scales(use_ste=True)
+    expected = _apply_rotation(
+        model.weight * channel_scales,
+        model.pairs,
+        model.theta,
+        scales=None,
+        group_size=8,
+        fused_rotation=False,
+    )
+    actual = model.transformed_weight(use_ste=True, channel_scales=channel_scales)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused rotation requires CUDA.")
+def test_paroquant_transformed_weight_fused_scale_fold_matches_premultiplied_path():
+    """Guard the fused path against the pre-multiplied formulation it replaces.
+
+    The fused rotation kernel already multiplies each loaded element by its
+    channel scale, so feeding it the raw weight is the same arithmetic as
+    scaling the full weight first and rotating with unit scales. The two forms
+    have to agree bitwise on the forward value and on the weight, angle, and
+    channel-scale gradients, otherwise the launch the fold removes is not free.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for out_features, in_features in ((896, 896), (128, 896), (896, 4864)):
+        weight = torch.randn((out_features, in_features), dtype=torch.float32) * 0.02
+        pairs, theta_mask = build_random_rotation_buffers(
+            in_features=in_features,
+            group_size=128,
+            krot=8,
+            pair_ratio=0.5,
+            seed=0,
+            device=device,
+        )
+        model = _ParoQuantOptimLinear(
+            weight,
+            None,
+            bits=4,
+            group_size=128,
+            quantizer_sym=True,
+            pairs=pairs,
+            theta_mask=theta_mask,
+            fused_rotation=True,
+        )
+        with torch.no_grad():
+            model.theta.uniform_(-0.2, 0.2)
+            model.channel_scales_opt.uniform_(0.8, 1.2)
+
+        actual = model.transformed_weight(use_ste=True)
+        actual_grads = torch.autograd.grad(
+            actual.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        premultiplied_scales = model._safe_channel_scales(use_ste=True)
+        expected = paroquant_optimization.apply_paroquant_rotation_autograd(
+            model.weight * premultiplied_scales,
+            model.pairs,
+            model.theta,
+            scales=None,
+            group_size=128,
+        )
+        expected_grads = torch.autograd.grad(
+            expected.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+
+
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     """Guard that only large CUDA training-time quant calls route into the compiled helper."""
     class _FakeWeight:

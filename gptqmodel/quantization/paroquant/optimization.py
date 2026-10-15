@@ -981,12 +981,19 @@ class _ParoQuantOptimLinear(nn.Module):
         # same tensor down instead of rebuilding the STE clamp every time.
         if channel_scales is None:
             channel_scales = self._safe_channel_scales(use_ste=use_ste)
-        scaled_weight = self.weight * channel_scales
+        # Hand the channel scales to the fused rotation instead of materializing a
+        # scaled copy of the full weight first. The fused kernel already applies a
+        # per-column scale while loading each group into shared memory, so
+        # ``rotate(weight * scales)`` and ``rotate(weight, scales=scales)`` are the
+        # same arithmetic with one full-weight multiply and one full-weight
+        # intermediate removed from every optimization step. The fused backward
+        # derives ``grad_scale`` from the already un-rotated gradient, so the
+        # parameter gradients are identical to the pre-multiplied formulation.
         return _apply_rotation(
-            scaled_weight,
+            self.weight,
             self.pairs,
             self.theta,
-            scales=None,
+            scales=channel_scales,
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
