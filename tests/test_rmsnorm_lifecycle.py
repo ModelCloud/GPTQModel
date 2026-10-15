@@ -3,9 +3,12 @@
 
 """Local CPU public-API regressions; no downloads or inference kernel stubs."""
 
+import json
+from pathlib import Path
+
 import pytest
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
@@ -13,8 +16,23 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, QuantizeEmbed, RMSNorm
 from gptqmodel.quantization import FORMAT
 
 
+def _checkpoint_tensors(directory, basename):
+    index = directory / f"{basename}.safetensors.index.json"
+    if index.exists():
+        weight_map = json.loads(index.read_text())["weight_map"]
+        tensors = {}
+        for shard in set(weight_map.values()):
+            tensors.update(load_file(str(directory / shard)))
+        assert set(tensors) == set(weight_map)
+        for name, shard in weight_map.items():
+            assert name in load_file(str(directory / shard))
+        return tensors
+    return load_file(str(directory / f"{basename}.safetensors"))
+
+
+@pytest.mark.parametrize("layout", ["canonical", "legacy", "legacy-sharded"])
 @pytest.mark.parametrize("format", [FORMAT.GPTQ, FORMAT.GPTQ_V2])
-def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_path, monkeypatch, format):
+def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_path, monkeypatch, format, layout):
     # Compilation is immaterial to this CPU storage/lifecycle test.
     monkeypatch.setattr("gptqmodel.nn_modules.qlinear.torch.torch_compile", lambda fn, **kwargs: fn)
     torch.manual_seed(898)
@@ -41,7 +59,40 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
         model.requantize(calibration, rmsnorm=RMSNormConfig(teacher="must-not-load", steps=1),
             calibration_data_min_length=1)
     model.save(str(packed))
+    basename = "model" if layout == "canonical" else "gptq_model-4bit-16g"
+    if layout == "legacy":
+        (packed / "model.safetensors").rename(packed / f"{basename}.safetensors")
+    elif layout == "legacy-sharded":
+        tensors = load_file(str(packed / "model.safetensors"))
+        weight_map = {}
+        for part in range(2):
+            shard = f"{basename}-{part + 1:05}-of-00002.safetensors"
+            values = dict(list(tensors.items())[part::2])
+            save_file(values, str(packed / shard), metadata={"format": "pt"})
+            weight_map.update(dict.fromkeys(values, shard))
+        (packed / f"{basename}.safetensors.index.json").write_text(json.dumps({
+            "metadata": {"total_size": sum(t.numel() * t.element_size() for t in tensors.values())},
+            "weight_map": weight_map,
+        }))
+        (packed / "model.safetensors").unlink()
     model = GPTQModel.load(str(packed), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+
+    # Losing the selected source after loading must fail before teacher loading
+    # or any gain updates.
+    resolved = Path(model.checkpoint_file_name)
+    assert resolved.name.startswith(basename)
+    before = {k: v.clone() for k, v in model.model.state_dict().items()}
+    unavailable = resolved.with_name(resolved.name + ".unavailable")
+    resolved.rename(unavailable)
+    try:
+        with pytest.raises(FileNotFoundError):
+            model.requantize(calibration, rmsnorm=RMSNormConfig(teacher="must-not-load", steps=2),
+                calibration_data_min_length=1)
+        assert all(torch.equal(v, before[k]) for k, v in model.model.state_dict().items())
+        assert not getattr(model, "_module_replacement_prefixes", set())
+    finally:
+        unavailable.rename(resolved)
+
     tune = RMSNormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0)
     args = {"calibration": calibration, "embed_quant_mode": QuantizeEmbed.OUTPUT,
         "backend": BACKEND.TORCH, "calibration_data_min_length": 1}
@@ -69,7 +120,7 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
     with torch.inference_mode():
         logits = model.model(**calibration[0], use_cache=False).logits.clone()
     model.save(str(tuned))
-    original, saved = load_file(str(embedded / "model.safetensors")), load_file(str(tuned / "model.safetensors"))
+    original, saved = _checkpoint_tensors(embedded, basename), _checkpoint_tensors(tuned, basename)
     assert original.keys() == saved.keys()
     allowed = {name + ".weight" for name in result["rmsnorm"]["modules"]}
     changed = set()

@@ -128,31 +128,40 @@ class _QuantizedCheckpointSource:
     through the regular quantized loader and therefore has no LazyTurtle.
     """
 
-    def __init__(self, model_local_path: str):
-        self.model_local_path = model_local_path
-        index_path = os.path.join(model_local_path, "model.safetensors.index.json")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as handle:
+    def __init__(self, model_local_path: str, checkpoint_file_name: Optional[str] = None):
+        from safetensors import safe_open
+
+        # The loader has already selected the basename (including legacy GPTQ
+        # names) and whether it is sharded. Do not rediscover a different file.
+        if checkpoint_file_name is None:
+            checkpoint_file_name = os.path.join(model_local_path, "model.safetensors.index.json")
+            if not os.path.exists(checkpoint_file_name):
+                checkpoint_file_name = os.path.join(model_local_path, "model.safetensors")
+        checkpoint_file_name = os.path.abspath(checkpoint_file_name)
+        self.model_local_path = os.path.dirname(checkpoint_file_name)
+        self._index_filename = None
+        if checkpoint_file_name.endswith(".safetensors.index.json"):
+            with open(checkpoint_file_name, "r", encoding="utf-8") as handle:
                 index = json.load(handle)
             weight_map = index.get("weight_map", {})
             if not isinstance(weight_map, dict) or not weight_map:
-                raise ValueError(f"Checkpoint index at `{index_path}` has an empty or invalid `weight_map`.")
+                raise ValueError(f"Checkpoint index at `{checkpoint_file_name}` has an empty or invalid `weight_map`.")
             self._weight_map = {
                 str(tensor_name): str(shard_name)
                 for tensor_name, shard_name in weight_map.items()
             }
+            # Validate shard headers before any tuning; this maps files but does
+            # not load checkpoint tensors into CPU/GPU memory.
+            for shard_name in set(self._weight_map.values()):
+                with safe_open(os.path.join(self.model_local_path, shard_name), framework="pt", device="cpu"):
+                    pass
+            self._index_filename = os.path.basename(checkpoint_file_name)
             return
 
-        single_shard = os.path.join(model_local_path, "model.safetensors")
-        if not os.path.exists(single_shard):
-            raise FileNotFoundError(
-                f"No `model.safetensors.index.json` or `model.safetensors` found under `{model_local_path}`."
-            )
-
-        from safetensors import safe_open
-
-        with safe_open(single_shard, framework="pt", device="cpu") as handler:
-            self._weight_map = dict.fromkeys(handler.keys(), "model.safetensors")
+        if not checkpoint_file_name.endswith(".safetensors"):
+            raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
+        with safe_open(checkpoint_file_name, framework="pt", device="cpu") as handler:
+            self._weight_map = dict.fromkeys(handler.keys(), os.path.basename(checkpoint_file_name))
 
 
 class _ClassPropertyDescriptor:
@@ -1617,6 +1626,13 @@ class BaseQModel(nn.Module):
                 )
             validate_tuning_model(self.model)
 
+        if self.load_quantized_model and self.turtle_model is None:
+            # Resolve persistence before embedding packing or norm updates can
+            # mutate the loaded model. Revalidate on each requantize() call.
+            self._module_replacement_source = _QuantizedCheckpointSource(
+                str(self.model_local_path), checkpoint_file_name=getattr(self, "checkpoint_file_name", None)
+            )
+
         result = {}
         if embed_quant_config is not None:
             result = self._requantize_embeddings(
@@ -1709,8 +1725,6 @@ class BaseQModel(nn.Module):
         # Persist only the tuned norm tensors; every other checkpoint tensor is kept byte-identical.
         self._module_replacement_prefixes = set(getattr(self, "_module_replacement_prefixes", set())) | set(stats["modules"])
         if self.load_quantized_model:
-            if self.turtle_model is None and getattr(self, "_module_replacement_source", None) is None:
-                self._module_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
             self._model_free_weight_only_replacements_only = True
         return stats
 
@@ -1772,10 +1786,6 @@ class BaseQModel(nn.Module):
         self._module_replacement_prefixes = prefixes
 
         if self.load_quantized_model and prefixes:
-            if self.turtle_model is None:
-                # Keep the shard-map-only source separate: shell materializers
-                # require a complete LazyTurtle implementation.
-                self._module_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
             self._model_free_weight_only_replacements_only = True
 
         return result

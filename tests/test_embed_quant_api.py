@@ -1,12 +1,15 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
-from torch import nn
-from safetensors.torch import save_file
+import json
 
-from gptqmodel import QuantizeEmbed, QuantizeEmbedConfig
+import pytest
+from safetensors.torch import save_file
+from torch import nn
+
+from gptqmodel import QuantizeConfig, QuantizeEmbed, QuantizeEmbedConfig, RMSNormConfig
 from gptqmodel.models.base import BaseQModel, _QuantizedCheckpointSource
+from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization import QuantizeEmbedConfig as QuantizationEmbedConfig
 
 
@@ -120,3 +123,49 @@ def test_requantize_loaded_checkpoint_configures_embedding_only_save_source(tmp_
     assert model._module_replacement_source._weight_map == {
         "lm_head.qweight": "model.safetensors"
     }
+
+
+@pytest.mark.parametrize("sharded", [False, True])
+def test_checkpoint_source_uses_loader_selection_over_canonical_files(tmp_path, sharded):
+    canonical = "model.safetensors"
+    legacy = "gptq_model-4bit-16g.safetensors"
+    save_file({"wrong.weight": nn.Parameter().new_zeros(2)}, str(tmp_path / canonical))
+    (tmp_path / f"{canonical}.index.json").write_text(json.dumps({"weight_map": {"wrong.weight": canonical}}))
+    save_file({"norm.weight": nn.Parameter().new_ones(2)}, str(tmp_path / legacy))
+    selected = tmp_path / legacy
+    if sharded:
+        selected = tmp_path / f"{legacy}.index.json"
+        selected.write_text(json.dumps({"weight_map": {"norm.weight": legacy}}))
+    source = _QuantizedCheckpointSource(str(tmp_path), checkpoint_file_name=str(selected))
+    assert source._weight_map == {"norm.weight": legacy}
+    assert source._index_filename == (selected.name if sharded else None)
+
+
+@pytest.mark.parametrize("operation", ["norm", "embedding", "combined"])
+@pytest.mark.parametrize("broken", ["selected-file-missing", "shard-missing", "invalid-index"])
+def test_requantize_checks_persistence_before_dispatch(tmp_path, operation, broken):
+    model = _bare_model(quantized=True)
+    model.load_quantized_model = True
+    model.model_local_path = str(tmp_path)
+    model.model = nn.Module()
+    model.turtle_model = None
+    model.quantize_config = QuantizeConfig(format=FORMAT.GPTQ_V2, offload_to_disk=False)
+    selected = tmp_path / "gptq_model-4bit-16g.safetensors.index.json"
+    model.model.checkpoint_file_name = str(selected)
+    if broken == "shard-missing":
+        selected.write_text(json.dumps({"weight_map": {"norm.weight": "missing.safetensors"}}))
+    elif broken == "invalid-index":
+        selected.write_text('{"weight_map": {}}')
+    # A different valid checkpoint must not hide a missing selected source.
+    save_file({"norm.weight": nn.Parameter().new_ones(2)}, str(tmp_path / "model.safetensors"))
+    model._module_replacement_source = _QuantizedCheckpointSource(str(tmp_path))
+    model._requantize_rmsnorm = lambda **kwargs: pytest.fail("must fail before tuning")
+    model._requantize_embeddings = lambda **kwargs: pytest.fail("must fail before embedding packing")
+    kwargs = {}
+    if operation != "embedding":
+        kwargs["rmsnorm"] = RMSNormConfig(teacher="must-not-load")
+    if operation != "norm":
+        kwargs["embed_quant_mode"] = QuantizeEmbed.OUTPUT
+    with pytest.raises(ValueError if broken == "invalid-index" else FileNotFoundError):
+        model.requantize(calibration=["unused"], **kwargs)
+    assert not getattr(model, "_module_replacement_prefixes", set())

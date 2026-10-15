@@ -272,9 +272,10 @@ def _save_module_replacement_safetensors(
     ):
         prefixes = sorted({*prefixes, output_prefix})
 
-    index_path = os.path.join(save_dir, "model.safetensors.index.json")
+    index_name = getattr(turtle_model, "_index_filename", "model.safetensors.index.json")
+    index_path = os.path.join(save_dir, index_name) if index_name else None
     existing_weight_map = {}
-    if os.path.exists(index_path):
+    if index_path and os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as handle:
             existing_weight_map = json.load(handle).get("weight_map", {})
 
@@ -811,8 +812,9 @@ def ModelWriter(cls):
             save_dir=save_dir,
             metadata=metadata,
         )
-        index_path = join(save_dir, "model.safetensors.index.json")
-        if os.path.exists(index_path):
+        index_name = getattr(checkpoint_source, "_index_filename", "model.safetensors.index.json")
+        index_path = join(save_dir, index_name) if index_name else None
+        if index_path and os.path.exists(index_path):
             with open(index_path, "r", encoding="utf-8") as handle:
                 index = json.load(handle)
             weight_map = index.setdefault("weight_map", {})
