@@ -1866,6 +1866,20 @@ class AWQProcessor(LoopProcessor):
         # tensor-vs-tensor loss computation.
         use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
 
+        # Everything except the candidate scale is invariant across the grid: the
+        # module scaffolding (kwargs device placement, position ids, rotary
+        # embeddings) and the FP reference activations. Resolve them once instead of
+        # rebuilding them on each of the `n_grid` iterations.
+        prepared_x = x
+        prepared_kwargs = kwargs
+        reference_chunks = None
+        if use_chunked_scale_search:
+            prepared_x, prepared_kwargs = self._prepare_module_forward(x, module2inspect, kwargs)
+            reference_chunks = [
+                chunk.to(device=device)
+                for chunk in self._iter_reference_output_chunks(x, fp16_output)
+            ]
+
         for ratio in range(n_grid):
             # create new scales
             ratio = ratio / n_grid
@@ -1898,8 +1912,8 @@ class AWQProcessor(LoopProcessor):
                 total_loss = 0.0
                 total_elements = 0
                 for ref_chunk, int_w_output in zip(
-                    self._iter_reference_output_chunks(x, fp16_output),
-                    self._iter_module_forward_outputs(x, module2inspect, kwargs),
+                    reference_chunks,
+                    self._iter_prepared_forward_outputs(prepared_x, module2inspect, prepared_kwargs),
                 ):
                     int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                     ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
@@ -1984,10 +1998,16 @@ class AWQProcessor(LoopProcessor):
         return torch.cat(outputs, dim=0)
 
     @torch.inference_mode()
-    def _iter_module_forward_outputs(
+    def _prepare_module_forward(
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ):
-        """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
+        """Resolves the forward scaffolding that is invariant across candidate scales.
+
+        Device placement of ``module_kwargs``, batch promotion and the rotary
+        ``position_embeddings`` depend only on the module and the captured input,
+        never on the AWQ scale being evaluated. The chunked scale search resolves
+        them once and replays the result for every ratio in the grid.
+        """
 
         module_kwargs = dict(module_kwargs)
 
@@ -2072,6 +2092,22 @@ class AWQProcessor(LoopProcessor):
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
+        if target_device is not None and x.device != target_device:
+            x = x.to(target_device)
+
+        return x, module_kwargs
+
+    @torch.inference_mode()
+    def _iter_prepared_forward_outputs(
+            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+    ):
+        """Yields forward outputs chunk-by-chunk for an already-prepared forward.
+
+        ``x`` and ``module_kwargs`` must originate from
+        :meth:`_prepare_module_forward`, which guarantees they already live on the
+        module device.
+        """
+
         effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
 
         if (
@@ -2079,8 +2115,7 @@ class AWQProcessor(LoopProcessor):
             or x.dim() == 0
             or x.shape[0] <= effective_quant_batch_size
         ):
-            x_forward = x.to(target_device) if target_device is not None and x.device != target_device else x
-            module_output = module(x_forward, **module_kwargs)
+            module_output = module(x, **module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
             yield module_output
@@ -2102,16 +2137,24 @@ class AWQProcessor(LoopProcessor):
 
         batch_offset = 0
         for x_partial in torch.split(x, effective_quant_batch_size, dim=0):
-            x_forward = x_partial.to(target_device) if target_device is not None and x_partial.device != target_device else x_partial
             partial_kwargs = {
-                key: _slice_value(value, batch_offset, x_forward.shape[0])
+                key: _slice_value(value, batch_offset, x_partial.shape[0])
                 for key, value in module_kwargs.items()
             }
-            partial_output = module(x_forward, **partial_kwargs)
+            partial_output = module(x_partial, **partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
             yield partial_output
-            batch_offset += x_forward.shape[0]
+            batch_offset += x_partial.shape[0]
+
+    @torch.inference_mode()
+    def _iter_module_forward_outputs(
+            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+    ):
+        """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
+
+        x, prepared_kwargs = self._prepare_module_forward(x, module, module_kwargs)
+        yield from self._iter_prepared_forward_outputs(x, module, prepared_kwargs)
 
     def _iter_reference_output_chunks(self, x: torch.Tensor, reference_output):
         """Normalizes reference outputs to the same chunking contract as forward outputs."""
