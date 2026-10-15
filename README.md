@@ -740,9 +740,6 @@ dynamic = {
     r"-:.*\.20\..*gate.*": {}, 
     
     # negative match: skip all down modules for all layers.
-    # Note: on MoE models vLLM/SGLang merge all routed experts of a layer into
-    # one module, so this rule produces a checkpoint those engines cannot load;
-    # see "Fused Modules in Inference Engines" below.
     r"-:.*down.*": {},  
  } 
 
@@ -756,7 +753,7 @@ quantization config:
 * every routed expert of one decoder layer is merged into one module (`<prefix>.experts`),
 * `gate_proj` + `up_proj` are merged into `gate_up_proj`, and `q_proj` + `k_proj` + `v_proj` into `qkv_proj`.
 
-Those engines resolve `dynamic` from the **merged** module name only. A rule that matches just part of a merged module (for example
+A rule that matches just part of a merged module (for example
 `-:.*down.*`, which matches `...experts.<id>.down_proj` but not the merged `...experts` module) therefore produces a checkpoint that
 loads in GPT-QModel but fails in vLLM/SGLang, because those engines mix float and quantized shards of the same merged module. GPT-QModel
 detects this before quantization starts and warns, naming the offending rules and a pattern that covers both. A rule must match the merged
