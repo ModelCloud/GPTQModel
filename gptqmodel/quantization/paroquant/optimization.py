@@ -158,9 +158,45 @@ def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
     return bool(sym)
 
 
+class _RoundSTE(torch.autograd.Function):
+    """Round with a straight-through gradient of exactly one.
+
+    This is the autograd-node form of ``(x.round() - x).detach() + x``. Folding the
+    detach algebra into the node keeps the forward at a single ``round`` kernel and
+    makes the backward a pure pass-through. The detach formulation pays the
+    subtract and add kernels in the forward plus an accumulation kernel in the
+    backward, and ParoQuant runs one optimizer step per calibration batch per
+    module, so every one of those launches sits on the launch-bound critical path.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        return x.round()
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        return grad_output
+
+
+class _ClampSTE(torch.autograd.Function):
+    """Clamp with a straight-through gradient of exactly one.
+
+    This is the autograd-node form of ``(x.clamp(min, max) - x).detach() + x``: the
+    forward value is the plain clamp and the backward is a pure pass-through.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, min_value, max_value) -> torch.Tensor:
+        return x.clamp(min_value, max_value)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output, None, None
+
+
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
     """Apply a straight-through round so gradients flow through quantization."""
-    return (x.round() - x).detach() + x
+    return _RoundSTE.apply(x)
 
 
 def _checkpointed_forward(function, *args: torch.Tensor, enabled: bool = False) -> torch.Tensor:
@@ -176,7 +212,7 @@ def _clamp_ste(
     max_value: float | int | None = None,
 ) -> torch.Tensor:
     """Clamp with a straight-through estimator to stabilize learned qparams."""
-    return (x.clamp(min_value, max_value) - x).detach() + x
+    return _ClampSTE.apply(x, min_value, max_value)
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
