@@ -98,8 +98,13 @@ def quantize_tiles(tiles, quant_args: dict):
     K = quant_args["K"]
     mcg = "mcg" in quant_args
     mul1 = "mul1" in quant_args
-    quantized_tiles = torch.zeros_like(tiles)
-    quantized_idx = torch.zeros_like(tiles, dtype = torch.short)
+    # ``quantize_tiles_kernel`` writes every one of the 256 entries of each
+    # output tile (the final backward pass walks all 256 positions with
+    # ``write = true``), so zero-filling the buffers first only costs a
+    # separate memset launch per tile set -- one per 16-row block, i.e. up to
+    # a few hundred extra launches per weight matrix.
+    quantized_tiles = torch.empty_like(tiles)
+    quantized_idx = torch.empty_like(tiles, dtype = torch.short)
     _quantize_tiles_with_workspace(tiles, quantized_tiles, quantized_idx, K, mcg, mul1)
     return quantized_tiles, quantized_idx
 
