@@ -83,10 +83,12 @@ from ..utils.model import (
     MODALITY,
     _module_has_meta_tensors,
     find_modules,
+    fused_unit_check_module_names,
     get_module,
     get_module_by_name_prefix,
     get_module_name,
     move_to,
+    warn_fused_unit_dynamic_conflicts,
 )
 from ..utils.model_dequant import infer_block_shape
 from ..utils.structure import (
@@ -1174,6 +1176,32 @@ class BaseQModel(nn.Module):
             self.model, samples, quantize_config=self.quantize_config, progress=progress,
         )
 
+    def _warn_fused_unit_dynamic_overrides(self) -> None:
+        """Warn about `dynamic` rules the fused inference engines cannot honor.
+
+        Inference engines (vLLM, SGLang) merge the routed experts of a layer
+        into one module and `gate_proj`/`up_proj` into `gate_up_proj` (likewise
+        `q_proj`/`k_proj`/`v_proj` into `qkv_proj`), and they resolve `dynamic`
+        from the merged module name only. A rule that matches just part of a
+        merged module therefore saves a checkpoint those engines cannot load
+        (issue #1455). Warned once per model instance.
+        """
+
+        if getattr(self, "_fused_unit_dynamic_warned", False):
+            return
+        self._fused_unit_dynamic_warned = True
+
+        if not getattr(self.quantize_config, "dynamic", None):
+            return
+
+        try:
+            module_names = fused_unit_check_module_names(self.model, self.extract_layers_node())
+        except Exception as exc:
+            log.debug(f"Dynamic: skipped fused-module override check: {exc}")
+            return
+
+        warn_fused_unit_dynamic_conflicts(module_names, self.quantize_config)
+
     @with_quantization_device_telemetry
     def quantize(
         self,
@@ -1415,6 +1443,12 @@ class BaseQModel(nn.Module):
                     "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
                     f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                 )
+
+        # Warn before the (possibly long) quantization run: inference engines
+        # (vLLM, SGLang) fuse these modules and resolve `dynamic` from the fused
+        # module name only, so a checkpoint saved with a partial rule fails to
+        # load there (issue #1455).
+        self._warn_fused_unit_dynamic_overrides()
 
         if self.quantize_config.uses_weight_only_lifecycle():
             result = self._quantize_weight_only(
@@ -2087,6 +2121,11 @@ class BaseQModel(nn.Module):
 
         try:
             if self.quantized:
+                # Saving an already quantized model (for example one loaded from
+                # an older checkpoint) is the last point where a `dynamic` rule
+                # the fused engines cannot honor can be reported.
+                self._warn_fused_unit_dynamic_overrides()
+
                 # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
                 #untie_weights(self.model)
 
