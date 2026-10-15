@@ -180,25 +180,36 @@ pool size, is what decides how many chains exist.
 
 ## Launch accounting: 22% of launches are the scale search
 
-`quantize_tiles` is called 5 760 times per run. Instrumenting the call sites
-splits them cleanly:
+`quantize_tiles` is called 4 386 times per run, and those calls issue 5 760
+`quantize_tiles_kernel` launches: the HIP op splits a call into
+`ceil(tiles / 256)` launches of at most 256 blocks. Instrumenting the call sites
+splits both counts cleanly:
 
-| Source | Launches |
-| --- | --- |
-| `ldlq` (one per 16-row block) | 4 512 |
-| `g_scale_gss` (global-scale search) | 1 248 |
-| total | 5 760 |
+| Source | `quantize_tiles` calls | Kernel launches |
+| --- | --- | --- |
+| `ldlq` (one per 16-row block) | 3 840 | 4 512 |
+| `g_scale_gss` (global-scale search) | 546 | 1 248 |
+| total | 4 386 | 5 760 |
 
-`ldlq` issues exactly `size_k / 16` launches per module, and that count is
-invariant under `buf_size_k`: a larger span trades outer iterations for inner
-ones. `mlp.down_proj` is `(4864, 896)` and therefore contributes 304 launches
-per layer, about 35% of the layer's 528 critical-path launches.
+The 5 760 agrees with the 5 759 `quantize_tiles_kernel<4, 1>` records in the
+profiler trace, and the scale search is still 22% of them.
 
-`g_scale_gss` issues `13 * ceil(sample_tiles / 256)` launches. The 13 is not a
-tunable: it is a golden-section search over `[0.1, 1.9]` with `tol = 0.01`,
-which shrinks the bracket by `1/phi` per iteration and needs 11 iterations plus
-2 probes. `sample_tiles` is `max(tiles_k, tiles_n) * 3`, which is 168 for the
-896-square and `(896,128)` modules and 912 for `(896,4864)` and `(4864,896)`.
+`ldlq` calls `quantize_tiles` exactly `size_k / 16` times per module, once per
+16-row block, and that count is invariant under `buf_size_k`: a larger span
+trades outer iterations for inner ones. How many kernel launches those calls
+issue depends on the shape, because the call's grid is `tiles_n`: 56 tiles is
+one launch, and the 304-tile call of a `(896,4864)` module is two.
+`mlp.down_proj` is `(4864, 896)`, so it makes 304 single-launch calls per layer:
+304 of the layer's 752 `ldlq` kernel launches, and every one of them is on the
+critical path because the module is alone in its subset.
+
+`g_scale_gss` calls `quantize_tiles` 13 times per module, and each of those
+calls is `ceil(sample_tiles / 256)` kernel launches -- one for the 168-tile
+sample of the square and `(896,128)` shapes, four for the 912-tile sample of
+`(896,4864)` and `(4864,896)`. The 13 is not a tunable: it is a golden-section
+search over `[0.1, 1.9]` with `tol = 0.01`, which shrinks the bracket by `1/phi`
+per iteration and needs 11 iterations plus 2 probes. `sample_tiles` is
+`max(tiles_k, tiles_n) * 3`.
 
 On an idle device the search is pure launch latency:
 
@@ -237,22 +248,34 @@ is not recoverable inside one module: the chain is sequential along `size_k`,
 the tile grid is fixed by the weight shape, and splitting a 16x16 tile across
 blocks would need a grid-wide barrier per trellis position.
 
-Counting sequential launch *steps* (a step is one wave, and concurrent chains
-share a step while their combined grid stays under 256 blocks) gives the whole
-layer:
+Counting waves per subset -- one wave is one `ceil(tiles / 256)` kernel launch,
+and 256 blocks cost ~1.55 ms -- and measuring the subset walls on the same run:
 
-| Subset | Modules | Chains | Steps | GPU |
-| --- | --- | --- | --- | --- |
-| 1/4 | `q,k,v_proj` | 3 | 56 | 84 ms |
-| 2/4 | `o_proj` | 1 | 56 | 84 ms |
-| 3/4 | `gate,up_proj` | 2 | 56 | 84 ms |
-| 4/4 | `down_proj` | 1 | 304 | 456 ms |
-| `ldlq` total | | | 472 | **708 ms** |
-| `g_scale_gss` | | | 195 waves | **293 ms** |
-| forward / capture / sync | | | | ~310 ms |
-| layer critical path | | | | **1.31 s** |
+| Subset | Modules | Chains | `ldlq` waves | `gss` waves | Measured wall |
+| --- | --- | --- | --- | --- | --- |
+| 1/4 | `q,k,v_proj` | 3 | 168 | 39 | 148 ms |
+| 2/4 | `o_proj` | 1 | 56 | 13 | 120 ms |
+| 3/4 | `gate,up_proj` | 2 | 224 | 104 | 432 ms |
+| 4/4 | `down_proj` | 1 | 304 | 52 | 615 ms |
+| total | | | 752 | 208 | **1.31 s** |
 
-That reconciles the measured 1.31 s per layer and the 7.86 s of the 8.00 s wall.
+960 waves at 1.55 ms would be 1.49 s if every wave queued behind the last, so
+the subset walls are 1.31 s because the chains that fit inside one wave do share
+it, and only those:
+
+* Subset 1 launches 56, 8 and 8 blocks per step, 72 in all, so its three `ldlq`
+  chains fit in a single wave: 56 waves of wall time carry 168 wave-slots. Its
+  three 168-tile `gss` searches overlap the same way, 26 waves for 39 slots.
+* Subset 3 launches 304 + 304 = 608 blocks per step, three waves' worth, so its
+  two chains cannot share one: the subset pays three waves per step, 168 waves
+  of wall time for its 224 `ldlq` slots. Its two `gss` searches do share: 52
+  waves for 104 slots.
+* Subset 4 is a single 56-block chain, so all 304 of its waves are wall time.
+
+That is 584 `ldlq` wave-slots of wall time (~905 ms) plus 143 `gss` wave-slots
+(~222 ms), and the remaining ~190 ms per layer is `regularize`'s non-`gss` work,
+`finalize_capture_H`, the replay and the subset-boundary syncs. It reconciles
+the measured 1.31 s per layer and the 7.86 s of the 8.00 s wall.
 
 This also explains the `metric_h2d` column in the phase table below. The
 `H.to(device)` copy at the end of the module is a *synchronous* pageable
@@ -279,7 +302,8 @@ Summed over the run, 11.78 thread-seconds elapse inside `quantize_exl3` for
 `regularize` work is only ~4 ms per module.
 
 `ldlq`'s column is thread time, not GPU time: the loop only enqueues launches.
-The GPU-side cost of `ldlq` is `1.5 ms * (size_k / 16)`.
+The GPU-side cost of `ldlq` is one wave per launch, i.e.
+`1.5 ms * (size_k / 16) * ceil(tiles_n / 256)`.
 
 ## Negatives that should not be re-derived
 
@@ -371,13 +395,14 @@ Three things follow from the step accounting above.
 
 * `g_scale_gss` and the non-`gss` parts of `regularize` depend only on the
   original weight and the finalized Hessian, both of which exist for every
-  module of a layer before the subset loop starts. They are 195 waves per layer
-  (~293 ms) that currently run back-to-back with `ldlq` on the same stream
-  rather than beside it. Hoisting them out of the per-subset critical path is
-  the largest accuracy-preserving opportunity, but the bound is the free CUs,
-  not the 293 ms: in subset 4 `ldlq` leaves 200 CUs idle for 456 ms, so the
-  78 ms of `gss` there can hide completely, while in subset 3 `gss` and `ldlq`
-  are both wide enough to contend.
+  module of a layer before the subset loop starts. They are 208 waves per layer
+  (~222 ms of wall time) that currently run back-to-back with `ldlq` on the same
+  stream rather than beside it. Hoisting them out of the per-subset critical
+  path is the largest accuracy-preserving opportunity, but the bound is the free
+  CUs, not the 222 ms: in subset 4 `ldlq` leaves 200 CUs idle for 615 ms, so the
+  52 waves of `gss` there (81 ms) can hide completely, while in subset 1 the
+  168-tile searches are wider than the 72 blocks `ldlq` launches there and would
+  contend with it instead.
 * Merging all seven layer modules into one subset removes the subset barriers
   and takes the wall from 7.97 s to **6.18 s**, verified twice. It is not a free
   win: it changes the state hash because `true_sequential` replay is what makes
