@@ -165,22 +165,58 @@ class QuantizeEmbedConfig:
     embed_only: bool = True
 
 
-@dataclass
-class RMSNormConfig:
-    """Post-quantization RMSNorm gain tuning target for ``requantize()``.
+class NormType(str, Enum):
+    """Normalization families eligible for post-quantization tuning.
 
-    Only the gains of modules tagged ``:rmsnorm`` in the model definition (plus
-    ``pre_lm_head_norm_module``) are trained, by distilling the next-token
-    distribution of an unquantized ``teacher``. Packed quantized tensors are
-    never modified.
+    ``RMSNORM`` covers mean-free normalization with a gain (Llama/Qwen style),
+    including Gemma-style ``1 + weight`` gains. ``LAYERNORM`` covers
+    mean-centered normalization with an optional bias.
+    """
+
+    RMSNORM = "rmsnorm"
+    LAYERNORM = "layernorm"
+
+
+def normalize_norm_types(types: Any) -> Tuple[NormType, ...]:
+    """Coerce a ``NormType``/string iterable into a validated, deduplicated tuple."""
+    if types is None:
+        return (NormType.RMSNORM,)
+    if isinstance(types, (NormType, str)):
+        types = (types,)
+    normalized = []
+    for entry in types:
+        try:
+            norm_type = entry if isinstance(entry, NormType) else NormType(entry)
+        except ValueError as exc:
+            supported = ", ".join(f"`{member.value}`" for member in NormType)
+            raise ValueError(f"Unsupported norm type `{entry}`. Supported types: {supported}.") from exc
+        if norm_type not in normalized:
+            normalized.append(norm_type)
+    if not normalized:
+        raise ValueError("`types` must name at least one norm type.")
+    return tuple(normalized)
+
+
+@dataclass
+class NormConfig:
+    """Post-quantization normalization tuning target for ``requantize()``.
+
+    Only the parameters of modules tagged ``:norm`` (legacy ``:rmsnorm``) in the
+    model definition, plus ``pre_lm_head_norm_module``, are trained by
+    distilling the next-token distribution of an unquantized ``teacher``.
+    Packed quantized tensors are never modified. ``types`` selects the
+    normalization families to tune; the default keeps the original RMSNorm-only
+    behavior of the first release.
     """
 
     # Unquantized reference model: a local path / HF id, or an already loaded module.
     teacher: Any = None
+    # Normalization families to tune: `NormType` members or their string values.
+    types: Tuple[NormType, ...] = (NormType.RMSNORM,)
     steps: int = 400
     lr: float = 1e-3
-    # Strength of the L2 pull of each gain toward its quantized-checkpoint value,
-    # measured relative to that tensor's mean absolute gain.
+    # Strength of the L2 pull of each parameter toward its quantized-checkpoint
+    # value, measured relative to that parameter's mean absolute effective value.
     reg: float = 1e-3
     seed: int = 0
     # Tagged module names ending with any of these suffixes are left untouched.
@@ -188,14 +224,20 @@ class RMSNormConfig:
 
     def __post_init__(self):
         if self.teacher is None:
-            raise ValueError("RMSNormConfig requires an unquantized `teacher` model or path.")
+            raise ValueError("NormConfig requires an unquantized `teacher` model or path.")
+        self.types = normalize_norm_types(self.types)
         if self.steps <= 0:
-            raise ValueError("RMSNormConfig.steps must be positive.")
+            raise ValueError("NormConfig.steps must be positive.")
         if self.lr <= 0:
-            raise ValueError("RMSNormConfig.lr must be positive.")
+            raise ValueError("NormConfig.lr must be positive.")
         if self.reg < 0:
-            raise ValueError("RMSNormConfig.reg must be non-negative.")
+            raise ValueError("NormConfig.reg must be non-negative.")
         self.skip = tuple(self.skip)
+
+
+# First-release name: kept as an exact alias so existing callers and
+# ``isinstance`` checks keep working with the generalized config.
+RMSNormConfig = NormConfig
 
 
 class FallbackStrategy(str, Enum):

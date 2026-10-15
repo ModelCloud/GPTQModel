@@ -7,7 +7,7 @@ import pytest
 from safetensors.torch import save_file
 from torch import nn
 
-from gptqmodel import QuantizeConfig, QuantizeEmbed, QuantizeEmbedConfig, RMSNormConfig
+from gptqmodel import NormConfig, QuantizeConfig, QuantizeEmbed, QuantizeEmbedConfig
 from gptqmodel.models.base import BaseQModel, _QuantizedCheckpointSource
 from gptqmodel.quantization import FORMAT
 from gptqmodel.quantization import QuantizeEmbedConfig as QuantizationEmbedConfig
@@ -159,11 +159,11 @@ def test_requantize_checks_persistence_before_dispatch(tmp_path, operation, brok
     # A different valid checkpoint must not hide a missing selected source.
     save_file({"norm.weight": nn.Parameter().new_ones(2)}, str(tmp_path / "model.safetensors"))
     model._module_replacement_source = _QuantizedCheckpointSource(str(tmp_path))
-    model._requantize_rmsnorm = lambda **kwargs: pytest.fail("must fail before tuning")
+    model._requantize_norm = lambda **kwargs: pytest.fail("must fail before tuning")
     model._requantize_embeddings = lambda **kwargs: pytest.fail("must fail before embedding packing")
     kwargs = {}
     if operation != "embedding":
-        kwargs["rmsnorm"] = RMSNormConfig(teacher="must-not-load")
+        kwargs["norm"] = NormConfig(teacher="must-not-load")
     if operation != "norm":
         kwargs["embed_quant_mode"] = QuantizeEmbed.OUTPUT
     with pytest.raises(ValueError if broken == "invalid-index" else FileNotFoundError):

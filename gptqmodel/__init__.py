@@ -303,6 +303,8 @@ from .quantization import (
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,
+    NormConfig,
+    NormType,
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,

@@ -51,14 +51,16 @@ from ..quantization.config import (
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
     GcMode,
+    NormConfig,
+    NormType,
     QuantizeEmbed,
     QuantizeEmbedConfig,
-    RMSNormConfig,
     VramStrategy,
     configure_dynamic_override_cache_for_model,
     dynamic_get,
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
+    normalize_norm_types,
     resolve_quant_format,
 )
 from ..quantization.dtype import (
@@ -71,6 +73,7 @@ from ..quantization.dtype import (
     is_fp4_packed_dtype,
     quark_floatx_formats,
 )
+from ..quantization.norm_tuning import norm_type_of
 from ..quantization.rotation.rotation import fuse_layer_norms, rotate_model
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.backend import BACKEND, awq_gemm_pack_backend, backend_for_activation, normalize_backend
@@ -247,8 +250,16 @@ def _apply_module_tree_override_in_place(module_tree, override):
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
+NORM_FLAG = ":norm"
+# First-release flag: still accepted so existing definitions and custom model
+# definitions keep working; new definitions should tag modules with `:norm`.
 RMSNORM_FLAG = ":rmsnorm"
+NORM_FLAGS = (NORM_FLAG.lstrip(":"), RMSNORM_FLAG.lstrip(":"))
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
+
+
+def _has_norm_flag(flags) -> bool:
+    return any(flag in flags for flag in NORM_FLAGS)
 
 
 # Fix cpu memory leak.
@@ -319,6 +330,7 @@ class BaseQModel(nn.Module):
         "get_moe_modules",
         "is_moe_module",
         "get_moe_module_name",
+        "get_norm_modules",
         "get_rmsnorm_modules",
         "build_layer_modules",
         "simple_layer_modules",
@@ -884,8 +896,8 @@ class BaseQModel(nn.Module):
         return found_names
 
     @classmethod
-    def _collect_rmsnorm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
-        """Collect layer-relative paths of modules tagged with the `:rmsnorm` flag."""
+    def _collect_norm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
+        """Collect layer-relative paths of modules tagged with the `:norm` flag."""
         found = []
         if isinstance(tree_node, dict):
             for key, value in tree_node.items():
@@ -893,18 +905,18 @@ class BaseQModel(nn.Module):
                     continue
                 module_name, flags = cls._parse_module_flags(key)
                 path = f"{parent_path}.{module_name}" if parent_path else module_name
-                if RMSNORM_FLAG.lstrip(":") in flags:
+                if _has_norm_flag(flags):
                     found.append(path)
-                found.extend(cls._collect_rmsnorm_modules_from_tree(value, path))
+                found.extend(cls._collect_norm_modules_from_tree(value, path))
         elif isinstance(tree_node, (tuple, list)):
             for item in tree_node:
                 if isinstance(item, dict):
-                    found.extend(cls._collect_rmsnorm_modules_from_tree(item, parent_path))
+                    found.extend(cls._collect_norm_modules_from_tree(item, parent_path))
                     continue
                 if not isinstance(item, str):
                     continue
                 module_name, flags = cls._parse_module_flags(item)
-                if RMSNORM_FLAG.lstrip(":") not in flags:
+                if not _has_norm_flag(flags):
                     continue
                 # Same leaf rule as the layer walker: a child named like its parent is the parent.
                 if parent_path == module_name or parent_path.endswith(f".{module_name}"):
@@ -914,9 +926,12 @@ class BaseQModel(nn.Module):
         return found
 
     @classmethod
-    def get_rmsnorm_modules(cls) -> List[str]:
+    def get_norm_modules(cls) -> List[str]:
         """
-        Layer-relative paths of RMSNorm modules declared in the module_tree via `:rmsnorm`.
+        Layer-relative paths of normalization modules declared in the module_tree via `:norm`.
+
+        The legacy `:rmsnorm` flag is accepted as an alias. The flag only marks
+        eligibility; `NormConfig.types` decides which families are trained.
 
         Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
         """
@@ -927,15 +942,30 @@ class BaseQModel(nn.Module):
                 if item == "#":
                     found_hash = True
                 elif found_hash and isinstance(item, dict):
-                    for name in cls._collect_rmsnorm_modules_from_tree(item):
+                    for name in cls._collect_norm_modules_from_tree(item):
                         if name not in names:
                             names.append(name)
                     break
         return names
 
-    def rmsnorm_module_names(self) -> List[str]:
-        """Full paths of every tagged RMSNorm module in the live model, plus the pre-lm_head norm."""
-        relative = self.get_rmsnorm_modules()
+    @classmethod
+    def get_rmsnorm_modules(cls) -> List[str]:
+        """Deprecated alias for `get_norm_modules()`: every tagged normalization module."""
+        log.warn.once("`get_rmsnorm_modules()` is deprecated; use `get_norm_modules()`.")
+        return cls.get_norm_modules()
+
+    @classmethod
+    def has_norm_flag(cls, module_spec: str) -> bool:
+        """Check if a module specification has the `:norm` (or legacy `:rmsnorm`) flag."""
+        if not isinstance(module_spec, str):
+            return False
+        _, flags = cls._parse_module_flags(module_spec)
+        return _has_norm_flag(flags)
+
+    def norm_module_names(self, types=None) -> List[str]:
+        """Full paths of every tagged norm module matching `types`, plus the pre-lm_head norm."""
+        requested = normalize_norm_types(types)
+        relative = self.get_norm_modules()
         names = []
         for layers_path in self.extract_layers_node():
             try:
@@ -948,18 +978,34 @@ class BaseQModel(nn.Module):
                         module = layer.get_submodule(name)
                     except AttributeError:
                         continue
-                    if not type(module).__name__.endswith("RMSNorm"):
+                    family = norm_type_of(module)
+                    if family is None:
                         raise ValueError(
-                            f"{type(self).__name__} tags `{name}` as `:rmsnorm` but it is `{type(module).__name__}`."
+                            f"{type(self).__name__} tags `{name}` as `:norm` but it is `{type(module).__name__}`, "
+                            "which no normalization handler supports."
                         )
-                    names.append(f"{layers_path}.{index}.{name}")
+                    if family in requested:
+                        names.append(f"{layers_path}.{index}.{name}")
         if names and self.pre_lm_head_norm_module:
             try:
-                self.model.get_submodule(self.pre_lm_head_norm_module)
-                names.append(self.pre_lm_head_norm_module)
+                module = self.model.get_submodule(self.pre_lm_head_norm_module)
             except AttributeError:
-                pass
+                module = None
+            if module is not None:
+                family = norm_type_of(module)
+                if family in requested:
+                    names.append(self.pre_lm_head_norm_module)
+                elif family is None:
+                    log.warn.once(
+                        f"{type(self).__name__}: `{self.pre_lm_head_norm_module}` is not a supported "
+                        "normalization module and is skipped."
+                    )
         return names
+
+    def rmsnorm_module_names(self) -> List[str]:
+        """Deprecated alias for `norm_module_names((NormType.RMSNORM,))`."""
+        log.warn.once("`rmsnorm_module_names()` is deprecated; use `norm_module_names(types=...)`.")
+        return self.norm_module_names((NormType.RMSNORM,))
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
@@ -1604,18 +1650,18 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
-        rmsnorm: Optional[RMSNormConfig] = None,
+        norm: Optional[NormConfig] = None,
+        rmsnorm: Optional[NormConfig] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
-        if rmsnorm is not None and not isinstance(rmsnorm, RMSNormConfig):
-            raise TypeError("`rmsnorm` must be a `RMSNormConfig` instance.")
-        if embed_quant_config is None and rmsnorm is None:
-            raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `rmsnorm`.")
+        norm = self._normalize_norm_config(norm, rmsnorm)
+        if embed_quant_config is None and norm is None:
+            raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `norm`.")
 
-        if rmsnorm is not None:
-            from ..quantization.rmsnorm import validate_tuning_model
+        if norm is not None:
+            from ..quantization.norm_tuning import validate_tuning_model
 
             # Fail before embedding packing, dataset preparation or teacher loading.
             # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
@@ -1623,9 +1669,9 @@ class BaseQModel(nn.Module):
                 self.quantize_config.format, self.quantize_config.method
             ) == FORMAT.GPTQ:
                 raise ValueError(
-                    "RMSNorm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                    "Norm tuning cannot be combined with GPTQ-v1 embedding requantization. "
                     "Requantize embeddings separately, save the model, then reload with "
-                    "`backend=BACKEND.TORCH` and call `requantize(rmsnorm=...)`."
+                    "`backend=BACKEND.TORCH` and call `requantize(norm=...)`."
                 )
             validate_tuning_model(self.model)
 
@@ -1651,11 +1697,11 @@ class BaseQModel(nn.Module):
                 calibration_data_min_length=calibration_data_min_length,
                 calibration_concat_separator=calibration_concat_separator,
             )
-        if rmsnorm is not None:
+        if norm is not None:
             result = dict(result or {})
-            result["rmsnorm"] = self._requantize_rmsnorm(
+            result["norm"] = self._requantize_norm(
                 calibration=calibration,
-                rmsnorm=rmsnorm,
+                norm=norm,
                 calibration_concat_size=calibration_concat_size,
                 calibration_sort=calibration_sort,
                 batch_size=batch_size,
@@ -1665,11 +1711,25 @@ class BaseQModel(nn.Module):
             )
         return result
 
-    def _requantize_rmsnorm(
+    def _normalize_norm_config(
+        self,
+        norm: Optional[NormConfig],
+        rmsnorm: Optional[NormConfig],
+    ) -> Optional[NormConfig]:
+        if norm is not None and rmsnorm is not None:
+            raise ValueError("Pass only one of `norm` or the deprecated `rmsnorm`.")
+        if rmsnorm is not None:
+            log.warn.once("`requantize(rmsnorm=...)` is deprecated; use `requantize(norm=NormConfig(...))`.")
+            norm = rmsnorm
+        if norm is not None and not isinstance(norm, NormConfig):
+            raise TypeError("`norm` must be a `NormConfig` instance.")
+        return norm
+
+    def _requantize_norm(
         self,
         *,
         calibration,
-        rmsnorm: RMSNormConfig,
+        norm: NormConfig,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
         batch_size: int,
@@ -1677,15 +1737,16 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int,
         calibration_concat_separator: Optional[str],
     ) -> Dict[str, Any]:
-        """Tune tagged RMSNorm gains against an unquantized teacher; packed tensors stay untouched."""
-        from ..quantization.rmsnorm import tune_rmsnorm_gains, validate_tuning_model
+        """Tune tagged norm parameters against an unquantized teacher; packed tensors stay untouched."""
+        from ..quantization.norm_tuning import tune_norm_params, validate_tuning_model
 
         validate_tuning_model(self.model)
 
-        names = self.rmsnorm_module_names()
+        names = self.norm_module_names(norm.types)
         if not names:
             raise ValueError(
-                f"{type(self).__name__} declares no `:rmsnorm` modules in its module_tree; RMSNorm tuning is unavailable."
+                f"{type(self).__name__} declares no `:norm` modules matching {[t.value for t in norm.types]} in its "
+                "module_tree; norm tuning is unavailable."
             )
 
         if tokenizer is not None:
@@ -1708,7 +1769,7 @@ class BaseQModel(nn.Module):
             calibration_concat_separator=calibration_concat_separator,
         )
 
-        teacher = rmsnorm.teacher
+        teacher = norm.teacher
         owns_teacher = not isinstance(teacher, nn.Module)
         if owns_teacher:
             device = get_device(self.get_input_embeddings())
@@ -1719,7 +1780,7 @@ class BaseQModel(nn.Module):
                 trust_remote_code=self.trust_remote_code,
             )
         try:
-            stats = tune_rmsnorm_gains(self.model, teacher, batches, names, rmsnorm)
+            stats = tune_norm_params(self.model, teacher, batches, names, norm)
         finally:
             if owns_teacher:
                 del teacher

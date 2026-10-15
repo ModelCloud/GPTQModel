@@ -12,7 +12,7 @@ from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import BACKEND, GPTQModel, QuantizeConfig, QuantizeEmbed, RMSNormConfig
+from gptqmodel import BACKEND, GPTQModel, NormConfig, QuantizeConfig, QuantizeEmbed
 from gptqmodel.quantization import FORMAT
 
 
@@ -56,7 +56,7 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
     model.quantize(calibration, batch_size=1, backend=BACKEND.TORCH, calibration_data_min_length=1)
     assert any(t.is_meta or torch.is_inference(t) for t in model.model.parameters())
     with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-        model.requantize(calibration, rmsnorm=RMSNormConfig(teacher="must-not-load", steps=1),
+        model.requantize(calibration, norm=NormConfig(teacher="must-not-load", steps=1),
             calibration_data_min_length=1)
     model.save(str(packed))
     basename = "model" if layout == "canonical" else "gptq_model-4bit-16g"
@@ -86,43 +86,43 @@ def test_fresh_quantization_and_embedding_requantization_tuning_lifecycle(tmp_pa
     resolved.rename(unavailable)
     try:
         with pytest.raises(FileNotFoundError):
-            model.requantize(calibration, rmsnorm=RMSNormConfig(teacher="must-not-load", steps=2),
+            model.requantize(calibration, norm=NormConfig(teacher="must-not-load", steps=2),
                 calibration_data_min_length=1)
         assert all(torch.equal(v, before[k]) for k, v in model.model.state_dict().items())
         assert not getattr(model, "_module_replacement_prefixes", set())
     finally:
         unavailable.rename(resolved)
 
-    tune = RMSNormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0)
+    tune = NormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0)
     args = {"calibration": calibration, "embed_quant_mode": QuantizeEmbed.OUTPUT,
         "backend": BACKEND.TORCH, "calibration_data_min_length": 1}
     if format == FORMAT.GPTQ:
         before = {k: v.clone() for k, v in model.model.state_dict().items()}
         with pytest.raises(ValueError, match="Requantize embeddings separately"):
-            model.requantize(**args, rmsnorm=tune)
+            model.requantize(**args, norm=tune)
         assert all(torch.equal(v, before[k]) for k, v in model.model.state_dict().items())
         model.requantize(**args)
         assert model.model.lm_head.qzero_format() == 1
         with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-            model.requantize(calibration, rmsnorm=tune, calibration_data_min_length=1)
+            model.requantize(calibration, norm=tune, calibration_data_min_length=1)
         model.save(str(embedded))
         model = GPTQModel.load(str(embedded), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
     else:
         # GPTQ-v2 remains a supported combined operation.
-        result = model.requantize(**args, rmsnorm=tune)
-        assert result["rmsnorm"]["skipped_steps"] == 0
+        result = model.requantize(**args, norm=tune)
+        assert result["norm"]["skipped_steps"] == 0
         model.save(str(embedded))
         model = GPTQModel.load(str(embedded), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
 
     # The documented save/reload recovery must really train and remain serializable.
-    result = model.requantize(calibration, rmsnorm=tune, calibration_data_min_length=1)
-    assert result["rmsnorm"]["skipped_steps"] == 0
+    result = model.requantize(calibration, norm=tune, calibration_data_min_length=1)
+    assert result["norm"]["skipped_steps"] == 0
     with torch.inference_mode():
         logits = model.model(**calibration[0], use_cache=False).logits.clone()
     model.save(str(tuned))
     original, saved = _checkpoint_tensors(embedded, basename), _checkpoint_tensors(tuned, basename)
     assert original.keys() == saved.keys()
-    allowed = {name + ".weight" for name in result["rmsnorm"]["modules"]}
+    allowed = {name + ".weight" for name in result["norm"]["modules"]}
     changed = set()
     for name, value in original.items():
         assert saved[name].dtype == value.dtype
