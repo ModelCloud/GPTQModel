@@ -51,8 +51,9 @@ def tensor_core_perm_i(device):
     return torch.argsort(tensor_core_perm(device))
 
 
-@lru_cache
-def get_temp_buffers(device, K: int):
+def _allocate_temp_buffers(device, K: int):
+    """Allocate one stream's worth of writable tile scratch."""
+
     max_batch_size = 256
     temp_costs = torch.zeros((max_batch_size, 2, 65536 >> K), dtype = torch.half, device = device)
     temp_edges = torch.zeros((max_batch_size, 256, 65536 >> K), dtype = torch.short, device = device)
@@ -60,26 +61,33 @@ def get_temp_buffers(device, K: int):
 
 
 _workspace_registry_lock = threading.Lock()
-_workspace_gates = {}
+_workspace_buffers = {}
+
+
+def _stream_temp_buffers(device, K: int, stream):
+    """Return the writable tile scratch owned by *stream*.
+
+    A launch indexes the scratch by tile slot, so launches that may run at the
+    same time must never share it. The lifecycle quantizes several modules
+    concurrently (one per device-pool worker thread) and each thread drives its
+    own serial chain of tile launches; keying the scratch by stream keeps those
+    chains independent so they can overlap on the device. Launches on a single
+    stream stay ordered by the stream itself, so no event handshake is needed.
+    """
+
+    key = (torch.device(device), int(K), stream)
+    with _workspace_registry_lock:
+        buffers = _workspace_buffers.get(key)
+        if buffers is None:
+            buffers = _allocate_temp_buffers(key[0], K)
+            _workspace_buffers[key] = buffers
+        return buffers
 
 
 def _quantize_tiles_with_workspace(tiles, output, indices, K, mcg, mul1):
-    # The cached scratch tensors are writable. Order their use across streams,
-    # not just Python calls: releasing a mutex does not finish CUDA kernels.
-    key = (tiles.device, K)
-    with _workspace_registry_lock:
-        gate = _workspace_gates.setdefault(key, {"lock": threading.Lock(), "event": None})
     stream = torch.cuda.current_stream(tiles.device)
-    with gate["lock"]:
-        if gate["event"] is not None:
-            stream.wait_event(gate["event"])
-        temp_costs, temp_edges = get_temp_buffers(tiles.device, K)
-        try:
-            ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
-        finally:
-            event = torch.cuda.Event()
-            event.record(stream)
-            gate["event"] = event
+    temp_costs, temp_edges = _stream_temp_buffers(tiles.device, K, stream)
+    ext.quantize_tiles(tiles, output, indices, temp_costs, temp_edges, K, mcg, mul1)
 
 
 def quantize_tiles(tiles, quant_args: dict):
@@ -96,9 +104,27 @@ def quantize_tiles(tiles, quant_args: dict):
     return quantized_tiles, quantized_idx
 
 
-@lru_cache
+_quant_stream_tls = threading.local()
+
+
 def get_quant_stream(device):
-    return torch.cuda.Stream(device = device)
+    """Return this thread's quantization stream for *device*.
+
+    Modules are quantized by a pool of worker threads, and every module runs its
+    own serial chain of small tile launches (a 56-tile grid fills less than a
+    quarter of the machine). One stream per thread lets independent chains
+    co-schedule on the device; a single shared stream serializes them instead.
+    """
+
+    device = torch.device(device)
+    streams = getattr(_quant_stream_tls, "streams", None)
+    if streams is None:
+        streams = _quant_stream_tls.streams = {}
+    stream = streams.get(device)
+    if stream is None:
+        stream = torch.cuda.Stream(device = device)
+        streams[device] = stream
+    return stream
 
 
 pinned_tiles: torch.Tensor | None = None
