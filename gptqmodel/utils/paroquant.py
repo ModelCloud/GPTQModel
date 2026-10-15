@@ -411,6 +411,62 @@ def _apply_fused_rotation_pair(
     return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
 
 
+def _fused_rotate_pair_grad_op():
+    """Return the fused backward-sweep op, or None when it cannot be used.
+
+    The autograd backward rotates the saved activation and the incoming gradient
+    in reverse order and measures the rotation gradient after every step, which
+    costs one two-tensor rotation plus one rotation-gradient launch per rotation
+    plus the host-side sin/cos and index staging. The native op keeps the running
+    rotated state in shared memory and returns the final pair together with the
+    whole rotation gradient, so the steady-state backward becomes two launches.
+    Unsupported dtypes/devices keep the reference torch path.
+    """
+    try:
+        return _extension_api().op("paroquant", "rotate_pair_grad")
+    except Exception:
+        return None
+
+
+def _fused_rotate_pair_grad_ready(x: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused backward-sweep op can service this pair."""
+    return (
+        x.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and x.is_cuda
+        and grad.is_cuda
+        and x.is_contiguous()
+        and grad.is_contiguous()
+        and x.shape == grad.shape
+    )
+
+
+def _apply_fused_rotation_pair_grad(
+    x: torch.Tensor,
+    grad: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    group_size: int,
+    *,
+    op=None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the whole backward rotation sweep plus its gradient in two launches."""
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=None,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    if op is None:
+        op = _fused_rotate_pair_grad_op()
+    if op is None:
+        raise RuntimeError("ParoQuant rotate_pair_grad op is unavailable.")
+    return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
+
+
 def _rotation_launch_cache_key(
     x: torch.Tensor,
     *,
@@ -627,84 +683,108 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
         if ctx.needs_theta_grad:
             rotated = y.reshape(batch_rows, hidden)
-            grad_theta = torch.zeros_like(theta)
-            offsets = (
-                torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
+            # The fused native op keeps the running rotated pair in shared memory
+            # and accumulates every rotation's gradient in one pass, so the whole
+            # reverse sweep plus the rotation gradient costs two launches instead
+            # of a per-rotation rotation/gradient pair plus the host-side staging
+            # of the negated thetas, the sin/cos tables and the gather indices.
+            fused_pair_grad = (
+                _fused_rotate_pair_grad_op()
+                if _fused_rotate_pair_grad_ready(rotated, grad)
+                else None
             )
-
-            # The rotation set is fixed for the whole backward pass, so derive every
-            # per-rotation constant once instead of rebuilding it inside the loop:
-            # the negated thetas, their sin/cos, and the gather index pairs. This
-            # removes krot sin/cos/neg launches and krot strided-slice+add passes.
-            krot = pairs.shape[0]
-            neg_theta_all = theta.neg()
-            sin_all = theta.reshape(krot, num_groups, half_group).sin()
-            cos_all = theta.reshape(krot, num_groups, half_group).cos()
-            pair_view_all = pairs.reshape(krot, num_groups, group_size)
-            idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
-            idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
-
-            # The fused native op replaces the four gathers plus the elementwise
-            # and reduce ops of one rotation with a single launch. Fall back to
-            # the reference formulation for unsupported dtypes/devices.
-            fused_grad_theta = (
-                _fused_grad_theta_op() if _fused_grad_theta_ready(rotated, grad) else None
-            )
-            fused_parts = [None] * krot if fused_grad_theta is not None else None
-            # The two backward rotations share a pair/theta set and shape, so the
-            # native two-tensor op can service both operands in one launch.
-            fused_rotate_pair = (
-                _fused_rotate_pair_op() if _fused_rotate_pair_ready(rotated, grad) else None
-            )
-
-            for rot_idx in range(krot - 1, -1, -1):
-                pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
-                if fused_rotate_pair is not None:
-                    rotated, grad = _apply_fused_rotation_pair(
-                        rotated,
-                        grad,
-                        pair_row,
-                        neg_theta,
-                        group_size,
-                        op=fused_rotate_pair,
-                    )
-                else:
-                    rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
-                    grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
-
-                idx_i = idx_i_all[rot_idx]
-                idx_j = idx_j_all[rot_idx]
-
-                if fused_grad_theta is not None:
-                    fused_parts[rot_idx] = fused_grad_theta(
-                        rotated,
-                        grad,
-                        idx_i,
-                        idx_j,
-                        sin_all[rot_idx].reshape(-1),
-                        cos_all[rot_idx].reshape(-1),
-                    )
-                    continue
-
-                xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
-                xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
-                grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
-                grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
-
-                sin_t = sin_all[rot_idx]
-                cos_t = cos_all[rot_idx]
-                grad_theta[rot_idx] = (
-                    (
-                        (grad_i * xj - grad_j * xi).sum(0) * cos_t
-                        - (grad_i * xi + grad_j * xj).sum(0) * sin_t
-                    )
-                    .reshape(-1)
-                    .to(theta.dtype)
+            if fused_pair_grad is not None:
+                rotated, grad, grad_theta = _apply_fused_rotation_pair_grad(
+                    rotated,
+                    grad,
+                    pairs,
+                    theta,
+                    group_size,
+                    op=fused_pair_grad,
+                )
+                grad_theta = grad_theta.reshape(theta.shape).to(theta.dtype)
+            else:
+                grad_theta = torch.zeros_like(theta)
+                offsets = (
+                    torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1)
+                    * group_size
                 )
 
-            if fused_parts is not None:
-                grad_theta = torch.stack(fused_parts, dim=0).reshape(theta.shape).to(theta.dtype)
+                # The rotation set is fixed for the whole backward pass, so derive every
+                # per-rotation constant once instead of rebuilding it inside the loop:
+                # the negated thetas, their sin/cos, and the gather index pairs. This
+                # removes krot sin/cos/neg launches and krot strided-slice+add passes.
+                krot = pairs.shape[0]
+                neg_theta_all = theta.neg()
+                sin_all = theta.reshape(krot, num_groups, half_group).sin()
+                cos_all = theta.reshape(krot, num_groups, half_group).cos()
+                pair_view_all = pairs.reshape(krot, num_groups, group_size)
+                idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
+                idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
+
+                # The fused native op replaces the four gathers plus the elementwise
+                # and reduce ops of one rotation with a single launch. Fall back to
+                # the reference formulation for unsupported dtypes/devices.
+                fused_grad_theta = (
+                    _fused_grad_theta_op() if _fused_grad_theta_ready(rotated, grad) else None
+                )
+                fused_parts = [None] * krot if fused_grad_theta is not None else None
+                # The two backward rotations share a pair/theta set and shape, so the
+                # native two-tensor op can service both operands in one launch.
+                fused_rotate_pair = (
+                    _fused_rotate_pair_op() if _fused_rotate_pair_ready(rotated, grad) else None
+                )
+
+                for rot_idx in range(krot - 1, -1, -1):
+                    pair_row = pairs.narrow(0, rot_idx, 1)
+                    neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
+                    if fused_rotate_pair is not None:
+                        rotated, grad = _apply_fused_rotation_pair(
+                            rotated,
+                            grad,
+                            pair_row,
+                            neg_theta,
+                            group_size,
+                            op=fused_rotate_pair,
+                        )
+                    else:
+                        rotated = _apply_fused_rotation(
+                            rotated, pair_row, neg_theta, None, group_size
+                        )
+                        grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
+
+                    idx_i = idx_i_all[rot_idx]
+                    idx_j = idx_j_all[rot_idx]
+
+                    if fused_grad_theta is not None:
+                        fused_parts[rot_idx] = fused_grad_theta(
+                            rotated,
+                            grad,
+                            idx_i,
+                            idx_j,
+                            sin_all[rot_idx].reshape(-1),
+                            cos_all[rot_idx].reshape(-1),
+                        )
+                        continue
+
+                    xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                    xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
+                    grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                    grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
+
+                    sin_t = sin_all[rot_idx]
+                    cos_t = cos_all[rot_idx]
+                    grad_theta[rot_idx] = (
+                        (
+                            (grad_i * xj - grad_j * xi).sum(0) * cos_t
+                            - (grad_i * xi + grad_j * xj).sum(0) * sin_t
+                        )
+                        .reshape(-1)
+                        .to(theta.dtype)
+                    )
+
+                if fused_parts is not None:
+                    grad_theta = torch.stack(fused_parts, dim=0).reshape(theta.shape).to(theta.dtype)
         else:
             neg_theta_all = theta.neg()
             for rot_idx in range(pairs.shape[0] - 1, -1, -1):

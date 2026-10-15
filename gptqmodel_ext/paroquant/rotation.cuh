@@ -37,6 +37,8 @@ static __device__ __forceinline__ __nv_bfloat162 __floats2bfloat162_rn(float lo,
 template <typename scalar_t> struct RotateAccess;
 
 template <> struct RotateAccess<float> {
+  __device__ static float to_float(float v) { return v; }
+
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp, const float *__restrict__ x,
                                     const float *__restrict__ scales, const int s, const int h,
@@ -98,6 +100,8 @@ template <> struct RotateAccess<float> {
 };
 
 template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessHalf {
+  __device__ static float to_float(HalfT v) { return Traits::to_float(v); }
+
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(HalfT *__restrict__ x_grp, const HalfT *__restrict__ x,
                                     const HalfT *__restrict__ scales, const int s, const int h,
