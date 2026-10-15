@@ -760,6 +760,44 @@ quant_config = QuantizeConfig(bits=4, group_size=128, act_group_aware=True)
 
 ### Experimental Features 🧪
 
+#### RMSNorm gain tuning
+
+After quantization, `requantize()` can tune the gains of RMSNorm modules tagged
+by the model definition while leaving packed quantized tensors unchanged. Pass
+an unquantized teacher model (or its Hugging Face path) with the `rmsnorm`
+argument:
+
+```py
+from gptqmodel import BACKEND, GPTQModel, RMSNormConfig
+
+model = GPTQModel.load("path/to/saved-quantized-model", backend=BACKEND.TORCH)
+model.requantize(
+    calibration=calibration,
+    rmsnorm=RMSNormConfig(teacher="Qwen/Qwen3-0.6B", steps=400),
+)
+```
+
+This feature requires a backend with autograd support through the quantized
+linears, such as `BACKEND.TORCH`. After fresh `quantize()`, save and reload
+before tuning: the live quantization model may still contain offloaded/meta
+or inference tensors, or checkpoint-format GPTQ-v1 zero points. These states
+are rejected before tuning rather than trained with incorrectly decoded weights.
+
+For GPTQ-v1 embedding requantization, use two separate passes:
+
+```py
+from gptqmodel import QuantizeEmbed
+
+model.requantize(calibration=calibration, embed_quant_mode=QuantizeEmbed.OUTPUT)
+model.save("embedding-requantized")
+model = GPTQModel.load("embedding-requantized", backend=BACKEND.TORCH)
+model.requantize(calibration=calibration, rmsnorm=RMSNormConfig(teacher="teacher-model"))
+model.save("norm-tuned")
+```
+
+A combined embedding/RMSNorm call remains supported for training-capable
+GPTQ-v2 models.
+
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 
 Enable GPTAQ quantization by setting `gptaq = GPTAQConfig(...)`.
@@ -798,6 +836,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 
 ## Citations 📖
@@ -883,6 +922,17 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# Norm Tweaking
+@misc{li2023normtweakinghighperformancelowbit,
+  title={Norm Tweaking: High-performance Low-bit Quantization of Large Language Models},
+  author={Liang Li and Qingyuan Li and Bo Zhang and Xiangxiang Chu},
+  year={2023},
+  eprint={2309.02784},
+  archivePrefix={arXiv},
+  primaryClass={cs.LG},
+  url={https://arxiv.org/abs/2309.02784}
 }
 
 # ExLlama V3 / EXL3

@@ -10,7 +10,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.writer import _save_embedding_replacement_safetensors
+from gptqmodel.models.writer import _save_module_replacement_safetensors
 
 
 def test_embedding_replacement_rewrites_only_affected_shard(tmp_path):
@@ -38,7 +38,7 @@ def test_embedding_replacement_rewrites_only_affected_shard(tmp_path):
         },
     )
 
-    rewritten, weight_map, _size, removed = _save_embedding_replacement_safetensors(
+    rewritten, weight_map, _size, removed = _save_module_replacement_safetensors(
         model,
         turtle,
         ["embed_tokens"],
@@ -122,7 +122,7 @@ def test_embedding_replacement_saves_tied_lm_head_omitted_from_checkpoint(
         _weight_map={"embed_tokens.weight": shard_name},
     )
 
-    rewritten, weight_map, _size, removed = _save_embedding_replacement_safetensors(
+    rewritten, weight_map, _size, removed = _save_module_replacement_safetensors(
         model,
         turtle,
         prefixes,
@@ -141,7 +141,7 @@ def test_model_save_routes_embedding_only_lifecycle_with_metadata(tmp_path):
     model = BaseQModel.__new__(BaseQModel)
     nn.Module.__init__(model)
     model.quantized = True
-    model._model_free_weight_only_embeddings_only = True
+    model._model_free_weight_only_replacements_only = True
     model.quant_override_files = {}
     model.quant_region_timer = None
     captured = {}

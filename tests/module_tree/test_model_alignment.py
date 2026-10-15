@@ -74,8 +74,15 @@ class TestMarinModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
-        self.assertIn("q_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
-        self.assertIn("k_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
+        attention_specs = Qwen3QModel.module_tree[3]["self_attn"]
+        attention_flags = {
+            Qwen3QModel._parse_module_flags(spec)[0]: Qwen3QModel._parse_module_flags(spec)[1]
+            for spec in attention_specs
+        }
+        self.assertIn("!", attention_flags["q_norm"])
+        self.assertIn("rmsnorm", attention_flags["q_norm"])
+        self.assertIn("!", attention_flags["k_norm"])
+        self.assertIn("rmsnorm", attention_flags["k_norm"])
 
 
 class TestMarinAwqModuleTree(ModelTest):
@@ -91,8 +98,15 @@ class TestMarinAwqModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "k_norm"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "q_proj"))
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
-        self.assertIn("q_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
-        self.assertIn("k_norm:!", Qwen3QModel.module_tree[3]["self_attn"])
+        attention_specs = Qwen3QModel.module_tree[3]["self_attn"]
+        attention_flags = {
+            Qwen3QModel._parse_module_flags(spec)[0]: Qwen3QModel._parse_module_flags(spec)[1]
+            for spec in attention_specs
+        }
+        self.assertIn("!", attention_flags["q_norm"])
+        self.assertIn("rmsnorm", attention_flags["q_norm"])
+        self.assertIn("!", attention_flags["k_norm"])
+        self.assertIn("rmsnorm", attention_flags["k_norm"])
 
 
 class TestQwen2ModuleTree(ModelTest):

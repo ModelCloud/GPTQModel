@@ -623,7 +623,7 @@ def run_layer_stage(
             # iterate plans instead of repeatedly re-deriving replay, batching,
             # and device-routing state inside the execution loop.
             if embed_quant_mode is not None and embed_only is not False and not is_embeddings_module:
-                # Embedding-only operations replay loaded decoder blocks only
+                # Module-replacement operations replay loaded decoder blocks only
                 # to propagate calibration activations to the output endpoint.
                 subset_plans = []
             else:

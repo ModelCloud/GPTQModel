@@ -53,6 +53,7 @@ from ..quantization.config import (
     GcMode,
     QuantizeEmbed,
     QuantizeEmbedConfig,
+    RMSNormConfig,
     VramStrategy,
     configure_dynamic_override_cache_for_model,
     dynamic_get,
@@ -97,7 +98,7 @@ from ..utils.structure import (
     alias_direct_meta_from_turtle_for_submodule,
     alias_from_turtle_for_submodule,
 )
-from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
+from ..utils.torch import TORCH_HAS_COMPILE, torch_compile, torch_empty_cache
 from ._const import (
     CPU,
     DEFAULT_MAX_SHARD_SIZE,
@@ -124,35 +125,44 @@ if TYPE_CHECKING:
 class _QuantizedCheckpointSource:
     """Expose an on-disk quantized checkpoint through the shard-map interface.
 
-    Embedding-only saves use this lightweight source when a model was loaded
+    Module-replacement saves use this lightweight source when a model was loaded
     through the regular quantized loader and therefore has no LazyTurtle.
     """
 
-    def __init__(self, model_local_path: str):
-        self.model_local_path = model_local_path
-        index_path = os.path.join(model_local_path, "model.safetensors.index.json")
-        if os.path.exists(index_path):
-            with open(index_path, "r", encoding="utf-8") as handle:
+    def __init__(self, model_local_path: str, checkpoint_file_name: Optional[str] = None):
+        from safetensors import safe_open
+
+        # The loader has already selected the basename (including legacy GPTQ
+        # names) and whether it is sharded. Do not rediscover a different file.
+        if checkpoint_file_name is None:
+            checkpoint_file_name = os.path.join(model_local_path, "model.safetensors.index.json")
+            if not os.path.exists(checkpoint_file_name):
+                checkpoint_file_name = os.path.join(model_local_path, "model.safetensors")
+        checkpoint_file_name = os.path.abspath(checkpoint_file_name)
+        self.model_local_path = os.path.dirname(checkpoint_file_name)
+        self._index_filename = None
+        if checkpoint_file_name.endswith(".safetensors.index.json"):
+            with open(checkpoint_file_name, "r", encoding="utf-8") as handle:
                 index = json.load(handle)
             weight_map = index.get("weight_map", {})
             if not isinstance(weight_map, dict) or not weight_map:
-                raise ValueError(f"Checkpoint index at `{index_path}` has an empty or invalid `weight_map`.")
+                raise ValueError(f"Checkpoint index at `{checkpoint_file_name}` has an empty or invalid `weight_map`.")
             self._weight_map = {
                 str(tensor_name): str(shard_name)
                 for tensor_name, shard_name in weight_map.items()
             }
+            # Validate shard headers before any tuning; this maps files but does
+            # not load checkpoint tensors into CPU/GPU memory.
+            for shard_name in set(self._weight_map.values()):
+                with safe_open(os.path.join(self.model_local_path, shard_name), framework="pt", device="cpu"):
+                    pass
+            self._index_filename = os.path.basename(checkpoint_file_name)
             return
 
-        single_shard = os.path.join(model_local_path, "model.safetensors")
-        if not os.path.exists(single_shard):
-            raise FileNotFoundError(
-                f"No `model.safetensors.index.json` or `model.safetensors` found under `{model_local_path}`."
-            )
-
-        from safetensors import safe_open
-
-        with safe_open(single_shard, framework="pt", device="cpu") as handler:
-            self._weight_map = dict.fromkeys(handler.keys(), "model.safetensors")
+        if not checkpoint_file_name.endswith(".safetensors"):
+            raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
+        with safe_open(checkpoint_file_name, framework="pt", device="cpu") as handler:
+            self._weight_map = dict.fromkeys(handler.keys(), os.path.basename(checkpoint_file_name))
 
 
 class _ClassPropertyDescriptor:
@@ -237,6 +247,7 @@ def _apply_module_tree_override_in_place(module_tree, override):
 NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
+RMSNORM_FLAG = ":rmsnorm"
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
 
 
@@ -308,6 +319,7 @@ class BaseQModel(nn.Module):
         "get_moe_modules",
         "is_moe_module",
         "get_moe_module_name",
+        "get_rmsnorm_modules",
         "build_layer_modules",
         "simple_layer_modules",
         "shared_input_plan",
@@ -870,6 +882,84 @@ class BaseQModel(nn.Module):
                         found_names.append(module_name)
 
         return found_names
+
+    @classmethod
+    def _collect_rmsnorm_modules_from_tree(cls, tree_node, parent_path: str = "") -> List[str]:
+        """Collect layer-relative paths of modules tagged with the `:rmsnorm` flag."""
+        found = []
+        if isinstance(tree_node, dict):
+            for key, value in tree_node.items():
+                if key == "#":
+                    continue
+                module_name, flags = cls._parse_module_flags(key)
+                path = f"{parent_path}.{module_name}" if parent_path else module_name
+                if RMSNORM_FLAG.lstrip(":") in flags:
+                    found.append(path)
+                found.extend(cls._collect_rmsnorm_modules_from_tree(value, path))
+        elif isinstance(tree_node, (tuple, list)):
+            for item in tree_node:
+                if isinstance(item, dict):
+                    found.extend(cls._collect_rmsnorm_modules_from_tree(item, parent_path))
+                    continue
+                if not isinstance(item, str):
+                    continue
+                module_name, flags = cls._parse_module_flags(item)
+                if RMSNORM_FLAG.lstrip(":") not in flags:
+                    continue
+                # Same leaf rule as the layer walker: a child named like its parent is the parent.
+                if parent_path == module_name or parent_path.endswith(f".{module_name}"):
+                    found.append(parent_path)
+                else:
+                    found.append(f"{parent_path}.{module_name}" if parent_path else module_name)
+        return found
+
+    @classmethod
+    def get_rmsnorm_modules(cls) -> List[str]:
+        """
+        Layer-relative paths of RMSNorm modules declared in the module_tree via `:rmsnorm`.
+
+        Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
+        """
+        names = []
+        for tree in cls._iter_module_tree_variants():
+            found_hash = False
+            for item in tree:
+                if item == "#":
+                    found_hash = True
+                elif found_hash and isinstance(item, dict):
+                    for name in cls._collect_rmsnorm_modules_from_tree(item):
+                        if name not in names:
+                            names.append(name)
+                    break
+        return names
+
+    def rmsnorm_module_names(self) -> List[str]:
+        """Full paths of every tagged RMSNorm module in the live model, plus the pre-lm_head norm."""
+        relative = self.get_rmsnorm_modules()
+        names = []
+        for layers_path in self.extract_layers_node():
+            try:
+                layers = self.model.get_submodule(layers_path)
+            except AttributeError:
+                continue
+            for index, layer in enumerate(layers):
+                for name in relative:
+                    try:
+                        module = layer.get_submodule(name)
+                    except AttributeError:
+                        continue
+                    if not type(module).__name__.endswith("RMSNorm"):
+                        raise ValueError(
+                            f"{type(self).__name__} tags `{name}` as `:rmsnorm` but it is `{type(module).__name__}`."
+                        )
+                    names.append(f"{layers_path}.{index}.{name}")
+        if names and self.pre_lm_head_norm_module:
+            try:
+                self.model.get_submodule(self.pre_lm_head_norm_module)
+                names.append(self.pre_lm_head_norm_module)
+            except AttributeError:
+                pass
+        return names
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
@@ -1514,13 +1604,148 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
+        rmsnorm: Optional[RMSNormConfig] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
-        if embed_quant_config is None:
-            raise ValueError("`requantize()` requires `embed_quant_config` or `embed_quant_mode`.")
+        if rmsnorm is not None and not isinstance(rmsnorm, RMSNormConfig):
+            raise TypeError("`rmsnorm` must be a `RMSNormConfig` instance.")
+        if embed_quant_config is None and rmsnorm is None:
+            raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `rmsnorm`.")
 
+        if rmsnorm is not None:
+            from ..quantization.rmsnorm import validate_tuning_model
+
+            # Fail before embedding packing, dataset preparation or teacher loading.
+            # Loaded GPTQ-v1 checkpoints are fine: their runtime zeros are already v2.
+            if embed_quant_config is not None and resolve_quant_format(
+                self.quantize_config.format, self.quantize_config.method
+            ) == FORMAT.GPTQ:
+                raise ValueError(
+                    "RMSNorm tuning cannot be combined with GPTQ-v1 embedding requantization. "
+                    "Requantize embeddings separately, save the model, then reload with "
+                    "`backend=BACKEND.TORCH` and call `requantize(rmsnorm=...)`."
+                )
+            validate_tuning_model(self.model)
+
+        if self.load_quantized_model and self.turtle_model is None:
+            # Resolve persistence before embedding packing or norm updates can
+            # mutate the loaded model. Revalidate on each requantize() call.
+            self._module_replacement_source = _QuantizedCheckpointSource(
+                str(self.model_local_path), checkpoint_file_name=getattr(self, "checkpoint_file_name", None)
+            )
+
+        result = {}
+        if embed_quant_config is not None:
+            result = self._requantize_embeddings(
+                calibration=calibration,
+                embed_quant_config=embed_quant_config,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                backend=backend,
+                adapter=adapter,
+                adapter_calibration_dataset=adapter_calibration_dataset,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+        if rmsnorm is not None:
+            result = dict(result or {})
+            result["rmsnorm"] = self._requantize_rmsnorm(
+                calibration=calibration,
+                rmsnorm=rmsnorm,
+                calibration_concat_size=calibration_concat_size,
+                calibration_sort=calibration_sort,
+                batch_size=batch_size,
+                tokenizer=tokenizer,
+                calibration_data_min_length=calibration_data_min_length,
+                calibration_concat_separator=calibration_concat_separator,
+            )
+        return result
+
+    def _requantize_rmsnorm(
+        self,
+        *,
+        calibration,
+        rmsnorm: RMSNormConfig,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        calibration_data_min_length: int,
+        calibration_concat_separator: Optional[str],
+    ) -> Dict[str, Any]:
+        """Tune tagged RMSNorm gains against an unquantized teacher; packed tensors stay untouched."""
+        from ..quantization.rmsnorm import tune_rmsnorm_gains, validate_tuning_model
+
+        validate_tuning_model(self.model)
+
+        names = self.rmsnorm_module_names()
+        if not names:
+            raise ValueError(
+                f"{type(self).__name__} declares no `:rmsnorm` modules in its module_tree; RMSNorm tuning is unavailable."
+            )
+
+        if tokenizer is not None:
+            if not isinstance(tokenizer, PreTrainedTokenizerBase):
+                raise ValueError(
+                    f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`."
+                )
+            self.tokenizer = Tokenicer.load(
+                tokenizer,
+                trust_remote_code=self.trust_remote_code,
+                model_config=getattr(self.model, "config", None),
+            )
+
+        batches = self.prepare_dataset(
+            calibration_dataset=calibration,
+            calibration_dataset_concat_size=calibration_concat_size,
+            calibration_dataset_sort=calibration_sort,
+            batch_size=batch_size,
+            calibration_data_min_length=calibration_data_min_length,
+            calibration_concat_separator=calibration_concat_separator,
+        )
+
+        teacher = rmsnorm.teacher
+        owns_teacher = not isinstance(teacher, nn.Module)
+        if owns_teacher:
+            device = get_device(self.get_input_embeddings())
+            teacher = AutoModelForCausalLM.from_pretrained(
+                teacher,
+                dtype=self.model.dtype,
+                device_map={"": device},
+                trust_remote_code=self.trust_remote_code,
+            )
+        try:
+            stats = tune_rmsnorm_gains(self.model, teacher, batches, names, rmsnorm)
+        finally:
+            if owns_teacher:
+                del teacher
+                torch_empty_cache()
+
+        # Persist only the tuned norm tensors; every other checkpoint tensor is kept byte-identical.
+        self._module_replacement_prefixes = set(getattr(self, "_module_replacement_prefixes", set())) | set(stats["modules"])
+        if self.load_quantized_model:
+            self._model_free_weight_only_replacements_only = True
+        return stats
+
+    def _requantize_embeddings(
+        self,
+        *,
+        calibration,
+        embed_quant_config: QuantizeEmbedConfig,
+        calibration_concat_size: Optional[int],
+        calibration_sort: Optional[str],
+        batch_size: int,
+        tokenizer: Optional[PreTrainedTokenizerBase],
+        backend: Optional[BACKEND],
+        adapter: Adapter,
+        adapter_calibration_dataset,
+        calibration_data_min_length: int,
+        calibration_concat_separator: Optional[str],
+    ):
         # Quantized checkpoint loading may use only a device map, leaving the
         # quantization device unset. Requantization still needs a concrete
         # device for kernel selection and calibration replay.
@@ -1549,9 +1774,9 @@ class BaseQModel(nn.Module):
 
         # A loaded quantized model may contain inference-repacked or fused
         # modules that cannot safely be serialized as a complete checkpoint.
-        # Preserve the source checkpoint and let the embedding-only writer
+        # Preserve the source checkpoint and let the module-replacement writer
         # replace only the shards owned by the requested endpoints.
-        prefixes = set(getattr(self, "_embedding_replacement_prefixes", set()))
+        prefixes = set(getattr(self, "_module_replacement_prefixes", set()))
         mode = embed_quant_config.embed_quant_mode
         if mode in (QuantizeEmbed.INPUT, QuantizeEmbed.BOTH):
             input_name = self.get_input_embeddings_name()
@@ -1561,14 +1786,10 @@ class BaseQModel(nn.Module):
             output_name = self.get_output_embeddings_name() or self.lm_head
             if output_name:
                 prefixes.add(output_name)
-        self._embedding_replacement_prefixes = prefixes
+        self._module_replacement_prefixes = prefixes
 
         if self.load_quantized_model and prefixes:
-            if self.turtle_model is None:
-                # Keep the shard-map-only source separate: shell materializers
-                # require a complete LazyTurtle implementation.
-                self._embedding_replacement_source = _QuantizedCheckpointSource(str(self.model_local_path))
-            self._model_free_weight_only_embeddings_only = True
+            self._model_free_weight_only_replacements_only = True
 
         return result
 
@@ -2093,7 +2314,7 @@ class BaseQModel(nn.Module):
                 # Safetensors is unable to save tied weights, so we untie them here. Reference: https://github.com/huggingface/safetensors/issues/202
                 #untie_weights(self.model)
 
-                if getattr(self, "_model_free_weight_only_embeddings_only", False):
+                if getattr(self, "_model_free_weight_only_replacements_only", False):
                     self.save_quantized_embeddings(
                         save_dir=save_dir,
                         safetensors_metadata=safetensors_metadata,

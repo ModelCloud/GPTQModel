@@ -165,6 +165,39 @@ class QuantizeEmbedConfig:
     embed_only: bool = True
 
 
+@dataclass
+class RMSNormConfig:
+    """Post-quantization RMSNorm gain tuning target for ``requantize()``.
+
+    Only the gains of modules tagged ``:rmsnorm`` in the model definition (plus
+    ``pre_lm_head_norm_module``) are trained, by distilling the next-token
+    distribution of an unquantized ``teacher``. Packed quantized tensors are
+    never modified.
+    """
+
+    # Unquantized reference model: a local path / HF id, or an already loaded module.
+    teacher: Any = None
+    steps: int = 400
+    lr: float = 1e-3
+    # Strength of the L2 pull of each gain toward its quantized-checkpoint value,
+    # measured relative to that tensor's mean absolute gain.
+    reg: float = 1e-3
+    seed: int = 0
+    # Tagged module names ending with any of these suffixes are left untouched.
+    skip: Tuple[str, ...] = ()
+
+    def __post_init__(self):
+        if self.teacher is None:
+            raise ValueError("RMSNormConfig requires an unquantized `teacher` model or path.")
+        if self.steps <= 0:
+            raise ValueError("RMSNormConfig.steps must be positive.")
+        if self.lr <= 0:
+            raise ValueError("RMSNormConfig.lr must be positive.")
+        if self.reg < 0:
+            raise ValueError("RMSNormConfig.reg must be non-negative.")
+        self.skip = tuple(self.skip)
+
+
 class FallbackStrategy(str, Enum):
     """
     +-----------+----------------------+---------------------------+------------------------------+

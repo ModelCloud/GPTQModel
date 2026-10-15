@@ -34,6 +34,7 @@ from .config import (
                      QuantizeConfig,
                      QuantizeEmbed,
                      QuantizeEmbedConfig,
+                     RMSNormConfig,
                      RTNConfig,
                      SmootherConfig,
                      SmoothLog,

@@ -76,8 +76,8 @@ def test_dynamic_rule_order_survives_save(
     if embedding_only:
         source = Path(writer.model_local_path)
         save_file({"proj.weight": torch.ones(32, 32)}, source / "model.safetensors")
-        writer._embedding_replacement_prefixes = {"proj"}
-        writer._embedding_replacement_source = SimpleNamespace(
+        writer._module_replacement_prefixes = {"proj"}
+        writer._module_replacement_source = SimpleNamespace(
             model_local_path=str(source),
             _weight_map={"proj.weight": "model.safetensors"},
         )
