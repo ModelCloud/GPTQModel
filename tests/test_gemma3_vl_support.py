@@ -1,0 +1,216 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+from types import SimpleNamespace
+
+from torch import nn
+
+from gptqmodel.models import auto
+from gptqmodel.models.definitions import gemma3 as gemma3_def
+from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
+from gptqmodel.utils.model import MODALITY
+
+
+class _FakeProcessor:
+    def __init__(self):
+        self.template_calls = []
+
+    def apply_chat_template(self, conversations, **kwargs):
+        self.template_calls.append((conversations, kwargs))
+        return {"input_ids": [[index] for index, _ in enumerate(conversations)]}
+
+
+def _vl_qmodel():
+    model = object.__new__(Gemma3ForConditionalGenerationGPTQ)
+    nn.Module.__init__(model)
+    model.model_local_path = "google/gemma-3-4b-it"
+    return model
+
+
+def _conversation():
+    return [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image",
+                    "image": "http://images.cocodataset.org/val2017/000000037777.jpg",
+                },
+                {"type": "text", "text": "generate a caption for this image"},
+            ],
+        },
+        {"role": "assistant", "content": "a kitchen with wooden cabinets"},
+    ]
+
+
+def _fake_vl_model(offload_to_disk):
+    language_model = nn.Module()
+    language_model.embed_tokens = nn.Embedding(4, 4)
+    language_model.rotary_emb = nn.Identity()
+    language_model.norm = nn.LayerNorm(4)
+
+    core_model = nn.Module()
+    core_model.language_model = language_model
+    core_model.vision_tower = nn.Identity()
+    core_model.multi_modal_projector = nn.Linear(4, 4)
+
+    wrapper = nn.Module()
+    wrapper.model = core_model
+
+    model = _vl_qmodel()
+    model.model = wrapper
+    model.quantize_config = SimpleNamespace(
+        device="cuda:0",
+        offload_to_disk=offload_to_disk,
+        offload_to_disk_path="/tmp/gemma3-offload",
+    )
+    return model
+
+
+def test_gemma3_vl_definition_declares_multimodal_contract():
+    assert auto.MODEL_MAP["gemma3"] is Gemma3ForConditionalGenerationGPTQ
+    assert Gemma3ForConditionalGenerationGPTQ.modality == [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
+    assert Gemma3ForConditionalGenerationGPTQ.require_load_processor is True
+    assert Gemma3ForConditionalGenerationGPTQ.pre_lm_head_norm_module == "model.language_model.norm"
+
+
+def test_gemma3_text_definition_stays_text_only():
+    assert auto.MODEL_MAP["gemma3_text"] is Gemma3QModel
+    assert Gemma3QModel.modality == [MODALITY.TEXT]
+    assert Gemma3QModel.require_load_processor is False
+
+
+def test_gemma3_vl_load_processor_uses_model_path(monkeypatch):
+    calls = []
+    processor = object()
+
+    def fake_from_pretrained(*args, **kwargs):
+        calls.append((args, kwargs))
+        return processor
+
+    monkeypatch.setattr(gemma3_def.AutoProcessor, "from_pretrained", fake_from_pretrained)
+    model = _vl_qmodel()
+
+    assert model.load_processor() is processor
+    assert calls == [(("google/gemma-3-4b-it",), {"trust_remote_code": False})]
+
+
+def test_gemma3_vl_prepare_dataset_renders_conversations_with_processor(monkeypatch):
+    processor = _FakeProcessor()
+    monkeypatch.setattr(Gemma3ForConditionalGenerationGPTQ, "load_processor", lambda self: processor)
+    model = _vl_qmodel()
+
+    prepared = model.prepare_dataset([_conversation(), _conversation()], batch_size=1)
+
+    assert len(prepared) == 2
+    assert [len(conversations) for conversations, _ in processor.template_calls] == [1, 1]
+    for _, kwargs in processor.template_calls:
+        assert kwargs == {
+            "add_generation_prompt": True,
+            "return_tensors": "pt",
+            "return_dict": True,
+            "tokenize": True,
+        }
+
+
+def test_gemma3_vl_prepare_dataset_honors_batch_size(monkeypatch):
+    processor = _FakeProcessor()
+    monkeypatch.setattr(Gemma3ForConditionalGenerationGPTQ, "load_processor", lambda self: processor)
+    model = _vl_qmodel()
+
+    prepared = model.prepare_dataset([_conversation(), _conversation()], batch_size=2)
+
+    assert len(prepared) == 1
+    assert [len(conversations) for conversations, _ in processor.template_calls] == [2]
+
+
+def test_gemma3_vl_calibration_dataset_resolves_to_image_conversations(monkeypatch):
+    from ovis import image_to_test_dataset
+
+    captured = {}
+
+    def fake_prepare_dataset(format_func, n_sample=20):
+        captured["format_func"] = format_func
+        captured["n_sample"] = n_sample
+        return [format_func("http://images.cocodataset.org/val2017/000000037777.jpg", "a kitchen")]
+
+    monkeypatch.setattr(image_to_test_dataset, "prepare_dataset", fake_prepare_dataset)
+    model = object.__new__(Gemma3ForConditionalGenerationGPTQ)
+
+    samples = image_to_test_dataset.get_calib_dataset(model)
+
+    assert captured["format_func"] is image_to_test_dataset.format_qwen2_vl_dataset
+    assert captured["n_sample"] == 20
+    assert samples[0][0]["content"][0] == {
+        "type": "image",
+        "image": "http://images.cocodataset.org/val2017/000000037777.jpg",
+    }
+    assert samples[0][1] == {"role": "assistant", "content": "a kitchen"}
+
+
+def test_gemma3_vl_hooks_materialize_multimodal_modules(monkeypatch):
+    materialized = []
+    monkeypatch.setattr(
+        Gemma3ForConditionalGenerationGPTQ,
+        "shell_module_materialize",
+        lambda self, target_submodule, device: materialized.append((target_submodule, device)),
+    )
+    model = _fake_vl_model(offload_to_disk=False)
+    core_model = model.model.model
+    language_model = core_model.language_model
+
+    model.pre_quantize_generate_hook_start()
+
+    assert [module for module, _ in materialized] == [
+        language_model.embed_tokens,
+        language_model.rotary_emb,
+        language_model.norm,
+        core_model.vision_tower,
+        core_model.multi_modal_projector,
+    ]
+    assert [device for _, device in materialized] == ["cuda:0"] * 5
+
+
+def test_gemma3_vl_hooks_offload_multimodal_modules(monkeypatch):
+    offloaded = []
+    monkeypatch.setattr(
+        gemma3_def,
+        "offload_to_disk",
+        lambda module, model, disk_path: offloaded.append((module, model, disk_path)),
+    )
+    model = _fake_vl_model(offload_to_disk=True)
+    core_model = model.model.model
+    language_model = core_model.language_model
+
+    model.pre_quantize_generate_hook_end()
+
+    assert offloaded == [
+        (language_model.embed_tokens, language_model, "/tmp/gemma3-offload"),
+        (language_model.rotary_emb, language_model, "/tmp/gemma3-offload"),
+        (language_model.norm, language_model, "/tmp/gemma3-offload"),
+        (core_model.vision_tower, core_model, "/tmp/gemma3-offload"),
+        (core_model.multi_modal_projector, core_model, "/tmp/gemma3-offload"),
+    ]
+
+
+def test_gemma3_vl_hooks_release_multimodal_modules_to_cpu(monkeypatch):
+    moved = []
+    monkeypatch.setattr(
+        gemma3_def,
+        "move_to",
+        lambda module, device: moved.append((module, device)) or module,
+    )
+    model = _fake_vl_model(offload_to_disk=False)
+    core_model = model.model.model
+    language_model = core_model.language_model
+
+    model.pre_quantize_generate_hook_end()
+
+    assert [module for module, _ in moved] == [
+        language_model.embed_tokens,
+        language_model.rotary_emb,
+        language_model.norm,
+        core_model.vision_tower,
+        core_model.multi_modal_projector,
+    ]
+    assert [device for _, device in moved] == [gemma3_def.CPU] * 5
