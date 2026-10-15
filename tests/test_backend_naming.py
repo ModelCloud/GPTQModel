@@ -22,6 +22,7 @@ def test_legacy_torch_backend_normalizes_by_quant_method():
     assert normalize_backend("torch", quant_method=METHOD.GPTQ) == BACKEND.GPTQ_TORCH
     assert normalize_backend("torch", quant_method=METHOD.FP8) == BACKEND.FP8_TORCH
     assert normalize_backend("torch", quant_method=METHOD.EXL3) == BACKEND.EXL3_TORCH
+    assert normalize_backend("torch", quant_method=METHOD.VPTQ) == BACKEND.VPTQ_TORCH
 
 
 def test_awq_specific_legacy_backends_normalize_to_canonical_names():
