@@ -925,7 +925,21 @@ def quantize_exl3(
     swap_to_device: torch.device | None = None,
     save_reg: str = None
 ):
-    """
+    """Quantize one weight matrix against a captured Hessian.
+
+    The whole body runs on this worker thread's quantization stream instead of
+    the ambient (device-shared) stream. ``ldlq``, ``fallback_quant`` and
+    ``g_scale_gss`` each bracket their work with
+    ``stream.wait_stream(current)`` / ``current.wait_stream(stream)`` pairs, and
+    when ``current`` is the shared default stream those brackets chain every
+    worker's tile launches behind every other worker's through the wait events
+    they leave on it. That serialized the tile chains (one launch in flight at a
+    time, measured 1.19x overlap across four workers) even though the kernel is
+    latency-bound and a single 56-block launch fills under a quarter of the
+    device. Hoisting the bracket to this boundary keeps the same ordering
+    guarantees against the caller, while the nested pairs become waits on their
+    own stream, i.e. no-ops.
+
     :param weight:
         Input tensor, row major shape (in_features, out_features)
 
@@ -960,6 +974,38 @@ def quantize_exl3(
           - proxy error: trace(err @ H @ err.T) / (W @ H @ W.T)
           - quantized and packed tensors
     """
+
+    device = torch.device(quant_args["devices"][0])
+    quant_stream = get_quant_stream(device)
+    outer_stream = torch.cuda.current_stream(device)
+    quant_stream.wait_stream(outer_stream)
+    with torch.cuda.stream(quant_stream):
+        try:
+            return _quantize_exl3_body(
+                weight,
+                H_data,
+                quant_args,
+                return_weight_q,
+                progress_str=progress_str,
+                verbose=verbose,
+                swap_to_device=swap_to_device,
+                save_reg=save_reg,
+            )
+        finally:
+            outer_stream.wait_stream(quant_stream)
+
+
+def _quantize_exl3_body(
+    weight: torch.Tensor,
+    H_data: dict,
+    quant_args: dict,
+    return_weight_q: bool,
+    progress_str: str | None = None,
+    verbose: bool = False,
+    swap_to_device: torch.device | None = None,
+    save_reg: str | None = None
+):
+    """Runs the EXL3 quantization body; see :func:`quantize_exl3`."""
 
     progress_text = None if not progress_str else progress_str.replace("<step>", "Preparing")
     with (ProgressBar(progress_text, 100) as pb):
