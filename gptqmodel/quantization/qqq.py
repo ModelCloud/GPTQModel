@@ -724,9 +724,12 @@ class QQQ:
                 count = i2 - i1
 
                 W1 = W[:, i1:i2].clone()
-                Q1 = torch.zeros_like(W1)
-                Err1 = torch.zeros_like(W1)
-                Losses1 = torch.zeros_like(W1)
+                # ``Q`` is written through the block view and ``Losses`` through its
+                # block slice; both are fully overwritten per block, so no staging
+                # copy or zero-fill is required.
+                Q1 = Q[:, i1:i2]
+                Err1 = torch.empty_like(W1)
+                Losses1 = Losses[:, i1:i2]
                 Hinv1 = Hinv[i1:i2, i1:i2]
 
                 if fused_block_update is not None and count == 128:
@@ -843,8 +846,7 @@ class QQQ:
                         )
                         Err1[:, i] = err1
 
-                Q[:, i1:i2] = Q1
-                Losses[:, i1:i2] = Losses1 / 2
+                Losses1.div_(2)
 
                 W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
 
