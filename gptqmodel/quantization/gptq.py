@@ -9,8 +9,9 @@ import contextlib
 import math
 import threading
 import time
-from dataclasses import dataclass
 from concurrent.futures import Future
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
@@ -277,6 +278,12 @@ def get_number_of_rows_and_cols(layer: nn.Module):
     else:
         # weight shape is (n_out, n_in); math.prod keeps `columns` a plain int
         return layer.weight.shape[0], math.prod(layer.weight.shape[1:])
+
+
+@lru_cache(maxsize=8)
+def _uniform_column_group(count: int, device: torch.device) -> torch.Tensor:
+    """Constant group index for blocks whose columns share one quantizer group."""
+    return torch.zeros(count, device=device, dtype=torch.int32)
 
 
 class GPTQ:
@@ -1957,38 +1964,63 @@ class GPTQ:
                     # Group parameters are based on W, which the eager column
                     # loop does not modify until after the block. Thus every
                     # boundary inside this block can be prepared before launch.
-                    block_scales = []
-                    block_zeros = []
-                    column_groups = []
-                    parameter_indices = {}
-                    for i in range(count):
-                        column = i1 + i
-                        if self.qcfg.group_size != -1:
+                    block_group_size = self.qcfg.group_size
+                    uniform_group = block_group_size == -1 or (
+                        i1 // block_group_size == (i2 - 1) // block_group_size
+                        and (not self.qcfg.static_groups or not self.qcfg.desc_act)
+                    )
+                    if uniform_group:
+                        # Every column of this block resolves to the same
+                        # quantizer group, so the per-column bookkeeping
+                        # collapses to one lookup and a constant group index.
+                        if block_group_size != -1:
                             if not self.qcfg.static_groups:
-                                if column % self.qcfg.group_size == 0:
+                                if i1 % block_group_size == 0:
                                     self.quantizer.find_params(
-                                        W[:, column : column + self.qcfg.group_size], weight=True,
+                                        W[:, i1 : i1 + block_group_size], weight=True,
                                     )
-                                if (column // self.qcfg.group_size) - now_idx == -1:
+                                if (i1 // block_group_size) - now_idx == -1:
                                     scale.append(self.quantizer.scale)
                                     zero.append(self.quantizer.zero)
                                     now_idx += 1
                             else:
-                                idx = perm[column] if self.qcfg.desc_act else column
-                                self.quantizer = groups[idx // self.qcfg.group_size]
+                                self.quantizer = groups[i1 // block_group_size]
+                        block_scale = self.quantizer.scale.flatten().unsqueeze(0)
+                        block_zero = self.quantizer.zero.flatten().unsqueeze(0)
+                        column_group = _uniform_column_group(count, W.device)
+                    else:
+                        block_scales = []
+                        block_zeros = []
+                        column_groups = []
+                        parameter_indices = {}
+                        for i in range(count):
+                            column = i1 + i
+                            if self.qcfg.group_size != -1:
+                                if not self.qcfg.static_groups:
+                                    if column % self.qcfg.group_size == 0:
+                                        self.quantizer.find_params(
+                                            W[:, column : column + self.qcfg.group_size], weight=True,
+                                        )
+                                    if (column // self.qcfg.group_size) - now_idx == -1:
+                                        scale.append(self.quantizer.scale)
+                                        zero.append(self.quantizer.zero)
+                                        now_idx += 1
+                                else:
+                                    idx = perm[column] if self.qcfg.desc_act else column
+                                    self.quantizer = groups[idx // self.qcfg.group_size]
 
-                        key = id(self.quantizer.scale)
-                        group_index = parameter_indices.get(key)
-                        if group_index is None:
-                            group_index = len(block_scales)
-                            parameter_indices[key] = group_index
-                            block_scales.append(self.quantizer.scale.flatten())
-                            block_zeros.append(self.quantizer.zero.flatten())
-                        column_groups.append(group_index)
+                            key = id(self.quantizer.scale)
+                            group_index = parameter_indices.get(key)
+                            if group_index is None:
+                                group_index = len(block_scales)
+                                parameter_indices[key] = group_index
+                                block_scales.append(self.quantizer.scale.flatten())
+                                block_zeros.append(self.quantizer.zero.flatten())
+                            column_groups.append(group_index)
 
-                    block_scale = torch.stack(block_scales)
-                    block_zero = torch.stack(block_zeros)
-                    column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
+                        block_scale = torch.stack(block_scales)
+                        block_zero = torch.stack(block_zeros)
+                        column_group = torch.tensor(column_groups, device=W.device, dtype=torch.int32)
                     fused_block_update(
                         W1, Hinv1, block_scale, block_zero, column_group,
                         Q1, Err1, Losses1, (1 << self.qcfg.bits) - 1,
