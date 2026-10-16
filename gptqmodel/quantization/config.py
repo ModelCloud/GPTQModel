@@ -4392,7 +4392,10 @@ class ParoConfig(PreProcessorConfig):
     opt_fused_rotation: bool = field(default=True)
     opt_gradient_checkpointing: Optional[bool] = field(default=None)
     opt_stage_cudagraph: bool = field(default=True)
-    opt_amp: bool = field(default=True)
+    # `None` = auto: run the optimization stages without AMP on ROCm (measured
+    # faster and at-least-as-accurate on MI355X/gfx950) and keep the historical
+    # CUDA AMP default elsewhere.
+    opt_amp: Optional[bool] = field(default=None)
     opt_best_state_dtype: Union[str, torch.dtype] = field(default="fp32")
     opt_train_on_noisy_inputs: bool = field(default=False)
     opt_scope: str = field(default="module")
@@ -4461,7 +4464,8 @@ class ParoConfig(PreProcessorConfig):
             checkpointing = self.default_opt_gradient_checkpointing_for_scope(self.opt_scope)
         self.opt_gradient_checkpointing = bool(checkpointing)
         self.opt_stage_cudagraph = bool(self.opt_stage_cudagraph)
-        self.opt_amp = bool(self.opt_amp)
+        if self.opt_amp is not None:
+            self.opt_amp = bool(self.opt_amp)
         self.opt_best_state_dtype = _normalize_paroquant_best_state_dtype(self.opt_best_state_dtype)
         self.opt_train_on_noisy_inputs = bool(self.opt_train_on_noisy_inputs)
         self.opt_stage_impl = str(self.opt_stage_impl).strip().lower()
