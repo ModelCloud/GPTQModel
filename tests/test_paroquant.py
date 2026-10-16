@@ -3570,6 +3570,102 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
     assert calls == [([expected_param_group], expected_kwargs)]
 
 
+def test_paroquant_stage_merges_identical_optimizer_param_groups():
+    """Guard the live stage path against paying one AdamW call per one-tensor group."""
+    channel_scales = torch.nn.Parameter(torch.randn(4))
+    theta = torch.nn.Parameter(torch.randn(4))
+    weight = torch.nn.Parameter(torch.randn(4))
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [channel_scales], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [theta], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [weight], "lr": 1e-5, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [channel_scales, theta]
+    assert groups[1]["params"] == [weight]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"lr": 0.051},
+        {"weight_decay": 0.02},
+        {"betas": (0.9, 0.96)},
+        {"eps": 1e-9},
+        {"amsgrad": True},
+        {"momentum": 0.5},
+        {"dampening": 0.1},
+        {"nesterov": True},
+    ],
+)
+def test_paroquant_stage_group_merge_requires_identical_hyperparameters(override):
+    """Guard the merge from folding groups AdamW would update with different scalars."""
+    first = torch.nn.Parameter(torch.randn(4))
+    second = torch.nn.Parameter(torch.randn(4))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [first], **base},
+            {"params": [second], **{**base, **override}},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [first]
+    assert groups[1]["params"] == [second]
+
+
+def test_paroquant_stage_group_merge_keeps_distinct_device_dtype_signatures_apart():
+    """Guard the merge from changing how many fused calls a mixed-dtype group list makes."""
+    fp32_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float32))
+    fp16_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float16))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [fp32_param], **base},
+            {"params": [fp16_param], **base},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [fp32_param]
+    assert groups[1]["params"] == [fp16_param]
+
+
+def test_paroquant_merged_group_adamw_step_is_bitwise_identical():
+    """Guard that folding identical groups leaves every parameter update bitwise unchanged."""
+    torch.manual_seed(7)
+    optimizer_kwargs = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+    initial = [torch.randn(16) for _ in range(2)]
+    grads = [torch.randn(16) * 1e-3 for _ in range(2)]
+
+    split_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    merged_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    split_optimizer = torch.optim.AdamW([{"params": [param], **optimizer_kwargs} for param in split_params])
+    merged_groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [{"params": [param], **optimizer_kwargs} for param in merged_params]
+    )
+    assert len(merged_groups) == 1
+    merged_optimizer = torch.optim.AdamW(merged_groups)
+
+    for _ in range(3):
+        for param, grad in zip(split_params, grads):
+            param.grad = grad.clone()
+        for param, grad in zip(merged_params, grads):
+            param.grad = grad.clone()
+        split_optimizer.step()
+        merged_optimizer.step()
+
+    for split_param, merged_param in zip(split_params, merged_params):
+        assert torch.equal(split_param, merged_param)
+
+
 def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
     """Guard grouped CUDA optimizer setup against fused AdamW support gaps."""
 

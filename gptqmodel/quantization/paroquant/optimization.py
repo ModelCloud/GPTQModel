@@ -23,7 +23,7 @@ import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Iterable, Literal, Optional, Sequence, cast
 
 import torch
 import torch.nn.functional as F
@@ -1401,7 +1401,57 @@ def _normalize_optimizer_param_groups(
                 "nesterov": bool(param_group.get("nesterov", False)),
             }
         )
-    return normalized_groups
+    return _merge_identical_optimizer_param_groups(normalized_groups)
+
+
+def _merge_identical_optimizer_param_groups(
+    normalized_groups: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Fold param groups that agree on every hyperparameter into one group.
+
+    ``torch.optim.AdamW`` runs the fused CUDA step once per ``(device, dtype)``
+    grouping of the tensor list it is handed, and each of those calls is
+    surrounded by a per-call ``_foreach_add_``/``_foreach_sub_`` on the step
+    counters. Those three launches are per *call*, not per tensor, so ParoQuant's
+    rotation stage -- which splits ``channel_scales_opt`` and ``theta`` into two
+    groups that carry byte-identical hyperparameters because both train at
+    ``rotation_lr`` -- pays three extra launches on every optimizer step for two
+    one-tensor lists that one grouped call would already process independently.
+    ParoQuant runs one optimizer step per calibration batch per stage, and both
+    stages are launch-bound, so the split is pure launch overhead.
+
+    The fold is only applied when the groups agree on every value AdamW reads
+    (``lr``, ``weight_decay``, ``betas``, ``eps``, ``amsgrad`` and the SGD
+    fields) *and* on the exact set of ``(device, dtype)`` pairs their tensors
+    resolve to. AdamW derives each tensor's update from its own group scalars
+    and never mixes values across tensors in a list, so merging identical-scalar
+    groups leaves every parameter update bitwise unchanged; keeping the device
+    and dtype signature in the key means the number of fused calls, and their
+    grouping, is unchanged for groups that would not have shared one.
+    """
+    merged: list[dict[str, object]] = []
+    merged_index: dict[tuple[object, ...], int] = {}
+    for group in normalized_groups:
+        params = cast("list[nn.Parameter]", group["params"])
+        key = (
+            group["lr"],
+            group["weight_decay"],
+            group["betas"],
+            group["eps"],
+            group["amsgrad"],
+            group["momentum"],
+            group["dampening"],
+            group["nesterov"],
+            tuple(sorted({(param.device.type, str(param.dtype)) for param in params})),
+        )
+        index = merged_index.get(key)
+        if index is None:
+            merged_index[key] = len(merged)
+            merged.append(group)
+            continue
+        existing = cast("list[nn.Parameter]", merged[index]["params"])
+        merged[index]["params"] = [*existing, *params]
+    return merged
 
 
 def _optimizer_param_groups_support_fused(
