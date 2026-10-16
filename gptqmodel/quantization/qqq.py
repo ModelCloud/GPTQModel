@@ -23,7 +23,7 @@ from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from .fallback_smooth import mse_optimal_quant, smooth_block
-from .gptq import get_number_of_rows_and_cols
+from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
 
 
@@ -732,42 +732,66 @@ class QQQ:
                     # Group parameters depend on W, which the eager column loop
                     # leaves untouched until the block finishes, so every group
                     # boundary inside the block can be resolved before launch.
-                    block_scales = []
-                    block_zeros = []
-                    column_groups = []
-                    parameter_indices = {}
-                    for i in range(count):
-                        column = i1 + i
+                    uniform_group = i1 // groupsize == (i2 - 1) // groupsize and (
+                        not static_groups or not actorder
+                    )
+                    if uniform_group:
+                        # Every column of this block resolves to the same
+                        # quantizer group, so the per-column bookkeeping
+                        # collapses to one lookup and a constant group index.
                         if not static_groups:
-                            if column % groupsize == 0:
+                            if i1 % groupsize == 0:
                                 self.quantizer.find_params(
-                                    W[:, column: column + groupsize], weight=True
+                                    W[:, i1: i1 + groupsize], weight=True
                                 )
 
-                            if (column // groupsize) - now_idx == -1:
+                            if (i1 // groupsize) - now_idx == -1:
                                 scale.append(self.quantizer.scale)
                                 zero.append(self.quantizer.zero)
                                 now_idx += 1
                         else:
-                            idx = column
-                            if actorder:
-                                idx = perm[idx]
-                            self.quantizer = groups[idx // groupsize]
+                            self.quantizer = groups[i1 // groupsize]
 
-                        key = id(self.quantizer.scale)
-                        group_index = parameter_indices.get(key)
-                        if group_index is None:
-                            group_index = len(block_scales)
-                            parameter_indices[key] = group_index
-                            block_scales.append(self.quantizer.scale.flatten())
-                            block_zeros.append(self.quantizer.zero.flatten())
-                        column_groups.append(group_index)
+                        block_scale = self.quantizer.scale.flatten().unsqueeze(0)
+                        block_zero = self.quantizer.zero.flatten().unsqueeze(0)
+                        column_group = _uniform_column_group(count, W.device)
+                    else:
+                        block_scales = []
+                        block_zeros = []
+                        column_groups = []
+                        parameter_indices = {}
+                        for i in range(count):
+                            column = i1 + i
+                            if not static_groups:
+                                if column % groupsize == 0:
+                                    self.quantizer.find_params(
+                                        W[:, column: column + groupsize], weight=True
+                                    )
 
-                    block_scale = torch.stack(block_scales)
-                    block_zero = torch.stack(block_zeros)
-                    column_group = torch.tensor(
-                        column_groups, device=W.device, dtype=torch.int32
-                    )
+                                if (column // groupsize) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = column
+                                if actorder:
+                                    idx = perm[idx]
+                                self.quantizer = groups[idx // groupsize]
+
+                            key = id(self.quantizer.scale)
+                            group_index = parameter_indices.get(key)
+                            if group_index is None:
+                                group_index = len(block_scales)
+                                parameter_indices[key] = group_index
+                                block_scales.append(self.quantizer.scale.flatten())
+                                block_zeros.append(self.quantizer.zero.flatten())
+                            column_groups.append(group_index)
+
+                        block_scale = torch.stack(block_scales)
+                        block_zero = torch.stack(block_zeros)
+                        column_group = torch.tensor(
+                            column_groups, device=W.device, dtype=torch.int32
+                        )
                     fused_block_update(
                         W1,
                         Hinv1,
