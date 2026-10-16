@@ -399,6 +399,25 @@ def _cleanup_saved_weight_files(
 
 
 
+def _read_safetensors_weight_map(model_local_path: str) -> Optional[Dict[str, str]]:
+    index_path = join(model_local_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return None
+    try:
+        with open(index_path, "r", encoding="utf-8") as handle:
+            weight_map = json.load(handle).get("weight_map", {})
+    except Exception as exc:
+        log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+        return None
+    if not isinstance(weight_map, dict):
+        return None
+    return {
+        name: filename
+        for name, filename in weight_map.items()
+        if isinstance(filename, str) and filename.endswith(".safetensors")
+    }
+
+
 def _resolve_out_of_model_source_files(
     model_local_path: str,
     source_files: Optional[List[str]] = None,
@@ -406,22 +425,9 @@ def _resolve_out_of_model_source_files(
     if source_files:
         return sorted(dict.fromkeys(source_files))
 
-    index_path = join(model_local_path, "model.safetensors.index.json")
-    if os.path.exists(index_path):
-        try:
-            with open(index_path, "r", encoding="utf-8") as handle:
-                index_data = json.load(handle)
-            weight_map = index_data.get("weight_map", {})
-            if isinstance(weight_map, dict):
-                return sorted(
-                    {
-                        filename
-                        for filename in weight_map.values()
-                        if isinstance(filename, str) and filename.endswith(".safetensors")
-                    }
-                )
-        except Exception as exc:
-            log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+    weight_map = _read_safetensors_weight_map(model_local_path)
+    if weight_map is not None:
+        return sorted(set(weight_map.values()))
 
     return sorted(
         filename
@@ -497,6 +503,16 @@ def _load_tensors_by_prefixes(
                 f"Model: Failed to read tensors from {source_file_name} while scanning for prefixes "
                 f"{prefixes}: {exc}"
             )
+    # Prefixes absent from the index stay optional, but tensors the index declares
+    # must not be silently dropped when their shard is missing or unreadable.
+    weight_map = None if source_files else _read_safetensors_weight_map(model_local_path)
+    missing = sorted(name for name in weight_map or {} if name.startswith(tuple(prefixes)) and name not in tensors)
+    if missing:
+        shards = sorted({weight_map[name] for name in missing})
+        raise ValueError(
+            f"Model: {len(missing)} tensors with prefixes {prefixes} declared in the safetensors index of "
+            f"`{model_local_path}` are missing from or unreadable in {shards}, e.g. {missing[:3]}."
+        )
     return tensors
 
 

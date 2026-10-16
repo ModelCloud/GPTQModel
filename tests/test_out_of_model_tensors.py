@@ -8,13 +8,14 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import AutoConfig
 
 from gptqmodel.models.auto import check_and_get_model_definition
-from gptqmodel.models.writer import ModelWriter
+from gptqmodel.models.writer import ModelWriter, _merge_prefix_tensors_into_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import TensorSource
 
@@ -586,6 +587,59 @@ def test_merge_prefixed_tensors_with_multiple_shards(tmp_path, monkeypatch):
     with open(save_dir / "model.safetensors.index.json", "r", encoding="utf-8") as handle:
         index_data = json.load(handle)
     assert index_data["weight_map"]["mtp.fc.weight"] == "model-00001-of-00002.safetensors"
+
+
+def _write_index(path, weight_map):
+    with open(path / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump({"weight_map": weight_map}, handle)
+
+
+@pytest.mark.parametrize("failure", ["missing-shard", "unreadable-shard", "missing-tensor"])
+def test_merge_prefixed_tensors_rejects_incomplete_declared_tensors(tmp_path, failure):
+    save_file({"mtp.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    if failure == "unreadable-shard":
+        (tmp_path / "second.safetensors").write_bytes(b"truncated")
+    elif failure == "missing-tensor":
+        save_file({"model.weight": torch.ones(2)}, str(tmp_path / "second.safetensors"))
+    _write_index(tmp_path, {"mtp.a": "first.safetensors", "mtp.b": "second.safetensors"})
+    state_dict = {}
+
+    with pytest.raises(ValueError, match=r"missing from or unreadable in \['second.safetensors'\], e.g. \['mtp.b'\]"):
+        _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert state_dict == {}
+
+
+def test_merge_prefixed_tensors_keeps_undeclared_prefix_optional(tmp_path):
+    save_file({"model.weight": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    _write_index(tmp_path, {"model.weight": "first.safetensors", "model.bias": "absent.safetensors"})
+    state_dict = {}
+
+    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert state_dict == {}
+
+
+def test_merge_prefixed_tensors_checks_whole_dotted_prefixes(tmp_path):
+    save_file({"model.layers.61.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    _write_index(
+        tmp_path,
+        {
+            "model.layers.61.a": "first.safetensors",
+            "model.layers.61.b": "second.safetensors",
+            "model.layers.610.c": "second.safetensors",
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"1 tensors .* e\.g\. \['model\.layers\.61\.b'\]"):
+        _merge_prefix_tensors_into_state_dict(["model.layers.61"], str(tmp_path), {})
+
+
+def test_merge_prefixed_tensors_without_a_readable_index_scans_shards(tmp_path):
+    save_file({"mtp.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    (tmp_path / "model.safetensors.index.json").write_text("{", encoding="utf-8")
+    state_dict = {}
+
+    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert list(state_dict) == ["mtp.a"]
 
 
 def test_copy_existing_file(tmp_path, monkeypatch):
