@@ -862,10 +862,9 @@ class QQQ:
 
         groupsize = groupsize if groupsize != -1 else self.columns
         if static_groups and actorder:
-            g_idx = [perm[i] // groupsize for i in range(self.columns)]
+            g_idx = (perm // groupsize).to(dtype=torch.int32, device=Q.device)
         else:
-            g_idx = [i // groupsize for i in range(self.columns)]
-        g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = torch.arange(self.columns, dtype=torch.int32, device=Q.device) // groupsize
         if actorder:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
