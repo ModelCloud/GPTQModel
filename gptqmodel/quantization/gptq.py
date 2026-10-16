@@ -1954,7 +1954,10 @@ class GPTQ:
 
                 W1 = W[:, i1:i2].clone()
                 Q1 = Q[:, i1:i2]
-                Err1 = torch.zeros_like(W1) if Hinv is not None else None
+                # ``Err1`` is fully overwritten per block by the fused kernel (or by
+                # ``torch.sub(..., out=delta)`` in the eager loop) before it is read,
+                # so skip the redundant zero-fill of a 128-column block.
+                Err1 = torch.empty_like(W1) if Hinv is not None else None
                 Losses1 = Losses[:, i1:i2] if Hinv is not None else None
 
                 if Hinv is not None:
