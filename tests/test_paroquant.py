@@ -132,6 +132,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_fused_rotation": False,
                 "opt_gradient_checkpointing": False,
                 "opt_stage_cudagraph": False,
+                "opt_amp": False,
                 "opt_best_state_dtype": "fp16",
                 "opt_train_on_noisy_inputs": True,
                 "opt_scope": "compute_block",
@@ -169,6 +170,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_stage_cudagraph is False
+    assert cfg.opt_amp is False
     assert cfg.opt_best_state_dtype == "fp16"
     assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "compute_block"
@@ -180,6 +182,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
+    assert cfg.to_dict()["meta"]["opt_amp"] is False
     assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "fp16"
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
@@ -484,6 +487,50 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
         param_groups=[],
         epochs=0,
         batch_size=16,
+    )
+
+    assert train_loss == 0.0
+    assert val_loss == 0.0
+    assert calls == [expected_use_amp, expected_use_amp]
+
+
+@pytest.mark.parametrize(
+    ("use_amp", "expected_use_amp"),
+    [
+        (None, True),
+        (False, False),
+        (True, True),
+    ],
+)
+def test_paroquant_fast_stage_honors_explicit_amp_override_on_cuda(monkeypatch, use_amp, expected_use_amp):
+    """Guard that `opt_amp` overrides the CUDA AMP default and that `None` keeps it."""
+    calls = []
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeTensor:
+        def __init__(self, kind: str):
+            self.device = SimpleNamespace(type=kind)
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        calls.append(use_amp)
+        return 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=_DummyModel(),
+        inputs_train=_FakeTensor("cuda"),
+        targets_train=_FakeTensor("cuda"),
+        inputs_val=_FakeTensor("cuda"),
+        targets_val=_FakeTensor("cuda"),
+        param_groups=[],
+        epochs=0,
+        batch_size=16,
+        use_amp=use_amp,
     )
 
     assert train_loss == 0.0
