@@ -18,19 +18,51 @@ from .data import collate_data
 from .logger import setup_logger
 
 
-try:  # pragma: no cover - optional dependency
-    from datasets import Dataset as HFDataset
-    from datasets import IterableDataset as HFIterableDataset
-except Exception:  # pragma: no cover - handled dynamically
-    HFDataset = HFIterableDataset = None
+_HF_DATASET_TYPES: Optional[tuple] = None
+_HF_DATASET_ATTRS = ("HFDataset", "HFIterableDataset")
 
 
+def _hf_dataset_types() -> tuple:
+    """Return the HF ``datasets`` classes, or ``()`` when it is not installed.
+
+    Resolved on first use: importing ``datasets`` drags in ``pyarrow`` and
+    ``pandas`` (about 0.4 s of process startup) and the classes are only needed
+    to recognise HF dataset objects handed in as calibration input.
+    """
+
+    global _HF_DATASET_TYPES
+    if _HF_DATASET_TYPES is None:
+        try:
+            from datasets import Dataset, IterableDataset
+        except Exception:  # pragma: no cover - optional dependency
+            _HF_DATASET_TYPES = ()
+        else:
+            _HF_DATASET_TYPES = (Dataset, IterableDataset)
+    return _HF_DATASET_TYPES
+
+
+def __getattr__(name: str):
+    """Keep ``HFDataset``/``HFIterableDataset`` importable without eager import."""
+
+    # Answer unknown names (the import system probes `__path__` on every
+    # submodule import) before touching the optional dependency.
+    if name not in _HF_DATASET_ATTRS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    types = _hf_dataset_types()
+    if not types:
+        return None
+    return types[0] if name == "HFDataset" else types[1]
+
+
+# `HFDataset`/`HFIterableDataset` are forward references resolved lazily by
+# `__getattr__` above, so annotating does not import the optional dependency.
 CalibrationInputType = Union[
     List[Dict[str, Union[List[int], torch.LongTensor]]],
     List[str],
     List[List[int]],
-    "HFDataset",  # type: ignore[type-arg]
-    "HFIterableDataset",  # type: ignore[type-arg]
+    "HFDataset",  # type: ignore[type-arg]  # noqa: F821
+    "HFIterableDataset",  # type: ignore[type-arg]  # noqa: F821
 ]
 
 
@@ -108,11 +140,7 @@ def prepare_calibration_dataset(
     tokenizer = getattr(qmodel, "tokenizer", None)
     support_batch_quantize = getattr(qmodel, "support_batch_quantize", True)
 
-    hf_dataset_types: tuple = ()
-    if HFDataset is not None:
-        hf_dataset_types += (HFDataset,)
-    if HFIterableDataset is not None:
-        hf_dataset_types += (HFIterableDataset,)
+    hf_dataset_types: tuple = _hf_dataset_types()
 
     if isinstance(calibration_dataset, str):
         raise ValueError("Quantize: calibration dataset must be iterable, not a single string.")

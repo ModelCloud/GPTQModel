@@ -28,14 +28,6 @@ from transformers import (
     modeling_utils,
 )
 
-
-try:  # Optional dependency for huggingface datasets support
-    from datasets import Dataset as HFDataset
-    from datasets import IterableDataset as HFIterableDataset
-except Exception:  # pragma: no cover - datasets may not be installed
-    HFDataset = None
-    HFIterableDataset = None
-
 from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
