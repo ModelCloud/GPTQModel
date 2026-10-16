@@ -94,7 +94,8 @@ class Quantizer(nn.Module):
 
     def find_params(self, x, weight=False):
         dev = x.device
-        self.maxq = self.maxq.to(dev)
+        if self.maxq.device != dev:
+            self.maxq = self.maxq.to(dev)
 
         shape = x.shape
         if self.perchannel:
