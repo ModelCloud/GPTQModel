@@ -56,6 +56,7 @@ from ..quantization.mlx_paroquant_optimize import (
 )
 from ..quantization.paroquant.optimization import (
     _activate_stage_params,
+    _backward_scalar_loss,
     _normalize_group_size,
     _normalize_opt_impl,
     _normalize_opt_optimizer,
@@ -1968,7 +1969,7 @@ class ParoQuantProcessor(LoopProcessor):
                         target = self._prepare_group_target(target_batch, device=preds.device, dtype=preds.dtype)
                         loss = F.smooth_l1_loss(preds, target)
 
-                    scaler.scale(loss).backward()
+                    _backward_scalar_loss(scaler.scale(loss))
                     scaler.step(optimizer)
                     scaler.update()
                     optimizer.zero_grad(set_to_none=True)
@@ -2131,7 +2132,7 @@ class ParoQuantProcessor(LoopProcessor):
                             )
                             loss = F.smooth_l1_loss(preds, target)
 
-                            scaler.scale(loss).backward()
+                            _backward_scalar_loss(scaler.scale(loss))
                             scaler.step(optimizer)
                             scaler.update()
                             optimizer.zero_grad(set_to_none=True)
