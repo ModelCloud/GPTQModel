@@ -1881,6 +1881,21 @@ class AWQProcessor(LoopProcessor):
                     master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
                 fc.weight.copy_(master)
 
+        def apply_scaled_weights(scales_view: torch.Tensor) -> None:
+            """Restore the pristine master and apply the candidate scale in one pass.
+
+            `restore_weights` exists because `mul_` followed by `div_` is not an
+            exact identity in floating point, so every grid step has to start from
+            the untouched master. Forming the product from that master directly
+            keeps the guarantee and replaces the copy plus the multiply with a
+            single launch per linear.
+            """
+            for fc in linears2scale:
+                master = orig_weights[fc]
+                if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
+                    master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
+                torch.mul(master, scales_view, out=fc.weight)
+
         try:
             device = next(module2inspect.parameters()).device
         except StopIteration:
@@ -1934,9 +1949,11 @@ class AWQProcessor(LoopProcessor):
 
             # Q(W * s)
             # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
-            # and rely on the CPU master copy to restore the original FP values after evaluation.
+            # and rely on the master copy to restore the original FP values after evaluation.
+            # `apply_scaled_weights` rebuilds the product from that master, so the
+            # restore the previous iteration needed is folded into this step.
+            apply_scaled_weights(scales_view)
             for fc in linears2scale:
-                fc.weight.mul_(scales_view)
                 self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
                 fc.weight.div_(scales_view)
 
@@ -1977,9 +1994,9 @@ class AWQProcessor(LoopProcessor):
                 best_error = loss
                 best_ratio = ratio
                 best_scales = scales.clone()
-            restore_weights()
 
-        # Reset weights one final time so callers always see the pristine FP copy.
+        # The last grid step leaves its quantized product in place, so reset once
+        # more to hand callers the pristine FP copy.
         restore_weights()
         orig_weights.clear()
 
