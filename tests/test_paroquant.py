@@ -568,6 +568,127 @@ def test_paroquant_stage_skips_dead_pre_epoch_train_eval(monkeypatch, stage_runn
     assert seen_splits.count("val") >= epochs
 
 
+def test_paroquant_fold_epoch_loss_matches_host_fp64_fold():
+    """The device-side fold must reproduce the host fp64 accumulation it replaces."""
+    losses = [
+        torch.tensor(0.1, dtype=torch.float32),
+        torch.tensor(1e-8, dtype=torch.float32),
+        torch.tensor(-3.5, dtype=torch.float32),
+        torch.tensor(12345.678, dtype=torch.float32),
+    ]
+
+    accumulator = paroquant_optimization._fold_epoch_loss(None, losses[0])
+    assert isinstance(accumulator, torch.Tensor)
+    assert accumulator.dtype == torch.float64
+    assert accumulator.item() == float(losses[0])
+
+    for loss in losses[1:]:
+        accumulator = paroquant_optimization._fold_epoch_loss(accumulator, loss)
+
+    # Same order, same IEEE-754 binary64 adds: the epoch total is bitwise equal
+    # to the per-step `float(loss.item())` host sum the fold removes.
+    assert accumulator.item() == sum(float(loss) for loss in losses)
+    assert accumulator.device.type == losses[0].device.type
+
+
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_reference"],
+)
+def test_paroquant_stage_defers_train_loss_readback_to_epoch_end(monkeypatch, stage_runner_name):
+    """Guard that no optimizer step pays for a host readback of that step's loss.
+
+    `epoch_loss += float(loss.item())` synchronizes the stream once per
+    optimizer step, and ParoQuant runs one step per calibration batch on a
+    launch-bound stage, so the running total must stay on the device until the
+    epoch closes.
+    """
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0, 1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x * self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 2)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        del use_amp
+        return 0.0
+
+    step_losses = []
+    original_smooth_l1 = paroquant_optimization.F.smooth_l1_loss
+
+    def recording_smooth_l1(preds, targets):
+        loss = original_smooth_l1(preds, targets)
+        step_losses.append(loss)
+        return loss
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def recording_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(paroquant_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+    monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", recording_smooth_l1)
+    monkeypatch.setattr(torch.Tensor, "item", recording_item)
+
+    model = _TinyModel()
+    epochs = 2
+    train_loss, _val_loss = getattr(paroquant_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    assert len(step_losses) == epochs * len(train_input_batches)
+    # A step loss is a private per-batch value: reading it back forces a device
+    # sync that the epoch total makes redundant.
+    assert not any(readback is loss for readback in readbacks for loss in step_losses)
+
+    last_epoch_losses = step_losses[-len(train_input_batches) :]
+    expected = sum(float(loss.detach()) for loss in last_epoch_losses) / len(last_epoch_losses)
+    assert train_loss == expected
+
+
 def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
     """Guard the PR-18 fix so validation loss stays inside the CUDA autocast region."""
     state = {"autocast_active": False, "loss_saw_autocast": None}
