@@ -36,6 +36,7 @@ from ...utils.paroquant import (
     apply_paroquant_rotation_autograd,
     build_identity_rotation_buffers,
 )
+from ...utils.rocm import IS_ROCM
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 
 
@@ -1711,12 +1712,13 @@ def build_paroquant_optimizer(
 def _resolve_stage_use_amp(inputs_train: torch.Tensor, use_amp: Optional[bool]) -> bool:
     """Resolve the requested AMP mode against the stage device.
 
-    ``None`` keeps the historical CUDA-only default so callers that never set
-    ``opt_amp`` behave exactly as before.
+    ``None`` means auto: ROCm hosts skip AMP because the autocast overhead was
+    measured slower (and no more accurate) than the plain path on MI355X
+    (gfx950), while other CUDA hosts keep the historical AMP default.
     """
     on_cuda = getattr(getattr(inputs_train, "device", None), "type", None) == "cuda"
     if use_amp is None:
-        return on_cuda
+        return on_cuda and not IS_ROCM
     return bool(use_amp) and on_cuda
 
 

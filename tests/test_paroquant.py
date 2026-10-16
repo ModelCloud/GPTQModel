@@ -453,14 +453,17 @@ def test_paroquant_fused_rotation_uses_forward_only_path_without_grad_inputs(mon
 
 
 @pytest.mark.parametrize(
-    ("device_type", "expected_use_amp"),
+    ("device_type", "is_rocm", "expected_use_amp"),
     [
-        ("cpu", False),
-        ("cuda", True),
+        ("cpu", False, False),
+        ("cuda", False, True),
+        ("cuda", True, False),
     ],
 )
-def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, device_type, expected_use_amp):
-    """Guard that the fast stage uses CUDA AMP for eval bookkeeping like reference."""
+def test_paroquant_fast_stage_matches_reference_amp_eval_flag(
+    monkeypatch, device_type, is_rocm, expected_use_amp
+):
+    """Guard that the fast stage resolves the auto AMP default per device/platform like reference."""
     calls = []
 
     class _DummyModel(torch.nn.Module):
@@ -476,6 +479,7 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
         calls.append(use_amp)
         return 0.0
 
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
     monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
 
     train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
@@ -495,15 +499,20 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
 
 
 @pytest.mark.parametrize(
-    ("use_amp", "expected_use_amp"),
+    ("is_rocm", "use_amp", "expected_use_amp"),
     [
-        (None, True),
-        (False, False),
-        (True, True),
+        (False, None, True),
+        (False, False, False),
+        (False, True, True),
+        (True, None, False),
+        (True, False, False),
+        (True, True, True),
     ],
 )
-def test_paroquant_fast_stage_honors_explicit_amp_override_on_cuda(monkeypatch, use_amp, expected_use_amp):
-    """Guard that `opt_amp` overrides the CUDA AMP default and that `None` keeps it."""
+def test_paroquant_fast_stage_honors_explicit_amp_override_on_cuda(
+    monkeypatch, is_rocm, use_amp, expected_use_amp
+):
+    """Guard that explicit `opt_amp` wins on CUDA and that `None` auto-skips AMP on ROCm."""
     calls = []
 
     class _DummyModel(torch.nn.Module):
@@ -519,6 +528,7 @@ def test_paroquant_fast_stage_honors_explicit_amp_override_on_cuda(monkeypatch, 
         calls.append(use_amp)
         return 0.0
 
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
     monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
 
     train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
@@ -964,13 +974,21 @@ def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
     assert state["loss_saw_autocast"] is True
 
 
-def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
-    """Guard that the fast stage now mirrors upstream AMP training on CUDA."""
+@pytest.mark.parametrize(
+    ("is_rocm", "expect_amp"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch, is_rocm, expect_amp):
+    """Guard the fast-stage AMP default: historical CUDA AMP on, ROCm auto off."""
     state = {"autocast_active": False, "loss_saw_autocast": []}
     scaler_events = []
 
     @contextmanager
     def fake_autocast(device_type: str):
+        assert expect_amp, "ROCm auto default must not enable autocast"
         assert device_type == "cuda"
         previous = state["autocast_active"]
         state["autocast_active"] = True
@@ -1037,7 +1055,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
         raise AssertionError("unexpected rows object")
 
     def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
-        assert use_amp is True
+        assert use_amp is expect_amp
         return 0.0
 
     original_loss = paroquant_optimization.F.smooth_l1_loss
@@ -1051,6 +1069,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
     monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", wrapped_loss)
     monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
     monkeypatch.setattr(torch.amp, "GradScaler", _FakeScaler)
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
 
     model = _TinyModel()
     train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
@@ -1066,8 +1085,8 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
 
     assert train_loss >= 0.0
     assert val_loss == 0.0
-    assert state["loss_saw_autocast"] == [True, True]
-    assert scaler_events[0] == ("init", True)
+    assert state["loss_saw_autocast"] == [expect_amp, expect_amp]
+    assert scaler_events[0] == ("init", expect_amp)
     assert [event[0] for event in scaler_events[1:]] == [
         "scale",
         "backward",
@@ -1078,7 +1097,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
         "step",
         "update",
     ]
-    assert all(event[1] is True for event in scaler_events if event[0] != "backward")
+    assert all(event[1] is expect_amp for event in scaler_events if event[0] != "backward")
     assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
 
 
