@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import os
 import threading
 from pathlib import Path
@@ -23,6 +26,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
+from .env import env_flag
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -30,6 +34,9 @@ _SUPPORTED_ROTATION_KERNEL_DTYPES = {
     torch.bfloat16,
     torch.float32,
 }
+
+# Reverse lookup used to rebuild persisted launch-cache keys from their names.
+_ROTATION_AUTOTUNE_DTYPE_BY_NAME = {str(dtype): dtype for dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES}
 
 # Process-local cache for resolved fused launch configs. The steady-state
 # rotation path uses this to avoid sending autotune sentinels back into the
@@ -48,6 +55,19 @@ _ROTATION_LAUNCH_POLICY_CACHE: Optional[tuple[int, int]] = None
 # Latched once the fused rotation extension has loaded successfully in this
 # process. A failed attempt is never latched so a later rebuild can retry.
 _ROTATION_EXTENSION_READY = False
+
+# Autotuning a cold rotation shape costs ~130ms of native benchmarking, and a
+# full lifecycle measures ~18 shapes, so the resolved launch configs are also
+# persisted per device/torch/HIP fingerprint. Bump the format whenever the
+# native candidate set or its scoring changes so stale picks are discarded.
+_ROTATION_AUTOTUNE_CACHE_FORMAT = 1
+_ROTATION_AUTOTUNE_CACHE_ENV = "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE"
+_ROTATION_AUTOTUNE_DISK_LOCK = threading.Lock()
+# device index -> loaded flag, so the on-disk cache is read at most once.
+_ROTATION_AUTOTUNE_DISK_LOADED: set[int] = set()
+# Mirrors what the current process has written so the file can be rewritten
+# wholesale without re-reading it.
+_ROTATION_AUTOTUNE_DISK_ENTRIES: dict[tuple[object, ...], tuple[int, int]] = {}
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -249,6 +269,13 @@ def clear_paroquant_rotation_autotune_cache() -> None:
     _ROTATION_LAUNCH_POLICY_CACHE = None
     with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
         _ROTATION_LAUNCH_CONFIG_CACHE.clear()
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        known_devices = sorted(_ROTATION_AUTOTUNE_DISK_LOADED)
+        _ROTATION_AUTOTUNE_DISK_LOADED.clear()
+        _ROTATION_AUTOTUNE_DISK_ENTRIES.clear()
+        for device_index in known_devices:
+            with contextlib.suppress(OSError):
+                _rotation_autotune_cache_path(device_index).unlink()
     clear_cache = _rotation_native_op_if_loaded("clear_autotune_cache")
     if clear_cache is not None:
         clear_cache()
@@ -518,6 +545,144 @@ def _apply_fused_rotation_pair_grad(
     return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
 
 
+def _rotation_autotune_cache_enabled() -> bool:
+    return env_flag(_ROTATION_AUTOTUNE_CACHE_ENV, default=True)
+
+
+def _rotation_autotune_cache_dir() -> Path:
+    """Return the user cache root, matching the other GPTQModel caches."""
+    configured = os.getenv("GPTQMODEL_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    xdg_cache_home = os.getenv("XDG_CACHE_HOME")
+    if xdg_cache_home:
+        return Path(xdg_cache_home).expanduser() / "gptqmodel"
+    return Path.home() / ".cache" / "gptqmodel"
+
+
+def _rotation_autotune_cache_identity(device_index: int) -> str:
+    """
+    Fingerprint the tuning environment.
+
+    Launch choices are measured on real hardware, so a cache written for one
+    device/driver/torch combination must never be reused for another.
+    """
+    parts = [f"format={_ROTATION_AUTOTUNE_CACHE_FORMAT}", f"torch={torch.__version__}"]
+    parts.append(f"hip={getattr(torch.version, 'hip', None) or 'none'}")
+    device_name = "unknown"
+    if torch.cuda.is_available():
+        try:
+            device_name = torch.cuda.get_device_name(device_index if device_index >= 0 else 0)
+        except Exception:
+            device_name = "unknown"
+    parts.append(f"device={device_name}")
+    return "|".join(parts)
+
+
+def _rotation_autotune_cache_path(device_index: int) -> Path:
+    identity = _rotation_autotune_cache_identity(device_index)
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return _rotation_autotune_cache_dir() / "paroquant" / "rotation_launch" / f"{digest}.json"
+
+
+def _ensure_rotation_autotune_cache_loaded(device_index: int) -> None:
+    """Seed the in-process launch cache from disk once per device."""
+    if not _rotation_autotune_cache_enabled():
+        return
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
+            return
+        _ROTATION_AUTOTUNE_DISK_LOADED.add(device_index)
+        try:
+            raw = json.loads(_rotation_autotune_cache_path(device_index).read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict) or raw.get("format") != _ROTATION_AUTOTUNE_CACHE_FORMAT:
+            return
+        entries = raw.get("entries")
+        if not isinstance(entries, list):
+            return
+        with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+            for entry in entries:
+                parsed = _rotation_autotune_entry_to_cache(entry)
+                if parsed is None:
+                    continue
+                cache_key, resolved = parsed
+                _ROTATION_LAUNCH_CONFIG_CACHE.setdefault(cache_key, resolved)
+                _ROTATION_AUTOTUNE_DISK_ENTRIES[cache_key] = resolved
+
+
+def _rotation_autotune_entry_to_cache(
+    entry: object,
+) -> Optional[tuple[tuple[object, ...], tuple[int, int]]]:
+    """Rebuild one ``(cache_key, resolved)`` pair from its serialized form."""
+    if not isinstance(entry, list) or len(entry) != 11:
+        return None
+    device_index, dtype_name, rows, hidden, group_size, krot, has_scale, req_cta_m, req_row_pad, cta_m, row_pad = entry
+    dtype = _ROTATION_AUTOTUNE_DTYPE_BY_NAME.get(str(dtype_name))
+    if dtype is None:
+        return None
+    cache_key = (
+        int(device_index),
+        dtype,
+        int(rows),
+        int(hidden),
+        int(group_size),
+        int(krot),
+        bool(has_scale),
+        int(req_cta_m),
+        int(req_row_pad),
+    )
+    return cache_key, (int(cta_m), int(row_pad))
+
+
+def _persist_rotation_autotune_entry(
+    cache_key: tuple[object, ...], resolved: tuple[int, int], device_index: int
+) -> None:
+    """Record one resolved launch config on disk for the next process."""
+    if not _rotation_autotune_cache_enabled():
+        return
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        _ROTATION_AUTOTUNE_DISK_ENTRIES[cache_key] = resolved
+        path = _rotation_autotune_cache_path(device_index)
+        payload = {
+            "format": _ROTATION_AUTOTUNE_CACHE_FORMAT,
+            "identity": _rotation_autotune_cache_identity(device_index),
+            "entries": [
+                _rotation_autotune_entry_from_cache(key, value)
+                for key, value in _ROTATION_AUTOTUNE_DISK_ENTRIES.items()
+                if int(key[0]) == int(device_index)
+            ],
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(payload))
+            os.replace(tmp_path, path)
+        except OSError:
+            return
+
+
+def _rotation_autotune_entry_from_cache(
+    cache_key: tuple[object, ...], resolved: tuple[int, int]
+) -> list[object]:
+    """Serialize one ``(cache_key, resolved)`` pair; dtypes become names."""
+    device, dtype, rows, hidden, group_size, krot, has_scale, req_cta_m, req_row_pad = cache_key
+    return [
+        int(device),
+        str(dtype),
+        int(rows),
+        int(hidden),
+        int(group_size),
+        int(krot),
+        int(bool(has_scale)),
+        int(req_cta_m),
+        int(req_row_pad),
+        int(resolved[0]),
+        int(resolved[1]),
+    ]
+
+
 def _rotation_launch_cache_key(
     x: torch.Tensor,
     *,
@@ -564,6 +729,10 @@ def _resolve_rotation_launch(
         requested_cta_m=requested_cta_m,
         requested_row_pad=requested_row_pad,
     )
+    device_index = int(cache_key[0])
+    # Seed from the previous process before measuring anything: a full cold
+    # lifecycle autotunes ~18 shapes at ~130ms each.
+    _ensure_rotation_autotune_cache_loaded(device_index)
     with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
         cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
     if cached is not None:
@@ -586,6 +755,7 @@ def _resolve_rotation_launch(
         resolved = (int(cta_m), int(row_pad))
         with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
             cached = _ROTATION_LAUNCH_CONFIG_CACHE.setdefault(cache_key, resolved)
+        _persist_rotation_autotune_entry(cache_key, cached, device_index)
         return cached
 
 

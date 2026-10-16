@@ -6518,3 +6518,36 @@ def test_paroquant_reference_quantizer_exports_affine_qzeros():
 
     midpoint = 2 ** (4 - 1)
     assert not torch.all(result.q_zeros == midpoint)
+
+
+def test_rotation_autotune_entry_serialization_round_trip():
+    """A persisted launch entry must rebuild the exact in-process cache key."""
+    utils = paroquant_utils_module
+    key = (0, torch.float32, 896, 4864, 128, 8, True, -2, -2)
+
+    serialized = utils._rotation_autotune_entry_from_cache(key, (4, 0))
+    assert serialized == [0, "torch.float32", 896, 4864, 128, 8, 1, -2, -2, 4, 0]
+    assert utils._rotation_autotune_entry_to_cache(serialized) == (key, (4, 0))
+
+    # Malformed or unknown-dtype entries are skipped instead of raising.
+    assert utils._rotation_autotune_entry_to_cache("not-a-list") is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.float32", 1]) is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.uint8", 8, 896, 128, 8, 1, -2, -2, 4, 0]) is None
+
+
+def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, monkeypatch):
+    """Writes land under the configured cache dir and can be disabled."""
+    utils = paroquant_utils_module
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", raising=False)
+
+    key = (0, torch.float32, 8, 896, 128, 8, True, -2, -2)
+    utils._persist_rotation_autotune_entry(key, (4, 0), 0)
+    path = utils._rotation_autotune_cache_path(0)
+    assert path.exists()
+    assert str(path).startswith(str(tmp_path))
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", "0")
+    assert utils._rotation_autotune_cache_enabled() is False
+    utils._persist_rotation_autotune_entry((0, torch.float32, 64, 896, 128, 8, True, -2, -2), (4, 0), 1)
+    assert not utils._rotation_autotune_cache_path(1).exists()
