@@ -2697,18 +2697,22 @@ class ParoQuantProcessor(LoopProcessor):
             logger=log,
             module_name=module_label,
         ):
-            with parent_module_lock(module.full_name):
-                pack_module(
-                    name=module.full_name,
-                    qModules=qmodules,
-                    q_scales=q_scales,
-                    q_zeros=q_zeros,
-                    q_g_idx=None,
-                    layers=layers,
-                    quant_linear_cls=quant_linear_cls,
-                    lock=self.lock,
-                    quantize_config=self.qcfg,
-                )
+            # `pack_module` only reads the already-resolved float layer and
+            # mutates the freshly created quant module; it never touches the
+            # parent's module tree. Holding the parent lock here would block
+            # every sibling module's proxy attribute access (which takes the
+            # same lock) for the whole packing window.
+            pack_module(
+                name=module.full_name,
+                qModules=qmodules,
+                q_scales=q_scales,
+                q_zeros=q_zeros,
+                q_g_idx=None,
+                layers=layers,
+                quant_linear_cls=quant_linear_cls,
+                lock=self.lock,
+                quantize_config=self.qcfg,
+            )
 
         qmodule = qmodules[module.full_name]
         if not isinstance(qmodule, ParoLinear):
