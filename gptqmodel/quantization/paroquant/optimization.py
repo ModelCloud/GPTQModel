@@ -1358,6 +1358,27 @@ def _evaluate_model(
         return float(loss.item())
 
 
+def _fold_epoch_loss(
+    accumulator: Optional[torch.Tensor],
+    loss: torch.Tensor,
+) -> torch.Tensor:
+    """Fold one optimizer-step loss into the running epoch total without a device sync.
+
+    ``epoch_loss += float(loss.item())`` reads the loss back to the host on every
+    optimizer step, and a scalar read on CUDA synchronizes the stream. ParoQuant
+    runs one optimizer step per calibration batch and every stage is launch-bound,
+    so that sync costs more than the kernels it waits on and stops the host from
+    running ahead of the device. Keeping the running total on the device as an
+    fp64 scalar and reading it once per epoch removes the per-step sync.
+
+    The accumulation is fp64 over the exact fp32 step losses, folded in the same
+    order the host used to fold them, so the epoch mean that reaches the result
+    metadata is bitwise identical to the per-step host sum it replaces.
+    """
+    step_loss = loss.detach().to(torch.float64)
+    return step_loss if accumulator is None else accumulator + step_loss
+
+
 def _normalize_optimizer_param_groups(
     param_groups: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -1524,7 +1545,7 @@ def _run_stage_gptqmodel_impl(
     last_train_loss = 0.0
 
     for _epoch in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
@@ -1545,10 +1566,10 @@ def _run_stage_gptqmodel_impl(
                 )
 
             model.reset_masked_angles()
-            epoch_loss += float(loss.item())
+            epoch_loss = _fold_epoch_loss(epoch_loss, loss)
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1658,7 +1679,7 @@ def _run_stage_gptqmodel_cudagraph(
         model.reset_masked_angles()
 
     for _epoch in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
@@ -1674,7 +1695,7 @@ def _run_stage_gptqmodel_cudagraph(
                 static_input.copy_(input_batch)
                 static_target.copy_(target_batch)
                 graph.replay()
-                loss_value = float(static_loss.item())
+                epoch_loss = _fold_epoch_loss(epoch_loss, static_loss)
             else:
                 optimizer.zero_grad(set_to_none=True)
                 preds = model(input_batch)
@@ -1682,12 +1703,11 @@ def _run_stage_gptqmodel_cudagraph(
                 loss.backward()
                 optimizer.step()
                 model.reset_masked_angles()
-                loss_value = float(loss.item())
+                epoch_loss = _fold_epoch_loss(epoch_loss, loss)
 
-            epoch_loss += loss_value
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1810,7 +1830,7 @@ def _run_stage_reference(
     last_train_loss = 0.0
 
     for _ in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
         optimizer.zero_grad(set_to_none=True)
 
@@ -1833,10 +1853,10 @@ def _run_stage_reference(
                 )
 
             model.reset_masked_angles()
-            epoch_loss += float(loss.item())
+            epoch_loss = _fold_epoch_loss(epoch_loss, loss)
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
