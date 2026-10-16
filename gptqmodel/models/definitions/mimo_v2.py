@@ -16,8 +16,13 @@ from torch import nn
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 
 from ...utils.mimo import is_mimo_mixed_source
+from ...utils.model import nested_move_to
 from ...utils.torch import CPU
 from ..base import BaseQModel
+
+
+_REPLAY_INPUTS_KEY = "_mimo_v2_replay_inputs"
+_CAPTURE_ATTENTION_MASK_ATTR = "_mimo_v2_capture_attention_mask"
 
 
 def _compatible_mask(function: Callable) -> Callable:
@@ -173,3 +178,68 @@ class MimoV2QModel(BaseQModel):
         # Therefore, MiMoV2RotaryEmbedding is manually reconstructed here.
         model.rotary_emb = rotary_emb_cls(config=config, is_swa=False, device=CPU)
         model.swa_rotary_emb = rotary_emb_cls(config=config, is_swa=True, device=CPU)
+
+    def run_input_capture(self, example, use_cache: bool, data_device):
+        """Keep the raw attention mask so each attention type can rebuild its own replay mask."""
+
+        previous_mask = self.__dict__.get(_CAPTURE_ATTENTION_MASK_ATTR)
+        setattr(self, _CAPTURE_ATTENTION_MASK_ATTR, example.get("attention_mask"))
+        try:
+            return super().run_input_capture(example, use_cache=use_cache, data_device=data_device)
+        finally:
+            setattr(self, _CAPTURE_ATTENTION_MASK_ATTR, previous_mask)
+
+    def capture_first_layer_input_kwargs(self, args, kwargs, batch_device, layer_input_kwargs):
+        """Cache the raw mask and both rotary variants before the base modules are offloaded."""
+
+        captured = dict(super().capture_first_layer_input_kwargs(args, kwargs, batch_device, layer_input_kwargs))
+        hidden_states = kwargs.get("hidden_states")
+        if hidden_states is None:
+            hidden_states = args[0]
+        position_ids = kwargs["position_ids"]
+        model = self.model.model
+        captured[_REPLAY_INPUTS_KEY] = nested_move_to({
+            "attention_mask": self.__dict__.get(_CAPTURE_ATTENTION_MASK_ATTR),
+            "position_embeddings": {
+                "full_attention": model.rotary_emb(hidden_states, position_ids),
+                "sliding_window_attention": model.swa_rotary_emb(hidden_states, position_ids),
+            },
+        }, device=batch_device)
+        return captured
+
+    def prepare_layer_replay_kwargs(self, layer, layer_input, additional_inputs, target_device):
+        """Select the mask and rotary inputs for each full or sliding attention layer."""
+
+        prepared = dict(super().prepare_layer_replay_kwargs(layer, layer_input, additional_inputs, target_device))
+        replay = prepared.pop(_REPLAY_INPUTS_KEY, None)
+        attention_type = getattr(layer, "attention_type", None)
+        if attention_type is None or not layer_input:
+            return prepared
+        if replay is None:
+            raise ValueError("MiMo layer replay is missing captured attention and rotary inputs")
+        if attention_type not in ("full_attention", "sliding_window_attention"):
+            raise ValueError(f"Unsupported MiMo replay attention type: {attention_type}")
+
+        raw_mask = replay["attention_mask"]
+        if isinstance(raw_mask, dict):
+            attention_mask = raw_mask[attention_type]
+        else:
+            modeling = import_module(type(self.model).__module__)
+            mask_builder = (
+                modeling.create_sliding_window_causal_mask
+                if attention_type == "sliding_window_attention"
+                else modeling.create_causal_mask
+            )
+            attention_mask = mask_builder(
+                config=self.model.config,
+                input_embeds=layer_input[0],
+                attention_mask=nested_move_to(raw_mask, device=target_device),
+                cache_position=prepared.get("cache_position"),
+                past_key_values=None,
+                position_ids=prepared.get("position_ids"),
+            )
+        prepared["attention_mask"] = nested_move_to(attention_mask, device=target_device)
+        prepared["position_embeddings"] = nested_move_to(
+            replay["position_embeddings"][attention_type], device=target_device,
+        )
+        return prepared
