@@ -2064,11 +2064,9 @@ class GPTQ:
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
         if self.qcfg.static_groups and self.qcfg.desc_act:
-            g_idx = [perm[i] // group_size for i in range(self.columns)]
+            g_idx = (perm // group_size).to(dtype=torch.int32, device=Q.device)
         else:
-            g_idx = [i // group_size for i in range(self.columns)]
-
-        g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = torch.arange(self.columns, dtype=torch.int32, device=Q.device) // group_size
 
         if self.qcfg.desc_act and use_hessian:
             invperm = invperm.to(device=Q.device)
