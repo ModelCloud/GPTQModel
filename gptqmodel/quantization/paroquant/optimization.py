@@ -1115,6 +1115,12 @@ class _ParoQuantOptimLinear(nn.Module):
             )
         self.register_buffer("pairs", pairs)
         self.register_buffer("theta_mask", theta_mask)
+        # ``reset_masked_angles`` runs once per optimizer step, and the fill is
+        # only observable when the padded-pair layout actually reserved a dummy
+        # angle slot. The mask is structural, so deciding that once here keeps
+        # the per-step path launch-free for the fully-packed layouts that every
+        # default ParoQuant configuration produces.
+        self._theta_mask_active = bool(theta_mask.any().item())
         self.weight = nn.Parameter(weight.clone())
         self.bias = None if bias is None else nn.Parameter(bias.clone())
         self.theta = nn.Parameter(torch.zeros((pairs.shape[0], weight.shape[1] // 2), device=weight.device, dtype=weight.dtype))
@@ -1225,6 +1231,8 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def reset_masked_angles(self) -> None:
         """Force dummy padded pairs to stay at zero angle during optimization."""
+        if not self._theta_mask_active:
+            return
         with torch.no_grad():
             self.theta.masked_fill_(self.theta_mask, 0)
 

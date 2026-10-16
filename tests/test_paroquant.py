@@ -3666,6 +3666,82 @@ def test_paroquant_merged_group_adamw_step_is_bitwise_identical():
         assert torch.equal(split_param, merged_param)
 
 
+def test_paroquant_stage_angle_reset_skips_fill_for_fully_packed_layout(monkeypatch):
+    """Guard the per-step angle reset against launching a no-op fill on packed layouts."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    # The default ParoQuant layout packs `pair_ratio * group_size` pairs exactly,
+    # so every rotation row is fully populated and no angle slot is a dummy.
+    assert torch.count_nonzero(theta_mask).item() == 0
+
+    model = _ParoQuantOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is False
+
+    fills = []
+    real_masked_fill = torch.Tensor.masked_fill_
+
+    def counting_masked_fill(self, *args, **kwargs):
+        fills.append(tuple(self.shape))
+        return real_masked_fill(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "masked_fill_", counting_masked_fill)
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert fills == []
+    assert torch.equal(model.theta, torch.ones_like(model.theta))
+
+
+def test_paroquant_stage_angle_reset_masks_padded_pairs():
+    """Guard the padded-pair reset that keeps dummy angles at zero during optimization."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=1,
+        device=torch.device("cpu"),
+    )
+    theta_mask = theta_mask.clone()
+    theta_mask[0, 0] = True
+    theta_mask[2, 5] = True
+
+    model = _ParoQuantOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is True
+
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert torch.equal(model.theta[theta_mask], torch.zeros_like(model.theta[theta_mask]))
+    assert torch.equal(model.theta[~theta_mask], torch.ones_like(model.theta[~theta_mask]))
+
+
 def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
     """Guard grouped CUDA optimizer setup against fused AdamW support gaps."""
 
