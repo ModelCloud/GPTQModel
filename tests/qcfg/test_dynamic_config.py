@@ -32,6 +32,7 @@ from gptqmodel.quantization.config import (
     configure_dynamic_override_cache,
     configure_dynamic_override_cache_for_model,
     dynamic_get,
+    dynamic_matching_pattern,
     dynamic_override_cache_stats,
     log_dynamic_override_cache_stats,
 )
@@ -438,6 +439,66 @@ def test_dynamic_mixed_ordering_respected():
     }
     cfg2 = QuantizeConfig(dynamic=dynamic_reordered, bits=4, group_size=128, sym=False)
     assert cfg2.dynamic_get("model.layers.5.mlp.gate_proj", "bits", cfg2.bits) == 2
+
+
+def test_dynamic_matching_pattern_reports_first_match():
+    """`dynamic_matching_pattern` must mirror `dynamic_get` first-match resolution."""
+    dynamic = {
+        "+:.*\\.down_proj$": {"bits": 2},
+        "+:^model\\.layers\\.0\\.mlp\\.gate_proj$": {"bits": 8},
+    }
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.0.mlp.down_proj") == "+:.*\\.down_proj$"
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.0.mlp.gate_proj") == (
+        "+:^model\\.layers\\.0\\.mlp\\.gate_proj$"
+    )
+    # No match means the base config applies to the module.
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.0.self_attn.q_proj") is None
+    assert cfg.dynamic_get("model.layers.0.self_attn.q_proj", "bits", cfg.bits) == cfg.bits
+
+
+def test_dynamic_matching_pattern_honors_exact_shadowing():
+    """An earlier regex must shadow a later exact literal, like `dynamic_get` does."""
+    exact = _exact_pattern("model.layers.5.mlp.gate_proj")
+    regex = "+:^model\\.layers\\.\\d+\\.mlp\\.gate_proj$"
+    dynamic = {regex: {"bits": 8}, exact: {"bits": 2}}
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.5.mlp.gate_proj") == regex
+    assert cfg.dynamic_get("model.layers.5.mlp.gate_proj", "bits", cfg.bits) == 8
+
+    reordered = {exact: {"bits": 2}, regex: {"bits": 8}}
+    cfg2 = QuantizeConfig(dynamic=reordered, bits=4, group_size=128, sym=False)
+    assert dynamic_matching_pattern(cfg2.dynamic, "model.layers.5.mlp.gate_proj") == exact
+    assert cfg2.dynamic_get("model.layers.5.mlp.gate_proj", "bits", cfg2.bits) == 2
+
+
+def test_dynamic_matching_pattern_reports_negative_rules():
+    """A `-:` exclusion is reported like any other match."""
+    dynamic = {"-:.*\\.down_proj$": {}, "+:.*\\.up_proj$": {"bits": 8}}
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.3.mlp.down_proj") == "-:.*\\.down_proj$"
+    assert cfg.dynamic_get("model.layers.3.mlp.down_proj") is False
+    assert dynamic_matching_pattern(cfg.dynamic, "model.layers.3.mlp.up_proj") == "+:.*\\.up_proj$"
+
+
+def test_dynamic_matching_pattern_handles_exact_only_config():
+    """Exact-only configs must resolve without regex matching."""
+    modules = [f"model.layers.{i}.mlp.down_proj" for i in range(10)]
+    dynamic = {_exact_pattern(name): {"bits": 2} for name in modules}
+    cfg = QuantizeConfig(dynamic=dynamic, bits=4, group_size=128, sym=False)
+
+    with patch.object(pcre.Pattern, "match") as mock_match:
+        assert dynamic_matching_pattern(cfg.dynamic, modules[3]) == _exact_pattern(modules[3])
+        assert dynamic_matching_pattern(cfg.dynamic, "model.layers.unknown.mlp.down_proj") is None
+        mock_match.assert_not_called()
+
+
+def test_dynamic_matching_pattern_empty_config():
+    assert dynamic_matching_pattern(None, "model.layers.0.mlp.down_proj") is None
+    assert dynamic_matching_pattern({}, "model.layers.0.mlp.down_proj") is None
 
 
 def test_dynamic_large_exact_config_no_pcre_regression():

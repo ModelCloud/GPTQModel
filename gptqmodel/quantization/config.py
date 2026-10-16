@@ -2767,6 +2767,36 @@ def dynamic_get(dynamic: Dict[str, Dict[str, Union[int, bool]]], module_name: st
 
     return sub_value
 
+
+def dynamic_matching_pattern(dynamic: Dict[str, Dict[str, Any]], module_name: str) -> Optional[str]:
+    """Return the `dynamic` pattern that decides `module_name`'s override.
+
+    Mirrors `_resolve_dynamic_override` first-match ordering. `None` means no
+    rule matched, so the base `QuantizeConfig` applies to the module.
+    """
+
+    if not dynamic:
+        return None
+
+    patterns = list(dynamic.keys())
+    exact_lookup, all_exact, regex_patterns = _get_dynamic_patterns(dynamic)
+
+    if all_exact:
+        entry = exact_lookup.get(module_name)
+        return patterns[entry[0]] if entry is not None else None
+
+    exact_entry = exact_lookup.get(module_name)
+    best_index = exact_entry[0] if exact_entry is not None else None
+    for index, _is_negative, compiled, _overrides in regex_patterns:
+        if best_index is not None and index > best_index:
+            break
+        if compiled.match(module_name):
+            return patterns[index]
+    if best_index is not None:
+        return patterns[best_index]
+    return None
+
+
 def _normalize_quant_method(value: Union[str, METHOD]) -> METHOD:
     if isinstance(value, str):
         value = value.lower()

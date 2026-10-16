@@ -739,11 +739,40 @@ dynamic = {
     # negative match: skip layer 21, gate module
     r"-:.*\.20\..*gate.*": {}, 
     
-    # negative match: skip all down modules for all layers
+    # negative match: skip all down modules for all layers.
     r"-:.*down.*": {},  
  } 
 
 ```
+
+#### Fused Modules in Inference Engines (vLLM / SGLang) 🧩
+
+Inference engines merge modules before they resolve the quantization config, and each merged module carries one precision and one
+quantization config:
+
+* every routed expert of one decoder layer is merged into one module (`<prefix>.experts`),
+* `gate_proj` + `up_proj` are merged into `gate_up_proj`, and `q_proj` + `k_proj` + `v_proj` into `qkv_proj`.
+
+A rule that matches just part of a merged module (for example
+`-:.*down.*`, which matches `...experts.<id>.down_proj` but not the merged `...experts` module) therefore produces a checkpoint that
+loads in GPT-QModel but fails in vLLM/SGLang, because those engines mix float and quantized shards of the same merged module. GPT-QModel
+detects this before quantization starts and warns, naming the offending rules and a pattern that covers both. A rule must match the merged
+module **and** its shards: routed experts live below their merged module, so one pattern on `...mlp.experts` covers everything, while
+`gate_up_proj`/`qkv_proj` are siblings of their shards and need an alternation (for example `(gate_proj|up_proj|gate_up_proj)`).
+
+```py
+dynamic = {
+    # skip the whole merged routed-expert module of layer 20
+    r"-:.*\.20\.mlp\.experts(\.|$)": {},
+
+    # give the whole merged routed-expert module of layer 18 one config
+    r"+:.*\.18\.mlp\.experts(\.|$)": {"bits": 4, "group_size": 32},
+}
+```
+
+Experts that never receive calibration traffic are a special case: with `fallback` disabled (`fallback=None`) GPT-QModel skips them and
+they keep their source dtype. Those engines load a merged expert module with a single precision, so keep `fallback` enabled (the default)
+when the checkpoint must load in vLLM/SGLang.
 
 ### Group Aware Reordering (GAR) 🔄
 
