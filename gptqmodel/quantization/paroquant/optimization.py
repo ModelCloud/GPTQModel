@@ -309,6 +309,23 @@ def _get_triton_affine_kernels():
     return affine_ste
 
 
+@lru_cache(maxsize=1)
+def _get_triton_sym_kernels():
+    """Import the Triton symmetric-STE kernels lazily, or ``None`` when unusable.
+
+    Importing Triton costs hundreds of milliseconds and is only worthwhile on the
+    training-time symmetric path, so the import is deferred until the first fused
+    call and cached for the process.
+    """
+    try:
+        from gptqmodel.quantization.paroquant.modules.triton import sym_ste
+    except Exception:
+        return None
+    if not sym_ste.sym_quant_dequant_ste_available():
+        return None
+    return sym_ste
+
+
 def _affine_quant_dequant_ste_fused(
     weight: torch.Tensor,
     scale: torch.Tensor,
@@ -376,6 +393,74 @@ def _affine_quant_dequant_ste_fused(
             if fused is not None:
                 return fused
     return _AffineQuantDequantSTE.apply(weight, scale, zero_point_float, 0, 2**bits - 1, group_size)
+
+
+def _sym_quant_dequant_ste_fused(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+) -> Optional[torch.Tensor]:
+    """Route the symmetric STE path through the fused node when it is provably equivalent.
+
+    The fused node reproduces the composed reference graph bit for bit, but only
+    under the shapes and dtypes that graph is spelled for: float32 CUDA tensors,
+    a contiguous per-group ``(groups, 1)`` scale, and an enabled autograd graph
+    with at least one differentiable input. Everything else keeps the eager
+    reference so no caller silently changes semantics.
+
+    On hosts with Triton the same arithmetic runs in one kernel per direction
+    instead of fifteen launches. ``torch.compile`` keeps the pure-torch graph:
+    the compiled large-tensor path already fuses this region, and Inductor is the
+    only tracer that has to agree with the graph.
+
+    Value-only callers -- the calibration loop evaluates the replayed model under
+    ``torch.no_grad()`` -- have no graph to fuse, but they still pay the composed
+    graph's five launches per call. Those calls take the fused Triton forward
+    without its autograd node; the value is the same either way, and without
+    Triton the eager reference is already as cheap as the torch node's forward.
+    """
+    if weight.device.type != "cuda" or weight.dtype != torch.float32:
+        return None
+    if scale.dtype != torch.float32 or not scale.is_contiguous():
+        return None
+    numel = weight.numel()
+    if numel == 0 or numel % group_size != 0:
+        return None
+    groups = numel // group_size
+    if tuple(scale.shape) != (groups, 1):
+        return None
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+    grad_enabled = torch.is_grad_enabled()
+    differentiable = weight.requires_grad or scale.requires_grad
+    if not grad_enabled or not differentiable:
+        if grad_enabled or torch.compiler.is_compiling():
+            return None
+        kernels = _get_triton_sym_kernels()
+        if kernels is None:
+            return None
+        return kernels.sym_quant_dequant_ste_forward(
+            weight,
+            scale,
+            qmin=qmin,
+            qmax=qmax,
+            group_size=group_size,
+        )
+    if not torch.compiler.is_compiling():
+        kernels = _get_triton_sym_kernels()
+        if kernels is not None:
+            fused = kernels.sym_quant_dequant_ste(
+                weight,
+                scale,
+                qmin=qmin,
+                qmax=qmax,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
+    return None
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -973,6 +1058,14 @@ def pseudo_quantize_dequant(
         if scale is None:
             scale = weight_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5) / qmax
         if use_ste:
+            fused = _sym_quant_dequant_ste_fused(
+                weight,
+                scale,
+                bits=bits,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             quant = _clamp_ste(_round_ste(weight_view / scale), qmin, qmax)
             dequant = quant * scale
