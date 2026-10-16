@@ -1824,13 +1824,15 @@ class AWQProcessor(LoopProcessor):
                 max_val = abs_max.reshape(src_view.shape[0], 1)
             max_val = max_val.clamp(min=1e-5)
             max_int = 2 ** (self.qcfg.bits - 1) - 1
-            min_int = -(2 ** (self.qcfg.bits - 1))
             scales = max_val / max_int
 
-            # Divide straight into the destination instead of copying first.
+            # Divide straight into the destination instead of copying first. The
+            # symmetric magnitude that produced `scales` bounds `src_view`, so
+            # `src_view / scales` cannot exceed `max_int` and the rounded value
+            # already sits inside the signed range: the clamp the asymmetric
+            # path needs (where `zeros` shifts the value) never changes one here.
             torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
-            dst_view.clamp_(min_int, max_int)
             dst_view.mul_(scales)
 
 
