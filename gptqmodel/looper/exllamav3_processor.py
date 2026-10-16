@@ -288,6 +288,9 @@ class EXL3Processor(LoopProcessor):
                 "H": hessian,
                 "count": capture.nsamples,
                 "finalized": False,
+                # This dict is dropped as soon as the call returns, so the quantizer
+                # must not spend a device->host transfer caching ``L`` for reuse.
+                "single_use": True,
             }
             quant_args = self._build_quant_args(
                 module, module_qcfg, target_device

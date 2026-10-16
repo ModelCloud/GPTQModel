@@ -107,6 +107,56 @@ def test_exllamav3_torch_weight_matches_quantized_reference(bits: int, codebook:
     assert torch.allclose(dense_weight, weight_q, rtol=3e-3, atol=3e-3)
 
 
+def _quantize_single_tensor(*, single_use: bool):
+    """Quantize one deterministic tensor and report the result plus the cached Hessian state."""
+
+    quantize_exl3 = _get_quantize_exl3()
+
+    torch.manual_seed(23)
+    in_features, out_features = 128, 128
+    weight = torch.randn(in_features, out_features, device="cuda", dtype=torch.float32)
+    hessian = torch.eye(in_features, device="cuda", dtype=torch.float32)
+    quant_args = {
+        "K": 4,
+        "devices": [weight.device],
+        "apply_out_scales": True,
+        "sigma_reg": 0.025,
+        "seed": 787,
+    }
+    h_data: dict[str, object] = {"H": hessian, "count": in_features, "finalized": False}
+    if single_use:
+        h_data["single_use"] = True
+
+    weight_q, _, _ = quantize_exl3(
+        weight=weight,
+        H_data=h_data,
+        quant_args=quant_args,
+        return_weight_q=True,
+    )
+
+    return weight_q, h_data
+
+
+def test_exllamav3_single_use_h_data_skips_host_cache():
+    """A single-use ``H_data`` must not spend a device->host transfer caching ``L``.
+
+    ``finalize_capture_H`` hands back the very tensor it caches in ``H_data``, so the
+    cached entry is only re-read by a caller that re-quantizes against the same Hessian.
+    The layer processor builds one dict per module and drops it as soon as the call
+    returns, so it opts into ``single_use`` and expects the entry to be released instead
+    of copied to the host -- without changing a single quantized value.
+    """
+
+    cached_weight_q, cached_h_data = _quantize_single_tensor(single_use=False)
+    cached_l = cached_h_data["L"]
+    assert isinstance(cached_l, torch.Tensor)
+    assert cached_l.device.type == "cpu"
+
+    released_weight_q, released_h_data = _quantize_single_tensor(single_use=True)
+    assert released_h_data["L"] is None
+    assert torch.equal(released_weight_q, cached_weight_q)
+
+
 @pytest.mark.parametrize(
     ("bits", "codebook"),
     [
