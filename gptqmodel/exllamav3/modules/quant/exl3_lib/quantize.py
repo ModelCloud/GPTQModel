@@ -51,38 +51,24 @@ def tensor_core_perm_i(device):
     return torch.argsort(tensor_core_perm(device))
 
 
-@lru_cache
-def tile_core_perm_index(tiles_n: int, device):
-    """Flattened index that permutes a (16, tiles_n * 16) row block into tiles.
+def tile_core_permute(rows: torch.Tensor, tiles_n: int) -> torch.Tensor:
+    """Move a (16, tiles_n * 16) row block into the tensor core tile layout.
 
-    Equivalent to
-    ``rows.reshape(16, tiles_n, 16).permute(1, 0, 2).reshape(tiles_n, 256)[:, tensor_core_perm(device)]``
-    but the combined gather index is built once per shape, so the per-block cost
-    is a single gather kernel instead of a permute copy followed by a gather.
-    The two paths move the same values, so the result is bit-identical.
+    ``tensor_core_perm`` reorders each 16x16 tile so that the source element
+    ``r = 8*n + 2*a + m``, ``c = 8*q + b`` lands at ``p = 32*b + 8*a + 4*q + 2*n + m``.
+    That mapping is a pure dimension permutation of the block, so it is expressed
+    as a view plus a transpose rather than an index gather. The copy kernel this
+    produces is coalesced and vectorized, where the gather reads one scattered
+    element per thread. Both forms move the same values and are bit-identical.
     """
 
-    perm = tensor_core_perm(device)
-    rows = perm // 16
-    cols = perm % 16
-    tiles = torch.arange(tiles_n, device=perm.device)
-    return (rows[None, :] * (tiles_n * 16) + tiles[:, None] * 16 + cols[None, :]).contiguous()
+    return rows.reshape(2, 4, 2, tiles_n, 2, 8).permute(3, 5, 1, 4, 0, 2).reshape(tiles_n, 256)
 
 
-@lru_cache
-def tile_core_perm_i_index(tiles_n: int, device):
-    """Flattened index that undoes :func:`tile_core_perm_index`.
+def tile_core_permute_i(tiles: torch.Tensor, tiles_n: int, size_n: int) -> torch.Tensor:
+    """Undo :func:`tile_core_permute`, back to a (16, size_n) row block."""
 
-    Equivalent to
-    ``tiles[:, tensor_core_perm_i(device)].reshape(tiles_n, 16, 16).permute(1, 0, 2).reshape(16, tiles_n * 16)``
-    as a single gather, bit-identical to the permute-copy path.
-    """
-
-    perm_i = tensor_core_perm_i(device)
-    rows = torch.arange(16, device=perm_i.device)[:, None, None]
-    tiles = torch.arange(tiles_n, device=perm_i.device)[None, :, None]
-    cols = torch.arange(16, device=perm_i.device)[None, None, :]
-    return (tiles * 256 + perm_i[rows * 16 + cols]).reshape(-1).contiguous()
+    return tiles.reshape(tiles_n, 8, 4, 2, 2, 2).permute(4, 2, 5, 0, 3, 1).reshape(16, size_n)
 
 
 def _allocate_temp_buffers(device, K: int):
@@ -499,13 +485,13 @@ def ldlq(
                 rows = b_weight[bi:bj] + compensation_term
 
                 # Pre-permute to tensor core layout
-                tiles = rows.reshape(-1)[tile_core_perm_index(tiles_n, device)]
+                tiles = tile_core_permute(rows, tiles_n)
 
                 # Quantize
                 quant_w, quant_i = quantize_tiles_multigpu(tiles, quant_args)
 
                 # Undo permutation on reconstructed tiles, but keep indices in tensor core layout
-                quant_w = quant_w.reshape(-1)[tile_core_perm_i_index(tiles_n, device)].view(16, size_n)
+                quant_w = tile_core_permute_i(quant_w, tiles_n, size_n)
 
                 # Store result
                 b_weight_q[bi:bj] = quant_w
@@ -604,13 +590,13 @@ def fallback_quant(
                 rows = b_weight[bi:bj]
 
                 # Pre-permute to tensor core layout
-                tiles = rows.reshape(-1)[tile_core_perm_index(tiles_n, device)]
+                tiles = tile_core_permute(rows, tiles_n)
 
                 # Quantize
                 quant_w, quant_i = quantize_tiles_multigpu(tiles, quant_args)
 
                 # Undo permutation on reconstructed tiles, but keep indices in tensor core layout
-                quant_w = quant_w.reshape(-1)[tile_core_perm_i_index(tiles_n, device)].view(16, size_n)
+                quant_w = tile_core_permute_i(quant_w, tiles_n, size_n)
 
                 # Store result
                 b_weight_q[bi:bj] = quant_w
