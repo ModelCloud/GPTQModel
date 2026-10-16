@@ -1999,6 +1999,37 @@ def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=fake_cuda_rows, batch_size=64) is False
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant ROCm capture gate needs a real CUDA tensor.")
+def test_paroquant_stage_cudagraph_gate_skips_rocm_capture(monkeypatch):
+    """Guard that ROCm hosts never capture: hipBLASLt deadlocks instead of raising."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    model = _DummyModel()
+    rows = torch.ones((2048, 4), dtype=torch.float32, device="cuda")
+
+    # Everything the gate asks for is satisfied here, so the ROCm flag is the
+    # only thing that can decide the result.
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", False)
+    assert (
+        paroquant_optimization._should_use_paroquant_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+        )
+        is True
+    )
+
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", True)
+    assert (
+        paroquant_optimization._should_use_paroquant_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+        )
+        is False
+    )
+
+
 def test_paroquant_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypatch):
     """Guard that a CUDA-graph stage failure restores model state and reruns eagerly."""
     class _DummyModel(torch.nn.Module):

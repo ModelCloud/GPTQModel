@@ -1809,10 +1809,22 @@ def _should_use_paroquant_stage_cudagraph(
     batch_size: int,
     stage_cudagraph: Optional[bool] = None,
 ) -> bool:
-    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing."""
+    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing.
+
+    ROCm hosts are excluded unconditionally. The captured train step runs a
+    hipBLASLt GEMM, and hipBLASLt rejects work issued while a stream is
+    capturing ("operation not permitted when stream is capturing"). That raise
+    lands inside the shared cuBLASLt handle pool, where it deadlocks on the
+    pool mutex instead of surfacing as an exception, so the eager fallback in
+    ``_run_stage_gptqmodel`` never gets a chance to run and the whole
+    quantization hangs. There is no eager/ROCm path to fall back to from a
+    deadlock, so the capture is skipped before it starts.
+    """
     if stage_cudagraph is None:
         stage_cudagraph = env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True)
     if not bool(stage_cudagraph):
+        return False
+    if IS_ROCM:
         return False
     if not isinstance(inputs_train, torch.Tensor):
         return False
