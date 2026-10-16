@@ -1397,6 +1397,52 @@ def _fold_epoch_loss(
     return accumulator
 
 
+_SCALAR_BACKWARD_SEEDS: dict[tuple[object, ...], torch.Tensor] = {}
+
+
+def _scalar_backward_seed(loss: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return a reusable unit seed for a one-element loss backward, or ``None``.
+
+    ``torch.autograd.backward`` seeds an implicit-gradient call with
+    ``torch.ones_like`` of the output, so every optimizer step spends one fill
+    launch on a single element before any real gradient work starts. ParoQuant
+    runs one optimizer step per calibration batch over two stages per layer and
+    every stage is launch-bound on MI350X, so that seed is worth caching.
+
+    The seed is only ever read: the engine hands it to the first backward node as
+    ``grad_output``, and no backward in this pipeline writes into its incoming
+    gradient. One tensor per (device, dtype, shape) therefore serves every step,
+    and keying the cache on those three keeps a stage that switches device or
+    dtype from reusing a seed of the wrong kind.
+
+    Anything that is not a real tensor -- a duck-typed scaler double, for
+    instance -- is left to its own ``backward``.
+    """
+    if not isinstance(loss, torch.Tensor) or not loss.requires_grad or loss.numel() != 1:
+        return None
+    key = (loss.device, loss.dtype, tuple(loss.shape))
+    seed = _SCALAR_BACKWARD_SEEDS.get(key)
+    if seed is None:
+        seed = torch.ones_like(loss)
+        _SCALAR_BACKWARD_SEEDS[key] = seed
+    return seed
+
+
+def _backward_scalar_loss(loss: torch.Tensor) -> None:
+    """Run the backward of a one-element loss without materialising a fresh seed.
+
+    ``loss.backward()`` stays the fallback for every case the cache cannot serve
+    -- non-scalar losses, frozen graphs, or a loss that does not require grad --
+    so the call site keeps the exact semantics of the call it replaces while the
+    steady state saves one fill launch per optimizer step.
+    """
+    seed = _scalar_backward_seed(loss)
+    if seed is None:
+        loss.backward()
+        return
+    torch.autograd.backward(loss, seed)
+
+
 def _normalize_optimizer_param_groups(
     param_groups: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -1622,7 +1668,7 @@ def _run_stage_gptqmodel_impl(
             with autocast_ctx:
                 preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
-            scaler.scale(loss).backward()
+            _backward_scalar_loss(scaler.scale(loss))
             scaler.step(optimizer)
             scaler.update()
             global_step += 1
@@ -1729,7 +1775,7 @@ def _run_stage_gptqmodel_cudagraph(
             optimizer.zero_grad(set_to_none=True)
             preds = model(static_input)
             loss = F.smooth_l1_loss(preds, static_target)
-            loss.backward()
+            _backward_scalar_loss(loss)
             optimizer.step()
             model.reset_masked_angles()
             del preds, loss
@@ -1768,7 +1814,7 @@ def _run_stage_gptqmodel_cudagraph(
                 optimizer.zero_grad(set_to_none=True)
                 preds = model(input_batch)
                 loss = F.smooth_l1_loss(preds, target_batch)
-                loss.backward()
+                _backward_scalar_loss(loss)
                 optimizer.step()
                 model.reset_masked_angles()
                 epoch_loss = _fold_epoch_loss(epoch_loss, loss)
@@ -1907,7 +1953,7 @@ def _run_stage_reference(
             with autocast_ctx:
                 preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
-            scaler.scale(loss).backward()
+            _backward_scalar_loss(scaler.scale(loss))
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)

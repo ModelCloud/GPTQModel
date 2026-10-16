@@ -614,6 +614,64 @@ def test_paroquant_fold_epoch_loss_accumulates_in_place_without_touching_the_ste
     assert fp64_step_loss.item() == 1.25
 
 
+def test_paroquant_backward_scalar_loss_reuses_one_seed_and_matches_tensor_backward():
+    """Guard the scalar backward against materialising a ones_like seed per step."""
+    paroquant_optimization._SCALAR_BACKWARD_SEEDS.clear()
+    x = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+    reference = x.detach().clone().requires_grad_(True)
+
+    paroquant_optimization._backward_scalar_loss((x * 2.0).sum())
+    seed_key = (x.device, torch.float64, ())
+    seed = paroquant_optimization._SCALAR_BACKWARD_SEEDS[seed_key]
+    assert seed.shape == () and seed.dtype == torch.float64
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    # The second step reuses the very same tensor: that reuse is the saved fill.
+    paroquant_optimization._backward_scalar_loss((x * 3.0).sum())
+    assert paroquant_optimization._SCALAR_BACKWARD_SEEDS[seed_key] is seed
+    # The engine only reads the seed, so a reused seed must still be all ones.
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    (reference * 2.0).sum().backward()
+    (reference * 3.0).sum().backward()
+    assert torch.equal(x.grad, reference.grad)
+
+
+def test_paroquant_backward_scalar_loss_keeps_the_tensor_backward_fallback():
+    """A loss the seed cache cannot serve must keep plain `Tensor.backward()` semantics."""
+    paroquant_optimization._SCALAR_BACKWARD_SEEDS.clear()
+
+    # Non-scalar losses raise exactly what `Tensor.backward()` raises.
+    vector = torch.randn(3, requires_grad=True) * 2.0
+    with pytest.raises(RuntimeError):
+        paroquant_optimization._backward_scalar_loss(vector)
+    assert not paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A loss that does not require grad keeps the eager error instead of a seed.
+    frozen = torch.tensor(1.0)
+    with pytest.raises(RuntimeError):
+        paroquant_optimization._backward_scalar_loss(frozen)
+    assert not paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A one-element non-0-dim output is still scalar enough for autograd.
+    x = torch.randn(2, dtype=torch.float64, requires_grad=True)
+    paroquant_optimization._backward_scalar_loss((x * 4.0).sum().reshape(1))
+    assert torch.equal(x.grad, torch.full_like(x, 4.0))
+    assert (x.device, torch.float64, (1,)) in paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A duck-typed loss double keeps its own `backward` instead of the seed path.
+    class _StandIn:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self):
+            self.calls += 1
+
+    stand_in = _StandIn()
+    paroquant_optimization._backward_scalar_loss(stand_in)
+    assert stand_in.calls == 1
+
+
 @pytest.mark.parametrize(
     "stage_runner_name",
     ["_run_stage_gptqmodel_impl", "_run_stage_reference"],
