@@ -487,7 +487,10 @@ class VPTQLinear(WeightOnlyQuantLinear):
         bias = getattr(self, "bias", None)
         if bias is not None and bias.dtype != x.dtype:
             bias = bias.to(dtype=x.dtype)
-        return F.linear(x, weight, bias)
+        out = F.linear(x, weight, bias)
+        if self.adapter is not None:
+            out = self.adapter.apply(x=x, out=out)
+        return out
 
     def extra_repr(self) -> str:
         return (

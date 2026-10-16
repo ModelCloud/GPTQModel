@@ -92,7 +92,7 @@ reported as `config.bits` and can be tuned by changing the codebook sizes
 | `norm_dim` | `0` | Normalization axis: `0` (columns) or `1` (rows). |
 | `enable_perm` | `False` | Re-order input channels by descending Hessian diagonal before quantization. |
 | `block_size` | `128` | GPTQ error-propagation block size. |
-| `percdamp` | `0.01` | Hessian damping percentage used by the error-propagation pass. |
+| `percdamp` | `0.01` | Hessian damping percentage, applied once to the mean-normalized Hessian by the error-propagation pass (`percdamp=0` adds no damping). |
 
 `bits` is derived from the codebook configuration and is not a storage
 parameter; passing an explicit `bits` only logs the derived value. Per-layer
@@ -107,11 +107,26 @@ Configuration constraints:
   of one packed word.
 - `num_res_centroids[0]` must stay `-1`: the runtime has no residual codebook
   for the outlier group.
+- `group_num` may not exceed the input channels available for grouped
+  quantization (after the outlier split when the outlier codebook is enabled);
+  a larger value would leave a codebook group without any channel and is
+  rejected before quantization starts.
 - With `group_num`, channels left over by the division are added to the outlier
   set while the outlier codebook is enabled. Without an outlier codebook the
   remainder stays in the last group, and the last group's zero padding is
   dropped when the weight is reconstructed. The same holds for a trailing
   partial group when `group_size` is set explicitly.
+
+## Supported modules
+
+VPTQ quantizes `nn.Linear` and `transformers.Conv1D` layers. Convolution
+modules (`nn.Conv1d`, `nn.Conv2d`) are rejected: the runtime reconstructs a
+dense linear weight and cannot preserve convolutional semantics. `transformers.Conv1D`
+stores its weight as `(in_features, out_features)` and is transposed into the
+same `F.linear` layout as a linear layer.
+
+LoRA/EoRA adapters are supported: when a model is loaded with an adapter, the
+kernel adds the adapter projection to the dequantized linear output.
 
 ## Quality and codebook size
 

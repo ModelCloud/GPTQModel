@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import transformers
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
@@ -33,6 +34,7 @@ from transformers import PreTrainedTokenizerFast
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
 from gptqmodel.quantization.vptq import VPTQ, VPTQQuantResult, _chunked_assign, _matrix_to_vectors
@@ -168,14 +170,22 @@ def build_quantizer(weight, qcfg, dtype=torch.float32):
     return VPTQ(module=linear, qcfg=qcfg)
 
 
-def build_module(qcfg, in_features, out_features, dtype=torch.float32, register_buffers=False):
+def build_module(
+    qcfg,
+    in_features,
+    out_features,
+    dtype=torch.float32,
+    register_buffers=False,
+    bias=False,
+    adapter=None,
+):
     """Create a `VPTQLinear` matching `qcfg`."""
 
     return VPTQLinear(
         bits=qcfg.bits,
         in_features=in_features,
         out_features=out_features,
-        bias=False,
+        bias=bias,
         vector_lens=qcfg.vector_lens,
         num_centroids=qcfg.num_centroids,
         num_res_centroids=qcfg.num_res_centroids,
@@ -187,6 +197,7 @@ def build_module(qcfg, in_features, out_features, dtype=torch.float32, register_
         enable_perm=qcfg.enable_perm,
         dtype=dtype,
         register_buffers=register_buffers,
+        adapter=adapter,
     )
 
 
@@ -367,6 +378,62 @@ def test_vptq_group_layout_without_outlier_codebook():
     assert (outlier_size, group_size, group_num) == (0, 17, 4)
     assert group_size * group_num >= 65
     assert vptq_group_for_column(64, outlier_size=outlier_size, group_size=group_size) == group_num
+
+
+def test_vptq_group_num_cannot_exceed_available_channels():
+    """An oversized `group_num` would create codebook groups without any channel."""
+
+    # one channel per codebook is the smallest legal grouping
+    assert vptq_group_setting(64, npercent=0.0, group_size=-1, group_num=64, enable_outlier=False) == (
+        0,
+        1,
+        64,
+    )
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        vptq_group_setting(64, npercent=0.0, group_size=-1, group_num=65, enable_outlier=False)
+
+    # with an outlier codebook the remainder moves into the outlier set, so the
+    # limit applies to the channels left over after the outlier split
+    outlier_size, group_size, group_num = vptq_group_setting(
+        64, npercent=10.0, group_size=-1, group_num=57, enable_outlier=True
+    )
+    assert (outlier_size, group_size, group_num) == (7, 1, 57)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        vptq_group_setting(64, npercent=10.0, group_size=-1, group_num=58, enable_outlier=True)
+
+
+def test_vptq_group_num_equal_to_in_features_roundtrip():
+    """`group_num == in_features` is legal and packs one codebook per channel."""
+
+    weight, hessian = synthetic_problem(out_features=32, in_features=64, seed=24)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_num=64,
+        kmeans_iters=4,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+    assert all(result.centroids[cidx] is not None for cidx in range(1, 65))
+
+    module = build_module(qcfg, 64, 32)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    dequantized = module.dequantize()
+    assert dequantized.shape == weight.shape
+    assert torch.equal(dequantized, result.quantized_weight)
+
+    oversized = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_num=65,
+        kmeans_iters=4,
+    )
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        build_module(oversized, 64, 32)
+    with pytest.raises(ValueError, match="empty codebook groups"):
+        build_quantizer(weight, oversized).quantize_weight(weight, hessian)
 
 
 def test_vptq_outlier_codebook_resolution():
@@ -813,6 +880,148 @@ def test_vptq_quantizer_accumulates_calibration_hessian():
     hessian = quantizer.materialize_hessian()
     assert torch.allclose(hessian, expected, rtol=1e-12, atol=1e-12)
     assert quantizer.nsamples == batch.shape[0] * batch.shape[1] * 2
+
+
+def test_vptq_percdamp_is_applied_exactly_once():
+    """`percdamp` must be the only damping: `U^T U == (H + percdamp * I)^-1`."""
+
+    raw = torch.diag(torch.linspace(0.5, 4.0, 32, dtype=torch.float64))
+    # `quantize_weight` normalizes the Hessian to mean diagonal 1 before the pass
+    normalized = raw / raw.diagonal().mean()
+    identity = torch.eye(32, dtype=torch.float64)
+
+    inverses = {}
+    for percdamp in (0.0, 0.01, 0.25):
+        qcfg = VPTQConfig(
+            vector_lens=[-1, 4],
+            num_centroids=[-1, 16],
+            num_res_centroids=[-1, -1],
+            kmeans_iters=2,
+            percdamp=percdamp,
+        )
+        quantizer = build_quantizer(torch.zeros(16, 32), qcfg)
+        upper = quantizer._inverse_hessian_cholesky(normalized.clone())
+        inverse = upper.t().double() @ upper.double()
+        oracle = torch.linalg.inv(normalized + percdamp * identity)
+
+        # a float64 oracle keeps this far below the 1e-6 matrix tolerance
+        assert torch.allclose(inverse, oracle, rtol=1e-9, atol=1e-9), (
+            f"percdamp={percdamp}: max drift {float((inverse - oracle).abs().max())}"
+        )
+        inverses[percdamp] = inverse
+
+    # percdamp=0 applies no damping at all, and nonzero values change the matrix
+    assert torch.allclose(inverses[0.0], torch.linalg.inv(normalized), rtol=1e-9, atol=1e-9)
+    assert not torch.allclose(inverses[0.0], inverses[0.01])
+    assert not torch.allclose(inverses[0.01], inverses[0.25])
+
+
+def test_vptq_percdamp_reaches_the_error_propagation_pass():
+    """Changing `percdamp` must change the quantized weight, not just a helper."""
+
+    generator = torch.Generator().manual_seed(25)
+    weight = torch.randn(24, 32, generator=generator) * 0.05
+    # correlated features: the Hessian stays positive definite but the
+    # inverse used by the pass is sensitive to the requested damping
+    features = torch.randn(32, 32, generator=generator)
+    hessian = features.t() @ features
+    hessian = (hessian / hessian.diagonal().mean()).double()
+
+    quantized = {}
+    for percdamp in (0.0, 0.9):
+        qcfg = VPTQConfig(
+            vector_lens=[-1, 4],
+            num_centroids=[-1, 64],
+            num_res_centroids=[-1, -1],
+            kmeans_iters=8,
+            percdamp=percdamp,
+        )
+        quantizer = build_quantizer(weight, qcfg)
+        # the synthetic Hessian stands in for the calibration Hessian, so the
+        # sample-count fallback must not replace it with the identity
+        quantizer.fallback = None
+        result, _loss = quantizer.quantize_weight(weight, hessian)
+        quantized[percdamp] = result.quantized_weight
+
+    assert not torch.allclose(quantized[0.0], quantized[0.9])
+
+
+def test_vptq_rejects_convolution_modules():
+    """The dense-weight runtime cannot preserve convolutional semantics."""
+
+    qcfg = VPTQConfig(vector_lens=[-1, 4], num_centroids=[-1, 16], kmeans_iters=2)
+    for layer in (
+        torch.nn.Conv1d(8, 6, kernel_size=3, bias=False),
+        torch.nn.Conv2d(4, 6, kernel_size=3, bias=False),
+    ):
+        with pytest.raises(ValueError, match="nn.Linear.*transformers.Conv1D"):
+            VPTQ(module=layer, qcfg=qcfg)
+
+
+def test_vptq_transformers_conv1d_roundtrip():
+    """`transformers.Conv1D` stores `(in, out)` and must transpose into the runtime."""
+
+    torch.manual_seed(26)
+    conv1d = transformers.Conv1D(16, 32)  # (nf, nx) = (out_features, in_features)
+    conv1d.weight.data.copy_(torch.randn(32, 16) * 0.05)
+    conv1d.bias.data.copy_(torch.randn(16) * 0.05)
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=8,
+    )
+    quantizer = VPTQ(module=conv1d, qcfg=qcfg)
+    activations = torch.randn(2, 7, 32)
+    quantizer.add_batch(activations)
+    result, _duration, _loss = quantizer.quantize()
+
+    module = build_module(qcfg, 32, 16, bias=True)
+    module.pack(linear=conv1d, vptq_result=result)
+
+    dequantized = module.dequantize()
+    assert dequantized.shape == conv1d.weight.t().shape
+    assert torch.equal(dequantized, result.quantized_weight)
+    assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
+
+    actual = module(activations)
+    expected = conv1d(activations)
+    assert actual.shape == expected.shape
+    # a transposed or otherwise mis-shaped reconstruction would not stay close
+    relative_error = (actual - expected).detach().norm() / expected.detach().norm()
+    assert float(relative_error) < 0.5
+
+
+def test_vptq_linear_applies_lora_adapter():
+    """A loaded LoRA adapter must be added to the dequantized linear output."""
+
+    torch.manual_seed(28)
+    weight, hessian = synthetic_problem(out_features=16, in_features=32, seed=27)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=4,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    lora = Lora(
+        rank=1,
+        # merged-weight layout: (in_features, rank) x (rank, out_features)
+        lora_A=torch.randn(32, 1) * 0.1,
+        lora_B=torch.randn(1, 16) * 0.1,
+    )
+    module = build_module(qcfg, 32, 16, adapter=lora)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    for activations in (torch.randn(3, 32), torch.randn(2, 5, 32)):
+        base = torch.nn.functional.linear(activations, module.dequantize())
+        delta = (activations @ module.adapter.lora_A) @ module.adapter.lora_B
+        actual = module(activations)
+        assert not torch.allclose(actual, base)
+        assert torch.allclose(actual, base + delta, atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

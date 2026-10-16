@@ -198,7 +198,7 @@ class VPTQQuantResult:
 
 
 class VPTQ:
-    """Torch VPTQ quantizer for a single linear (or convolution) module."""
+    """Torch VPTQ quantizer for a single `nn.Linear` or `transformers.Conv1D` module."""
 
     def __init__(self, module: nn.Module, qcfg: Optional[VPTQConfig] = None):
         self.qcfg = qcfg if qcfg is not None else VPTQConfig()
@@ -215,9 +215,8 @@ class VPTQ:
         self._validate_module(self.layer)
 
         weight = self.layer.weight
-        if isinstance(self.layer, nn.Conv2d):
-            rows, columns = weight.shape[0], math.prod(weight.shape[1:])
-        elif isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.layer, transformers.Conv1D):
+            # transformers.Conv1D stores `(in_features, out_features)`.
             rows, columns = weight.shape[1], weight.shape[0]
         else:
             rows, columns = weight.shape[0], weight.shape[1]
@@ -240,8 +239,12 @@ class VPTQ:
 
     @staticmethod
     def _validate_module(module: nn.Module) -> None:
-        if not isinstance(module, (nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D)):
-            raise ValueError(f"VPTQ supports only linear and convolutional layers, got `{module}`.")
+        if not isinstance(module, (nn.Linear, transformers.Conv1D)):
+            raise ValueError(
+                f"VPTQ supports only `nn.Linear` and `transformers.Conv1D` layers, got "
+                f"`{module.__class__.__name__}`: the VPTQ runtime reconstructs a dense linear "
+                "weight and cannot preserve convolutional semantics."
+            )
 
     def free(self) -> None:
         self.H2 = None
@@ -255,28 +258,9 @@ class VPTQ:
         del out
         if inp.dim() == 2:
             inp = inp.unsqueeze(0)
-        if isinstance(self.layer, (nn.Linear, transformers.Conv1D)):
-            if inp.dim() == 3:
-                inp = inp.reshape(-1, inp.shape[-1])
-            inp = inp.t()
-        elif isinstance(self.layer, nn.Conv1d):
-            unfold = nn.Unfold(
-                self.layer.kernel_size,
-                dilation=self.layer.dilation,
-                padding=self.layer.padding,
-                stride=self.layer.stride,
-            )
-            inp = unfold(inp)
-            inp = inp.permute([1, 0, 2]).flatten(1)
-        elif isinstance(self.layer, nn.Conv2d):
-            unfold = nn.Unfold(
-                self.layer.kernel_size,
-                dilation=self.layer.dilation,
-                padding=self.layer.padding,
-                stride=self.layer.stride,
-            )
-            inp = unfold(inp)
-            inp = inp.permute([1, 0, 2]).flatten(1)
+        if inp.dim() == 3:
+            inp = inp.reshape(-1, inp.shape[-1])
+        inp = inp.t()
 
         dev = inp.device
         batch_tokens = inp.shape[1]
@@ -324,9 +308,7 @@ class VPTQ:
 
     def _layer_weight(self) -> torch.Tensor:
         weight = self.layer.weight.data
-        if isinstance(self.layer, nn.Conv2d):
-            weight = weight.flatten(1)
-        elif isinstance(self.layer, transformers.Conv1D):
+        if isinstance(self.layer, transformers.Conv1D):
             weight = weight.t()
         return weight.float()
 
@@ -422,7 +404,6 @@ class VPTQ:
         mean_diag = torch.diagonal(hessian).mean()
         if float(mean_diag) > 0:
             hessian = hessian / mean_diag
-        hessian = hessian + torch.eye(columns, dtype=hessian.dtype, device=device) * 1e-2
 
         weight_scale = None
         weight_bias = None

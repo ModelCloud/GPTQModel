@@ -74,6 +74,11 @@ def vptq_group_setting(
     remaining_columns = in_features - initial_outlier_size
 
     if group_num != -1:
+        if group_num > remaining_columns:
+            raise ValueError(
+                f"VPTQ: `group_num` ({group_num}) exceeds the {remaining_columns} input channels "
+                "available for grouped quantization, which would leave empty codebook groups."
+            )
         if enable_outlier:
             pad = remaining_columns % group_num
             outlier_size = initial_outlier_size + pad
