@@ -401,6 +401,16 @@ class BaseQwen3VLGPTQ(BaseQModel):
                 f"is missing required field(s): {', '.join(missing)}."
             )
 
+    @staticmethod
+    def _is_pretokenized_sample(sample) -> bool:
+        # Only fields BaseQModel's tokenized path keeps, so nothing is dropped.
+        if isinstance(sample, dict):
+            keys = sample.keys()
+            return "input_ids" in keys and keys <= {"input_ids", "attention_mask"}
+        if isinstance(sample, (list, tuple)):
+            return all(isinstance(token, int) for token in sample)
+        return torch.is_tensor(sample)
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         if isinstance(calibration_dataset, (str, bytes, bytearray, Mapping)):
             raise ValueError(
@@ -409,6 +419,14 @@ class BaseQwen3VLGPTQ(BaseQModel):
             )
         if isinstance(calibration_dataset, Sized) and len(calibration_dataset) == 0:
             raise ValueError("Qwen3-VL calibration dataset is empty.")
+
+        # Pre-tokenized text rows keep BaseQModel's tokenized path; anything else,
+        # including processor output with vision fields, uses the processor path.
+        calibration_dataset = list(calibration_dataset)
+        if all(self._is_pretokenized_sample(sample) for sample in calibration_dataset):
+            return super().prepare_dataset(
+                calibration_dataset, batch_size=batch_size, **kwargs
+            )
 
         try:
             # Some adapter contract tests construct an uninitialized wrapper

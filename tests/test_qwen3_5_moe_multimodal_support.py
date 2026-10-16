@@ -220,6 +220,65 @@ def test_qwen3_5_moe_prepare_dataset_rejects_invalid_top_level_data(
         model.prepare_dataset(invalid_dataset)
 
 
+def test_qwen3_5_moe_prepare_dataset_routes_pretokenized_rows_to_base_path(
+    monkeypatch,
+):
+    def forbid_processor(self):
+        raise AssertionError("pre-tokenized rows must not load the processor")
+
+    monkeypatch.setattr(Qwen3_5_MoeQModel, "load_processor", forbid_processor)
+    short, long = list(range(1, 13)), list(range(1, 15))
+    padded = [1] * 11 + [0]
+    rows = [
+        {"input_ids": short, "attention_mask": padded},
+        long,
+        torch.tensor(short),
+        tuple(long),
+    ]
+
+    prepared = _qmodel().prepare_dataset(
+        (row for row in rows), batch_size=2, calibration_dataset_sort="desc"
+    )
+
+    assert [batch["input_ids"].tolist() for batch in prepared] == [
+        [long, long],
+        [short, short],
+    ]
+    assert [batch["attention_mask"].tolist() for batch in prepared] == [
+        [[1] * 14, [1] * 14],
+        [padded, [1] * 12],
+    ]
+
+
+def test_qwen3_5_moe_prepare_dataset_keeps_text_and_vision_rows_on_processor(
+    monkeypatch,
+):
+    processor = _FakeProcessor()
+    monkeypatch.setattr(Qwen3_5_MoeQModel, "load_processor", lambda self: processor)
+    model = _qmodel()
+
+    model.prepare_dataset([{"text": "hello", "input_ids": [1, 2, 3]}])
+    assert processor.template_calls[0][0] == [
+        [{"role": "user", "content": [{"type": "text", "text": "hello"}]}]
+    ]
+
+    # A token row mixed into a text dataset is rejected on the processor path,
+    # in either order.
+    with pytest.raises(ValueError, match="preparation failed for batch 1"):
+        model.prepare_dataset([{"text": "hello"}, [1, 2, 3]])
+    with pytest.raises(ValueError, match="preparation failed for batch 0"):
+        model.prepare_dataset([[1, 2, 3], {"text": "hello"}])
+
+    # The tokenized path would silently drop the vision fields.
+    processor_output = {
+        "input_ids": [1, 2, 3],
+        "pixel_values": torch.zeros(4),
+        "image_grid_thw": torch.ones((1, 3)),
+    }
+    with pytest.raises(ValueError, match="calibration conversation"):
+        model.prepare_dataset([processor_output])
+
+
 class _FakeVision(nn.Module):
     def forward(self, pixel_values, image_grid_thw):
         del image_grid_thw
