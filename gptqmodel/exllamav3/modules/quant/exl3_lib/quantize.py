@@ -1053,9 +1053,14 @@ def _quantize_exl3_body(
             H_diag = H_diag.to(device)
         sv = _random_signs(n, device=device, seed=quant_args.get("seed"), stream=1).unsqueeze(0)
 
-        # Move stored L to CPU (if not already), move working L to device
+        # ``finalize_capture_H`` returns the very tensor it cached in ``H_data``, so the
+        # working copy below aliases the caller's stored reference. Replacing the cached
+        # entry (rather than only rebinding the local) is what lets ``del L`` further
+        # down release the device buffer. A single-use dict never reads the cache again,
+        # so drop the reference instead of duplicating ``L`` onto the host; reusable
+        # dicts keep a host copy so they stay cheap to re-quantize.
         if H_data["L"] is not None:
-            H_data["L"] = H_data["L"].cpu()
+            H_data["L"] = None if H_data.get("single_use") else H_data["L"].cpu()
         if L is not None:
             L = L.to(device)
 
