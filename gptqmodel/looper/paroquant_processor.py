@@ -551,6 +551,7 @@ class ParoQuantProcessor(LoopProcessor):
                 fused_rotation=self.qcfg.opt_fused_rotation,
                 gradient_checkpointing=bool(getattr(self.qcfg, "opt_gradient_checkpointing", False)),
                 stage_cudagraph=self._module_scope_stage_cudagraph_enabled(),
+                use_amp=bool(getattr(self.qcfg, "opt_amp", True)),
                 best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
                 stage_impl=self.qcfg.opt_stage_impl,
                 pair_impl=self.qcfg.opt_pair_impl,

@@ -1708,6 +1708,18 @@ def build_paroquant_optimizer(
     raise AssertionError(f"Unhandled ParoQuant optimizer `{normalized_name}`.")
 
 
+def _resolve_stage_use_amp(inputs_train: torch.Tensor, use_amp: Optional[bool]) -> bool:
+    """Resolve the requested AMP mode against the stage device.
+
+    ``None`` keeps the historical CUDA-only default so callers that never set
+    ``opt_amp`` behave exactly as before.
+    """
+    on_cuda = getattr(getattr(inputs_train, "device", None), "type", None) == "cuda"
+    if use_amp is None:
+        return on_cuda
+    return bool(use_amp) and on_cuda
+
+
 def _run_stage_gptqmodel_impl(
     *,
     model: nn.Module,
@@ -1721,11 +1733,12 @@ def _run_stage_gptqmodel_impl(
     optimizer_name: str,
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
-    use_amp = inputs_train.device.type == "cuda"
+    use_amp = _resolve_stage_use_amp(inputs_train, use_amp)
     if epochs <= 0 or not normalized_groups:
         train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
@@ -1939,8 +1952,13 @@ def _run_stage_gptqmodel(
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
-    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
+    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager.
+
+    ``use_amp=None`` keeps the historical CUDA-only AMP default. The captured
+    CUDA-graph path itself always replays in fp32.
+    """
     if not _should_use_paroquant_stage_cudagraph(
         model,
         inputs_train=inputs_train,
@@ -1959,6 +1977,7 @@ def _run_stage_gptqmodel(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
     initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -1992,6 +2011,7 @@ def _run_stage_gptqmodel(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
 
@@ -2008,11 +2028,12 @@ def _run_stage_reference(
     optimizer_name: str,
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
-    use_amp = inputs_train.device.type == "cuda"
+    use_amp = _resolve_stage_use_amp(inputs_train, use_amp)
     if epochs <= 0 or not normalized_groups:
         train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
@@ -2089,6 +2110,7 @@ def _run_stage(
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     with _activate_stage_params(model, param_groups):
@@ -2105,6 +2127,7 @@ def _run_stage(
                 optimizer_name=optimizer_name,
                 gradient_checkpointing=gradient_checkpointing,
                 best_state_dtype=best_state_dtype,
+                use_amp=use_amp,
             )
         return _run_stage_gptqmodel(
             model=model,
@@ -2119,6 +2142,7 @@ def _run_stage(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
 
@@ -2227,6 +2251,7 @@ def optimize_paroquant_linear(
     quantizer_impl: Literal["fast", "reference"] = "fast",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
     scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
     scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
 ) -> ParoQuantOptimizationResult:
@@ -2339,6 +2364,7 @@ def optimize_paroquant_linear(
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
         best_state_dtype=best_state_dtype,
+        use_amp=use_amp,
     )
 
     model.init_quantizer()
@@ -2379,6 +2405,7 @@ def optimize_paroquant_linear(
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
         best_state_dtype=best_state_dtype,
+        use_amp=use_amp,
     )
 
     return _result_from_model(
