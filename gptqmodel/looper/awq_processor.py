@@ -1701,11 +1701,6 @@ class AWQProcessor(LoopProcessor):
             min_errs = torch.ones_like(org_max_val) * 1e9
             clamp_slice = scratch_clamp[: w.shape[0]]
             quant_slice = scratch_quant[: w.shape[0]]
-            # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
-            # symmetric magnitude the quantizer re-derives is just `min(|w|.amax(),
-            # max_val)`. Hoisting it here removes an `abs()` and a reduction from
-            # every grid step without changing a single value.
-            clamp_bound = torch.empty_like(org_max_val)
 
             org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
 
@@ -1713,8 +1708,13 @@ class AWQProcessor(LoopProcessor):
                 max_val = org_max_val * (1 - i_s / n_grid)
                 min_val = -max_val
                 torch.clamp(w, min_val, max_val, out=clamp_slice)
-                torch.minimum(org_max_val, max_val, out=clamp_bound)
-                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice, abs_max=clamp_bound)
+                # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
+                # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
+                # `org_max_val` is `|w|.amax()` and `max_val` is it scaled by a factor in
+                # `[0.5, 1]`, so the minimum is `max_val` itself: passing it straight
+                # through drops a kernel and a buffer per grid step without changing a
+                # single value.
+                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice, abs_max=max_val)
                 cur_out = (input_feat * quant_slice).sum(dim=-1)
 
                 # Evaluate the reconstruction error for the current clamp ratio and keep the best
@@ -1923,9 +1923,12 @@ class AWQProcessor(LoopProcessor):
             scales = scales / (scales.max() * scales.min()).sqrt()
             scales_view = scales.view(1, -1).to(device)
 
-            # avoid scaling values that overflow
-            scales[torch.isinf(scales)] = 1
-            scales[torch.isnan(scales)] = 1
+            # Avoid scaling values that overflow. The in-place `nan_to_num_` replaces the
+            # two masked assignments (four kernels: two predicates plus two index writes)
+            # with one elementwise pass, and keeps them in place so `scales_view`, which
+            # aliases `scales` whenever the scales are already on the module device, still
+            # observes the fixups.
+            scales.nan_to_num_(nan=1.0, posinf=1.0, neginf=1.0)
 
             # Q(W * s)
             # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
