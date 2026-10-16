@@ -19,6 +19,14 @@ round-to-nearest division the eager graph performs, ``rint`` for the
 round-half-to-even step behind ``torch.round``, and the clamp order the
 reference uses, so the result is bitwise identical to the composed graph.
 
+The forward also stores ``-scaled / bounded_scale`` in place of ``scaled``. The
+composed graph's ``grad_scale`` sums ``grad_out * centered`` against
+``grad_scaled * (-scaled / bounded_scale)``, so that factor is the only thing
+the backward ever needs ``scaled`` for. Spelling it in the forward kernel costs
+the same single full-size store the old intermediate did, and removes the
+``neg`` plus ``div`` launches the torch backward used to spend rebuilding it
+from ``scaled`` on every optimizer step.
+
 Both backward variants keep the two per-group reductions in torch. Torch's
 reduction order is what makes ``grad_scale`` bitwise reproducible, and a Triton
 block reduction would sum the same terms in a different order; the elementwise
@@ -73,7 +81,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         scale_ptr,
         zero_point_ptr,
         out_ptr,
-        scaled_ptr,
+        neg_scaled_over_scale_ptr,
         centered_ptr,
         num_elements,
         group_size,
@@ -97,7 +105,11 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         # Value-only callers have no backward to feed, so the two full-size
         # intermediates stay in registers and the kernel writes one tensor.
         if STORE_INTERMEDIATES:
-            tl.store(scaled_ptr + offsets, scaled, mask=mask)
+            tl.store(
+                neg_scaled_over_scale_ptr + offsets,
+                tl.math.div_rn(-scaled, bounded_scale),
+                mask=mask,
+            )
             tl.store(centered_ptr + offsets, centered, mask=mask)
         tl.store(out_ptr + offsets, centered * bounded_scale, mask=mask)
 
@@ -106,7 +118,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
     def _affine_qdq_backward_kernel(
         grad_ptr,
         scale_ptr,
-        scaled_ptr,
+        neg_scaled_over_scale_ptr,
         centered_ptr,
         grad_weight_ptr,
         grad_scale_mul_ptr,
@@ -122,12 +134,14 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         bounded_scale = tl.load(scale_ptr + group, mask=mask, other=1.0)
         bounded_scale = tl.minimum(tl.maximum(bounded_scale, 1e-5), 1e5)
         grad = tl.load(grad_ptr + offsets, mask=mask, other=0.0)
-        scaled = tl.load(scaled_ptr + offsets, mask=mask, other=0.0)
+        neg_scaled_over_scale = tl.load(
+            neg_scaled_over_scale_ptr + offsets, mask=mask, other=0.0
+        )
         centered = tl.load(centered_ptr + offsets, mask=mask, other=0.0)
         grad_scaled = grad * bounded_scale
         tl.store(grad_weight_ptr + offsets, tl.math.div_rn(grad_scaled, bounded_scale), mask=mask)
         tl.store(grad_scale_mul_ptr + offsets, grad * centered, mask=mask)
-        tl.store(grad_scale_div_ptr + offsets, grad_scaled * tl.math.div_rn(-scaled, bounded_scale), mask=mask)
+        tl.store(grad_scale_div_ptr + offsets, grad_scaled * neg_scaled_over_scale, mask=mask)
 
 
     def _triton_qdq_forward(
@@ -143,7 +157,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         view = weight.reshape(-1, group_size).contiguous()
         num_elements = view.numel()
         out = torch.empty_like(view)
-        scaled = torch.empty_like(view)
+        neg_scaled_over_scale = torch.empty_like(view)
         centered = torch.empty_like(view)
         grid = (triton.cdiv(num_elements, _AFFINE_STE_BLOCK),)
         _affine_qdq_forward_kernel[grid](
@@ -151,7 +165,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             scale,
             zero_point_float,
             out,
-            scaled,
+            neg_scaled_over_scale,
             centered,
             num_elements,
             group_size,
@@ -160,7 +174,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             STORE_INTERMEDIATES=True,
             BLOCK=_AFFINE_STE_BLOCK,
         )
-        ctx.save_for_backward(scaled, centered, scale)
+        ctx.save_for_backward(neg_scaled_over_scale, centered, scale)
         ctx.group_size = group_size
         ctx.zero_point_shape = zero_point_float.shape
         return out.reshape_as(weight)
@@ -225,7 +239,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 
         @staticmethod
         def backward(ctx, grad_output: torch.Tensor):
-            scaled, centered, scale = ctx.saved_tensors
+            neg_scaled_over_scale, centered, scale = ctx.saved_tensors
             group_size = ctx.group_size
             grad_view = grad_output.reshape(-1, group_size).contiguous()
             num_elements = grad_view.numel()
@@ -236,7 +250,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             _affine_qdq_backward_kernel[grid](
                 grad_view,
                 scale,
-                scaled,
+                neg_scaled_over_scale,
                 centered,
                 grad_weight,
                 grad_scale_mul,
@@ -274,13 +288,13 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 
         @staticmethod
         def backward(ctx, grad_output: torch.Tensor):
-            scaled, centered, scale = ctx.saved_tensors
+            neg_scaled_over_scale, centered, scale = ctx.saved_tensors
             bounded_scale = scale.clamp(min=1e-5, max=1e5)
             grad_view = grad_output.reshape(-1, ctx.group_size)
             grad_scaled = grad_view * bounded_scale
             grad_weight = grad_scaled / bounded_scale
             grad_scale = (grad_view * centered).sum(dim=1, keepdim=True) + (
-                grad_scaled * (-scaled / bounded_scale)
+                grad_scaled * neg_scaled_over_scale
             ).sum(dim=1, keepdim=True)
             grad_zero_point = grad_scale.new_zeros(ctx.zero_point_shape)
             return grad_weight.reshape_as(grad_output), grad_scale, grad_zero_point, None, None, None
