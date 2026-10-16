@@ -77,7 +77,7 @@ def configure_dynamo_cache(*, ensure_import: bool = False) -> bool:
             return False
         try:
             import torch._dynamo as dynamo
-        except BaseException:
+        except Exception:
             # triton built from source maybe incompatible with _dynamo private api
             return False
 
@@ -86,7 +86,7 @@ def configure_dynamo_cache(*, ensure_import: bool = False) -> bool:
         if dynamo.config.cache_size_limit < 128:
             dynamo.config.cache_size_limit = 128
         return True
-    except BaseException:
+    except Exception:
         # triton built from source maybe incompatible with _dynamo private api
         return False
 
