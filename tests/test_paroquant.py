@@ -614,6 +614,109 @@ def test_paroquant_fold_epoch_loss_accumulates_in_place_without_touching_the_ste
     assert fp64_step_loss.item() == 1.25
 
 
+def test_paroquant_group_layer_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the grouped validation pass against a device sync per validation batch.
+
+    The pass folded each batch with ``float(loss.item())``, which drains the device
+    once per batch. The fold now stays on the device in fp64 and is read back once,
+    so a multi-batch pass costs a single sync for the same fp64 total.
+    """
+    processor = object.__new__(ParoQuantProcessor)
+    step_losses = [0.5, 1.5, 3.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_group_batch(layer, *, batch_index, input_batch, input_kwargs, attention_mask, position_ids):
+        del layer, batch_index, input_batch, input_kwargs, attention_mask, position_ids
+        return torch.zeros(2, 4)
+
+    def fake_prepare_group_target(target, *, device, dtype):
+        del target, device, dtype
+        return torch.zeros(2, 4)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_group_batch = fake_forward_group_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paroquant_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer(
+        torch.nn.Module(),
+        input_batches=[[torch.zeros(2, 4)] for _ in step_losses],
+        input_kwargs_batches=[{} for _ in step_losses],
+        target_batches=[torch.zeros(2, 4) for _ in step_losses],
+        position_ids=[None for _ in step_losses],
+        attention_masks=[None for _ in step_losses],
+        use_amp=False,
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
+def test_paroquant_streamed_group_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the streamed grouped validation pass against a device sync per batch."""
+    processor = object.__new__(ParoQuantProcessor)
+    batches = [
+        paroquant_processor_module._ParoQuantReplayBatch(
+            inputs=[torch.zeros(2, 4)],
+            input_kwargs={},
+            target=torch.zeros(2, 6),
+            position_ids=None,
+            attention_mask=None,
+            row_count=2,
+        )
+        for _ in range(4)
+    ]
+    step_losses = [0.25, 0.5, 1.0, 2.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_replay_batch(layer, *, replay_batch, cache_kwargs):
+        del layer, replay_batch, cache_kwargs
+        return torch.zeros(2, 6)
+
+    def fake_prepare_group_target(target, *, device, dtype, cache=False):
+        del target, device, dtype, cache
+        return torch.zeros(2, 6)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_replay_batch = fake_forward_replay_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paroquant_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer_streamed(
+        torch.nn.Module(),
+        replay_batches=batches,
+        use_amp=False,
+        target_device=torch.device("cpu"),
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
 def test_paroquant_backward_scalar_loss_reuses_one_seed_and_matches_tensor_backward():
     """Guard the scalar backward against materialising a ones_like seed per step."""
     paroquant_optimization._SCALAR_BACKWARD_SEEDS.clear()

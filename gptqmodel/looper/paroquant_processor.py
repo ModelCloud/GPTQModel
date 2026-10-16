@@ -57,6 +57,7 @@ from ..quantization.mlx_paroquant_optimize import (
 from ..quantization.paroquant.optimization import (
     _activate_stage_params,
     _backward_scalar_loss,
+    _fold_epoch_loss,
     _normalize_group_size,
     _normalize_opt_impl,
     _normalize_opt_optimizer,
@@ -1653,11 +1654,17 @@ class ParoQuantProcessor(LoopProcessor):
         attention_masks: list[Optional[torch.Tensor]],
         use_amp: bool,
     ) -> float:
-        """Measure full-layer reconstruction error for one grouped optimization stage."""
+        """Measure full-layer reconstruction error for one grouped optimization stage.
+
+        The per-batch losses are folded on the device into one fp64 scalar and read
+        back once, so a validation pass costs a single device sync instead of one
+        per batch. The fold order and fp64 accumulation match the per-batch host
+        sum bit for bit.
+        """
         if not input_batches:
             return 0.0
 
-        total_loss = 0.0
+        total_loss: Optional[torch.Tensor] = None
         with torch.inference_mode():
             for batch_index, (input_batch, input_kwargs, target_batch, pos_ids, attn_mask) in enumerate(
                 zip(input_batches, input_kwargs_batches, target_batches, position_ids, attention_masks)
@@ -1673,8 +1680,10 @@ class ParoQuantProcessor(LoopProcessor):
                         position_ids=pos_ids,
                     )
                     target = self._prepare_group_target(target_batch, device=preds.device, dtype=preds.dtype)
-                    total_loss += float(F.smooth_l1_loss(preds, target).item())
-        return total_loss / max(1, len(input_batches))
+                    total_loss = _fold_epoch_loss(total_loss, F.smooth_l1_loss(preds, target))
+        if total_loss is None:
+            return 0.0
+        return float(total_loss.item()) / max(1, len(input_batches))
 
     def _forward_group_batch_train(
         self,
@@ -1943,7 +1952,7 @@ class ParoQuantProcessor(LoopProcessor):
             global_step = 0
 
             for _epoch in range(epochs):
-                epoch_loss = 0.0
+                epoch_loss: Optional[torch.Tensor] = None
                 batch_count = 0
                 optimizer.zero_grad(set_to_none=True)
 
@@ -1980,10 +1989,10 @@ class ParoQuantProcessor(LoopProcessor):
                         group["lr"] = (base_lr / 20.0) + ((base_lr - (base_lr / 20.0)) * cosine_ratio)
 
                     self._reset_group_angles(optim_modules)
-                    epoch_loss += float(loss.item())
+                    epoch_loss = _fold_epoch_loss(epoch_loss, loss)
                     batch_count += 1
 
-                last_train_loss = epoch_loss / max(1, batch_count)
+                last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
                 val_loss = self._evaluate_group_layer(
                     layer,
                     input_batches=input_batches_val,
@@ -2015,11 +2024,17 @@ class ParoQuantProcessor(LoopProcessor):
         target_device: torch.device,
         metadata_cache: Optional[dict[tuple[int, str], torch.Tensor]] = None,
     ) -> float:
-        """Measure full-layer reconstruction error while streaming one validation batch at a time."""
+        """Measure full-layer reconstruction error while streaming one validation batch at a time.
+
+        Each streamed batch contributes one device-side fold into an fp64 scalar
+        that is read back once, so the pass costs a single device sync instead of
+        one per batch. The fold order and fp64 accumulation match the per-batch
+        host sum bit for bit.
+        """
         if not replay_batches:
             return 0.0
 
-        total_loss = 0.0
+        total_loss: Optional[torch.Tensor] = None
         loader = _LayerShardLoader(
             replay_batches,
             target_device=target_device,
@@ -2041,8 +2056,10 @@ class ParoQuantProcessor(LoopProcessor):
                     dtype=preds.dtype,
                     cache=False,
                 )
-                total_loss += float(F.smooth_l1_loss(preds, target).item())
-        return total_loss / max(1, len(replay_batches))
+                total_loss = _fold_epoch_loss(total_loss, F.smooth_l1_loss(preds, target))
+        if total_loss is None:
+            return 0.0
+        return float(total_loss.item()) / max(1, len(replay_batches))
 
     def _run_group_stage_streamed(
         self,
@@ -2105,7 +2122,7 @@ class ParoQuantProcessor(LoopProcessor):
             )
 
             for _epoch in range(epochs):
-                epoch_loss = 0.0
+                epoch_loss: Optional[torch.Tensor] = None
                 batch_count = 0
                 optimizer.zero_grad(set_to_none=True)
                 train_loader = _LayerShardLoader(
@@ -2144,10 +2161,10 @@ class ParoQuantProcessor(LoopProcessor):
 
                             if needs_angle_reset:
                                 self._reset_group_angles(optim_modules)
-                            epoch_loss += float(loss.item())
+                            epoch_loss = _fold_epoch_loss(epoch_loss, loss)
                             batch_count += 1
 
-                last_train_loss = epoch_loss / max(1, batch_count)
+                last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
                 val_loss = self._evaluate_group_layer_streamed(
                     layer,
                     replay_batches=replay_batches_val,
