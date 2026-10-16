@@ -33,6 +33,11 @@ block reduction would sum the same terms in a different order; the elementwise
 partials are therefore produced -- in one kernel by
 ``_AffineQuantDequantTritonSTE``, or by the same torch spelling the reference
 uses in ``_AffineQuantDequantHybridSTE`` -- and reduced by the caller.
+
+The forward also publishes the bounded scale itself. Both backwards previously
+rebuilt it with their own ``clamp`` launch on every optimizer step; the kernel
+has already computed the same value per group, so the group's first element
+writes it to a ``(groups, 1)`` buffer the backward reads back instead.
 """
 
 from __future__ import annotations
@@ -80,6 +85,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         weight_ptr,
         scale_ptr,
         zero_point_ptr,
+        bounded_scale_ptr,
         out_ptr,
         neg_scaled_over_scale_ptr,
         centered_ptr,
@@ -105,6 +111,13 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         # Value-only callers have no backward to feed, so the two full-size
         # intermediates stay in registers and the kernel writes one tensor.
         if STORE_INTERMEDIATES:
+            # Every element of a group clamps to the same value, so the group's
+            # first element is the single writer that publishes it.
+            tl.store(
+                bounded_scale_ptr + group,
+                bounded_scale,
+                mask=mask & (offsets % group_size == 0),
+            )
             tl.store(
                 neg_scaled_over_scale_ptr + offsets,
                 tl.math.div_rn(-scaled, bounded_scale),
@@ -157,6 +170,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
         view = weight.reshape(-1, group_size).contiguous()
         num_elements = view.numel()
         out = torch.empty_like(view)
+        bounded_scale = torch.empty_like(scale)
         neg_scaled_over_scale = torch.empty_like(view)
         centered = torch.empty_like(view)
         grid = (triton.cdiv(num_elements, _AFFINE_STE_BLOCK),)
@@ -164,6 +178,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             view,
             scale,
             zero_point_float,
+            bounded_scale,
             out,
             neg_scaled_over_scale,
             centered,
@@ -174,7 +189,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             STORE_INTERMEDIATES=True,
             BLOCK=_AFFINE_STE_BLOCK,
         )
-        ctx.save_for_backward(neg_scaled_over_scale, centered, scale)
+        ctx.save_for_backward(neg_scaled_over_scale, centered, bounded_scale)
         ctx.group_size = group_size
         ctx.zero_point_shape = zero_point_float.shape
         return out.reshape_as(weight)
@@ -203,6 +218,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             view,
             scale,
             zero_point_float,
+            out,
             out,
             out,
             out,
@@ -239,7 +255,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 
         @staticmethod
         def backward(ctx, grad_output: torch.Tensor):
-            neg_scaled_over_scale, centered, scale = ctx.saved_tensors
+            neg_scaled_over_scale, centered, bounded_scale = ctx.saved_tensors
             group_size = ctx.group_size
             grad_view = grad_output.reshape(-1, group_size).contiguous()
             num_elements = grad_view.numel()
@@ -249,7 +265,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
             grid = (triton.cdiv(num_elements, _AFFINE_STE_BLOCK),)
             _affine_qdq_backward_kernel[grid](
                 grad_view,
-                scale,
+                bounded_scale,
                 neg_scaled_over_scale,
                 centered,
                 grad_weight,
@@ -288,8 +304,7 @@ if _AFFINE_STE_TRITON_AVAILABLE:
 
         @staticmethod
         def backward(ctx, grad_output: torch.Tensor):
-            neg_scaled_over_scale, centered, scale = ctx.saved_tensors
-            bounded_scale = scale.clamp(min=1e-5, max=1e5)
+            neg_scaled_over_scale, centered, bounded_scale = ctx.saved_tensors
             grad_view = grad_output.reshape(-1, ctx.group_size)
             grad_scaled = grad_view * bounded_scale
             grad_weight = grad_scaled / bounded_scale
