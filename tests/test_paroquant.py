@@ -591,6 +591,29 @@ def test_paroquant_fold_epoch_loss_matches_host_fp64_fold():
     assert accumulator.device.type == losses[0].device.type
 
 
+def test_paroquant_fold_epoch_loss_accumulates_in_place_without_touching_the_step_loss():
+    """Guard the per-step fold against paying a cast-plus-add kernel pair per step."""
+    accumulator = paroquant_optimization._fold_epoch_loss(None, torch.tensor(1.5, dtype=torch.float32))
+    assert accumulator.dtype == torch.float64
+    total_before = accumulator.item()
+
+    step_loss = torch.tensor(2.5, dtype=torch.float32)
+    returned = paroquant_optimization._fold_epoch_loss(accumulator, step_loss)
+
+    # In-place: the stage loop reassigns the fold result, so folding into the
+    # accumulator the loop already owns removes one kernel per optimizer step.
+    assert returned is accumulator
+    assert accumulator.item() == total_before + float(step_loss)
+    assert step_loss.item() == 2.5
+
+    # An fp64 step loss must not make the accumulator alias the live loss, which
+    # would let the next in-place fold write through to it.
+    fp64_step_loss = torch.tensor(1.25, dtype=torch.float64)
+    fp64_accumulator = paroquant_optimization._fold_epoch_loss(None, fp64_step_loss)
+    paroquant_optimization._fold_epoch_loss(fp64_accumulator, torch.tensor(1.0, dtype=torch.float64))
+    assert fp64_step_loss.item() == 1.25
+
+
 @pytest.mark.parametrize(
     "stage_runner_name",
     ["_run_stage_gptqmodel_impl", "_run_stage_reference"],
