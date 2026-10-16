@@ -26,6 +26,7 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from ..utils.vptq import vptq_index_bits
 
 
 log = setup_logger()
@@ -4708,6 +4709,7 @@ class VPTQConfig(GPTQConfig):
         out["num_centroids"] = list(self.num_centroids)
         out["num_res_centroids"] = list(self.num_res_centroids)
         out["npercent"] = self.npercent
+        out["group_size"] = self.group_size
         out["group_num"] = self.group_num
         out["kmeans_mode"] = self.kmeans_mode
         out["kmeans_iters"] = self.kmeans_iters
@@ -4724,16 +4726,30 @@ class VPTQConfig(GPTQConfig):
         self.num_centroids = _normalize_vptq_centroids(self.num_centroids, "num_centroids")
         self.num_res_centroids = _normalize_vptq_centroids(self.num_res_centroids, "num_res_centroids")
 
-        if self.num_centroids[1] < 1:
-            raise ValueError("VPTQConfig: `num_centroids[1]` must be a power-of-two positive integer.")
-        if self.vector_lens[0] > 0 and self.num_centroids[0] < 1:
+        if self.num_centroids[1] < 2:
             raise ValueError(
-                "VPTQConfig: outlier vector quantization requires `num_centroids[0]` > 0."
+                "VPTQConfig: `num_centroids[1]` must be a power-of-two integer of at least 2, "
+                "so the main codebook needs at least one index bit."
             )
         if self.npercent < 0:
             raise ValueError("VPTQConfig: `npercent` must be greater than or equal to 0.")
         if self.npercent > 0 and self.vector_lens[0] <= 0:
             raise ValueError("VPTQConfig: `npercent` > 0 requires `vector_lens[0]` > 0.")
+        if self.npercent > 0 and self.num_centroids[0] < 2:
+            raise ValueError("VPTQConfig: `npercent` > 0 requires `num_centroids[0]` of at least 2.")
+        if self.num_res_centroids[0] != -1:
+            raise ValueError(
+                "VPTQConfig: residual codebooks for the outlier group are not supported; "
+                "set `num_res_centroids[0]` to -1."
+            )
+        index_bits = vptq_index_bits(self.num_centroids[1])
+        if self.num_res_centroids[1] > 1:
+            index_bits += vptq_index_bits(self.num_res_centroids[1])
+        if index_bits > 32:
+            raise ValueError(
+                f"VPTQConfig: `num_centroids[1]`/`num_res_centroids[1]` need {index_bits} index bits; "
+                "the packed index stream supports at most 32."
+            )
         if self.group_num != -1 and self.group_num < 1:
             raise ValueError("VPTQConfig: `group_num` must be `-1` or a positive integer.")
         if self.group_num != -1 and self.group_size != -1:

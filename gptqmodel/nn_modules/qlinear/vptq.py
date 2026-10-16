@@ -25,6 +25,7 @@ from ...utils.vptq import (
     unpack_vptq_indices,
     vptq_group_setting,
     vptq_index_bits,
+    vptq_outlier_enabled,
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
@@ -120,21 +121,31 @@ class VPTQLinear(WeightOnlyQuantLinear):
         self.percdamp = float(percdamp)
         self.codebook_dtype = dtype if dtype in (torch.float16, torch.bfloat16, torch.float32) else torch.float16
 
-        self.outlier_size, self.group_size, self.group_num = vptq_group_setting(
-            self.in_features,
-            npercent=self.npercent,
-            group_size=group_size,
-            group_num=group_num,
-        )
         self.vector_len = self.vector_lens[1]
         self.outlier_vector_len = self.vector_lens[0] if self.vector_lens[0] > 0 else 0
         self.num_centroids = self.num_centroids_pair[1]
         self.num_res_centroids = self.num_res_centroids_pair[1]
         self.enable_residual = self.num_res_centroids > 1
-        self.enable_outlier = self.outlier_size > 0 and self.outlier_vector_len > 0 and self.num_centroids_pair[0] > 1
-        if self.outlier_size > 0 and not self.enable_outlier:
+        self.enable_outlier = vptq_outlier_enabled(
+            npercent=self.npercent,
+            outlier_vector_len=self.outlier_vector_len,
+            outlier_num_centroids=self.num_centroids_pair[0],
+        )
+        if self.npercent > 0 and not self.enable_outlier:
             raise ValueError(
-                "VPTQLinear: `npercent` > 0 requires positive `vector_lens[0]` and `num_centroids[0]`."
+                "VPTQLinear: `npercent` > 0 requires positive `vector_lens[0]` and `num_centroids[0]` > 1."
+            )
+        self.outlier_size, self.group_size, self.group_num = vptq_group_setting(
+            self.in_features,
+            npercent=self.npercent,
+            group_size=group_size,
+            group_num=group_num,
+            enable_outlier=self.enable_outlier,
+        )
+        if self.outlier_size + self.group_num * self.group_size < self.in_features:
+            raise ValueError(
+                f"VPTQLinear: the resolved group layout covers "
+                f"{self.outlier_size + self.group_num * self.group_size} of {self.in_features} input channels."
             )
 
         self.index_bits = vptq_index_bits(self.num_centroids)
@@ -221,7 +232,10 @@ class VPTQLinear(WeightOnlyQuantLinear):
                     "outlier_indices",
                     torch.zeros(
                         (1, self.outlier_num_indices, self.outlier_size),
-                        dtype=torch.int16,
+                        # int32: an outlier codebook may hold more than 32768
+                        # entries, and Torch gather cannot read a wrapped
+                        # int16 the way the reference CUDA kernel reads uint16.
+                        dtype=torch.int32,
                         device=device,
                     ),
                 )
@@ -312,8 +326,13 @@ class VPTQLinear(WeightOnlyQuantLinear):
             outlier_indices = result.indices.get(0)
             if outlier_indices is None:
                 raise ValueError(f"VPTQLinear `{self.name}`: missing outlier indices.")
+            if int(outlier_indices.max().item()) >= self.outlier_num_centroids:
+                raise ValueError(
+                    f"VPTQLinear `{self.name}`: outlier index exceeds the "
+                    f"{self.outlier_num_centroids}-entry outlier codebook."
+                )
             self.outlier_indices.data.copy_(
-                outlier_indices.to(device=device, dtype=torch.int16).reshape(
+                outlier_indices.to(device=device, dtype=torch.int32).reshape(
                     1, self.outlier_num_indices, self.outlier_size
                 )
             )
@@ -444,6 +463,11 @@ class VPTQLinear(WeightOnlyQuantLinear):
             if self.outlier_row_padding > 0:
                 qweight_outlier = qweight_outlier[: -self.outlier_row_padding]
             qweight = torch.cat([qweight_outlier, qweight], dim=1)
+
+        if qweight.shape[1] > self.in_features:
+            # The last group is zero-padded up to `group_size`; those padding
+            # columns carry no quantized channel and must not reach the weight.
+            qweight = qweight[:, : self.in_features]
 
         if self.enable_perm:
             qweight = qweight[:, torch.argsort(self.perm.to(torch.int64))]

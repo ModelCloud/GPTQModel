@@ -33,11 +33,13 @@ import transformers
 
 from ..looper.named_module import NamedModule
 from ..quantization.config import VPTQConfig
+from ..utils.fallback import should_use_fallback
 from ..utils.logger import setup_logger
 from ..utils.vptq import (
     vptq_group_for_column,
     vptq_group_setting,
     vptq_index_bits,
+    vptq_outlier_enabled,
 )
 
 
@@ -97,10 +99,13 @@ def _chunked_assign(
     for start in range(0, num_rows, rows_per_chunk):
         end = min(start + rows_per_chunk, num_rows)
         block = data[start:end]
+        # `||c||^2 - 2 x.c` is the expanded squared distance minus `||x||^2`.
+        # The omitted term is constant per row, so it cannot change the argmin,
+        # but the returned residual must add it back to be a true distance.
         distance = centroids_norm.unsqueeze(0) - 2.0 * (block @ centroids.t())
         best_distance, best_index = distance.min(dim=1)
         assignment[start:end] = best_index
-        residual[start:end] = best_distance
+        residual[start:end] = best_distance + (block * block).sum(dim=1)
     return assignment, residual
 
 
@@ -229,6 +234,7 @@ class VPTQ:
         self._device_sample_counts: Dict[torch.device, int] = {}
 
         self.fallback = getattr(self.qcfg, "fallback", None)
+        self.fallback_used = False
         self.expected_nsamples: Optional[float] = None
         self.quant_result: Optional[VPTQQuantResult] = None
 
@@ -331,6 +337,14 @@ class VPTQ:
             dtype = torch.float32
         return dtype
 
+    @staticmethod
+    def _hessian_is_usable(hessian: torch.Tensor) -> bool:
+        """Report whether the Hessian holds any calibration information."""
+
+        if not bool(torch.isfinite(hessian).all()):
+            return False
+        return float(torch.diagonal(hessian).abs().sum().item()) > 0.0
+
     @torch.no_grad()
     def quantize(self) -> Tuple[VPTQQuantResult, float, float]:
         """Run VPTQ and return `(result, duration_seconds, hessian_weighted_loss)`."""
@@ -362,17 +376,42 @@ class VPTQ:
         num_centroids = [int(item) for item in qcfg.num_centroids]
         num_res_centroids = [int(item) for item in qcfg.num_res_centroids]
         target_dtype = target_dtype if target_dtype is not None else self._target_dtype()
+        self.fallback_used = False
 
         outlier_size, group_size, group_num = vptq_group_setting(
             columns,
             npercent=qcfg.npercent,
             group_size=qcfg.group_size,
             group_num=qcfg.group_num,
+            enable_outlier=vptq_outlier_enabled(
+                npercent=qcfg.npercent,
+                outlier_vector_len=vector_lens[0],
+                outlier_num_centroids=num_centroids[0],
+            ),
         )
         self._outlier_size = outlier_size
         self._group_size = group_size
 
         hessian = hessian.to(device=device, dtype=_HESSIAN_DTYPE).clone()
+        if not self._hessian_is_usable(hessian):
+            # A module that never received calibration traffic has no Hessian at
+            # all. The per-column rule for dead channels would zero the whole
+            # weight matrix and silently destroy the layer, so degrade to plain
+            # vector quantization instead.
+            log.warn(
+                f"VPTQ: `{self.name}` has no usable Hessian (samples={self.nsamples}); "
+                "using the Hessian-free vector quantization fallback."
+            )
+            hessian = torch.eye(columns, dtype=_HESSIAN_DTYPE, device=device)
+            self.fallback_used = True
+        elif should_use_fallback(self.fallback, float(self.nsamples), self.expected_nsamples):
+            log.warn(
+                f"VPTQ: `{self.name}` observed `{self.nsamples}` calibration tokens, below the "
+                "configured `fallback` threshold; using the Hessian-free vector quantization fallback."
+            )
+            hessian = torch.eye(columns, dtype=_HESSIAN_DTYPE, device=device)
+            self.fallback_used = True
+
         dead = torch.diagonal(hessian) == 0
         if bool(dead.any()):
             hessian[dead, dead] = 1.0
@@ -524,6 +563,7 @@ class VPTQ:
             res_index_bits=vptq_index_bits(num_res_centroids[1]) if enable_residual else 0,
         )
         result.quantized_weight = quantized.to(dtype=target_dtype)
+        result.stats["fallback"] = self.fallback_used
         return result, loss
 
     def _inverse_hessian_cholesky(self, hessian: torch.Tensor) -> torch.Tensor:

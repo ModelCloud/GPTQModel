@@ -34,14 +34,15 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausal
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
-from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig, VPTQConfig
-from gptqmodel.quantization.vptq import VPTQ, _chunked_assign
+from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
+from gptqmodel.quantization.vptq import VPTQ, VPTQQuantResult, _chunked_assign, _matrix_to_vectors
 from gptqmodel.utils.vptq import (
     pack_vptq_indices,
     unpack_vptq_indices,
     vptq_group_for_column,
     vptq_group_setting,
     vptq_index_bits,
+    vptq_outlier_enabled,
     vptq_packed_words,
 )
 
@@ -139,6 +140,11 @@ def oracle_reconstruct(result, module):
         if module.outlier_row_padding > 0:
             outlier = outlier[: -module.outlier_row_padding]
         main = torch.cat([outlier, main], dim=1)
+
+    # the last group is zero-padded up to `group_size`; those columns are not
+    # part of the weight matrix
+    if main.shape[1] > module.in_features:
+        main = main[:, : module.in_features]
 
     if module.enable_perm:
         main = main[:, torch.argsort(result.perm.to(device=device, dtype=torch.int64))]
@@ -299,6 +305,24 @@ def test_vptq_pack_empty_and_invalid():
         pack_vptq_indices(torch.zeros((1, 2), dtype=torch.int64), 4, res_bits=2)
 
 
+def test_vptq_pack_rejects_index_streams_wider_than_a_word():
+    """A 32-bit word cannot hold an element that straddles two words."""
+
+    indices = torch.zeros((1, 2), dtype=torch.int64)
+    res_indices = torch.zeros((1, 2), dtype=torch.int64)
+
+    with pytest.raises(ValueError):
+        pack_vptq_indices(indices, 17, res_indices=res_indices, res_bits=16)
+    with pytest.raises(ValueError):
+        pack_vptq_indices(indices, 33)
+    # exactly 32 bits per element is the widest supported stream
+    packed = pack_vptq_indices(indices, 32)
+    unpacked, _ = unpack_vptq_indices(packed, 32, 2)
+    assert torch.equal(unpacked, indices)
+    with pytest.raises(ValueError):
+        unpack_vptq_indices(packed, 33, 2)
+
+
 def test_vptq_group_layout():
     """Group resolution mirrors the reference layout, including padding."""
 
@@ -319,6 +343,40 @@ def test_vptq_group_layout():
 
     with pytest.raises(ValueError):
         vptq_group_setting(64, npercent=0.0, group_size=16, group_num=4)
+
+
+def test_vptq_group_layout_without_outlier_codebook():
+    """Without an outlier codebook the last group carries the remainder."""
+
+    # `group_num` divides 64 - 4 = 60 evenly here, so nothing is padded
+    assert vptq_group_setting(64, npercent=6.25, group_size=-1, group_num=4, enable_outlier=True) == (
+        4,
+        15,
+        4,
+    )
+    # the same remainder is moved out of the outlier set when outliers are off
+    assert vptq_group_setting(64, npercent=6.25, group_size=-1, group_num=4, enable_outlier=False) == (
+        0,
+        16,
+        4,
+    )
+    # 65 channels over 4 groups: the last group is one channel short
+    outlier_size, group_size, group_num = vptq_group_setting(
+        65, npercent=0.0, group_size=-1, group_num=4, enable_outlier=False
+    )
+    assert (outlier_size, group_size, group_num) == (0, 17, 4)
+    assert group_size * group_num >= 65
+    assert vptq_group_for_column(64, outlier_size=outlier_size, group_size=group_size) == group_num
+
+
+def test_vptq_outlier_codebook_resolution():
+    """`npercent` alone does not enable the outlier codebook."""
+
+    assert not vptq_outlier_enabled(npercent=0.0, outlier_vector_len=4, outlier_num_centroids=16)
+    assert not vptq_outlier_enabled(npercent=10.0, outlier_vector_len=-1, outlier_num_centroids=16)
+    assert not vptq_outlier_enabled(npercent=10.0, outlier_vector_len=4, outlier_num_centroids=-1)
+    assert not vptq_outlier_enabled(npercent=10.0, outlier_vector_len=4, outlier_num_centroids=1)
+    assert vptq_outlier_enabled(npercent=10.0, outlier_vector_len=4, outlier_num_centroids=16)
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +422,86 @@ def test_vptq_config_derives_bits_from_codebooks():
     assert VPTQConfig(num_centroids=[-1, 65536], num_res_centroids=[-1, -1], vector_lens=[-1, 8]).bits == 2
 
 
+def test_vptq_config_rejects_unusable_codebooks():
+    """Configurations the packer or the runtime cannot represent must fail early."""
+
+    # a single-entry codebook needs zero index bits, which cannot be packed
+    with pytest.raises(ValueError):
+        VPTQConfig(num_centroids=[-1, 1], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    # more than 32 bits per element cannot fit the int32 word stream
+    with pytest.raises(ValueError):
+        VPTQConfig(num_centroids=[-1, 2**17], num_res_centroids=[-1, 2**16], vector_lens=[-1, 8])
+    # the runtime has no outlier residual codebook
+    with pytest.raises(ValueError):
+        VPTQConfig(num_centroids=[-1, 64], num_res_centroids=[16, 16], vector_lens=[-1, 4])
+    # `npercent` needs a real outlier codebook
+    with pytest.raises(ValueError):
+        VPTQConfig(num_centroids=[-1, -1], num_res_centroids=[-1, -1], vector_lens=[-1, 4], npercent=10.0)
+    with pytest.raises(ValueError):
+        VPTQConfig(num_centroids=[-1, 64], num_res_centroids=[-1, -1], vector_lens=[4, 8], npercent=10.0)
+
+
+def test_vptq_config_round_trip_keeps_group_size():
+    """`group_size` must survive the saved payload so reloads rebuild the layout."""
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_size=8,
+    )
+    payload = qcfg.to_dict()
+    assert payload["group_size"] == 8
+
+    restored = QuantizeConfig.from_quant_config(payload)
+    assert isinstance(restored, VPTQConfig)
+    assert restored.group_size == 8
+    assert restored.group_num == -1
+
+
+def test_vptq_module_built_from_config_matches_quantizer_layout():
+    """The kernel must be built with the group layout the quantizer used."""
+
+    weight, hessian = synthetic_problem(out_features=32, in_features=64, seed=25)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_size=8,
+        kmeans_iters=4,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    module = VPTQLinear(
+        bits=qcfg.bits,
+        # `create_quant_module` passes the generic fields explicitly and the
+        # method-specific ones from `quant_linear_init_kwargs()`
+        group_size=qcfg.group_size,
+        desc_act=qcfg.desc_act,
+        sym=qcfg.sym,
+        in_features=weight.shape[1],
+        out_features=weight.shape[0],
+        bias=False,
+        # the quantizer targeted the fp32 layer weight, so the kernel must store
+        # its codebooks in the same dtype for a bit-exact round trip
+        dtype=torch.float32,
+        **qcfg.quant_linear_init_kwargs(),
+    )
+    assert module.group_size == 8
+    assert module.group_num == 8
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    assert torch.equal(module.dequantize(), result.quantized_weight)
+
+
 # ---------------------------------------------------------------------------
 # quantization -> module round trip
 # ---------------------------------------------------------------------------
 VPTQ_VARIANTS = [
     ("baseline", {}),
     ("group_num", {"group_num": 4}),
+    ("group_size_remainder", {"group_size": 6}),
+    ("group_num_remainder", {"group_num": 5}),
     ("perm", {"enable_perm": True}),
     ("norm", {"enable_norm": True}),
     ("residual", {"num_res_centroids": [-1, 16]}),
@@ -454,6 +586,164 @@ def test_vptq_codebook_larger_than_available_vectors():
     assert (dequantized - weight).abs().max().item() < 1e-6
 
 
+def test_vptq_outlier_indices_beyond_int16_survive_pack():
+    """Outlier codes above 32767 must not wrap in the outlier index buffer."""
+
+    in_features, out_features = 8, 4
+    qcfg = VPTQConfig(
+        vector_lens=[1, 4],
+        num_centroids=[65536, 16],
+        num_res_centroids=[-1, -1],
+        npercent=50.0,
+    )
+    module = build_module(qcfg, in_features, out_features)
+    assert module.enable_outlier
+
+    generator = torch.Generator().manual_seed(13)
+    outlier_centroids = torch.randn(65536, 1, generator=generator)
+    main_centroids = torch.randn(16, 4, generator=generator)
+    outlier_indices = torch.tensor(
+        [[40000, 1, 2, 3], [65000, 5, 6, 7], [1, 2, 3, 4], [2, 3, 4, 5]],
+        dtype=torch.int64,
+    )
+    result = VPTQQuantResult(
+        centroids={0: outlier_centroids, 1: main_centroids},
+        indices={0: outlier_indices, 1: torch.zeros(1, module.group_size, dtype=torch.int64)},
+        res_centroids={0: None, 1: None},
+        res_indices={0: None, 1: None},
+        outlier_size=module.outlier_size,
+        group_size=module.group_size,
+        group_num=module.group_num,
+        index_bits=module.index_bits,
+        res_index_bits=0,
+    )
+    module.pack(vptq_result=result)
+    assert module.outlier_indices.dtype == torch.int32
+
+    dequantized = module.dequantize()
+    expected_outlier = outlier_centroids[outlier_indices].squeeze(-1)
+    assert torch.equal(dequantized[:, : module.outlier_size], expected_outlier)
+
+
+def test_vptq_group_padding_columns_are_dropped():
+    """A partial last group must not widen the dequantized weight."""
+
+    weight, hessian = synthetic_problem(out_features=32, in_features=100, seed=21)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_size=16,
+        kmeans_iters=4,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    module = build_module(qcfg, weight.shape[1], weight.shape[0])
+    # 7 groups of 16 channels cover 112 columns, i.e. 12 padding columns
+    assert module.group_num * module.group_size == 112
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    dequantized = module.dequantize()
+    assert dequantized.shape == weight.shape
+    assert torch.equal(dequantized, result.quantized_weight)
+    assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
+    assert module(torch.randn(3, weight.shape[1])).shape == (3, weight.shape[0])
+
+
+def test_vptq_group_num_remainder_without_outlier_codebook():
+    """`group_num` must not move leftover channels into a disabled outlier codebook."""
+
+    weight, hessian = synthetic_problem(out_features=32, in_features=65, seed=22)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        group_num=4,
+        kmeans_iters=4,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+
+    module = build_module(qcfg, weight.shape[1], weight.shape[0])
+    assert module.outlier_size == 0
+    # 4 groups of 17 channels cover 68 columns, i.e. 3 padding columns
+    assert module.group_num * module.group_size == 68
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    dequantized = module.dequantize()
+    assert dequantized.shape == weight.shape
+    assert torch.equal(dequantized, result.quantized_weight)
+    assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
+
+
+def test_vptq_zero_hessian_uses_hessian_free_fallback():
+    """A module with no calibration traffic keeps its weights instead of zeroing them."""
+
+    weight, _hessian = synthetic_problem(out_features=16, in_features=32, seed=23)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=8,
+    )
+    quantizer = build_quantizer(weight, qcfg)
+    result, loss = quantizer.quantize_weight(weight, torch.zeros(32, 32, dtype=torch.float64))
+
+    assert result.stats["fallback"] is True
+    assert math.isfinite(loss)
+    assert result.quantized_weight.abs().max().item() > 0
+
+    # the fallback is plain vector quantization: every sub-vector of the
+    # original weight lands on its nearest codebook entry, with no Hessian
+    # error compensation between columns
+    codebook = result.centroids[1].float()
+    vectors, _ = _matrix_to_vectors(weight, 4)
+    quantized_vectors, _ = _matrix_to_vectors(result.quantized_weight.float(), 4)
+    error = ((quantized_vectors - vectors) ** 2).sum(dim=1)
+    nearest = ((vectors.unsqueeze(1) - codebook.unsqueeze(0)) ** 2).sum(dim=-1).min(dim=1).values
+    assert torch.allclose(error, nearest, atol=1e-5)
+
+    module = build_module(qcfg, weight.shape[1], weight.shape[0])
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    assert torch.equal(module.dequantize(), result.quantized_weight)
+
+
+def test_vptq_fallback_threshold_switches_to_hessian_free_vq():
+    """The configured `fallback` threshold must switch low-coverage modules."""
+
+    weight, hessian = synthetic_problem(out_features=16, in_features=32, seed=24)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=8,
+    )
+
+    low_sample = build_quantizer(weight, qcfg)
+    low_sample.fallback = Fallback(threshold="50%")
+    low_sample.expected_nsamples = 10000.0
+    low_sample.nsamples = 10
+    low_sample_result, _ = low_sample.quantize_weight(weight, hessian)
+    assert low_sample_result.stats["fallback"] is True
+
+    covered = build_quantizer(weight, qcfg)
+    covered.fallback = Fallback(threshold="50%")
+    covered.expected_nsamples = 10000.0
+    covered.nsamples = 9000
+    covered_result, _ = covered.quantize_weight(weight, hessian)
+    assert covered_result.stats["fallback"] is False
+
+    # the Hessian-aware path must win on the Hessian metric it optimizes
+    low_sample_loss = VPTQ.hessian_weighted_error(
+        weight_original=weight, quantized=low_sample_result.quantized_weight, hessian=hessian
+    )
+    covered_loss = VPTQ.hessian_weighted_error(
+        weight_original=weight, quantized=covered_result.quantized_weight, hessian=hessian
+    )
+    assert covered_loss < low_sample_loss
+
+
 def test_vptq_residual_reduces_hessian_error():
     """The residual codebook must not increase the reconstruction error."""
 
@@ -486,6 +776,24 @@ def test_vptq_nearest_centroid_tie_breaks_to_lower_index():
     above = torch.tensor([[0.5 + 1e-6, 0.0]])
     assert int(_chunked_assign(below, codebook)[0][0]) == 0
     assert int(_chunked_assign(above, codebook)[0][0]) == 1
+
+
+def test_vptq_chunked_assign_returns_true_squared_distance():
+    """The residual must be `||x - c||^2`, not the expanded form without `||x||^2`."""
+
+    generator = torch.Generator().manual_seed(17)
+    data = torch.randn(37, 4, generator=generator)
+    centroids = torch.randn(6, 4, generator=generator)
+
+    assignment, residual = _chunked_assign(data, centroids)
+    expected = ((data - centroids[assignment]) ** 2).sum(dim=1)
+    assert torch.allclose(residual, expected, rtol=1e-6, atol=1e-6)
+    # the k-means inertia depends on the absolute distance, not a per-row offset
+    assert float(residual.min()) >= 0.0
+
+    exact_assignment, exact_residual = _chunked_assign(centroids[:2], centroids)
+    assert exact_assignment.tolist() == [0, 1]
+    assert torch.allclose(exact_residual, torch.zeros(2), atol=1e-6)
 
 
 def test_vptq_quantizer_accumulates_calibration_hessian():
@@ -597,6 +905,18 @@ def test_vptq_cuda_quantize_and_infer(dtype):
 # ---------------------------------------------------------------------------
 # end to end
 # ---------------------------------------------------------------------------
+def test_vptq_processor_participates_in_calibration_coverage_policy():
+    """Never-invoked VPTQ modules must be pruned or reported, never quantized blind."""
+
+    from gptqmodel.looper.stage_subset import _resolve_subset_calibration_coverage_policy
+    from gptqmodel.looper.vptq_processor import VPTQProcessor
+
+    policy = _resolve_subset_calibration_coverage_policy(object.__new__(VPTQProcessor), None)
+    assert policy.validate_input_coverage is True
+    assert policy.prune_uncovered_modules is True
+    assert policy.record_dynamic_exclusions is True
+
+
 _CALIBRATION_TEXTS = [
     "tiny vptq calibration sample one with enough tokens to survive minimum length filtering",
     "tiny vptq calibration sample two with repeated words to exercise the vector quantization path",
@@ -735,6 +1055,59 @@ def test_tiny_qwen3_vptq_quantization_smoke(tmp_path: Path):
     assert torch.allclose(packed_logits, dense_logits, atol=2e-3, rtol=2e-3)
     assert torch.equal(packed_tokens, dense_tokens)
     assert packed_tokens.shape[-1] == inputs["input_ids"].shape[-1] + 4
+
+
+@pytest.mark.cpu
+@pytest.mark.slow
+def test_tiny_qwen3_vptq_grouped_checkpoint_roundtrip(tmp_path: Path):
+    """A grouped layout with a partial last group must survive save and reload."""
+
+    native_dir = tmp_path / "native"
+    quantized_dir = tmp_path / "quantized"
+    native_dir.mkdir()
+    _, tokenizer = _build_tiny_qwen3_fixture(native_dir)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    # 64 hidden and 128 intermediate channels over groups of 12 leave 8 and 4
+    # padding channels in the last group
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 8],
+        group_size=12,
+        kmeans_iters=8,
+        device="cpu",
+    )
+    model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
+    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+
+    grouped = {
+        name: module for name, module in model.named_modules() if isinstance(module, VPTQLinear)
+    }
+    assert grouped
+    for module in grouped.values():
+        assert module.group_size == 12
+        assert module.group_num * module.group_size >= module.in_features
+        assert module.dequantize().shape == (module.out_features, module.in_features)
+
+    model.save(quantized_dir)
+    reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=torch.bfloat16)
+    assert reloaded.quantize_config.group_size == 12
+
+    reloaded_modules = dict(reloaded.named_modules())
+    for name, module in grouped.items():
+        restored = reloaded_modules[name]
+        assert isinstance(restored, VPTQLinear)
+        assert restored.group_size == module.group_size
+        assert restored.group_num == module.group_num
+        assert torch.equal(
+            restored.dequantize().float(), module.dequantize().float()
+        ), name
+
+    inputs = tokenizer("tiny vptq calibration sample", return_tensors="pt")
+    with torch.no_grad():
+        logits = reloaded.model(**inputs).logits
+    assert torch.isfinite(logits).all()
 
 
 @pytest.mark.cuda

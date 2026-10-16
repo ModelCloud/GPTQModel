@@ -43,12 +43,19 @@ def vptq_group_setting(
     npercent: float,
     group_size: int,
     group_num: int,
+    enable_outlier: bool = True,
 ) -> Tuple[int, int, int]:
     """Resolve `(outlier_size, group_size, group_num)` for the VPTQ group layout.
 
     The non-outlier input channels are partitioned into `group_num` contiguous
     groups of `group_size` channels; each group owns one codebook. Exactly one
     of `group_size`/`group_num` may be set; `-1` lets the other one decide.
+
+    With `group_num` the channels left over by the division are added to the
+    outlier set so every group keeps exactly `group_size` channels. That is
+    only possible while the outlier codebook is part of the layout, so
+    `enable_outlier=False` keeps `outlier_size` at zero and lets the last group
+    carry the remainder instead (the runtime drops its padding on dequantize).
     """
 
     if in_features < 1:
@@ -62,12 +69,18 @@ def vptq_group_setting(
 
     initial_outlier_size = int(math.ceil((npercent / 100.0) * in_features))
     initial_outlier_size = max(0, min(in_features, initial_outlier_size))
+    if not enable_outlier:
+        initial_outlier_size = 0
     remaining_columns = in_features - initial_outlier_size
 
     if group_num != -1:
-        pad = remaining_columns % group_num
-        outlier_size = initial_outlier_size + pad
-        resolved_group_size = (in_features - outlier_size) // group_num
+        if enable_outlier:
+            pad = remaining_columns % group_num
+            outlier_size = initial_outlier_size + pad
+            resolved_group_size = (in_features - outlier_size) // group_num
+        else:
+            outlier_size = 0
+            resolved_group_size = int(math.ceil(remaining_columns / group_num))
         resolved_group_num = group_num
     elif group_size != -1:
         outlier_size = initial_outlier_size
@@ -84,6 +97,17 @@ def vptq_group_setting(
             f"(outlier_size={outlier_size}, group_size={resolved_group_size}, group_num={resolved_group_num})."
         )
     return outlier_size, resolved_group_size, resolved_group_num
+
+
+def vptq_outlier_enabled(
+    *,
+    npercent: float,
+    outlier_vector_len: int,
+    outlier_num_centroids: int,
+) -> bool:
+    """Report whether the configuration carries a usable outlier codebook."""
+
+    return outlier_vector_len > 0 and outlier_num_centroids > 1 and npercent > 0
 
 
 def vptq_group_for_column(column: int, *, outlier_size: int, group_size: int) -> int:
@@ -119,6 +143,10 @@ def pack_vptq_indices(
         res_bits = 0
 
     total_bits = index_bits + res_bits
+    if total_bits > 32:
+        raise ValueError(
+            f"pack_vptq_indices: `index_bits` + `res_bits` must be at most 32, got `{total_bits}`."
+        )
     num_elements = indices.shape[-1]
     if num_elements == 0:
         return torch.zeros(*indices.shape[:-1], 0, dtype=torch.int32, device=indices.device)
@@ -171,6 +199,10 @@ def unpack_vptq_indices(
         raise ValueError(f"unpack_vptq_indices: `num_elements` must be non-negative, got `{num_elements}`.")
 
     total_bits = index_bits + res_bits
+    if total_bits > 32:
+        raise ValueError(
+            f"unpack_vptq_indices: `index_bits` + `res_bits` must be at most 32, got `{total_bits}`."
+        )
     if num_elements == 0:
         empty = torch.zeros(*packed.shape[:-1], 0, dtype=torch.int64, device=packed.device)
         return empty, (empty.clone() if res_bits > 0 else None)

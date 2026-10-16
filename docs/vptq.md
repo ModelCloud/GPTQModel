@@ -30,6 +30,18 @@ calibration dataset to `model.quantize(...)`; no offline Hessian files are
 required. Quantization without calibration is not supported for VPTQ and
 raises a `ValueError`.
 
+## Calibration coverage and fallback
+
+Modules that never receive calibration traffic (for example MoE experts that
+are never routed to) cannot produce a Hessian. By default GPT-QModel prunes
+those modules from VPTQ quantization and keeps them dense. If you configure
+`fallback` (see `Fallback`/`FallbackStrategy`), low-coverage modules are kept
+and quantized with the Hessian-free fallback instead: plain vector
+quantization with uniform codebook weights and no Hessian error compensation.
+This is the VPTQ analogue of the RTN fallback used by GPTQ, and it is also
+applied automatically when a module's Hessian is unusable (all-zero or
+non-finite), so a never-invoked module is never silently zeroed.
+
 ## Example: Llama 3.2 1B Instruct
 
 ```py
@@ -85,6 +97,21 @@ reported as `config.bits` and can be tuned by changing the codebook sizes
 `bits` is derived from the codebook configuration and is not a storage
 parameter; passing an explicit `bits` only logs the derived value. Per-layer
 `dynamic` overrides are not supported for VPTQ.
+
+Configuration constraints:
+
+- `num_centroids[1]` must be a power of two of at least `2`, and `npercent > 0`
+  additionally requires `vector_lens[0] > 0` and `num_centroids[0]` of at least
+  `2`. A one-entry codebook needs zero index bits and cannot be packed.
+- The main and residual index widths together may not exceed 32 bits, the width
+  of one packed word.
+- `num_res_centroids[0]` must stay `-1`: the runtime has no residual codebook
+  for the outlier group.
+- With `group_num`, channels left over by the division are added to the outlier
+  set while the outlier codebook is enabled. Without an outlier codebook the
+  remainder stays in the last group, and the last group's zero padding is
+  dropped when the weight is reconstructed. The same holds for a trailing
+  partial group when `group_size` is set explicitly.
 
 ## Quality and codebook size
 
