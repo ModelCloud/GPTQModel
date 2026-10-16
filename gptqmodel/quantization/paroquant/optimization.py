@@ -1382,9 +1382,19 @@ def _fold_epoch_loss(
     The accumulation is fp64 over the exact fp32 step losses, folded in the same
     order the host used to fold them, so the epoch mean that reaches the result
     metadata is bitwise identical to the per-step host sum it replaces.
+
+    The fold itself is in-place once the accumulator exists: ``accumulator + step``
+    materializes the fp32-to-fp64 cast and the add as two kernels per optimizer
+    step, while ``add_`` promotes the incoming step loss to the accumulator's
+    dtype inside a single kernel. The accumulator is private to the stage loop and
+    the first fold allocates with ``copy=True`` so it can never alias the live
+    loss, which makes the in-place write invisible to every caller.
     """
-    step_loss = loss.detach().to(torch.float64)
-    return step_loss if accumulator is None else accumulator + step_loss
+    step_loss = loss.detach()
+    if accumulator is None:
+        return step_loss.to(torch.float64, copy=True)
+    accumulator.add_(step_loss)
+    return accumulator
 
 
 def _normalize_optimizer_param_groups(
