@@ -18,6 +18,7 @@ from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
+from ..utils.linalg_warmup import await_torch_linear_prewarm
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
@@ -33,6 +34,14 @@ _VISION_INPUT_KEYS = frozenset(("pixel_values", "images"))
 
 def _has_vision_inputs(example: Dict[str, Any]) -> bool:
     return any(key in example for key in _VISION_INPUT_KEYS)
+
+
+def _forward_dtype(model: torch.nn.Module) -> Optional[torch.dtype]:
+    """Best-effort dtype the capture forward will run in, for the `linear` prewarm join."""
+    try:
+        return next(model.parameters()).dtype
+    except (StopIteration, AttributeError, TypeError):
+        return None
 
 
 class StageInputsCapture:
@@ -331,6 +340,15 @@ class StageInputsCapture:
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
         self.gptq_model.pre_quantize_generate_hook_start()
+
+        # The first `linear` of the capture forward pays a one-time accelerator-library
+        # init unless the background prewarm kicked at load time already completed it.
+        # All CPU-bound setup is done here, so joining now costs only the prewarm's
+        # remaining tail; racing it instead would pay the init a second time inline.
+        await_torch_linear_prewarm(
+            self.gptq_model.quantize_config.device,
+            _forward_dtype(self.gptq_model.model),
+        )
 
         try:
             for batch_index, example in enumerate(calibration_data, start=1):

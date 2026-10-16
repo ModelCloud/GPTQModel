@@ -53,6 +53,7 @@ from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
+from ..utils.env import env_flag  # noqa: E402
 from ..utils.hf import (  # noqa: E402
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
@@ -61,8 +62,10 @@ from ..utils.hf import (  # noqa: E402
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
-from ..utils.model import find_modules  # noqa: E402
+from ..utils.linalg_warmup import kick_torch_linear_prewarm  # noqa: E402
+from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
+from ._const import DEVICE  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .loader import native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
@@ -561,6 +564,94 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     return MODEL_MAP[model_type]
 
 
+def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
+    """
+    Return the dtype the caller pinned explicitly, if any.
+
+    Only real `torch.dtype` values count: the loader's own dtype resolution ignores
+    string dtypes, so treating one as a decision here would warm the wrong dtype.
+    """
+    for key in ("dtype", "torch_dtype"):
+        value = kwargs.get(key)
+        if isinstance(value, torch.dtype):
+            return value
+    return None
+
+
+def _config_prewarm_dtype(model_cfg, target: torch.device) -> Optional[torch.dtype]:
+    """Mirror the loader's own dtype resolution so the prewarm warms the dtype the model will use."""
+    try:
+        family = DEVICE(target.type)
+        return auto_dtype(config=model_cfg, device=family, quant_inference=False)
+    except Exception as exc:
+        log.debug(f"linear prewarm dtype unresolved for {model_cfg}: {exc}")
+        return None
+
+
+def _resolve_prewarm_device(device, device_map) -> Optional[torch.device]:
+    candidates = []
+    if device is not None:
+        candidates.append(device)
+    if isinstance(device_map, str):
+        candidates.append(device_map)
+    elif isinstance(device_map, dict):
+        candidates.extend(device_map.values())
+    if not candidates:
+        # No explicit placement: the loader auto-selects the first accelerator.
+        return torch.device("cuda")
+    for candidate in candidates:
+        if isinstance(candidate, int):
+            candidate = f"cuda:{candidate}"
+        try:
+            resolved = torch.device(candidate)
+        except (RuntimeError, TypeError, ValueError):
+            continue
+        if resolved.type in ("cuda", "xpu", "npu"):
+            return resolved
+    return None
+
+
+def _kick_quantize_linear_prewarm(device, device_map, kwargs, model_cfg=None) -> None:
+    """
+    Hide the one-time `linear` accelerator-library init behind the model load.
+
+    The first `linear` forward of the quantization pass otherwise pays the full
+    one-time library init inline (measured ~1.2 s on ROCm). Starting it on a
+    background thread while the CPU-bound model load is still running moves that
+    cost off the critical path of the first quantization forward.
+
+    Without `model_cfg` only an explicitly pinned dtype is warmed: the config that
+    decides the default dtype has not been read yet, and guessing a dtype would
+    spend the init on a warmup the first forward cannot use.
+    """
+    target = _resolve_prewarm_device(device, device_map)
+    if target is None:
+        return
+    dtype = _explicit_prewarm_dtype(kwargs)
+    if dtype is None and model_cfg is not None:
+        dtype = _config_prewarm_dtype(model_cfg, target)
+    if dtype is None:
+        return
+    kick_torch_linear_prewarm(target, dtype)
+
+
+def _prebuild_device_thread_pool() -> None:
+    """
+    Build the device thread pool before the quantization loop starts.
+
+    Pool construction kicks the one-time accelerator warmups on its workers (see
+    `DeviceThreadPool._kick_worker_warmups`). Building the pool at load time lets
+    those warmups overlap with the (CPU-bound) model load instead of serializing
+    in front of the first quantization task.
+    """
+    if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
+        return
+
+    from .. import get_device_thread_pool
+
+    get_device_thread_pool()
+
+
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
@@ -592,6 +683,10 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **kwargs,
     ):
+        if quantize_config is not None:
+            _kick_quantize_linear_prewarm(device, device_map, kwargs)
+            _prebuild_device_thread_pool()
+
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -688,6 +783,14 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if quantize_config is not None:
+            _kick_quantize_linear_prewarm(
+                model_init_kwargs.get("device"),
+                model_init_kwargs.get("device_map"),
+                model_init_kwargs,
+            )
+            _prebuild_device_thread_pool()
+
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             model_init_kwargs,
@@ -722,6 +825,14 @@ class GPTQModel:
                            "If you want to quantize the model, please pass un_quantized model path or id, and use "
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
+
+        if quantize_config is not None:
+            _kick_quantize_linear_prewarm(
+                model_init_kwargs.get("device"),
+                model_init_kwargs.get("device_map"),
+                model_init_kwargs,
+                config,
+            )
 
         if quantize_config and quantize_config.dynamic:
             log.warn(
