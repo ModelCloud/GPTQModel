@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import itertools
 from collections.abc import Mapping, Sized
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -401,6 +402,28 @@ class BaseQwen3VLGPTQ(BaseQModel):
                 f"is missing required field(s): {', '.join(missing)}."
             )
 
+    @staticmethod
+    def _is_pretokenized_sample(sample) -> bool:
+        # Only fields BaseQModel's tokenized path keeps, so nothing is dropped.
+        if isinstance(sample, dict):
+            keys = sample.keys()
+            return "input_ids" in keys and keys <= {"input_ids", "attention_mask"}
+        if isinstance(sample, (list, tuple)):
+            return all(isinstance(token, int) for token in sample)
+        return torch.is_tensor(sample)
+
+    def _buffer_pretokenized_prefix(self, calibration_dataset):
+        # Buffer only the leading pre-tokenized rows: the rest of the dataset must
+        # stay lazy so image iterators keep their files open until the processor
+        # reads each batch.
+        iterator = iter(calibration_dataset)
+        prefix = []
+        for sample in iterator:
+            if not self._is_pretokenized_sample(sample):
+                return prefix, itertools.chain([sample], iterator), False
+            prefix.append(sample)
+        return prefix, iter(()), True
+
     def prepare_dataset(self, calibration_dataset, batch_size: int = 1, **kwargs):
         if isinstance(calibration_dataset, (str, bytes, bytearray, Mapping)):
             raise ValueError(
@@ -409,6 +432,15 @@ class BaseQwen3VLGPTQ(BaseQModel):
             )
         if isinstance(calibration_dataset, Sized) and len(calibration_dataset) == 0:
             raise ValueError("Qwen3-VL calibration dataset is empty.")
+
+        # Pre-tokenized text rows keep BaseQModel's tokenized path; anything else,
+        # including processor output with vision fields, uses the processor path.
+        prefix, remainder, all_pretokenized = self._buffer_pretokenized_prefix(
+            calibration_dataset
+        )
+        if all_pretokenized:
+            return super().prepare_dataset(prefix, batch_size=batch_size, **kwargs)
+        calibration_dataset = itertools.chain(prefix, remainder)
 
         try:
             # Some adapter contract tests construct an uninitialized wrapper
