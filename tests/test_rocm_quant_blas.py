@@ -65,6 +65,10 @@ def test_switch_is_scoped_to_the_context(monkeypatch):
     assert fake.current.name == "Cublaslt"
 
 
+def _raise_from_quantize():
+    raise RuntimeError("quantize blew up")
+
+
 def test_restore_happens_on_error(monkeypatch):
     fake = _FakeTorchBlas(current="Cublaslt")
     _install(monkeypatch, fake)
@@ -74,7 +78,7 @@ def test_restore_happens_on_error(monkeypatch):
     with pytest.raises(RuntimeError):
         with rocm.quant_blas_backend():
             assert fake.current.name == "Cublas"
-            raise RuntimeError("quantize blew up")
+            _raise_from_quantize()
 
     assert fake.calls == ["hipblas", "cublaslt"]
     assert fake.current.name == "Cublaslt"

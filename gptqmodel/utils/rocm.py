@@ -92,4 +92,7 @@ def quant_blas_backend():
         try:
             setter(previous)
         except Exception:
+            # Restoring is best-effort: the quantization result is already
+            # computed, and a platform that refuses the restore must not turn a
+            # successful quantize into a failure.
             pass
