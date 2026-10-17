@@ -813,7 +813,7 @@ model.requantize(
 ```
 
 `NormConfig.types` selects which normalization families are tuned and defaults
-to `(NormType.RMSNORM,)`, preserving the original RMSNorm-only behavior. Pass
+to `(NormType.RMSNORM,)`. Pass
 `NormType.LAYERNORM` (or both) to also tune LayerNorm gains and biases:
 
 ```py
@@ -851,10 +851,8 @@ model.save("norm-tuned")
 A combined embedding/Norm call remains supported for training-capable GPTQ-v2
 models.
 
-The first-release names remain available for compatibility: `RMSNormConfig` is
-an alias of `NormConfig` with the original positional argument order. The new
-`types` selector is keyword-only. The `rmsnorm=` argument emits a deprecation
-warning and keeps the `"rmsnorm"` result key; `norm=` returns the `"norm"` key.
+Use `NormConfig` with the `norm=` keyword; tuning statistics are returned under
+the `"norm"` result key. Model definitions mark eligible modules with `:norm`.
 
 #### Using GPTAQ (Experimental, not MoE compatible, and results may not be better than original) ⚗️
 

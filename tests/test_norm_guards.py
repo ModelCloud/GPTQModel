@@ -14,11 +14,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 from torch import nn
-from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from gptqmodel import NormConfig, NormType
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.quantization.norm_tuning import _probe_gain_offset, resolve_norm_params, tune_norm_params
 
 
@@ -30,15 +28,6 @@ def _bare(cls, hf_model=None):
     if hf_model is not None:
         model.model = hf_model
     return model
-
-
-def _tiny_qwen3(seed: int = 0) -> Qwen3ForCausalLM:
-    torch.manual_seed(seed)
-    return Qwen3ForCausalLM(Qwen3Config(
-        vocab_size=64, hidden_size=32, intermediate_size=64, num_hidden_layers=2,
-        num_attention_heads=2, num_key_value_heads=1, head_dim=16, max_position_embeddings=64,
-        tie_word_embeddings=False,
-    )).eval()
 
 
 class _NormLM(nn.Module):
@@ -278,28 +267,7 @@ def test_norm_module_names_skips_unsupported_head_norm():
     assert _bare(HeadLinearQModel, Wrapper()).norm_module_names() == ["model.layers.0.input_layernorm"]
 
 
-def test_deprecated_rmsnorm_helpers_still_work():
-    assert Qwen3QModel.get_rmsnorm_modules() == Qwen3QModel.get_norm_modules()
-
-    model = _bare(Qwen3QModel, _tiny_qwen3())
-    assert model.rmsnorm_module_names() == model.norm_module_names((NormType.RMSNORM,))
-    assert model.norm_module_names() == model.norm_module_names((NormType.RMSNORM,))
-
-
 def test_requantize_requires_a_target():
     model = _bare(BaseQModel, nn.Module())
     with pytest.raises(ValueError, match="requires"):
         model.requantize(calibration=["sample"])
-
-
-def test_deprecated_tune_rmsnorm_gains_shim_delegates():
-    from gptqmodel.quantization.rmsnorm import tune_rmsnorm_gains
-
-    teacher = _NormLM(nn.RMSNorm(8))
-    student = _NormLM(nn.RMSNorm(8))
-    batches = [{"input_ids": torch.randint(0, 32, (2, 4))}]
-
-    stats = tune_rmsnorm_gains(student, teacher, batches, ["norm"], NormConfig(teacher=teacher, steps=1))
-
-    assert stats["modules"] == ["norm"]
-    assert stats["types"] == ["rmsnorm"]
