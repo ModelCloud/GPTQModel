@@ -55,10 +55,20 @@ def _set_cuda_preferred_linalg_library(backend) -> bool:
 
 
 def _make_spd(size: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
-    """Generate a small symmetric positive definite matrix."""
+    """Generate a small symmetric positive definite matrix without a BLAS GEMM.
+
+    ``A @ A.T`` would dispatch a GEMM that is not itself the warmup target: on
+    ROCm the default BLAS preference routes an fp32 GEMM to hipBLASLt, which
+    lazily loads a per-dtype Tensile library (~1 s) just to build this 4x4
+    warmup input.  An elementwise product is symmetric by construction, and
+    shifting the diagonal by the largest off-diagonal row sum keeps it strictly
+    diagonally dominant, hence positive definite.
+    """
     base = torch.randn((size, size), device=device, dtype=dtype)
-    identity = torch.eye(size, device=device, dtype=dtype)
-    return base @ base.transpose(-1, -2) + identity * 1e-3
+    spd = base * base.transpose(-1, -2)
+    off_diagonal = spd.abs().sum(dim=-1) - spd.diagonal().abs()
+    spd.diagonal().add_(off_diagonal.max() + 1.0)
+    return spd
 
 
 def _run_cholesky_and_eigh(device: torch.device, dtype: torch.dtype) -> None:
