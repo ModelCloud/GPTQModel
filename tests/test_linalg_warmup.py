@@ -59,6 +59,27 @@ def test_run_torch_linalg_warmup_always_runs_cholesky_and_eigh(monkeypatch):
         assert calls == [torch.float32, torch.float64]
 
 
+def test_make_spd_is_symmetric_positive_definite_without_matmul():
+    """The warmup input must not itself dispatch a GEMM (it loads hipBLASLt)."""
+    dispatched = []
+
+    class _Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            dispatched.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    for dtype in (torch.float32, torch.float64, torch.float16, torch.bfloat16):
+        with _Recorder():
+            spd = linalg_warmup._make_spd(4, torch.device("cpu"), dtype)
+
+        assert torch.equal(spd, spd.transpose(-1, -2)), dtype
+        # CPU cholesky has no half dtype, so check the spectrum in float64.
+        assert float(torch.linalg.eigvalsh(spd.double()).min()) > 0, dtype
+
+    banned = ("aten.mm.", "aten.matmul", "aten.addmm", "aten.bmm", "aten.linear")
+    assert not [name for name in dispatched if name.startswith(banned)], dispatched
+
+
 def test_build_device_thread_pool_uses_thread_and_device_linalg_warmup(monkeypatch):
     captured = {}
 
