@@ -157,11 +157,12 @@ def test_norm_module_names_reject_untagged_types():
         _bare(BrokenQModel, Broken()).norm_module_names()
 
 
-def test_legacy_rmsnorm_flag_is_still_collected():
-    assert _LegacyFlagQModel.get_norm_modules() == ["input_layernorm"]
-    assert _LegacyFlagQModel.has_norm_flag("input_layernorm:!:rmsnorm")
-    assert _LegacyFlagQModel.has_norm_flag("input_layernorm:!:norm")
-    assert not _LegacyFlagQModel.has_norm_flag("input_layernorm:!")
+def test_norm_flag_is_required_for_module_collection():
+    assert _MixedQModel.get_norm_modules() == ["input_layernorm", "ln"]
+    assert _MixedQModel.has_norm_flag("input_layernorm:!:norm")
+    assert not _MixedQModel.has_norm_flag("input_layernorm:!")
+    assert _LegacyFlagQModel.get_norm_modules() == []
+    assert not _LegacyFlagQModel.has_norm_flag("input_layernorm:!:rmsnorm")
 
 
 def test_gain_probe_resolves_parameterization():

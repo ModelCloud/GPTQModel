@@ -43,7 +43,6 @@ from ..quantization.config import (
     BaseQuantizeConfig,
     GcMode,
     NormConfig,
-    NormType,
     QuantizeEmbed,
     QuantizeEmbedConfig,
     VramStrategy,
@@ -244,15 +243,7 @@ NOT_QUANTIZE_FLAG = ":!"
 CAPTURE_ONLY_FLAG = ":?"
 MOE_FLAG = ":moe"
 NORM_FLAG = ":norm"
-# First-release flag: still accepted so existing definitions and custom model
-# definitions keep working; new definitions should tag modules with `:norm`.
-RMSNORM_FLAG = ":rmsnorm"
-NORM_FLAGS = (NORM_FLAG.lstrip(":"), RMSNORM_FLAG.lstrip(":"))
 NON_QUANTIZE_FLAGS = (NOT_QUANTIZE_FLAG, CAPTURE_ONLY_FLAG)
-
-
-def _has_norm_flag(flags) -> bool:
-    return any(flag in flags for flag in NORM_FLAGS)
 
 
 # Fix cpu memory leak.
@@ -324,7 +315,6 @@ class BaseQModel(nn.Module):
         "is_moe_module",
         "get_moe_module_name",
         "get_norm_modules",
-        "get_rmsnorm_modules",
         "build_layer_modules",
         "simple_layer_modules",
         "shared_input_plan",
@@ -898,7 +888,7 @@ class BaseQModel(nn.Module):
                     continue
                 module_name, flags = cls._parse_module_flags(key)
                 path = f"{parent_path}.{module_name}" if parent_path else module_name
-                if _has_norm_flag(flags):
+                if NORM_FLAG.lstrip(":") in flags:
                     found.append(path)
                 found.extend(cls._collect_norm_modules_from_tree(value, path))
         elif isinstance(tree_node, (tuple, list)):
@@ -909,7 +899,7 @@ class BaseQModel(nn.Module):
                 if not isinstance(item, str):
                     continue
                 module_name, flags = cls._parse_module_flags(item)
-                if not _has_norm_flag(flags):
+                if NORM_FLAG.lstrip(":") not in flags:
                     continue
                 # Same leaf rule as the layer walker: a child named like its parent is the parent.
                 if parent_path == module_name or parent_path.endswith(f".{module_name}"):
@@ -923,8 +913,7 @@ class BaseQModel(nn.Module):
         """
         Layer-relative paths of normalization modules declared in the module_tree via `:norm`.
 
-        The legacy `:rmsnorm` flag is accepted as an alias. The flag only marks
-        eligibility; `NormConfig.types` decides which families are trained.
+        The flag marks eligibility; `NormConfig.types` decides which families are trained.
 
         Example (Qwen3): ["input_layernorm", "self_attn.q_norm", "self_attn.k_norm", "post_attention_layernorm"]
         """
@@ -942,18 +931,12 @@ class BaseQModel(nn.Module):
         return names
 
     @classmethod
-    def get_rmsnorm_modules(cls) -> List[str]:
-        """Deprecated alias for `get_norm_modules()`: every tagged normalization module."""
-        log.warn.once("`get_rmsnorm_modules()` is deprecated; use `get_norm_modules()`.")
-        return cls.get_norm_modules()
-
-    @classmethod
     def has_norm_flag(cls, module_spec: str) -> bool:
-        """Check if a module specification has the `:norm` (or legacy `:rmsnorm`) flag."""
+        """Check if a module specification has the `:norm` flag."""
         if not isinstance(module_spec, str):
             return False
         _, flags = cls._parse_module_flags(module_spec)
-        return _has_norm_flag(flags)
+        return NORM_FLAG.lstrip(":") in flags
 
     def norm_module_names(self, types=None, skip=()) -> List[str]:
         """Full paths of every tagged norm module matching `types`, plus the pre-lm_head norm.
@@ -1003,11 +986,6 @@ class BaseQModel(nn.Module):
                         "normalization module and is skipped."
                     )
         return names
-
-    def rmsnorm_module_names(self) -> List[str]:
-        """Deprecated alias for `norm_module_names((NormType.RMSNORM,))`."""
-        log.warn.once("`rmsnorm_module_names()` is deprecated; use `norm_module_names(types=...)`.")
-        return self.norm_module_names((NormType.RMSNORM,))
 
     @classmethod
     def build_moe_modules_if_need(cls, model_config, layer_modules, is_awq_quantize: bool = False):
@@ -1688,14 +1666,14 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
-        rmsnorm: Optional[NormConfig] = None,
         *,
         norm: Optional[NormConfig] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
         embed_quant_config = self._normalize_embed_quant_config(embed_quant_config, embed_quant_mode)
-        norm = self._normalize_norm_config(norm, rmsnorm)
+        if norm is not None and not isinstance(norm, NormConfig):
+            raise TypeError("`norm` must be a `NormConfig` instance.")
         if embed_quant_config is None and norm is None:
             raise ValueError("`requantize()` requires `embed_quant_config`, `embed_quant_mode` or `norm`.")
 
@@ -1738,7 +1716,7 @@ class BaseQModel(nn.Module):
             )
         if norm is not None:
             result = dict(result or {})
-            result["rmsnorm" if rmsnorm is not None else "norm"] = self._requantize_norm(
+            result["norm"] = self._requantize_norm(
                 calibration=calibration,
                 norm=norm,
                 calibration_concat_size=calibration_concat_size,
@@ -1749,20 +1727,6 @@ class BaseQModel(nn.Module):
                 calibration_concat_separator=calibration_concat_separator,
             )
         return result
-
-    def _normalize_norm_config(
-        self,
-        norm: Optional[NormConfig],
-        rmsnorm: Optional[NormConfig],
-    ) -> Optional[NormConfig]:
-        if norm is not None and rmsnorm is not None:
-            raise ValueError("Pass only one of `norm` or the deprecated `rmsnorm`.")
-        if rmsnorm is not None:
-            log.warn.once("`requantize(rmsnorm=...)` is deprecated; use `requantize(norm=NormConfig(...))`.")
-            norm = rmsnorm
-        if norm is not None and not isinstance(norm, NormConfig):
-            raise TypeError("`norm` must be a `NormConfig` instance.")
-        return norm
 
     def _requantize_norm(
         self,

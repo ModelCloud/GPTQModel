@@ -13,7 +13,7 @@ from transformers.models.gemma2.modeling_gemma2 import Gemma2RMSNorm
 from transformers.models.llama.modeling_llama import LlamaRMSNorm
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
 
-from gptqmodel import NormConfig, NormType, RMSNormConfig
+from gptqmodel import NormConfig, NormType
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.quantization.norm_tuning import _probe_gain_offset, resolve_norm_params, tune_norm_params
 
@@ -135,10 +135,10 @@ def test_failed_probe_does_not_mutate_the_live_module():
     assert torch.equal(param, before)
 
 
-def test_legacy_config_positional_order_is_preserved():
-    old = RMSNormConfig('teacher', 10, 0.01, 0.02, 42, ('q_norm',))
-    new = NormConfig(teacher='teacher', steps=10, lr=0.01, reg=0.02, seed=42, skip=('q_norm',))
-    assert old == new
+def test_norm_config_accepts_type_selection_after_teacher():
+    positional = NormConfig('teacher', (NormType.LAYERNORM,), steps=10)
+    keyword = NormConfig(teacher='teacher', types=(NormType.LAYERNORM,), steps=10)
+    assert positional == keyword
 
 
 @pytest.mark.parametrize('field', ['lr', 'reg'])
@@ -177,16 +177,6 @@ def test_skip_applies_before_unsupported_tag_validation_through_public_api():
     with pytest.raises(ValueError, match='no `:norm` modules matching'):
         wrapper.requantize([], norm=NormConfig(teacher='must-not-load', types=(NormType.LAYERNORM,),
                                               skip=('layers.0.norm', 'head')))
-
-
-def test_deprecated_requantize_preserves_result_key_and_positional_slot():
-    wrapper = _head_model(nn.RMSNorm(8))
-    wrapper._requantize_norm = lambda **kwargs: {'steps': kwargs['norm'].steps}
-    config = RMSNormConfig(teacher='t', steps=1)
-    assert wrapper.requantize([], rmsnorm=config) == {'rmsnorm': {'steps': 1}}
-    assert wrapper.requantize([], None, None, 'desc', 1, None, None, None, None, 10, None, None, config) == {
-        'rmsnorm': {'steps': 1}}
-    assert wrapper.requantize([], norm=config) == {'norm': {'steps': 1}}
 
 
 class SharedNormLM(nn.Module):

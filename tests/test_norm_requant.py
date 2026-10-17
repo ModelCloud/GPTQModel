@@ -13,7 +13,7 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import NormConfig, NormType, QuantizeEmbed, RMSNormConfig
+from gptqmodel import NormConfig, NormType, QuantizeEmbed
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
@@ -69,7 +69,7 @@ def test_norm_modules_come_from_module_tree_tags():
     flat = [name for block in Qwen3QModel.build_layer_modules(Qwen3QModel.module_tree) for name in block]
     assert "input_layernorm:!" in flat
     assert "self_attn.q_norm:!" in flat
-    assert not any("rmsnorm" in name for name in flat)
+    assert not any(":norm" in name for name in flat)
 
 
 def test_norm_module_names_expand_layers_and_final_norm():
@@ -101,7 +101,7 @@ def test_tune_norm_params_trains_only_norm_gains():
     batches = [{"input_ids": input_ids[i : i + 2], "attention_mask": torch.ones(2, 16, dtype=torch.long)} for i in range(0, 8, 2)]
     kl_before = _kl(student, teacher, input_ids)
 
-    stats = tune_norm_params(student, teacher, batches, names, RMSNormConfig(teacher=teacher, steps=60, lr=1e-2, reg=0.0))
+    stats = tune_norm_params(student, teacher, batches, names, NormConfig(teacher=teacher, steps=60, lr=1e-2, reg=0.0))
 
     assert stats["modules"] == names
     assert _kl(student, teacher, input_ids) < 0.5 * kl_before
@@ -115,7 +115,7 @@ def test_tune_norm_params_honors_skip():
     student = copy.deepcopy(teacher)
     names = _bare(Qwen3QModel, student).norm_module_names()
     batches = [{"input_ids": torch.randint(0, 64, (2, 16))}]
-    config = RMSNormConfig(teacher=teacher, steps=2, skip=("q_norm", "k_norm"))
+    config = NormConfig(teacher=teacher, steps=2, skip=("q_norm", "k_norm"))
     stats = tune_norm_params(student, teacher, batches, names, config)
     assert len(stats["modules"]) == 2 * 2 + 1
     assert not any(name.endswith(("q_norm", "k_norm")) for name in stats["modules"])
@@ -135,7 +135,7 @@ def test_tune_norm_params_escapes_inference_scope_and_clears_stale_gradients():
             teacher,
             batches,
             names,
-            RMSNormConfig(teacher=teacher, steps=1, lr=1e-2, reg=0.0),
+            NormConfig(teacher=teacher, steps=1, lr=1e-2, reg=0.0),
         )
 
     assert all(student.get_submodule(name).weight.grad is None for name in names)
@@ -160,16 +160,11 @@ def test_requantize_dispatches_norm_without_embedding_target():
     assert captured["batch_size"] == 4
 
 
-def test_requantize_accepts_deprecated_rmsnorm_argument():
+def test_requantize_rejects_removed_rmsnorm_argument():
     model = _bare(BaseQModel, nn.Module())
-    model._requantize_norm = lambda **kwargs: {"modules": ["model.norm"], "config": kwargs["norm"]}
-    config = RMSNormConfig(teacher="teacher-path", steps=3)
-
-    result = model.requantize(calibration=["sample"], rmsnorm=config)
-
-    assert result == {"rmsnorm": {"modules": ["model.norm"], "config": config}}
-    with pytest.raises(ValueError, match="only one of"):
-        model.requantize(calibration=["sample"], norm=config, rmsnorm=config)
+    config = NormConfig(teacher="teacher-path", steps=3)
+    with pytest.raises(TypeError, match="unexpected keyword argument 'rmsnorm'"):
+        model.requantize(calibration=["sample"], rmsnorm=config)
 
 
 def test_norm_validates_arguments():
@@ -188,7 +183,6 @@ def test_norm_validates_arguments():
         NormConfig(teacher="t", types=("groupnorm",))
     with pytest.raises(ValueError, match="at least one"):
         NormConfig(teacher="t", types=())
-    assert RMSNormConfig is NormConfig
 
 
 @pytest.mark.parametrize("state", ["meta_parameter", "meta_buffer", "inference_parameter", "v1_zeros"])
@@ -210,7 +204,7 @@ def test_unsafe_runtime_rejected_before_tuning_mutates_state(state):
     modes = {name: module.training for name, module in student.named_modules()}
     with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
         tune_norm_params(student, _tiny_qwen3(), [{"input_ids": torch.ones(1, 8, dtype=torch.long)}],
-            names, RMSNormConfig(teacher="unused", steps=1))
+            names, NormConfig(teacher="unused", steps=1))
     assert modes == {name: module.training for name, module in student.named_modules()}
     for name, param in student.named_parameters():
         old, flag, grad = before[name]
@@ -314,7 +308,7 @@ def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path,
         teacher,
         batches,
         ["norm"],
-        RMSNormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0),
+        NormConfig(teacher=teacher, steps=2, lr=1e-2, reg=0.0),
     )
 
     _save_module_replacement_safetensors(

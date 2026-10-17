@@ -292,9 +292,9 @@ def exllama_set_max_input_length(model, max_input_length: int):
 import torch
 
 from . import extension
-from .models import GPTQModel, get_best_device
-from .looper.checkpoint_store import CheckpointConfig
 from .looper.checkpoint import CheckpointStopped
+from .looper.checkpoint_store import CheckpointConfig
+from .models import GPTQModel, get_best_device
 from .models.auto import ASCII_LOGO, TRANSFORMERS_VERSION
 from .quantization import (
     AWQConfig,
@@ -308,7 +308,6 @@ from .quantization import (
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,
-    RMSNormConfig,
     RTNConfig,
     TelemetryConfig,
     WeightOnlyConfig,

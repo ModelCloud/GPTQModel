@@ -201,18 +201,17 @@ def normalize_norm_types(types: Any) -> Tuple[NormType, ...]:
 class NormConfig:
     """Post-quantization normalization tuning target for ``requantize()``.
 
-    Only the parameters of modules tagged ``:norm`` (legacy ``:rmsnorm``) in the
+    Only the parameters of modules tagged ``:norm`` in the
     model definition, plus ``pre_lm_head_norm_module``, are trained by
     distilling the next-token distribution of an unquantized ``teacher``.
     Packed quantized tensors are never modified. ``types`` selects the
-    normalization families to tune; the default keeps the original RMSNorm-only
-    behavior of the first release.
+    normalization families to tune and defaults to RMSNorm.
     """
 
     # Unquantized reference model: a local path / HF id, or an already loaded module.
     teacher: Any = None
     # Normalization families to tune: `NormType` members or their string values.
-    types: Tuple[NormType, ...] = field(default=(NormType.RMSNORM,), kw_only=True)
+    types: Tuple[NormType, ...] = (NormType.RMSNORM,)
     steps: int = 400
     lr: float = 1e-3
     # Strength of the L2 pull of each parameter toward its quantized-checkpoint
@@ -233,11 +232,6 @@ class NormConfig:
         if not math.isfinite(self.reg) or self.reg < 0:
             raise ValueError("NormConfig.reg must be finite and non-negative.")
         self.skip = tuple(self.skip)
-
-
-# First-release name: kept as an exact alias so existing callers and
-# ``isinstance`` checks keep working with the generalized config.
-RMSNormConfig = NormConfig
 
 
 class FallbackStrategy(str, Enum):
