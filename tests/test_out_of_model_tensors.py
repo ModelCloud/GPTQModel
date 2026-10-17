@@ -12,7 +12,7 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig
+from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.auto import check_and_get_model_definition
 from gptqmodel.models.writer import ModelWriter, _merge_prefix_tensors_into_state_dict
@@ -640,6 +640,42 @@ def test_merge_prefixed_tensors_without_a_readable_index_scans_shards(tmp_path):
 
     _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
     assert list(state_dict) == ["mtp.a"]
+
+
+def test_save_quantized_keeps_existing_shards_when_declared_tensor_is_missing(tmp_path):
+    source_dir = tmp_path / "source"
+    save_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    save_file({"mtp.a": torch.ones(4)}, str(source_dir / "aux.safetensors"))
+    _write_index(source_dir, {"mtp.a": "aux.safetensors"})
+
+    writer = _build_writer_with_out_of_model_file(str(source_dir), [{"prefixes": ["mtp"]}])
+    writer.model = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=32,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+        )
+    )
+    writer.turtle_model = None
+
+    # The first save shards the model and cleans up obsolete shard names on
+    # every later save through the real Hugging Face save_pretrained() call.
+    writer.save_quantized(str(save_dir), max_shard_size=512)
+    original_shards = sorted(path.name for path in save_dir.glob("model-*.safetensors"))
+    assert len(original_shards) > 1
+
+    (source_dir / "aux.safetensors").unlink()
+
+    with pytest.raises(ValueError, match=r"mtp\.a"):
+        writer.save_quantized(str(save_dir), max_shard_size=512)
+
+    assert sorted(path.name for path in save_dir.glob("model-*.safetensors")) == original_shards
+    index = json.loads((save_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    assert set(index["weight_map"].values()) <= set(original_shards)
 
 
 def test_copy_existing_file(tmp_path, monkeypatch):
