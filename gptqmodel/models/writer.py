@@ -532,7 +532,7 @@ def _merge_prefix_tensors_into_state_dict(
 ) -> None:
     # Inject matched tensors into the ongoing state_dict before sharding.
     merged = 0
-    normalized_prefixes = _normalize_out_of_model_prefixes(prefixes)
+    normalized_prefixes = [prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes]
     tensors = _load_tensors_by_prefixes(model_local_path, normalized_prefixes)
     for name, tensor in tensors.items():
         state_dict[name] = _tensor_source_from_tensor(name, tensor)
@@ -541,16 +541,6 @@ def _merge_prefix_tensors_into_state_dict(
         log.info(f"Model: Merged {merged} tensors with prefixes {normalized_prefixes} into the state dict")
     else:
         log.warn(f"Model: No tensors matched prefixes {normalized_prefixes} while merging into the state dict")
-
-
-def _normalize_out_of_model_prefixes(prefixes: List[str]) -> List[str]:
-    return [prefix if prefix.endswith(".") else f"{prefix}." for prefix in prefixes]
-
-
-def _validate_out_of_model_source_tensors(prefixes: List[str], model_local_path: str) -> None:
-    # Called before save_dir is mutated: save_pretrained() deletes existing
-    # shards, so a late failure would destroy a previously saved checkpoint.
-    _load_tensors_by_prefixes(model_local_path, _normalize_out_of_model_prefixes(prefixes))
 
 
 def _normalize_out_of_model_tensors_entries(
@@ -891,6 +881,16 @@ def ModelWriter(cls):
             split_by: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
+        if not self.quantized:
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
+            getattr(self, "out_of_model_tensors", None)
+        )
+        out_of_model_state_dict: Dict[str, TensorSource] = {}
+        if prefix_entries:
+            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, out_of_model_state_dict)
+
         os.makedirs(save_dir, exist_ok=True)
 
         if self.quant_log:
@@ -988,18 +988,6 @@ def ModelWriter(cls):
         config = copy.deepcopy(self.model.config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
-
-        if not self.quantized:
-            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
-
-        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
-            getattr(self, "out_of_model_tensors", None)
-        )
-        if prefix_entries:
-            # Refuse incomplete auxiliary sources before the config save block:
-            # save_pretrained() deletes existing shards, so failing afterwards
-            # would leave a previously saved checkpoint unusable.
-            _validate_out_of_model_source_tensors(prefix_entries, self.model_local_path)
 
         quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
         runtime_format = resolve_quant_format(quantize_config.format, quant_method)
@@ -1117,8 +1105,8 @@ def ModelWriter(cls):
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
-        if prefix_entries:
-            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, state_dict)
+        state_dict.update(out_of_model_state_dict)
+        out_of_model_state_dict.clear()
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
