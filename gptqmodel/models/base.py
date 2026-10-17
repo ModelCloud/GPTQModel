@@ -955,7 +955,7 @@ class BaseQModel(nn.Module):
         _, flags = cls._parse_module_flags(module_spec)
         return _has_norm_flag(flags)
 
-    def norm_module_names(self, types=None) -> List[str]:
+    def norm_module_names(self, types=None, skip=()) -> List[str]:
         """Full paths of every tagged norm module matching `types`, plus the pre-lm_head norm.
 
         `types` accepts `NormType` members or their string values and defaults to
@@ -971,6 +971,9 @@ class BaseQModel(nn.Module):
                 continue
             for index, layer in enumerate(layers):
                 for name in relative:
+                    full_name = f"{layers_path}.{index}.{name}"
+                    if any(full_name.endswith(suffix) for suffix in skip):
+                        continue
                     try:
                         module = layer.get_submodule(name)
                     except AttributeError:
@@ -982,8 +985,10 @@ class BaseQModel(nn.Module):
                             "which no normalization handler supports."
                         )
                     if family in requested:
-                        names.append(f"{layers_path}.{index}.{name}")
-        if names and self.pre_lm_head_norm_module:
+                        names.append(full_name)
+        if self.pre_lm_head_norm_module and not any(
+            self.pre_lm_head_norm_module.endswith(suffix) for suffix in skip
+        ):
             try:
                 module = self.model.get_submodule(self.pre_lm_head_norm_module)
             except AttributeError:
@@ -1683,8 +1688,9 @@ class BaseQModel(nn.Module):
         calibration_data_min_length: int = 10,
         calibration_concat_separator: Optional[str] = None,
         embed_quant_mode: Optional[QuantizeEmbed] = None,
-        norm: Optional[NormConfig] = None,
         rmsnorm: Optional[NormConfig] = None,
+        *,
+        norm: Optional[NormConfig] = None,
     ) -> Dict[str, List[Dict[str, str]]]:
         if not self.quantized:
             raise EnvironmentError("requantize() must be called on a model that has already been quantized.")
@@ -1732,7 +1738,7 @@ class BaseQModel(nn.Module):
             )
         if norm is not None:
             result = dict(result or {})
-            result["norm"] = self._requantize_norm(
+            result["rmsnorm" if rmsnorm is not None else "norm"] = self._requantize_norm(
                 calibration=calibration,
                 norm=norm,
                 calibration_concat_size=calibration_concat_size,
@@ -1775,7 +1781,7 @@ class BaseQModel(nn.Module):
 
         validate_tuning_model(self.model)
 
-        names = self.norm_module_names(norm.types)
+        names = self.norm_module_names(norm.types, norm.skip)
         if not names:
             raise ValueError(
                 f"{type(self).__name__} declares no `:norm` modules matching {[t.value for t in norm.types]} in its "

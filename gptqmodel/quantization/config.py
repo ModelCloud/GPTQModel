@@ -212,7 +212,7 @@ class NormConfig:
     # Unquantized reference model: a local path / HF id, or an already loaded module.
     teacher: Any = None
     # Normalization families to tune: `NormType` members or their string values.
-    types: Tuple[NormType, ...] = (NormType.RMSNORM,)
+    types: Tuple[NormType, ...] = field(default=(NormType.RMSNORM,), kw_only=True)
     steps: int = 400
     lr: float = 1e-3
     # Strength of the L2 pull of each parameter toward its quantized-checkpoint
@@ -228,10 +228,10 @@ class NormConfig:
         self.types = normalize_norm_types(self.types)
         if self.steps <= 0:
             raise ValueError("NormConfig.steps must be positive.")
-        if self.lr <= 0:
-            raise ValueError("NormConfig.lr must be positive.")
-        if self.reg < 0:
-            raise ValueError("NormConfig.reg must be non-negative.")
+        if not math.isfinite(self.lr) or self.lr <= 0:
+            raise ValueError("NormConfig.lr must be finite and positive.")
+        if not math.isfinite(self.reg) or self.reg < 0:
+            raise ValueError("NormConfig.reg must be finite and non-negative.")
         self.skip = tuple(self.skip)
 
 

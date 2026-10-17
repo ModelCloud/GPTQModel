@@ -17,6 +17,7 @@ the same loop instead of class-name special cases.
 
 from __future__ import annotations
 
+import copy
 import random
 import time
 from dataclasses import dataclass
@@ -32,21 +33,9 @@ from .config import FORMAT, NormConfig, NormType, normalize_norm_types
 
 log = setup_logger()
 
-# A probed effective gain must land within this absolute distance of one of the
-# supported hypotheses. The two gain hypotheses differ by exactly 1.0, so the
-# tolerance only has to absorb low-precision weights and normalization epsilons.
+# Probe with small, known gains so this bound only absorbs serving-dtype
+# rounding. It must not grow with the checkpoint's gain or bias magnitude.
 _PROBE_TOLERANCE = 0.05
-
-# Low-precision serving dtypes round the probe output, which moves the recovered
-# gain by roughly 0.8% of its own magnitude in bf16. Scale the tolerance with the
-# recovered gain so a large plain `weight` is not read as an unknown
-# parameterization. The scaled tolerance stays below the 0.5 midpoint that
-# separates the two hypotheses.
-_PROBE_RELATIVE_TOLERANCE = 0.02
-
-# Class -> gain offset. The parameterization is a property of the module class,
-# so one probe per class covers every layer of a model.
-_GAIN_OFFSET_CACHE: Dict[type, float] = {}
 
 
 @dataclass(frozen=True)
@@ -99,59 +88,72 @@ def norm_type_of(module: nn.Module) -> Optional[NormType]:
 def _probe_gain_offset(module: nn.Module, name: str) -> float:
     """Return the gain offset applied by ``module``: ``0.0`` for ``weight``.
 
-    Gemma-style norms scale by ``1 + weight``. Instead of a class-name list,
-    probe the module with a symmetric input pair and recover the effective gain
-    ``(f(x) - f(-x)) / (2 * unit(x))``. The antisymmetric form cancels any bias
-    and both supported gain hypotheses differ by exactly 1.0.
+    Evaluate both hypotheses on a private copy at two small stored gains.
+    This avoids dividing by zero-valued probe coordinates, cancellation from
+    large biases, and ambiguous rounding of large checkpoint gains. Recheck
+    every instance: the same class can configure plain or offset gains.
     """
     weight = getattr(module, "weight", None)
     if not isinstance(weight, nn.Parameter) or not weight.is_floating_point():
         raise ValueError(f"Norm tuning: `{name}` ({type(module).__name__}) has no floating point `weight`.")
 
-    cls = type(module)
-    cached = _GAIN_OFFSET_CACHE.get(cls)
-    if cached is not None:
-        return cached
+    if weight.ndim == 0 or weight.numel() == 0:
+        raise ValueError(f"Norm tuning: `{name}` has an empty or scalar gain shape.")
+    if not bool(torch.isfinite(weight).all()):
+        raise ValueError(f"Norm tuning: `{name}.weight` contains non-finite values.")
 
-    # Probe in the module's own dtype so the same fused kernel path the model
-    # serves with is the one that resolves the parameterization.
-    probe = torch.linspace(
-        -1.0, 1.0, steps=weight.numel(), dtype=weight.dtype, device=weight.device
-    ).reshape(weight.shape)
-    unit = probe / probe.pow(2).mean(dim=-1, keepdim=True).sqrt()
+    cls = type(module)
+    # Alternating signs also work for odd widths. Normalize over the complete
+    # affine shape, as nn.LayerNorm/nn.RMSNorm do, and account for the live eps.
+    probe = ((torch.arange(weight.numel(), device=weight.device) % 2) * 2 - 1).to(weight.dtype)
+    probe = probe.reshape(weight.shape)
+    probe = torch.stack((probe, -probe))
+    axes = tuple(range(-weight.ndim, 0))
+    unit = probe.float()
+    if norm_type_of(module) == NormType.LAYERNORM:
+        unit = unit - unit.mean(dim=axes, keepdim=True)
+    eps = getattr(module, "eps", getattr(module, "variance_epsilon", 0.0))
+    if eps is None:
+        eps = torch.finfo(weight.dtype).eps
+    unit = unit * torch.rsqrt(unit.square().mean(dim=axes, keepdim=True) + eps)
+    errors = {0.0: 0.0, 1.0: 0.0}
     with torch.no_grad():
         try:
-            positive = module(probe)
-            negative = module(-probe)
+            candidate = copy.deepcopy(module).eval()
+            if getattr(candidate, "bias", None) is not None:
+                candidate.bias.zero_()
         except Exception as exc:  # noqa: BLE001 - report the module, not the raw error
             raise ValueError(
                 f"Norm tuning: cannot probe `{name}` ({cls.__name__}) to resolve its gain parameterization: {exc}"
             ) from exc
-    if not isinstance(positive, torch.Tensor) or not isinstance(negative, torch.Tensor):
-        raise ValueError(f"Norm tuning: `{name}` ({cls.__name__}) did not return a tensor for the gain probe.")
-    if positive.shape != probe.shape or negative.shape != probe.shape:
+        for gain in (-0.5, 0.5):
+            candidate.weight.fill_(gain)
+            try:
+                output = candidate(probe)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError(
+                    f"Norm tuning: cannot probe `{name}` ({cls.__name__}) to resolve its gain parameterization: {exc}"
+                ) from exc
+            if not isinstance(output, torch.Tensor):
+                raise ValueError(f"Norm tuning: `{name}` ({cls.__name__}) did not return a tensor for the gain probe.")
+            if output.shape != probe.shape:
+                raise ValueError(
+                    f"Norm tuning: `{name}` ({cls.__name__}) returned shape {tuple(output.shape)} for a "
+                    f"{tuple(probe.shape)} gain probe."
+                )
+            if not bool(torch.isfinite(output).all()) or not bool(torch.isfinite(unit).all()):
+                raise ValueError(f"Norm tuning: `{name}` ({cls.__name__}) produced non-finite gain probe values.")
+            for offset in errors:
+                errors[offset] = max(errors[offset], (output.float() - (gain + offset) * unit).abs().max().item())
+
+    matches = [offset for offset, error in errors.items() if error <= _PROBE_TOLERANCE]
+    if len(matches) != 1:
         raise ValueError(
-            f"Norm tuning: `{name}` ({cls.__name__}) returned shape {tuple(positive.shape)} for a "
-            f"{tuple(probe.shape)} gain probe."
+            f"Norm tuning: `{name}` ({cls.__name__}) has an unrecognized gain parameterization or an ambiguous "
+            "probe; cannot distinguish `weight` from `1 + weight`. Exclude it with `NormConfig.skip`."
         )
 
-    gain = (positive.detach().float() - negative.detach().float()) / (2.0 * unit)
-    stored = weight.detach().float()
-    error_plain = (gain - stored).abs().max().item()
-    error_offset = (gain - (1.0 + stored)).abs().max().item()
-    magnitude = max(float(gain.abs().max()), 1.0)
-    tolerance = max(_PROBE_TOLERANCE, _PROBE_RELATIVE_TOLERANCE * magnitude)
-    if min(error_plain, error_offset) > tolerance:
-        raise ValueError(
-            f"Norm tuning: `{name}` ({cls.__name__}) has an unrecognized gain parameterization; its effective "
-            "gain is neither `weight` nor `1 + weight`. Tag it with `skip` or report the module class."
-        )
-
-    offset = 0.0 if error_plain <= error_offset else 1.0
-    _GAIN_OFFSET_CACHE[cls] = offset
-    if offset:
-        log.info(f"Norm tuning: `{cls.__name__}` uses Gemma-style `1 + weight` gains.")
-    return offset
+    return matches[0]
 
 
 def resolve_norm_params(
@@ -186,12 +188,6 @@ def resolve_norm_params(
         weight = getattr(module, "weight", None)
         if not isinstance(weight, nn.Parameter) or not weight.is_floating_point():
             raise ValueError(f"Norm tuning: `{name}.weight` is not a floating point trainable gain.")
-        offset = _probe_gain_offset(module, name)
-        # The regularization scale is the mean absolute effective gain, so
-        # `1 + weight` norms are not pinned by a near-zero stored gain.
-        gain_scale = (weight.detach().float() + offset).abs().mean().clamp_min(1e-6)
-        resolved.append(NormParam(module=name, kind="weight", param=weight, offset=offset, scale=float(gain_scale)))
-
         bias = getattr(module, "bias", None)
         if isinstance(bias, nn.Parameter):
             if not bias.is_floating_point():
@@ -201,6 +197,15 @@ def resolve_norm_params(
                     f"Norm tuning: `{name}.bias` shape {tuple(bias.shape)} does not match "
                     f"`{name}.weight` shape {tuple(weight.shape)}."
                 )
+            if not bool(torch.isfinite(bias).all()):
+                raise ValueError(f"Norm tuning: `{name}.bias` contains non-finite values.")
+        offset = _probe_gain_offset(module, name)
+        # The regularization scale is the mean absolute effective gain, so
+        # `1 + weight` norms are not pinned by a near-zero stored gain.
+        gain_scale = (weight.detach().float() + offset).abs().mean().clamp_min(1e-6)
+        resolved.append(NormParam(module=name, kind="weight", param=weight, offset=offset, scale=float(gain_scale)))
+
+        if isinstance(bias, nn.Parameter):
             # A zero-initialized bias has no scale of its own; share the gain's
             # scale so the pull toward the checkpoint value stays meaningful.
             resolved.append(
@@ -304,11 +309,20 @@ def tune_norm_params(
             for entry in entries:
                 if entry.module not in names:
                     names.append(entry.module)
-            params = [entry.param for entry in entries]
+            # Keep all module paths for persistence, but optimize tied tensors
+            # only once. Otherwise the second alias consumes a cleared grad.
+            unique = {}
+            for entry in entries:
+                previous = unique.get(entry.param)
+                if previous is not None and (previous.offset, previous.scale) != (entry.offset, entry.scale):
+                    raise ValueError(f"Norm tuning: `{entry.label}` shares a parameter with incompatible gain scales.")
+                unique.setdefault(entry.param, entry)
+            train_entries = list(unique.values())
+            params = [entry.param for entry in train_entries]
             for param in params:
                 param.grad = None
             base = [param.detach().float().clone() for param in params]
-            scales = [entry.scale for entry in entries]
+            scales = [entry.scale for entry in train_entries]
             master = [b.clone().requires_grad_(True) for b in base]
             optimizer = torch.optim.Adam(master, lr=config.lr)
 
@@ -362,7 +376,7 @@ def tune_norm_params(
                 (config.reg * penalty).backward()
 
                 if step == 1:
-                    missing = [entry.label for entry, param in zip(entries, params) if param.grad is None]
+                    missing = [entry.label for entry, param in zip(train_entries, params) if param.grad is None]
                     if missing:
                         raise RuntimeError(
                             f"Norm tuning: no gradient reached {missing[:3]}. Load the quantized model with a "

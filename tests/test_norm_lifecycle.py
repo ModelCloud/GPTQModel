@@ -182,3 +182,10 @@ def test_layer_norm_tuning_through_requantize_on_quantized_gpt2(tmp_path, monkey
     after = _checkpoint_tensors(tuned, "model")
     changed = {name for name, value in before.items() if not torch.equal(after[name], value)}
     assert changed == expected  # Every packed quantized tensor stays byte-identical.
+
+    with torch.inference_mode():
+        logits = model.model(**calibration[0], use_cache=False).logits.clone()
+    reloaded = GPTQModel.load(str(tuned), backend=BACKEND.TORCH, device="cpu", dtype=torch.float16)
+    with torch.inference_mode():
+        restored = reloaded.model(**calibration[0], use_cache=False).logits
+    assert torch.equal(logits, restored)

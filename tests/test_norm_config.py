@@ -198,8 +198,7 @@ def test_gain_probe_rejects_unknown_parameterization():
 def test_gain_probe_resolves_offsets_in_serving_dtypes(dtype):
     """Serving checkpoints load in fp16/bf16; the probe must still resolve the gain."""
 
-    # Fresh classes per run: the probe cache is keyed by class, so reusing a
-    # module-level class here would return the cached offset without probing.
+    # Both supported parameterizations must work in the serving dtype.
     class PlainRMSNorm(nn.RMSNorm):
         pass
 
@@ -225,9 +224,8 @@ def test_gain_probe_resolves_offsets_in_serving_dtypes(dtype):
 def test_gain_probe_resolves_large_gains_in_low_precision(dtype):
     """A large plain gain must not be misread as an unknown parameterization.
 
-    bf16 rounds the probe output, which moves the recovered gain by ~0.8% of its
-    magnitude. The float64 oracle below evaluates both hypotheses itself, so a
-    fixed absolute tolerance fails this test instead of only the user's model.
+    The original live-gain probe amplified bf16 rounding as the checkpoint
+    gain grew. The float64 oracle independently identifies the plain gain.
     """
 
     class LargeGainRMSNorm(nn.RMSNorm):
@@ -268,12 +266,11 @@ def test_regularization_scale_matches_independent_oracle():
     )}
 
     for label, entry in entries.items():
-        # Independent float64 oracle for `mean(|stored + offset|)`.
-        if entry.kind == "bias":
-            gain = entries[f"{entry.module}.weight"]
-            oracle = float((gain.param.detach().double() + gain.offset).abs().mean().clamp_min(1e-6))
-        else:
-            oracle = float((entry.param.detach().double() + entry.offset).abs().mean().clamp_min(1e-6))
+        # Use the known module parameterization, never the offset under test.
+        offset = 1.0 if entry.module == "offset" else 0.0
+        weight = model.get_submodule(entry.module).weight.detach().double()
+        oracle = float((weight + offset).abs().mean().clamp_min(1e-6))
+        assert entry.offset == (offset if entry.kind == "weight" else 0.0)
         assert entry.scale == pytest.approx(oracle, rel=1e-6, abs=1e-9), label
 
     # RMSNorm parity with the first release: the scale is the legacy float32 formula.
