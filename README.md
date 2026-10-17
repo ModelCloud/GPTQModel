@@ -93,6 +93,12 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
+On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
+loads one Tensile library per (dtype, layout) pair on first use, and those one-time loads
+dominate a cold quantize while rocBLAS covers the same math. The override is scoped to the
+quantization phase and the previous backend is restored afterwards. Set
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` to keep torch's default backend.
+
 ## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
