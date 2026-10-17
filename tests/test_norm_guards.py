@@ -133,7 +133,7 @@ def test_resolve_norm_params_deduplicates_repeated_module_names():
 
 
 def test_probe_still_rejects_unknown_parameterization_at_large_gains():
-    """The magnitude-scaled tolerance must not become blanket acceptance."""
+    """Large checkpoint gains must not hide an unsupported parameterization."""
 
     class ScaledLargeRMSNorm(nn.Module):
         """Effective gain is `0.25 * weight`, matching neither supported hypothesis."""
@@ -192,7 +192,7 @@ def test_probe_gain_offset_rejects_broken_modules():
         resolve_norm_params(nn.Sequential(BadShapeRMSNorm(8)), ["0"], (), (NormType.RMSNORM,))
 
 
-def test_probe_gain_offset_is_cached_per_class():
+def test_probe_gain_offset_checks_each_instance():
     class CountingRMSNorm(nn.RMSNorm):
         calls = 0
 
@@ -203,10 +203,11 @@ def test_probe_gain_offset_is_cached_per_class():
     model = nn.Sequential(CountingRMSNorm(8), CountingRMSNorm(8))
     entries = resolve_norm_params(model, ["0", "1"], (), (NormType.RMSNORM,))
     assert [entry.offset for entry in entries] == [0.0, 0.0]
-    # One probe is two forwards; the second module reuses the cached offset.
-    assert CountingRMSNorm.calls == 2
+    # Each module gets two controlled-gain forwards; instances may configure
+    # different offsets even when they share a class.
+    assert CountingRMSNorm.calls == 4
     resolve_norm_params(model, ["0"], (), (NormType.RMSNORM,))
-    assert CountingRMSNorm.calls == 2
+    assert CountingRMSNorm.calls == 6
 
 
 def test_tune_norm_params_requires_calibration_data():

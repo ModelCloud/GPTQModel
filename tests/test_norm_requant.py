@@ -167,7 +167,7 @@ def test_requantize_accepts_deprecated_rmsnorm_argument():
 
     result = model.requantize(calibration=["sample"], rmsnorm=config)
 
-    assert result == {"norm": {"modules": ["model.norm"], "config": config}}
+    assert result == {"rmsnorm": {"modules": ["model.norm"], "config": config}}
     with pytest.raises(ValueError, match="only one of"):
         model.requantize(calibration=["sample"], norm=config, rmsnorm=config)
 
