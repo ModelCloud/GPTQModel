@@ -125,6 +125,31 @@ def test_resolve_norm_params_rejects_empty_selection():
         resolve_norm_params(model, ["0"], (), (NormType.LAYERNORM,))
 
 
+def test_resolve_norm_params_deduplicates_repeated_module_names():
+    """A repeated name must train its parameter once, not double its penalty."""
+    model = nn.Sequential(nn.RMSNorm(8))
+    entries = resolve_norm_params(model, ["0", "0", "0"], (), (NormType.RMSNORM,))
+    assert [entry.label for entry in entries] == ["0.weight"]
+
+
+def test_probe_still_rejects_unknown_parameterization_at_large_gains():
+    """The magnitude-scaled tolerance must not become blanket acceptance."""
+
+    class ScaledLargeRMSNorm(nn.Module):
+        """Effective gain is `0.25 * weight`, matching neither supported hypothesis."""
+
+        def __init__(self, dim):
+            super().__init__()
+            self.weight = nn.Parameter(torch.full((dim,), 16.0))
+
+        def forward(self, hidden_states):
+            normed = hidden_states * torch.rsqrt(hidden_states.pow(2).mean(-1, keepdim=True) + 1e-6)
+            return 0.25 * self.weight * normed
+
+    with pytest.raises(ValueError, match="unrecognized gain parameterization"):
+        resolve_norm_params(nn.Sequential(ScaledLargeRMSNorm(8)), ["0"], (), (NormType.RMSNORM,))
+
+
 def test_probe_gain_offset_requires_a_float_weight():
     class NoWeightRMSNorm(nn.Module):
         def forward(self, hidden_states):

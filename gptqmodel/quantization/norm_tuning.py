@@ -37,6 +37,13 @@ log = setup_logger()
 # tolerance only has to absorb low-precision weights and normalization epsilons.
 _PROBE_TOLERANCE = 0.05
 
+# Low-precision serving dtypes round the probe output, which moves the recovered
+# gain by roughly 0.8% of its own magnitude in bf16. Scale the tolerance with the
+# recovered gain so a large plain `weight` is not read as an unknown
+# parameterization. The scaled tolerance stays below the 0.5 midpoint that
+# separates the two hypotheses.
+_PROBE_RELATIVE_TOLERANCE = 0.02
+
 # Class -> gain offset. The parameterization is a property of the module class,
 # so one probe per class covers every layer of a model.
 _GAIN_OFFSET_CACHE: Dict[type, float] = {}
@@ -132,7 +139,9 @@ def _probe_gain_offset(module: nn.Module, name: str) -> float:
     stored = weight.detach().float()
     error_plain = (gain - stored).abs().max().item()
     error_offset = (gain - (1.0 + stored)).abs().max().item()
-    if min(error_plain, error_offset) > _PROBE_TOLERANCE:
+    magnitude = max(float(gain.abs().max()), 1.0)
+    tolerance = max(_PROBE_TOLERANCE, _PROBE_RELATIVE_TOLERANCE * magnitude)
+    if min(error_plain, error_offset) > tolerance:
         raise ValueError(
             f"Norm tuning: `{name}` ({cls.__name__}) has an unrecognized gain parameterization; its effective "
             "gain is neither `weight` nor `1 + weight`. Tag it with `skip` or report the module class."
@@ -154,6 +163,7 @@ def resolve_norm_params(
     """Resolve the trainable parameters of every selected normalization module."""
     requested = normalize_norm_types(types)
     resolved: List[NormParam] = []
+    resolved_names = set()
     for name in module_names:
         if any(name.endswith(suffix) for suffix in skip):
             continue
@@ -167,6 +177,10 @@ def resolve_norm_params(
                 f"Norm tuning: `{name}` ({type(module).__name__}) is not a supported normalization module."
             )
         if family not in requested:
+            continue
+        # A repeated name would train the same parameter twice and double-count
+        # its regularization term.
+        if name in resolved_names:
             continue
 
         weight = getattr(module, "weight", None)
@@ -192,6 +206,7 @@ def resolve_norm_params(
             resolved.append(
                 NormParam(module=name, kind="bias", param=bias, offset=0.0, scale=float(gain_scale))
             )
+        resolved_names.add(name)
     if not resolved:
         raise ValueError(
             "Norm tuning: no normalization modules selected; tag them with `:norm` in the model definition "

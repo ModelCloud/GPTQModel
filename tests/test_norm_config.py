@@ -221,6 +221,34 @@ def test_gain_probe_resolves_offsets_in_serving_dtypes(dtype):
     assert resolve_norm_params(offset, ["0"], (), (NormType.RMSNORM,))[0].offset == 1.0
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_gain_probe_resolves_large_gains_in_low_precision(dtype):
+    """A large plain gain must not be misread as an unknown parameterization.
+
+    bf16 rounds the probe output, which moves the recovered gain by ~0.8% of its
+    magnitude. The float64 oracle below evaluates both hypotheses itself, so a
+    fixed absolute tolerance fails this test instead of only the user's model.
+    """
+
+    class LargeGainRMSNorm(nn.RMSNorm):
+        pass
+
+    module = LargeGainRMSNorm(64).to(dtype)
+    with torch.no_grad():
+        module.weight.copy_(torch.linspace(12.0, 16.0, 64, dtype=dtype))
+
+    probe = torch.linspace(-1.0, 1.0, 64).to(dtype)
+    with torch.no_grad():
+        out = module(probe).double()
+    unit = probe.double() / probe.double().pow(2).mean().sqrt()
+    weight = module.weight.detach().double()
+    assert (out - unit * weight).abs().max() < (out - unit * (1.0 + weight)).abs().max()
+
+    entry = resolve_norm_params(nn.Sequential(module), ["0"], (), (NormType.RMSNORM,))[0]
+    assert entry.offset == 0.0
+    assert entry.scale == pytest.approx(float(weight.abs().mean()), rel=1e-6)
+
+
 def test_regularization_scale_matches_independent_oracle():
     model = nn.Module()
     model.standard = nn.RMSNorm(16)
