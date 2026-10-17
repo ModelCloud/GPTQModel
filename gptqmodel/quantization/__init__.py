@@ -27,6 +27,8 @@ from .config import (
                      GPTAQConfig,
                      GPTQConfig,
                      HessianConfig,
+                     NormConfig,
+                     NormType,
                      ParoConfig,
                      PreProcessorCode,
                      PreProcessorConfig,

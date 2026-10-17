@@ -14,9 +14,9 @@ class GPT2QModel(BaseQModel):
         "h",
         "#",
         {
-            "ln_1": ("ln_1:!",),
+            "ln_1": ("ln_1:!:norm",),
             "attn": ("c_attn:0", "c_proj:1"),
-            "ln_2": ("ln_2:!",),
+            "ln_2": ("ln_2:!:norm",),
             "mlp": ("c_fc:0", "c_proj:1"),
         }
     ]

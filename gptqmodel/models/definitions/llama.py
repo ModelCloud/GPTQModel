@@ -21,9 +21,9 @@ class LlamaQModel(BaseQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!:rmsnorm",),
+            "input_layernorm": ("input_layernorm:!:norm",),
             "self_attn": ("q_proj:0:in=x", "k_proj:0:in=x", "v_proj:0:in=x", "o_proj:1"),
-            "post_attention_layernorm": ("post_attention_layernorm:!:rmsnorm",),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         }
     ]

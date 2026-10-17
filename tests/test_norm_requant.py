@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Fast CPU coverage for RMSNorm gain tuning through ``requantize(rmsnorm=...)``."""
+"""Fast CPU coverage for norm tuning through ``requantize(norm=...)``."""
 
 import copy
 from types import SimpleNamespace
@@ -13,14 +13,14 @@ from safetensors.torch import load_file, save_file
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from gptqmodel import QuantizeEmbed, RMSNormConfig
+from gptqmodel import NormConfig, NormType, QuantizeEmbed, RMSNormConfig
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.models.definitions.llama import LlamaQModel
 from gptqmodel.models.definitions.qwen3 import Qwen3QModel
 from gptqmodel.models.writer import _save_module_replacement_safetensors
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization import FORMAT, QuantizeConfig
-from gptqmodel.quantization.rmsnorm import tune_rmsnorm_gains
+from gptqmodel.quantization.norm_tuning import tune_norm_params
 from gptqmodel.utils.model import pack_module
 
 
@@ -57,9 +57,9 @@ def _kl(student, teacher, input_ids) -> float:
     return float((t.exp() * (t - s)).sum(-1).mean())
 
 
-def test_rmsnorm_modules_come_from_module_tree_tags():
-    assert LlamaQModel.get_rmsnorm_modules() == ["input_layernorm", "post_attention_layernorm"]
-    assert Qwen3QModel.get_rmsnorm_modules() == [
+def test_norm_modules_come_from_module_tree_tags():
+    assert LlamaQModel.get_norm_modules() == ["input_layernorm", "post_attention_layernorm"]
+    assert Qwen3QModel.get_norm_modules() == [
         "input_layernorm",
         "self_attn.q_norm",
         "self_attn.k_norm",
@@ -72,9 +72,9 @@ def test_rmsnorm_modules_come_from_module_tree_tags():
     assert not any("rmsnorm" in name for name in flat)
 
 
-def test_rmsnorm_module_names_expand_layers_and_final_norm():
+def test_norm_module_names_expand_layers_and_final_norm():
     model = _bare(Qwen3QModel, _tiny_qwen3())
-    names = model.rmsnorm_module_names()
+    names = model.norm_module_names()
     assert names[:4] == [
         "model.layers.0.input_layernorm",
         "model.layers.0.self_attn.q_norm",
@@ -85,10 +85,10 @@ def test_rmsnorm_module_names_expand_layers_and_final_norm():
     assert len(names) == 2 * 4 + 1
 
 
-def test_tune_rmsnorm_gains_trains_only_norm_gains():
+def test_tune_norm_params_trains_only_norm_gains():
     teacher = _tiny_qwen3()
     student = copy.deepcopy(teacher)
-    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    names = _bare(Qwen3QModel, student).norm_module_names()
     generator = torch.Generator().manual_seed(1)
     with torch.no_grad():
         for name in names:
@@ -101,7 +101,7 @@ def test_tune_rmsnorm_gains_trains_only_norm_gains():
     batches = [{"input_ids": input_ids[i : i + 2], "attention_mask": torch.ones(2, 16, dtype=torch.long)} for i in range(0, 8, 2)]
     kl_before = _kl(student, teacher, input_ids)
 
-    stats = tune_rmsnorm_gains(student, teacher, batches, names, RMSNormConfig(teacher=teacher, steps=60, lr=1e-2, reg=0.0))
+    stats = tune_norm_params(student, teacher, batches, names, RMSNormConfig(teacher=teacher, steps=60, lr=1e-2, reg=0.0))
 
     assert stats["modules"] == names
     assert _kl(student, teacher, input_ids) < 0.5 * kl_before
@@ -110,27 +110,27 @@ def test_tune_rmsnorm_gains_trains_only_norm_gains():
     assert {name: param.requires_grad for name, param in student.named_parameters()} == grad_flags
 
 
-def test_tune_rmsnorm_gains_honors_skip():
+def test_tune_norm_params_honors_skip():
     teacher = _tiny_qwen3()
     student = copy.deepcopy(teacher)
-    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    names = _bare(Qwen3QModel, student).norm_module_names()
     batches = [{"input_ids": torch.randint(0, 64, (2, 16))}]
     config = RMSNormConfig(teacher=teacher, steps=2, skip=("q_norm", "k_norm"))
-    stats = tune_rmsnorm_gains(student, teacher, batches, names, config)
+    stats = tune_norm_params(student, teacher, batches, names, config)
     assert len(stats["modules"]) == 2 * 2 + 1
     assert not any(name.endswith(("q_norm", "k_norm")) for name in stats["modules"])
 
 
-def test_tune_rmsnorm_gains_escapes_inference_scope_and_clears_stale_gradients():
+def test_tune_norm_params_escapes_inference_scope_and_clears_stale_gradients():
     teacher = _tiny_qwen3()
     student = copy.deepcopy(teacher)
-    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    names = _bare(Qwen3QModel, student).norm_module_names()
     for name in names:
         student.get_submodule(name).weight.grad = torch.ones_like(student.get_submodule(name).weight)
 
     with torch.inference_mode():
         batches = [{"input_ids": torch.randint(0, 64, (2, 8))}]
-        tune_rmsnorm_gains(
+        tune_norm_params(
             student,
             teacher,
             batches,
@@ -141,38 +141,60 @@ def test_tune_rmsnorm_gains_escapes_inference_scope_and_clears_stale_gradients()
     assert all(student.get_submodule(name).weight.grad is None for name in names)
 
 
-def test_requantize_dispatches_rmsnorm_without_embedding_target():
+def test_requantize_dispatches_norm_without_embedding_target():
     model = _bare(BaseQModel, nn.Module())
     captured = {}
 
-    def requantize_rmsnorm(**kwargs):
+    def requantize_norm(**kwargs):
         captured.update(kwargs)
         return {"modules": ["model.norm"]}
 
-    model._requantize_rmsnorm = requantize_rmsnorm
+    model._requantize_norm = requantize_norm
     model._requantize_embeddings = lambda **kwargs: pytest.fail("embedding requant must not run")
-    config = RMSNormConfig(teacher="teacher-path", steps=3)
+    config = NormConfig(teacher="teacher-path", steps=3)
 
-    result = model.requantize(calibration=["sample"], rmsnorm=config, batch_size=4)
+    result = model.requantize(calibration=["sample"], norm=config, batch_size=4)
 
-    assert result == {"rmsnorm": {"modules": ["model.norm"]}}
-    assert captured["rmsnorm"] is config
+    assert result == {"norm": {"modules": ["model.norm"]}}
+    assert captured["norm"] is config
     assert captured["batch_size"] == 4
 
 
-def test_rmsnorm_validates_arguments():
+def test_requantize_accepts_deprecated_rmsnorm_argument():
+    model = _bare(BaseQModel, nn.Module())
+    model._requantize_norm = lambda **kwargs: {"modules": ["model.norm"], "config": kwargs["norm"]}
+    config = RMSNormConfig(teacher="teacher-path", steps=3)
+
+    result = model.requantize(calibration=["sample"], rmsnorm=config)
+
+    assert result == {"norm": {"modules": ["model.norm"], "config": config}}
+    with pytest.raises(ValueError, match="only one of"):
+        model.requantize(calibration=["sample"], norm=config, rmsnorm=config)
+
+
+def test_norm_validates_arguments():
     with pytest.raises(ValueError, match="teacher"):
-        RMSNormConfig()
+        NormConfig()
     with pytest.raises(ValueError, match="steps"):
-        RMSNormConfig(teacher="t", steps=0)
-    with pytest.raises(TypeError, match="rmsnorm"):
-        _bare(BaseQModel).requantize(calibration=["sample"], rmsnorm={"teacher": "t"})
+        NormConfig(teacher="t", steps=0)
+    with pytest.raises(TypeError, match="NormConfig"):
+        _bare(BaseQModel).requantize(calibration=["sample"], norm={"teacher": "t"})
+    assert NormConfig(teacher="t", types="layernorm").types == (NormType.LAYERNORM,)
+    assert NormConfig(teacher="t", types=(NormType.LAYERNORM, "rmsnorm", "rmsnorm")).types == (
+        NormType.LAYERNORM,
+        NormType.RMSNORM,
+    )
+    with pytest.raises(ValueError, match="Unsupported norm type"):
+        NormConfig(teacher="t", types=("groupnorm",))
+    with pytest.raises(ValueError, match="at least one"):
+        NormConfig(teacher="t", types=())
+    assert RMSNormConfig is NormConfig
 
 
 @pytest.mark.parametrize("state", ["meta_parameter", "meta_buffer", "inference_parameter", "v1_zeros"])
 def test_unsafe_runtime_rejected_before_tuning_mutates_state(state):
     student = _tiny_qwen3()
-    names = _bare(Qwen3QModel, student).rmsnorm_module_names()
+    names = _bare(Qwen3QModel, student).norm_module_names()
     if state == "meta_parameter":
         student.model.norm.weight = nn.Parameter(torch.empty(32, device="meta"))
     elif state == "meta_buffer":
@@ -187,7 +209,7 @@ def test_unsafe_runtime_rejected_before_tuning_mutates_state(state):
     before = {name: (param, param.requires_grad, param.grad) for name, param in student.named_parameters()}
     modes = {name: module.training for name, module in student.named_modules()}
     with pytest.raises(ValueError, match="reload.*BACKEND.TORCH"):
-        tune_rmsnorm_gains(student, _tiny_qwen3(), [{"input_ids": torch.ones(1, 8, dtype=torch.long)}],
+        tune_norm_params(student, _tiny_qwen3(), [{"input_ids": torch.ones(1, 8, dtype=torch.long)}],
             names, RMSNormConfig(teacher="unused", steps=1))
     assert modes == {name: module.training for name, module in student.named_modules()}
     for name, param in student.named_parameters():
@@ -199,10 +221,10 @@ def test_combined_v1_call_fails_before_embedding_or_teacher_work():
     model = _bare(Qwen3QModel, _tiny_qwen3())
     model.quantize_config = QuantizeConfig(bits=4, group_size=16, format=FORMAT.GPTQ, offload_to_disk=False)
     model._requantize_embeddings = lambda **kwargs: pytest.fail("must reject before embedding packing")
-    model._requantize_rmsnorm = lambda **kwargs: pytest.fail("must reject before teacher loading")
+    model._requantize_norm = lambda **kwargs: pytest.fail("must reject before teacher loading")
     with pytest.raises(ValueError, match="Requantize embeddings separately"):
         model.requantize(calibration=["sample"], embed_quant_mode=QuantizeEmbed.OUTPUT,
-            rmsnorm=RMSNormConfig(teacher="unused", steps=1))
+            norm=NormConfig(teacher="unused", steps=1))
 
 
 def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path, monkeypatch):
@@ -287,7 +309,7 @@ def test_packed_rmsnorm_tuning_save_reload_preserves_quantized_tensors(tmp_path,
         _weight_map=dict.fromkeys(student.state_dict(), "model.safetensors"),
     )
 
-    tune_rmsnorm_gains(
+    tune_norm_params(
         student,
         teacher,
         batches,
