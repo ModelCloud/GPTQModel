@@ -62,7 +62,10 @@ from ..utils.hf import (  # noqa: E402
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
-from ..utils.linalg_warmup import kick_torch_linear_prewarm  # noqa: E402
+from ..utils.linalg_warmup import (  # noqa: E402
+    kick_torch_linear_prewarm,
+    kick_torch_quantize_prewarm,
+)
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import DEVICE  # noqa: E402
@@ -611,14 +614,16 @@ def _resolve_prewarm_device(device, device_map) -> Optional[torch.device]:
     return None
 
 
-def _kick_quantize_linear_prewarm(device, device_map, kwargs, model_cfg=None) -> None:
+def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
     """
-    Hide the one-time `linear` accelerator-library init behind the model load.
+    Hide the one-time accelerator library and kernel inits behind the model load.
 
     The first `linear` forward of the quantization pass otherwise pays the full
-    one-time library init inline (measured ~1.2 s on ROCm). Starting it on a
-    background thread while the CPU-bound model load is still running moves that
-    cost off the critical path of the first quantization forward.
+    one-time library init inline (measured ~1.2 s on ROCm), and the first launch
+    of each distinct quantization kernel otherwise pays an accelerator module
+    load inline (measured 1.5 s of a 2.25 s cold pass on MI350X). Starting both
+    on background threads while the CPU-bound model load is still running moves
+    that cost off the critical path of the quantization pass.
 
     Without `model_cfg` only an explicitly pinned dtype is warmed: the config that
     decides the default dtype has not been read yet, and guessing a dtype would
@@ -633,6 +638,7 @@ def _kick_quantize_linear_prewarm(device, device_map, kwargs, model_cfg=None) ->
     if dtype is None:
         return
     kick_torch_linear_prewarm(target, dtype)
+    kick_torch_quantize_prewarm(target, dtype)
 
 
 def _prebuild_device_thread_pool() -> None:
@@ -684,7 +690,7 @@ class GPTQModel:
             **kwargs,
     ):
         if quantize_config is not None:
-            _kick_quantize_linear_prewarm(device, device_map, kwargs)
+            _kick_quantize_prewarms(device, device_map, kwargs)
             _prebuild_device_thread_pool()
 
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
@@ -784,7 +790,7 @@ class GPTQModel:
             **model_init_kwargs,
     ) -> BaseQModel:
         if quantize_config is not None:
-            _kick_quantize_linear_prewarm(
+            _kick_quantize_prewarms(
                 model_init_kwargs.get("device"),
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
@@ -827,7 +833,7 @@ class GPTQModel:
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
         if quantize_config is not None:
-            _kick_quantize_linear_prewarm(
+            _kick_quantize_prewarms(
                 model_init_kwargs.get("device"),
                 model_init_kwargs.get("device_map"),
                 model_init_kwargs,
