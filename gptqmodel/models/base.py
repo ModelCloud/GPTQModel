@@ -83,7 +83,7 @@ from ..utils.model import (
     warn_fused_unit_dynamic_conflicts,
 )
 from ..utils.model_dequant import infer_block_shape
-from ..utils.rocm import IS_ROCM
+from ..utils.rocm import IS_ROCM, quant_blas_backend
 from ..utils.structure import (
     LazyTurtle,
     _get_parent_and_leaf_by_path,
@@ -1534,33 +1534,37 @@ class BaseQModel(nn.Module):
         # load there (issue #1455).
         self._warn_fused_unit_dynamic_overrides()
 
-        if self.quantize_config.uses_weight_only_lifecycle():
-            result = self._quantize_weight_only(
-                checkpoint=checkpoint,
-                calibration=calibration,
-                calibration_concat_size=calibration_concat_size,
-                calibration_sort=calibration_sort,
-                batch_size=batch_size,
-                backend=backend,
-                calibration_concat_separator=calibration_concat_separator,
-                embed_quant_config=embed_quant_config,
-            )
-        else:
-            if calibration is None:
-                raise ValueError(
-                    "Calibration dataset is required unless a weight-only quantize config is configured."
+        # On ROCm, hipBLASLt's lazy Tensile-library loading dominates a cold
+        # quantize while rocBLAS covers the same math for a fraction of the
+        # loading cost. The override spans only the quantization phase.
+        with quant_blas_backend():
+            if self.quantize_config.uses_weight_only_lifecycle():
+                result = self._quantize_weight_only(
+                    checkpoint=checkpoint,
+                    calibration=calibration,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
+                    batch_size=batch_size,
+                    backend=backend,
+                    calibration_concat_separator=calibration_concat_separator,
+                    embed_quant_config=embed_quant_config,
                 )
-            result = self._quantize_with_calibration(
-                calibration=calibration,
-                calibration_concat_size=calibration_concat_size,
-                calibration_sort=calibration_sort,
-                batch_size=batch_size,
-                backend=backend,
-                adapter_calibration_dataset=adapter_calibration_dataset,
-                calibration_concat_separator=calibration_concat_separator,
-                embed_quant_config=embed_quant_config,
-                checkpoint=checkpoint,
-            )
+            else:
+                if calibration is None:
+                    raise ValueError(
+                        "Calibration dataset is required unless a weight-only quantize config is configured."
+                    )
+                result = self._quantize_with_calibration(
+                    calibration=calibration,
+                    calibration_concat_size=calibration_concat_size,
+                    calibration_sort=calibration_sort,
+                    batch_size=batch_size,
+                    backend=backend,
+                    adapter_calibration_dataset=adapter_calibration_dataset,
+                    calibration_concat_separator=calibration_concat_separator,
+                    embed_quant_config=embed_quant_config,
+                    checkpoint=checkpoint,
+                )
 
         # Some definitions need the complete layer stack before they can
         # restore cross-branch aliases (for example DiffusionGemma's decoder).
