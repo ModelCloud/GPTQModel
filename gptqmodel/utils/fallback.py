@@ -30,6 +30,7 @@ def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
     """
     Returns (threshold_value, is_percent).
     Percent values are returned as the fractional percentage (e.g., "5%" -> 5.0).
+    Raises ValueError for a string that is neither a number nor a percentage.
     """
     if isinstance(setting, str):
         stripped = setting.strip()
@@ -37,12 +38,12 @@ def _parse_threshold(setting: Any) -> Tuple[Optional[float], bool]:
             try:
                 val = float(stripped[:-1])
                 return val, True
-            except ValueError:
-                return None, False
+            except ValueError as exc:
+                raise ValueError(f"Invalid fallback threshold {setting!r}: expected a number or percentage.") from exc
         try:
             return float(stripped), False
-        except ValueError:
-            return None, False
+        except ValueError as exc:
+            raise ValueError(f"Invalid fallback threshold {setting!r}: expected a number or percentage.") from exc
 
     if isinstance(setting, (int, float)):
         return float(setting), False

@@ -721,6 +721,23 @@ def test_should_use_fallback_parses_numeric_and_percent():
     assert should_use_fallback("10%", observed_samples=10, expected_total_samples=200)
 
 
+@pytest.mark.parametrize("threshold", ["0.5%%", "nonsense", "%", "1x", "   "])
+def test_should_use_fallback_rejects_malformed_threshold(threshold):
+    with pytest.raises(ValueError, match="Invalid fallback threshold"):
+        should_use_fallback(threshold, observed_samples=0, expected_total_samples=100)
+
+
+@pytest.mark.parametrize("threshold", [None, False, 0, 0.0, "", "0"])
+def test_should_use_fallback_keeps_disabled_thresholds(threshold):
+    assert not should_use_fallback(threshold, observed_samples=0, expected_total_samples=100)
+
+
+@pytest.mark.parametrize("threshold", [" 10 ", "1e1", "10 %", " 10 % "])
+def test_should_use_fallback_accepts_padded_and_exponent_thresholds(threshold):
+    assert should_use_fallback(threshold, observed_samples=9, expected_total_samples=100)
+    assert not should_use_fallback(threshold, observed_samples=11, expected_total_samples=100)
+
+
 def test_gptq_fallback_threshold_triggers_rtn_when_samples_below_percent():
     torch.manual_seed(0)
     layer = nn.Linear(8, 8, bias=False)
