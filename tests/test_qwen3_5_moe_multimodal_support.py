@@ -250,6 +250,59 @@ def test_qwen3_5_moe_prepare_dataset_routes_pretokenized_rows_to_base_path(
     ]
 
 
+def test_qwen3_5_moe_prepare_dataset_keeps_image_iterators_lazy(
+    monkeypatch, tmp_path
+):
+    pulled = []
+    image_paths = []
+    for index in range(3):
+        path = tmp_path / f"image-{index}.png"
+        Image.new("RGB", (2, 2), (index, index, index)).save(path)
+        image_paths.append(path)
+
+    class _TrackingProcessor(_FakeProcessor):
+        def __init__(self):
+            super().__init__()
+            self.pulled_at_call = []
+
+        def __call__(self, *, text, images, videos, padding, return_tensors):
+            self.pulled_at_call.append(len(pulled))
+            for image in images or []:
+                # A real processor reads pixels; a closed file-backed image
+                # fails here.
+                image.load()
+            return super().__call__(
+                text=text,
+                images=images,
+                videos=videos,
+                padding=padding,
+                return_tensors=return_tensors,
+            )
+
+    processor = _TrackingProcessor()
+    monkeypatch.setattr(Qwen3_5_MoeQModel, "load_processor", lambda self: processor)
+    model = _qmodel()
+
+    def dataset():
+        for index, path in enumerate(image_paths):
+            # Materializing the whole dataset up front closes the files before
+            # the processor reads the first batch.
+            with Image.open(path) as image:
+                pulled.append(index)
+                yield [
+                    {
+                        "role": "user",
+                        "content": [_image_content(image)],
+                    }
+                ]
+
+    prepared = model.prepare_dataset(dataset(), batch_size=1)
+
+    assert len(prepared) == 3
+    assert processor.pulled_at_call == [1, 2, 3]
+    assert [len(call["images"] or []) for call in processor.processor_calls] == [1, 1, 1]
+
+
 def test_qwen3_5_moe_prepare_dataset_keeps_text_and_vision_rows_on_processor(
     monkeypatch,
 ):
