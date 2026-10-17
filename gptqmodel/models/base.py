@@ -1400,6 +1400,8 @@ class BaseQModel(nn.Module):
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
                 preferred_backend = BACKEND.QQQ_TORCH if quant_device_type == "npu" else BACKEND.QQQ
+            elif self.quantize_config.method == METHOD.VPTQ:
+                preferred_backend = BACKEND.VPTQ_TORCH
             elif self.quantize_config.method == METHOD.PARO:
                 preferred_backend = BACKEND.PAROQUANT_CUDA
             elif self.quantize_config.method == METHOD.EXL3:
@@ -1889,6 +1891,12 @@ class BaseQModel(nn.Module):
 
             quantize_processor = preprocessors + [
                 QQQProcessor(**args),
+            ]
+        elif self.quantize_config.method == METHOD.VPTQ:
+            from ..looper.vptq_processor import VPTQProcessor
+
+            quantize_processor = preprocessors + [
+                VPTQProcessor(**args),
             ]
         elif self.quantize_config.method == METHOD.AWQ:
             from ..looper.awq_processor import AWQProcessor
@@ -4308,10 +4316,18 @@ class BaseQModel(nn.Module):
     def _auto_detect_module_tree(self, model: PreTrainedModel, quant_method: METHOD):
         log.warn("Model not yet support, attempting Module Tree AutoCompat...")
 
-        if quant_method not in {METHOD.GPTQ, METHOD.GGUF, METHOD.FP8, METHOD.BITSANDBYTES, METHOD.EXL3, METHOD.PARO}:
+        if quant_method not in {
+            METHOD.GPTQ,
+            METHOD.GGUF,
+            METHOD.FP8,
+            METHOD.BITSANDBYTES,
+            METHOD.EXL3,
+            METHOD.PARO,
+            METHOD.VPTQ,
+        }:
             log.warn(
                 f"Module Tree AutoCompat: Failed, quant_method={quant_method}, "
-                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT"
+                "only support GPTQ/GGUF/FP8/BITSANDBYTES/EXL3/PAROQUANT/VPTQ"
             )
             return None
 

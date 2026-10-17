@@ -9,3 +9,4 @@
 * **Turboderp**: for releasing [Exllama v1](https://github.com/turboderp/exllama) and [Exllama v2](https://github.com/turboderp/exllamav2) kernels adapted for use in this project.
 * **FpgaMiner**: for [GPTQ-Triton](https://github.com/fpgaminer/GPTQ-triton) kernels used in [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda) which is adapted into this project.
 * **Casper Hansen**: for maintaining and support of [AutoAWQ](https://github.com/casper-hansen/AutoAWQ) for which the early version of the awq integration code was adapted from.
+* **Microsoft** and the [VPTQ](https://github.com/microsoft/VPTQ) authors: for the VPTQ algorithm and the reference codebook/index checkpoint layout, ported here under the MIT license.

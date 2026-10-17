@@ -486,6 +486,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.AWQ,
         METHOD.PARO,
         METHOD.QQQ,
+        METHOD.VPTQ,
         METHOD.EXL3,
     ):
         return True
@@ -499,6 +500,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.AWQ,
         METHOD.PARO,
         METHOD.QQQ,
+        METHOD.VPTQ,
         METHOD.EXL3,
     ):
         return True
