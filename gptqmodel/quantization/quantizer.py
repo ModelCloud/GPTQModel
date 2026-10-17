@@ -33,6 +33,10 @@ class Quantizer(nn.Module):
 
         self.qcfg = qcfg
         self.register_buffer("maxq", torch.tensor(0))
+        # Host mirror of the ``maxq`` buffer.  ``configure()`` is the only writer
+        # of ``maxq``, so the mirror cannot drift, and reading the bound as a
+        # Python int keeps the block loop free of device-to-host synchronizes.
+        self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
 
@@ -91,6 +95,7 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         if trits:
             self.maxq = torch.tensor(-1)
+        self._maxq_value = int(self.maxq)
 
     def find_params(self, x, weight=False):
         dev = x.device
@@ -113,19 +118,28 @@ class Quantizer(nn.Module):
             x = x.flatten().unsqueeze(0)
 
         tmp = torch.zeros(x.shape[0], device=dev)
-        xmin = torch.minimum(x.min(1)[0], tmp)
-        xmax = torch.maximum(x.max(1)[0], tmp)
+        # ``aminmax`` returns both extremes from a single reduction pass; the
+        # separate ``min(dim=1)``/``max(dim=1)`` pair also materializes the
+        # arg-min/arg-max indices that the range search never consumes.
+        xmin_raw, xmax_raw = torch.aminmax(x, dim=1)
+        xmin = torch.minimum(xmin_raw, tmp)
+        xmax = torch.maximum(xmax_raw, tmp)
 
         if self.qcfg.sym:
+            # ``xmax >= |xmin|`` from here on, so the negative mirror is exactly
+            # the ``xmin < 0`` lane.  Expressing it as an elementwise select
+            # keeps the decision on the device: the masked write it replaces
+            # forced a ``nonzero`` scan plus a host round trip per call.
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            if torch.any(tmp):
-                xmin[tmp] = -xmax[tmp]
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
+            xmin = torch.where(xmin < 0, -xmax, xmin)
+        # Empty groups (all-zero ranges) get the +-1 sentinel so the scale below
+        # stays finite.  ``both_zero`` selects the same lanes as the previous
+        # pair of masked writes without a device-to-host synchronization.
+        both_zero = (xmin == 0) & (xmax == 0)
+        xmin = torch.where(both_zero, xmin - 1, xmin)
+        xmax = torch.where(both_zero, xmax + 1, xmax)
 
-        if self.maxq < 0:
+        if self._maxq_value < 0:
             self.scale = xmax
             self.zero = xmin
         else:
@@ -135,7 +149,8 @@ class Quantizer(nn.Module):
             else:
                 self.scale = (xmax - xmin) / self.maxq
                 if self.qcfg.sym:
-                    self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+                    # ``maxq`` is odd here, so the host-side half is exact.
+                    self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
                 else:
                     self.zero = torch.round(-xmin / self.scale)
 

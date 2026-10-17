@@ -291,6 +291,86 @@ def test_two_bit_asymmetric_mse_search_optimizes_zero_point_orientation(monkeypa
     assert optimized_loss < legacy_loss
 
 
+def _legacy_find_params_range(x, sym):
+    """The pre-optimization range math, kept verbatim as the numeric oracle."""
+    tmp = torch.zeros(x.shape[0], device=x.device)
+    xmin = torch.minimum(x.min(1)[0], tmp)
+    xmax = torch.maximum(x.max(1)[0], tmp)
+
+    if sym:
+        xmax = torch.maximum(torch.abs(xmin), xmax)
+        tmp = xmin < 0
+        if torch.any(tmp):
+            xmin[tmp] = -xmax[tmp]
+    tmp = (xmin == 0) & (xmax == 0)
+    xmin[tmp] = -1
+    xmax[tmp] = +1
+    return xmin, xmax
+
+
+def _range_cases(dtype):
+    generator = torch.Generator().manual_seed(0)
+    cases = {"randn": torch.randn(48, 32, generator=generator)}
+    cases["all_zero"] = torch.zeros(48, 32)
+
+    mixed = torch.randn(48, 32, generator=generator)
+    mixed[::3] = 0.0
+    mixed[1::5] = -mixed[1::5].abs()
+    mixed[2::7] = mixed[2::7].abs()
+    mixed[3::11] = -0.0
+    cases["mixed_signs"] = mixed
+
+    wide = torch.randn(48, 32, generator=generator) * 1e4
+    wide[5] = 0.0
+    cases["wide"] = wide
+    return {name: tensor.to(dtype) for name, tensor in cases.items()}
+
+
+def _raw_bytes(tensor):
+    return tensor.detach().contiguous().view(torch.uint8)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("sym", [True, False])
+def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
+    """The min/max normalization must stay bit-identical to the legacy math.
+
+    It also must not fall back to boolean-mask indexing: ``xmin[mask] = ...``
+    forces a ``nonzero`` scan plus a device-to-host round trip on every call,
+    which is the dominant cost of the GPTQ block loop on accelerators.
+    """
+    dispatched = []
+
+    class _Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            dispatched.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, sym=sym, desc_act=False)
+
+    for name, weights in _range_cases(dtype).items():
+        quantizer = Quantizer(qcfg)
+        quantizer.configure(perchannel=True, bits=4, sym=sym)
+
+        dispatched.clear()
+        with _Recorder():
+            quantizer.find_params(weights, weight=True)
+
+        expected_xmin, expected_xmax = _legacy_find_params_range(weights.clone(), sym)
+        expected_scale = (expected_xmax - expected_xmin) / quantizer.maxq.cpu()
+        if sym:
+            expected_zero = torch.full_like(expected_scale, (quantizer.maxq.cpu() + 1) / 2)
+        else:
+            expected_zero = torch.round(-expected_xmin / expected_scale)
+
+        assert torch.equal(_raw_bytes(quantizer.scale.reshape(-1)), _raw_bytes(expected_scale)), name
+        assert torch.equal(_raw_bytes(quantizer.zero.reshape(-1)), _raw_bytes(expected_zero)), name
+
+        banned = ("aten.nonzero", "aten.index_put", "aten._local_scalar_dense", "aten.masked_scatter")
+        offenders = [entry for entry in dispatched if entry.startswith(banned)]
+        assert not offenders, (name, offenders)
+
+
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
