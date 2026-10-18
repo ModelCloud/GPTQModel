@@ -2011,6 +2011,9 @@ class BaseQModel(nn.Module):
             module_looper = ModuleLooper(
                 self, processors=processors, embed_quant_config=embed_quant_config,
                 extensions=(extension,) if extension is not None else (),
+                disk_write_expected=(
+                    bool(self.quantize_config.offload_to_disk) or checkpoint is not None
+                ),
             )
             use_cache = getattr(self.model.config, "use_cache", False)
             try:
