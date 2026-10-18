@@ -3,6 +3,7 @@ import time
 from types import SimpleNamespace
 
 import torch
+import torch.utils._python_dispatch  # noqa: F401
 
 import gptqmodel as gptqmodel_module
 from gptqmodel.utils import linalg_warmup
@@ -233,3 +234,114 @@ def test_kick_torch_linear_prewarm_registers_only_started_threads(monkeypatch):
     finally:
         prewarm.release.set()
         thread.join(5)
+
+
+def test_kick_torch_quantize_prewarm_is_independent_of_the_linear_payload(monkeypatch):
+    """Both payloads warm the same device/dtype, so each needs its own registry slot."""
+    linear = _BlockingPrewarm()
+    quantize = _BlockingPrewarm()
+    monkeypatch.setattr(linalg_warmup, "_run_linear_prewarm", linear)
+    monkeypatch.setattr(linalg_warmup, "_run_quantize_prewarm", quantize)
+    _isolate_linear_prewarm(monkeypatch)
+
+    linear_thread = linalg_warmup.kick_torch_linear_prewarm("cuda", torch.float16)
+    quantize_thread = linalg_warmup.kick_torch_quantize_prewarm("cuda", torch.float16)
+    assert linear_thread is not None
+    assert quantize_thread is not None
+    assert linear.started.wait(5)
+    assert quantize.started.wait(5)
+
+    try:
+        # Dedupe is per payload: a second kick of either one is a no-op, and the
+        # process-global device/dtype rules still apply.
+        assert linalg_warmup.kick_torch_linear_prewarm("cuda:0", torch.float16) is None
+        assert linalg_warmup.kick_torch_quantize_prewarm("cuda:0", torch.float16) is None
+        assert linalg_warmup.kick_torch_quantize_prewarm("cpu", torch.float16) is None
+        assert linalg_warmup.kick_torch_quantize_prewarm("cuda", torch.float64) is None
+    finally:
+        linear.release.set()
+        quantize.release.set()
+        linear_thread.join(5)
+        quantize_thread.join(5)
+
+    assert linear.calls == [("cuda", "torch.float16")]
+    assert quantize.calls == [("cuda", "torch.float16")]
+
+
+def test_kick_torch_quantize_prewarm_respects_kill_switch(monkeypatch):
+    prewarm = _BlockingPrewarm()
+    monkeypatch.setattr(linalg_warmup, "_run_quantize_prewarm", prewarm)
+    _isolate_linear_prewarm(monkeypatch)
+    monkeypatch.setenv("GPTQMODEL_QUANTIZE_PREWARM", "0")
+
+    assert linalg_warmup.kick_torch_quantize_prewarm("cuda", torch.float16) is None
+    linalg_warmup.await_torch_linear_prewarm("cuda", torch.float16, timeout=0.1)
+    assert prewarm.calls == []
+
+
+def test_await_torch_linear_prewarm_joins_every_payload_and_can_filter_one(monkeypatch):
+    linear = _BlockingPrewarm()
+    quantize = _BlockingPrewarm()
+    monkeypatch.setattr(linalg_warmup, "_run_linear_prewarm", linear)
+    monkeypatch.setattr(linalg_warmup, "_run_quantize_prewarm", quantize)
+    _isolate_linear_prewarm(monkeypatch)
+
+    thread = linalg_warmup.kick_torch_quantize_prewarm("cuda", torch.float16)
+    assert thread is not None
+    assert quantize.started.wait(5)
+
+    try:
+        # Filtering to the linear payload must not wait on the in-flight quantize one.
+        start = time.monotonic()
+        linalg_warmup.await_torch_linear_prewarm(
+            "cuda", torch.float16, timeout=0.5, payload=linalg_warmup._PREWARM_LINEAR
+        )
+        assert time.monotonic() - start < 0.5
+
+        joiner = threading.Thread(
+            target=linalg_warmup.await_torch_linear_prewarm,
+            args=("cuda", torch.float16),
+            kwargs={"timeout": 5},
+        )
+        joiner.start()
+        joiner.join(0.2)
+        assert joiner.is_alive(), "the default join must cover the quantize payload"
+
+        filtered = threading.Thread(
+            target=linalg_warmup.await_torch_linear_prewarm,
+            args=("cuda", torch.float16),
+            kwargs={"timeout": 5, "payload": linalg_warmup._PREWARM_QUANTIZE},
+        )
+        filtered.start()
+        filtered.join(0.2)
+        assert filtered.is_alive(), "an explicit payload filter must join that payload"
+
+        quantize.release.set()
+        joiner.join(5)
+        filtered.join(5)
+        assert not joiner.is_alive()
+        assert not filtered.is_alive()
+    finally:
+        quantize.release.set()
+        thread.join(5)
+
+    assert linear.calls == []
+
+
+def test_run_quantize_prewarm_launches_kernels_without_touching_the_rng():
+    """The payload may only warm kernels: perturbing the RNG would change results."""
+    dispatched = []
+
+    class _Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            dispatched.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    torch.manual_seed(1234)
+    before = torch.get_rng_state().clone()
+
+    with _Recorder():
+        linalg_warmup._run_quantize_prewarm(torch.device("cpu"), torch.float16)
+
+    assert torch.equal(before, torch.get_rng_state())
+    assert len(dispatched) >= 40, len(dispatched)
