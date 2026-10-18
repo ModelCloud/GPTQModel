@@ -264,6 +264,7 @@ class LoopProcessor:
         self._log_header_interval = 20
         current_time = datetime.now().strftime("%m_%d_%Y_%Hh_%Mm_%Ss")
         self.log_tmp_log_file_name = str(self._build_log_file_path(self.name(), current_time))
+        self._torch_rocm_memory_devices: List[str] = []
         self._device_smi_handles = self._init_device_smi_handles()
         self._cpu_device_smi = self._init_cpu_device_handle()
         self._device_metric_failures: Set[str] = set()
@@ -613,11 +614,19 @@ class LoopProcessor:
         return dtype_alias.get(dtype_str, dtype_str)
 
     def _init_device_smi_handles(self) -> Dict[str, Device]:
-        """Creates Device-SMI handles for all discovered accelerator devices."""
+        """Create Device-SMI handles except where ROCm VFs use Torch metrics."""
 
         handles: Dict[str, Device] = {}
 
         for device_id in self._discover_accelerator_devices():
+            if device_id.startswith("rocm:"):
+                try:
+                    if torch.cuda.get_device_name(int(device_id[5:])).upper().endswith(" VF"):
+                        self._torch_rocm_memory_devices.append(device_id)
+                        continue
+                except Exception:
+                    pass
+
             if device_id in _DEVICE_SMI_UNUSABLE:
                 continue
 
@@ -709,6 +718,16 @@ class LoopProcessor:
 
         with self._device_smi_lock:
             snapshot: Dict[str, float] = {}
+            for device_id in getattr(self, "_torch_rocm_memory_devices", ()):
+                if device_id in self._device_metric_failures:
+                    continue
+                try:
+                    free, total = torch.cuda.mem_get_info(int(device_id[5:]))
+                except Exception as exc:
+                    log.debug(f"Torch memory metrics unavailable for `{device_id}`: {exc}")
+                    self._device_metric_failures.add(device_id)
+                    continue
+                snapshot[device_id] = (total - free) / (1024 ** 3)
             for device_id, handle in self._device_smi_handles.items():
                 metrics = self._safe_query_metric(device_id, handle)
                 if metrics is None:
