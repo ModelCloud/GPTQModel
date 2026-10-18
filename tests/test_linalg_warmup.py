@@ -345,3 +345,4 @@ def test_run_quantize_prewarm_launches_kernels_without_touching_the_rng():
 
     assert torch.equal(before, torch.get_rng_state())
     assert len(dispatched) >= 40, len(dispatched)
+    assert any(name.startswith("aten.topk.") for name in dispatched)
