@@ -624,8 +624,8 @@ class LoopProcessor:
                     if torch.cuda.get_device_name(int(device_id[5:])).upper().endswith(" VF"):
                         self._torch_rocm_memory_devices.append(device_id)
                         continue
-                except Exception:
-                    pass
+                except Exception as exc:  # pragma: no cover - defensive, external runtime
+                    log.debug(f"Unable to determine ROCm device name for `{device_id}`: {exc}")
 
             if device_id in _DEVICE_SMI_UNUSABLE:
                 continue
