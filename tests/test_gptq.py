@@ -369,6 +369,8 @@ def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
         banned = ("aten.nonzero", "aten.index_put", "aten._local_scalar_dense", "aten.masked_scatter")
         offenders = [entry for entry in dispatched if entry.startswith(banned)]
         assert not offenders, (name, offenders)
+        if sym:
+            assert "aten.__and__.Tensor" not in dispatched, (name, dispatched)
 
 
 class TestGPTQAddBatchCPU(ModelTest):

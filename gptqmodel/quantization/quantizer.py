@@ -135,7 +135,10 @@ class Quantizer(nn.Module):
         # Empty groups (all-zero ranges) get the +-1 sentinel so the scale below
         # stays finite.  ``both_zero`` selects the same lanes as the previous
         # pair of masked writes without a device-to-host synchronization.
-        both_zero = (xmin == 0) & (xmax == 0)
+        # In the symmetric path ``xmax >= |xmin|``, so a zero ``xmax`` already
+        # proves the whole range is zero.  The non-symmetric path needs both
+        # comparisons because an all-negative group has ``xmax == 0``.
+        both_zero = xmax == 0 if self.qcfg.sym else (xmin == 0) & (xmax == 0)
         xmin = torch.where(both_zero, xmin - 1, xmin)
         xmax = torch.where(both_zero, xmax + 1, xmax)
 
