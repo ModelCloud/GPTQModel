@@ -174,6 +174,11 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
     half = dtype
     single = torch.float32
 
+    if dev.type == "cuda" and torch.version.hip:
+        with contextlib.suppress(Exception):
+            matrix = torch.eye(1024, device=dev, dtype=single)
+            torch.linalg.cholesky_ex(matrix, check_errors=False)
+
     with contextlib.suppress(Exception):
         values = torch.ones((7, 128), device=dev, dtype=single)
         torch.topk(values, k=128, dim=1, largest=True, sorted=True)
