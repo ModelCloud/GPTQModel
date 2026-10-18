@@ -365,6 +365,34 @@ def test_device_metric_handles_are_serialized_and_closed():
     assert processor._cpu_device_smi is None
 
 
+def test_rocm_vf_reports_torch_memory_without_device_smi(monkeypatch):
+    processor = _make_processor()
+    processor._torch_rocm_memory_devices = []
+    monkeypatch.setattr(processor, "_discover_accelerator_devices", lambda: ["rocm:0"])
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda index: "AMD Instinct MI355X VF")
+    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda index: (3 * 1024**3, 4 * 1024**3))
+    monkeypatch.setattr("gptqmodel.looper.loop_processor._DEVICE_SMI_UNUSABLE", {"rocm:0"})
+    monkeypatch.setattr("gptqmodel.looper.loop_processor.Device", lambda device: pytest.fail("Device-SMI queried"))
+
+    processor._device_smi_handles = processor._init_device_smi_handles()
+
+    assert processor._device_smi_handles == {}
+    assert processor._snapshot_device_memory_gib() == {"rocm:0": 1.0}
+    assert processor.device_memory_report().startswith("rocm 1G")
+
+
+def test_rocm_without_vf_keeps_device_smi(monkeypatch):
+    processor = _make_processor()
+    processor._torch_rocm_memory_devices = []
+    handle = MagicMock()
+    monkeypatch.setattr(processor, "_discover_accelerator_devices", lambda: ["rocm:0"])
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda index: "AMD Instinct MI355X")
+    monkeypatch.setattr("gptqmodel.looper.loop_processor.Device", lambda device: handle)
+
+    assert processor._init_device_smi_handles() == {"rocm:0": handle}
+    assert processor._torch_rocm_memory_devices == []
+
+
 def test_device_metric_close_failures_are_logged_and_suppressed(monkeypatch):
     class _FailingHandle:
         def close(self):
