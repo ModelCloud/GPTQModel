@@ -148,8 +148,11 @@ class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
 
-def io_write_performance() -> Optional[float]:
-    """Estimate and cache sustained disk write throughput in MB/s."""
+def io_write_performance(enabled: bool = True) -> Optional[float]:
+    """Cache disk write throughput in MB/s when the run expects disk writes."""
+
+    if not enabled:
+        return None
 
     global _IO_WRITE_SPEED_MB
     if _IO_WRITE_SPEED_MB is not None:
@@ -179,6 +182,7 @@ class ModuleLooper(DeviceAssignmentState):
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
         *,
         extensions=(),
+        disk_write_expected: bool = False,
     ):
         """Initialize loop state, device policy, and callback wiring."""
 
@@ -198,7 +202,7 @@ class ModuleLooper(DeviceAssignmentState):
         self._dangling_threads: List[threading.Thread] = []
         self._dangling_threads_lock = threading.Lock()
 
-        io_write_speed = io_write_performance()
+        io_write_speed = io_write_performance(disk_write_expected)
         if io_write_speed is not None:
             if io_write_speed < 100:
                 log.error(
