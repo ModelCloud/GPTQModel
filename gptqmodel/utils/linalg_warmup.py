@@ -174,6 +174,10 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
     half = dtype
     single = torch.float32
 
+    with contextlib.suppress(Exception):
+        values = torch.ones((7, 128), device=dev, dtype=single)
+        torch.topk(values, k=128, dim=1, largest=True, sorted=True)
+
     a = torch.full((256, 128), 0.25, device=dev, dtype=half)
     b = torch.full((256, 128), 0.5, device=dev, dtype=half)
     a32 = a.to(single)
