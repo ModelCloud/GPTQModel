@@ -891,6 +891,21 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
     assert captured["fp16_output_shape"] == (4, 8, 16)
 
 
+def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
+    processor = _TestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=8))
+    w = torch.ones(64, 16, dtype=torch.float16)
+    input_feat = torch.ones(4, 16, dtype=torch.float16)
+
+    def nan_quantize(src, dst, abs_max=None):
+        dst.fill_(float("nan"))
+
+    processor._pseudo_quantize_tensor_into = nan_quantize
+
+    best_max_val = processor._compute_best_clip(w, input_feat, n_grid=20, max_shrink=0.5)
+
+    assert torch.equal(best_max_val, torch.ones(64, 2, 1, dtype=torch.float16))
+
+
 @parameterized.expand([
     ("cpu_gs32", "cpu", 32),
     ("cpu_gs64", "cpu", 64),

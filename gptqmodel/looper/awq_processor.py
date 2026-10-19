@@ -1717,8 +1717,13 @@ class AWQProcessor(LoopProcessor):
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
-            best_max_val = org_max_val.clone()
-            min_errs = torch.ones_like(org_max_val) * 1e9
+            # Keep the pristine bound as the initial candidate. The previous loop
+            # compared against an FP16 `1e9` sentinel, which overflows to `+inf`, so
+            # an all-NaN/all-infinite grid retained `org_max_val`. Stacking the
+            # errors and selecting once preserves that behavior while replacing two
+            # `where` launches per grid step with one `argmin` per output batch.
+            errs = [torch.full_like(org_max_val, float("inf"))]
+            max_vals = [org_max_val]
             clamp_slice = scratch_clamp[: w.shape[0]]
             quant_slice = scratch_quant[: w.shape[0]]
 
@@ -1739,13 +1744,21 @@ class AWQProcessor(LoopProcessor):
 
                 # Evaluate the reconstruction error for the current clamp ratio and keep the best
                 # one. `cur_out` is a private temporary so the difference and square happen in
-                # place, and the winner is chosen with `torch.where` instead of masked scatter
-                # (which launched four gather/scatter kernels per grid step).
+                # place.
                 cur_out.sub_(org_out).pow_(2)
-                err = cur_out.mean(dim=1).view(min_errs.shape)
-                better = err < min_errs
-                min_errs = torch.where(better, err, min_errs)
-                best_max_val = torch.where(better, max_val, best_max_val)
+                errs.append(cur_out.mean(dim=1).view(org_max_val.shape))
+                max_vals.append(max_val)
+
+            # `argmin` returns the first occurrence on ties, matching the old
+            # strict-`<` update. NaN candidates were never selected before, so map
+            # them to `+inf` and let the pristine-bound sentinel absorb an all-NaN
+            # grid.
+            best_index = torch.stack(errs, dim=0).nan_to_num(nan=torch.inf).argmin(dim=0)
+            best_max_val = torch.gather(
+                torch.stack(max_vals, dim=0),
+                dim=0,
+                index=best_index.unsqueeze(0),
+            ).squeeze(0)
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
