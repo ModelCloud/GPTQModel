@@ -16,8 +16,16 @@ import torch
 import torch.nn as nn
 from models.model_test import ModelTest
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+)
+from gptqmodel.quantization.foem import FOEM
+from gptqmodel.quantization.gptaq import GPTAQ
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.quantizer import Quantizer, quantize
 
@@ -482,6 +490,61 @@ def test_gptq_bypasses_zero_scale_and_logs_once(monkeypatch, act_group_aware):
     assert (scale != 0).all()
     assert len(errors) == 1
     assert "zero scale found and bypassed" in errors[0]
+
+
+@pytest.mark.parametrize("kind", ["gptaq", "foem"])
+def test_specialized_quantizers_sanitize_zero_scale_before_return(monkeypatch, kind):
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32)
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    if kind == "gptaq":
+        named.state["native_inp"] = []
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=True,
+            desc_act=False,
+            gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+        )
+        task = GPTAQ(named, qcfg=qcfg)
+    else:
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=True,
+            desc_act=False,
+            foem=FOEMConfig(alpha=0, beta=0.2, device="cpu"),
+        )
+        task = FOEM(named, qcfg=qcfg)
+
+    task.quantizer.configure(perchannel=True)
+    task.H = torch.eye(task.columns, dtype=torch.float32)
+    task.nsamples = 1
+    if kind == "gptaq":
+        task.dXXT = torch.zeros_like(task.H)
+
+    original_find_params = task.quantizer.find_params
+
+    def find_params_with_zero_scale(x, weight=False):
+        original_find_params(x, weight=weight)
+        task.quantizer.scale[0, 0] = 0
+
+    monkeypatch.setattr(
+        task.quantizer,
+        "find_params",
+        find_params_with_zero_scale,
+    )
+
+    quantized, scale, zero, *_ = task.quantize(blocksize=4)
+
+    assert torch.isfinite(quantized).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert (scale != 0).all()
 
 
 class TestGPTQAddBatchCPU(ModelTest):

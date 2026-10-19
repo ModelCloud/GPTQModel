@@ -1178,7 +1178,9 @@ class GPTQ:
                     w_min = block_mod.min(dim=1, keepdim=True).values
                     w_max = block_mod.max(dim=1, keepdim=True).values
                     mid = (w_max + w_min) / 2.0
-                    scale = torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                    scale = _replace_zero_scale(
+                        torch.clamp((w_max - w_min) / maxq, min=1e-8)
+                    )
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - mid) / scale + zero_mid)
                     q = torch.clamp(q, 0, maxq)
@@ -1189,7 +1191,7 @@ class GPTQ:
                     mean = block_mod.mean(dim=1, keepdim=True)
                     max_dev = torch.max((block_mod - mean).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = (2 * max_dev) / maxq
+                    scale = _replace_zero_scale((2 * max_dev) / maxq)
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - mean) / scale + zero_mid)
                     q = torch.clamp(q, 0, maxq)
@@ -1200,7 +1202,7 @@ class GPTQ:
                     median = block_mod.median(dim=1, keepdim=True).values
                     max_dev = torch.max((block_mod - median).abs(), dim=1, keepdim=True).values
                     max_dev = torch.clamp(max_dev, min=1e-8)
-                    scale = (2 * max_dev) / maxq
+                    scale = _replace_zero_scale((2 * max_dev) / maxq)
                     zero_mid = torch.full_like(scale, maxq / 2.0)
                     q = torch.round((block_mod - median) / scale + zero_mid)
                     q = torch.clamp(q, 0, maxq)
@@ -1213,7 +1215,9 @@ class GPTQ:
                     std = torch.clamp(std, min=1e-8)
                     lo = mean - sigma * std
                     hi = mean + sigma * std
-                    scale = torch.clamp((hi - lo) / maxq, min=1e-8)
+                    scale = _replace_zero_scale(
+                        torch.clamp((hi - lo) / maxq, min=1e-8)
+                    )
                     zero = torch.round(-lo / scale)
                     zero = torch.clamp(zero, 0, maxq)
                     q = torch.round(block_mod / scale + zero)
@@ -1222,8 +1226,9 @@ class GPTQ:
                 elif strategy == FallbackStrategy.RTN:
                     self.quantizer.find_params(block_mod, weight=True)
                     dequant = self.quantizer.quantize(block_mod)
-                    scale = self.quantizer.scale
-                    zero = self.quantizer.zero
+                    scale, zero = _replace_zero_scale(
+                        self.quantizer.scale, self.quantizer.zero
+                    )
                 else:
                     raise ValueError(f"Unsupported fallback strategy: {strategy}")
 
