@@ -777,6 +777,12 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     inp = torch.randn(4, 8, 16, device="cpu", dtype=torch.float16)
 
     captured = {}
+    prepare_calls = []
+    original_prepare = AWQProcessor._prepare_module_forward
+
+    def counting_prepare(self, x, module, module_kwargs):
+        prepare_calls.append(1)
+        return original_prepare(self, x, module, module_kwargs)
 
     def fake_compute_best_scale(
         self,
@@ -788,15 +794,18 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
         fp16_output,
         module_kwargs,
         replay_batch_size=None,
+        prepared_forward=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
         captured["fp16_output_shapes"] = [tuple(chunk.shape) for chunk in fp16_output]
         captured["replay_batch_size"] = replay_batch_size
+        captured["prepared_forward"] = prepared_forward
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
     monkey_patcher.setattr(AWQProcessor, "_compute_best_scale", fake_compute_best_scale)
+    monkey_patcher.setattr(AWQProcessor, "_prepare_module_forward", counting_prepare)
 
     try:
         processor._search_best_scale(
@@ -814,6 +823,8 @@ def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     assert captured["fp16_output_devices"] == ["cpu"]
     assert captured["fp16_output_shapes"] == [(4, 8, 16)]
     assert captured["replay_batch_size"] == 0
+    assert captured["prepared_forward"] is not None
+    assert len(prepare_calls) == 1
 
 
 def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
@@ -851,6 +862,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         fp16_output,
         module_kwargs,
         replay_batch_size=None,
+        prepared_forward=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
@@ -1010,6 +1022,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         fp16_output,
         module_kwargs,
         replay_batch_size=None,
+        prepared_forward=None,
     ):
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
