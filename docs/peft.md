@@ -4,6 +4,8 @@ GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tune
 
 Use a current PEFT release together with `optimum>=1.24.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The examples below were validated with PEFT 0.21.2, Optimum 2.3.0, Transformers 5.19.0, and PyTorch 2.14.
 
+For training, select a trainable kernel such as `gptq_torch`. The default Marlin kernel is optimized for inference and does not propagate gradients through the quantized layers, so a backward pass will fail.
+
 ```bash
 pip install "gptqmodel[hf]" peft
 ```
@@ -11,11 +13,12 @@ pip install "gptqmodel[hf]" peft
 ## Train a LoRA adapter
 
 ```py
-import torch
 from peft import LoraConfig, get_peft_model
-from transformers import AutoModelForCausalLM
+from transformers import AutoConfig, AutoModelForCausalLM
 
-base = AutoModelForCausalLM.from_pretrained(quant_path, device_map="auto")
+config = AutoConfig.from_pretrained(quant_path)
+config.quantization_config["backend"] = "gptq_torch"
+base = AutoModelForCausalLM.from_pretrained(quant_path, config=config, device_map="auto")
 model = get_peft_model(
     base,
     LoraConfig(
@@ -62,6 +65,7 @@ from transformers import AutoModelForCausalLM
 full_precision = AutoModelForCausalLM.from_pretrained(
     original_model_id,
     dtype=torch.bfloat16,
+    device_map="auto",
 )
 merged = PeftModel.from_pretrained(full_precision, adapter_path).merge_and_unload()
 merged.save_pretrained(merged_model_path)
