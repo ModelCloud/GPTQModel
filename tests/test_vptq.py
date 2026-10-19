@@ -31,6 +31,7 @@ from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from tokenizers.trainers import WordLevelTrainer
 from transformers import PreTrainedTokenizerFast
+from transformers.models.gpt2.modeling_gpt2 import GPT2Config, GPT2LMHeadModel
 from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 from gptqmodel import BACKEND, GPTQModel
@@ -302,6 +303,35 @@ def test_vptq_pack_boundary_values_and_padding():
     # codes outside the declared bit width are rejected instead of silently truncated
     with pytest.raises(ValueError):
         pack_vptq_indices(torch.full((1, 2), 1 << index_bits, dtype=torch.int64), index_bits)
+
+
+@pytest.mark.parametrize(
+    ("indices", "res_indices", "index_bits", "res_bits"),
+    [
+        ([[-1, 0]], [[0, 0]], 2, 2),
+        ([[4, 0]], [[0, 0]], 2, 2),
+        ([[0, 0]], [[0, 4]], 2, 2),
+        ([[0, 0]], [[-1, 0]], 2, 2),
+    ],
+    ids=[
+        "negative-main",
+        "main-overflow-with-residual",
+        "residual-overflow",
+        "negative-residual",
+    ],
+)
+def test_vptq_pack_rejects_out_of_range_index_streams(
+    indices, res_indices, index_bits, res_bits
+):
+    """Each stream must fit its own field instead of spilling into the other."""
+
+    with pytest.raises(ValueError, match="pack_vptq_indices"):
+        pack_vptq_indices(
+            torch.tensor(indices, dtype=torch.int64),
+            index_bits,
+            res_indices=torch.tensor(res_indices, dtype=torch.int64),
+            res_bits=res_bits,
+        )
 
 
 def test_vptq_pack_empty_and_invalid():
@@ -1171,6 +1201,24 @@ def _build_tiny_qwen3_fixture(model_dir: Path):
     return config, _build_local_tokenizer(model_dir)
 
 
+def _build_tiny_gpt2_fixture(model_dir: Path):
+    """Save a tiny GPT-2 checkpoint whose projections are `transformers.Conv1D`."""
+
+    config = GPT2Config(
+        n_layer=1,
+        n_embd=32,
+        n_head=4,
+        n_positions=32,
+        n_ctx=32,
+        vocab_size=128,
+        pad_token_id=0,
+        bos_token_id=1,
+        eos_token_id=2,
+    )
+    GPT2LMHeadModel(config).save_pretrained(model_dir)
+    return config, _build_local_tokenizer(model_dir)
+
+
 def _build_calibration_dataset(tokenizer: PreTrainedTokenizerFast):
     return [
         {
@@ -1264,6 +1312,62 @@ def test_tiny_qwen3_vptq_quantization_smoke(tmp_path: Path):
     assert torch.allclose(packed_logits, dense_logits, atol=2e-3, rtol=2e-3)
     assert torch.equal(packed_tokens, dense_tokens)
     assert packed_tokens.shape[-1] == inputs["input_ids"].shape[-1] + 4
+
+
+@pytest.mark.cpu
+@pytest.mark.slow
+def test_tiny_gpt2_vptq_conv1d_quantize_save_reload(tmp_path: Path):
+    """Processor replay and feature inference must preserve Conv1D orientation."""
+
+    native_dir = tmp_path / "native"
+    quantized_dir = tmp_path / "quantized"
+    native_dir.mkdir()
+
+    _, tokenizer = _build_tiny_gpt2_fixture(native_dir)
+    calibration = _build_calibration_dataset(tokenizer)
+
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 8],
+        kmeans_iters=8,
+        device="cpu",
+    )
+    model = GPTQModel.load(str(native_dir), quantize_config=qcfg, backend=BACKEND.VPTQ_TORCH)
+    model.quantize(calibration, batch_size=1, backend=BACKEND.VPTQ_TORCH, calibration_data_min_length=1)
+
+    expected_modules = {
+        "model.transformer.h.0.attn.c_attn": (32, 96),
+        "model.transformer.h.0.attn.c_proj": (32, 32),
+        "model.transformer.h.0.mlp.c_fc": (32, 128),
+        "model.transformer.h.0.mlp.c_proj": (128, 32),
+    }
+    for name, (in_features, out_features) in expected_modules.items():
+        module = dict(model.named_modules())[name]
+        assert isinstance(module, VPTQLinear), name
+        assert (module.in_features, module.out_features) == (in_features, out_features)
+        assert module.dequantize().shape == (out_features, in_features)
+        activations = torch.randn(2, 3, in_features)
+        assert module(activations).shape == (2, 3, out_features)
+
+    prompt = "tiny vptq calibration sample"
+    inputs = tokenizer(prompt, return_tensors="pt")
+    model.save(quantized_dir)
+
+    reloaded = GPTQModel.load(str(quantized_dir), device="cpu", dtype=torch.bfloat16)
+    reloaded_modules = dict(reloaded.named_modules())
+    for name, (in_features, out_features) in expected_modules.items():
+        restored = reloaded_modules[name]
+        assert isinstance(restored, VPTQLinear), name
+        assert (restored.in_features, restored.out_features) == (in_features, out_features)
+        assert restored.dequantize().shape == (out_features, in_features)
+        assert torch.equal(restored.dequantize(), dict(model.named_modules())[name].dequantize())
+
+    with torch.no_grad():
+        logits = reloaded.model(**inputs).logits
+        tokens = reloaded.model.generate(**inputs, max_new_tokens=2, do_sample=False)
+    assert torch.isfinite(logits).all()
+    assert tokens.shape[-1] == inputs["input_ids"].shape[-1] + 2
 
 
 @pytest.mark.cpu

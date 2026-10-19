@@ -157,18 +157,27 @@ def pack_vptq_indices(
         return torch.zeros(*indices.shape[:-1], 0, dtype=torch.int32, device=indices.device)
 
     merged = indices.to(torch.int64)
+    if bool((merged < 0).any()):
+        raise ValueError("pack_vptq_indices: `indices` must be non-negative.")
+    if int(merged.max().item()) >= (1 << index_bits):
+        raise ValueError(
+            f"pack_vptq_indices: `indices` values exceed the {index_bits}-bit packing range."
+        )
     if res_indices is not None:
         if res_indices.shape != indices.shape:
             raise ValueError(
                 f"pack_vptq_indices: residual index shape {tuple(res_indices.shape)} "
                 f"must match index shape {tuple(indices.shape)}."
             )
-        merged = merged | (res_indices.to(torch.int64) << index_bits)
-
-    if int(merged.max().item()) >= (1 << total_bits):
-        raise ValueError(
-            f"pack_vptq_indices: index values exceed the {total_bits}-bit packing range."
-        )
+        res_merged = res_indices.to(torch.int64)
+        if bool((res_merged < 0).any()):
+            raise ValueError("pack_vptq_indices: `res_indices` must be non-negative.")
+        if int(res_merged.max().item()) >= (1 << res_bits):
+            raise ValueError(
+                f"pack_vptq_indices: `res_indices` values exceed the "
+                f"{res_bits}-bit packing range."
+            )
+        merged = merged | (res_merged << index_bits)
 
     bit_offsets = torch.arange(total_bits, device=indices.device, dtype=torch.int64)
     bits = (merged.unsqueeze(-1) >> bit_offsets) & 1

@@ -6,6 +6,7 @@ import copy
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
+import transformers
 from torch.nn import Module
 
 from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
@@ -133,6 +134,16 @@ class VPTQProcessor(LoopProcessor):
         result.quantized_weight = to_cpu(result.quantized_weight)
         return result
 
+    @staticmethod
+    def _replay_weight(module: NamedModule, weight: torch.Tensor) -> torch.Tensor:
+        """Restore the quantized weight to the live module's native layout."""
+
+        if isinstance(module.module, transformers.Conv1D):
+            # VPTQ stores `(out_features, in_features)`; `transformers.Conv1D`
+            # keeps the transposed `(in_features, out_features)` layout.
+            return weight.t()
+        return weight
+
     def process(
         self,
         module: NamedModule,
@@ -157,8 +168,12 @@ class VPTQProcessor(LoopProcessor):
             q.free()
 
         wq = result.quantized_weight
+        replay_wq = self._replay_weight(module, wq)
         if self.calculate_w_wq_diff:
-            w_wq_diff = module.weight.data.to(dtype=torch.float32) - wq.to(dtype=torch.float32)
+            w_wq_diff = (
+                module.weight.data.to(dtype=torch.float32)
+                - replay_wq.to(dtype=torch.float32)
+            )
         else:
             w_wq_diff = None
 
@@ -195,12 +210,12 @@ class VPTQProcessor(LoopProcessor):
             if self.calculate_w_wq_diff:
                 module.state["w_wq_diff"] = w_wq_diff
                 # EoRA rematerializes the dense module before consuming this.
-                module.state["wq"] = wq.detach().to(device=CPU, copy=True)
+                module.state["wq"] = replay_wq.detach().to(device=CPU, copy=True)
 
         self.log_new_row(stat)
 
         # single largest deallocation of vram happens here
-        module.weight.data = wq
+        module.weight.data = replay_wq
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
