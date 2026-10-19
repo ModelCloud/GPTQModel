@@ -680,6 +680,12 @@ print(f"Result: {result}")
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
+### PEFT LoRA Training and Adapter Loading 🤗
+
+GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded through `PeftModel`. Use a current PEFT release with `optimum>=1.24.0`; older combinations may warn that the quantized layer type is unsupported.
+
+PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
+
 ### How to Add Support for a New Model 🛠️
 
 Read the [`gptqmodel/models/llama.py`](https://github.com/ModelCloud/GPTQModel/blob/5627f5ffeb3f19b1a2a97e3b6de6fbe668b0dc42/gptqmodel/models/llama.py) code which explains in detail via comments how the model support is defined. Use it as a guide for PRs to add new models. Most models follow the same pattern.
