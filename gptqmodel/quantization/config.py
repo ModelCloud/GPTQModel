@@ -4606,7 +4606,26 @@ class QQQConfig(GPTQConfig):
         return QQQ_EXPORT_FORMATS
 
     def default_desc_act(self) -> bool:
-        return True
+        # QQQ's packed runtime has contiguous 128-column group scales and no
+        # g_idx buffer, so GPTQ-style activation reordering cannot be
+        # represented in the checkpoint.
+        return False
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        if self.desc_act:
+            raise ValueError(
+                "QQQConfig: `desc_act=True` is not supported by the QQQ runtime; "
+                "use `desc_act=False`."
+            )
+
+        for layer, override in (self.dynamic or {}).items():
+            if isinstance(override, dict) and bool(override.get("desc_act")):
+                raise ValueError(
+                    f"QQQConfig: `desc_act=True` is not supported by the QQQ runtime; "
+                    f"layer `{layer}` must use `desc_act=False`."
+                )
 
 
 @dataclass

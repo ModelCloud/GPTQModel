@@ -58,14 +58,14 @@ def test_qqq_processor_bridge_preserves_mps_values(group_size):
             )
 
 
-def _quantize(source, calibration, group_size, desc_act):
+def _quantize(source, calibration, group_size):
     layer = torch.nn.Linear(
         source.shape[1], source.shape[0], bias=False, dtype=source.dtype
     )
     layer.weight.data.copy_(source)
     config = QQQConfig(
         group_size=group_size,
-        desc_act=desc_act,
+        desc_act=False,
         damp_percent=0.01,
         offload_to_disk=False,
     )
@@ -83,10 +83,9 @@ def _quantize(source, calibration, group_size, desc_act):
 
 
 @pytest.mark.parametrize("group_size", [-1, 128])
-@pytest.mark.parametrize("desc_act", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_qqq_processor_mlx_matches_torch(
-    monkeypatch, group_size, desc_act, dtype
+    monkeypatch, group_size, dtype
 ):
     torch.manual_seed(73)
     source = torch.randn((7, 256), dtype=torch.float32).to(dtype)
@@ -96,11 +95,11 @@ def test_qqq_processor_mlx_matches_torch(
     monkeypatch.setattr(
         qqq_module, "_mlx_qqq_quantization_available", lambda: False
     )
-    expected = _quantize(source, calibration, group_size, desc_act)
+    expected = _quantize(source, calibration, group_size)
     monkeypatch.setattr(
         qqq_module, "_mlx_qqq_quantization_available", lambda: True
     )
-    actual = _quantize(source, calibration, group_size, desc_act)
+    actual = _quantize(source, calibration, group_size)
 
     torch.testing.assert_close(actual[0], expected[0], rtol=0, atol=0)
     torch.testing.assert_close(actual[1], expected[1], rtol=1e-6, atol=1e-6)
@@ -126,11 +125,11 @@ def test_qqq_processor_dead_columns_preserve_original_extra_scale(
     monkeypatch.setattr(
         qqq_module, "_mlx_qqq_quantization_available", lambda: False
     )
-    expected = _quantize(source, calibration, 128, False)
+    expected = _quantize(source, calibration, 128)
     monkeypatch.setattr(
         qqq_module, "_mlx_qqq_quantization_available", lambda: True
     )
-    actual = _quantize(source, calibration, 128, False)
+    actual = _quantize(source, calibration, 128)
 
     torch.testing.assert_close(actual[7], expected[7], rtol=0, atol=0)
 
