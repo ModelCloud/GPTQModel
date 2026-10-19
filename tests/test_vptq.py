@@ -163,12 +163,428 @@ def oracle_reconstruct(result, module):
     return main.to(torch.float32)
 
 
-def build_quantizer(weight, qcfg, dtype=torch.float32):
+_ORACLE_EPS = 1e-12
+
+
+def oracle_group_setting(
+    in_features,
+    *,
+    npercent,
+    group_size,
+    group_num,
+    enable_outlier,
+):
+    """Resolve the VPTQ group layout without calling the production helper."""
+
+    initial_outlier_size = int(math.ceil((npercent / 100.0) * in_features))
+    initial_outlier_size = max(0, min(in_features, initial_outlier_size))
+    if not enable_outlier:
+        initial_outlier_size = 0
+    remaining_columns = in_features - initial_outlier_size
+
+    if group_num != -1:
+        if enable_outlier:
+            pad = remaining_columns % group_num
+            outlier_size = initial_outlier_size + pad
+            resolved_group_size = (in_features - outlier_size) // group_num
+        else:
+            outlier_size = 0
+            resolved_group_size = int(math.ceil(remaining_columns / group_num))
+        resolved_group_num = group_num
+    elif group_size != -1:
+        outlier_size = initial_outlier_size
+        resolved_group_num = int(math.ceil((in_features - outlier_size) / group_size))
+        resolved_group_size = group_size
+    else:
+        outlier_size = initial_outlier_size
+        resolved_group_num = 1
+        resolved_group_size = in_features - outlier_size
+
+    return outlier_size, resolved_group_size, resolved_group_num
+
+
+def oracle_matrix_to_vectors(data, vector_len):
+    """Split a matrix into vectors along rows using only test-local arithmetic."""
+
+    rows, columns = data.shape
+    pad = (-rows) % vector_len
+    if pad:
+        data = torch.cat(
+            [data, torch.zeros((pad, columns), dtype=data.dtype, device=data.device)],
+            dim=0,
+        )
+    vectors = data.permute(1, 0).reshape(columns, -1, vector_len).reshape(-1, vector_len)
+    return vectors, rows + pad
+
+
+def oracle_vectors_to_matrix(vectors, columns, padded_rows, rows):
+    """Inverse of :func:`oracle_matrix_to_vectors`."""
+
+    data = vectors.reshape(columns, padded_rows // vectors.shape[-1], vectors.shape[-1])
+    return data.permute(1, 0, 2).reshape(padded_rows, columns)[:rows]
+
+
+def oracle_assign(data, centroids):
+    """Return nearest-centroid assignments and true squared distances."""
+
+    centroids_norm = (centroids * centroids).sum(dim=1)
+    distance = centroids_norm.unsqueeze(0) - 2.0 * (data @ centroids.t())
+    best_distance, best_index = distance.min(dim=1)
+    return best_index, best_distance + (data * data).sum(dim=1)
+
+
+def oracle_weighted_kmeans(data, num_centroids, weights, *, iters, tol, seed):
+    """Independent Lloyd implementation with the production initialization order."""
+
+    num_rows = data.shape[0]
+    generator = torch.Generator(device=data.device)
+    generator.manual_seed(int(seed))
+    permutation = torch.randperm(num_rows, generator=generator, device=data.device)
+    if num_centroids <= num_rows:
+        init_index = permutation[:num_centroids]
+    else:
+        repeats = (num_centroids + num_rows - 1) // num_rows
+        init_index = permutation.repeat(repeats)[:num_centroids]
+    centroids = data[init_index].clone()
+
+    if weights is None:
+        weights = torch.ones(num_rows, dtype=data.dtype, device=data.device)
+    else:
+        weights = weights.to(dtype=data.dtype, device=data.device)
+
+    previous_inertia = None
+    for _ in range(max(1, int(iters))):
+        assignment, residual = oracle_assign(data, centroids)
+        inertia = (residual.double() * weights.double()).sum().item()
+
+        weighted = data * weights.unsqueeze(1)
+        sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
+        counts = torch.zeros(
+            num_centroids, dtype=data.dtype, device=data.device
+        ).index_add_(0, assignment, weights)
+        updated = sums / counts.clamp_min(_ORACLE_EPS).unsqueeze(1)
+        empty = counts <= 0
+        if bool(empty.any()):
+            updated[empty] = centroids[empty]
+        centroids = updated
+
+        if previous_inertia is not None:
+            denominator = max(abs(previous_inertia), _ORACLE_EPS)
+            if abs(previous_inertia - inertia) <= tol * denominator:
+                break
+        previous_inertia = inertia
+
+    return centroids
+
+
+def oracle_inverse_hessian_cholesky(hessian, percdamp):
+    """Independent `(H + damp * mean(diag(H)) I)^-1 = U^T U` reference."""
+
+    damped = hessian.clone()
+    diagonal = torch.arange(damped.shape[0], device=damped.device)
+    damped[diagonal, diagonal] += float(percdamp) * float(torch.diagonal(hessian).mean())
+    cholesky = torch.linalg.cholesky(damped)
+    inverse = torch.cholesky_inverse(cholesky)
+    return torch.linalg.cholesky(inverse, upper=True)
+
+
+def oracle_vptq_pass(
+    weight,
+    hessian,
+    group_bounds,
+    vector_lens,
+    centroids,
+    res_centroids,
+    enable_residual,
+    outlier_size,
+    group_size,
+    block_size,
+    percdamp,
+):
+    """Independent sequential VPTQ pass with GPTQ-style error propagation."""
+
+    rows, columns = weight.shape
+    device = weight.device
+    index_tensors = {}
+    res_index_tensors = {}
+    for cidx, (start, end) in enumerate(group_bounds):
+        codebook = centroids.get(cidx)
+        if codebook is None or end <= start:
+            index_tensors[cidx] = None
+            res_index_tensors[cidx] = None
+            continue
+        vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
+        num_indices = math.ceil(rows / vector_len)
+        index_tensors[cidx] = torch.zeros(
+            (num_indices, end - start), dtype=torch.int64, device=device
+        )
+        res_codebook = None if res_centroids is None else res_centroids.get(cidx)
+        if enable_residual and res_codebook is not None:
+            res_index_tensors[cidx] = torch.zeros_like(index_tensors[cidx])
+        else:
+            res_index_tensors[cidx] = None
+
+    inv_hessian = oracle_inverse_hessian_cholesky(hessian, percdamp).to(torch.float32)
+    inv_scale = 1.0 / torch.diagonal(inv_hessian)
+
+    weight = weight.clone().float()
+    quantized = torch.zeros_like(weight)
+    qerror = torch.zeros_like(weight)
+
+    for block_start in range(0, columns, block_size):
+        block_end = min(block_start + block_size, columns)
+        block_weight = weight[:, block_start:block_end].clone()
+        block_qweight = torch.zeros_like(block_weight)
+        block_error = torch.zeros_like(block_weight)
+        block_inv = inv_hessian[block_start:block_end, block_start:block_end]
+
+        for k in range(block_end - block_start):
+            column_index = block_start + k
+            column = block_weight[:, k : k + 1]
+            cidx = (
+                0
+                if column_index < outlier_size
+                else 1 + (column_index - outlier_size) // group_size
+            )
+            codebook = centroids.get(cidx)
+
+            if codebook is None:
+                q_column = column.clone()
+                assignment = None
+                res_assignment = None
+            else:
+                codebook = codebook.to(dtype=column.dtype)
+                vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
+                vectors, padded_rows = oracle_matrix_to_vectors(column, vector_len)
+                assignment, _ = oracle_assign(vectors, codebook)
+                selected = codebook[assignment]
+
+                res_assignment = None
+                res_codebook = (
+                    None if res_centroids is None else res_centroids.get(cidx)
+                )
+                if res_codebook is not None:
+                    res_codebook = res_codebook.to(dtype=column.dtype)
+                    res_assignment, _ = oracle_assign(vectors - selected, res_codebook)
+                    selected = selected + res_codebook[res_assignment]
+
+                q_column = oracle_vectors_to_matrix(selected, 1, padded_rows, rows)
+
+            block_qweight[:, k : k + 1] = q_column
+            if assignment is not None and index_tensors.get(cidx) is not None:
+                group_start = group_bounds[cidx][0]
+                index_tensors[cidx][:, column_index - group_start] = assignment
+            if res_assignment is not None and res_index_tensors.get(cidx) is not None:
+                group_start = group_bounds[cidx][0]
+                res_index_tensors[cidx][:, column_index - group_start] = res_assignment
+
+            error = (column - q_column) * inv_scale[column_index]
+            if k + 1 < block_end - block_start:
+                block_weight[:, k + 1 :] -= error @ block_inv[k : k + 1, k + 1 :]
+            block_error[:, k : k + 1] = error
+
+        quantized[:, block_start:block_end] = block_qweight
+        qerror[:, block_start:block_end] = block_weight - block_qweight
+        if block_end < columns:
+            weight[:, block_end:] -= (
+                block_error @ inv_hessian[block_start:block_end, block_end:]
+            )
+
+    return quantized, qerror, index_tensors, res_index_tensors
+
+
+def oracle_vptq_quantize(weight, hessian, qcfg, target_dtype=torch.float32):
+    """Complete independent VPTQ reference used to audit the production quantizer."""
+
+    vector_lens = [int(item) for item in qcfg.vector_lens]
+    num_centroids = [int(item) for item in qcfg.num_centroids]
+    num_res_centroids = [int(item) for item in qcfg.num_res_centroids]
+    enable_outlier = (
+        vector_lens[0] > 0
+        and num_centroids[0] > 1
+        and qcfg.npercent > 0
+    )
+    outlier_size, group_size, group_num = oracle_group_setting(
+        weight.shape[1],
+        npercent=qcfg.npercent,
+        group_size=qcfg.group_size,
+        group_num=qcfg.group_num,
+        enable_outlier=enable_outlier,
+    )
+
+    weight = weight.clone()
+    hessian = hessian.to(device=weight.device, dtype=torch.float64).clone()
+    dead = torch.diagonal(hessian) == 0
+    if bool(dead.any()):
+        hessian[dead, dead] = 1.0
+        weight[:, dead] = 0.0
+
+    mean_diag = torch.diagonal(hessian).mean()
+    if float(mean_diag) > 0:
+        hessian = hessian / mean_diag
+
+    weight_scale = None
+    weight_bias = None
+    if qcfg.enable_norm:
+        norm_dim = int(qcfg.norm_dim)
+        weight_min = weight.amin(dim=norm_dim)
+        weight_max = weight.amax(dim=norm_dim)
+        scale = (weight_max - weight_min).clamp_min(_ORACLE_EPS)
+        weight = (weight - weight_min.unsqueeze(norm_dim)) / scale.unsqueeze(norm_dim)
+        weight_scale = scale
+        weight_bias = weight_min
+
+    kmeans_weight = None
+    if qcfg.kmeans_mode == "hessian":
+        kmeans_weight = (
+            torch.diagonal(hessian)
+            .to(weight.dtype)
+            .unsqueeze(0)
+            .expand(weight.shape[0], weight.shape[1])
+            .contiguous()
+        )
+
+    perm = None
+    if qcfg.enable_perm:
+        perm = torch.argsort(torch.diagonal(hessian), descending=True)
+        weight = weight[:, perm]
+        hessian = hessian[perm][:, perm]
+        if kmeans_weight is not None:
+            kmeans_weight = kmeans_weight[:, perm]
+
+    group_bounds = [(0, outlier_size)] + [
+        (
+            outlier_size + index * group_size,
+            min(weight.shape[1], outlier_size + (index + 1) * group_size),
+        )
+        for index in range(group_num)
+    ]
+
+    centroids = {}
+    working_centroids = {}
+    for cidx, (start, end) in enumerate(group_bounds):
+        vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
+        num_centroids_for_group = num_centroids[0] if cidx == 0 else num_centroids[1]
+        if num_centroids_for_group <= 1 or end <= start:
+            centroids[cidx] = None
+            working_centroids[cidx] = None
+            continue
+
+        vectors, _ = oracle_matrix_to_vectors(weight[:, start:end], vector_len)
+        group_weights = None
+        if kmeans_weight is not None:
+            weight_vectors, _ = oracle_matrix_to_vectors(
+                kmeans_weight[:, start:end], vector_len
+            )
+            group_weights = weight_vectors.mean(dim=1)
+        group_centroids = oracle_weighted_kmeans(
+            vectors,
+            num_centroids_for_group,
+            group_weights,
+            iters=qcfg.kmeans_iters,
+            tol=qcfg.kmeans_tol,
+            seed=qcfg.kmeans_seed,
+        )
+        centroids[cidx] = group_centroids.to(dtype=target_dtype)
+        working_centroids[cidx] = centroids[cidx].to(dtype=torch.float32)
+
+    res_centroids = dict.fromkeys(centroids)
+    working_res_centroids = dict.fromkeys(centroids)
+    enable_residual = num_res_centroids[1] > 1
+
+    quantized, qerror, indices, res_indices = oracle_vptq_pass(
+        weight=weight,
+        hessian=hessian,
+        group_bounds=group_bounds,
+        vector_lens=vector_lens,
+        centroids=working_centroids,
+        res_centroids=None,
+        enable_residual=False,
+        outlier_size=outlier_size,
+        group_size=group_size,
+        block_size=max(1, int(qcfg.block_size)),
+        percdamp=qcfg.percdamp,
+    )
+
+    if enable_residual:
+        for cidx, (start, end) in enumerate(group_bounds):
+            vector_len = vector_lens[0] if cidx == 0 else vector_lens[1]
+            num_res = num_res_centroids[0] if cidx == 0 else num_res_centroids[1]
+            if num_res <= 1 or end <= start:
+                continue
+
+            residual_vectors, _ = oracle_matrix_to_vectors(
+                qerror[:, start:end], vector_len
+            )
+            group_weights = None
+            if kmeans_weight is not None:
+                weight_vectors, _ = oracle_matrix_to_vectors(
+                    kmeans_weight[:, start:end], vector_len
+                )
+                group_weights = weight_vectors.mean(dim=1)
+            group_res_centroids = oracle_weighted_kmeans(
+                residual_vectors,
+                num_res,
+                group_weights,
+                iters=qcfg.kmeans_iters,
+                tol=qcfg.kmeans_tol,
+                seed=qcfg.kmeans_seed,
+            )
+            res_centroids[cidx] = group_res_centroids.to(dtype=target_dtype)
+            working_res_centroids[cidx] = res_centroids[cidx].to(dtype=torch.float32)
+
+        quantized, qerror, indices, res_indices = oracle_vptq_pass(
+            weight=weight,
+            hessian=hessian,
+            group_bounds=group_bounds,
+            vector_lens=vector_lens,
+            centroids=working_centroids,
+            res_centroids=working_res_centroids,
+            enable_residual=True,
+            outlier_size=outlier_size,
+            group_size=group_size,
+            block_size=max(1, int(qcfg.block_size)),
+            percdamp=qcfg.percdamp,
+        )
+
+    if perm is not None:
+        quantized = quantized[:, torch.argsort(perm)]
+
+    if qcfg.enable_norm:
+        norm_dim = int(qcfg.norm_dim)
+        scale = weight_scale.to(dtype=target_dtype)
+        bias = weight_bias.to(dtype=target_dtype)
+        quantized = (
+            quantized.to(dtype=target_dtype) * scale.unsqueeze(norm_dim)
+            + bias.unsqueeze(norm_dim)
+        ).to(dtype=torch.float32)
+
+    return {
+        "centroids": centroids,
+        "indices": indices,
+        "res_centroids": res_centroids,
+        "res_indices": res_indices,
+        "weight_scale": weight_scale,
+        "weight_bias": weight_bias,
+        "perm": perm,
+        "outlier_size": outlier_size,
+        "group_size": group_size,
+        "group_num": group_num,
+        "quantized_weight": quantized.to(dtype=target_dtype),
+    }
+
+
+def build_quantizer(weight, qcfg, dtype=torch.float32, *, use_fallback=False):
     """Attach a VPTQ quantizer to a real `nn.Linear` holding `weight`."""
 
     linear = torch.nn.Linear(weight.shape[1], weight.shape[0], bias=False, dtype=dtype)
     linear.weight.data.copy_(weight.to(dtype))
-    return VPTQ(module=linear, qcfg=qcfg)
+    quantizer = VPTQ(module=linear, qcfg=qcfg)
+    if not use_fallback:
+        # Tests that pass a synthetic Hessian exercise that Hessian directly;
+        # the calibration-coverage fallback is tested separately.
+        quantizer.fallback = None
+    return quantizer
 
 
 def build_module(
@@ -638,6 +1054,7 @@ def test_vptq_quantize_module_roundtrip(variant, overrides, dtype):
     result, loss = quantizer.quantize_weight(weight, hessian, target_dtype=dtype)
 
     assert math.isfinite(loss) and loss >= 0.0
+    assert result.stats["fallback"] is False
 
     module = build_module(qcfg, weight.shape[1], weight.shape[0], dtype=dtype)
     module.pack(linear=quantizer.layer, vptq_result=result)
@@ -648,6 +1065,135 @@ def test_vptq_quantize_module_roundtrip(variant, overrides, dtype):
     # quantizer reconstruction (vectorized) == module unpack+lookup == oracle
     assert torch.equal(dequantized, result.quantized_weight)
     assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
+
+
+VPTQ_ORACLE_VARIANTS = [
+    ("baseline", {}),
+    ("group_size_remainder", {"group_size": 6}),
+    ("group_num", {"group_num": 4}),
+    ("perm", {"enable_perm": True}),
+    ("norm", {"enable_norm": True}),
+    ("residual", {"num_res_centroids": [-1, 8]}),
+    ("outlier", {"npercent": 12.5, "vector_lens": [4, 8], "num_centroids": [8, 32]}),
+    (
+        "all",
+        {
+            "npercent": 12.5,
+            "vector_lens": [4, 8],
+            "num_centroids": [8, 32],
+            "num_res_centroids": [-1, 8],
+            "enable_perm": True,
+            "enable_norm": True,
+            "group_num": 2,
+        },
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("variant", "overrides"),
+    VPTQ_ORACLE_VARIANTS,
+    ids=[item[0] for item in VPTQ_ORACLE_VARIANTS],
+)
+def test_vptq_quantizer_matches_independent_oracle(variant, overrides):
+    """The complete quantizer must match an independent Torch reference exactly."""
+
+    seed = 40 + [item[0] for item in VPTQ_ORACLE_VARIANTS].index(variant)
+    weight, hessian = synthetic_problem(out_features=24, in_features=32, seed=seed)
+    settings = {
+        "num_centroids": [-1, 32],
+        "num_res_centroids": [-1, -1],
+        "vector_lens": [-1, 4],
+        "kmeans_iters": 6,
+        "kmeans_tol": 1e-12,
+        "block_size": 16,
+    }
+    settings.update(overrides)
+    qcfg = VPTQConfig(**settings)
+
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+    assert result.stats["fallback"] is False
+
+    expected = oracle_vptq_quantize(weight, hessian, qcfg)
+    assert (
+        result.outlier_size,
+        result.group_size,
+        result.group_num,
+    ) == (
+        expected["outlier_size"],
+        expected["group_size"],
+        expected["group_num"],
+    )
+
+    for field in ("centroids", "res_centroids"):
+        actual_map = getattr(result, field)
+        expected_map = expected[field]
+        assert set(actual_map) == set(expected_map)
+        for cidx, expected_tensor in expected_map.items():
+            actual_tensor = actual_map[cidx]
+            if expected_tensor is None:
+                assert actual_tensor is None
+            else:
+                assert actual_tensor is not None
+                assert torch.allclose(
+                    actual_tensor, expected_tensor, rtol=1e-6, atol=1e-6
+                ), f"{field}[{cidx}] drift {float((actual_tensor - expected_tensor).abs().max())}"
+
+    for field in ("indices", "res_indices"):
+        actual_map = getattr(result, field)
+        expected_map = expected[field]
+        assert set(actual_map) == set(expected_map)
+        for cidx, expected_tensor in expected_map.items():
+            actual_tensor = actual_map[cidx]
+            if expected_tensor is None:
+                assert actual_tensor is None
+            else:
+                assert actual_tensor is not None
+                assert torch.equal(actual_tensor, expected_tensor), f"{field}[{cidx}] mismatch"
+
+    for field in ("weight_scale", "weight_bias", "perm"):
+        actual_tensor = getattr(result, field)
+        expected_tensor = expected[field]
+        if expected_tensor is None:
+            assert actual_tensor is None
+        else:
+            assert actual_tensor is not None
+            assert torch.equal(actual_tensor, expected_tensor), field
+
+    drift = (result.quantized_weight - expected["quantized_weight"]).abs()
+    assert torch.allclose(
+        result.quantized_weight, expected["quantized_weight"], rtol=1e-6, atol=1e-6
+    ), f"quantized weight max drift {float(drift.max())}"
+
+
+def test_vptq_norm_scale_clamp_matches_independent_oracle():
+    """The normalization scale clamp must match the independent reference."""
+
+    weight = torch.full((8, 16), 0.25)
+    hessian = torch.eye(16, dtype=torch.float64)
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 8],
+        num_res_centroids=[-1, -1],
+        enable_norm=True,
+        kmeans_iters=2,
+        kmeans_tol=1e-12,
+        block_size=8,
+    )
+
+    quantizer = build_quantizer(weight, qcfg)
+    result, _loss = quantizer.quantize_weight(weight, hessian)
+    assert result.stats["fallback"] is False
+
+    expected = oracle_vptq_quantize(weight, hessian, qcfg)
+    assert torch.allclose(result.weight_scale, expected["weight_scale"], rtol=1e-6, atol=1e-6)
+    assert torch.allclose(
+        result.quantized_weight,
+        expected["quantized_weight"],
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 def test_vptq_codebook_larger_than_available_vectors():
@@ -855,8 +1401,12 @@ def test_vptq_residual_reduces_hessian_error():
         kmeans_iters=12,
     )
 
-    _, base_loss = build_quantizer(weight, base).quantize_weight(weight, hessian)
-    _, residual_loss = build_quantizer(weight, with_residual).quantize_weight(weight, hessian)
+    base_result, base_loss = build_quantizer(weight, base).quantize_weight(weight, hessian)
+    residual_result, residual_loss = build_quantizer(
+        weight, with_residual
+    ).quantize_weight(weight, hessian)
+    assert base_result.stats["fallback"] is False
+    assert residual_result.stats["fallback"] is False
     assert residual_loss < base_loss
 
 
@@ -868,11 +1418,14 @@ def test_vptq_nearest_centroid_tie_breaks_to_lower_index():
     tie = torch.tensor([[0.5, 0.0]])
     assignment, _ = _chunked_assign(tie, codebook)
     assert int(assignment[0]) == 0
+    assert int(oracle_assign(tie, codebook)[0][0]) == 0
 
     below = torch.tensor([[0.5 - 1e-6, 0.0]])
     above = torch.tensor([[0.5 + 1e-6, 0.0]])
     assert int(_chunked_assign(below, codebook)[0][0]) == 0
     assert int(_chunked_assign(above, codebook)[0][0]) == 1
+    assert int(oracle_assign(below, codebook)[0][0]) == 0
+    assert int(oracle_assign(above, codebook)[0][0]) == 1
 
 
 def test_vptq_chunked_assign_returns_true_squared_distance():
@@ -893,23 +1446,36 @@ def test_vptq_chunked_assign_returns_true_squared_distance():
     assert torch.allclose(exact_residual, torch.zeros(2), atol=1e-6)
 
 
-def test_vptq_quantizer_accumulates_calibration_hessian():
+@pytest.mark.parametrize(
+    "shape",
+    [(6,), (2, 6), (2, 3, 6), (2, 3, 5, 6)],
+    ids=["rank1", "rank2", "rank3", "rank4"],
+)
+def test_vptq_quantizer_accumulates_calibration_hessian(shape):
     """`add_batch` must average `x^T x` over the calibration tokens."""
 
     qcfg = VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
     quantizer = build_quantizer(torch.zeros(8, 6), qcfg)
 
     generator = torch.Generator().manual_seed(3)
-    batch = torch.randn(2, 5, 6, generator=generator, dtype=torch.float64)
-    quantizer.add_batch(batch)
-    quantizer.add_batch(batch.flip(0))
+    first = torch.randn(*shape, generator=generator, dtype=torch.float64)
+    second = torch.randn(*shape, generator=generator, dtype=torch.float64)
+    quantizer.add_batch(first)
+    quantizer.add_batch(second)
 
-    # both batches hold the same tokens, so the mean Hessian is the single-batch one
-    tokens = batch.reshape(-1, 6)
+    tokens = torch.cat([first.reshape(-1, 6), second.reshape(-1, 6)], dim=0)
     expected = (tokens.t() @ tokens) / tokens.shape[0]
     hessian = quantizer.materialize_hessian()
+    normalized_error = float((hessian - expected).norm() / expected.norm())
+    assert torch.isfinite(hessian).all()
+    assert normalized_error <= 1e-6
     assert torch.allclose(hessian, expected, rtol=1e-12, atol=1e-12)
-    assert quantizer.nsamples == batch.shape[0] * batch.shape[1] * 2
+    assert quantizer.nsamples == tokens.shape[0]
+
+    with pytest.raises(ValueError, match="at least one dimension"):
+        quantizer.add_batch(torch.tensor(1.0))
+    with pytest.raises(ValueError, match="expected 6 input features"):
+        quantizer.add_batch(torch.randn(5))
 
 
 def test_vptq_percdamp_is_applied_exactly_once():

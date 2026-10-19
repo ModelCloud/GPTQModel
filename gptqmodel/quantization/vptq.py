@@ -256,11 +256,14 @@ class VPTQ:
         """Accumulate `H = sum(x^T x)` for one calibration batch."""
 
         del out
-        if inp.dim() == 2:
-            inp = inp.unsqueeze(0)
-        if inp.dim() == 3:
-            inp = inp.reshape(-1, inp.shape[-1])
-        inp = inp.t()
+        if inp.dim() == 0:
+            raise ValueError("VPTQ.add_batch expects an input with at least one dimension.")
+        if inp.shape[-1] != self.columns:
+            raise ValueError(
+                f"VPTQ.add_batch expected {self.columns} input features, "
+                f"got {inp.shape[-1]}."
+            )
+        inp = inp.reshape(-1, self.columns).t()
 
         dev = inp.device
         batch_tokens = inp.shape[1]
