@@ -4731,6 +4731,12 @@ class VPTQConfig(GPTQConfig):
                 "VPTQConfig: `num_centroids[1]` must be a power-of-two integer of at least 2, "
                 "so the main codebook needs at least one index bit."
             )
+        if self.num_res_centroids[1] == 1:
+            raise ValueError(
+                "VPTQConfig: `num_res_centroids[1]` must be -1 (disabled) or a power-of-two "
+                "integer of at least 2; a one-entry residual codebook has no index bits and "
+                "cannot be packed."
+            )
         if self.npercent < 0:
             raise ValueError("VPTQConfig: `npercent` must be greater than or equal to 0.")
         if self.npercent > 0 and self.vector_lens[0] <= 0:

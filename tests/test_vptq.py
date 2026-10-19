@@ -941,6 +941,8 @@ def test_vptq_config_rejects_unusable_codebooks():
     # a single-entry codebook needs zero index bits, which cannot be packed
     with pytest.raises(ValueError):
         VPTQConfig(num_centroids=[-1, 1], num_res_centroids=[-1, -1], vector_lens=[-1, 4])
+    with pytest.raises(ValueError, match=r"num_res_centroids\[1\].*at least 2"):
+        VPTQConfig(num_centroids=[-1, 16], num_res_centroids=[-1, 1], vector_lens=[-1, 4])
     # more than 32 bits per element cannot fit the int32 word stream
     with pytest.raises(ValueError):
         VPTQConfig(num_centroids=[-1, 2**17], num_res_centroids=[-1, 2**16], vector_lens=[-1, 8])
@@ -952,6 +954,35 @@ def test_vptq_config_rejects_unusable_codebooks():
         VPTQConfig(num_centroids=[-1, -1], num_res_centroids=[-1, -1], vector_lens=[-1, 4], npercent=10.0)
     with pytest.raises(ValueError):
         VPTQConfig(num_centroids=[-1, 64], num_res_centroids=[-1, -1], vector_lens=[4, 8], npercent=10.0)
+
+
+def test_vptq_config_rejects_one_entry_residual_on_reload():
+    """A persisted one-entry residual codebook must not reload as disabled."""
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+    )
+    payload = qcfg.to_dict()
+    payload["num_res_centroids"] = [-1, 1]
+    with pytest.raises(ValueError, match=r"num_res_centroids\[1\].*at least 2"):
+        QuantizeConfig.from_quant_config(payload)
+
+
+def test_vptq_linear_rejects_one_entry_residual_codebook():
+    """Direct runtime construction must not silently disable a requested residual stage."""
+
+    with pytest.raises(ValueError, match=r"num_res_centroids\[1\].*at least 2"):
+        VPTQLinear(
+            bits=2,
+            in_features=16,
+            out_features=8,
+            vector_lens=(-1, 4),
+            num_centroids=(-1, 16),
+            num_res_centroids=(-1, 1),
+            dtype=torch.float32,
+        )
 
 
 def test_vptq_config_round_trip_keeps_group_size():

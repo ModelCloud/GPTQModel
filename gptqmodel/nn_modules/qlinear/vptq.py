@@ -125,6 +125,12 @@ class VPTQLinear(WeightOnlyQuantLinear):
         self.outlier_vector_len = self.vector_lens[0] if self.vector_lens[0] > 0 else 0
         self.num_centroids = self.num_centroids_pair[1]
         self.num_res_centroids = self.num_res_centroids_pair[1]
+        if self.num_res_centroids == 1:
+            raise ValueError(
+                "VPTQLinear: `num_res_centroids[1]` must be -1 (disabled) or a power-of-two "
+                "integer of at least 2; a one-entry residual codebook has no index bits and "
+                "cannot be packed."
+            )
         self.enable_residual = self.num_res_centroids > 1
         self.enable_outlier = vptq_outlier_enabled(
             npercent=self.npercent,

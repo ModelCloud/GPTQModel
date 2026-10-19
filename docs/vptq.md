@@ -103,6 +103,9 @@ Configuration constraints:
 - `num_centroids[1]` must be a power of two of at least `2`, and `npercent > 0`
   additionally requires `vector_lens[0] > 0` and `num_centroids[0]` of at least
   `2`. A one-entry codebook needs zero index bits and cannot be packed.
+- `num_res_centroids[1]` must be `-1` (disabled) or a power of two of at least
+  `2`. A one-entry residual codebook needs zero index bits and is rejected
+  rather than silently disabling residual refinement.
 - The main and residual index widths together may not exceed 32 bits, the width
   of one packed word.
 - `num_res_centroids[0]` must stay `-1`: the runtime has no residual codebook
