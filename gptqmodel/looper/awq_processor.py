@@ -1602,6 +1602,7 @@ class AWQProcessor(LoopProcessor):
         for key, value in global_allowed_kwargs.items():
             module_kwargs.setdefault(key, value)
         module_kwargs = self._align_module_kwargs_to_input(inp, module_kwargs)
+        replay_batch_size = self._scale_search_replay_batch_size(inp)
 
         if use_chunked_scale_search:
             # Build the FP reference output one micro-batch at a time and move each
@@ -1610,7 +1611,12 @@ class AWQProcessor(LoopProcessor):
             with ctx(torch.inference_mode()):
                 fp16_output = [
                     output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
-                    for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
+                    for output in self._iter_module_forward_outputs(
+                        inp,
+                        module2inspect,
+                        module_kwargs,
+                        batch_size=replay_batch_size,
+                    )
                 ]
         else:
             # Legacy path: run the full forward eagerly on the module device and keep
@@ -1622,7 +1628,14 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 4]: Compute loss
         best_scales, loss = self._compute_best_scale(
-            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+            inp,
+            w_mean,
+            x_mean,
+            module2inspect,
+            layers,
+            fp16_output,
+            module_kwargs,
+            replay_batch_size=replay_batch_size,
         )
 
         return (
@@ -1845,6 +1858,7 @@ class AWQProcessor(LoopProcessor):
         linears2scale: List[nn.Linear],
         fp16_output: torch.Tensor,
         kwargs: Dict={},
+        replay_batch_size: Optional[int] = None,
     ):
         """
         Compute loss and select best scales
@@ -1972,7 +1986,12 @@ class AWQProcessor(LoopProcessor):
                 total_elements = 0
                 for ref_chunk, int_w_output in zip(
                     reference_chunks,
-                    self._iter_prepared_forward_outputs(prepared_x, module2inspect, prepared_kwargs),
+                    self._iter_prepared_forward_outputs(
+                        prepared_x,
+                        module2inspect,
+                        prepared_kwargs,
+                        batch_size=replay_batch_size,
+                    ),
                 ):
                     int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                     ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
@@ -2155,9 +2174,37 @@ class AWQProcessor(LoopProcessor):
 
         return x, module_kwargs
 
+    def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
+        """Rows per scale-search replay forward.
+
+        The capture batch size is tuned for activation capture and is often 1.
+        Replaying one capture batch at a time turns every candidate scale into a
+        series of tiny GEMMs.  Coalesce the captured batches up to the activation
+        budget already used by the chunked loss so peak memory stays bounded.
+        Returns ``0`` when the whole replay fits in one forward.
+        """
+
+        if x.dim() == 0:
+            return None
+        rows = int(x.shape[0])
+        if rows <= 1:
+            return None
+        hidden = int(x.shape[-1]) if x.dim() > 1 else 1
+        element_size = max(int(x.element_size()), 2)
+        # Input, forward output, and the CPU reference copy are resident together.
+        bytes_per_row = max(1, hidden) * element_size * 3
+        budget_rows = max(1, int(self.max_chunk_memory) // bytes_per_row)
+        if budget_rows >= rows:
+            return 0
+        return max(int(self._quant_batch_size or 1), budget_rows)
+
     @torch.inference_mode()
     def _iter_prepared_forward_outputs(
-            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+            self,
+            x: torch.Tensor,
+            module: torch.nn.Module,
+            module_kwargs: Dict,
+            batch_size: Optional[int] = None,
     ):
         """Yields forward outputs chunk-by-chunk for an already-prepared forward.
 
@@ -2166,7 +2213,12 @@ class AWQProcessor(LoopProcessor):
         module device.
         """
 
-        effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+        effective_quant_batch_size = self._quant_batch_size if batch_size is None else batch_size
+        effective_quant_batch_size = (
+            effective_quant_batch_size
+            if effective_quant_batch_size and effective_quant_batch_size > 0
+            else None
+        )
 
         if (
             effective_quant_batch_size is None
@@ -2207,18 +2259,33 @@ class AWQProcessor(LoopProcessor):
 
     @torch.inference_mode()
     def _iter_module_forward_outputs(
-            self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
+            self,
+            x: torch.Tensor,
+            module: torch.nn.Module,
+            module_kwargs: Dict,
+            batch_size: Optional[int] = None,
     ):
         """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
 
         x, prepared_kwargs = self._prepare_module_forward(x, module, module_kwargs)
-        yield from self._iter_prepared_forward_outputs(x, module, prepared_kwargs)
+        yield from self._iter_prepared_forward_outputs(
+            x, module, prepared_kwargs, batch_size=batch_size
+        )
 
-    def _iter_reference_output_chunks(self, x: torch.Tensor, reference_output):
+    def _iter_reference_output_chunks(
+        self,
+        x: torch.Tensor,
+        reference_output,
+    ):
         """Normalizes reference outputs to the same chunking contract as forward outputs."""
 
         if isinstance(reference_output, torch.Tensor):
-            effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+            effective_quant_batch_size = self._quant_batch_size
+            effective_quant_batch_size = (
+                effective_quant_batch_size
+                if effective_quant_batch_size and effective_quant_batch_size > 0
+                else None
+            )
             if (
                 effective_quant_batch_size is None
                 or x.dim() == 0

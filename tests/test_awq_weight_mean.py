@@ -753,7 +753,7 @@ def test_awq_align_module_kwargs_crops_single_batch_max_cache_mask():
     assert aligned["attention_mask"][0, 0, 0, 1] == torch.finfo(torch.float32).min
 
 
-def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_chunks():
+def test_awq_search_best_scale_coalesces_cpu_activation_replay():
     if not torch.cuda.is_available():
         pytest.skip("CUDA is not available for this test run.")
 
@@ -787,10 +787,12 @@ def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_ch
         layers_arg,
         fp16_output,
         module_kwargs,
+        replay_batch_size=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_devices"] = [chunk.device.type for chunk in fp16_output]
         captured["fp16_output_shapes"] = [tuple(chunk.shape) for chunk in fp16_output]
+        captured["replay_batch_size"] = replay_batch_size
         return torch.ones_like(w_mean, dtype=w_mean.dtype).detach().cpu(), 0.0
 
     monkey_patcher = MonkeyPatch()
@@ -809,8 +811,9 @@ def test_awq_search_best_scale_keeps_cpu_activations_off_device_until_forward_ch
         monkey_patcher.undo()
 
     assert captured["inp_device"] == "cpu"
-    assert captured["fp16_output_devices"] == ["cpu", "cpu", "cpu", "cpu"]
-    assert captured["fp16_output_shapes"] == [(1, 8, 16)] * 4
+    assert captured["fp16_output_devices"] == ["cpu"]
+    assert captured["fp16_output_shapes"] == [(4, 8, 16)]
+    assert captured["replay_batch_size"] == 0
 
 
 def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
@@ -847,6 +850,7 @@ def test_awq_search_best_scale_can_disable_chunked_activation_streaming():
         layers_arg,
         fp16_output,
         module_kwargs,
+        replay_batch_size=None,
     ):
         captured["inp_device"] = _inp.device.type
         captured["fp16_output_type"] = type(fp16_output).__name__
@@ -1005,6 +1009,7 @@ def test_awq_weight_mean_matches_legacy_impl(param_name, device, group_size):
         layers_arg,
         fp16_output,
         module_kwargs,
+        replay_batch_size=None,
     ):
         captured["fast"] = w_mean.detach().to(torch.float32).cpu()
         captured["baseline"] = (
