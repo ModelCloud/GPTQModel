@@ -1603,18 +1603,24 @@ class AWQProcessor(LoopProcessor):
             module_kwargs.setdefault(key, value)
         module_kwargs = self._align_module_kwargs_to_input(inp, module_kwargs)
         replay_batch_size = self._scale_search_replay_batch_size(inp)
+        prepared_forward = None
 
         if use_chunked_scale_search:
-            # Build the FP reference output one micro-batch at a time and move each
+            # Resolve the device placement and rotary scaffolding once. Both the FP
+            # reference and every candidate-scale replay reuse this prepared forward.
+            prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
+            prepared_forward = (prepared_x, prepared_kwargs)
+
+            # Build the FP reference output one replay batch at a time and move each
             # chunk back to CPU immediately so scale search does not keep the full
             # activation tensor resident on GPU.
             with ctx(torch.inference_mode()):
                 fp16_output = [
                     output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
-                    for output in self._iter_module_forward_outputs(
-                        inp,
+                    for output in self._iter_prepared_forward_outputs(
+                        prepared_x,
                         module2inspect,
-                        module_kwargs,
+                        prepared_kwargs,
                         batch_size=replay_batch_size,
                     )
                 ]
@@ -1636,6 +1642,7 @@ class AWQProcessor(LoopProcessor):
             fp16_output,
             module_kwargs,
             replay_batch_size=replay_batch_size,
+            prepared_forward=prepared_forward,
         )
 
         return (
@@ -1859,6 +1866,7 @@ class AWQProcessor(LoopProcessor):
         fp16_output: torch.Tensor,
         kwargs: Dict={},
         replay_batch_size: Optional[int] = None,
+        prepared_forward: Optional[Tuple[torch.Tensor, Dict]] = None,
     ):
         """
         Compute loss and select best scales
@@ -1936,7 +1944,10 @@ class AWQProcessor(LoopProcessor):
         prepared_kwargs = kwargs
         reference_chunks = None
         if use_chunked_scale_search:
-            prepared_x, prepared_kwargs = self._prepare_module_forward(x, module2inspect, kwargs)
+            if prepared_forward is None:
+                prepared_x, prepared_kwargs = self._prepare_module_forward(x, module2inspect, kwargs)
+            else:
+                prepared_x, prepared_kwargs = prepared_forward
             reference_chunks = [
                 chunk.to(device=device)
                 for chunk in self._iter_reference_output_chunks(x, fp16_output)
