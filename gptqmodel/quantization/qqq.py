@@ -577,6 +577,12 @@ class QQQ:
             blocksize=128,
     ):
         start = time.time()
+        if self.qcfg.desc_act:
+            raise ValueError(
+                "QQQ quantization does not support `desc_act=True`; "
+                "use `desc_act=False`."
+            )
+
         from ..utils.fallback import (
             resolve_fallback_strategy,
             resolve_threshold,

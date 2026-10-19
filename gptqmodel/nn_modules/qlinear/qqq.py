@@ -70,7 +70,7 @@ class QQQLinear(GroupedQuantLinear):
     SUPPORTS_FORMATS = {FORMAT.QQQ: 100}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 128]
-    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
@@ -110,10 +110,8 @@ class QQQLinear(GroupedQuantLinear):
         # self.original_in_features = in_features
         # self.original_out_features = out_features
 
-        if desc_act and group_size == -1:
-            # In this case, act_order == True is the same as act_order == False
-            # (since we have only one group per output channel)
-            desc_act = False
+        if desc_act:
+            raise ValueError("QQQ does not support activation ordering (`desc_act=True`).")
 
         super().__init__(
             bits=bits,
@@ -461,7 +459,7 @@ class QQQTorchLinear(QQQLinear):
     SUPPORTS_FORMATS = {FORMAT.QQQ: 90}
     SUPPORTS_BITS = [4]
     SUPPORTS_GROUP_SIZE = [-1, 128]
-    SUPPORTS_DESC_ACT = [True, False]
+    SUPPORTS_DESC_ACT = [False]
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False

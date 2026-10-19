@@ -61,6 +61,7 @@ class TestGroupSize(unittest.TestCase):
         quantize_config = QuantizeConfig(
             bits=4,
             group_size=group_size,
+            desc_act=False,
             quant_method=METHOD.QQQ,
             format=FORMAT.QQQ,
         )

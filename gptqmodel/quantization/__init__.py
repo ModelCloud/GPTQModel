@@ -32,6 +32,7 @@ from .config import (
                      ParoConfig,
                      PreProcessorCode,
                      PreProcessorConfig,
+                     QQQConfig,
                      QuantBits,
                      QuantizeConfig,
                      QuantizeEmbed,

@@ -305,6 +305,7 @@ from .quantization import (
     GPTQConfig,
     NormConfig,
     NormType,
+    QQQConfig,
     QuantizeConfig,
     QuantizeEmbed,
     QuantizeEmbedConfig,

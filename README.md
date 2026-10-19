@@ -473,6 +473,40 @@ procedures, and operational gotchas.
 
 `GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
+##### QQQ Example: Llama 3.2 1B Instruct
+
+QQQ supports 4-bit symmetric weights with `group_size=-1` or `group_size=128`. Use `desc_act=False`: the packed QQQ runtime stores contiguous group scales and does not support GPTQ-style activation reordering. MSE scale search (`mse=2.4`) is the recommended quality recipe.
+
+```py
+import torch
+from datasets import load_dataset
+from gptqmodel import GPTQModel, QQQConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-QQQ-4bit"
+
+calibration_dataset = load_dataset(
+    "allenai/c4",
+    data_files="en/c4-train.00001-of-01024.json.gz",
+    split="train",
+).select(range(256))["text"]
+
+quant_config = QQQConfig(
+    bits=4,
+    group_size=128,
+    desc_act=False,
+    mse=2.4,
+)
+
+model = GPTQModel.load(model_id, quant_config, dtype=torch.float16)
+model.quantize(
+    calibration_dataset,
+    batch_size=1,
+    calibration_concat_size=2048,
+)
+model.save(quant_path)
+```
+
 Experimental W4A streams on NVIDIA GB10 (SM121) keep GPTQ INT4 weights and quantize the *activations*: E4M3 FP8 with a per-token scale, or E2M1 NVFP4 with E4M3 block scales. Selected Llama decoder operators pass encoded activations and scales across module and layer boundaries instead of decoding to BF16. See the **[W4A guide](docs/gptq-w4a-gb10.md)** for the policy reference, and the [accuracy appendix](docs/gptq-w4a-accuracy-notes.md) for measured quality.
 
 ##### Preprocessors 🧹
