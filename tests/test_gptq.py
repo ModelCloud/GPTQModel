@@ -19,7 +19,7 @@ from models.model_test import ModelTest
 from gptqmodel.quantization import gptq as gptq_mod
 from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization.quantizer import Quantizer
+from gptqmodel.quantization.quantizer import Quantizer, quantize
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -371,6 +371,117 @@ def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
         assert not offenders, (name, offenders)
         if sym:
             assert "aten.__and__.Tensor" not in dispatched, (name, dispatched)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("requires_groupwise_processing", [False, True])
+def test_quantize_bypasses_zero_scale_without_nonfinite_output(
+    device, dtype, requires_groupwise_processing
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    target = torch.device(device)
+    if target.type == "cuda":
+        torch.cuda.set_device(0)
+
+    maxq = 7 if requires_groupwise_processing else 15
+    x = torch.tensor(
+        [
+            [8.0, 1.5, 0.5, -0.5, -1.5, -8.0, 0.0, -0.0],
+            [1.0, 0.0, -0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+    scale = torch.tensor(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+    zero = torch.tensor(
+        [
+            [0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            [float("nan"), 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+
+    actual = quantize(
+        x,
+        scale,
+        zero,
+        torch.tensor(maxq, device=target),
+        requires_groupwise_processing,
+    )
+
+    safe_scale = torch.where(
+        scale == 0,
+        torch.full_like(scale, torch.finfo(dtype).tiny),
+        scale,
+    )
+    undefined_zero = (scale == 0) & ~torch.isfinite(zero)
+    safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
+    if requires_groupwise_processing:
+        expected = safe_scale * torch.clamp(
+            torch.round(x / safe_scale), -maxq, maxq
+        )
+    else:
+        expected = safe_scale * (
+            torch.clamp(torch.round(x / safe_scale) + safe_zero, 0, maxq)
+            - safe_zero
+        )
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("act_group_aware", [False, True])
+def test_gptq_bypasses_zero_scale_and_logs_once(monkeypatch, act_group_aware):
+    torch.manual_seed(0)
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        act_group_aware=act_group_aware,
+    )
+    gptq = GPTQ(linear, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+
+    inputs = torch.randn(16, 8)
+    gptq.add_batch(inputs, linear(inputs))
+
+    original_find_params = gptq.quantizer.find_params
+
+    def find_params_with_zero_scale(x, weight=False):
+        original_find_params(x, weight=weight)
+        gptq.quantizer.scale[0, 0] = 0
+
+    monkeypatch.setattr(gptq.quantizer, "find_params", find_params_with_zero_scale)
+
+    errors = []
+    monkeypatch.setattr(
+        gptq_mod.log,
+        "error",
+        lambda message, *args, **kwargs: errors.append(message % args if args else message),
+    )
+
+    quantized, scale, zero, *_ = gptq.quantize(blocksize=4)
+
+    assert torch.isfinite(quantized).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert (scale != 0).all()
+    assert len(errors) == 1
+    assert "zero scale found and bypassed" in errors[0]
 
 
 class TestGPTQAddBatchCPU(ModelTest):

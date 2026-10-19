@@ -34,7 +34,7 @@ from .gar import (
     invert_perm,
 )
 from .npu_linalg import npu_inverse_cholesky_factor
-from .quantizer import HF_OPTIMUM, Quantizer
+from .quantizer import HF_OPTIMUM, Quantizer, _replace_zero_scale
 
 
 log = setup_logger()
@@ -455,6 +455,19 @@ class GPTQ:
             stage,
             source_device,
         )
+
+    def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
+        """Bypass zero scales and report the unstable module once per pass."""
+
+        if bool((scale == 0).any()):
+            log.error(
+                "Quantization: Module `%s` -> zero scale found and bypassed. "
+                "This module may not be properly trained or received enough calibration data, "
+                "causing unmanageable outliers. If this is a MoE module, please check with the "
+                "model publisher and/or provide more calibration data.",
+                self.name,
+            )
+        return _replace_zero_scale(scale, zero)
 
     def clone_module(self, copy=True, device: torch.device = None):
         if not device:
@@ -1240,6 +1253,8 @@ class GPTQ:
         else:
             valid_cols = self.columns
 
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
+
         group_size = effective_group_size if effective_group_size != -1 else self.columns
         g_idx = torch.arange(valid_cols, device=Q.device, dtype=torch.int32) // group_size
 
@@ -1599,6 +1614,8 @@ class GPTQ:
                 scale = torch.cat((full_scale, scale[:, full_group_count:]), dim=1)
                 zero = torch.cat((full_zero, zero[:, full_group_count:]), dim=1)
 
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
+
         abs_max = max(diag.max().item(), 1.0)
         floor = abs_max * 1e-6
         effective_diag = torch.clamp(diag, min=floor) + self.qcfg.damp_percent * diag.mean()
@@ -1874,8 +1891,7 @@ class GPTQ:
                     # Vectorized quantization for the entire block (major optimization)
                     if len(scale) > 0 and len(zero) > 0:
                         # Use latest scale and zero for the entire block
-                        latest_scale = scale[-1]
-                        latest_zero = zero[-1]
+                        latest_scale, latest_zero = _replace_zero_scale(scale[-1], zero[-1])
 
                         # Vectorized quantization using broadcasting
                         # Reshape scales and zeros to match block dimensions
@@ -1911,8 +1927,9 @@ class GPTQ:
                     # No grouping - vectorized quantization for entire block
                     maxq_val = 2 ** self.qcfg.bits - 1
                     if hasattr(self.quantizer, 'scale') and hasattr(self.quantizer, 'zero'):
-                        latest_scale = self.quantizer.scale
-                        latest_zero = self.quantizer.zero
+                        latest_scale, latest_zero = _replace_zero_scale(
+                            self.quantizer.scale, self.quantizer.zero
+                        )
 
                         if latest_scale.dim() == 1:
                             latest_scale = latest_scale.view(-1, 1)
@@ -1988,8 +2005,11 @@ class GPTQ:
                                     now_idx += 1
                             else:
                                 self.quantizer = groups[i1 // block_group_size]
-                        block_scale = self.quantizer.scale.flatten().unsqueeze(0)
-                        block_zero = self.quantizer.zero.flatten().unsqueeze(0)
+                        block_scale, block_zero = _replace_zero_scale(
+                            self.quantizer.scale, self.quantizer.zero
+                        )
+                        block_scale = block_scale.flatten().unsqueeze(0)
+                        block_zero = block_zero.flatten().unsqueeze(0)
                         column_group = _uniform_column_group(count, W.device)
                     else:
                         block_scales = []
@@ -2017,8 +2037,11 @@ class GPTQ:
                             if group_index is None:
                                 group_index = len(block_scales)
                                 parameter_indices[key] = group_index
-                                block_scales.append(self.quantizer.scale.flatten())
-                                block_zeros.append(self.quantizer.zero.flatten())
+                                block_scale, block_zero = _replace_zero_scale(
+                                    self.quantizer.scale, self.quantizer.zero
+                                )
+                                block_scales.append(block_scale.flatten())
+                                block_zeros.append(block_zero.flatten())
                             column_groups.append(group_index)
 
                         block_scale = torch.stack(block_scales)
@@ -2147,6 +2170,8 @@ class GPTQ:
             valid_cols = self._original_columns
             scale = self.truncate_last_dim(scale, valid_cols)
             zero = self.truncate_last_dim(zero, valid_cols)
+
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
 
         if cpu_fallback_used and Q.device != result_device:
             log.info(
