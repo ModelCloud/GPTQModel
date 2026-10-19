@@ -22,6 +22,7 @@ from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
 
+
 _MLX_FOEM_MIN_ELEMENTS = 256 * 1024
 
 
@@ -300,6 +301,7 @@ class FOEM(GPTQ):
             if isinstance(self.module, transformers.Conv1D):
                 Q = Q.t()
             Q = Q.reshape(self.module.weight.shape).type_as(self.module.weight.data)
+            scale, zero = self._sanitize_scale_and_log(scale, zero)
             return (
                 Q,
                 scale,
@@ -411,6 +413,7 @@ class FOEM(GPTQ):
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
 
         duration = time.time() - start
 

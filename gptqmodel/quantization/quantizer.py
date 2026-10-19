@@ -16,9 +16,38 @@ log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
 
+
+def _replace_zero_scale(scale: torch.Tensor, zero: torch.Tensor | None = None):
+    """Replace exact zero scales with a representable positive value.
+
+    ``1e-8`` is not representable as a normal ``float16`` value and would
+    underflow to zero there.  Use the dtype's smallest normal instead so the
+    division below remains finite for every supported weight dtype.
+    """
+
+    zero_mask = scale == 0
+    safe_scale = torch.where(
+        zero_mask,
+        torch.full_like(scale, torch.finfo(scale.dtype).tiny),
+        scale,
+    )
+    if zero is None:
+        return safe_scale
+
+    # A zero scale can also make the affine zero point non-finite.  Preserve
+    # valid zero points, but pin undefined lanes to zero so the result stays
+    # finite.
+    undefined_zero = zero_mask & ~torch.isfinite(zero)
+    safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
+    return safe_scale, safe_zero
+
+
 def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
+
+    scale, zero = _replace_zero_scale(scale, zero)
+
     if requires_groupwise_processing:
         q = torch.clamp(torch.round(x / scale), -maxq, maxq)
         return scale * q

@@ -257,6 +257,7 @@ class GPTAQ(GPTQ):
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
 
         duration = time.time() - start
 
