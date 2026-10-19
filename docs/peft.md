@@ -4,7 +4,7 @@ GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tune
 
 Use a current PEFT release together with `optimum>=1.24.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The examples below were validated with PEFT 0.21.2, Optimum 2.3.0, Transformers 5.19.0, and PyTorch 2.14.
 
-For training, select a trainable kernel such as `gptq_torch`. The default Marlin kernel is optimized for inference and does not propagate gradients through the quantized layers, so a backward pass will fail.
+For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
 ```bash
 pip install "gptqmodel[hf]" peft
@@ -17,7 +17,9 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoConfig, AutoModelForCausalLM
 
 config = AutoConfig.from_pretrained(quant_path)
-config.quantization_config["backend"] = "gptq_torch"
+trainable_backends = {"gptq": "gptq_torch", "awq": "torch_awq"}
+method = config.quantization_config["quant_method"]
+config.quantization_config["backend"] = trainable_backends[method]
 base = AutoModelForCausalLM.from_pretrained(quant_path, config=config, device_map="auto")
 model = get_peft_model(
     base,
@@ -47,11 +49,13 @@ The adapter remains separate at inference time. This is the supported path for a
 
 ## Merging the adapter
 
-PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Calling `merge_and_unload()` on a quantized model therefore raises:
+PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Calling `merge_and_unload()` on a quantized model therefore raises for GPTQ:
 
 ```text
 ValueError: Cannot merge LORA layers when the model is gptq quantized
 ```
+
+For AWQ, PEFT's AWQ LoRA wrapper raises `NotImplementedError` instead.
 
 This is intentional, not a GPT-QModel defect: the base model does not store dense floating-point weights that a LoRA delta can be added to.
 
