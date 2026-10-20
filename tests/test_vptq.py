@@ -728,6 +728,22 @@ def test_vptq_pack_boundary_values_and_padding():
         pack_vptq_indices(torch.full((1, 2), 1 << index_bits, dtype=torch.int64), index_bits)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_vptq_pack_bounds_validation_matches_cpu(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    valid = torch.tensor([[0, 3, 7]], dtype=torch.int64, device=device)
+    packed = pack_vptq_indices(valid, 3)
+    expected = pack_vptq_indices(valid.cpu(), 3)
+    assert torch.equal(packed.cpu(), expected)
+
+    with pytest.raises(ValueError, match="must be non-negative"):
+        pack_vptq_indices(torch.tensor([[0, -1]], dtype=torch.int64, device=device), 3)
+    with pytest.raises(ValueError, match="packing range"):
+        pack_vptq_indices(torch.tensor([[0, 8]], dtype=torch.int64, device=device), 3)
+
+
 @pytest.mark.parametrize(
     ("indices", "res_indices", "index_bits", "res_bits"),
     [

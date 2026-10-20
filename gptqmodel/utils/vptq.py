@@ -157,9 +157,12 @@ def pack_vptq_indices(
         return torch.zeros(*indices.shape[:-1], 0, dtype=torch.int32, device=indices.device)
 
     merged = indices.to(torch.int64)
-    if bool((merged < 0).any()):
+    merged_min, merged_max = (
+        int(value) for value in torch.stack(torch.aminmax(merged)).tolist()
+    )
+    if merged_min < 0:
         raise ValueError("pack_vptq_indices: `indices` must be non-negative.")
-    if int(merged.max().item()) >= (1 << index_bits):
+    if merged_max >= (1 << index_bits):
         raise ValueError(
             f"pack_vptq_indices: `indices` values exceed the {index_bits}-bit packing range."
         )
@@ -170,9 +173,12 @@ def pack_vptq_indices(
                 f"must match index shape {tuple(indices.shape)}."
             )
         res_merged = res_indices.to(torch.int64)
-        if bool((res_merged < 0).any()):
+        res_min, res_max = (
+            int(value) for value in torch.stack(torch.aminmax(res_merged)).tolist()
+        )
+        if res_min < 0:
             raise ValueError("pack_vptq_indices: `res_indices` must be non-negative.")
-        if int(res_merged.max().item()) >= (1 << res_bits):
+        if res_max >= (1 << res_bits):
             raise ValueError(
                 f"pack_vptq_indices: `res_indices` values exceed the "
                 f"{res_bits}-bit packing range."
