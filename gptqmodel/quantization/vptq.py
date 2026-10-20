@@ -325,9 +325,9 @@ class VPTQ:
     def _hessian_is_usable(hessian: torch.Tensor) -> bool:
         """Report whether the Hessian holds any calibration information."""
 
-        if not bool(torch.isfinite(hessian).all()):
-            return False
-        return float(torch.diagonal(hessian).abs().sum().item()) > 0.0
+        finite = torch.isfinite(hessian).all()
+        nonzero_diagonal = torch.diagonal(hessian).abs().sum() > 0.0
+        return bool(finite & nonzero_diagonal)
 
     @torch.no_grad()
     def quantize(self) -> Tuple[VPTQQuantResult, float, float]:
