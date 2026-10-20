@@ -164,3 +164,25 @@ supported on CPU, CUDA, and other Torch devices.
 
 VPTQ checkpoints are not understood by Transformers, vLLM, or SGLang, and the
 checkpoint/resume feature is not available for VPTQ quantizations.
+
+## Short PR benchmark
+
+For a compact method comparison, run `scripts/benchmark_vptq.py` with one model
+and a fresh output directory. The default matrix is `dense`, VPTQ 2/4/8-bit,
+and GPTQ 2/4/8-bit. It reports WikiText-2 perplexity using 128 calibration
+rows of 512 tokens each and an 8192-token evaluation window; ARC and throughput are
+optional because they materially increase the runtime.
+
+```bash
+python scripts/benchmark_vptq.py \
+  --model Qwen/Qwen3-0.6B \
+  --output-root ./benchmark-vptq
+```
+
+Repeat the command with `Qwen/Qwen3-8B` for the larger reference model.
+
+Use `--with-arc` or `--with-speed` only when those additional measurements are
+needed. To use multiple GPUs, launch one configuration per visible device with
+`--configs vptq2`, `--configs vptq4`, and so on, then collect each
+`results.json` into the PR table. Do not commit generated checkpoints or result
+files.

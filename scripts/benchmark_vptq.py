@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Reproducible VPTQ quality and speed benchmark.
+"""Short, reproducible VPTQ quality benchmark.
 
-The benchmark intentionally keeps one model family and one tokenizer per run.
-It can build dense, GPTQ, and VPTQ checkpoints, then measure WikiText-2
-perplexity, ARC accuracy, decode throughput, peak CUDA memory, and effective
-bits per replaced weight.
+The default run follows the compact comparison used by the project's other
+method PRs: one model, deterministic calibration/evaluation windows, and a
+WikiText-2 perplexity row for dense, VPTQ, and GPTQ at 2/4/8 bits.  Throughput
+and ARC are opt-in because they make a PR benchmark substantially longer while
+not changing the quantization-quality comparison.
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ from gptqmodel.utils.backend import BACKEND
 
 WIKITEXT_DATASET = "Salesforce/wikitext"
 WIKITEXT_CONFIG = "wikitext-2-raw-v1"
+VPTQ_CONFIGS = {
+    # (main index bits + residual index bits) / vector length = nominal bpw.
+    "vptq2": dict(vector_lens=[-1, 8], num_centroids=[-1, 4096], num_res_centroids=[-1, 16]),
+    "vptq4": dict(vector_lens=[-1, 2], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
+    "vptq8": dict(vector_lens=[-1, 1], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
+}
 
 
 def _device(value: str) -> torch.device:
@@ -51,21 +58,33 @@ def _load_calibration(tokenizer, blocks: int, block_size: int):
         truncation=True,
         max_length=blocks * block_size,
     ).input_ids[0]
-    return [input_ids[start : start + block_size].tolist() for start in range(0, min(input_ids.numel(), blocks * block_size), block_size)]
+    return [
+        input_ids[start : start + block_size].tolist()
+        for start in range(0, min(input_ids.numel(), blocks * block_size), block_size)
+        if input_ids[start : start + block_size].numel() == block_size
+    ]
+
+
+def _load_eval_tokens(tokenizer, max_tokens: int):
+    dataset = load_dataset(WIKITEXT_DATASET, WIKITEXT_CONFIG, split="test")
+    text = "\n\n".join(row["text"] for row in dataset)
+    return tokenizer(
+        text,
+        return_tensors="pt",
+        add_special_tokens=False,
+        truncation=True,
+        max_length=max_tokens,
+    ).input_ids
 
 
 def _build_quant_config(name: str):
-    vptq_configs = {
-        # (main index bits + residual index bits) / vector length = nominal bpw.
-        "vptq2": dict(vector_lens=[-1, 8], num_centroids=[-1, 4096], num_res_centroids=[-1, 16]),
-        "vptq4": dict(vector_lens=[-1, 2], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
-        "vptq8": dict(vector_lens=[-1, 1], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
-    }
-    if name in vptq_configs:
+    if name in VPTQ_CONFIGS:
         return VPTQConfig(
-            **vptq_configs[name],
+            **VPTQ_CONFIGS[name],
             kmeans_mode="hessian",
-            kmeans_iters=8,
+            # Keep the PR matrix bounded; full quality studies can use more
+            # Lloyd updates in a dedicated run.
+            kmeans_iters=1,
             kmeans_seed=0,
         ), BACKEND.VPTQ_TORCH
     if name.startswith("gptq"):
@@ -84,8 +103,7 @@ def _build_quant_config(name: str):
     raise ValueError(f"Unsupported quantized configuration: {name}")
 
 
-def _load_model(model_path: str, name: str, output_path: Path, args):
-    tokenizer = AutoTokenizer.from_pretrained(model_path)
+def _load_model(model_path: str, name: str, output_path: Path, args, tokenizer, calibration):
     if name == "dense":
         model = AutoModelForCausalLM.from_pretrained(
             model_path,
@@ -103,7 +121,7 @@ def _load_model(model_path: str, name: str, output_path: Path, args):
             device_map={"": str(args.device)},
         )
         model.quantize(
-            _load_calibration(tokenizer, args.calibration_rows, args.calibration_concat_size),
+            calibration,
             calibration_concat_size=args.calibration_concat_size,
             batch_size=1,
             backend=backend,
@@ -141,10 +159,7 @@ def _model_bytes_per_weight(model) -> float | None:
 
 
 @torch.inference_mode()
-def _perplexity(model, tokenizer, args) -> float:
-    dataset = load_dataset(WIKITEXT_DATASET, WIKITEXT_CONFIG, split="test")
-    text = "\n\n".join(row["text"] for row in dataset)
-    tokens = tokenizer(text, return_tensors="pt", add_special_tokens=False).input_ids
+def _perplexity(model, tokens, args) -> float:
     tokens = tokens.to(args.device)
     total_nll = 0.0
     total_tokens = 0
@@ -197,15 +212,13 @@ def _throughput(model, tokenizer, args) -> tuple[float, float, float]:
 
 
 def _arc(model_path: Path, backend, args):
-    if args.skip_arc:
-        return {}
     from tests.eval import evaluate, get_eval_task_results
 
     result = evaluate(
         model_or_id_or_path=str(model_path),
         backend=backend or BACKEND.AUTO,
         model_args={"dtype": "float16", "device": str(args.device)},
-        tasks=["arc_easy", "arc_challenge"],
+        tasks=args.arc_tasks.split(","),
         batch_size=args.arc_batch_size,
         apply_chat_template=True,
         suite_kwargs={"stream": True},
@@ -219,29 +232,52 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--configs", default="dense,vptq2,vptq4,vptq8,gptq2,gptq4,gptq8")
     parser.add_argument("--device", default="cuda:0")
-    parser.add_argument("--calibration-rows", type=int, default=32)
-    parser.add_argument("--calibration-concat-size", type=int, default=2048)
-    parser.add_argument("--eval-seq-len", type=int, default=2048)
-    parser.add_argument("--decode-tokens", type=int, default=127)
-    parser.add_argument("--warmup", type=int, default=3)
-    parser.add_argument("--trials", type=int, default=3)
+    parser.add_argument("--calibration-rows", type=int, default=128)
+    parser.add_argument("--calibration-concat-size", type=int, default=512)
+    parser.add_argument("--eval-tokens", type=int, default=8192)
+    parser.add_argument("--eval-seq-len", type=int, default=1024)
+    parser.add_argument("--decode-tokens", type=int, default=32)
+    parser.add_argument("--warmup", type=int, default=1)
+    parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--arc-batch-size", type=int, default=32)
-    parser.add_argument("--skip-arc", action="store_true")
+    parser.add_argument("--arc-tasks", default="arc_easy")
+    parser.add_argument("--with-speed", action="store_true", help="Also measure short prefill/decode throughput.")
+    parser.add_argument("--with-arc", action="store_true", help="Also run the selected ARC task(s).")
     args = parser.parse_args()
     args.device = _device(args.device)
     torch.cuda.set_device(args.device)
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    calibration = _load_calibration(tokenizer, args.calibration_rows, args.calibration_concat_size)
+    eval_tokens = _load_eval_tokens(tokenizer, args.eval_tokens)
+    if len(calibration) != args.calibration_rows:
+        raise RuntimeError(
+            f"Only loaded {len(calibration)} complete calibration rows; "
+            f"expected {args.calibration_rows}."
+        )
+
+    config_names = [item.strip() for item in args.configs.split(",") if item.strip()]
     results = []
-    for name in [item.strip() for item in args.configs.split(",") if item.strip()]:
+    for name in config_names:
         output_path = args.output_root / name
-        model, tokenizer, backend = _load_model(args.model, name, output_path, args)
-        ppl = _perplexity(model, tokenizer, args)
-        prefill, decode, peak_mib = _throughput(model, tokenizer, args)
-        arc = _arc(output_path if name != "dense" else Path(args.model), backend, args)
+        model, model_tokenizer, backend = _load_model(args.model, name, output_path, args, tokenizer, calibration)
+        ppl = _perplexity(model, eval_tokens, args)
+        if args.with_speed:
+            prefill, decode, peak_mib = _throughput(model, model_tokenizer, args)
+        else:
+            prefill = decode = peak_mib = None
+        arc = (
+            _arc(output_path if name != "dense" else Path(args.model), backend, args)
+            if args.with_arc
+            else {}
+        )
         row = {
             "model": args.model,
             "config": name,
+            "calibration_rows": args.calibration_rows,
+            "calibration_seq_len": args.calibration_concat_size,
+            "eval_tokens": args.eval_tokens,
             "ppl": ppl,
             "arc": arc,
             "prefill_tok_s": prefill,
@@ -255,7 +291,9 @@ def main() -> None:
         gc.collect()
         torch.cuda.empty_cache()
     args.output_root.mkdir(parents=True, exist_ok=True)
-    (args.output_root / "results.json").write_text(json.dumps(results, indent=2) + "\n")
+    result_path = output_path / "results.json" if len(config_names) == 1 else args.output_root / "results.json"
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    result_path.write_text(json.dumps(results, indent=2) + "\n")
 
 
 if __name__ == "__main__":
