@@ -1114,6 +1114,33 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     assert torch.equal(best_max_val, torch.ones(64, 2, 1, dtype=torch.float16))
 
 
+def test_awq_pseudo_quantize_nan_guards_use_two_host_reads():
+    """Entry and exit guards must each cost one reduction, not two."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=8)
+    )
+    torch.manual_seed(0)
+    w = torch.randn(16, 8)
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        processor.pseudo_quantize_tensor(w)
+    assert recorder.scalar_reads == 2
+
+    nan_weights = w.clone()
+    nan_weights[0, 0] = float("nan")
+    with pytest.raises(AssertionError):
+        processor.pseudo_quantize_tensor(nan_weights)
+
+    # Infinite weights produce finite-but-infinite scales; the dequantized
+    # weights become NaN, so the exit guard must still reject them.
+    inf_weights = w.clone()
+    inf_weights[0, 0] = float("inf")
+    with pytest.raises(AssertionError):
+        processor.pseudo_quantize_tensor(inf_weights)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda:0"])
 @pytest.mark.parametrize("sym", [True, False], ids=["sym", "asym"])
 @pytest.mark.parametrize("chunked", [True, False], ids=["chunked", "legacy"])

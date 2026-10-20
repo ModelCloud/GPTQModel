@@ -1775,7 +1775,7 @@ class AWQProcessor(LoopProcessor):
             assert org_w_shape[-1] % self.qcfg.group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({self.qcfg.group_size})!"
             w = w.reshape(-1, self.qcfg.group_size)
         assert w.dim() == 2
-        assert torch.isnan(w).sum() == 0
+        assert not bool(torch.isnan(w).any())
 
         # zero point quantization
         if not self.qcfg.sym:
@@ -1797,8 +1797,10 @@ class AWQProcessor(LoopProcessor):
             scales = max_val / max_int
             w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
 
-        assert torch.isnan(scales).sum() == 0
-        assert torch.isnan(w).sum() == 0
+        # A single reduction and host read covers both guards. NaN scales and
+        # NaN dequantized weights are independent failures, but each full-tensor
+        # scan previously synchronized the stream separately.
+        assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
 
         scales = scales.view(org_w_shape[0], -1)
 
