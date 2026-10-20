@@ -1310,8 +1310,8 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     assert torch.equal(best_max_val, torch.ones(64, 2, 1, dtype=torch.float16))
 
 
-def test_awq_pseudo_quantize_nan_guards_use_two_host_reads():
-    """Entry and exit guards must each cost one reduction, not two."""
+def test_awq_pseudo_quantize_nan_guard_uses_one_host_read():
+    """The exit guard covers NaN inputs without a second full-weight scan."""
 
     processor = _TestAWQProcessor(
         QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=8)
@@ -1322,7 +1322,7 @@ def test_awq_pseudo_quantize_nan_guards_use_two_host_reads():
     recorder = _ScalarReadRecorder()
     with recorder:
         processor.pseudo_quantize_tensor(w)
-    assert recorder.scalar_reads == 2
+    assert recorder.scalar_reads == 1
 
     nan_weights = w.clone()
     nan_weights[0, 0] = float("nan")

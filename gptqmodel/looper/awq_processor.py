@@ -1801,7 +1801,6 @@ class AWQProcessor(LoopProcessor):
             assert org_w_shape[-1] % self.qcfg.group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({self.qcfg.group_size})!"
             w = w.reshape(-1, self.qcfg.group_size)
         assert w.dim() == 2
-        assert not bool(torch.isnan(w).any())
 
         # zero point quantization
         if not self.qcfg.sym:
