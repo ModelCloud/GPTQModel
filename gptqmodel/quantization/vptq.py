@@ -160,9 +160,7 @@ def _weighted_kmeans(
         )
         updated = sums / counts.clamp_min(_EPS).unsqueeze(1)
         empty = counts <= 0
-        if bool(empty.any()):
-            updated[empty] = centroids[empty]
-        centroids = updated
+        centroids = torch.where(empty.unsqueeze(1), centroids, updated)
 
         if previous_inertia is not None:
             denominator = max(abs(previous_inertia), _EPS)
