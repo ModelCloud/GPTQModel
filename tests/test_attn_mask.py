@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import pytest
 import torch
 
 from gptqmodel.utils.attn_mask import apply_keep_mask_bt, normalize_seq_mask
@@ -60,6 +61,32 @@ def test_normalize_seq_mask_handles_causal_square():
 
     assert keep.shape == (batch, seq_len)
     torch.testing.assert_close(keep, torch.ones((batch, seq_len), dtype=torch.bool))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("kind", ["binary", "additive"])
+def test_normalize_seq_mask_numeric_paths_match_reference(device, kind):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    if kind == "binary":
+        mask = torch.tensor(
+            [[1, 0, 1, 1], [0, 0, 1, 0]],
+            device=device,
+            dtype=torch.int64,
+        )
+    else:
+        mask = torch.tensor(
+            [[0.0, -10000.0, 0.0, -10000.0]],
+            device=device,
+            dtype=torch.float32,
+        )
+
+    expected = mask >= 0 if torch.any(mask < 0) else mask > 0
+    actual = normalize_seq_mask(mask)
+
+    assert actual.dtype is torch.bool
+    assert torch.equal(actual, expected)
 
 
 def test_apply_keep_mask_bt_retains_order():
