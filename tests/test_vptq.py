@@ -1384,6 +1384,21 @@ def test_vptq_zero_hessian_uses_hessian_free_fallback():
     assert torch.equal(module.dequantize(), result.quantized_weight)
 
 
+def test_vptq_hessian_usability_rejects_zero_and_nonfinite():
+    """The combined device predicate must preserve the Hessian validity rules."""
+
+    assert VPTQ._hessian_is_usable(torch.eye(4, dtype=torch.float64))
+    assert not VPTQ._hessian_is_usable(torch.zeros(4, 4, dtype=torch.float64))
+
+    nan_hessian = torch.eye(4, dtype=torch.float64)
+    nan_hessian[0, 0] = float("nan")
+    assert not VPTQ._hessian_is_usable(nan_hessian)
+
+    inf_hessian = torch.eye(4, dtype=torch.float64)
+    inf_hessian[0, 1] = float("inf")
+    assert not VPTQ._hessian_is_usable(inf_hessian)
+
+
 def test_vptq_partial_dead_hessian_matches_oracle():
     """Dead channels must be neutralized without changing the oracle result."""
 
