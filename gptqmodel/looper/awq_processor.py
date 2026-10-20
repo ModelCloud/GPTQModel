@@ -62,6 +62,7 @@ class _AWQLayerState:
     processed_subsets: Set[int] = field(default_factory=set)
     layer_module: Optional[torch.nn.Module] = None
     previous_weight_scale: Optional[float] = None
+    previous_weight_scale_source: Optional[Dict[str, NamedModule]] = None
     quantized: bool = False
     pending_modules: Set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -973,6 +974,23 @@ class AWQProcessor(LoopProcessor):
 
         return float(sum(values) / len(values))
 
+    def _previous_subset_scale(
+        self,
+        state: _AWQLayerState,
+        previous_subset: Optional[Dict[str, NamedModule]],
+    ) -> Optional[float]:
+        """Returns the cached previous-subset weight scale for one stage."""
+
+        if not previous_subset:
+            return None
+        if state.previous_weight_scale_source is not previous_subset:
+            state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
+            # The mapping is alive for the whole stage and is replaced by the
+            # next subset, so this reference does not extend module lifetimes
+            # beyond the stage. ``_finalize_quantized_layer`` drops it early.
+            state.previous_weight_scale_source = previous_subset
+        return state.previous_weight_scale
+
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         """Collapse cached per-batch inputs into one replay tensor per module.
 
@@ -1126,6 +1144,7 @@ class AWQProcessor(LoopProcessor):
         state.processed_subsets.clear()
         state.subset_total = None
         state.previous_weight_scale = None
+        state.previous_weight_scale_source = None
 
         task_names = self._feature_task_names or (fallback_task_names or set())
         with self.lock:
@@ -2595,7 +2614,12 @@ class AWQProcessor(LoopProcessor):
                 state.pending_modules.discard(module.name)
 
             if previous_subset:
-                state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
+                # ``process`` runs once per module, so every worker receives the
+                # same previous-subset mapping. Recomputing its weight scale for
+                # each module turned one reduction per module into O(modules^2)
+                # reductions and device reads per layer. Cache by identity; the
+                # processed subset is immutable once handed to the next stage.
+                state.previous_weight_scale = self._previous_subset_scale(state, previous_subset)
 
             # Only gate on modules that were scheduled for subset processing to
             # avoid early quantization while parallel workers are still running.
