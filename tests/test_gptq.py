@@ -697,6 +697,24 @@ def test_dead_channel_neutralization_stays_on_device(kind):
     assert "aten.masked_fill_.Scalar" in recorder.ops, kind
 
 
+def test_qqq_quantize_has_no_redundant_device_sync(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    linear = nn.Linear(16, 8, bias=False, dtype=torch.float32, device="cuda")
+    task = QQQ(linear)
+    task.quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=4)
+    task.add_batch(torch.randn(4, 8, 16, device="cuda"), None)
+    task.materialize_hessian()
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("QQQ quantization must not issue a redundant device sync")
+
+    monkeypatch.setattr(torch.cuda, "synchronize", fail_sync)
+
+    task.quantize(blocksize=8)
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("requires_groupwise_processing", [False, True])
