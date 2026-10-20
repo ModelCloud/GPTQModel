@@ -78,7 +78,7 @@ class Quantizer(nn.Module):
         """Return whether range search should optimize the 2-bit affine orientation."""
 
         return (
-            int(self.maxq.item()) == 3
+            self._maxq_value == 3
             and not self.qcfg.sym
             and not self.requires_groupwise_processing()
         )
@@ -190,7 +190,7 @@ class Quantizer(nn.Module):
         if mse > 0.0:
             best = torch.full([x.shape[0]], float("inf"), device=dev)
             search_adjacent_zero_points = self._search_adjacent_zero_points()
-            maxq_value = int(self.maxq.item()) if search_adjacent_zero_points else 0
+            maxq_value = self._maxq_value if search_adjacent_zero_points else 0
             for i in range(int(self.maxshrink * self.grid)):
                 p = 1 - i / self.grid
                 xmin1 = p * xmin
@@ -216,18 +216,21 @@ class Quantizer(nn.Module):
                         x,
                         scale1.unsqueeze(1),
                         zero_candidate.unsqueeze(1),
-                        self.maxq,
+                        self._maxq_value,
                         self.requires_groupwise_processing(),
                     )
                     q -= x
                     q.abs_()
                     q.pow_(mse)
                     err = torch.sum(q, 1)
-                    tmp = err < best
-                    if torch.any(tmp):
-                        best[tmp] = err[tmp]
-                        self.scale[tmp] = scale1[tmp]
-                        self.zero[tmp] = zero_candidate[tmp]
+                    # Select on the device.  The masked writes this replaces
+                    # needed a ``nonzero`` scan plus a host round trip per grid
+                    # step, and the surrounding ``torch.any`` forced the same
+                    # synchronization even when no lane improved.
+                    better = err < best
+                    best = torch.where(better, err, best)
+                    self.scale = torch.where(better, scale1, self.scale)
+                    self.zero = torch.where(better, zero_candidate, self.zero)
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -252,7 +255,10 @@ class Quantizer(nn.Module):
             self.zero = self.zero.unsqueeze(0)
 
     def quantize(self, x):
-        return quantize(x, self.scale, self.zero, self.maxq, self.requires_groupwise_processing())
+        # ``maxq`` is a device tensor, so passing it into the elementwise helper
+        # would make its ``maxq < 0`` branch and clamp bounds read the scalar back
+        # to the host on every block.  ``_maxq_value`` mirrors it exactly.
+        return quantize(x, self.scale, self.zero, self._maxq_value, self.requires_groupwise_processing())
 
     # def enabled(self):
     #     return self.maxq > 0
