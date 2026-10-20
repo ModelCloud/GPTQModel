@@ -652,12 +652,13 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
             diag_mean = torch.diag(H).mean()
             q_fallback = diag_mean.item() < 1e-20
 
-        # Regularize diagonal
-        idx = torch.arange(H.shape[0])
-        H[idx, idx] += quant_args.get("sigma_reg", 0.025) * diag_mean
+        # Regularize diagonal. ``H.diagonal()`` is a view, so this avoids
+        # materializing index tensors and the gather/scatter pair that advanced
+        # indexing performs for the same elementwise update.
+        H.diagonal().add_(quant_args.get("sigma_reg", 0.025) * diag_mean)
 
         # Some tests
-        diag = H[idx, idx].clone()
+        diag = H.diagonal().clone()
 
         if verbose:
             print(f"     - H min/max: {H.min().item():.6f}   {H.max().item():.6f}")
@@ -680,14 +681,13 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
             L = None
         else:
             L, H = block_ldl(H, 16, verbose)
-            dr = torch.arange(k)
-            L[dr, dr] = 0
+            L.diagonal().zero_()
 
         H_data["L"] = L
 
         # H is no longer needed except to compute proxy error so move to CPU
         H = H.cpu()
-        H_data["H"] = H.cpu()
+        H_data["H"] = H
 
         H_data["finalized"] = True
         H_data["diag"] = diag

@@ -34,6 +34,18 @@ def _get_block_trace():
     return block_trace
 
 
+def _get_finalize_capture_h():
+    if not torch.cuda.is_available():
+        pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
+
+    try:
+        from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import finalize_capture_H
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"EXL3 quantizer unavailable: {exc}")
+
+    return finalize_capture_H
+
+
 class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self) -> None:
         self.scalar_reads = 0
@@ -78,6 +90,32 @@ def test_exllamav3_block_trace_matches_host_accumulation(columns: int):
     assert actual.dtype == torch.float64
     assert actual.device.type == "cuda"
     assert actual.item() == _host_block_trace(A, B)
+
+
+def test_exllamav3_finalize_capture_h_regularizes_diagonal_in_place():
+    """Diagonal regularization and LDL zeroing must match the indexed reference."""
+
+    finalize_capture_H = _get_finalize_capture_h()
+    torch.manual_seed(31)
+    size = 128
+    basis = torch.randn(size, size, device="cuda", dtype=torch.float32)
+    hessian = basis @ basis.T + torch.eye(size, device="cuda", dtype=torch.float32) * size
+    count = 4
+    sigma_reg = 0.025
+
+    scaled = hessian / count
+    expected_diag = scaled.diagonal() + sigma_reg * torch.diag(scaled).mean()
+
+    q_fallback, _, L, _, diag = finalize_capture_H(
+        {"H": hessian, "count": count, "finalized": False},
+        {"sigma_reg": sigma_reg, "seed": 787},
+        False,
+    )
+
+    assert q_fallback is False
+    assert torch.equal(diag, expected_diag)
+    assert L is not None
+    assert torch.count_nonzero(L.diagonal()) == 0
 
 
 def _clone_tensors(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
