@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import math
 import threading
 import time
 from types import MethodType
@@ -220,7 +221,7 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_capture_generation = 0
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
-        self._activation_amax: Dict[str, float] = {}
+        self._activation_amax: Dict[str, torch.Tensor] = {}
         self._activation_headroom: Dict[str, NVFP4ActivationHeadroom] = {}
         self._activation_global_scales: Dict[str, float] = {}
         self._activation_headroom_probe = False
@@ -286,11 +287,18 @@ class GPTQProcessor(LoopProcessor):
                     raise RuntimeError(f"Missing NVFP4 headroom collector for `{key}`.")
                 collector.collect(inp)
             return
-        current = float(inp.detach().abs().amax().item())
-        if not torch.isfinite(torch.tensor(current)):
-            raise ValueError(f"NVFP4 calibration input for `{name}` contains NaN or infinity.")
+        # Keep the running maximum on the device. Reading it back per batch
+        # synchronized the calibration stream for every module and batch; the
+        # finiteness check moves to the single consumer read at quantization.
+        current = inp.detach().abs().amax()
         with self.lock:
-            self._activation_amax[key] = max(current, self._activation_amax.get(key, 0.0))
+            previous = self._activation_amax.get(key)
+            if previous is None:
+                self._activation_amax[key] = current
+            else:
+                if previous.device != current.device or previous.dtype != current.dtype:
+                    current = current.to(device=previous.device, dtype=previous.dtype)
+                torch.maximum(previous, current, out=previous)
 
     def begin_activation_scale_probe(self, subset, layer=None) -> bool:
         """Start the calibration-only pass required by NVIDIA headroom scales."""
@@ -802,8 +810,17 @@ class GPTQProcessor(LoopProcessor):
                     ) from exc
             else:
                 observed = self._activation_amax.get(
-                    module.full_name, self._activation_amax.get(module.name, 0.0)
+                    module.full_name, self._activation_amax.get(module.name)
                 )
+                if observed is None:
+                    observed = 0.0
+                elif torch.is_tensor(observed):
+                    observed = float(observed.item())
+                    if not math.isfinite(observed):
+                        raise ValueError(
+                            f"NVFP4 calibration input for `{module.full_name}` "
+                            "contains NaN or infinity."
+                        )
                 scale = float(nvfp4_global_scale(
                     observed, recipe=recipe or self.qcfg.activation_recipe or "least_squares"
                 ))

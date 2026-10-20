@@ -742,7 +742,28 @@ def test_headroom_probe_uses_attention_recipe_override(top_recipe, attention_rec
         assert dense._w4a_headroom_probe is False
     else:
         assert named.full_name not in processor._activation_global_scales
-        assert processor._activation_amax[named.full_name] == pytest.approx(0.5)
+        assert float(processor._activation_amax[named.full_name]) == pytest.approx(0.5)
+
+
+def test_activation_amax_accumulates_on_device_and_propagates_nan():
+    """The per-batch maximum stays a tensor; NaN survives for the consumer check."""
+
+    processor = _headroom_probe_processor(
+        {"mode": "w4a_nvfp4", "recipe": "least_squares"}
+    )
+    dense, named, _ = _projection("mlp.gate_proj")
+
+    processor._record_activation_amax("mlp.gate_proj", torch.full((8, 128), 0.5), dense)
+    processor._record_activation_amax("mlp.gate_proj", torch.full((8, 128), 0.25), dense)
+
+    observed = processor._activation_amax[named.full_name]
+    assert torch.is_tensor(observed)
+    assert float(observed) == pytest.approx(0.5)
+
+    processor._record_activation_amax(
+        "mlp.gate_proj", torch.full((8, 128), float("nan")), dense
+    )
+    assert bool(torch.isnan(processor._activation_amax[named.full_name]))
 
 @pytest.mark.parametrize("mlp_layers,headroom", [((), True), ((0,), False)])
 def test_headroom_probe_uses_per_layer_mlp_override(mlp_layers, headroom):
