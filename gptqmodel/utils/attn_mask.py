@@ -24,10 +24,13 @@ def normalize_seq_mask(mask: torch.Tensor | None, seq_len: int | None = None) ->
     m = mask
     # Convert numeric to bool 'keep' (HF tends to use >0 for keep; extended masks use big negatives for masked)
     if m.dtype != torch.bool:
-        if torch.any(m < 0):
-            m = (m >= 0)
+        if m.device.type in {"cuda", "mps"}:
+            has_negative = (m < 0).any()
+            m = torch.where(has_negative, m >= 0, m > 0)
+        elif torch.any(m < 0):
+            m = m >= 0
         else:
-            m = (m > 0)
+            m = m > 0
 
     # Squeeze broadcast dims to reach [B, S]
     if m.dim() == 4 and m.size(1) == 1:
