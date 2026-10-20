@@ -660,6 +660,58 @@ def test_awq_fallback_uses_raw_token_row_coverage_but_retained_latest_batch_rows
     assert processor._should_fallback_group([module_name], input_feat) is False
 
 
+def test_awq_previous_subset_scale_is_cached_per_subset_identity():
+    """Every module in a stage shares one previous subset; compute its scale once."""
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(
+            quant_method=METHOD.AWQ,
+            format=FORMAT.GEMM,
+            group_size=4,
+        )
+    )
+    state = _AWQLayerState()
+    subset = {
+        "a": NamedModule(
+            nn.Linear(4, 4, bias=False),
+            name="a",
+            full_name="model.layers.0.a",
+            layer_index=0,
+        ),
+        "b": NamedModule(
+            nn.Linear(4, 4, bias=False),
+            name="b",
+            full_name="model.layers.0.b",
+            layer_index=0,
+        ),
+    }
+
+    calls = []
+    capture = processor._capture_previous_subset_scale
+
+    def counting_capture(previous_subset):
+        calls.append(previous_subset)
+        return capture(previous_subset)
+
+    processor._capture_previous_subset_scale = counting_capture
+
+    assert processor._previous_subset_scale(state, None) is None
+    assert processor._previous_subset_scale(state, {}) is None
+    assert calls == []
+
+    first = processor._previous_subset_scale(state, subset)
+    second = processor._previous_subset_scale(state, subset)
+    assert first == second
+    assert len(calls) == 1
+
+    # A different mapping object starts a new stage even when it wraps the same
+    # modules, so the hint is keyed by identity rather than by contents.
+    replacement = dict(subset)
+    third = processor._previous_subset_scale(state, replacement)
+    assert third == first
+    assert len(calls) == 2
+
+
 @pytest.mark.parametrize("completion_path", ["no_config", "no_valid_groups"])
 def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
     processor = _TestAWQProcessor(
