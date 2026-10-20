@@ -37,6 +37,7 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausal
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
+from gptqmodel.quantization import vptq as vptq_module
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
 from gptqmodel.quantization.vptq import VPTQ, VPTQQuantResult, _chunked_assign, _matrix_to_vectors
 from gptqmodel.utils.vptq import (
@@ -1408,6 +1409,32 @@ def test_vptq_partial_dead_hessian_matches_oracle():
         rtol=1e-6,
         atol=1e-6,
     )
+
+
+def test_vptq_hessian_weighted_error_accumulates_chunks_on_device(monkeypatch):
+    """Chunked loss accumulation must match a single independent float64 oracle."""
+
+    generator = torch.Generator().manual_seed(31)
+    weight = torch.randn(17, 9, generator=generator, dtype=torch.float64)
+    quantized = weight + torch.randn(
+        17, 9, generator=generator, dtype=torch.float64
+    ) * 0.01
+    hessian = torch.randn(9, 9, generator=generator, dtype=torch.float64)
+    hessian = hessian @ hessian.mT
+
+    delta = quantized - weight
+    expected_error = ((delta @ hessian) * delta).sum()
+    expected_weight = ((weight @ hessian) * weight).sum()
+    expected = float(expected_error / max(abs(float(expected_weight)), 1e-12))
+
+    monkeypatch.setattr(vptq_module, "_LOSS_CHUNK_BYTES", 9 * 8 * 2)
+    actual = VPTQ.hessian_weighted_error(
+        weight_original=weight,
+        quantized=quantized,
+        hessian=hessian,
+    )
+
+    assert actual == pytest.approx(expected, rel=1e-12, abs=1e-12)
 
 
 def test_vptq_fallback_threshold_switches_to_hessian_free_vq():

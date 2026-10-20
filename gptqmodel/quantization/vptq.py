@@ -47,6 +47,7 @@ log = setup_logger()
 
 _HESSIAN_DTYPE = torch.float64
 _DISTANCE_CHUNK_BYTES = 256 * 1024 * 1024
+_LOSS_CHUNK_BYTES = 64 * 1024 * 1024
 _EPS = 1e-12
 
 
@@ -703,16 +704,16 @@ class VPTQ:
         delta = quantized.to(torch.float64) - weight_original.to(torch.float64)
         hessian = hessian.to(torch.float64)
         rows = delta.shape[0]
-        chunk = max(1, int(64 * 1024 * 1024 // max(1, delta.shape[1] * 8)))
+        chunk = max(1, int(_LOSS_CHUNK_BYTES // max(1, delta.shape[1] * 8)))
 
-        error_sum = 0.0
-        weight_sum = 0.0
+        error_sum = torch.zeros((), dtype=torch.float64, device=delta.device)
+        weight_sum = torch.zeros((), dtype=torch.float64, device=delta.device)
         for start in range(0, rows, chunk):
             end = min(start + chunk, rows)
             error_block = delta[start:end] @ hessian
             weight_block = weight_original[start:end].to(torch.float64) @ hessian
-            error_sum += float((error_block * delta[start:end]).sum().item())
-            weight_sum += float((weight_block * weight_original[start:end].to(torch.float64)).sum().item())
+            error_sum.add_((error_block * delta[start:end]).sum())
+            weight_sum.add_((weight_block * weight_original[start:end].to(torch.float64)).sum())
 
-        denominator = max(abs(weight_sum), _EPS)
-        return error_sum / denominator
+        denominator = torch.clamp(weight_sum.abs(), min=_EPS)
+        return float((error_sum / denominator).item())
