@@ -58,8 +58,8 @@ def _build_quant_config(name: str):
     vptq_configs = {
         # (main index bits + residual index bits) / vector length = nominal bpw.
         "vptq2": dict(vector_lens=[-1, 8], num_centroids=[-1, 4096], num_res_centroids=[-1, 16]),
-        "vptq3": dict(vector_lens=[-1, 4], num_centroids=[-1, 4096], num_res_centroids=[-1, -1]),
         "vptq4": dict(vector_lens=[-1, 4], num_centroids=[-1, 65536], num_res_centroids=[-1, -1]),
+        "vptq8": dict(vector_lens=[-1, 2], num_centroids=[-1, 65536], num_res_centroids=[-1, -1]),
     }
     if name in vptq_configs:
         return VPTQConfig(
@@ -217,7 +217,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--output-root", type=Path, required=True)
-    parser.add_argument("--configs", default="dense,vptq2,vptq3,vptq4,gptq2,gptq3,gptq4")
+    parser.add_argument("--configs", default="dense,vptq2,vptq4,vptq8,gptq2,gptq4,gptq8")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--calibration-rows", type=int, default=32)
     parser.add_argument("--calibration-concat-size", type=int, default=2048)
