@@ -21,6 +21,7 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
+from .quantizer import _neutralize_dead_columns
 
 
 _MLX_FOEM_MIN_ELEMENTS = 256 * 1024
@@ -230,12 +231,10 @@ class FOEM(GPTQ):
 
         H = self.H
         del self.H
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
-
         if self.gptaq:
-            self.dXXT[:, dead] = 0
+            _neutralize_dead_columns(H, W, self.dXXT)
+        else:
+            _neutralize_dead_columns(H, W)
 
         # g_idx = []
         scale = []

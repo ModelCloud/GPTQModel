@@ -18,7 +18,7 @@ from torch import nn
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.config import FallbackStrategy, SmoothMSE
-from ..quantization.quantizer import HF_OPTIMUM
+from ..quantization.quantizer import HF_OPTIMUM, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.env import env_flag
@@ -621,9 +621,7 @@ class QQQ:
 
         H = self.H
         del self.H
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
+        _neutralize_dead_columns(H, W)
 
         g_idx = []
         scale = []

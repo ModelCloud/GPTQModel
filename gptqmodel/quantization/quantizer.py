@@ -42,6 +42,31 @@ def _replace_zero_scale(scale: torch.Tensor, zero: torch.Tensor | None = None):
     return safe_scale, safe_zero
 
 
+def _neutralize_dead_columns(
+    hessian: torch.Tensor,
+    weight: torch.Tensor,
+    *column_tensors: torch.Tensor,
+) -> None:
+    """Neutralize calibration-dead input channels in place.
+
+    A channel with a zero Hessian diagonal carries no calibration signal. Its
+    diagonal entry is replaced with one so the Cholesky inverse stays
+    well-defined, and the matching weight (and optional auxiliary) columns are
+    zeroed.
+
+    Boolean-mask assignment (``H[dead, dead] = 1`` / ``W[:, dead] = 0``)
+    performs a ``nonzero`` scan and a device-to-host synchronization per
+    module. The ``masked_fill_`` forms below are equivalent and stay on the
+    device.
+    """
+
+    dead = torch.diagonal(hessian) == 0
+    hessian.diagonal().masked_fill_(dead, 1.0)
+    weight.masked_fill_(dead.unsqueeze(0), 0.0)
+    for tensor in column_tensors:
+        tensor.masked_fill_(dead.unsqueeze(0), 0.0)
+
+
 def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
     if maxq < 0:
         return (x > scale / 2).float() * scale + (x < zero / 2).float() * zero
