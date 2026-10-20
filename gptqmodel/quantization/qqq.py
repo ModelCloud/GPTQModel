@@ -869,10 +869,6 @@ class QQQ:
             loss_sum = torch.sum(Losses).item()
             del Losses
 
-        if W.device.type == "cuda":
-            torch.cuda.synchronize(W.device)
-        elif W.device.type == "mps":
-            torch.mps.synchronize()
         print("time %.2f" % (time.time() - tick))
         print("error", loss_sum)
 
