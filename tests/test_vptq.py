@@ -1663,6 +1663,37 @@ def test_vptq_percdamp_is_applied_exactly_once():
     assert not torch.allclose(inverses[0.01], inverses[0.25])
 
 
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self):
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if func is torch.ops.aten._local_scalar_dense.default:
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+def test_vptq_inverse_hessian_damping_has_no_host_scalar_read():
+    """Damping must stay on-device so each module's pass does not serialize."""
+
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=2,
+        percdamp=0.01,
+    )
+    quantizer = build_quantizer(torch.zeros(16, 32), qcfg)
+    hessian = torch.diag(torch.linspace(0.5, 4.0, 32, dtype=torch.float64))
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        upper = quantizer._inverse_hessian_cholesky(hessian)
+
+    assert recorder.scalar_reads == 0
+    assert torch.isfinite(upper).all()
+
+
 def test_vptq_percdamp_reaches_the_error_propagation_pass():
     """Changing `percdamp` must change the quantized weight, not just a helper."""
 

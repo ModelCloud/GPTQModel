@@ -552,10 +552,9 @@ class VPTQ:
     def _inverse_hessian_cholesky(self, hessian: torch.Tensor) -> torch.Tensor:
         """Return `U` with `U^T U = (H + damp * mean(diag(H)) I)^-1`, `U` upper."""
 
-        damp = float(self.qcfg.percdamp) * float(torch.diagonal(hessian).mean())
+        damp = torch.diagonal(hessian).mean().to(torch.float64) * float(self.qcfg.percdamp)
         damped = hessian.clone()
-        diagonal = torch.arange(damped.shape[0], device=damped.device)
-        damped[diagonal, diagonal] += damp
+        damped.diagonal().add_(damp.to(dtype=damped.dtype))
 
         try:
             cholesky = torch.linalg.cholesky(damped)
