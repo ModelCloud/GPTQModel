@@ -396,15 +396,13 @@ class VPTQ:
             self.fallback_used = True
 
         dead = torch.diagonal(hessian) == 0
-        if bool(dead.any()):
-            hessian[dead, dead] = 1.0
-            weight = weight.clone()
-            weight[:, dead] = 0.0
+        hessian.diagonal().masked_fill_(dead, 1.0)
         weight_original = weight.clone()
+        weight_original.masked_fill_(dead.unsqueeze(0), 0.0)
+        weight = weight_original
 
         mean_diag = torch.diagonal(hessian).mean()
-        if float(mean_diag) > 0:
-            hessian = hessian / mean_diag
+        hessian = hessian / torch.where(mean_diag > 0, mean_diag, torch.ones_like(mean_diag))
 
         weight_scale = None
         weight_bias = None

@@ -1383,6 +1383,33 @@ def test_vptq_zero_hessian_uses_hessian_free_fallback():
     assert torch.equal(module.dequantize(), result.quantized_weight)
 
 
+def test_vptq_partial_dead_hessian_matches_oracle():
+    """Dead channels must be neutralized without changing the oracle result."""
+
+    weight, hessian = synthetic_problem(out_features=16, in_features=32, seed=25)
+    dead = torch.tensor([1, 7, 19])
+    hessian[dead, :] = 0.0
+    hessian[:, dead] = 0.0
+    qcfg = VPTQConfig(
+        vector_lens=[-1, 4],
+        num_centroids=[-1, 16],
+        num_res_centroids=[-1, -1],
+        kmeans_iters=4,
+        block_size=8,
+    )
+
+    result, loss = build_quantizer(weight, qcfg).quantize_weight(weight, hessian)
+    expected = oracle_vptq_quantize(weight, hessian, qcfg)
+
+    assert math.isfinite(loss)
+    assert torch.allclose(
+        result.quantized_weight,
+        expected["quantized_weight"],
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+
 def test_vptq_fallback_threshold_switches_to_hessian_free_vq():
     """The configured `fallback` threshold must switch low-coverage modules."""
 
