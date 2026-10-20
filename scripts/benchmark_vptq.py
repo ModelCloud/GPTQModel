@@ -58,8 +58,8 @@ def _build_quant_config(name: str):
     vptq_configs = {
         # (main index bits + residual index bits) / vector length = nominal bpw.
         "vptq2": dict(vector_lens=[-1, 8], num_centroids=[-1, 4096], num_res_centroids=[-1, 16]),
-        "vptq4": dict(vector_lens=[-1, 4], num_centroids=[-1, 65536], num_res_centroids=[-1, -1]),
-        "vptq8": dict(vector_lens=[-1, 2], num_centroids=[-1, 65536], num_res_centroids=[-1, -1]),
+        "vptq4": dict(vector_lens=[-1, 2], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
+        "vptq8": dict(vector_lens=[-1, 1], num_centroids=[-1, 256], num_res_centroids=[-1, -1]),
     }
     if name in vptq_configs:
         return VPTQConfig(
