@@ -119,12 +119,21 @@ def build_identity_rotation_buffers(
 def is_identity_rotation(theta: torch.Tensor, channel_scales: Optional[torch.Tensor]) -> bool:
     """Check whether a ParoQuant rotation reduces to a no-op."""
     if theta is None:
-        return True
-    if torch.count_nonzero(theta).item() != 0:
-        return False
+        return True if channel_scales is None else bool(torch.all(channel_scales == 1))
+
+    if not theta.is_cuda:
+        if torch.count_nonzero(theta).item() != 0:
+            return False
+        if channel_scales is None:
+            return True
+        return bool(torch.all(channel_scales == 1))
+
+    # Keep both predicates on the device and read the combined scalar once.
+    theta_is_identity = torch.count_nonzero(theta) == 0
     if channel_scales is None:
-        return True
-    return bool(torch.all(channel_scales == 1))
+        return bool(theta_is_identity)
+    scales_are_identity = torch.all(channel_scales == 1)
+    return bool(theta_is_identity & scales_are_identity)
 
 
 def apply_paroquant_rotation_reference(

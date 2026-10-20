@@ -50,6 +50,7 @@ from gptqmodel.utils.paroquant import (
     build_identity_rotation_buffers,
     clear_paroquant_rotation_autotune_cache,
     clear_paroquant_rotation_extension_cache,
+    is_identity_rotation,
     prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
@@ -2350,6 +2351,63 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
     )
 
     torch.testing.assert_close(rotated, x, atol=0, rtol=0)
+
+
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self) -> None:
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if str(func).startswith("aten._local_scalar_dense"):
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    ("theta", "channel_scales", "expected"),
+    [
+        (None, None, True),
+        (None, "ones", True),
+        (None, "nonidentity", False),
+        ("zeros", None, True),
+        ("zeros", "ones", True),
+        ("zeros", "nonidentity", False),
+        ("nonzero", None, False),
+        ("nonzero", "ones", False),
+        ("nonzero", "nonidentity", False),
+    ],
+)
+def test_paroquant_identity_predicate_matches_reference_and_reads_once(
+    device, theta, channel_scales, expected
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    theta_tensor = None
+    if theta is not None:
+        theta_tensor = torch.zeros(8, device=device, dtype=torch.float32)
+        if theta == "nonzero":
+            theta_tensor[3] = 0.25
+
+    scales_tensor = None
+    if channel_scales is not None:
+        scales_tensor = torch.ones(16, device=device, dtype=torch.float16)
+        if channel_scales == "nonidentity":
+            scales_tensor[7] = 1.5
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        actual = is_identity_rotation(theta_tensor, scales_tensor)
+
+    assert actual is expected
+    if theta is None and channel_scales is None:
+        expected_reads = 0
+    elif device == "cpu" and theta == "zeros" and channel_scales is not None:
+        expected_reads = 2
+    else:
+        expected_reads = 1
+    assert recorder.scalar_reads == expected_reads
 
 
 def test_paroquant_module_default_rotation_buffers_are_identity():
