@@ -96,7 +96,7 @@ def _should_use_mlx_qqq_quantization(
         and bool(quantizer.sym)
         and not bool(quantizer.mse)
         and int(quantizer.groupsize) == group_size
-        and int(quantizer.maxq.item()) == expected_maxq
+        and quantizer._maxq_value == expected_maxq
     )
 
 
@@ -115,6 +115,9 @@ class Quantizer(nn.Module):
     def __init__(self, shape=1):
         super(Quantizer, self).__init__()
         self.register_buffer("maxq", torch.tensor(0))
+        # Host mirror of the ``maxq`` buffer. ``configure()`` is the only writer,
+        # so the block loop avoids a device-to-host scalar read per column.
+        self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
 
@@ -143,6 +146,7 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         if trits:
             self.maxq = torch.tensor(-1)
+        self._maxq_value = int(self.maxq)
 
     def find_params(self, x, weight=False):
         dev = x.device
@@ -170,21 +174,19 @@ class Quantizer(nn.Module):
 
         if self.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            if torch.any(tmp):
-                xmin[tmp] = -xmax[tmp]
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
+            xmin = torch.where(xmin < 0, -xmax, xmin)
+        both_zero = (xmin == 0) & (xmax == 0)
+        xmin = torch.where(both_zero, xmin - 1, xmin)
+        xmax = torch.where(both_zero, xmax + 1, xmax)
 
-        if self.maxq < 0:
+        if self._maxq_value < 0:
             self.scale = xmax
             self.zero = xmin
         else:
             if self.groupsize != -1 or not self.sym:
                 self.scale = (xmax - xmin) / self.maxq
                 if self.sym:
-                    self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+                    self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
                 else:
                     self.zero = torch.round(-xmin / self.scale)
             else:
@@ -207,7 +209,7 @@ class Quantizer(nn.Module):
                     x,
                     scale1.unsqueeze(1),
                     zero1.unsqueeze(1),
-                    self.maxq,
+                    self._maxq_value,
                     self.sym,
                     self.groupsize,
                 )
@@ -215,11 +217,10 @@ class Quantizer(nn.Module):
                 q.abs_()
                 q.pow_(self.norm)
                 err = torch.sum(q, 1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    self.scale[tmp] = scale1[tmp]
-                    self.zero[tmp] = zero1[tmp]
+                better = err < best
+                best = torch.where(better, err, best)
+                self.scale = torch.where(better, scale1, self.scale)
+                self.zero = torch.where(better, zero1, self.zero)
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -246,7 +247,7 @@ class Quantizer(nn.Module):
     def quantize(self, x):
         if self.ready():
             return quantize(
-                x, self.scale, self.zero, self.maxq, self.sym, self.groupsize
+                x, self.scale, self.zero, self._maxq_value, self.sym, self.groupsize
             )
         return x
 
@@ -811,7 +812,7 @@ class QQQ:
                         Q1,
                         Err1,
                         Losses1,
-                        int(self.quantizer.maxq.item()),
+                        self.quantizer._maxq_value,
                     )
                 else:
                     for i in range(count):
@@ -839,7 +840,7 @@ class QQQ:
                             w.unsqueeze(1),
                             self.quantizer.scale,
                             self.quantizer.zero,
-                            self.quantizer.maxq,
+                            self.quantizer._maxq_value,
                             self.quantizer.sym,
                             self.quantizer.groupsize,
                         ).flatten()
