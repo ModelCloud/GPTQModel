@@ -459,7 +459,8 @@ class GPTQ:
     def _sanitize_scale_and_log(self, scale: torch.Tensor, zero: torch.Tensor):
         """Bypass zero scales and report the unstable module once per pass."""
 
-        if bool((scale == 0).any()):
+        zero_mask = scale == 0
+        if bool(zero_mask.any()):
             log.error(
                 "Quantization: Module `%s` -> zero scale found and bypassed. "
                 "This module may not be properly trained or received enough calibration data, "
@@ -467,7 +468,7 @@ class GPTQ:
                 "model publisher and/or provide more calibration data.",
                 self.name,
             )
-        return _replace_zero_scale(scale, zero)
+        return _replace_zero_scale(scale, zero, zero_mask=zero_mask)
 
     def clone_module(self, copy=True, device: torch.device = None):
         if not device:

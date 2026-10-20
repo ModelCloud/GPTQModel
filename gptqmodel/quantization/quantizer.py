@@ -17,7 +17,12 @@ log = setup_logger()
 HF_OPTIMUM = "hf_optimum"
 
 
-def _replace_zero_scale(scale: torch.Tensor, zero: torch.Tensor | None = None):
+def _replace_zero_scale(
+    scale: torch.Tensor,
+    zero: torch.Tensor | None = None,
+    *,
+    zero_mask: torch.Tensor | None = None,
+):
     """Replace exact zero scales with a representable positive value.
 
     ``1e-8`` is not representable as a normal ``float16`` value and would
@@ -25,7 +30,8 @@ def _replace_zero_scale(scale: torch.Tensor, zero: torch.Tensor | None = None):
     division below remains finite for every supported weight dtype.
     """
 
-    zero_mask = scale == 0
+    if zero_mask is None:
+        zero_mask = scale == 0
     safe_scale = torch.where(
         zero_mask,
         torch.full_like(scale, torch.finfo(scale.dtype).tiny),

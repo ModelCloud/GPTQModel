@@ -28,7 +28,12 @@ from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
 from gptqmodel.quantization.gptq import GPTQ
 from gptqmodel.quantization.qqq import QQQ
-from gptqmodel.quantization.quantizer import Quantizer, _neutralize_dead_columns, quantize
+from gptqmodel.quantization.quantizer import (
+    Quantizer,
+    _neutralize_dead_columns,
+    _replace_zero_scale,
+    quantize,
+)
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -759,6 +764,33 @@ def test_quantize_bypasses_zero_scale_without_nonfinite_output(
     assert actual.dtype == dtype
     assert torch.isfinite(actual).all()
     torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_replace_zero_scale_accepts_precomputed_mask(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    scale = torch.tensor(
+        [[0.0, 1.0, 0.0], [2.0, 0.0, 3.0]],
+        dtype=torch.float16,
+        device=device,
+    )
+    zero = torch.tensor(
+        [[float("nan"), 0.0, 1.0], [0.0, 1.0, 0.0]],
+        dtype=torch.float16,
+        device=device,
+    )
+
+    expected_scale, expected_zero = _replace_zero_scale(scale, zero)
+    actual_scale, actual_zero = _replace_zero_scale(
+        scale,
+        zero,
+        zero_mask=scale == 0,
+    )
+
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual_zero, expected_zero, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("act_group_aware", [False, True])
