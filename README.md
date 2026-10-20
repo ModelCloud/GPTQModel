@@ -66,11 +66,12 @@ Every quantization method shares a common lifecycle—calibrate, quantize, valid
 | EoRA                      | ✅          | ✅ | ✅ | ✅ | x             | 
 | Group Aware Act Reordering | ✅          | ✅ | ✅ | ✅ | ✅             |
 | QQQ                       | ✅          | x | x | x | x             | 
+| VPTQ                      | ✅          | x | x | x | x             |
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
 
-`GGUF`, `FP8`, `EXL3`, and `ParoQuant` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+`GGUF`, `FP8`, `EXL3`, `ParoQuant`, and `VPTQ` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
 
 SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
 
@@ -84,6 +85,7 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
+| `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_TORCH` |
 | `METHOD.GGUF` | `FORMAT.GGUF` | `BACKEND.GGUF_TRITON`, `BACKEND.GGUF_CPP_CUDA`, `BACKEND.GGUF_CPP_CPU`, `BACKEND.GGUF_TORCH` |
 | `METHOD.FP8` | `FORMAT.FP8` | `BACKEND.FP8_TORCH` |
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
@@ -103,7 +105,7 @@ quantization phase and the previous backend is restored afterwards. Set
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
-* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, VPTQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
 * ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -239,11 +241,11 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
-| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, BitBLAS, Triton, BitsAndBytes, Torch |
+| 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, BitBLAS, Triton, BitsAndBytes, Torch |
 | 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 6.2+` | Exllama V2, AWQ Triton GEMM, AWQ GEMV, QQQ, FP8 Torch, Torch (gfx950 fused GPTQ GEMV) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
-| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, Torch |
+| 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, Torch |
 | 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
 
@@ -469,9 +471,9 @@ procedures, and operational gotchas.
 
 #### Other Quantization Formats 📦
 
-`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
+`QuantizeConfig` remains the broad factory. The concrete config classes are now `GPTQConfig`, `AWQConfig`, `ParoConfig`, `QQQConfig`, `VPTQConfig`, `RTNConfig`, `GGUFConfig`, `FP8Config`, `BitsAndBytesConfig`, and `EXL3Config`.
 
-`GPTQ`, `AWQ`, `ParoQuant`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
+`GPTQ`, `AWQ`, `ParoQuant`, `VPTQ`, and `EXL3` are calibration-based. `GGUF` and `FP8` are weight-only and should be quantized with `calibration=None`.
 
 ##### QQQ Example: Llama 3.2 1B Instruct
 
@@ -609,6 +611,38 @@ qcfg = EXL3Config(
 
 model = GPTQModel.load(model_id, qcfg)
 model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.EXL3_EXLLAMA_V3)
+model.save(quant_path)
+```
+
+##### VPTQ Example: Llama 3.2 1B Instruct
+
+VPTQ learns vector codebooks from calibration data with GPTQ-style error
+compensation; Hessians are accumulated online, so no pre-generated Hessian
+files are needed. See the **[VPTQ guide](docs/vptq.md)** for the full
+configuration reference.
+
+```py
+from datasets import load_dataset
+from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.quantization import VPTQConfig
+
+model_id = "meta-llama/Llama-3.2-1B-Instruct"
+quant_path = "Llama-3.2-1B-Instruct-VPTQ"
+
+calibration_dataset = load_dataset(
+    "allenai/c4",
+    data_files="en/c4-train.00001-of-01024.json.gz",
+    split="train",
+).select(range(1024))["text"]
+
+qcfg = VPTQConfig(
+    vector_lens=[-1, 8],         # 8-weight vectors, no outlier codebook
+    num_centroids=[-1, 4096],    # 4096-entry main codebook
+    num_res_centroids=[-1, 16],  # 16-entry residual codebook
+)
+
+model = GPTQModel.load(model_id, qcfg)
+model.quantize(calibration_dataset, batch_size=1, backend=BACKEND.VPTQ_TORCH)
 model.save(quant_path)
 ```
 
@@ -932,6 +966,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * Fast Hadamard Transform: [Dao-AILab/fast-hadamard-transform](https://github.com/Dao-AILab/fast-hadamard-transform), by Tri Dao, vendored into `gptqmodel_ext/hadamard/` under the BSD-3-Clause license. A copy of the license is included in `gptqmodel_ext/hadamard/LICENSE`.
 * Swordfish Kernel: Blackwell (`>= sm100`) GPTQ/AWQ kernel from [AlpinDale](https://x.com/AlpinDale). [Paper](https://blog.alpindale.net/posts/swordfish/)
 * QQQ: Meituan, main-author Ying Zhang, arXiv:2406.09904
+* VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 
@@ -1018,6 +1053,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
       author={Ying Zhang and Peng Zhang and Mincong Huang and Jingyang Xiang and Yujie Wang and Chao Wang and Yineng Zhang and Lei Yu and Chuan Liu and Wei Lin},
       journal={arXiv preprint arXiv:2406.09904},
       year={2024}
+}
+
+# VPTQ
+@inproceedings{liu2024vptq,
+  title={{VPTQ}: Extreme Low-bit Vector Post-Training Quantization for Large Language Models},
+  author={Liu, Yifei and Wen, Jicheng and Wang, Yang and Ye, Shengyu and Zhang, Li Lyna and Cao, Ting and Li, Cheng and Yang, Mao},
+  booktitle={Proceedings of the 2024 Conference on Empirical Methods in Natural Language Processing (EMNLP)},
+  year={2024}
 }
 
 # Norm Tweaking

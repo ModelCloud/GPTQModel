@@ -52,6 +52,9 @@ class BACKEND(str, Enum):
     # FP8 kernels
     FP8_TORCH = "fp8_torch"
 
+    # VPTQ kernels
+    VPTQ_TORCH = "vptq_torch"
+
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
     GGUF_TRITON = "gguf_triton"
@@ -135,6 +138,9 @@ _LEGACY_BACKEND_BY_METHOD = {
     "exl3": {
         BACKEND.EXLLAMA_V3: BACKEND.EXL3_EXLLAMA_V3,
         BACKEND.TORCH: BACKEND.EXL3_TORCH,
+    },
+    "vptq": {
+        BACKEND.TORCH: BACKEND.VPTQ_TORCH,
     },
 }
 

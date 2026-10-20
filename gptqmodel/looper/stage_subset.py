@@ -39,6 +39,7 @@ from ..utils.torch import torch_empty_cache, torch_sync
 from .awq_processor import AWQProcessor
 from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
+from .vptq_processor import VPTQProcessor
 
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -226,7 +227,9 @@ def _resolve_subset_calibration_coverage_policy(
 ) -> CalibrationCoveragePolicy:
     """Resolve how this subset handles modules that never receive calibration traffic."""
 
-    validate_input_coverage = isinstance(processor, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor))
+    validate_input_coverage = isinstance(
+        processor, (GPTQProcessor, QQQProcessor, AWQProcessor, ParoQuantProcessor, VPTQProcessor)
+    )
     fallback_enabled = fallback is not None
     prune_uncovered_modules = validate_input_coverage and not fallback_enabled
 

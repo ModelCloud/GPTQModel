@@ -50,6 +50,7 @@ from .config import (
                      SmoothSoftNorm,
                      TelemetryConfig,
                      TensorParallelPadderConfig,
+                     VPTQConfig,
                      WeightOnlyConfig,
                      WeightOnlyMethod,
 )

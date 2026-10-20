@@ -26,6 +26,7 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from ..utils.vptq import vptq_index_bits
 
 
 log = setup_logger()
@@ -124,6 +125,7 @@ class FORMAT(str, Enum):
     BITBLAS = "bitblas"
     QQQ = "qqq"
     EXL3 = "exl3"
+    VPTQ = "vptq"
 
     GEMM = "gemm"
     GEMV = "gemv"
@@ -144,6 +146,7 @@ class METHOD(str, Enum):
     AWQ = "awq"
     EXL3 = "exl3"
     PARO = "paroquant"
+    VPTQ = "vptq"
 
 
 class VramStrategy(str, Enum):
@@ -1857,6 +1860,9 @@ QUANT_METHOD_FORMAT_MAPPING = {
     METHOD.PARO: {
         FORMAT.PAROQUANT,
     },
+    METHOD.VPTQ: {
+        FORMAT.VPTQ,
+    },
 }
 
 GPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
@@ -1905,6 +1911,9 @@ RTN_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
 GGUF_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
     FORMAT.GGUF,
 )
+VPTQ_EXPORT_FORMATS: Tuple[FORMAT, ...] = (
+    FORMAT.VPTQ,
+)
 
 _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.GPTQ: METHOD.GPTQ,
@@ -1921,6 +1930,7 @@ _UNAMBIGUOUS_EXPORT_METHOD_BY_FORMAT = {
     FORMAT.LLM_AWQ: METHOD.AWQ,
     FORMAT.PAROQUANT: METHOD.PARO,
     FORMAT.QQQ: METHOD.QQQ,
+    FORMAT.VPTQ: METHOD.VPTQ,
 }
 
 # inference only methods should go here
@@ -3328,6 +3338,19 @@ def _normalize_quantize_config_payload_for_target_cls(target_cls, payload: Dict[
         if normalized_format is not None and normalized_format != FORMAT.QQQ:
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.QQQ}`")
             normalized[FORMAT_FIELD_CODE] = FORMAT.QQQ
+    elif target_cls is VPTQConfig:
+        expected_method = METHOD.VPTQ
+        format_value = normalized.get(FORMAT_FIELD_CODE)
+        normalized_format = None
+        if format_value is not None:
+            try:
+                normalized_format = _normalize_format(format_value)
+                normalized[FORMAT_FIELD_CODE] = normalized_format
+            except ValueError:
+                normalized_format = None
+        if normalized_format is not None and normalized_format != FORMAT.VPTQ:
+            log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.VPTQ}`")
+            normalized[FORMAT_FIELD_CODE] = FORMAT.VPTQ
     else:
         expected_method = METHOD.GPTQ
 
@@ -4628,6 +4651,232 @@ class QQQConfig(GPTQConfig):
                 )
 
 
+VPTQ_VALID_BITS: Tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8)
+
+
+def _normalize_vptq_vector_lens(value: Union[List[int], Tuple[int, int]]) -> List[int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError("VPTQConfig: `vector_lens` must be a 2-item list/tuple `[outlier_vector_len, vector_len]`.")
+
+    vector_lens = [int(item) for item in value]
+    outlier_vector_len, vector_len = vector_lens
+    if vector_len <= 0:
+        raise ValueError("VPTQConfig: `vector_lens[1]` must be a positive integer.")
+    if outlier_vector_len == 0 or outlier_vector_len < -1:
+        raise ValueError("VPTQConfig: `vector_lens[0]` must be `-1` (disabled) or a positive integer.")
+    return vector_lens
+
+
+def _normalize_vptq_centroids(value: Union[List[int], Tuple[int, int]], name: str) -> List[int]:
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"VPTQConfig: `{name}` must be a 2-item list/tuple `[outlier, main]`.")
+
+    centroids = [int(item) for item in value]
+    for index, item in enumerate(centroids):
+        if item == -1:
+            continue
+        if item < 1 or (item & (item - 1)) != 0:
+            raise ValueError(
+                f"VPTQConfig: `{name}[{index}]` must be `-1` (disabled) or a power-of-two positive integer, got `{item}`."
+            )
+    return centroids
+
+
+@dataclass
+class VPTQConfig(GPTQConfig):
+    """Configuration for VPTQ (Vector Post-Training Quantization).
+
+    VPTQ splits each weight matrix column (the `out_features` axis) into
+    sub-vectors of `vector_lens[1]` elements, quantizes every sub-vector with a
+    per-codebook nearest-centroid lookup, optionally refines the result with a
+    residual codebook, and finally applies the GPTQ error-propagation rule with
+    the module Hessian so quantization error is compensated across columns.
+
+    `bits` is derived from the codebook sizes and vector length; it is a
+    nominal bits-per-weight label used for logging and kernel selection, not a
+    storage parameter. Configure `vector_lens`, `num_centroids`, and
+    `num_res_centroids` instead of setting `bits` directly.
+    """
+
+    method: METHOD = field(default=METHOD.VPTQ)
+    format: FORMAT = field(default=FORMAT.VPTQ)
+    # `bits` is derived; the relaxed choices list keeps the nominal bpw label
+    # (e.g. 1.5 -> 2) valid for small vector codebooks.
+    bits: int = field(default=2, metadata={"choices": list(VPTQ_VALID_BITS)})
+    # [outlier_vector_len, vector_len]; -1 disables the outlier codebook
+    vector_lens: Union[List[int], Tuple[int, int]] = field(default_factory=lambda: [-1, 8])
+    # [outlier_num_centroids, num_centroids]; -1 disables the codebook
+    num_centroids: Union[List[int], Tuple[int, int]] = field(default_factory=lambda: [-1, 4096])
+    # [outlier_num_res_centroids, num_res_centroids]; -1 disables the residual codebook
+    num_res_centroids: Union[List[int], Tuple[int, int]] = field(default_factory=lambda: [-1, 16])
+    # percentage of input channels assigned to the outlier codebook
+    npercent: float = field(default=0.0)
+    # number of input channels per codebook; -1 lets group_num decide (single codebook)
+    group_size: int = field(default=-1)
+    # number of codebooks for the non-outlier channels; -1 lets group_size decide
+    group_num: int = field(default=-1)
+    # weighted k-means sample weighting: "" (uniform) or "hessian"
+    kmeans_mode: str = field(default="hessian")
+    kmeans_iters: int = field(default=100)
+    kmeans_tol: float = field(default=1e-5)
+    kmeans_seed: int = field(default=0)
+    # per-channel min/max normalization applied before vector quantization
+    enable_norm: bool = field(default=False)
+    norm_dim: int = field(default=0)
+    # reorder input channels by descending Hessian diagonal before quantization
+    enable_perm: bool = field(default=False)
+    # GPTQ error-propagation block size and damping
+    block_size: int = field(default=128)
+    percdamp: float = field(default=0.01)
+
+    def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
+        return (METHOD.VPTQ,)
+
+    def supported_export_formats(self) -> Tuple[FORMAT, ...]:
+        return VPTQ_EXPORT_FORMATS
+
+    def default_desc_act(self) -> bool:
+        return False
+
+    def uses_weight_only_lifecycle(self) -> bool:
+        return False
+
+    def _derive_bits(self) -> int:
+        import math
+
+        vector_len = int(self.vector_lens[1])
+        num_centroids = int(self.num_centroids[1])
+        num_res_centroids = int(self.num_res_centroids[1])
+
+        index_bits = math.log2(num_centroids)
+        if num_res_centroids > 1:
+            index_bits += math.log2(num_res_centroids)
+        return max(VPTQ_VALID_BITS[0], min(VPTQ_VALID_BITS[-1], math.ceil(index_bits / vector_len)))
+
+    def _normalize_bits_field(self, bits_value, checkpoint_format: FORMAT):
+        del checkpoint_format
+        derived = self._derive_bits()
+        if bits_value is not None and int(bits_value) != derived:
+            log.info(
+                f"VPTQConfig: `bits` is derived from the codebook configuration; "
+                f"ignoring `bits={bits_value}` and using `bits={derived}`."
+            )
+        return derived
+
+    def _normalize_dynamic_layer_config(
+        self,
+        layer_name: str,
+        layer_dict: Dict[str, Any],
+        *,
+        valid_bit_widths: List[int],
+        checkpoint_format: FORMAT,
+    ) -> None:
+        del valid_bit_widths, checkpoint_format
+        unsupported = sorted(key for key in layer_dict)
+        if unsupported:
+            raise ValueError(
+                f"VPTQConfig: dynamic overrides for layer `{layer_name}` are not supported; "
+                f"got `{unsupported}`. Configure `vector_lens`/`num_centroids`/`num_res_centroids` globally."
+            )
+
+    def quant_linear_init_kwargs(self) -> Dict[str, Any]:
+        return {
+            "vector_lens": list(self.vector_lens),
+            "num_centroids": list(self.num_centroids),
+            "num_res_centroids": list(self.num_res_centroids),
+            "npercent": self.npercent,
+            "group_num": self.group_num,
+            "kmeans_mode": self.kmeans_mode,
+            "kmeans_iters": self.kmeans_iters,
+            "kmeans_tol": self.kmeans_tol,
+            "kmeans_seed": self.kmeans_seed,
+            "enable_norm": self.enable_norm,
+            "norm_dim": self.norm_dim,
+            "enable_perm": self.enable_perm,
+            "block_size": self.block_size,
+            "percdamp": self.percdamp,
+        }
+
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        out["vector_lens"] = list(self.vector_lens)
+        out["num_centroids"] = list(self.num_centroids)
+        out["num_res_centroids"] = list(self.num_res_centroids)
+        out["npercent"] = self.npercent
+        out["group_size"] = self.group_size
+        out["group_num"] = self.group_num
+        out["kmeans_mode"] = self.kmeans_mode
+        out["kmeans_iters"] = self.kmeans_iters
+        out["kmeans_tol"] = self.kmeans_tol
+        out["kmeans_seed"] = self.kmeans_seed
+        out["enable_norm"] = self.enable_norm
+        out["norm_dim"] = self.norm_dim
+        out["enable_perm"] = self.enable_perm
+        out["block_size"] = self.block_size
+        out["percdamp"] = self.percdamp
+
+    def __post_init__(self):
+        self.vector_lens = _normalize_vptq_vector_lens(self.vector_lens)
+        self.num_centroids = _normalize_vptq_centroids(self.num_centroids, "num_centroids")
+        self.num_res_centroids = _normalize_vptq_centroids(self.num_res_centroids, "num_res_centroids")
+
+        if self.num_centroids[1] < 2:
+            raise ValueError(
+                "VPTQConfig: `num_centroids[1]` must be a power-of-two integer of at least 2, "
+                "so the main codebook needs at least one index bit."
+            )
+        if self.num_res_centroids[1] == 1:
+            raise ValueError(
+                "VPTQConfig: `num_res_centroids[1]` must be -1 (disabled) or a power-of-two "
+                "integer of at least 2; a one-entry residual codebook has no index bits and "
+                "cannot be packed."
+            )
+        if self.npercent < 0:
+            raise ValueError("VPTQConfig: `npercent` must be greater than or equal to 0.")
+        if self.npercent > 0 and self.vector_lens[0] <= 0:
+            raise ValueError("VPTQConfig: `npercent` > 0 requires `vector_lens[0]` > 0.")
+        if self.npercent > 0 and self.num_centroids[0] < 2:
+            raise ValueError("VPTQConfig: `npercent` > 0 requires `num_centroids[0]` of at least 2.")
+        if self.num_res_centroids[0] != -1:
+            raise ValueError(
+                "VPTQConfig: residual codebooks for the outlier group are not supported; "
+                "set `num_res_centroids[0]` to -1."
+            )
+        index_bits = vptq_index_bits(self.num_centroids[1])
+        if self.num_res_centroids[1] > 1:
+            index_bits += vptq_index_bits(self.num_res_centroids[1])
+        if index_bits > 32:
+            raise ValueError(
+                f"VPTQConfig: `num_centroids[1]`/`num_res_centroids[1]` need {index_bits} index bits; "
+                "the packed index stream supports at most 32."
+            )
+        if self.group_num != -1 and self.group_num < 1:
+            raise ValueError("VPTQConfig: `group_num` must be `-1` or a positive integer.")
+        if self.group_num != -1 and self.group_size != -1:
+            raise ValueError("VPTQConfig: `group_num` and `group_size` cannot both be set.")
+        if self.kmeans_mode not in ("", "hessian"):
+            raise ValueError(f"VPTQConfig: unsupported `kmeans_mode` `{self.kmeans_mode}`.")
+        if self.kmeans_iters < 1:
+            raise ValueError("VPTQConfig: `kmeans_iters` must be a positive integer.")
+        if not 0 < self.kmeans_tol < 1:
+            raise ValueError("VPTQConfig: `kmeans_tol` must be between 0 and 1.")
+        if self.norm_dim not in (0, 1):
+            raise ValueError("VPTQConfig: `norm_dim` must be `0` or `1`.")
+        if self.block_size < 1:
+            raise ValueError("VPTQConfig: `block_size` must be a positive integer.")
+        if not 0 <= self.percdamp < 1:
+            raise ValueError("VPTQConfig: `percdamp` must be between 0 and 1.")
+        if self.dynamic:
+            for layer, override in self.dynamic.items():
+                if override is False:
+                    continue
+                if not isinstance(override, dict):
+                    raise ValueError(
+                        f"VPTQConfig: dynamic entry for `{layer}` must be `False` or a dict of overrides."
+                    )
+
+        super().__post_init__()
+
+
 @dataclass
 class FP8Config(PreProcessorConfig):
     bits: int = field(default=8, metadata={"choices": [8]})
@@ -5340,6 +5589,8 @@ def _resolve_quantize_config_class(payload: Dict[str, Any]) -> type[BaseQuantize
         return EXL3Config
     if method == METHOD.PARO or format_value == FORMAT.PAROQUANT:
         return ParoConfig
+    if method == METHOD.VPTQ or format_value == FORMAT.VPTQ:
+        return VPTQConfig
     if method == METHOD.QQQ or format_value == FORMAT.QQQ:
         return QQQConfig
     if method == METHOD.AWQ:
@@ -5361,6 +5612,7 @@ def _known_quantize_config_field_names() -> set[str]:
         AWQConfig,
         ParoConfig,
         QQQConfig,
+        VPTQConfig,
         FP8Config,
         BitsAndBytesConfig,
         EXL3Config,
