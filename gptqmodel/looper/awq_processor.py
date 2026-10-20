@@ -1892,9 +1892,8 @@ class AWQProcessor(LoopProcessor):
         """
         n_grid = 20
         history = []
-        best_ratio = -1
         best_scales = None
-        best_error = float("inf")
+        best_error = None
 
         # Stash a pristine master copy of every scaled linear once so the per-ratio
         # quantize/restore cycle never reaches back to host memory. The master stays on
@@ -2024,7 +2023,17 @@ class AWQProcessor(LoopProcessor):
                     sq_sum = chunk_sq if sq_sum is None else sq_sum + chunk_sq
                     total_elements += diff.numel()
 
-                loss = (0.0 if sq_sum is None else sq_sum.item()) / max(total_elements, 1)
+                if sq_sum is None:
+                    loss = torch.zeros((), dtype=torch.float64, device=device)
+                else:
+                    # A Python scalar denominator selects a CUDA division path
+                    # that rounds one ULP away from host IEEE division. A
+                    # float64 device denominator keeps the legacy loss exact.
+                    loss = sq_sum / torch.tensor(
+                        max(total_elements, 1),
+                        dtype=torch.float64,
+                        device=sq_sum.device,
+                    )
             else:
                 # Legacy eager scoring path: compute one dense quantized output tensor
                 # and evaluate loss against the dense FP reference tensor.
@@ -2032,24 +2041,40 @@ class AWQProcessor(LoopProcessor):
                 int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                 loss = self._compute_loss(fp16_output, int_w_output, device)
 
+            # Keep the whole grid on the device. Comparing a 0-D loss in Python
+            # forces a host synchronization after every ratio; instead, update
+            # the running minimum and its scale tensor with the same strict `<`
+            # predicate the host loop used, which also preserves the first
+            # minimum on ties. The scalar is read once after the grid.
             history.append(loss)
-            if loss < best_error:
-                best_error = loss
-                best_ratio = ratio
-                best_scales = scales.clone()
+            if best_error is None:
+                best_error = torch.full(
+                    (),
+                    float("inf"),
+                    dtype=loss.dtype,
+                    device=loss.device,
+                )
+                # The first candidate can alias the local scales tensor; every
+                # later replacement writes through `where` into that tensor.
+                best_scales = scales
+                improved = loss < best_error
+                torch.where(improved, loss, best_error, out=best_error)
+            else:
+                improved = loss < best_error
+                torch.where(improved, loss, best_error, out=best_error)
+                torch.where(improved, scales, best_scales, out=best_scales)
 
         # The last grid step leaves its quantized product in place, so reset once
         # more to hand callers the pristine FP copy.
         restore_weights()
         orig_weights.clear()
 
-        if best_ratio == -1:
-            log.debug(history)
+        best_error_value = best_error.item()
+        if best_error_value == float("inf"):
+            log.debug([loss.item() for loss in history])
             raise Exception
 
-        assert torch.isnan(best_scales).sum() == 0, best_scales
-
-        return best_scales.detach().cpu(), best_error
+        return best_scales.detach().cpu(), best_error_value
 
     @torch.inference_mode()
     def _compute_loss(
@@ -2060,7 +2085,7 @@ class AWQProcessor(LoopProcessor):
     ):
         """Computes chunked mean-squared reconstruction loss under a memory cap."""
 
-        loss = 0.0
+        loss = None
         fp16_output_flat = fp16_output.view(-1)
         int_w_output_flat = int_w_output.view(-1)
         num_elements = fp16_output_flat.size(0)
@@ -2077,11 +2102,18 @@ class AWQProcessor(LoopProcessor):
 
         # Compute the loss for each chunk
         for fp16_chunk, int_w_chunk in zip(fp16_chunks, int_w_chunks):
-            chunk_loss = (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().item()
-            loss += chunk_loss
+            chunk_loss = (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().double()
+            loss = chunk_loss if loss is None else loss + chunk_loss
 
         # Normalize the loss by the total number of elements
-        loss /= num_elements
+        if loss is None:
+            loss = torch.zeros((), dtype=torch.float64, device=device)
+        # Match the chunked path and the old host division bit-for-bit.
+        loss = loss / torch.tensor(
+            num_elements,
+            dtype=torch.float64,
+            device=loss.device,
+        )
 
         return loss
 

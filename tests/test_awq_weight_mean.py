@@ -93,6 +93,25 @@ class _DummyQwen3MoeLayer(nn.Module):
         self.mlp.experts = nn.ModuleList([_DummyQwen3MoeExpert(), _DummyQwen3MoeExpert()])
 
 
+class _ZeroLinear(nn.Linear):
+    def forward(self, x, *args, **kwargs):
+        return torch.zeros(
+            x.shape[:-1] + (self.out_features,),
+            device=x.device,
+            dtype=x.dtype,
+        )
+
+
+class _NaNLinear(nn.Linear):
+    def forward(self, x, *args, **kwargs):
+        return torch.full(
+            x.shape[:-1] + (self.out_features,),
+            float("nan"),
+            device=x.device,
+            dtype=x.dtype,
+        )
+
+
 class _TestAWQProcessor(AWQProcessor):
     def __init__(self, qcfg: QuantizeConfig):
         super().__init__(
@@ -114,6 +133,195 @@ class _TestAWQProcessor(AWQProcessor):
 
     def _module_forward(self, x: torch.Tensor, module: torch.nn.Module, module_kwargs):
         return module(x)
+
+
+def _oracle_pseudo_quantize_tensor_(
+    weight: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    sym: bool,
+) -> None:
+    """Independent Torch implementation of the AWQ pseudo-quantizer."""
+
+    org_shape = weight.shape
+    if group_size > 0:
+        view = weight.view(-1, group_size)
+    else:
+        view = weight.reshape(org_shape[0], -1)
+
+    if sym:
+        max_val = view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+        max_int = 2 ** (bits - 1) - 1
+        scales = max_val / max_int
+        view.copy_(torch.round(view / scales) * scales)
+    else:
+        max_val = view.amax(dim=1, keepdim=True)
+        min_val = view.amin(dim=1, keepdim=True)
+        max_int = 2**bits - 1
+        min_int = 0
+        scales = (max_val - min_val).clamp(min=1e-5) / max_int
+        zeros = (-torch.round(min_val / scales)).clamp(min_int, max_int)
+        view.copy_(
+            (
+                torch.clamp(torch.round(view / scales) + zeros, min_int, max_int)
+                - zeros
+            )
+            * scales
+        )
+
+
+def _legacy_awq_best_scale(
+    processor: AWQProcessor,
+    x: torch.Tensor,
+    w_mean: torch.Tensor,
+    x_mean: torch.Tensor,
+    module2inspect: torch.nn.Module,
+    linears2scale: list[nn.Linear],
+    fp16_output: torch.Tensor,
+    *,
+    chunked: bool,
+    replay_batch_size: int,
+) -> tuple[int, torch.Tensor, float, list[torch.Tensor]]:
+    """Host-loop oracle for the pre-device-selection AWQ scale search."""
+
+    device = next(module2inspect.parameters()).device
+    x_mean = x_mean.view(-1).to(device)
+    w_mean = w_mean.view(-1).to(device)
+    prev_scale = getattr(processor._scale_context, "prev_scale", None)
+    if prev_scale is not None:
+        w_mean = w_mean * float(prev_scale)
+
+    masters = {
+        linear: linear.weight.detach().clone()
+        for linear in linears2scale
+    }
+    best_ratio = -1
+    best_scales = None
+    best_error = float("inf")
+    candidates = []
+
+    try:
+        for ratio_index in range(20):
+            ratio = ratio_index / 20
+            if processor.duo_scaling:
+                scales = (
+                    x_mean.pow(ratio) / (w_mean.pow(1 - ratio) + 1e-4)
+                ).clamp(min=1e-4)
+            else:
+                scales = x_mean.pow(ratio).clamp(min=1e-4).view(-1)
+            scales = scales / (scales.max() * scales.min()).sqrt()
+            scales_view = scales.view(1, -1).to(device)
+            scales.nan_to_num_(nan=1.0, posinf=1.0, neginf=1.0)
+            candidates.append(scales.clone())
+
+            for linear in linears2scale:
+                torch.mul(masters[linear], scales_view, out=linear.weight)
+                _oracle_pseudo_quantize_tensor_(
+                    linear.weight,
+                    bits=processor.qcfg.bits,
+                    group_size=processor.qcfg.group_size,
+                    sym=processor.qcfg.sym,
+                )
+                linear.weight.div_(scales_view)
+
+            if chunked:
+                total = None
+                total_elements = 0
+                for reference_chunk, int_w_output in zip(
+                    processor._iter_reference_output_chunks(x, fp16_output),
+                    processor._iter_prepared_forward_outputs(
+                        x,
+                        module2inspect,
+                        {},
+                        batch_size=replay_batch_size,
+                    ),
+                ):
+                    int_w_output = int_w_output.clip(
+                        torch.finfo(int_w_output.dtype).min,
+                        torch.finfo(int_w_output.dtype).max,
+                    )
+                    reference_chunk = reference_chunk.to(
+                        device=int_w_output.device,
+                        dtype=int_w_output.dtype,
+                    )
+                    diff = (reference_chunk - int_w_output).float()
+                    chunk_sq = diff.pow(2).sum().double()
+                    total = chunk_sq if total is None else total + chunk_sq
+                    total_elements += diff.numel()
+                loss = (0.0 if total is None else total.item()) / max(total_elements, 1)
+            else:
+                int_w_output = processor._module_forward(
+                    x,
+                    module2inspect,
+                    {},
+                )
+                int_w_output = int_w_output.clip(
+                    torch.finfo(int_w_output.dtype).min,
+                    torch.finfo(int_w_output.dtype).max,
+                )
+                fp16_flat = fp16_output.view(-1)
+                int_w_flat = int_w_output.view(-1)
+                num_elements = fp16_flat.size(0)
+                chunk_size = processor.max_chunk_memory // (
+                    fp16_output.element_size() * 2
+                )
+                chunk_size = min(chunk_size, num_elements)
+                loss = 0.0
+                for fp16_chunk, int_w_chunk in zip(
+                    torch.split(fp16_flat, chunk_size),
+                    torch.split(int_w_flat, chunk_size),
+                ):
+                    loss += (
+                        (fp16_chunk.to(device) - int_w_chunk.to(device))
+                        .float()
+                        .pow(2)
+                        .sum()
+                        .item()
+                    )
+                loss /= num_elements
+
+            if loss < best_error:
+                best_error = loss
+                best_ratio = ratio_index
+                best_scales = scales.clone()
+    finally:
+        for linear in linears2scale:
+            linear.weight.copy_(masters[linear])
+
+    return (
+        best_ratio,
+        best_scales.detach().cpu(),
+        best_error,
+        [candidate.detach().cpu() for candidate in candidates],
+    )
+
+
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self) -> None:
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if str(func).startswith("aten._local_scalar_dense"):
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+def _make_scale_search_processor(*, sym: bool, chunked: bool) -> _TestAWQProcessor:
+    processor = _TestAWQProcessor(
+        AWQConfig(
+            format=FORMAT.GEMM,
+            group_size=4,
+            bits=4,
+            sym=sym,
+            scale_search_chunked_activations=chunked,
+        )
+    )
+    processor._quant_batch_size = 2
+    # Keep the master weights on the module device while forcing `_compute_loss`
+    # to split the twenty-element output into multiple chunks.
+    processor.max_chunk_memory = 128
+    return processor
 
 
 def test_awq_record_input_feature_preserves_sample_axis_for_2d_inputs():
@@ -904,6 +1112,162 @@ def test_awq_clip_search_nan_grid_keeps_unclipped_bound():
     best_max_val = processor._compute_best_clip(w, input_feat, n_grid=20, max_shrink=0.5)
 
     assert torch.equal(best_max_val, torch.ones(64, 2, 1, dtype=torch.float16))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+@pytest.mark.parametrize("sym", [True, False], ids=["sym", "asym"])
+@pytest.mark.parametrize("chunked", [True, False], ids=["chunked", "legacy"])
+def test_awq_best_scale_selection_matches_host_oracle(device, sym, chunked):
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    torch.manual_seed(0)
+    processor = _make_scale_search_processor(sym=sym, chunked=chunked)
+    linear = nn.Linear(8, 4, bias=False, device=device, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, device=device, dtype=torch.float32)
+    fp16_output = linear(x).detach().clone()
+    w_mean = torch.linspace(0.2, 1.4, 8, device=device, dtype=torch.float32)
+    x_mean = torch.linspace(1.6, 0.3, 8, device=device, dtype=torch.float32)
+    original = linear.weight.detach().clone()
+
+    expected_ratio, expected_scales, expected_loss, candidates = _legacy_awq_best_scale(
+        processor,
+        x,
+        w_mean,
+        x_mean,
+        linear,
+        [linear],
+        fp16_output,
+        chunked=chunked,
+        replay_batch_size=2,
+    )
+    assert torch.equal(linear.weight, original)
+
+    actual_scales, actual_loss = processor._compute_best_scale(
+        x,
+        w_mean,
+        x_mean,
+        linear,
+        [linear],
+        fp16_output,
+        {},
+        replay_batch_size=2,
+        prepared_forward=(x, {}) if chunked else None,
+    )
+
+    assert torch.equal(linear.weight, original)
+    assert expected_ratio >= 0
+    assert torch.equal(actual_scales, expected_scales)
+    assert actual_loss == expected_loss
+    assert torch.equal(actual_scales, candidates[expected_ratio])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_awq_best_scale_first_minimum_tie_keeps_first_ratio(device):
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    processor = _make_scale_search_processor(sym=True, chunked=True)
+    linear = _ZeroLinear(8, 4, bias=False, device=device, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, device=device, dtype=torch.float32)
+    fp16_output = torch.zeros(5, 4, device=device, dtype=torch.float32)
+    w_mean = torch.linspace(0.2, 1.4, 8, device=device, dtype=torch.float32)
+    x_mean = torch.linspace(1.6, 0.3, 8, device=device, dtype=torch.float32)
+
+    expected_ratio, expected_scales, expected_loss, candidates = _legacy_awq_best_scale(
+        processor,
+        x,
+        w_mean,
+        x_mean,
+        linear,
+        [linear],
+        fp16_output,
+        chunked=True,
+        replay_batch_size=2,
+    )
+    assert expected_ratio == 0
+    assert expected_loss == 0.0
+    assert torch.equal(expected_scales, candidates[0])
+    assert not torch.equal(candidates[0], candidates[1])
+
+    actual_scales, actual_loss = processor._compute_best_scale(
+        x,
+        w_mean,
+        x_mean,
+        linear,
+        [linear],
+        fp16_output,
+        {},
+        replay_batch_size=2,
+        prepared_forward=(x, {}),
+    )
+
+    assert actual_loss == expected_loss
+    assert torch.equal(actual_scales, candidates[0])
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+def test_awq_best_scale_all_nan_losses_raise_and_restore(device):
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    processor = _make_scale_search_processor(sym=True, chunked=True)
+    linear = _NaNLinear(8, 4, bias=False, device=device, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, device=device, dtype=torch.float32)
+    fp16_output = torch.zeros(5, 4, device=device, dtype=torch.float32)
+    w_mean = torch.linspace(0.2, 1.4, 8, device=device, dtype=torch.float32)
+    x_mean = torch.linspace(1.6, 0.3, 8, device=device, dtype=torch.float32)
+    original = linear.weight.detach().clone()
+
+    with pytest.raises(Exception):
+        processor._compute_best_scale(
+            x,
+            w_mean,
+            x_mean,
+            linear,
+            [linear],
+            fp16_output,
+            {},
+            replay_batch_size=2,
+            prepared_forward=(x, {}),
+        )
+
+    assert torch.equal(linear.weight, original)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda:0"])
+@pytest.mark.parametrize("chunked", [True, False], ids=["chunked", "legacy"])
+def test_awq_best_scale_reads_loss_scalar_once(device, chunked):
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available for this test run.")
+
+    torch.manual_seed(0)
+    processor = _make_scale_search_processor(sym=True, chunked=chunked)
+    linear = nn.Linear(8, 4, bias=False, device=device, dtype=torch.float32)
+    linear.weight.requires_grad_(False)
+    x = torch.randn(5, 8, device=device, dtype=torch.float32)
+    fp16_output = linear(x).detach().clone()
+    w_mean = torch.linspace(0.2, 1.4, 8, device=device, dtype=torch.float32)
+    x_mean = torch.linspace(1.6, 0.3, 8, device=device, dtype=torch.float32)
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        processor._compute_best_scale(
+            x,
+            w_mean,
+            x_mean,
+            linear,
+            [linear],
+            fp16_output,
+            {},
+            replay_batch_size=2,
+            prepared_forward=(x, {}) if chunked else None,
+        )
+
+    assert recorder.scalar_reads == 1
 
 
 @parameterized.expand([
