@@ -581,10 +581,15 @@ class GPTQProcessor(LoopProcessor):
                 out_tensor = out if torch.is_tensor(out) else None
                 # Keep per-sample boundaries here so batched calibration
                 # accumulates GPTQ stats with the same semantics as batch_size=1.
-                for sample_index, sample_keep in enumerate(keep_mask):
-                    if not bool(sample_keep.any().item()):
+                mask_tls = getattr(self, "_mask_tls", None)
+                sample_has_tokens = getattr(mask_tls, "sample_has_tokens", None)
+                if sample_has_tokens is None:
+                    sample_has_tokens = keep_mask.any(dim=1).tolist()
+                for sample_index, has_tokens in enumerate(sample_has_tokens):
+                    if not has_tokens:
                         continue
 
+                    sample_keep = keep_mask[sample_index]
                     input_keep = sample_keep.to(device=inp_tensor.device)
                     sample_inp = inp_tensor[
                         sample_index : sample_index + 1, input_keep, :
