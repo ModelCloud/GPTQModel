@@ -22,6 +22,64 @@ def _get_quantize_exl3():
     return quantize_exl3
 
 
+def _get_block_trace():
+    if not torch.cuda.is_available():
+        pytest.skip("EXL3 kernel verification requires CUDA/HIP.")
+
+    try:
+        from gptqmodel.exllamav3.modules.quant.exl3_lib.quantize import block_trace
+    except Exception as exc:  # pragma: no cover - environment dependent
+        pytest.skip(f"EXL3 quantizer unavailable: {exc}")
+
+    return block_trace
+
+
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self) -> None:
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if str(func).startswith("aten._local_scalar_dense"):
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+def _host_block_trace(A: torch.Tensor, B: torch.Tensor, block_size: int = 1024) -> float:
+    """Reference accumulation: one host read per block, Python float additions."""
+
+    total = 0.0
+    for j_start in range(0, B.shape[1], block_size):
+        j_end = min(j_start + block_size, B.shape[1])
+        partial = torch.einsum(
+            "ik,ij,jk->",
+            A,
+            B[:, j_start:j_end],
+            A[j_start:j_end, :],
+        )
+        total += partial.item()
+    return total
+
+
+@pytest.mark.parametrize("columns", [0, 1, 1024, 1025, 4096])
+def test_exllamav3_block_trace_matches_host_accumulation(columns: int):
+    """Device-side accumulation must be bit-identical and read the scalar once."""
+
+    block_trace = _get_block_trace()
+    torch.manual_seed(41)
+    # ``A`` is the [in_features, out_features] error/weight matrix and ``B`` the
+    # [in_features, in_features] Hessian; the loop streams Hessian columns.
+    A = torch.randn(columns, 96, device="cuda", dtype=torch.float32)
+    B = torch.randn(columns, columns, device="cuda", dtype=torch.float32)
+
+    with _ScalarReadRecorder() as recorder:
+        actual = block_trace(A, B)
+
+    assert recorder.scalar_reads == 0
+    assert actual.dtype == torch.float64
+    assert actual.device.type == "cuda"
+    assert actual.item() == _host_block_trace(A, B)
+
+
 def _clone_tensors(tensors: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     return {
         name: tensor.clone() if isinstance(tensor, torch.Tensor) else tensor
