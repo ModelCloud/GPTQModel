@@ -859,6 +859,26 @@ def block_nmse(x: torch.Tensor, y: torch.Tensor, dim: int = 0, blocksize: int = 
     return diff_sq.item() / (sq.item() + 1e-20)
 
 
+def block_trace(A: torch.Tensor, B: torch.Tensor, block_size: int = 1024):
+    # Compute trace(A @ B) by streaming 1024-column blocks of B.
+    #
+    # The partials used to be read back one at a time and accumulated in a
+    # Python float, synchronizing the device after every block. Widening each
+    # float32 partial to float64 and accumulating on the device performs the
+    # exact same ordered IEEE-754 double additions, so the result is unchanged
+    # while only one device-to-host read is needed by the caller.
+    total = None
+    for j_start in range(0, B.shape[1], block_size):
+        j_end = min(j_start + block_size, B.shape[1])
+        B_block = B[:, j_start:j_end]
+        A_j_block = A[j_start:j_end, :]
+        partial = torch.einsum("ik,ij,jk->", A, B_block, A_j_block).double()
+        total = partial if total is None else total + partial
+    if total is None:
+        return torch.zeros((), dtype=torch.float64, device=A.device)
+    return total
+
+
 def regularize(
     weight: torch.Tensor,
     su: torch.Tensor,
@@ -1130,15 +1150,6 @@ def _quantize_exl3_body(
         # Metrics
         if not q_fallback:
             try:
-                def block_trace(A, B, block_size = 1024):
-                    total = 0.0
-                    for j_start in range(0, B.shape[1], block_size):
-                        j_end = min(j_start + block_size, B.shape[1])
-                        B_block = B[:, j_start:j_end]
-                        A_j_block = A[j_start:j_end, :]
-                        partial = torch.einsum("ik,ij,jk->", A, B_block, A_j_block)
-                        total += partial.item()
-                    return total
                 E = None
                 W = None
                 Hd = None
@@ -1153,7 +1164,9 @@ def _quantize_exl3_body(
                 den = block_trace(W, Hd)
                 W = None
                 Hd = None
-                proxy_err = num / max(den, 1e-8)
+                # Both traces are complete on the device; read them once and
+                # keep the original host double division.
+                proxy_err = num.item() / max(den.item(), 1e-8)
             except torch.OutOfMemoryError:
                 del weight_r, E, W, Hd
                 proxy_err = -1.0
