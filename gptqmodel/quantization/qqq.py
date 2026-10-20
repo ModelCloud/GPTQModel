@@ -120,6 +120,10 @@ class Quantizer(nn.Module):
         self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
+        # Host mirror of ``ready()``. ``find_params`` is the only writer of the
+        # scale buffer, so callers in the quantization loop can avoid a
+        # device-to-host reduction before every quantize call.
+        self._params_ready = False
 
     def configure(
             self,
@@ -229,6 +233,8 @@ class Quantizer(nn.Module):
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
 
+        self._params_ready = True
+
         if weight:
             shape = [-1] + [1] * (len(shape) - 1)
             self.scale = self.scale.reshape(shape)
@@ -255,7 +261,7 @@ class Quantizer(nn.Module):
         return self.maxq > 0
 
     def ready(self):
-        return torch.all(self.scale != 0)
+        return self._params_ready
 
 
 class QQQ:

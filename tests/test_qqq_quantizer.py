@@ -207,3 +207,50 @@ def test_qqq_quantize_host_maxq_matches_tensor_bound(dtype, maxq, sym, groupsize
 
     assert torch.equal(_raw_bytes(actual), _raw_bytes(expected))
     _assert_sync_free(recorder.ops, (maxq, sym, groupsize))
+
+
+def test_qqq_ready_uses_host_flag_without_device_sync():
+    """Readiness must not reduce the scale buffer on the device."""
+
+    quantizer = Quantizer()
+    quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=128, mse=False)
+    x = torch.randn(16, 64)
+
+    assert quantizer.ready() is False
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        unconfigured = quantizer.quantize(x)
+    assert unconfigured is x
+    _assert_sync_free(recorder.ops, "unconfigured quantize")
+
+    quantizer.find_params(x, weight=True)
+    assert quantizer.ready() is True
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        quantizer.quantize(x)
+    _assert_sync_free(recorder.ops, "configured quantize")
+
+
+@pytest.mark.parametrize("bits,sym,groupsize", [(4, True, -1), (4, False, -1), (2, True, 128)])
+def test_qqq_ready_after_find_params_always_has_nonzero_scale(bits, sym, groupsize):
+    """The host flag is only equivalent if ``find_params`` never leaves a zero scale."""
+
+    quantizer = Quantizer()
+    quantizer.configure(bits=bits, perchannel=True, sym=sym, groupsize=groupsize, mse=False)
+    quantizer.find_params(torch.zeros(8, 32), weight=True)
+
+    assert quantizer.ready() is True
+    assert bool(torch.all(quantizer.scale != 0))
+
+
+def test_qqq_ready_flag_survives_deepcopy():
+    import copy
+
+    quantizer = Quantizer()
+    quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=128, mse=False)
+    quantizer.find_params(torch.randn(16, 64), weight=True)
+
+    clone = copy.deepcopy(quantizer)
+    assert clone.ready() is True
