@@ -381,6 +381,176 @@ def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
             assert "aten.__and__.Tensor" not in dispatched, (name, dispatched)
 
 
+def _legacy_mse_quantize(x, scale, zero, maxq):
+    """The pre-optimization MSE candidate dequantization, kept as the oracle."""
+    zero_mask = scale == 0
+    safe_scale = torch.where(
+        zero_mask,
+        torch.full_like(scale, torch.finfo(scale.dtype).tiny),
+        scale,
+    )
+    undefined_zero = zero_mask & ~torch.isfinite(zero)
+    safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
+    quantized = torch.clamp(torch.round(x / safe_scale) + safe_zero, 0, maxq)
+    return safe_scale * (quantized - safe_zero)
+
+
+def _legacy_mse_range_search(x, *, bits, sym, mse, grid=100, maxshrink=0.8):
+    """The pre-optimization MSE search, kept verbatim as the numeric oracle."""
+    x = x.flatten(1)
+    maxq = 2**bits - 1
+    xmin, xmax = _legacy_find_params_range(x, sym)
+    scale = (xmax - xmin) / maxq
+    zero = torch.full_like(scale, (maxq + 1) / 2) if sym else torch.round(-xmin / scale)
+    best = torch.full([x.shape[0]], float("inf"), device=x.device)
+    search_adjacent_zero_points = maxq == 3 and not sym
+
+    for i in range(int(maxshrink * grid)):
+        p = 1 - i / grid
+        xmin1 = p * xmin
+        xmax1 = p * xmax
+        scale1 = (xmax1 - xmin1) / maxq
+        zero1 = torch.round(-xmin1 / scale1) if not sym else zero
+        zero_candidates = (zero1,)
+        if search_adjacent_zero_points:
+            ideal = -xmin1 / scale1
+            lower = torch.floor(ideal).clamp_(0, maxq)
+            upper = torch.ceil(ideal).clamp_(0, maxq)
+            zero_candidates = (zero1, torch.where(zero1 == lower, upper, lower))
+
+        for zero_candidate in zero_candidates:
+            candidate = _legacy_mse_quantize(x, scale1.unsqueeze(1), zero_candidate.unsqueeze(1), maxq)
+            candidate -= x
+            candidate.abs_()
+            candidate.pow_(mse)
+            err = torch.sum(candidate, 1)
+            better = err < best
+            if torch.any(better):
+                best[better] = err[better]
+                scale[better] = scale1[better]
+                zero[better] = zero_candidate[better]
+
+    return scale, zero
+
+
+def _mse_search_cases(dtype):
+    generator = torch.Generator().manual_seed(0)
+    cases = {"randn": torch.randn(32, 128, generator=generator)}
+    cases["all_zero"] = torch.zeros(32, 128)
+
+    mixed = torch.randn(32, 128, generator=generator)
+    mixed[::3] = 0.0
+    mixed[1::5] = -mixed[1::5].abs()
+    mixed[2::7] = mixed[2::7].abs()
+    mixed[3::11] = -0.0
+    cases["mixed_signs"] = mixed
+
+    wide = torch.randn(32, 128, generator=generator) * 1e4
+    wide[5] = 0.0
+    cases["wide"] = wide
+
+    # Rounding thresholds: values one representable step below, exactly on, and
+    # one step above the nearest half-step for each magnitude.
+    centers = torch.tensor([-2.5, -1.5, -0.5, 0.5, 1.5, 2.5], dtype=dtype)
+    ulps = torch.nextafter(centers, torch.full_like(centers, float("inf"))) - centers
+    thresholds = torch.empty(32, 128, dtype=dtype)
+    for row in range(32):
+        for col in range(128):
+            index = (row + col) % centers.numel()
+            thresholds[row, col] = centers[index] + (col % 3 - 1) * ulps[index]
+    thresholds[0, 0] = -0.0
+    cases["rounding_thresholds"] = thresholds
+
+    return {name: tensor.to(dtype) for name, tensor in cases.items()}
+
+
+class _DispatchRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self):
+        self.ops = []
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        self.ops.append(str(func))
+        return func(*args, **(kwargs or {}))
+
+
+def _assert_sync_free(ops, context):
+    banned = ("aten.nonzero", "aten.index_put", "aten._local_scalar_dense", "aten.masked_scatter")
+    offenders = [entry for entry in ops if entry.startswith(banned)]
+    assert not offenders, (context, offenders)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("bits", [2, 4])
+@pytest.mark.parametrize("sym", [True, False])
+def test_mse_range_search_stays_bit_exact_and_sync_free(dtype, bits, sym):
+    """The device-side MSE selection must match the masked-write oracle exactly.
+
+    The replaced loop paid one ``torch.any`` host round trip and three
+    ``index_put_`` scans per grid step, plus two scalar reads inside the
+    quantizer.  Scale and zero-point selection are discrete decisions, so the
+    optimized path has to stay bitwise identical, not merely close.
+    """
+    qcfg = QuantizeConfig(bits=bits, group_size=128, sym=sym, mse=2.0)
+
+    for name, weights in _mse_search_cases(dtype).items():
+        quantizer = Quantizer(qcfg)
+        quantizer.configure(perchannel=True)
+
+        recorder = _DispatchRecorder()
+        with recorder:
+            quantizer.find_params(weights, weight=True)
+
+        expected_scale, expected_zero = _legacy_mse_range_search(
+            weights.clone(),
+            bits=bits,
+            sym=sym,
+            mse=2.0,
+        )
+        assert torch.equal(_raw_bytes(quantizer.scale.reshape(-1)), _raw_bytes(expected_scale)), (name, "scale")
+        assert torch.equal(_raw_bytes(quantizer.zero.reshape(-1)), _raw_bytes(expected_zero)), (name, "zero")
+        _assert_sync_free(recorder.ops, (name, "find_params"))
+
+        recorder = _DispatchRecorder()
+        with recorder:
+            actual = quantizer.quantize(weights)
+        expected = _legacy_mse_quantize(
+            weights,
+            quantizer.scale,
+            quantizer.zero,
+            2**bits - 1,
+        )
+        assert torch.equal(_raw_bytes(actual), _raw_bytes(expected)), (name, "quantize")
+        _assert_sync_free(recorder.ops, (name, "quantize"))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("maxq", [-1, 3, 15])
+@pytest.mark.parametrize("requires_groupwise_processing", [False, True])
+def test_quantize_host_maxq_matches_tensor_bound(dtype, maxq, requires_groupwise_processing):
+    """A host ``maxq`` must remove scalar reads without changing any output bit."""
+    torch.manual_seed(0)
+    x = torch.randn(16, 32, dtype=dtype)
+    scale = torch.rand(16, 1, dtype=dtype) * 0.1
+    zero = torch.randn(16, 1, dtype=dtype) * 2.0
+    scale[0] = 0
+    zero[0] = float("nan")
+
+    expected = quantize(
+        x,
+        scale,
+        zero,
+        torch.tensor(maxq, dtype=torch.float32),
+        requires_groupwise_processing,
+    )
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        actual = quantize(x, scale, zero, maxq, requires_groupwise_processing)
+
+    assert torch.equal(_raw_bytes(actual), _raw_bytes(expected))
+    _assert_sync_free(recorder.ops, (maxq, requires_groupwise_processing))
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("requires_groupwise_processing", [False, True])
