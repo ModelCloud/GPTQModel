@@ -1854,7 +1854,7 @@ class GPTQ:
             and W.device.type == "cuda"
             and blocksize == 128
             and self.qcfg.bits in (2, 3, 4, 5, 6, 7, 8)
-            and int(self.quantizer.maxq.item()) == (1 << self.qcfg.bits) - 1
+            and self.quantizer._maxq_value == (1 << self.qcfg.bits) - 1
             and not self.qcfg.mock_quantization
             and type(self.quantizer) is Quantizer
             and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
