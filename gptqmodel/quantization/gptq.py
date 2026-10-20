@@ -1622,8 +1622,12 @@ class GPTQ:
 
         scale, zero = self._sanitize_scale_and_log(scale, zero)
 
-        abs_max = max(diag.max().item(), 1.0)
-        floor = abs_max * 1e-6
+        # Keep the floor selection on-device: the following loss read already
+        # synchronizes the stream, so reading `diag.max()` here only adds a
+        # second host round trip per module. `max(x, 1) * 1e-6` is
+        # `max(x * 1e-6, 1e-6)`; computing it in the diagonal dtype can differ
+        # from the former double-precision product by at most one ULP.
+        floor = torch.clamp(diag.max() * 1e-6, min=1e-6)
         effective_diag = torch.clamp(diag, min=floor) + self.qcfg.damp_percent * diag.mean()
         column_error = (original_weight - quantized).square().sum(dim=0)
         if self.nsamples:

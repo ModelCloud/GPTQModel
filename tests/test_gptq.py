@@ -242,6 +242,32 @@ def test_embedding_quantization_is_group_exact_and_blocksize_independent():
     assert loss == pytest.approx(expected_loss)
 
 
+def test_embedding_quantization_keeps_diagonal_floor_on_device():
+    """Only the zero-scale probe and final loss may read a host scalar."""
+
+    class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __init__(self):
+            self.scalar_reads = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func in (
+                torch.ops.aten._local_scalar_dense.default,
+                torch.ops.aten.item.default,
+                torch.ops.aten.is_nonzero.default,
+            ):
+                self.scalar_reads += 1
+            return func(*args, **(kwargs or {}))
+
+    gptq = _make_embedding_gptq(group_size=2)
+    gptq.add_batch(torch.tensor([[0, 1, 1, 3, 4, 4, 4]]), None)
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        gptq.quantize(blocksize=1)
+
+    assert recorder.scalar_reads == 2
+
+
 def test_embedding_desc_act_uses_frequency_ordered_groups():
     gptq = _make_embedding_gptq(group_size=2, desc_act=True)
     gptq.add_batch(torch.tensor([[0, 1, 1, 1, 3, 3, 4]]), None)
