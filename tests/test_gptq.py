@@ -27,7 +27,8 @@ from gptqmodel.quantization.config import (
 from gptqmodel.quantization.foem import FOEM
 from gptqmodel.quantization.gptaq import GPTAQ
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization.quantizer import Quantizer, quantize
+from gptqmodel.quantization.qqq import QQQ
+from gptqmodel.quantization.quantizer import Quantizer, _neutralize_dead_columns, quantize
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -467,9 +468,18 @@ def _mse_search_cases(dtype):
 class _DispatchRecorder(torch.utils._python_dispatch.TorchDispatchMode):
     def __init__(self):
         self.ops = []
+        self.bool_mask_index_puts = 0
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        self.ops.append(str(func))
+        name = str(func)
+        self.ops.append(name)
+        if name.startswith("aten.index_put"):
+            indices = args[1] if len(args) > 1 else ()
+            if any(
+                isinstance(index, torch.Tensor) and index.dtype == torch.bool
+                for index in indices
+            ):
+                self.bool_mask_index_puts += 1
         return func(*args, **(kwargs or {}))
 
 
@@ -549,6 +559,137 @@ def test_quantize_host_maxq_matches_tensor_bound(dtype, maxq, requires_groupwise
 
     assert torch.equal(_raw_bytes(actual), _raw_bytes(expected))
     _assert_sync_free(recorder.ops, (maxq, requires_groupwise_processing))
+
+
+_DEAD_COLUMN_CASES = {
+    "none": [],
+    "partial": [1, 4],
+    "endpoints": [0, 7],
+    "all": list(range(8)),
+}
+
+
+@pytest.mark.parametrize("case", list(_DEAD_COLUMN_CASES))
+@pytest.mark.parametrize("strided", [False, True])
+def test_neutralize_dead_columns_matches_boolean_mask_oracle(case, strided):
+    """Device masking must stay bit-identical to the replaced boolean indexing.
+
+    ``H[dead, dead] = 1`` / ``W[:, dead] = 0`` scans the mask with ``nonzero``
+    and synchronizes with the host once per module.  The in-place masked-fill
+    form must produce exactly the same tensors while staying on the device.
+    """
+
+    generator = torch.Generator().manual_seed(7)
+    size = 8
+    hessian = torch.randn(size, size, generator=generator, dtype=torch.float64)
+    hessian = hessian @ hessian.mT
+    weight = torch.randn(5, size, generator=generator, dtype=torch.float64)
+    auxiliary = torch.randn(3, size, generator=generator, dtype=torch.float64)
+    dead_columns = _DEAD_COLUMN_CASES[case]
+
+    if strided:
+        hessian = torch.randn(size * 2, size * 2, generator=generator, dtype=torch.float64)[::2, ::2]
+        weight = torch.randn(5, size * 2, generator=generator, dtype=torch.float64)[:, ::2]
+        auxiliary = torch.randn(3, size * 2, generator=generator, dtype=torch.float64)[:, ::2]
+
+    mask = torch.zeros(size, dtype=torch.bool)
+    mask[dead_columns] = True
+    # A dead channel is defined by a zero Hessian diagonal, exactly as the
+    # production path observes it.
+    hessian.diagonal()[mask] = 0.0
+
+    expected_hessian = hessian.clone()
+    expected_weight = weight.clone()
+    expected_auxiliary = auxiliary.clone()
+    expected_hessian[mask, mask] = 1.0
+    expected_weight[:, mask] = 0.0
+    expected_auxiliary[:, mask] = 0.0
+
+    actual_hessian = hessian.clone()
+    actual_weight = weight.clone()
+    actual_auxiliary = auxiliary.clone()
+    recorder = _DispatchRecorder()
+    with recorder:
+        _neutralize_dead_columns(actual_hessian, actual_weight, actual_auxiliary)
+
+    assert torch.equal(actual_hessian, expected_hessian), case
+    assert torch.equal(actual_weight, expected_weight), case
+    assert torch.equal(actual_auxiliary, expected_auxiliary), case
+    _assert_sync_free(recorder.ops, (case, "neutralize_dead_columns"))
+
+
+def _dead_channel_task(kind):
+    """Build a tiny quantizer whose Hessian has one calibration-dead channel."""
+
+    torch.manual_seed(0)
+    if kind == "gptq":
+        linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+        task = GPTQ(
+            linear,
+            qcfg=QuantizeConfig(bits=4, group_size=4, sym=True, desc_act=False),
+        )
+        task.quantizer.configure(perchannel=True)
+        inputs = torch.randn(16, 8)
+        task.add_batch(inputs, linear(inputs))
+        task.finalize_hessian()
+    elif kind in ("gptaq", "foem"):
+        linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+        named = NamedModule(
+            linear,
+            name="proj",
+            full_name="layer.0.proj",
+            layer_index=0,
+        )
+        named.state["native_inp"] = []
+        if kind == "gptaq":
+            qcfg = QuantizeConfig(
+                bits=4,
+                group_size=4,
+                sym=True,
+                desc_act=False,
+                gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+            )
+            task = GPTAQ(named, qcfg=qcfg)
+        else:
+            qcfg = QuantizeConfig(
+                bits=4,
+                group_size=4,
+                sym=True,
+                desc_act=False,
+                foem=FOEMConfig(alpha=0, beta=0.2, device="cpu"),
+            )
+            task = FOEM(named, qcfg=qcfg)
+        task.quantizer.configure(perchannel=True)
+        task.H = torch.eye(task.columns, dtype=torch.float32)
+        task.nsamples = 1
+        if kind == "gptaq":
+            task.dXXT = torch.zeros(task.columns, task.columns)
+    else:
+        linear = nn.Linear(16, 8, bias=False, dtype=torch.float32).eval()
+        task = QQQ(linear)
+        task.quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=4)
+        task.add_batch(torch.randn(4, 8, 16), None)
+        task.materialize_hessian()
+
+    hessian = task.H
+    hessian.diagonal()[2] = 0.0
+    hessian[2, :] = 0.0
+    hessian[:, 2] = 0.0
+    return task
+
+
+@pytest.mark.parametrize("kind", ["gptq", "gptaq", "foem", "qqq"])
+def test_dead_channel_neutralization_stays_on_device(kind):
+    """No quantization pipeline may write dead channels through a boolean mask."""
+
+    task = _dead_channel_task(kind)
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        task.quantize(blocksize=4 if kind != "qqq" else 8)
+
+    assert recorder.bool_mask_index_puts == 0, (kind, recorder.ops)
+    assert "aten.masked_fill_.Scalar" in recorder.ops, kind
 
 
 @pytest.mark.parametrize("device", ["cpu", "cuda"])

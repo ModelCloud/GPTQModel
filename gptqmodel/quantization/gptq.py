@@ -34,7 +34,7 @@ from .gar import (
     invert_perm,
 )
 from .npu_linalg import npu_inverse_cholesky_factor
-from .quantizer import HF_OPTIMUM, Quantizer, _replace_zero_scale
+from .quantizer import HF_OPTIMUM, Quantizer, _neutralize_dead_columns, _replace_zero_scale
 
 
 log = setup_logger()
@@ -1726,9 +1726,7 @@ class GPTQ:
         # H = self.H.to(device=self.H.device)
 
         if use_hessian:
-            dead = torch.diag(self.H) == 0
-            self.H[dead, dead] = 1
-            W[:, dead] = 0
+            _neutralize_dead_columns(self.H, W)
 
         # g_idx = []
         scale = []
