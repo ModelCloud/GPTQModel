@@ -1034,6 +1034,43 @@ def test_awq_pack_square_token_blocks_lengths_match_reference(device, batch):
     torch.testing.assert_close(packed, expected, rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("batch", [1, 2, 8])
+@pytest.mark.parametrize("expand_source", [False, True])
+def test_awq_pack_kept_token_rows_matches_reference(device, batch, expand_source):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    seq_len = 7
+    row_patterns = torch.tensor(
+        [
+            [True, False, True, True, False, False, True],
+            [False, True, True, False, True, False, False],
+            [True, True, True, True, True, True, True],
+            [False, False, False, False, False, False, False],
+        ],
+        device=device,
+    )
+    keep_mask = row_patterns.repeat((batch + 3) // 4, 1)[:batch]
+    source_rows = 1 if expand_source else batch
+    batch_tensor = (
+        torch.arange(source_rows * seq_len, device=device, dtype=torch.int64)
+        .reshape(source_rows, seq_len)
+    )
+
+    source = batch_tensor
+    if source_rows == 1 and batch > 1:
+        source = source.expand(batch, *source.shape[1:])
+    expected = torch.cat(
+        [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)],
+        dim=0,
+    ).unsqueeze(0)
+
+    packed = AWQProcessor._pack_kept_token_rows(batch_tensor, keep_mask)
+
+    assert torch.equal(packed, expected)
+
+
 def test_awq_align_module_kwargs_crops_single_batch_max_cache_mask():
     """Replay must crop a max-cache causal mask instead of padding activations."""
 
