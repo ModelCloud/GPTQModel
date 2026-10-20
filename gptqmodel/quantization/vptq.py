@@ -152,7 +152,7 @@ def _weighted_kmeans(
     previous_inertia = None
     for _ in range(max(1, int(iters))):
         assignment, residual = _chunked_assign(data, centroids)
-        inertia = (residual.double() * weights.double()).sum().item()
+        inertia = (residual.double() * weights.double()).sum()
 
         weighted = data * weights.unsqueeze(1)
         sums = torch.zeros_like(centroids).index_add_(0, assignment, weighted)
@@ -163,6 +163,8 @@ def _weighted_kmeans(
         empty = counts <= 0
         centroids = torch.where(empty.unsqueeze(1), centroids, updated)
 
+        # Enqueue the independent centroid update before waiting for inertia.
+        inertia = float(inertia.item())
         if previous_inertia is not None:
             denominator = max(abs(previous_inertia), _EPS)
             if abs(previous_inertia - inertia) <= tol * denominator:

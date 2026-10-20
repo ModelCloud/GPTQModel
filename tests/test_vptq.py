@@ -39,7 +39,13 @@ from gptqmodel.adapter.adapter import Lora
 from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
 from gptqmodel.quantization import vptq as vptq_module
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
-from gptqmodel.quantization.vptq import VPTQ, VPTQQuantResult, _chunked_assign, _matrix_to_vectors
+from gptqmodel.quantization.vptq import (
+    VPTQ,
+    VPTQQuantResult,
+    _chunked_assign,
+    _matrix_to_vectors,
+    _weighted_kmeans,
+)
 from gptqmodel.utils.vptq import (
     pack_vptq_indices,
     unpack_vptq_indices,
@@ -1397,6 +1403,35 @@ def test_vptq_hessian_usability_rejects_zero_and_nonfinite():
     inf_hessian = torch.eye(4, dtype=torch.float64)
     inf_hessian[0, 1] = float("inf")
     assert not VPTQ._hessian_is_usable(inf_hessian)
+
+
+def test_vptq_weighted_kmeans_defers_inertia_read_until_after_update():
+    """The convergence read must not block the independent centroid update."""
+
+    ops = []
+
+    class Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            ops.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    data = torch.randn(32, 4)
+    weights = torch.rand(32)
+    with Recorder():
+        centroids, assignment = _weighted_kmeans(
+            data,
+            8,
+            weights,
+            iters=2,
+            tol=0.0,
+            seed=0,
+        )
+
+    assert centroids.shape == (8, 4)
+    assert assignment.shape == (32,)
+    inertia_read = ops.index("aten._local_scalar_dense.default")
+    centroid_update = ops.index("aten.index_add_.default")
+    assert inertia_read > centroid_update
 
 
 def test_vptq_partial_dead_hessian_matches_oracle():
