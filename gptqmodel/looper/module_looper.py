@@ -763,6 +763,14 @@ class ModuleLooper(DeviceAssignmentState):
 
         tls = self._processor_mask_tls(processor)
         tls.value = mask
+        # ``mask`` is [batch, seq] on the execution device. Derive the
+        # per-sample emptiness flags once per batch here; every module's
+        # forward hook would otherwise synchronize once per sample.
+        tls.sample_has_tokens = (
+            mask.any(dim=1).tolist()
+            if torch.is_tensor(mask) and mask.ndim == 2
+            else None
+        )
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
