@@ -712,6 +712,67 @@ def test_awq_previous_subset_scale_is_cached_per_subset_identity():
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_awq_previous_subset_scale_matches_per_module_means(device, dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4)
+    )
+    torch.manual_seed(0)
+    subset = {}
+    for index, (out_features, in_features) in enumerate(((3, 5), (7, 5), (2, 5))):
+        layer = nn.Linear(
+            in_features,
+            out_features,
+            bias=False,
+            device=device,
+            dtype=dtype,
+        )
+        subset[f"module_{index}"] = NamedModule(
+            layer,
+            name=f"module_{index}",
+            full_name=f"model.layers.0.module_{index}",
+            layer_index=0,
+        )
+
+    expected = sum(
+        float(named_module.module.weight.detach().abs().mean().item())
+        for named_module in subset.values()
+    ) / len(subset)
+
+    actual = processor._capture_previous_subset_scale(subset)
+
+    assert actual == expected
+
+
+def test_awq_previous_subset_scale_supports_mixed_devices():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    processor = _TestAWQProcessor(
+        QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=4)
+    )
+    subset = {}
+    for index, device in enumerate(("cpu", "cuda")):
+        layer = nn.Linear(5, 3, bias=False, device=device, dtype=torch.float32)
+        subset[f"module_{index}"] = NamedModule(
+            layer,
+            name=f"module_{index}",
+            full_name=f"model.layers.0.module_{index}",
+            layer_index=0,
+        )
+
+    expected = sum(
+        float(named_module.module.weight.detach().abs().mean().item())
+        for named_module in subset.values()
+    ) / len(subset)
+
+    assert processor._capture_previous_subset_scale(subset) == expected
+
+
 @pytest.mark.parametrize("completion_path", ["no_config", "no_valid_groups"])
 def test_awq_early_layer_completion_releases_all_feature_state(completion_path):
     processor = _TestAWQProcessor(

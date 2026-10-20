@@ -966,18 +966,20 @@ class AWQProcessor(LoopProcessor):
         if not previous_subset:
             return None
 
-        values: List[float] = []
+        values: List[torch.Tensor] = []
         for named_module in previous_subset.values():
             weight = getattr(named_module.module, "weight", None)
             if weight is None:
                 continue
             with torch.no_grad():
-                values.append(float(weight.detach().abs().mean().item()))
+                values.append(weight.detach().abs().mean())
 
         if not values:
             return None
 
-        return float(sum(values) / len(values))
+        if len({value.device for value in values}) != 1:
+            return float(sum(float(value.item()) for value in values) / len(values))
+        return float(sum(torch.stack(values).tolist()) / len(values))
 
     def _previous_subset_scale(
         self,
