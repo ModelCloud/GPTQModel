@@ -806,8 +806,8 @@ class AWQProcessor(LoopProcessor):
         source = batch_tensor
         if source.shape[0] == 1 and batch > 1:
             source = source.expand(batch, *source.shape[1:])
-        packed_rows = [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)]
-        return torch.cat(packed_rows, dim=0).unsqueeze(0)
+        rows, columns = torch.nonzero(keep_mask, as_tuple=True)
+        return source[rows, columns].unsqueeze(0)
 
     @staticmethod
     def _pack_square_token_blocks(batch_tensor: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
