@@ -51,6 +51,7 @@ _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 _PACK_BLOCK_TORCH_OPS_EXTENSION = None
 _FLOATX_CPU_TORCH_OPS_EXTENSION = None
+_INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION = None
 
 _cpp_ext_lock = _TORCH_OPS_JIT_LOCK
 
@@ -1838,6 +1839,27 @@ def _floatx_cpu_source_path() -> Path:
     return project_root / "gptqmodel_ext" / "floatx_cpu.cpp"
 
 
+def _int4_qzero_group_scaled_cpu_source_dir() -> Path:
+    """Resolve the shared INT4 qzero/group-scaled CPU kernel source directory."""
+
+    project_root = Path(__file__).resolve().parents[2]
+    source_dir = project_root / "gptqmodel_ext" / "int4_qzero_group_scaled_cpu"
+    if source_dir.is_dir():
+        return source_dir
+    return project_root / "int4_qzero_group_scaled_cpu"
+
+
+def _int4_qzero_group_scaled_cpu_sources() -> list[str]:
+    source_dir = _int4_qzero_group_scaled_cpu_source_dir()
+    return [
+        str(source_dir / "binding.cpp"),
+        str(source_dir / "int4_qzero_group_scaled_torch.cpp"),
+        str(source_dir / "int4_qzero_group_scaled.cpp"),
+        str(source_dir / "int4_qzero_group_scaled_avx512.cpp"),
+        str(source_dir / "int4_qzero_group_scaled_pack.cpp"),
+    ]
+
+
 def _pack_block_extension() -> TorchOpsJitExtension:
     """Build the shared pack_block torch.ops loader on first use."""
 
@@ -1880,6 +1902,46 @@ def _floatx_cpu_extension() -> TorchOpsJitExtension:
             python_abi_dependent=False,
         )
     return _FLOATX_CPU_TORCH_OPS_EXTENSION
+
+
+def _int4_qzero_group_scaled_cpu_extension() -> TorchOpsJitExtension:
+    """Build the shared INT4 qzero/group-scaled CPU torch.ops loader."""
+
+    global _INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION
+    if _INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION is None:
+        source_dir = _int4_qzero_group_scaled_cpu_source_dir()
+        _INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+            name="gptqmodel_int4_qzero_group_scaled_cpu",
+            namespace="gptqmodel_int4_qzero_group_scaled_cpu",
+            required_ops=(
+                "gemm_int4_qzero_group_scaled_cpu_forward",
+                "pack_gptq_int4",
+                "pack_awq_int4",
+            ),
+            sources=_int4_qzero_group_scaled_cpu_sources,
+            build_root_env="GPTQMODEL_EXT_BUILD",
+            default_build_root=lambda: default_torch_ops_build_root("int4_qzero_group_scaled_cpu"),
+            display_name="int4_qzero_group_scaled_cpu",
+            extra_cflags=[
+                "-O3",
+                f"-std={_jit_cxx_standard()}",
+                "-fopenmp",
+                "-mfma",
+                "-mf16c",
+                "-mavx512f",
+                "-mavx512bf16",
+                "-mavx512vl",
+                "-mavx512dq",
+                "-mavx512bw",
+                "-mavx512vbmi",
+            ],
+            extra_include_paths=[str(source_dir)],
+            extra_ldflags=["-fopenmp"],
+            verbose_env="GPTQMODEL_EXT_VERBOSE",
+            requires_cuda=False,
+            python_abi_dependent=False,
+        )
+    return _INT4_QZERO_GROUP_SCALED_CPU_TORCH_OPS_EXTENSION
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
