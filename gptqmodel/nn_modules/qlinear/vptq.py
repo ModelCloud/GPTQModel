@@ -499,6 +499,12 @@ class VPTQLinear(WeightOnlyQuantLinear):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         bias = getattr(self, "bias", None)
+        if self.input_rows(x) == 0:
+            out = self.empty_linear_output(x)
+            if self.adapter is not None:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
         if (
             self.backend == BACKEND.VPTQ_CUDA
             and x.is_cuda

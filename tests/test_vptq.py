@@ -1930,6 +1930,43 @@ def test_vptq_cuda_fused_linear_matches_independent_torch_oracle(dtype):
     assert float(drift.max()) <= 2e-3
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("shape", [(0, 128), (2, 0, 128)])
+def test_vptq_cuda_empty_rows_skip_kernel_and_preserve_adapter(shape, monkeypatch):
+    """Empty CUDA inputs preserve Linear shape and adapter behavior without a launch."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for VPTQ empty-input coverage")
+
+    class AddOneAdapter:
+        def apply(self, *, x, out):
+            return out + 1
+
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    module = build_module(qcfg, 128, 64, dtype=torch.float16).to("cuda")
+    # VPTQ currently rejects adapters during normal backend selection, but its
+    # forward path still preserves an attached adapter for shared linear APIs.
+    module.adapter = AddOneAdapter()
+    module.backend = BACKEND.VPTQ_CUDA
+
+    def fail_if_kernel_called(*args, **kwargs):
+        raise AssertionError("empty input must not dispatch the CUDA kernel")
+
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", fail_if_kernel_called)
+    x = torch.empty(shape, device="cuda", dtype=torch.float16)
+    actual = module(x)
+    assert actual.shape == shape[:-1] + (64,)
+    assert actual.dtype == x.dtype and actual.device == x.device
+    assert torch.equal(actual, torch.ones_like(actual))
+
+
 # ---------------------------------------------------------------------------
 # end to end
 # ---------------------------------------------------------------------------
