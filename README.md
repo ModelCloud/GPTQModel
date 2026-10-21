@@ -98,7 +98,8 @@ same AVX512-BF16 int4 GEMM on Linux x86-64 hosts with AVX512-BF16,
 AVX512-VBMI, and OS AVX512 state enabled. GPTQ and AWQ use separate fused
 checkpoint-to-kernel packers but no separate compute kernels. `AUTO` selects
 the AVX512 path ahead of the ATen int4pack fallback when the layer shape
-satisfies the kernel's 32-row and group-size alignment requirements.
+satisfies the kernel's 32-row and group-size alignment requirements. Supported
+group sizes are 16, 32, 64, 128, 256, and 512.
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 

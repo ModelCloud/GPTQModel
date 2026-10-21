@@ -305,8 +305,12 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
     (
         (1, 256, 64, 32),
         (7, 512, 128, 32),
+        (7, 1024, 128, 256),
+        (7, 1024, 128, 512),
         (1, 256, 64, 64),
         (7, 512, 128, 128),
+        (31, 1024, 128, 256),
+        (31, 1024, 128, 512),
         (31, 1024, 256, 128),
         (64, 2048, 512, 64),
     ),
@@ -347,7 +351,8 @@ def test_awq_layer_matches_dequantize_gemm_oracle(
     relative_error = torch.linalg.vector_norm(
         (output.float() - reference.float()).flatten()
     ) / torch.linalg.vector_norm(reference.float().flatten())
-    assert relative_error < 3e-3
+    normalized_limit = 3.5e-3 if group_size >= 256 else 3e-3
+    assert relative_error < normalized_limit
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -472,3 +477,26 @@ def test_awq_auto_selection_prefers_shared_avx512_kernel():
         assert candidates.index(TorchCpuAvx512AwqLinear) < candidates.index(
             TorchAtenAwqLinear
         )
+
+
+@pytest.mark.parametrize("group_size", (256, 512))
+def test_awq_auto_selection_supports_large_groups(group_size):
+    if not has_avx512_bf16():
+        pytest.skip(avx512_bf16_error())
+    ok, err = TorchCpuAvx512AwqLinear.cached_validate_once()
+    if not ok:
+        pytest.skip(str(err))
+
+    clear_validation_cache()
+    selected = select_quant_linear(
+        bits=4,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+    assert selected is TorchCpuAvx512AwqLinear

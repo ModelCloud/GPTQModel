@@ -506,8 +506,12 @@ def test_unsupported_host_disables_backend_and_falls_back(monkeypatch):
     (
         (1, 256, 64, 32),
         (7, 512, 128, 32),
+        (7, 1024, 128, 256),
+        (7, 1024, 128, 512),
         (1, 256, 64, 64),
         (7, 512, 128, 128),
+        (25, 1024, 128, 256),
+        (25, 1024, 128, 512),
         (25, 512, 128, 128),
         (64, 1024, 256, 128),
         (128, 2048, 512, 64),
@@ -541,7 +545,8 @@ def test_kernel_matches_independent_bf16_oracle(
     assert output.dtype == torch.bfloat16
     torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
     normalized_error = (output.float() - reference.float()).norm() / reference.float().norm()
-    assert normalized_error.item() < 3e-3
+    normalized_limit = 3.5e-3 if group_size >= 256 else 3e-3
+    assert normalized_error.item() < normalized_limit
 
 
 def test_kernel_preserves_fp16_input_dtype():
@@ -764,3 +769,22 @@ def test_auto_selection_and_shape_fallback():
             pack_dtype=torch.int32,
         )
         assert aten is TorchAtenLinear
+
+
+@pytest.mark.parametrize("group_size", (256, 512))
+def test_auto_selection_supports_large_groups(group_size):
+    if not has_avx512_bf16():
+        pytest.skip(avx512_bf16_error())
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=group_size,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ_V2,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    assert selected is TorchCpuAvx512Linear
