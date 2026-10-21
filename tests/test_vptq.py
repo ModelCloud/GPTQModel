@@ -1889,6 +1889,47 @@ def test_vptq_cuda_quantize_and_infer(dtype):
     assert float((actual.to(torch.float64) - oracle.to(torch.float64)).abs().max()) <= 2e-3
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_vptq_cuda_fused_linear_matches_independent_torch_oracle(dtype):
+    """The fused CUDA path must preserve dtype and match independent reconstruction."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for VPTQ fused inference coverage")
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=71)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    result, _ = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype
+    )
+    module = build_module(qcfg, weight.shape[1], weight.shape[0], dtype=dtype).to(device)
+    module.backend = BACKEND.VPTQ_CUDA
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    generator = torch.Generator().manual_seed(73)
+    activations = torch.randn(3, 128, generator=generator, dtype=torch.float32).to(
+        device=device, dtype=dtype
+    )
+    actual = module(activations)
+    assert actual.dtype == dtype
+
+    # Independent reconstruction is computed by the test oracle, then Torch
+    # performs the reference GEMM without invoking the VPTQ CUDA operator.
+    oracle_weight = oracle_reconstruct(result, module).to(device=device, dtype=torch.float64)
+    oracle = (activations.to(torch.float64) @ oracle_weight.t()).to(dtype)
+    drift = (actual.to(torch.float64) - oracle.to(torch.float64)).abs()
+    assert float(drift.max()) <= 2e-3
+
+
 # ---------------------------------------------------------------------------
 # end to end
 # ---------------------------------------------------------------------------
