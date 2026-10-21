@@ -51,6 +51,7 @@ _PACK_BLOCK_EXTENSION_INITIALISED = False
 
 _PACK_BLOCK_TORCH_OPS_EXTENSION = None
 _FLOATX_CPU_TORCH_OPS_EXTENSION = None
+_GPTQ_CPU_AVX512_TORCH_OPS_EXTENSION = None
 
 _cpp_ext_lock = _TORCH_OPS_JIT_LOCK
 
@@ -1838,6 +1839,27 @@ def _floatx_cpu_source_path() -> Path:
     return project_root / "gptqmodel_ext" / "floatx_cpu.cpp"
 
 
+def _gptq_cpu_avx512_source_dir() -> Path:
+    """Resolve the ported CPU GPTQ AVX512 kernel source directory."""
+
+    project_root = Path(__file__).resolve().parents[2]
+    source_dir = project_root / "gptqmodel_ext" / "gptq_cpu"
+    if source_dir.is_dir():
+        return source_dir
+    return project_root / "gptq_cpu"
+
+
+def _gptq_cpu_avx512_sources() -> list[str]:
+    source_dir = _gptq_cpu_avx512_source_dir()
+    return [
+        str(source_dir / "binding.cpp"),
+        str(source_dir / "gptq_cpu_torch.cpp"),
+        str(source_dir / "gptq_cpu.cpp"),
+        str(source_dir / "gptq_avx512.cpp"),
+        str(source_dir / "gptq_pack.cpp"),
+    ]
+
+
 def _pack_block_extension() -> TorchOpsJitExtension:
     """Build the shared pack_block torch.ops loader on first use."""
 
@@ -1880,6 +1902,42 @@ def _floatx_cpu_extension() -> TorchOpsJitExtension:
             python_abi_dependent=False,
         )
     return _FLOATX_CPU_TORCH_OPS_EXTENSION
+
+
+def _gptq_cpu_avx512_extension() -> TorchOpsJitExtension:
+    """Build the CPU GPTQ AVX512-BF16 torch.ops loader on first use."""
+
+    global _GPTQ_CPU_AVX512_TORCH_OPS_EXTENSION
+    if _GPTQ_CPU_AVX512_TORCH_OPS_EXTENSION is None:
+        source_dir = _gptq_cpu_avx512_source_dir()
+        _GPTQ_CPU_AVX512_TORCH_OPS_EXTENSION = TorchOpsJitExtension(
+            name="gptqmodel_gptq_cpu_avx512",
+            namespace="gptqmodel_gptq_cpu",
+            required_ops=("gemm_int4_forward", "pack_gptq_int4"),
+            sources=_gptq_cpu_avx512_sources,
+            build_root_env="GPTQMODEL_EXT_BUILD",
+            default_build_root=lambda: default_torch_ops_build_root("gptq_cpu_avx512"),
+            display_name="gptq_cpu_avx512",
+            extra_cflags=[
+                "-O3",
+                f"-std={_jit_cxx_standard()}",
+                "-fopenmp",
+                "-mfma",
+                "-mf16c",
+                "-mavx512f",
+                "-mavx512bf16",
+                "-mavx512vl",
+                "-mavx512dq",
+                "-mavx512bw",
+                "-mavx512vbmi",
+            ],
+            extra_include_paths=[str(source_dir)],
+            extra_ldflags=["-fopenmp"],
+            verbose_env="GPTQMODEL_EXT_VERBOSE",
+            requires_cuda=False,
+            python_abi_dependent=False,
+        )
+    return _GPTQ_CPU_AVX512_TORCH_OPS_EXTENSION
 
 
 def load_pack_block_extension(*, verbose: bool = False) -> Optional[object]:
