@@ -22,7 +22,7 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..nn_modules.qlinear.vptq import VPTQLinear
+from ..nn_modules.qlinear.vptq_torch import VPTQLinear
 from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
 from ..quantization.vptq import VPTQ
 from ..utils.backend import BACKEND

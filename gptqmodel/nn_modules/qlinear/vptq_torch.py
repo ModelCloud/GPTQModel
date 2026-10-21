@@ -32,7 +32,6 @@ from . import WeightOnlyQuantLinear
 
 
 log = setup_logger()
-_VPTQ_CUDA_MAX_ROWS = 8
 
 
 def _as_pair(value: Any, name: str) -> List[int]:
@@ -42,9 +41,9 @@ def _as_pair(value: Any, name: str) -> List[int]:
 
 
 class VPTQLinear(WeightOnlyQuantLinear):
-    """Weight-only VPTQ linear layer with Torch and fused CUDA inference."""
+    """Weight-only VPTQ linear layer with the portable Torch implementation."""
 
-    SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH, BACKEND.VPTQ_CUDA]
+    SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]
     SUPPORTS_FORMATS = {FORMAT.VPTQ: 100}
     SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 7, 8]
@@ -505,43 +504,10 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 out = self.adapter.apply(x=x, out=out)
             return out
 
-        if (
-            self.backend == BACKEND.VPTQ_CUDA
-            and x.is_cuda
-            and x.dtype == self.centroids.weight.dtype
-            and x.numel() // self.in_features <= _VPTQ_CUDA_MAX_ROWS
-        ):
-            from ...utils.vptq_cuda import vptq_cuda_linear
-
-            inverse_perm = self.inverse_perm if self.enable_perm else None
-            out = vptq_cuda_linear(
-                x.contiguous(),
-                self.indices,
-                self.centroids.weight,
-                self.res_centroids.weight if self.enable_residual else None,
-                self.outlier_indices if self.enable_outlier else None,
-                self.outlier_centroids.weight if self.enable_outlier else None,
-                inverse_perm,
-                self.weight_scale if self.enable_norm else None,
-                self.weight_bias if self.enable_norm else None,
-                bias,
-                group_size=self.group_size,
-                in_features=self.in_features,
-                out_features=self.out_features,
-                vector_len=self.vector_len,
-                outlier_size=self.outlier_size,
-                outlier_vector_len=self.outlier_vector_len,
-                num_centroids=self.num_centroids,
-                num_res_centroids=self.num_res_centroids,
-                index_bits=self.index_bits,
-                res_bits=self.res_index_bits,
-                norm_dim=self.norm_dim,
-            )
-        else:
-            weight = self.dequantize().to(dtype=x.dtype, device=x.device)
-            if bias is not None and bias.dtype != x.dtype:
-                bias = bias.to(dtype=x.dtype)
-            out = F.linear(x, weight, bias)
+        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        if bias is not None and bias.dtype != x.dtype:
+            bias = bias.to(dtype=x.dtype)
+        out = F.linear(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
         return out

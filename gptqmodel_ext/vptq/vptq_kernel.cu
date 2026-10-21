@@ -300,6 +300,44 @@ at::Tensor vptq_dequantize_cuda(
     int64_t outlier_size, int64_t outlier_vector_len, int64_t num_centroids,
     int64_t num_res_centroids, int64_t index_bits, int64_t res_bits,
     int64_t norm_dim) {
+  TORCH_CHECK(indices.is_cuda() && indices.is_contiguous() && indices.dim() == 3 &&
+                  indices.scalar_type() == at::kInt,
+              "VPTQ CUDA indices must be contiguous 3D int32 on CUDA");
+  TORCH_CHECK(centroids.is_cuda() && centroids.device() == indices.device() &&
+                  centroids.is_contiguous(),
+              "VPTQ CUDA centroids must be contiguous and on the indices device");
+  TORCH_CHECK(in_features > 0 && out_features > 0 && group_size > 0 && vector_len > 0,
+              "VPTQ CUDA feature and group sizes must be positive");
+  TORCH_CHECK(index_bits > 0 && res_bits >= 0 && index_bits + res_bits <= 32,
+              "VPTQ CUDA packed-index metadata is invalid");
+  TORCH_CHECK(outlier_size >= 0 && outlier_size <= in_features,
+              "VPTQ CUDA outlier size is outside the input feature range");
+  const auto check_optional = [&](const c10::optional<at::Tensor>& tensor,
+                                  const char* name,
+                                  c10::optional<at::ScalarType> expected_dtype = c10::nullopt) {
+    if (!tensor.has_value()) return;
+    TORCH_CHECK(tensor->is_cuda() && tensor->device() == indices.device() && tensor->is_contiguous(),
+                "VPTQ CUDA ", name, " must be contiguous and on the indices device");
+    if (expected_dtype.has_value()) {
+      TORCH_CHECK(tensor->scalar_type() == *expected_dtype,
+                  "VPTQ CUDA ", name, " has an unexpected dtype");
+    }
+  };
+  check_optional(res_centroids, "residual centroids", centroids.scalar_type());
+  check_optional(outlier_indices, "outlier indices", at::kInt);
+  check_optional(outlier_centroids, "outlier centroids", centroids.scalar_type());
+  check_optional(inverse_perm, "inverse permutation", at::kInt);
+  check_optional(weight_scale, "weight scale", centroids.scalar_type());
+  check_optional(weight_bias, "weight bias", centroids.scalar_type());
+  TORCH_CHECK(res_centroids.has_value() == (res_bits > 0),
+              "VPTQ CUDA residual centroids and residual index bits must agree");
+  TORCH_CHECK(outlier_indices.has_value() == outlier_centroids.has_value(),
+              "VPTQ CUDA outlier indices and centroids must be provided together");
+  TORCH_CHECK(weight_scale.has_value() == weight_bias.has_value(),
+              "VPTQ CUDA normalization scale and bias must be provided together");
+  TORCH_CHECK(outlier_indices.has_value() == (outlier_size > 0),
+              "VPTQ CUDA outlier buffers and outlier size must agree");
+
   c10::cuda::CUDAGuard guard(indices.device());
   auto out = at::empty({out_features, in_features}, centroids.options());
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, centroids.scalar_type(), "vptq_dequantize", [&] {
@@ -327,8 +365,55 @@ at::Tensor vptq_linear_cuda(
     int64_t num_res_centroids, int64_t index_bits, int64_t res_bits,
     int64_t norm_dim) {
   TORCH_CHECK(x.is_cuda() && x.is_contiguous(), "VPTQ CUDA expects contiguous CUDA activations");
+  TORCH_CHECK(x.dim() >= 1, "VPTQ CUDA activations must have at least one dimension");
+  TORCH_CHECK(in_features > 0 && out_features > 0, "VPTQ CUDA feature sizes must be positive");
   TORCH_CHECK(x.size(-1) == in_features, "VPTQ CUDA activation width mismatch");
   TORCH_CHECK(x.scalar_type() == centroids.scalar_type(), "VPTQ CUDA activation/codebook dtypes must match");
+  TORCH_CHECK(indices.is_cuda() && indices.device() == x.device() && indices.is_contiguous(),
+              "VPTQ CUDA indices must be contiguous and on the activation device");
+  TORCH_CHECK(indices.scalar_type() == at::kInt && indices.dim() == 3,
+              "VPTQ CUDA indices must be a contiguous 3D int32 tensor");
+  TORCH_CHECK(centroids.is_cuda() && centroids.device() == x.device() && centroids.is_contiguous(),
+              "VPTQ CUDA centroids must be contiguous and on the activation device");
+  TORCH_CHECK(group_size > 0 && vector_len > 0 && index_bits > 0 && res_bits >= 0,
+              "VPTQ CUDA packed-index metadata is invalid");
+  TORCH_CHECK(index_bits + res_bits <= 32, "VPTQ CUDA packed indices may use at most 32 bits");
+  TORCH_CHECK(outlier_size >= 0 && outlier_size <= in_features,
+              "VPTQ CUDA outlier size is outside the input feature range");
+  TORCH_CHECK(indices.size(1) >= (out_features + vector_len - 1) / vector_len,
+              "VPTQ CUDA indices do not cover all output vectors");
+  TORCH_CHECK(indices.size(2) >= (group_size * (index_bits + res_bits) + 31) / 32,
+              "VPTQ CUDA packed-index rows are too short for the declared bit width");
+
+  const auto check_optional = [&](const c10::optional<at::Tensor>& tensor,
+                                  const char* name,
+                                  c10::optional<at::ScalarType> expected_dtype = c10::nullopt) {
+    if (!tensor.has_value()) return;
+    TORCH_CHECK(tensor->is_cuda() && tensor->device() == x.device() && tensor->is_contiguous(),
+                "VPTQ CUDA ", name, " must be contiguous and on the activation device");
+    if (expected_dtype.has_value()) {
+      TORCH_CHECK(tensor->scalar_type() == *expected_dtype,
+                  "VPTQ CUDA ", name, " has an unexpected dtype");
+    }
+  };
+  check_optional(res_centroids, "residual centroids", x.scalar_type());
+  check_optional(outlier_indices, "outlier indices", at::kInt);
+  check_optional(outlier_centroids, "outlier centroids", x.scalar_type());
+  check_optional(inverse_perm, "inverse permutation", at::kInt);
+  check_optional(weight_scale, "weight scale", x.scalar_type());
+  check_optional(weight_bias, "weight bias", x.scalar_type());
+  check_optional(bias, "bias", x.scalar_type());
+  TORCH_CHECK(res_centroids.has_value() == (res_bits > 0),
+              "VPTQ CUDA residual centroids and residual index bits must agree");
+  TORCH_CHECK(outlier_indices.has_value() == outlier_centroids.has_value(),
+              "VPTQ CUDA outlier indices and centroids must be provided together");
+  TORCH_CHECK(weight_scale.has_value() == weight_bias.has_value(),
+              "VPTQ CUDA normalization scale and bias must be provided together");
+  TORCH_CHECK(outlier_indices.has_value() == (outlier_size > 0),
+              "VPTQ CUDA outlier buffers and outlier size must agree");
+  if (bias.has_value()) {
+    TORCH_CHECK(bias->numel() == out_features, "VPTQ CUDA bias width mismatch");
+  }
   c10::cuda::CUDAGuard guard(x.device());
   const int64_t batch = x.numel() / in_features;
   auto output = at::empty({batch, out_features}, x.options());

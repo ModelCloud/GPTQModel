@@ -9,8 +9,8 @@ nearest codebook entry, and an optional residual codebook refines the result.
 GPT-QModel implements the recipe from
 [microsoft/VPTQ](https://github.com/microsoft/VPTQ)
 ([paper](https://arxiv.org/abs/2409.17066)) as a Torch quantization path with
-Torch reference inference (`BACKEND.VPTQ_TORCH`) and an optional fused CUDA
-inference kernel (`BACKEND.VPTQ_CUDA`). Both use the same
+Torch reference inference (`BACKEND.VPTQ_TORCH`) and hybrid CUDA inference
+(`BACKEND.VPTQ_CUDA`). Both use the same
 `METHOD.VPTQ` / `FORMAT.VPTQ` checkpoint layout.
 
 The pipeline is:
@@ -159,21 +159,21 @@ and trade extra quantization time for accuracy.
 ## Inference and checkpoint compatibility
 
 Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
-`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for the fused CUDA path;
-`BACKEND.VPTQ_TORCH` remains available as the reference implementation. The
-CUDA kernel reads packed indices and codebooks directly and fuses weight
-reconstruction with the matrix product, avoiding a temporary dense weight
-matrix. The CUDA path requires matching activation and codebook dtypes; FP16,
-BF16, and FP32 are supported when stored in the checkpoint. Dtype mismatches
-and inputs with more than eight flattened activation rows use the Torch
-reference path; the current fused kernel is tuned for decode and small batches.
-Torch inference also runs on CPU and other Torch devices.
+`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
+`BACKEND.VPTQ_TORCH` remains available as the reference implementation. Up to
+two flattened activation rows use the fused CUDA GEMV. Larger inputs use the
+CUDA dequantization op followed by Torch/cuBLAS GEMM, reusing the reconstructed
+weight across activation rows. The fused path requires matching activation
+and codebook dtypes. FP16, BF16, and FP32 are supported when stored in the
+checkpoint; dtype mismatches use CUDA dequantization plus GEMM. This dispatch
+follows the upstream VPTQ `quant_gemm` strategy. Torch inference also runs on
+CPU and other Torch devices.
 
 To compare both paths on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.
-The script reports median per-layer latency for batch sizes 1, 8, and 32,
-speedup, and maximum output error. Run it on the target GPU before treating the
-CUDA path as a measured performance win.
+The script reports median per-layer latency for batch sizes 1, 8, 16, 32, and
+128, speedup, and maximum output error. Run it on the target GPU before
+assessing the crossover for its layer shapes and activation dtype.
 
 VPTQ checkpoints are not understood by Transformers, vLLM, or SGLang, and the
 checkpoint/resume feature is not available for VPTQ quantizations.

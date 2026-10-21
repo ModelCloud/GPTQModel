@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the fused VPTQ CUDA path with the Torch reference on a checkpoint."""
+"""Compare VPTQ CUDA inference paths with the Torch reference on a checkpoint."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import statistics
 import torch
 
 from gptqmodel import GPTQModel
-from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear, _VPTQ_CUDA_MAX_ROWS
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.utils.backend import BACKEND
 
 
@@ -29,12 +29,20 @@ def _milliseconds(fn, *, warmup: int, repeats: int) -> float:
     return statistics.median(samples)
 
 
+def _torch_forward(module: VPTQLinear, x: torch.Tensor) -> torch.Tensor:
+    weight = module.dequantize().to(device=x.device, dtype=x.dtype)
+    bias = getattr(module, "bias", None)
+    if bias is not None and bias.dtype != x.dtype:
+        bias = bias.to(dtype=x.dtype)
+    return torch.nn.functional.linear(x, weight, bias)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", help="Local VPTQ checkpoint directory")
     parser.add_argument("--layer", help="Exact VPTQ module name; default benchmarks all layers")
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
-    parser.add_argument("--batch-sizes", default="1,8")
+    parser.add_argument("--batch-sizes", default="1,8,16,32,128")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=50)
     args = parser.parse_args()
@@ -42,12 +50,6 @@ def main() -> None:
     batch_sizes = [int(value) for value in args.batch_sizes.split(",") if value.strip()]
     if not batch_sizes or any(batch <= 0 for batch in batch_sizes):
         raise SystemExit("Batch sizes must be positive integers.")
-    if any(batch > _VPTQ_CUDA_MAX_ROWS for batch in batch_sizes):
-        raise SystemExit(
-            f"Fused CUDA benchmark supports at most {_VPTQ_CUDA_MAX_ROWS} rows; "
-            "larger batches use the Torch fallback."
-        )
-
     if not torch.cuda.is_available():
         raise SystemExit("A CUDA device is required.")
     dtype = getattr(torch, args.dtype)
@@ -65,7 +67,7 @@ def main() -> None:
     if not layers:
         raise SystemExit(f"No VPTQLinear modules found for layer={args.layer!r}.")
 
-    print("layer,batch,dtype,torch_ms,fused_cuda_ms,speedup,max_abs_error")
+    print("layer,batch,dtype,torch_ms,cuda_ms,speedup,max_abs_error")
     for name, module in layers:
         if module.centroids.weight.dtype != dtype:
             raise SystemExit(
@@ -76,11 +78,9 @@ def main() -> None:
             for batch in batch_sizes
         }
         for batch, x in x_by_batch.items():
-            module.backend = BACKEND.VPTQ_TORCH
-            expected = module(x)
-            torch_ms = _milliseconds(lambda: module(x), warmup=args.warmup, repeats=args.repeats)
+            expected = _torch_forward(module, x)
+            torch_ms = _milliseconds(lambda: _torch_forward(module, x), warmup=args.warmup, repeats=args.repeats)
 
-            module.backend = BACKEND.VPTQ_CUDA
             actual = module(x)
             torch.cuda.synchronize()
             max_abs_error = float((actual.float() - expected.float()).abs().max().item())
