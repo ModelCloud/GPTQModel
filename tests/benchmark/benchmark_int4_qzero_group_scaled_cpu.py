@@ -97,6 +97,7 @@ def _cpu_model() -> str:
             if line.lower().startswith("model name"):
                 return line.partition(":")[2].strip()
     except OSError:
+        # /proc/cpuinfo is unavailable on some platforms; fall back below.
         pass
     return platform.processor() or "unknown"
 
@@ -421,6 +422,7 @@ def main() -> int:
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
+        # PyTorch rejects changes after the interop pool starts; keep its setting.
         pass
     if not has_avx512_bf16():
         print("This benchmark requires Linux x86-64 with AVX512-BF16.")
