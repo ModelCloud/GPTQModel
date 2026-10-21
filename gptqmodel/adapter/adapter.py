@@ -4,7 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Hashable, List, Optional, Tuple, Union
 
 import pcre
 import safetensors
@@ -24,10 +24,10 @@ HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 class AdapterCache():
     """Caches loaded adapter configs and tensors by source path."""
 
-    cache: Dict[str, Dict[str, Union[LoraConfig, torch.Tensor]]] = {}  # first level key is `path`, second level keys [ `config` = LoraConfig, `weights` = Dict[str, Tensors]
+    cache: Dict[Hashable, Dict[str, Union[LoraConfig, Dict[str, torch.Tensor]]]] = {}
 
     @classmethod
-    def get(cls, path: str) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
+    def get(cls, path: Hashable) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
         """Returns cached adapter config and weights for a path, if present."""
 
         data = cls.cache.get(path)
@@ -44,7 +44,7 @@ class AdapterCache():
         cls.cache = {}
 
     @classmethod
-    def add(cls, path: str, config: LoraConfig, weights: Dict[str, torch.Tensor]):
+    def add(cls, path: Hashable, config: LoraConfig, weights: Dict[str, torch.Tensor]):
         """Stores adapter config and weight tensors under the source path."""
 
         cls.cache[path] = {"config": config, "weights": weights}
@@ -64,6 +64,8 @@ class Adapter():
 
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
         self.path = path.strip() if isinstance(path, str) else path
+        self._gptqmodel_remote_revision: Optional[str] = None
+        self._gptqmodel_remote_sha256: Optional[str] = None
 
     def validate_path(self, local=False):
         """Validates that the configured adapter path matches the expected source type."""
@@ -184,10 +186,18 @@ class Lora(Adapter):
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
-        lora_cache = AdapterCache.get(self.path)
+        remote_revision = getattr(self, "_gptqmodel_remote_revision", None)
+        remote_sha256 = getattr(self, "_gptqmodel_remote_sha256", None)
+        cache_key = (self.path, remote_revision, remote_sha256)
+        lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
             # get lora config
-            lora_cfg = LoraConfig.from_pretrained(path=self.path, filename=HF_ADAPTER_CONFIG_FILE_NAME)
+            lora_cfg = LoraConfig.from_pretrained(
+                path=self.path,
+                filename=HF_ADAPTER_CONFIG_FILE_NAME,
+                allow_remote=remote_revision is not None,
+                revision=remote_revision,
+            )
             lora_cfg.gptqmodel_path = self.path  # hack: save this
 
             if not isinstance(lora_cfg, LoraConfig):
@@ -199,12 +209,18 @@ class Lora(Adapter):
                 if self.rank != lora_cfg.r:
                     raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
-            lora_path = resolve_path(self.path, HF_ADAPTER_FILE_NAME)
+            lora_path = resolve_path(
+                self.path,
+                HF_ADAPTER_FILE_NAME,
+                allow_remote=remote_revision is not None,
+                revision=remote_revision,
+                expected_sha256=remote_sha256,
+            )
 
             # save to adapter cache
-            AdapterCache.add(self.path, lora_cfg, safetensors.torch.load_file(lora_path))
+            AdapterCache.add(cache_key, lora_cfg, safetensors.torch.load_file(lora_path))
 
-            lora_cache = AdapterCache.get(self.path)
+            lora_cache = AdapterCache.get(cache_key)
             assert lora_cache is not None
 
         # lora_cache result is a tuple
@@ -232,7 +248,7 @@ class Lora(Adapter):
 
             # we have consumed all modules
             if len(lora_weights) == 0:
-                AdapterCache.remove(self.path)
+                AdapterCache.remove(cache_key)
                 log.info("Adapter: Consumed all Lora weights")
 
         else:

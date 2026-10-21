@@ -689,6 +689,9 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ):
         if quantize_config is not None:
@@ -759,9 +762,14 @@ class GPTQModel:
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                allow_remote_adapter=allow_remote_adapter,
+                adapter_revision=adapter_revision,
+                adapter_sha256=adapter_sha256,
                 **kwargs,
             )
         else:
+            if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
+                raise ValueError("Remote adapter options are only valid when loading a quantized checkpoint.")
             m = cls.from_pretrained(
                 model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
@@ -871,6 +879,9 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ) -> BaseQModel:
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
@@ -905,6 +916,9 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             adapter=adapter,
+            allow_remote_adapter=allow_remote_adapter,
+            adapter_revision=adapter_revision,
+            adapter_sha256=adapter_sha256,
             **kwargs,
         )
 
