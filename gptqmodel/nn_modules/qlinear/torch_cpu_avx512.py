@@ -103,7 +103,7 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     QUANT_TYPE = "torch_cpu_avx512"
 
-    gemm_int4_forward_kernel = None
+    gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
 
     def __init__(self, *args, **kwargs):
@@ -114,26 +114,26 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         if not has_avx512_bf16():
-            cls.gemm_int4_forward_kernel = None
+            cls.gemm_int4_qzero_group_scaled_cpu_kernel = None
             err = RuntimeError(avx512_bf16_error())
             log.warning(str(err))
             return False, err
 
         try:
-            cls.gemm_int4_forward_kernel = extension_op(
-                "gptq_cpu_avx512", "gemm_int4_forward"
+            cls.gemm_int4_qzero_group_scaled_cpu_kernel = extension_op(
+                "int4_qzero_group_scaled_cpu", "gemm_int4_qzero_group_scaled_cpu_forward"
             )
             cls.pack_gptq_int4_kernel = extension_op(
-                "gptq_cpu_avx512", "pack_gptq_int4"
+                "int4_qzero_group_scaled_cpu", "pack_gptq_int4"
             )
         except Exception as exc:
-            cls.gemm_int4_forward_kernel = None
+            cls.gemm_int4_qzero_group_scaled_cpu_kernel = None
             cls.pack_gptq_int4_kernel = None
             return False, exc
         return True, None
 
     def _cpu_fused_available(self) -> bool:
-        if self.gemm_int4_forward_kernel is not None:
+        if self.gemm_int4_qzero_group_scaled_cpu_kernel is not None:
             return True
         ok, _ = type(self).cached_validate_once()
         return ok
@@ -212,7 +212,7 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         original_dtype = x.dtype
         if original_dtype != torch.bfloat16:
             x = x.to(torch.bfloat16)
-        out = self.gemm_int4_forward_kernel(
+        out = self.gemm_int4_qzero_group_scaled_cpu_kernel(
             x,
             self.qweight,
             self.qzeros,

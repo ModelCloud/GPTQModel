@@ -1,3 +1,8 @@
+// Based on the Hugging Face kernels-community `quantization-gptq` CPU kernel:
+// https://github.com/huggingface/kernels-community/tree/c467920211e144ea621d9e8193ff71ec160ce256/quantization-gptq
+// Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
+// Modified for GPT-QModel by ModelCloud.ai.
+
 // AVX512 implementation - compile with -mavx512f -mavx512bf16
 #include <algorithm>
 #include <ATen/Parallel.h>
@@ -10,7 +15,7 @@
 #include <immintrin.h>
 #include <cstdint>
 
-namespace gptq_cpu
+namespace int4_qzero_group_scaled_cpu
 {
     namespace avx512
     {
@@ -118,4 +123,4 @@ namespace gptq_cpu
             int64_t M, int64_t N, int64_t K, const T *__restrict__ x, const unsigned char *__restrict__ w, const uint8_t *__restrict__ zeros,
             const T *__restrict__ absmax, T *__restrict__ out, int64_t blocksize, int64_t x_stride, int64_t out_stride);
     } // namespace avx512
-} // namespace gptq_cpu
+} // namespace int4_qzero_group_scaled_cpu

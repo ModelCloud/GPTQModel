@@ -1,10 +1,15 @@
+// Based on the Hugging Face kernels-community `quantization-gptq` CPU kernel:
+// https://github.com/huggingface/kernels-community/tree/c467920211e144ea621d9e8193ff71ec160ce256/quantization-gptq
+// Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
+// Modified for GPT-QModel by ModelCloud.ai.
+
 #include <torch/all.h>
-#include "gptq_cpu.hpp"
-#include "gptq_pack.hpp"
+#include "int4_qzero_group_scaled.hpp"
+#include "int4_qzero_group_scaled_pack.hpp"
 #include <limits>
 
 // Forward implementation for CPU
-torch::Tensor gemm_int4_cpu_forward(
+torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     const torch::Tensor &input, const torch::Tensor &weight, const torch::Tensor &zeros,
     const torch::Tensor &absmax, int64_t blocksize)
 {
@@ -39,7 +44,7 @@ torch::Tensor gemm_int4_cpu_forward(
         return output;
     }
 
-    gptq_cpu::gemm_int4(
+    int4_qzero_group_scaled_cpu::gemm_int4(
         input,
         weight,
         zeros,
@@ -56,10 +61,22 @@ pack_gptq_int4_cpu_forward(
     const torch::Tensor &qweight, const torch::Tensor &qzeros,
     const torch::Tensor &ret_idx, int64_t out_features, int64_t in_features)
 {
-    return gptq_cpu::pack_gptq_int4(
+    return int4_qzero_group_scaled_cpu::pack_gptq_int4(
         qweight,
         qzeros,
         ret_idx,
+        out_features,
+        in_features);
+}
+
+std::vector<torch::Tensor>
+pack_awq_int4_cpu_forward(
+    const torch::Tensor &qweight, const torch::Tensor &qzeros,
+    int64_t out_features, int64_t in_features)
+{
+    return int4_qzero_group_scaled_cpu::pack_awq_int4(
+        qweight,
+        qzeros,
         out_features,
         in_features);
 }
@@ -71,5 +88,5 @@ int64_t parallel_thread_count_cpu(const torch::Tensor &input, int64_t rows)
     TORCH_CHECK(
         rows <= std::numeric_limits<int>::max(),
         "rows exceeds the supported kernel dimension");
-    return gptq_cpu::avx512::adjust_num_threads(static_cast<int>(rows));
+    return int4_qzero_group_scaled_cpu::avx512::adjust_num_threads(static_cast<int>(rows));
 }

@@ -1,7 +1,7 @@
-GPT-QModel CPU AVX512-BF16 GPTQ kernel
-=====================================
+GPT-QModel CPU AVX512-BF16 GPTQ/AWQ kernel
+==========================================
 
-The sources in this directory are adapted from the MIT-licensed
+The sources in this directory are based on the MIT-licensed
 `quantization-gptq` kernel in Hugging Face `kernels-community`:
 
   https://github.com/huggingface/kernels-community/tree/c467920211e144ea621d9e8193ff71ec160ce256/quantization-gptq
@@ -14,11 +14,13 @@ GPT-QModel changes:
   * moved the tiny-GEMM/brgemm crossover from M > 4 to M > 24
   * added a fused GPTQ-to-HF int4 packer, replacing the much slower Python
     unpack/reorder/pack conversion used while loading a checkpoint; see
-    `tests/benchmark/benchmark_gptq_cpu_avx512.py` for measured host-specific
+    `tests/benchmark/benchmark_int4_qzero_group_scaled_cpu.py` for measured host-specific
     results
+  * added a fused AWQ-to-HF int4 packer so AWQ GEMM checkpoints reuse this
+    same compute kernel instead of requiring a second CPU GEMM
   * skip activation gather and packer index-select when `ret_idx` is the
     canonical identity mapping
-  * registered the kernel under the `gptqmodel_gptq_cpu` torch.ops namespace
+  * registered the kernel under the `gptqmodel_int4_qzero_group_scaled_cpu` torch.ops namespace
   * added tensor dtype/shape/index validation and an empty-batch fast path
   * tightened AVX512-BF16 host detection to require every ISA feature used by
     the kernel and enabled OS XSAVE state

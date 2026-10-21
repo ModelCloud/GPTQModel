@@ -39,6 +39,7 @@ class BACKEND(str, Enum):
     AWQ_TORCH_INT8 = "awq_torch_int8"
     AWQ_TORCH_FUSED = "awq_torch_fused"
     AWQ_TORCH_ATEN = "awq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
+    AWQ_TORCH_CPU_AVX512 = "awq_torch_cpu_avx512"  # CPU AVX512-BF16 kernel shared with GPTQ
     AWQ_TORCH = "awq_torch"
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_MACHETE = "awq_machete"

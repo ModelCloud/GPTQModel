@@ -439,7 +439,7 @@ def test_fused_packer_rejects_invalid_inputs():
 
 def test_parallel_thread_count_follows_torch_intraop_budget():
     _skip_unless_avx512_bf16()
-    thread_count = torch.ops.gptqmodel_gptq_cpu._parallel_thread_count
+    thread_count = torch.ops.gptqmodel_int4_qzero_group_scaled_cpu._parallel_thread_count
     probe = torch.empty(0)
     previous = torch.get_num_threads()
     try:
@@ -462,7 +462,7 @@ def test_unsupported_host_disables_backend_and_falls_back(monkeypatch):
         lambda: "AVX512-BF16 is unavailable in this test",
     )
     TorchCpuAvx512Linear.cached_validate_once.cache_clear()
-    TorchCpuAvx512Linear.gemm_int4_forward_kernel = None
+    TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel = None
     TorchCpuAvx512Linear.pack_gptq_int4_kernel = None
     clear_validation_cache()
     try:
@@ -494,7 +494,7 @@ def test_unsupported_host_disables_backend_and_falls_back(monkeypatch):
             assert selected is TorchAtenLinear
     finally:
         TorchCpuAvx512Linear.cached_validate_once.cache_clear()
-        TorchCpuAvx512Linear.gemm_int4_forward_kernel = None
+        TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel = None
         TorchCpuAvx512Linear.pack_gptq_int4_kernel = None
         clear_validation_cache()
 
@@ -526,7 +526,7 @@ def test_kernel_matches_independent_bf16_oracle(
 
     weight = _dequantize_oracle(codes, zeros, scales, group_size)
     reference = torch.matmul(x, weight)
-    output = TorchCpuAvx512Linear.gemm_int4_forward_kernel(
+    output = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel(
         x,
         pack_hf_int4(codes),
         zeros,
@@ -580,7 +580,7 @@ def test_kernel_empty_batch_and_validation():
     zeros = torch.zeros((groups, out_features), dtype=torch.uint16).to(torch.uint8)
     scales = torch.ones((groups, out_features), dtype=torch.bfloat16)
     packed = pack_hf_int4(codes)
-    kernel = TorchCpuAvx512Linear.gemm_int4_forward_kernel
+    kernel = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel
 
     output = kernel(
         torch.empty((0, in_features), dtype=torch.bfloat16),

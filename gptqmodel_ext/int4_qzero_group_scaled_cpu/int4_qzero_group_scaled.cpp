@@ -1,7 +1,11 @@
-#include "gptq_cpu.hpp"
+// Based on the Hugging Face kernels-community `quantization-gptq` CPU kernel:
+// https://github.com/huggingface/kernels-community/tree/c467920211e144ea621d9e8193ff71ec160ce256/quantization-gptq
+// Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
+// Modified for GPT-QModel by ModelCloud.ai.
 
+#include "int4_qzero_group_scaled.hpp"
 
-namespace gptq_cpu
+namespace int4_qzero_group_scaled_cpu
 {
 
     // Main dispatcher that selects the best implementation based on runtime CPU features
@@ -18,7 +22,7 @@ namespace gptq_cpu
         if (CPUFeatures::hasAVX512BF16())
         {
             // Use AVX512 optimized implementation
-            gptq_cpu::avx512::gemm_int4_inference<at::BFloat16>(
+            int4_qzero_group_scaled_cpu::avx512::gemm_int4_inference<at::BFloat16>(
                 M, N, K,
                 input.data_ptr<at::BFloat16>(),
                 weight.data_ptr<unsigned char>(),
@@ -46,4 +50,4 @@ namespace gptq_cpu
             torch::matmul_out(out, input, weight_final);
         }
     }
-} // namespace gptq_cpu
+} // namespace int4_qzero_group_scaled_cpu

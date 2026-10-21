@@ -24,6 +24,7 @@ from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
+from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
@@ -237,7 +238,7 @@ def test_cpu_auto_select_prioritizes_avx512_then_torch_aten_for_gptq(monkeypatch
         assert candidates[0] is TorchAtenLinear
 
 
-def test_cpu_auto_select_prioritizes_torch_aten_for_awq(monkeypatch):
+def test_cpu_auto_select_prioritizes_avx512_then_torch_aten_for_awq(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.AWQ, FORMAT.GEMM)
 
     candidates = select_quant_linear(
@@ -253,7 +254,12 @@ def test_cpu_auto_select_prioritizes_torch_aten_for_awq(monkeypatch):
         multi_select=True,
     )
 
-    assert candidates[0] is TorchAtenAwqLinear
+    if TorchCpuAvx512AwqLinear in candidates:
+        assert candidates.index(TorchCpuAvx512AwqLinear) < candidates.index(
+            TorchAtenAwqLinear
+        )
+    else:
+        assert candidates[0] is TorchAtenAwqLinear
 
 
 def test_cpu_auto_select_prioritizes_cpp_kernel_for_gguf(monkeypatch):

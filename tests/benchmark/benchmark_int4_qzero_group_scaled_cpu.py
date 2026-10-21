@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
-"""Reproducible GPTQ CPU kernel benchmark.
+"""Reproducible GPTQ/AWQ CPU kernel benchmark.
 
-The GPTQ paths consume identical packed GPTQ weights. The oneDNN W8A8 and
-torchao paths are precision/quantizer comparisons, not byte-identical GPTQ
-implementations.
+The GPTQ and AWQ paths consume identical packed weights within their method.
+GPTQ and AWQ share the same AVX512 compute kernel. The oneDNN W8A8 and torchao
+paths are precision/quantizer comparisons, not byte-identical implementations.
 """
 
 from __future__ import annotations
@@ -23,9 +23,18 @@ from pathlib import Path
 import torch
 
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import (
     TorchCpuAvx512Linear,
     pack_hf_int4,
+)
+from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import (
+    TorchCpuAvx512AwqLinear,
+)
+from gptqmodel.quantization.awq.utils.packing_utils import (
+    pack_awq,
+    reverse_awq_order,
+    unpack_awq,
 )
 from gptqmodel.utils.cpu_features import has_avx512_bf16
 from gptqmodel.utils.logger import render_table
@@ -218,6 +227,36 @@ def _make_layers(
     return layers[0], layers[1], qweight, qzeros
 
 
+def _make_awq_layers(
+    *,
+    codes: torch.Tensor,
+    zeros: torch.Tensor,
+    scales: torch.Tensor,
+    group_size: int,
+):
+    in_features, out_features = codes.shape
+    qweight, qzeros = pack_awq(codes, zeros, 4)
+    layers = []
+    for cls in (TorchCpuAvx512AwqLinear, TorchAtenAwqLinear):
+        layer = cls(
+            bits=4,
+            group_size=group_size,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=False,
+            pack_dtype=torch.int32,
+            register_buffers=True,
+        )
+        layer.qweight.copy_(qweight)
+        layer.qzeros.copy_(qzeros)
+        layer.scales.copy_(scales)
+        layer.eval()
+        layers.append(layer)
+    return layers[0], layers[1], qweight, qzeros
+
+
 def _torchao_model(
     dense_weight: torch.Tensor,
     *,
@@ -323,6 +362,35 @@ def _pack_benchmark(
     return fused_median, python_median
 
 
+def _awq_pack_benchmark(
+    *,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    in_features: int,
+    out_features: int,
+    warmup: int,
+    iters: int,
+) -> tuple[float, float]:
+    ok, err = TorchCpuAvx512AwqLinear.cached_validate_once()
+    if not ok:
+        raise RuntimeError(str(err))
+    packer = TorchCpuAvx512AwqLinear.pack_awq_int4_kernel
+
+    def fused():
+        return packer(qweight, qzeros, out_features, in_features)
+
+    def python_conversion():
+        codes, zeros = unpack_awq(qweight, qzeros, 4, count=out_features)
+        codes, zeros = reverse_awq_order(codes, zeros, 4)
+        codes = (codes & 0xF).to(torch.uint8)
+        zeros = (zeros & 0xF).to(torch.uint8).reshape(-1, out_features)
+        return pack_hf_int4(codes.t().contiguous()), zeros.contiguous()
+
+    fused_median, _ = _bench(fused, warmup=warmup, iters=iters)
+    python_median, _ = _bench(python_conversion, warmup=warmup, iters=iters)
+    return fused_median, python_median
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--shapes", default=",".join(DEFAULT_SHAPES))
@@ -336,6 +404,7 @@ def main() -> int:
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--skip-pack", action="store_true")
+    parser.add_argument("--include-awq", action="store_true")
     parser.add_argument("--skip-torchao", action="store_true")
     parser.add_argument("--torchao-src", type=Path, default=None)
     parser.add_argument("--hf-kernels-src", type=Path, default=None)
@@ -412,6 +481,8 @@ def main() -> int:
 
     pack_rows = []
     inference_rows = []
+    awq_pack_rows = []
+    awq_inference_rows = []
     torchao_error = None
 
     for out_features, in_features in shapes:
@@ -470,7 +541,7 @@ def main() -> int:
             reference = x.float() @ dense_weight
             runners = {
                 "AVX512 port": partial(
-                    TorchCpuAvx512Linear.gemm_int4_forward_kernel,
+                    TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel,
                     x,
                     avx_layer.qweight,
                     avx_layer.qzeros,
@@ -537,6 +608,114 @@ def main() -> int:
             )
         )
 
+    if args.include_awq:
+        for out_features, in_features in shapes:
+            if out_features % 32 != 0 or in_features % group_size != 0:
+                continue
+
+            torch.manual_seed(args.seed + out_features + in_features + 1)
+            groups = in_features // group_size
+            codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.uint8)
+            zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.uint8)
+            scales = (
+                torch.rand((groups, out_features), dtype=torch.bfloat16) * 0.04 + 0.01
+            )
+            dense_weight = (
+                codes.float() - zeros.repeat_interleave(group_size, dim=0).float()
+            ) * scales.repeat_interleave(group_size, dim=0).float()
+
+            avx_layer, aten_layer, qweight, qzeros = _make_awq_layers(
+                codes=codes,
+                zeros=zeros,
+                scales=scales,
+                group_size=group_size,
+            )
+            if not args.skip_pack:
+                fused_ms, python_ms = _awq_pack_benchmark(
+                    qweight=qweight,
+                    qzeros=qzeros,
+                    in_features=in_features,
+                    out_features=out_features,
+                    warmup=warmup,
+                    iters=iters,
+                )
+                awq_pack_rows.append(
+                    [
+                        f"{out_features}x{in_features}",
+                        f"{fused_ms:.3f}",
+                        f"{python_ms:.3f}",
+                        f"{python_ms / fused_ms:.2f}x",
+                    ]
+                )
+
+            for tokens in token_counts:
+                x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
+                reference = x.float() @ dense_weight
+                runners = {
+                    "AVX512 AWQ": partial(avx_layer, x),
+                    "ATen AWQ": partial(aten_layer, x),
+                }
+
+                timings = {}
+                outputs = {}
+                for name, runner in runners.items():
+                    output = runner()
+                    outputs[name] = output
+                    timings[name] = _bench(runner, warmup=warmup, iters=iters)
+
+                aten_median = timings["ATen AWQ"][0]
+                for name, (median_ms, mean_ms) in timings.items():
+                    relative, max_abs, _ = _metrics(outputs[name], reference)
+                    awq_inference_rows.append(
+                        [
+                            f"{out_features}x{in_features}",
+                            str(tokens),
+                            name,
+                            f"{median_ms:.3f}",
+                            f"{mean_ms:.3f}",
+                            f"{_gops(tokens, in_features, out_features, median_ms):.2f}",
+                            f"{aten_median / median_ms:.2f}x",
+                            f"{relative:.4e}",
+                            f"{max_abs:.4e}",
+                        ]
+                    )
+
+            del avx_layer, aten_layer, dense_weight
+
+        if awq_pack_rows:
+            print("\nAWQ packing")
+            print(
+                render_table(
+                    awq_pack_rows,
+                    headers=[
+                        "shape",
+                        "fused C++ ms",
+                        "previous Python ms",
+                        "speedup",
+                    ],
+                    tablefmt="grid",
+                )
+            )
+        if awq_inference_rows:
+            print("\nAWQ inference")
+            print(
+                render_table(
+                    awq_inference_rows,
+                    headers=[
+                        "shape",
+                        "M",
+                        "backend",
+                        "median ms",
+                        "mean ms",
+                        "effective GOPS",
+                        "vs ATen",
+                        "relative error",
+                        "max abs error",
+                    ],
+                    tablefmt="grid",
+                )
+            )
+
     print("\nInference")
     print(
         render_table(
@@ -557,8 +736,9 @@ def main() -> int:
     )
     print(
         "\nAccuracy compares each output with an FP32 Torch matmul of the same "
-        "dequantized GPTQ weight. torchao uses a different affine quantizer and "
-        "oneDNN uses W8A8, so their error columns are not GPTQ kernel error."
+        "dequantized weight. GPTQ and AWQ share the same AVX512 compute kernel. "
+        "torchao uses a different affine quantizer and oneDNN uses W8A8, so "
+        "their error columns are not GPTQ kernel error."
     )
     if torchao_error is not None:
         print(f"torchao quantization was unavailable: {torchao_error}")

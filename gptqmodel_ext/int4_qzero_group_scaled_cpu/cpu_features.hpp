@@ -1,3 +1,8 @@
+// Based on the Hugging Face kernels-community `quantization-gptq` CPU kernel:
+// https://github.com/huggingface/kernels-community/tree/c467920211e144ea621d9e8193ff71ec160ce256/quantization-gptq
+// Original author: jiqing-feng <jiqing.feng@intel.com> (Intel).
+// Modified for GPT-QModel by ModelCloud.ai.
+
 #pragma once
 
 #ifdef _MSC_VER
@@ -5,7 +10,7 @@
 #else
 #include <cpuid.h>
 #endif
-namespace gptq_cpu
+namespace int4_qzero_group_scaled_cpu
 {
 
     // CPU feature detection
@@ -129,4 +134,4 @@ namespace gptq_cpu
         }
     };
 
-} // namespace gptq_cpu
+} // namespace int4_qzero_group_scaled_cpu

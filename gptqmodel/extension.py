@@ -51,9 +51,11 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_floatx_cpu_extension"),
     ),
     _ExtensionSpec(
-        name="gptq_cpu_avx512",
-        aliases=("gptq_cpu", "hf_gptq_cpu"),
-        resolve=lambda: _resolve_extension_factory("gptqmodel.utils.cpp", "_gptq_cpu_avx512_extension"),
+        name="int4_qzero_group_scaled_cpu",
+        aliases=(),
+        resolve=lambda: _resolve_extension_factory(
+            "gptqmodel.utils.cpp", "_int4_qzero_group_scaled_cpu_extension"
+        ),
         supported=lambda: _resolve_attr("gptqmodel.utils.cpu_features", "has_avx512_bf16")(),
         unsupported_error=lambda: _resolve_attr("gptqmodel.utils.cpu_features", "avx512_bf16_error")(),
     ),

@@ -7,7 +7,7 @@
 #include <vector>
 
 
-namespace gptq_cpu
+namespace int4_qzero_group_scaled_cpu
 {
 
     std::vector<torch::Tensor> pack_gptq_int4(
@@ -17,4 +17,10 @@ namespace gptq_cpu
         int64_t out_features,
         int64_t in_features);
 
-} // namespace gptq_cpu
+    std::vector<torch::Tensor> pack_awq_int4(
+        const torch::Tensor &qweight,
+        const torch::Tensor &qzeros,
+        int64_t out_features,
+        int64_t in_features);
+
+} // namespace int4_qzero_group_scaled_cpu
