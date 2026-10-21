@@ -303,6 +303,8 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
 @pytest.mark.parametrize(
     ("tokens", "in_features", "out_features", "group_size"),
     (
+        (1, 256, 64, 32),
+        (7, 512, 128, 32),
         (1, 256, 64, 64),
         (7, 512, 128, 128),
         (31, 1024, 256, 128),

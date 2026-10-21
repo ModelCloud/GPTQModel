@@ -112,10 +112,12 @@ def _dequantize_oracle(
     scales: torch.Tensor,
     group_size: int,
 ) -> torch.Tensor:
+    """Dequantize in FP32 so the oracle is independent of the kernel's BF16 path."""
+
     codes_kn = codes.t().to(torch.float32)
     zeros_kn = zeros.repeat_interleave(group_size, dim=0).to(torch.float32)
     scales_kn = scales.repeat_interleave(group_size, dim=0).to(torch.float32)
-    return ((codes_kn - zeros_kn) * scales_kn).to(torch.bfloat16)
+    return (codes_kn - zeros_kn) * scales_kn
 
 
 def _layer_dequantize_oracle(
@@ -502,6 +504,8 @@ def test_unsupported_host_disables_backend_and_falls_back(monkeypatch):
 @pytest.mark.parametrize(
     ("tokens", "in_features", "out_features", "group_size"),
     (
+        (1, 256, 64, 32),
+        (7, 512, 128, 32),
         (1, 256, 64, 64),
         (7, 512, 128, 128),
         (25, 512, 128, 128),
@@ -525,7 +529,7 @@ def test_kernel_matches_independent_bf16_oracle(
     x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
 
     weight = _dequantize_oracle(codes, zeros, scales, group_size)
-    reference = torch.matmul(x, weight)
+    reference = torch.matmul(x.float(), weight).to(torch.bfloat16)
     output = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel(
         x,
         pack_hf_int4(codes),
