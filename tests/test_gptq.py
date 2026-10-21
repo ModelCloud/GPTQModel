@@ -908,6 +908,139 @@ def test_specialized_quantizers_sanitize_zero_scale_before_return(monkeypatch, k
     assert (scale != 0).all()
 
 
+def _normalized_tensor_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    actual = actual.to(dtype=torch.float64)
+    return float(torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected))
+
+
+def test_gptaq_reports_token_samples_and_preserves_upstream_hessian():
+    torch.manual_seed(0)
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    inputs = [
+        torch.randn(2, 3, 8),
+        torch.randn(1, 5, 8),
+        torch.randn(4, 8),
+    ]
+    native_inputs = [
+        inp + 0.05 * torch.randn_like(inp)
+        for inp in inputs
+    ]
+    expected_native_inputs = [inp.clone() for inp in native_inputs]
+    named.state["native_inp"] = native_inputs
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+    )
+    task = GPTAQ(named, qcfg=qcfg)
+
+    for inp in inputs:
+        task.add_batch(inp, None)
+
+    assert task.nsamples == 15
+    assert task._gptaq_batch_request_count == 4
+    assert torch.isfinite(task.H).all()
+    assert torch.isfinite(task.dXXT).all()
+
+    hessian_oracle = torch.zeros((8, 8), dtype=torch.float64)
+    dxxT_oracle = torch.zeros((8, 8), dtype=torch.float64)
+    scale = 2.0 / task._gptaq_batch_request_count
+    for inp, native_inp in zip(inputs, expected_native_inputs):
+        rows = inp.reshape(-1, inp.shape[-1]).to(torch.float64)
+        native_rows = native_inp.reshape(-1, native_inp.shape[-1]).to(torch.float64)
+        hessian_oracle += scale * (rows.T @ rows)
+        dxxT_oracle += scale * ((native_rows - rows).T @ rows)
+
+    assert _normalized_tensor_error(task.H, hessian_oracle) <= 1e-6
+    assert _normalized_tensor_error(task.dXXT, dxxT_oracle) <= 1e-6
+
+
+def test_gptaq_loss_is_reported_per_token():
+    batch_request_count = 4
+    token_count = 15
+
+    generator = torch.Generator().manual_seed(0)
+    factor = torch.randn((8, 8), dtype=torch.float64, generator=generator)
+    hessian = factor @ factor.T + torch.eye(8, dtype=torch.float64)
+    hessian_ratio = token_count / batch_request_count
+    hessian_gptaq = hessian * hessian_ratio
+
+    inverse_factor_gptq = torch.linalg.cholesky(torch.linalg.inv(hessian), upper=True)
+    inverse_factor_gptaq = torch.linalg.cholesky(torch.linalg.inv(hessian_gptaq), upper=True)
+    assert torch.allclose(
+        inverse_factor_gptaq * math.sqrt(hessian_ratio),
+        inverse_factor_gptq,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    errors = torch.linspace(-0.5, 0.5, 8, dtype=torch.float64)
+    loss_sum_gptq = 0.5 * (errors.square() / inverse_factor_gptq.diagonal().square()).sum()
+    loss_sum_gptaq = 0.5 * (errors.square() / inverse_factor_gptaq.diagonal().square()).sum()
+    assert loss_sum_gptaq == pytest.approx(loss_sum_gptq * hessian_ratio)
+
+    actual = GPTAQ._token_normalized_avg_loss(loss_sum_gptaq.item(), batch_request_count, token_count)
+    expected = loss_sum_gptq.item() / token_count
+
+    assert actual == pytest.approx(expected)
+    with pytest.raises(ValueError, match="at least one calibration token"):
+        GPTAQ._token_normalized_avg_loss(loss_sum_gptaq.item(), batch_request_count, 0)
+
+
+def test_gptaq_quantize_uses_token_normalized_loss(monkeypatch):
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    named.state["native_inp"] = []
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+    )
+    task = GPTAQ(named, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True)
+    task.H = torch.eye(task.columns, dtype=torch.float32)
+    task.dXXT = torch.zeros_like(task.H)
+    task.nsamples = 15
+    task._gptaq_batch_request_count = 4
+
+    calls = []
+
+    def capture_loss_arguments(loss_sum, batch_request_count, token_count):
+        calls.append((loss_sum, batch_request_count, token_count))
+        return 1.25
+
+    monkeypatch.setattr(
+        GPTAQ,
+        "_token_normalized_avg_loss",
+        staticmethod(capture_loss_arguments),
+    )
+
+    *_, avg_loss, _, nsamples = task.quantize(blocksize=4)
+
+    assert avg_loss == 1.25
+    assert nsamples == 15
+    assert len(calls) == 1
+    loss_sum, batch_request_count, token_count = calls[0]
+    assert math.isfinite(loss_sum)
+    assert batch_request_count == 4
+    assert token_count == 15
+
+
 class TestGPTQAddBatchCPU(ModelTest):
     ######### test_gptq_add_batch_cpu.py ###########
     pytestmark = pytest.mark.skipif(
