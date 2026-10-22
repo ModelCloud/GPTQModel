@@ -764,6 +764,28 @@ print(f"Result: {result}")
 # Please use the benchmark tools in later part of this README to evaluate EoRA effectiveness
 ```
 
+### Remote LoRA Adapters 🔒
+
+Adapter paths stored in `quantize_config.json` are confined to the checkpoint's own storage (including same-repository Hugging Face cache blobs); metadata cannot authorize Hub downloads. Loading an adapter hosted on the Hub requires an explicit opt-in with an immutable commit pin and a SHA-256 digest of `adapter_model.safetensors`:
+
+```py
+model = GPTQModel.load(
+  model_id_or_path=quant_path,
+  adapter=Lora(path="org/adapter-repo", rank=32),
+  allow_remote_adapter=True,
+  adapter_revision="<40-char Hub commit sha>",
+  adapter_sha256="<sha256 of adapter_model.safetensors>",
+)
+```
+
+Manifest adapter directories must be checkpoint-relative and cannot contain directory symlinks.
+Adapter-file symlinks are rejected except for the standard Hugging Face cache links into the
+same repository's `blobs` directory. This confinement also applies when using
+`QuantizeConfig.from_pretrained()` and initializing its adapter directly.
+Explicit local `adapter=` arguments remain available for adapters stored elsewhere.
+For pinned Hugging Face blob URLs, the config and weights are loaded from the URL's
+containing folder at the supplied revision.
+
 ### PEFT LoRA Training and Adapter Loading 🤗
 
 GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded through `PeftModel`. Use a current PEFT release with `optimum>=1.24.0`; older combinations may warn that the quantized layer type is unsupported. For training, select the method-specific trainable backend (`gptq_torch` for GPTQ, `torch_awq` for AWQ); default inference kernels do not propagate gradients.

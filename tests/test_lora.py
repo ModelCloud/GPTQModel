@@ -78,6 +78,9 @@ class Test(ModelTest):
         model = GPTQModel.load(
             self.NATIVE_MODEL_ID,
             adapter=adapter,
+            allow_remote_adapter=True,
+            adapter_revision="afb7b878f927bac8e8e517e9c2d4e1bfe7c45844",
+            adapter_sha256="2d55a486c4044f260926bbb83d8a7720d33e5a16506474c32fb81943a9095bde",
             backend=backend,
             device_map="auto",
         )

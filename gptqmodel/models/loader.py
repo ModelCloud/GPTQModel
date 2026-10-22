@@ -36,7 +36,8 @@ from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import Adapter, normalize_adapter
+from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -1345,9 +1346,12 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
-            adapter: Optional[Adapter] = None,
+            adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ):
 
@@ -1480,6 +1484,24 @@ def ModelLoader(cls):
             )
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+
+        if adapter is None:
+            if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
+                raise ValueError(
+                    "Loader: remote adapter options require an explicit `adapter=` argument; "
+                    "checkpoint metadata cannot authorize remote adapter downloads."
+                )
+            if qcfg.adapter is not None and qcfg.adapter.path not in (None, ""):
+                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, model_local_path)
+        else:
+            qcfg.adapter = normalize_adapter(adapter)
+            configure_explicit_remote_adapter(
+                qcfg.adapter,
+                allow_remote=allow_remote_adapter,
+                revision=adapter_revision,
+                sha256=adapter_sha256,
+            )
+
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
@@ -1534,10 +1556,6 @@ def ModelLoader(cls):
             dtype = torch.float16
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
-
-        # inject adapter into qcfg
-        if adapter is not None:
-            qcfg.adapter = adapter
 
         qcfg.calculate_bits_per_weight()
 

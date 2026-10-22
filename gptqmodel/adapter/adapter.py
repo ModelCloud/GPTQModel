@@ -3,8 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Hashable, List, Optional, Tuple, Union
 
 import pcre
 import safetensors
@@ -12,7 +13,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
-from .remote import resolve_path
+from .remote import resolve_checkpoint_adapter_path, resolve_path, validate_remote_pin
 
 log = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
@@ -24,10 +25,10 @@ HF_ADAPTER_WEIGHT_KEY_PREFIX = "base_model.model."
 class AdapterCache():
     """Caches loaded adapter configs and tensors by source path."""
 
-    cache: Dict[str, Dict[str, Union[LoraConfig, torch.Tensor]]] = {}  # first level key is `path`, second level keys [ `config` = LoraConfig, `weights` = Dict[str, Tensors]
+    cache: Dict[Hashable, Dict[str, Union[LoraConfig, Dict[str, torch.Tensor]]]] = {}
 
     @classmethod
-    def get(cls, path: str) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
+    def get(cls, path: Hashable) -> Optional[Tuple[LoraConfig, Dict[str, torch.Tensor]]]:
         """Returns cached adapter config and weights for a path, if present."""
 
         data = cls.cache.get(path)
@@ -44,16 +45,16 @@ class AdapterCache():
         cls.cache = {}
 
     @classmethod
-    def add(cls, path: str, config: LoraConfig, weights: Dict[str, torch.Tensor]):
+    def add(cls, path: Hashable, config: LoraConfig, weights: Dict[str, torch.Tensor]):
         """Stores adapter config and weight tensors under the source path."""
 
         cls.cache[path] = {"config": config, "weights": weights}
 
     @classmethod
-    def remove(cls, path):
-        """Drops cached adapter state for a path if it exists."""
+    def remove(cls, key):
+        """Drops cached adapter state for a cache key if it exists."""
 
-        cls.cache.pop(path, None)
+        cls.cache.pop(key, None)
 
 
 class Adapter():
@@ -63,7 +64,12 @@ class Adapter():
         """Initializes adapter identity and optional source location."""
 
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
+        if isinstance(path, os.PathLike):
+            path = os.fspath(path)
         self.path = path.strip() if isinstance(path, str) else path
+        self._gptqmodel_remote_revision: Optional[str] = None
+        self._gptqmodel_remote_sha256: Optional[str] = None
+        self._gptqmodel_checkpoint_source: Optional[Tuple[str, str]] = None
 
     def validate_path(self, local=False):
         """Validates that the configured adapter path matches the expected source type."""
@@ -184,31 +190,50 @@ class Lora(Adapter):
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
-        lora_cache = AdapterCache.get(self.path)
+        if self._gptqmodel_checkpoint_source is not None:
+            checkpoint_path, manifest_path = self._gptqmodel_checkpoint_source
+            self.path = resolve_checkpoint_adapter_path(manifest_path, checkpoint_path)
+
+        remote_revision = getattr(self, "_gptqmodel_remote_revision", None)
+        remote_sha256 = getattr(self, "_gptqmodel_remote_sha256", None)
+        validate_remote_pin(remote_revision, remote_sha256)
+        if remote_revision is None and isinstance(self.path, str) and os.path.isdir(self.path):
+            self.path = os.path.abspath(self.path)
+        cache_key = (self.path, remote_revision, remote_sha256)
+        lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
             # get lora config
-            lora_cfg = LoraConfig.from_pretrained(path=self.path, filename=HF_ADAPTER_CONFIG_FILE_NAME)
+            lora_cfg = LoraConfig.from_pretrained(
+                path=self.path,
+                filename=HF_ADAPTER_CONFIG_FILE_NAME,
+                allow_remote=remote_revision is not None,
+                revision=remote_revision,
+            )
             lora_cfg.gptqmodel_path = self.path  # hack: save this
 
             if not isinstance(lora_cfg, LoraConfig):
                 raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
 
-            if self.rank is None:
-                self.rank = lora_cfg.r
-            else:
-                if self.rank != lora_cfg.r:
-                    raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
-
-            lora_path = resolve_path(self.path, HF_ADAPTER_FILE_NAME)
+            lora_path = resolve_path(
+                self.path,
+                HF_ADAPTER_FILE_NAME,
+                allow_remote=remote_revision is not None,
+                revision=remote_revision,
+                expected_sha256=remote_sha256,
+            )
 
             # save to adapter cache
-            AdapterCache.add(self.path, lora_cfg, safetensors.torch.load_file(lora_path))
+            AdapterCache.add(cache_key, lora_cfg, safetensors.torch.load_file(lora_path))
 
-            lora_cache = AdapterCache.get(self.path)
+            lora_cache = AdapterCache.get(cache_key)
             assert lora_cache is not None
 
         # lora_cache result is a tuple
         lora_cfg, lora_weights = lora_cache
+        if self.rank is None:
+            self.rank = lora_cfg.r
+        elif self.rank != lora_cfg.r:
+            raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
         weight_key = weight_key.lower()
 
@@ -232,7 +257,7 @@ class Lora(Adapter):
 
             # we have consumed all modules
             if len(lora_weights) == 0:
-                AdapterCache.remove(self.path)
+                AdapterCache.remove(cache_key)
                 log.info("Adapter: Consumed all Lora weights")
 
         else:
@@ -284,7 +309,7 @@ class Lora(Adapter):
 
         return {
             "name": self.name(),
-            "path": self.path,
+            "path": self._gptqmodel_checkpoint_source[1] if self._gptqmodel_checkpoint_source else self.path,
             "rank": self.rank
         }
 
@@ -312,6 +337,11 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
     adapterCls = ADAPTER_MAPPING.get(adapter_type)
     if adapterCls is None:
         raise ValueError(f"Adapter: Compatible adapters include `{ADAPTER_MAPPING.keys()}`: actual `{(adapter_type)}`.")
+
+    # Serialized manifests are data-only: never allow non-tensor adapter weights.
+    for tensor_key in adapterCls.parameter_keys() or []:
+        if adapter.get(tensor_key) is not None and not isinstance(adapter[tensor_key], torch.Tensor):
+            raise ValueError(f"Adapter: Invalid adapter config: `{adapter}`.")
 
     try:
         adapterInstance = adapterCls(**adapter)
