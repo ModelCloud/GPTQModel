@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 import torch
@@ -11,19 +12,18 @@ import torch.nn as nn
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_linear
 import gptqmodel.utils.model as model_utils
 from gptqmodel.models._const import DEVICE
+from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+    BITSANDBYTES_AVAILABLE,
+    BitsAndBytesLinear,
+    _cpu_packed_kernels,
+)
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import get_kernel_for_backend, select_quant_linear
 from gptqmodel.utils.model_dequant import dequantize_model, detect_format
-
-
-BITSANDBYTES_AVAILABLE = bnb_linear.BITSANDBYTES_AVAILABLE
-BitsAndBytesLinear = bnb_linear.BitsAndBytesLinear
-_cpu_packed_kernels = bnb_linear._cpu_packed_kernels
 
 
 def _build_linear(bits: int) -> nn.Linear:
@@ -337,7 +337,8 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     reason="bitsandbytes CPU packed kernel unavailable",
 )
 def test_bitsandbytes_cpu_packed_kernel_falls_back_when_accuracy_gate_fails(monkeypatch):
-    monkeypatch.setattr(bnb_linear, "_CPU_PACKED_REL_TOL", 0.0)
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", 0.0)
     linear, kernel = _build_cpu_packed_kernel()
     x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
 
