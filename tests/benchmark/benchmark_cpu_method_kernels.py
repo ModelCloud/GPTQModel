@@ -566,35 +566,19 @@ def main() -> int:
             + fp8.bias.float()
         )
 
-        def fp8_uncached(x_input: torch.Tensor) -> torch.Tensor:
-            fp8.clear_weight_cache()
-            return fp8(x_input)
-
-        fp8_opt_time = _bench(lambda: fp8(x), warmup=args.warmup, iters=args.iters)
-        fp8_base_time = _bench(lambda: fp8_uncached(x), warmup=args.warmup, iters=args.iters)
+        fp8_time = _bench(lambda: fp8(x), warmup=args.warmup, iters=args.iters)
         with torch.inference_mode():
             fp8_output = fp8(x)
         _add_row(
             rows,
             method="FP8",
-            variant="cached dequant",
+            variant="dequant + matmul (no dense cache)",
             shape=(out_features, in_features),
             tokens=tokens,
-            timing=fp8_opt_time,
-            baseline_ms=fp8_base_time[0],
+            timing=fp8_time,
+            baseline_ms=fp8_time[0],
             relative_error=_relative_error(fp8_output, fp8_oracle),
             visible_error=_visible_relative_error(fp8_output, fp8_oracle),
-        )
-        _add_row(
-            rows,
-            method="FP8",
-            variant="uncached dequant",
-            shape=(out_features, in_features),
-            tokens=tokens,
-            timing=fp8_base_time,
-            baseline_ms=fp8_base_time[0],
-            relative_error=_relative_error(fp8_uncached(x), fp8_oracle),
-            visible_error=_visible_relative_error(fp8_uncached(x), fp8_oracle),
         )
 
         vptq_oracle = torch.nn.functional.linear(
@@ -602,35 +586,19 @@ def main() -> int:
             vptq.dequantize().float(),
         )
 
-        def vptq_uncached(x_input: torch.Tensor) -> torch.Tensor:
-            vptq.clear_weight_cache()
-            return vptq(x_input)
-
-        vptq_opt_time = _bench(lambda: vptq(x), warmup=args.warmup, iters=args.iters)
-        vptq_base_time = _bench(lambda: vptq_uncached(x), warmup=args.warmup, iters=args.iters)
+        vptq_time = _bench(lambda: vptq(x), warmup=args.warmup, iters=args.iters)
         with torch.inference_mode():
             vptq_output = vptq(x)
         _add_row(
             rows,
             method="VPTQ",
-            variant="cached dequant",
+            variant="dequant + matmul (no dense cache)",
             shape=(out_features, in_features),
             tokens=tokens,
-            timing=vptq_opt_time,
-            baseline_ms=vptq_base_time[0],
+            timing=vptq_time,
+            baseline_ms=vptq_time[0],
             relative_error=_relative_error(vptq_output, vptq_oracle),
             visible_error=_visible_relative_error(vptq_output, vptq_oracle),
-        )
-        _add_row(
-            rows,
-            method="VPTQ",
-            variant="uncached dequant",
-            shape=(out_features, in_features),
-            tokens=tokens,
-            timing=vptq_base_time,
-            baseline_ms=vptq_base_time[0],
-            relative_error=_relative_error(vptq_uncached(x), vptq_oracle),
-            visible_error=_visible_relative_error(vptq_uncached(x), vptq_oracle),
         )
 
         exl3_oracle = (
