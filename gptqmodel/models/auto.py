@@ -150,6 +150,7 @@ from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
+from .definitions.llava import LlavaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
@@ -405,6 +406,7 @@ MODEL_MAP = {
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,
+    "llava": LlavaQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
     "nemotron_h_puzzle": NemotronHPuzzleQModel,
