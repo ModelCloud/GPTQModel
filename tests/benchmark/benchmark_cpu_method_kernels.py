@@ -375,6 +375,7 @@ def main() -> int:
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
+        # The inter-op pool may already be initialized by an imported runtime.
         pass
 
     rows: list[list[str]] = []
