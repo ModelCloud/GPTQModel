@@ -161,13 +161,12 @@ and trade extra quantization time for accuracy.
 Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
 `GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
 `BACKEND.VPTQ_TORCH` remains available as the reference implementation.
-For matching activation and codebook dtypes, vector-length-4 inputs with no
-outliers use the fused CUDA kernel through four activation rows; generic vector
-and outlier paths use it only for one row. Larger batches reconstruct the dense
-weight once with the CUDA dequantization op, then use Torch/cuBLAS GEMM. Dtype
-mismatches use the same dequantization plus GEMM path. FP16, BF16, and FP32 are
-supported when stored in the checkpoint. Torch inference also runs on CPU and
-other Torch devices.
+For matching activation and codebook dtypes, the fused CUDA kernel is used
+through four activation rows across vector lengths and outlier configurations.
+Larger batches reconstruct the dense weight once with the CUDA dequantization
+op, then use Torch/cuBLAS GEMM. Dtype mismatches use the same dequantization plus
+GEMM path. FP16, BF16, and FP32 are supported when stored in the checkpoint.
+Torch inference also runs on CPU and other Torch devices.
 
 To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.
