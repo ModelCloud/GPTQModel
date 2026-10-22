@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import os
 from dataclasses import dataclass
 from typing import Dict, Hashable, List, Optional, Tuple, Union
 
@@ -12,7 +13,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
-from .remote import resolve_path
+from .remote import resolve_path, validate_remote_pin
 
 log = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
@@ -50,10 +51,10 @@ class AdapterCache():
         cls.cache[path] = {"config": config, "weights": weights}
 
     @classmethod
-    def remove(cls, path):
-        """Drops cached adapter state for a path if it exists."""
+    def remove(cls, key):
+        """Drops cached adapter state for a cache key if it exists."""
 
-        cls.cache.pop(path, None)
+        cls.cache.pop(key, None)
 
 
 class Adapter():
@@ -63,6 +64,8 @@ class Adapter():
         """Initializes adapter identity and optional source location."""
 
         self.rank = rank # rank may be zero, when loading, and rank will be re-populated by loading saved LoraConfig file
+        if isinstance(path, os.PathLike):
+            path = os.fspath(path)
         self.path = path.strip() if isinstance(path, str) else path
         self._gptqmodel_remote_revision: Optional[str] = None
         self._gptqmodel_remote_sha256: Optional[str] = None
@@ -188,6 +191,7 @@ class Lora(Adapter):
 
         remote_revision = getattr(self, "_gptqmodel_remote_revision", None)
         remote_sha256 = getattr(self, "_gptqmodel_remote_sha256", None)
+        validate_remote_pin(remote_revision, remote_sha256)
         cache_key = (self.path, remote_revision, remote_sha256)
         lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
@@ -328,6 +332,11 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
     adapterCls = ADAPTER_MAPPING.get(adapter_type)
     if adapterCls is None:
         raise ValueError(f"Adapter: Compatible adapters include `{ADAPTER_MAPPING.keys()}`: actual `{(adapter_type)}`.")
+
+    # Serialized manifests are data-only: never allow non-tensor adapter weights.
+    for tensor_key in adapterCls.parameter_keys() or []:
+        if tensor_key in adapter and not isinstance(adapter[tensor_key], torch.Tensor):
+            raise ValueError(f"Adapter: Invalid adapter config: `{adapter}`.")
 
     try:
         adapterInstance = adapterCls(**adapter)

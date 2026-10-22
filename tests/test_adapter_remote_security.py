@@ -1,11 +1,15 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 import torch
 from safetensors.torch import save_file
 
-from gptqmodel.adapter.adapter import AdapterCache, Lora
+from gptqmodel.adapter.adapter import AdapterCache, Lora, normalize_adapter
 from gptqmodel.adapter.remote import (
     configure_explicit_remote_adapter,
     resolve_checkpoint_adapter_path,
@@ -54,6 +58,16 @@ def test_checkpoint_adapter_path_is_confined_to_checkpoint(tmp_path):
     with pytest.raises(ValueError, match="existing local directory"):
         resolve_checkpoint_adapter_path("attacker/untrusted-adapter", str(checkpoint))
 
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    with pytest.raises(ValueError, match="inside the checkpoint"):
+        resolve_checkpoint_adapter_path(str(outside), str(checkpoint))
+
+    # pathlib.Path adapter locations keep working.
+    assert resolve_checkpoint_adapter_path(
+        Path("local-lora-adapter"), str(checkpoint)
+    ) == str(adapter_dir.resolve())
+
 
 def test_explicit_remote_adapter_requires_opt_in_revision_and_digest():
     adapter = Lora(rank=2, path="attacker/untrusted-adapter")
@@ -74,7 +88,7 @@ def test_explicit_local_adapter_still_loads_without_remote_options(tmp_path):
     AdapterCache.reset()
     adapter_dir = tmp_path / "local"
     _write_adapter_files(adapter_dir)
-    adapter = Lora(rank=2, path=str(adapter_dir))
+    adapter = Lora(rank=2, path=adapter_dir)
 
     configure_explicit_remote_adapter(adapter, allow_remote=False)
     adapter.post_init(weight_key="layer", device=torch.device("cpu"))
@@ -132,6 +146,73 @@ def test_checkpoint_metadata_cannot_download_adapter(tmp_path, monkeypatch):
         adapter.post_init(weight_key="layer", device=torch.device("cpu"))
 
     assert calls == []
+
+
+def test_remote_adapter_requires_pin_and_digest_pair(monkeypatch):
+    AdapterCache.reset()
+    monkeypatch.setattr(
+        remote,
+        "hf_hub_download",
+        lambda **kwargs: pytest.fail("unpinned remote adapter fetch attempted"),
+    )
+    for revision, sha256 in (("a" * 40, None), (None, "0" * 64)):
+        adapter = Lora(rank=2, path="trusted/adapter")
+        adapter._gptqmodel_remote_revision = revision
+        adapter._gptqmodel_remote_sha256 = sha256
+        with pytest.raises(ValueError, match="revision"):
+            adapter.post_init(weight_key="layer", device=torch.device("cpu"))
+
+
+def test_remote_repo_subfolder_rejects_traversal(tmp_path):
+    AdapterCache.reset()
+    adapter = Lora(rank=2, path="trusted/adapter/../../evil")
+    configure_explicit_remote_adapter(
+        adapter,
+        allow_remote=True,
+        revision="a" * 40,
+        sha256="0" * 64,
+    )
+    with pytest.raises(ValueError, match="invalid path segments"):
+        adapter.post_init(weight_key="layer", device=torch.device("cpu"))
+
+
+def test_remote_adapter_url_revision_must_match_pin(monkeypatch):
+    AdapterCache.reset()
+    adapter = Lora(
+        rank=2,
+        path="https://huggingface.co/trusted/adapter/blob/"
+        + "b" * 40
+        + "/adapter_model.safetensors",
+    )
+    configure_explicit_remote_adapter(
+        adapter,
+        allow_remote=True,
+        revision="a" * 40,
+        sha256="0" * 64,
+    )
+    with pytest.raises(ValueError, match="must match the explicitly pinned"):
+        adapter.post_init(weight_key="layer", device=torch.device("cpu"))
+
+
+def test_serialized_adapter_cannot_inject_non_tensor_weights():
+    with pytest.raises(ValueError, match="Invalid adapter config"):
+        normalize_adapter(
+            adapter={"name": "lora", "rank": 2, "lora_A": {"n": 1}}
+        )
+    with pytest.raises(ValueError, match="Invalid adapter config"):
+        normalize_adapter(
+            adapter={"name": "lora", "rank": 2, "lora_B": [[1, 0], [0, 1]]}
+        )
+
+    adapter = normalize_adapter(
+        adapter={
+            "name": "lora",
+            "rank": 2,
+            "lora_A": torch.zeros(1),
+            "lora_B": torch.zeros(1),
+        }
+    )
+    assert adapter.lora_A is not None
 
 
 def test_remote_weight_digest_mismatch_fails_before_safetensors_load(
