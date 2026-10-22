@@ -41,7 +41,7 @@ def _as_pair(value: Any, name: str) -> List[int]:
 
 
 class VPTQLinear(WeightOnlyQuantLinear):
-    """Weight-only VPTQ linear layer with a Torch dequantization kernel."""
+    """Weight-only VPTQ linear layer with the portable Torch implementation."""
 
     SUPPORTS_BACKENDS = [BACKEND.VPTQ_TORCH]
     SUPPORTS_METHODS = [METHOD.VPTQ]
@@ -255,6 +255,11 @@ class VPTQLinear(WeightOnlyQuantLinear):
                     torch.arange(self.in_features, dtype=torch.int32, device=device),
                     persistent=True,
                 )
+                self.register_buffer(
+                    "inverse_perm",
+                    torch.arange(self.in_features, dtype=torch.int32, device=device),
+                    persistent=False,
+                )
             if bias:
                 # `bias` may already exist as a plain attribute from `__init__`.
                 self.__dict__.pop("bias", None)
@@ -272,6 +277,8 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 f"VPTQLinear `{self.name}`: unexpected `indices` shape {tuple(self.indices.shape)}; "
                 f"expected {(self.group_num, self.num_indices, self.packed_words)}."
             )
+        if self.enable_perm:
+            self.inverse_perm.copy_(torch.argsort(self.perm.to(torch.int64)).to(torch.int32))
 
     # ------------------------------------------------------------------
     # packing API
@@ -393,6 +400,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
             if perm is None:
                 raise ValueError(f"VPTQLinear `{self.name}`: missing permutation.")
             self.perm.data.copy_(perm.to(device=device, dtype=torch.int32))
+            self.inverse_perm.copy_(torch.argsort(self.perm.to(torch.int64)).to(torch.int32))
 
         if bias is not None:
             if getattr(self, "bias", None) is None:
@@ -489,8 +497,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
         return qweight
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
         bias = getattr(self, "bias", None)
+        if self.input_rows(x) == 0:
+            out = self.empty_linear_output(x)
+            if self.adapter is not None:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
+        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
         if bias is not None and bias.dtype != x.dtype:
             bias = bias.to(dtype=x.dtype)
         out = F.linear(x, weight, bias)

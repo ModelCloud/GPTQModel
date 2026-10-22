@@ -70,6 +70,11 @@ _EXTENSION_SPECS = (
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.qqq", "_QQQ_TORCH_OPS_EXTENSION"),
     ),
     _ExtensionSpec(
+        name="vptq",
+        aliases=("vptq_cuda",),
+        resolve=lambda: _resolve_extension_attr("gptqmodel.utils.vptq_cuda", "_VPTQ_TORCH_OPS_EXTENSION"),
+    ),
+    _ExtensionSpec(
         name="exllamav2",
         aliases=("exllama2", "exllama_v2", "exllamav2_gptq"),
         resolve=lambda: _resolve_extension_attr("gptqmodel.utils.exllamav2", "_EXLLAMAV2_GPTQ_TORCH_OPS_EXTENSION"),

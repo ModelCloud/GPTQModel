@@ -8,8 +8,10 @@ split into sub-vectors, every sub-vector is replaced by the index of its
 nearest codebook entry, and an optional residual codebook refines the result.
 GPT-QModel implements the recipe from
 [microsoft/VPTQ](https://github.com/microsoft/VPTQ)
-([paper](https://arxiv.org/abs/2409.17066)) as a Torch-only quantization and
-inference path (`METHOD.VPTQ` / `FORMAT.VPTQ` / `BACKEND.VPTQ_TORCH`).
+([paper](https://arxiv.org/abs/2409.17066)) as a Torch quantization path with
+Torch reference inference (`BACKEND.VPTQ_TORCH`) and hybrid CUDA inference
+(`BACKEND.VPTQ_CUDA`). Both use the same
+`METHOD.VPTQ` / `FORMAT.VPTQ` checkpoint layout.
 
 The pipeline is:
 
@@ -156,11 +158,39 @@ and trade extra quantization time for accuracy.
 
 ## Inference and checkpoint compatibility
 
-Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ` and can be loaded with
-`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_TORCH)`. The runtime keeps the
-codebooks and packed indices in the checkpoint and dequantizes on the fly
-(weight-only, no activation quantization). FP16, BF16, and FP32 inference are
-supported on CPU, CUDA, and other Torch devices.
+Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
+`GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
+`BACKEND.VPTQ_TORCH` remains available as the reference implementation.
+For matching activation and codebook dtypes, the fused CUDA kernel is used
+through four activation rows across vector lengths and outlier configurations.
+Larger batches reconstruct the dense weight once with the CUDA dequantization
+op, then use Torch/cuBLAS GEMM. Dtype mismatches use the same dequantization plus
+GEMM path. FP16, BF16, and FP32 are supported when stored in the checkpoint.
+Torch inference also runs on CPU and other Torch devices.
+
+To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
+`python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.
+Both forwards use the same module state and activation tensor. It compares
+dispatch, direct fused GEMV, dequantization plus GEMM, and `VPTQ_TORCH`. The
+benchmark reports synchronized GPU-event time and full wall-clock latency for
+each route, with median, minimum, and p90 by layer and activation row count.
+Use `--synthetic` to compare deterministic packed layers without loading a
+checkpoint, for example:
+
+```bash
+python scripts/benchmark_vptq_cuda.py \
+  --synthetic \
+  --shapes 2048x2048,4096x4096 \
+  --batch-sizes 1,8,32,128 \
+  --dtype bfloat16 \
+  --output ./vptq-backend-bf16.json
+```
+
+Synthetic codebooks are seeded and scaled to keep activation outputs near unit
+variance. The Torch path calls the portable `VPTQLinear.forward` implementation,
+including Torch index unpacking, codebook lookup, and `F.linear`; the CUDA path
+calls the native module forward. Run both FP16 and BF16 when comparing the
+target GPU.
 
 VPTQ checkpoints are not understood by Transformers, vLLM, or SGLang, and the
 checkpoint/resume feature is not available for VPTQ quantizations.

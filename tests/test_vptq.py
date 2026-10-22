@@ -12,8 +12,8 @@ pinned against an independent oracle:
    little-endian 32-bit word stream) so checkpoints stay interoperable
 2. the quantizer -> module reconstruction round trip, including permutation,
    per-channel normalization and residual refinement
-3. the Torch inference kernel, checked for activation-dtype preservation and
-   for accuracy against an independent Torch oracle
+3. the Torch and CUDA inference implementations, checked for activation-dtype
+   preservation and accuracy against independent Torch oracles
 
 The oracles below are written independently of the production code: the packer
 oracle is a pure-Python bit writer and the reconstruction oracle walks the
@@ -36,7 +36,11 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausal
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
+from gptqmodel.nn_modules.qlinear.vptq_cuda import (
+    VPTQCudaLinear,
+    _vptq_cuda_fused_max_rows,
+)
 from gptqmodel.quantization import vptq as vptq_module
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
 from gptqmodel.quantization.vptq import (
@@ -602,10 +606,11 @@ def build_module(
     register_buffers=False,
     bias=False,
     adapter=None,
+    linear_cls=VPTQLinear,
 ):
-    """Create a `VPTQLinear` matching `qcfg`."""
+    """Create a VPTQ inference module matching `qcfg`."""
 
-    return VPTQLinear(
+    return linear_cls(
         bits=qcfg.bits,
         in_features=in_features,
         out_features=out_features,
@@ -623,6 +628,16 @@ def build_module(
         register_buffers=register_buffers,
         adapter=adapter,
     )
+
+
+def test_vptq_backend_mapping_separates_torch_and_cuda_implementations():
+    from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
+    from gptqmodel.utils.importer import get_kernel_for_backend
+
+    assert get_kernel_for_backend(BACKEND.VPTQ_TORCH, METHOD.VPTQ, FORMAT.VPTQ) is VPTQLinear
+    assert get_kernel_for_backend(BACKEND.VPTQ_CUDA, METHOD.VPTQ, FORMAT.VPTQ) is VPTQCudaLinear
+    assert VPTQLinear.SUPPORTS_BACKENDS == [BACKEND.VPTQ_TORCH]
+    assert VPTQCudaLinear.SUPPORTS_BACKENDS == [BACKEND.VPTQ_CUDA]
 
 
 def synthetic_problem(out_features=48, in_features=64, seed=0):
@@ -1870,7 +1885,9 @@ def test_vptq_cuda_quantize_and_infer(dtype):
     assert math.isfinite(loss)
     assert result.indices[1].device.type == "cuda"
 
-    module = build_module(qcfg, weight.shape[1], weight.shape[0], dtype=dtype).to(device)
+    module = build_module(
+        qcfg, weight.shape[1], weight.shape[0], dtype=dtype, linear_cls=VPTQCudaLinear
+    ).to(device)
     module.pack(linear=quantizer.layer, vptq_result=result)
     assert module.centroids.weight.device == device
 
@@ -1887,6 +1904,155 @@ def test_vptq_cuda_quantize_and_infer(dtype):
     oracle_weight = oracle_reconstruct(result, module).to(device=device, dtype=torch.float64)
     oracle = (activations.to(torch.float64) @ oracle_weight.t()).to(dtype)
     assert float((actual.to(torch.float64) - oracle.to(torch.float64)).abs().max()) <= 2e-3
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("vector_len", [4, 8, 16])
+@pytest.mark.parametrize("rows", [1, 2, 3, 4, 8, 16, 17, 64, 127, 128, 129, 1024, 2048])
+def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_len, monkeypatch):
+    """Check fused and dense CUDA dispatch around the M crossover against an oracle."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for VPTQ fused inference coverage")
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=71)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, vector_len],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    result, _ = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype
+    )
+    module = build_module(
+        qcfg, weight.shape[1], weight.shape[0], dtype=dtype, linear_cls=VPTQCudaLinear
+    ).to(device)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    from gptqmodel.utils.vptq_cuda import (
+        vptq_cuda_dequantize as real_vptq_cuda_dequantize,
+        vptq_cuda_linear as real_vptq_cuda_linear,
+    )
+
+    fused_calls = []
+    dequantized_weights = []
+
+    def record_fused_call(*args, **kwargs):
+        fused_calls.append(True)
+        return real_vptq_cuda_linear(*args, **kwargs)
+
+    def record_dequantize(*args, **kwargs):
+        weight = real_vptq_cuda_dequantize(*args, **kwargs)
+        dequantized_weights.append(weight)
+        return weight
+
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", record_fused_call)
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_dequantize", record_dequantize)
+
+    generator = torch.Generator().manual_seed(73)
+    activations = torch.randn(rows, 128, generator=generator, dtype=torch.float32).to(
+        device=device, dtype=dtype
+    )
+    actual = module(activations)
+    assert actual.dtype == dtype
+    fused_expected = rows <= _vptq_cuda_fused_max_rows(module)
+    assert bool(fused_calls) is fused_expected
+    assert bool(dequantized_weights) is not fused_expected
+
+    oracle_weight = oracle_reconstruct(result, module).to(device=device)
+    oracle_raw = activations.to(torch.float64) @ oracle_weight.to(torch.float64).t()
+    oracle_rounded = oracle_raw.to(dtype)
+    if fused_expected:
+        # The fused kernel accumulates directly from independently
+        # reconstructed weights; compare visible output after output rounding.
+        torch.testing.assert_close(actual.float(), oracle_rounded.float(), rtol=2e-3, atol=2e-3)
+    else:
+        # The dense path must preserve native Torch/cuBLAS GEMM behavior once
+        # the independently reconstructed dense weights are supplied.
+        expected = torch.nn.functional.linear(activations, oracle_weight.to(dtype=dtype))
+        assert torch.equal(actual, expected)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("rows", [1, 3, 4])
+def test_vptq_cuda_outlier_path_matches_independent_torch_oracle(dtype, rows):
+    """Both native CUDA paths handle outliers, groups, residuals, permutation and norm."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for VPTQ CUDA outlier coverage")
+
+    device = torch.device("cuda:0")
+    weight, hessian = synthetic_problem(out_features=32, in_features=64, seed=83)
+    qcfg = VPTQConfig(
+        num_centroids=[8, 16],
+        num_res_centroids=[-1, 4],
+        vector_lens=[4, 4],
+        npercent=12.5,
+        group_num=2,
+        kmeans_iters=8,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=dtype)
+    result, _ = quantizer.quantize_weight(
+        weight.to(device=device, dtype=dtype), hessian.to(device), target_dtype=dtype
+    )
+    module = build_module(
+        qcfg, weight.shape[1], weight.shape[0], dtype=dtype, linear_cls=VPTQCudaLinear
+    ).to(device)
+    module.pack(linear=quantizer.layer, vptq_result=result)
+
+    activations = torch.randn(rows, weight.shape[1], device=device, dtype=dtype)
+    actual = module(activations)
+    oracle_weight = oracle_reconstruct(result, module).to(device=device)
+    oracle = torch.nn.functional.linear(activations, oracle_weight.to(dtype=dtype))
+    assert actual.dtype == dtype
+    assert float((actual.float() - oracle.float()).abs().max()) <= 2e-3
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("shape", [(0, 128), (2, 0, 128)])
+def test_vptq_cuda_empty_rows_skip_kernel_and_preserve_adapter(shape, monkeypatch):
+    """Empty CUDA inputs preserve Linear shape and adapter behavior without a launch."""
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required for VPTQ empty-input coverage")
+
+    class AddOneAdapter:
+        def apply(self, *, x, out):
+            return out + 1
+
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 64],
+        num_res_centroids=[-1, 8],
+        vector_lens=[-1, 4],
+        kmeans_iters=12,
+        enable_norm=True,
+        enable_perm=True,
+    )
+    module = build_module(
+        qcfg, 128, 64, dtype=torch.float16, linear_cls=VPTQCudaLinear
+    ).to("cuda")
+    # VPTQ currently rejects adapters during normal backend selection, but its
+    # forward path still preserves an attached adapter for shared linear APIs.
+    module.adapter = AddOneAdapter()
+
+    def fail_if_kernel_called(*args, **kwargs):
+        raise AssertionError("empty input must not dispatch the CUDA kernel")
+
+    monkeypatch.setattr("gptqmodel.utils.vptq_cuda.vptq_cuda_linear", fail_if_kernel_called)
+    x = torch.empty(shape, device="cuda", dtype=torch.float16)
+    actual = module(x)
+    assert actual.shape == shape[:-1] + (64,)
+    assert actual.dtype == x.dtype and actual.device == x.device
+    assert torch.equal(actual, torch.ones_like(actual))
 
 
 # ---------------------------------------------------------------------------

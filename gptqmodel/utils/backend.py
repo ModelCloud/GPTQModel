@@ -56,6 +56,7 @@ class BACKEND(str, Enum):
 
     # VPTQ kernels
     VPTQ_TORCH = "vptq_torch"
+    VPTQ_CUDA = "vptq_cuda"
 
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
