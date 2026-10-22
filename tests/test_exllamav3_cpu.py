@@ -7,7 +7,6 @@ import pytest
 import torch
 
 import gptqmodel.nn_modules.exllamav3_torch as exllamav3_torch
-from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 
 
 @pytest.fixture(autouse=True)
@@ -17,7 +16,7 @@ def _clear_cpu_bf16x3_cache():
     exllamav3_torch._cpu_bf16x3_support.cache_clear()
 
 
-def _make_module(size: int = 1024, bits: int = 4, seed: int = 731) -> ExllamaV3TorchLinear:
+def _make_module(size: int = 1024, bits: int = 4, seed: int = 731) -> exllamav3_torch.ExllamaV3TorchLinear:
     generator = torch.Generator().manual_seed(seed)
     tensors = {
         "trellis": torch.randint(
@@ -31,7 +30,7 @@ def _make_module(size: int = 1024, bits: int = 4, seed: int = 731) -> ExllamaV3T
         "svh": (torch.rand(size, generator=generator) * 0.02 + 0.001).to(torch.float16),
         "bias": torch.randn(size, generator=generator, dtype=torch.float16) * 0.01,
     }
-    return ExllamaV3TorchLinear.from_tensors(
+    return exllamav3_torch.ExllamaV3TorchLinear.from_tensors(
         in_features=size,
         out_features=size,
         name="cpu_bf16x3",
@@ -45,7 +44,7 @@ def _relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
     return ((actual - expected).norm() / expected.norm()).item()
 
 
-def _oracle(module: ExllamaV3TorchLinear, x: torch.Tensor) -> torch.Tensor:
+def _oracle(module: exllamav3_torch.ExllamaV3TorchLinear, x: torch.Tensor) -> torch.Tensor:
     weight = module.get_weight_tensor(torch.float32).double()
     bias = module.bias.double()
     return x.double() @ weight + bias
@@ -57,7 +56,7 @@ def _matmul_precision() -> str | None:
 
 
 def _fp32_matmul(
-    module: ExllamaV3TorchLinear,
+    module: exllamav3_torch.ExllamaV3TorchLinear,
     x: torch.Tensor,
     precision: str,
 ) -> torch.Tensor:
