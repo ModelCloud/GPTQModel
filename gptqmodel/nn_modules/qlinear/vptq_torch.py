@@ -21,6 +21,7 @@ from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.torch import torch_compile
 from ...utils.vptq import (
     unpack_vptq_indices,
     vptq_group_setting,
@@ -270,6 +271,33 @@ class VPTQLinear(WeightOnlyQuantLinear):
     def post_init(self):
         self._validate_loaded_state()
         super().post_init()
+        self.optimize()
+
+    def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
+        if self.optimized:
+            return
+
+        # Compile only the decode graph. The dense result is intentionally not
+        # memoized: every forward still reconstructs weights from packed
+        # indices and the live codebooks.
+        buffers = self.list_buffers()
+        device_type = buffers[0].device.type if buffers else "cpu"
+        if device_type == "npu":
+            # torch.compile/inductor is not reliable on torch-npu in supported
+            # deployments; keep the portable eager path there.
+            self.optimized = True
+            log.info.once("Optimize: `VPTQLinear` torch.compile skipped on NPU.")
+            return
+
+        if backend is None:
+            backend = "inductor" if device_type != "mps" else "aot_eager"
+        self.dequantize = torch_compile(
+            self.dequantize,
+            backend=backend,
+            mode=mode,
+            fullgraph=fullgraph,
+        )
+        super().optimize()
 
     def _validate_loaded_state(self) -> None:
         if self.indices.shape != (self.group_num, self.num_indices, self.packed_words):
@@ -426,12 +454,15 @@ class VPTQLinear(WeightOnlyQuantLinear):
             res_bits=self.res_index_bits,
         )
 
-        flat_indices = (
-            indices.reshape(self.group_num, -1, 1)
-            .expand(-1, -1, self.vector_len)
-            .reshape(self.group_num, -1, self.vector_len)
+        # Flatten the codebook and add one group offset per row. Advanced
+        # indexing is faster than an expanded gather on CPU and avoids the
+        # per-element broadcast tensor.
+        flat_centroids = centroids.reshape(-1, self.vector_len)
+        group_offsets = (
+            torch.arange(self.group_num, device=device, dtype=torch.int64)[:, None]
+            * self.num_centroids
         )
-        selected = torch.gather(centroids, 1, flat_indices)
+        selected = flat_centroids[indices.reshape(self.group_num, -1) + group_offsets]
         selected = selected.view(
             self.group_num, self.num_indices, self.group_size, self.vector_len
         ).permute(0, 1, 3, 2)
@@ -442,12 +473,14 @@ class VPTQLinear(WeightOnlyQuantLinear):
             res_centroids = self.res_centroids.weight.view(
                 self.group_num, self.num_res_centroids, self.vector_len
             )
-            flat_res_indices = (
-                res_indices.reshape(self.group_num, -1, 1)
-                .expand(-1, -1, self.vector_len)
-                .reshape(self.group_num, -1, self.vector_len)
+            flat_res_centroids = res_centroids.reshape(-1, self.vector_len)
+            res_group_offsets = (
+                torch.arange(self.group_num, device=device, dtype=torch.int64)[:, None]
+                * self.num_res_centroids
             )
-            selected_res = torch.gather(res_centroids, 1, flat_res_indices)
+            selected_res = flat_res_centroids[
+                res_indices.reshape(self.group_num, -1) + res_group_offsets
+            ]
             selected_res = selected_res.view(
                 self.group_num, self.num_indices, self.group_size, self.vector_len
             ).permute(0, 1, 3, 2)
@@ -464,12 +497,8 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 1, self.outlier_num_centroids, self.outlier_vector_len
             )
             outlier_indices = self.outlier_indices.to(torch.int64)
-            flat_outlier_indices = (
-                outlier_indices.reshape(1, -1, 1)
-                .expand(-1, -1, self.outlier_vector_len)
-                .reshape(1, -1, self.outlier_vector_len)
-            )
-            selected_outlier = torch.gather(outlier_centroids, 1, flat_outlier_indices)
+            flat_outlier_centroids = outlier_centroids.reshape(-1, self.outlier_vector_len)
+            selected_outlier = flat_outlier_centroids[outlier_indices.reshape(1, -1)]
             selected_outlier = selected_outlier.view(
                 1, self.outlier_num_indices, self.outlier_size, self.outlier_vector_len
             ).permute(0, 1, 3, 2)
@@ -484,7 +513,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
             qweight = qweight[:, : self.in_features]
 
         if self.enable_perm:
-            qweight = qweight[:, torch.argsort(self.perm.to(torch.int64))]
+            qweight = qweight[:, self.inverse_perm.to(torch.int64)]
 
         if self.enable_norm:
             if self.norm_dim == 0:

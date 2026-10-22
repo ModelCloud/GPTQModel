@@ -227,20 +227,25 @@ def unpack_vptq_indices(
         empty = torch.zeros(*packed.shape[:-1], 0, dtype=torch.int64, device=packed.device)
         return empty, (empty.clone() if res_bits > 0 else None)
 
-    word_offsets = torch.arange(32, device=packed.device, dtype=torch.int64)
-    bits = (packed.to(torch.int64).unsqueeze(-1) >> word_offsets) & 1
-    bits = bits.reshape(*packed.shape[:-1], -1)
-
-    needed = num_elements * total_bits
-    if bits.shape[-1] < needed:
+    if packed.shape[-1] * 32 < num_elements * total_bits:
         raise ValueError(
-            f"unpack_vptq_indices: packed tensor holds {bits.shape[-1]} bits, "
-            f"need at least {needed}."
+            f"unpack_vptq_indices: packed tensor holds {packed.shape[-1] * 32} bits, "
+            f"need at least {num_elements * total_bits}."
         )
-    bits = bits[..., :needed].reshape(*packed.shape[:-1], num_elements, total_bits)
 
-    element_offsets = torch.arange(total_bits, device=packed.device, dtype=torch.int64)
-    merged = (bits << element_offsets).sum(dim=-1)
+    # Read each value from a 64-bit window spanning at most two 32-bit words
+    # instead of expanding every packed word into 32 individual bits. The
+    # windowed form performs O(num_elements) work per packed row and is
+    # substantially faster for the small index counts used by VPTQ layers.
+    bit_offsets = (
+        torch.arange(num_elements, device=packed.device, dtype=torch.int64) * total_bits
+    )
+    word_offsets = bit_offsets // 32
+    shifts = bit_offsets % 32
+    lower = packed[..., word_offsets].to(torch.int64) & 0xFFFFFFFF
+    upper = packed[..., (word_offsets + 1).clamp_max(packed.shape[-1] - 1)]
+    merged = lower | ((upper.to(torch.int64) & 0xFFFFFFFF) << 32)
+    merged = (merged >> shifts) & ((1 << total_bits) - 1)
 
     index_mask = (1 << index_bits) - 1
     indices = merged & index_mask

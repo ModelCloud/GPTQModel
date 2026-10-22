@@ -295,6 +295,28 @@ def test_exllamav3_torch_unpack_indices_slices_output_tiles():
         assert torch.equal(module._unpack_indices(start, end), full[:, start:end])
 
 
+@pytest.mark.parametrize("bits", range(1, 17))
+def test_exllamav3_torch_unpack_indices_matches_independent_oracle_for_all_bit_widths(bits):
+    in_features = 384
+    out_features = 256
+    generator = torch.Generator().manual_seed(3000 + bits)
+    symbols = torch.randint(
+        0,
+        1 << bits,
+        (in_features // 16, out_features // 16, 256),
+        dtype=torch.int64,
+        generator=generator,
+    )
+    module = _make_module(
+        bits=bits,
+        trellis=_pack_symbols(symbols, bits),
+        in_features=in_features,
+        out_features=out_features,
+    )
+
+    assert torch.equal(module._unpack_indices(), _encode_symbols(symbols, bits))
+
+
 def test_exllamav3_torch_zero_rows_preserves_shape():
     module = _make_module(size=256)
     x = torch.empty(0, module.in_features, dtype=torch.bfloat16)

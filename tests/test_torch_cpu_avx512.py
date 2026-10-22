@@ -1022,3 +1022,35 @@ def test_auto_selection_supports_large_groups(group_size):
         pack_dtype=torch.int32,
     )
     assert selected is TorchCpuAvx512Linear
+
+
+def test_aten_cpu_group_size_contract_matches_the_op():
+    assert TorchAtenLinear.SUPPORTS_GROUP_SIZE == [32, 64, 128, 256]
+
+    if not _has_local_int4pack_cpu_ops():
+        pytest.skip("aten CPU int4pack ops are unavailable")
+
+    ok, err = TorchAtenLinear.validate(
+        bits=4,
+        group_size=16,
+        desc_act=False,
+        sym=True,
+        in_features=512,
+        out_features=64,
+        pack_dtype=torch.int32,
+        device=DEVICE.CPU,
+    )
+    assert not ok
+    assert "group_size" in str(err)
+
+    ok, err = TorchAtenLinear.validate(
+        bits=4,
+        group_size=256,
+        desc_act=False,
+        sym=True,
+        in_features=512,
+        out_features=64,
+        pack_dtype=torch.int32,
+        device=DEVICE.CPU,
+    )
+    assert ok, err

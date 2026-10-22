@@ -13,6 +13,7 @@ packing, not end-to-end model quality.
 from __future__ import annotations
 
 import argparse
+import copy
 import os
 import statistics
 import time
@@ -23,6 +24,11 @@ import torch.nn as nn
 from gptqmodel.nn_modules.exllamav3_torch import (
     ExllamaV3TorchLinear,
     _cpu_bf16x3_support,
+)
+from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+    BITSANDBYTES_AVAILABLE,
+    BitsAndBytesLinear,
+    _cpu_packed_kernels,
 )
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -85,6 +91,14 @@ def _pack_time(fn, *, repeats: int = 5) -> float:
         fn()
         samples.append((time.perf_counter() - start) * 1e3)
     return statistics.median(samples)
+
+
+def _package_version(name: str) -> str:
+    try:
+        module = __import__(name)
+    except Exception:
+        return "unavailable"
+    return str(getattr(module, "__version__", "unknown"))
 
 
 def _fp32_awq_oracle(
@@ -333,6 +347,43 @@ def _build_gguf(
     return make(), {"make": make, "linear": linear}
 
 
+def _build_bnb(
+    bits: int,
+    in_features: int,
+    out_features: int,
+) -> tuple[BitsAndBytesLinear, dict[str, object]]:
+    torch.manual_seed(800 + in_features + bits)
+    linear = nn.Linear(
+        in_features,
+        out_features,
+        bias=True,
+        dtype=torch.bfloat16,
+    )
+    linear.weight.data.normal_(0.0, 0.04)
+    linear.bias.data.normal_(0.0, 0.01)
+
+    def make():
+        module = BitsAndBytesLinear(
+            bits=bits,
+            group_size=-1,
+            sym=True,
+            desc_act=False,
+            in_features=in_features,
+            out_features=out_features,
+            bias=True,
+            register_buffers=False,
+            dtype=torch.bfloat16,
+            format="nf4" if bits == 4 else None,
+            block_size=128,
+            compress_statistics=False,
+        )
+        module.pack_original(linear=linear, scales=None, zeros=None)
+        module.post_init()
+        return module.eval()
+
+    return make(), {"make": make, "linear": linear}
+
+
 def _build_exl3(
     in_features: int,
     out_features: int,
@@ -464,6 +515,15 @@ def main() -> int:
             ("GGUF Q6_K", "q6_k"),
         )
     ]
+    bnb4 = bnb4_meta = None
+    bnb8 = bnb8_meta = None
+    bnb_error = None
+    if BITSANDBYTES_AVAILABLE:
+        try:
+            bnb4, bnb4_meta = _build_bnb(4, in_features, out_features)
+            bnb8, bnb8_meta = _build_bnb(8, in_features, out_features)
+        except Exception as exc:
+            bnb_error = f"{type(exc).__name__}: {exc}"
 
     pack_rows.extend(
         [
@@ -484,6 +544,27 @@ def main() -> int:
             for label, _, meta in gguf_variants
         ]
     )
+    if bnb4_meta is not None and bnb8_meta is not None:
+        pack_rows.extend(
+            [
+                [
+                    "BitsAndBytes 4-bit",
+                    f"{out_features}x{in_features}",
+                    f"{_pack_time(bnb4_meta['make']):.3f}",
+                ],
+                [
+                    "BitsAndBytes 8-bit",
+                    f"{out_features}x{in_features}",
+                    f"{_pack_time(bnb8_meta['make']):.3f}",
+                ],
+            ]
+        )
+
+    bnb4_packed = copy.deepcopy(bnb4) if bnb4 is not None else None
+    bnb4_canonical = copy.deepcopy(bnb4) if bnb4 is not None else None
+    if bnb4_canonical is not None:
+        bnb4_canonical._cpu_packing_disabled = True
+    bnb8_native = copy.deepcopy(bnb8) if bnb8 is not None else None
 
     for tokens in tokens_list:
         torch.manual_seed(600 + tokens)
@@ -708,6 +789,100 @@ def main() -> int:
                 visible_error=_visible_relative_error(module._forward_dequant_matmul(x), oracle),
             )
 
+        if bnb4_canonical is not None:
+            bnb4_oracle = (
+                x.float() @ bnb4_canonical.dequantize_weight().float().t()
+                + bnb4_canonical.bias.float()
+            )
+            bnb4_canonical_time = _bench(
+                lambda: bnb4_canonical(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            with torch.inference_mode():
+                bnb4_canonical_output = bnb4_canonical(x)
+                bnb4_packed(x)
+
+            if bnb4_packed._cpu_packing_active:
+                bnb4_packed_time = _bench(
+                    lambda: bnb4_packed(x),
+                    warmup=args.warmup,
+                    iters=args.iters,
+                )
+                with torch.inference_mode():
+                    bnb4_packed_output = bnb4_packed(x)
+                _add_row(
+                    rows,
+                    method="BitsAndBytes 4-bit",
+                    variant="packed AVX512-BF16",
+                    shape=(out_features, in_features),
+                    tokens=tokens,
+                    timing=bnb4_packed_time,
+                    baseline_ms=bnb4_canonical_time[0],
+                    relative_error=_relative_error(bnb4_packed_output, bnb4_oracle),
+                    visible_error=_visible_relative_error(bnb4_packed_output, bnb4_oracle),
+                )
+
+            _add_row(
+                rows,
+                method="BitsAndBytes 4-bit",
+                variant="canonical CPU",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=bnb4_canonical_time,
+                baseline_ms=bnb4_canonical_time[0],
+                relative_error=_relative_error(bnb4_canonical_output, bnb4_oracle),
+                visible_error=_visible_relative_error(bnb4_canonical_output, bnb4_oracle),
+            )
+
+        if bnb8_native is not None:
+            bnb8_oracle = (
+                x.float() @ bnb8_native.dequantize_weight().float().t()
+                + bnb8_native.bias.float()
+            )
+
+            def bnb8_dense(x_input: torch.Tensor) -> torch.Tensor:
+                weight = bnb8_native.dequantize_weight().float()
+                return (
+                    x_input.float() @ weight.t() + bnb8_native.bias.float()
+                ).to(x_input.dtype)
+
+            bnb8_native_time = _bench(
+                lambda: bnb8_native(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            bnb8_dense_time = _bench(
+                lambda: bnb8_dense(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            with torch.inference_mode():
+                bnb8_native_output = bnb8_native(x)
+                bnb8_dense_output = bnb8_dense(x)
+            _add_row(
+                rows,
+                method="BitsAndBytes 8-bit",
+                variant="native int8 matmul",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=bnb8_native_time,
+                baseline_ms=bnb8_dense_time[0],
+                relative_error=_relative_error(bnb8_native_output, bnb8_oracle),
+                visible_error=_visible_relative_error(bnb8_native_output, bnb8_oracle),
+            )
+            _add_row(
+                rows,
+                method="BitsAndBytes 8-bit",
+                variant="dense dequant + matmul",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=bnb8_dense_time,
+                baseline_ms=bnb8_dense_time[0],
+                relative_error=_relative_error(bnb8_dense_output, bnb8_oracle),
+                visible_error=_visible_relative_error(bnb8_dense_output, bnb8_oracle),
+            )
+
     print("Environment")
     print(
         render_table(
@@ -716,6 +891,9 @@ def main() -> int:
                 ["torch_threads", str(torch.get_num_threads())],
                 ["interop_threads", str(torch.get_num_interop_threads())],
                 ["exl3_bf16x3", str(_cpu_bf16x3_support())],
+                ["bitsandbytes", _package_version("bitsandbytes")],
+                ["bnb_cpu_packed", str(_cpu_packed_kernels() is not None)],
+                ["hf_kernels", _package_version("kernels")],
                 ["shape", f"{out_features}x{in_features}"],
                 ["tokens", args.tokens],
                 ["warmup", str(args.warmup)],
@@ -760,8 +938,12 @@ def main() -> int:
         "dtype first. VPTQ packing time loads a precomputed quantization "
         "result and excludes k-means training. EXL3 forward uses a bounded "
         "chunked decode and does not retain a dense weight; the dense-materialize "
-        "row is a per-call baseline, not a cache."
+        "row is a per-call baseline, not a cache. BitsAndBytes 4-bit uses the "
+        "packed AVX512-BF16 path for M <= 64; larger batches use the canonical "
+        "CPU path. The 8-bit dense baseline includes dequantization on every call."
     )
+    if bnb_error is not None:
+        print(f"BitsAndBytes benchmark was unavailable: {bnb_error}")
     return 0
 
 
