@@ -1378,6 +1378,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         except Exception:
             return False
 
+    def clear_autotune(self):
+        super().clear_autotune()
+        self._gguf_fused_autotune_cache = {}
+
     def _should_use_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
         if not self._is_fused_k_forward_candidate(x_flat):
             return False
@@ -1385,7 +1389,15 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         if not self.autotune_enabled:
             return True
 
-        return bool(self.maybe_autotune(x_flat))
+        key = (
+            x_flat.device.type,
+            x_flat.device.index,
+            x_flat.dtype,
+            tuple(x_flat.shape),
+        )
+        if key not in self._gguf_fused_autotune_cache:
+            self._gguf_fused_autotune_cache[key] = self._autotune(x_flat)
+        return bool(self._gguf_fused_autotune_cache[key])
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)

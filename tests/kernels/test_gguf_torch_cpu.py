@@ -173,3 +173,28 @@ def test_gguf_q4_q8_forward_matches_dense_oracle_and_fused_path(
     torch.testing.assert_close(fused.to(torch.float32), dense.to(torch.float32), **tolerance)
     torch.testing.assert_close(actual.to(torch.float32), expected, **tolerance)
     assert module._should_use_fused_k_forward(x)
+
+
+def test_gguf_fused_autotune_is_cached_per_shape(monkeypatch):
+    _, module = _build_module("q4_0", in_features=37, out_features=5)
+    module.gguf_fused_cpu_max_rows = 16
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.autotune_enabled = True
+    module.clear_autotune()
+
+    calls = []
+
+    def fake_autotune(self, x_flat):
+        calls.append(tuple(x_flat.shape))
+        return x_flat.shape[0] > 1
+
+    monkeypatch.setattr(type(module), "_autotune", fake_autotune)
+
+    single_token = torch.randn(1, module.in_features, dtype=torch.bfloat16)
+    many_tokens = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+
+    assert module._should_use_fused_k_forward(single_token) is False
+    assert module._should_use_fused_k_forward(many_tokens) is True
+    assert module._should_use_fused_k_forward(single_token) is False
+    assert module._should_use_fused_k_forward(many_tokens) is True
+    assert calls == [(1, module.in_features), (7, module.in_features)]
