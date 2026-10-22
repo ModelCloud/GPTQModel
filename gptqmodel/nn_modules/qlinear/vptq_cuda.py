@@ -14,14 +14,16 @@ from ...utils.backend import BACKEND
 from .vptq_torch import VPTQLinear
 
 
-# Initial crossover point from paired RTX 4090 benchmarks. The existing fused
-# kernel is retained for decode-sized inputs; larger M reconstructs weights
-# once and uses cuBLAS GEMM. Keep this internal until broader device testing.
-_VPTQ_CUDA_FUSED_MAX_ROWS = 1
+# Paired RTX 4090 benchmarks show the vec4 fused kernel remains faster through
+# M=4. Generic vector and outlier paths use the fused kernel only for M=1.
+_VPTQ_CUDA_FUSED_MAX_ROWS = 4
+_VPTQ_CUDA_FUSED_MAX_ROWS_GENERIC = 1
 
 
 def _vptq_cuda_fused_max_rows(module: VPTQLinear) -> int:
-    return _VPTQ_CUDA_FUSED_MAX_ROWS
+    if module.vector_len == 4 and not module.enable_outlier:
+        return _VPTQ_CUDA_FUSED_MAX_ROWS
+    return _VPTQ_CUDA_FUSED_MAX_ROWS_GENERIC
 
 
 class VPTQCudaLinear(VPTQLinear):
