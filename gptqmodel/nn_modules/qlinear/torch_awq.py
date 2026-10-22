@@ -78,8 +78,6 @@ class AwqTorchLinear(AWQuantLinear):
                 self.scales = self.scales.to(dtype=self.compute_dtype)
             if self.bias is not None and self.bias.dtype != self.compute_dtype:
                 self.bias = self.bias.to(dtype=self.compute_dtype)
-        self._dense_weight_cache = None
-        self._dense_weight_cache_key = None
         self._cpu_packed_qweight = None
         self._cpu_packed_qzeros = None
         self._cpu_packed_scales = None
@@ -100,8 +98,6 @@ class AwqTorchLinear(AWQuantLinear):
         return super().train(mode=mode)
 
     def clear_weight_cache(self) -> None:
-        self._dense_weight_cache = None
-        self._dense_weight_cache_key = None
         self._cpu_packed_qweight = None
         self._cpu_packed_qzeros = None
         self._cpu_packed_scales = None
@@ -153,37 +149,12 @@ class AwqTorchLinear(AWQuantLinear):
         ):
             self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
 
-    def _weight_cache_key(self, *, device: torch.device, dtype: torch.dtype):
-        return (
-            tensor_cache_key(self.qweight),
-            tensor_cache_key(self.qzeros),
-            tensor_cache_key(self.scales),
-            self.bits,
-            self.group_size,
-            device,
-            dtype,
-        )
-
-    def _dense_weight_for_inference(
+    def _dequantize_weight_for_inference(
         self,
         x_flat: torch.Tensor,
         *,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        if self.training or x_flat.requires_grad:
-            return dequantize_gemm(
-                qweight=self.qweight,
-                qzeros=self.qzeros,
-                scales=self.scales,
-                bits=self.bits,
-                group_size=self.group_size,
-            ).to(device=x_flat.device, dtype=dtype)
-
-        key = self._weight_cache_key(device=x_flat.device, dtype=dtype)
-        weight = self._dense_weight_cache
-        if weight is not None and self._dense_weight_cache_key == key:
-            return weight
-
         weight = dequantize_gemm(
             qweight=self.qweight,
             qzeros=self.qzeros,
@@ -195,8 +166,6 @@ class AwqTorchLinear(AWQuantLinear):
             raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
         if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
             weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
-        self._dense_weight_cache = weight
-        self._dense_weight_cache_key = key
         return weight
 
     def _cpu_avx512_eligible(self, x_flat: torch.Tensor) -> bool:
@@ -311,8 +280,8 @@ class AwqTorchLinear(AWQuantLinear):
         # This is the portable/reference AWQ implementation.  Its arithmetic
         # must remain the dense dequantize + matmul oracle; the BF16-only
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
-        # Subclasses such as ParoQuant may still opt into the shared helper.
-        weight = self._dense_weight_for_inference(x_flat, dtype=compute_dtype)
+        # Subclasses such as ParoQuant use the shared dequantize helper.
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
         output = torch.matmul(x_flat, weight)
         if self.bias is not None:
             output = output + self.bias

@@ -1136,7 +1136,7 @@ def test_vptq_quantize_module_roundtrip(variant, overrides, dtype):
     assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
 
 
-def test_vptq_inference_cache_reuses_and_invalidates():
+def test_vptq_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
     weight, hessian = synthetic_problem(out_features=16, in_features=32, seed=99)
     qcfg = VPTQConfig(
         num_centroids=[-1, 32],
@@ -1162,33 +1162,25 @@ def test_vptq_inference_cache_reuses_and_invalidates():
     module.eval()
 
     x = torch.randn(3, weight.shape[1], dtype=torch.float32)
+    calls = 0
+    dequantize = module.dequantize
+
+    def counted_dequantize():
+        nonlocal calls
+        calls += 1
+        return dequantize()
+
+    monkeypatch.setattr(module, "dequantize", counted_dequantize)
+
     with torch.inference_mode():
         first = module(x)
-    cached = module._dense_weight_cache
-    assert cached is not None
-    assert module._dense_weight_cache_key is not None
-
-    with torch.inference_mode():
         second = module(x)
-    assert module._dense_weight_cache is cached
+
+    assert calls == 2
+    assert not hasattr(module, "_dense_weight_cache")
     torch.testing.assert_close(second, first, rtol=0, atol=0)
 
-    with torch.no_grad():
-        module.centroids.weight.add_(0.01)
-    with torch.inference_mode():
-        module(x)
-    assert module._dense_weight_cache is not cached
-
-    module.load_quant_result(result)
-    assert module._dense_weight_cache is None
-    assert module._dense_weight_cache_key is None
-
-    with torch.inference_mode():
-        module(x)
-    assert module._dense_weight_cache is not None
     module.to(dtype=torch.float16)
-    assert module._dense_weight_cache is None
-
     with torch.inference_mode():
         output = module(x.to(torch.float16))
     assert output.dtype == torch.float16

@@ -28,9 +28,7 @@ from ...quantization.dtype import (
     device_supports_native_fp8,
 )
 from ...utils.backend import BACKEND
-from ...utils.env import env_flag
 from . import WeightOnlyQuantLinear
-from ._runtime_cache import tensor_cache_key
 from .gguf import _apply_optional_smoother
 
 
@@ -41,7 +39,6 @@ _MLX_FP8_FORMATS = {
     "float8_e4m3fnuz",
     "float8_e5m2fnuz",
 }
-_FP8_CACHE_WEIGHTS = env_flag("GPTQMODEL_FP8_CACHE_WEIGHTS", default=True)
 
 
 @lru_cache(maxsize=1)
@@ -230,20 +227,6 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
 
         if register_buffers:
             self._allocate_buffers(bias=bias)
-        self._dequant_weight_cache = None
-        self._dequant_weight_cache_key = None
-
-    def post_init(self):
-        self.clear_weight_cache()
-        super().post_init()
-
-    def clear_weight_cache(self) -> None:
-        self._dequant_weight_cache = None
-        self._dequant_weight_cache_key = None
-
-    def train(self, mode: bool = True):
-        self.clear_weight_cache()
-        return super().train(mode=mode)
 
     @classmethod
     def validate_once(cls):
@@ -377,14 +360,6 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 weight_block_size=self.weight_block_size,
             )
 
-        # ``pack_original`` runs under inference mode. Keep the FP8 cacheable
-        # tensors normal so their version counter observes in-place updates;
-        # inference tensors do not track one.
-        if qweight.is_inference():
-            with torch.inference_mode(False):
-                qweight = qweight.clone()
-                weight_scale_inv = weight_scale_inv.clone()
-
         if "weight" in self._buffers:
             self.weight = qweight
         else:
@@ -405,7 +380,6 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.bias = None
 
         self._scaled_mm_hard_disabled = False
-        self.clear_weight_cache()
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
         target_device = self.weight.device if device is None else torch.device(device)
@@ -503,29 +477,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         )
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
-        weight = self._dense_weight_for_inference(x_flat)
-        return torch.matmul(x_flat, weight)
-
-    def _dense_weight_for_inference(self, x_flat: torch.Tensor) -> torch.Tensor:
-        if self.training or x_flat.requires_grad or not _FP8_CACHE_WEIGHTS:
-            return self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-
-        key = (
-            tensor_cache_key(self.weight),
-            tensor_cache_key(self.weight_scale_inv),
-            self.fp8_format,
-            self.weight_scale_method,
-            self.weight_scale_semantics,
-            x_flat.device,
-            x_flat.dtype,
-        )
-        if self._dequant_weight_cache is not None and self._dequant_weight_cache_key == key:
-            return self._dequant_weight_cache
-
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        self._dequant_weight_cache = weight
-        self._dequant_weight_cache_key = key
-        return weight
+        return torch.matmul(x_flat, weight)
 
     def _forward_scaled_mm(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.weight if self.weight.device == x_flat.device else self.weight.to(device=x_flat.device)

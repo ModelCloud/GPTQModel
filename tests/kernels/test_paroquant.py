@@ -243,6 +243,57 @@ def test_paroquant_forward_matches_explicit_rotated_reference(monkeypatch):
     torch.testing.assert_close(module(x), expected, atol=5e-3, rtol=5e-3)
 
 
+def test_awq_torch_forward_dequantizes_per_call_without_dense_cache(monkeypatch):
+    from gptqmodel.nn_modules.qlinear import torch_awq as torch_awq_module
+
+    bits = 4
+    in_features = 128
+    out_features = 64
+    group_size = 128
+    qweight, qzeros, scales, bias = _make_packed_buffers(
+        bits,
+        in_features,
+        out_features,
+        group_size,
+    )
+
+    module = AwqTorchLinear(
+        bits=bits,
+        group_size=group_size,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=True,
+    )
+    module.qweight.copy_(qweight)
+    module.qzeros.copy_(qzeros)
+    module.scales.copy_(scales)
+    module.bias.copy_(bias)
+    module.post_init()
+    module.eval()
+
+    calls = 0
+    dequantize_gemm = torch_awq_module.dequantize_gemm
+
+    def counted_dequantize_gemm(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return dequantize_gemm(*args, **kwargs)
+
+    monkeypatch.setattr(torch_awq_module, "dequantize_gemm", counted_dequantize_gemm)
+
+    x = torch.randn(3, in_features, dtype=torch.float16)
+    with torch.inference_mode():
+        first = module(x)
+        second = module(x)
+
+    assert calls == 2
+    assert not hasattr(module, "_dense_weight_cache")
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("group_size", [32, 64, 128])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_paroquant_rotation_vectorized_matches_reference_exactly(group_size, dtype):

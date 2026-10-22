@@ -266,7 +266,7 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
-        weight = self._dense_weight_for_inference(x_flat, dtype=x_flat.dtype)
+        weight = self._dequantize_weight_for_inference(x_flat, dtype=x_flat.dtype)
         out = torch.matmul(x_flat, weight)
         if self.bias is not None:
             out = out + self.bias.to(device=x_flat.device, dtype=x_flat.dtype)
