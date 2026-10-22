@@ -14,14 +14,6 @@ from ...utils.backend import BACKEND
 from .vptq_torch import VPTQLinear
 
 
-# The fused GEMV is intended for small row counts; larger matrices use the
-# CUDA dequantization kernel followed by Torch/cuBLAS GEMM.
-# Match the upstream VPTQ dispatch: use fused GEMV only for decode-sized
-# inputs; for larger batches, reconstruct once with CUDA and reuse the weight
-# in a matrix multiply.
-_VPTQ_CUDA_FUSED_MAX_ROWS = 2
-
-
 class VPTQCudaLinear(VPTQLinear):
     """VPTQ layer using native CUDA ops, following upstream quant_gemm dispatch."""
 
@@ -86,7 +78,7 @@ class VPTQCudaLinear(VPTQLinear):
         if self.indices.device != x.device or self.centroids.weight.device != x.device:
             raise RuntimeError("VPTQ_CUDA requires VPTQ buffers and activations on the same CUDA device.")
 
-        if x.dtype == self.centroids.weight.dtype and rows <= _VPTQ_CUDA_FUSED_MAX_ROWS:
+        if x.dtype == self.centroids.weight.dtype:
             from ...utils.vptq_cuda import vptq_cuda_linear
 
             out = vptq_cuda_linear(

@@ -1957,22 +1957,15 @@ def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, monkeypa
     )
     actual = module(activations)
     assert actual.dtype == dtype
-    assert bool(fused_calls) is (rows <= 2)
-    assert bool(dequantized_weights) is (rows > 2)
+    assert bool(fused_calls)
+    assert not dequantized_weights
 
     oracle_weight = oracle_reconstruct(result, module).to(device=device)
-    if rows <= 2:
-        # The fused kernel accumulates directly from the independently
-        # reconstructed weight matrix.
-        oracle = (activations.to(torch.float64) @ oracle_weight.to(torch.float64).t()).to(dtype)
-        drift = (actual.to(torch.float64) - oracle.to(torch.float64)).abs()
-        assert float(drift.max()) <= 2e-3
-    else:
-        # The large-M path must reconstruct every weight exactly, then preserve
-        # native low-precision GEMM behavior.
-        assert torch.equal(dequantized_weights[-1], oracle_weight)
-        expected = torch.nn.functional.linear(activations, oracle_weight.to(dtype=dtype))
-        assert torch.equal(actual, expected)
+    # The fused kernel accumulates directly from the independently
+    # reconstructed weight matrix for every row count.
+    oracle = (activations.to(torch.float64) @ oracle_weight.to(torch.float64).t()).to(dtype)
+    drift = (actual.to(torch.float64) - oracle.to(torch.float64)).abs()
+    assert float(drift.max()) <= 2e-3
 
 
 @pytest.mark.cuda
