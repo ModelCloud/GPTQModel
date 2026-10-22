@@ -14,15 +14,12 @@ from ...utils.backend import BACKEND
 from .vptq_torch import VPTQLinear
 
 
-# Paired RTX 4090 benchmarks show the vec4 fused kernel remains faster through
-# M=4. Generic vector and outlier paths use the fused kernel only for M=1.
+# Use the fused CUDA kernel for batches up to four rows.
 _VPTQ_CUDA_FUSED_MAX_ROWS = 4
 
 
 def _vptq_cuda_fused_max_rows(module: VPTQLinear) -> int:
-    if module.vector_len == 4 and not module.enable_outlier:
-        return _VPTQ_CUDA_FUSED_MAX_ROWS
-    return 1
+    return _VPTQ_CUDA_FUSED_MAX_ROWS
 
 
 class VPTQCudaLinear(VPTQLinear):
