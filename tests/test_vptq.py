@@ -1907,7 +1907,7 @@ def test_vptq_cuda_quantize_and_infer(dtype):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("rows", [1, 2, 3, 8, 16, 17, 64, 1024, 2048])
 def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, monkeypatch):
-    """Check fused/dequant-GEMM dispatch against independent reconstruction."""
+    """Check fused CUDA inference at every row count against an independent oracle."""
 
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for VPTQ fused inference coverage")
