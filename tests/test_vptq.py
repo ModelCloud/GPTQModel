@@ -1909,7 +1909,7 @@ def test_vptq_cuda_quantize_and_infer(dtype):
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("vector_len", [4, 8, 16])
-@pytest.mark.parametrize("rows", [1, 2, 3, 8, 16, 17, 64, 127, 128, 129, 1024, 2048])
+@pytest.mark.parametrize("rows", [1, 2, 3, 4, 8, 16, 17, 64, 127, 128, 129, 1024, 2048])
 def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_len, monkeypatch):
     """Check fused and dense CUDA dispatch around the M crossover against an oracle."""
 
@@ -1981,7 +1981,7 @@ def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_l
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("rows", [1, 3])
+@pytest.mark.parametrize("rows", [1, 3, 4])
 def test_vptq_cuda_outlier_path_matches_independent_torch_oracle(dtype, rows):
     """Both native CUDA paths handle outliers, groups, residuals, permutation and norm."""
 
