@@ -324,9 +324,6 @@ def _build_gguf(
             register_buffers=True,
         )
         module.pack_original(linear=linear, scales=None, zeros=None)
-        module.gguf_fused_cpu_max_rows = 1024
-        module.gguf_fused_cpu_min_matrix_elements = 0
-        module.autotune_enabled = False
         module.clear_autotune()
         return module.eval()
 
@@ -680,8 +677,18 @@ def main() -> int:
                 warmup=args.warmup,
                 iters=args.iters,
             )
-            dense_time = _bench(
+            cached_time = _bench(
                 lambda: module._forward_dequant_matmul(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+
+            def uncached_dense(x_input: torch.Tensor) -> torch.Tensor:
+                module.clear_weight_cache()
+                return module._forward_dequant_matmul(x_input)
+
+            uncached_time = _bench(
+                lambda: uncached_dense(x),
                 warmup=args.warmup,
                 iters=args.iters,
             )
@@ -692,20 +699,31 @@ def main() -> int:
                 shape=(out_features, in_features),
                 tokens=tokens,
                 timing=fused_time,
-                baseline_ms=dense_time[0],
+                baseline_ms=uncached_time[0],
                 relative_error=_relative_error(module._forward_fused_k(x), oracle),
                 visible_error=_visible_relative_error(module._forward_fused_k(x), oracle),
             )
             _add_row(
                 rows,
                 method=label,
-                variant="dense dequant + matmul",
+                variant="cached dense matmul",
                 shape=(out_features, in_features),
                 tokens=tokens,
-                timing=dense_time,
-                baseline_ms=dense_time[0],
+                timing=cached_time,
+                baseline_ms=uncached_time[0],
                 relative_error=_relative_error(module._forward_dequant_matmul(x), oracle),
                 visible_error=_visible_relative_error(module._forward_dequant_matmul(x), oracle),
+            )
+            _add_row(
+                rows,
+                method=label,
+                variant="uncached dequant + matmul",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=uncached_time,
+                baseline_ms=uncached_time[0],
+                relative_error=_relative_error(uncached_dense(x), oracle),
+                visible_error=_visible_relative_error(uncached_dense(x), oracle),
             )
 
     print("Environment")

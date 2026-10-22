@@ -30,8 +30,10 @@ from ...quantization.config import (
 )
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._runtime_cache import tensor_cache_key
 
 
 try:
@@ -111,6 +113,7 @@ _GGUF_SIGN_ONLY_LUT = (
 )
 _GGUF_SIGN_ONLY_TORCH_LUT: dict[str, torch.Tensor] = {}
 _MLX_GGUF_MIN_ELEMENTS = 2 * 1024 * 1024
+_GGUF_CACHE_WEIGHTS = env_flag("GPTQMODEL_GGUF_CACHE_WEIGHTS", default=True)
 
 
 @lru_cache(maxsize=1)
@@ -938,6 +941,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         self.gguf_fused_autotune_warmup = self.GGUF_FUSED_AUTOTUNE_WARMUP
         self.gguf_fused_autotune_iters = self.GGUF_FUSED_AUTOTUNE_ITERS
         self.gguf_fused_autotune_margin = self.GGUF_FUSED_AUTOTUNE_MARGIN
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
 
         super().__init__(
             bits=int(bits_spec),
@@ -980,7 +985,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             self.bias = None
 
     def clear_weight_cache(self) -> None:
-        return None
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
 
     def post_init(self):
         self.clear_weight_cache()
@@ -1396,12 +1402,37 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             tuple(x_flat.shape),
         )
         if key not in self._gguf_fused_autotune_cache:
-            self._gguf_fused_autotune_cache[key] = self._autotune(x_flat)
+            self._autotune_result = self._autotune(x_flat)
+            self._autotune_complete = True
+            self._gguf_fused_autotune_cache[key] = self._autotune_result
         return bool(self._gguf_fused_autotune_cache[key])
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
-        weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
+        weight = self._dense_weight_for_inference(x_flat)
         return torch.matmul(x_flat, weight)
+
+    def _dense_weight_for_inference(self, x_flat: torch.Tensor) -> torch.Tensor:
+        if (
+            self.training
+            or x_flat.requires_grad
+            or not _GGUF_CACHE_WEIGHTS
+            or x_flat.device.type != "cpu"
+        ):
+            return self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
+
+        key = (
+            tensor_cache_key(self.qweight),
+            self.gguf_tensor_qtype,
+            x_flat.device,
+            x_flat.dtype,
+        )
+        if self._dense_weight_cache is not None and self._dense_weight_cache_key == key:
+            return self._dense_weight_cache
+
+        weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
+        self._dense_weight_cache = weight
+        self._dense_weight_cache_key = key
+        return weight
 
     def _forward_fused_k(self, x_flat: torch.Tensor) -> torch.Tensor:
         target_dtype = x_flat.dtype

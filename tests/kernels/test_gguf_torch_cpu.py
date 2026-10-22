@@ -198,3 +198,38 @@ def test_gguf_fused_autotune_is_cached_per_shape(monkeypatch):
     assert module._should_use_fused_k_forward(single_token) is False
     assert module._should_use_fused_k_forward(many_tokens) is True
     assert calls == [(1, module.in_features), (7, module.in_features)]
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("bits", ["q4_0", "q8_0", "q4_k", "q5_k", "q6_k"])
+def test_gguf_cpu_dense_weight_cache_matches_uncached(dtype: torch.dtype, bits: str):
+    linear, module = _build_module(bits, in_features=256, out_features=32, seed=117)
+    x = torch.randn(7, linear.in_features, dtype=dtype)
+
+    with torch.inference_mode():
+        expected = module.dequantize_weight(device="cpu", dtype=dtype)
+        first = module._dense_weight_for_inference(x)
+        second = module._dense_weight_for_inference(x)
+        actual = module(x)
+
+    assert first is second
+    torch.testing.assert_close(first, expected, rtol=0.0, atol=0.0)
+    assert actual.dtype == dtype
+
+    module.clear_weight_cache()
+    with torch.inference_mode():
+        refreshed = module._dense_weight_for_inference(x)
+    assert refreshed is not first
+    torch.testing.assert_close(refreshed, expected, rtol=0.0, atol=0.0)
+
+
+def test_gguf_cpu_dense_weight_cache_can_be_disabled(monkeypatch):
+    _, module = _build_module("q4_0", in_features=128, out_features=16, seed=211)
+    x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.gguf._GGUF_CACHE_WEIGHTS", False)
+
+    with torch.inference_mode():
+        first = module._dense_weight_for_inference(x)
+        second = module._dense_weight_for_inference(x)
+
+    assert first is not second

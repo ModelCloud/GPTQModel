@@ -106,6 +106,9 @@ group sizes are 16, 32, 64, 128, 256, and 512.
 GEMMs large enough to amortize dispatch. Set `GPTQMODEL_EXL3_CPU_BF16X3=0` to
 disable this path.
 
+`BACKEND.GGUF_TORCH` caches the dequantized dense weight on CPU during inference.
+Set `GPTQMODEL_GGUF_CACHE_WEIGHTS=0` to trade speed for lower memory use.
+
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
