@@ -4120,7 +4120,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             args_from_json = json.load(f)
             if transformers_config:
                 args_from_json = args_from_json["quantization_config"]
-            return cls.from_quant_config(args_from_json, format)
+            config = cls.from_quant_config(args_from_json, format)
+            if config.adapter is not None and config.adapter.path not in (None, ""):
+                config.adapter._gptqmodel_checkpoint_source = (
+                    os.path.abspath(save_dir), config.adapter.path,
+                )
+            return config
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         return None

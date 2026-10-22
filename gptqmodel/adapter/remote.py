@@ -6,10 +6,11 @@
 import hashlib
 import ntpath
 import os
+import posixpath
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from ..utils.hub import hf_hub_download
 from ..utils.logger import setup_logger
@@ -34,8 +35,15 @@ def _as_path_str(path) -> Optional[str]:
 def _check_remote_part(part: str, what: str) -> None:
     """Reject traversal or host-path fragments inside remote repo/file names."""
 
+    if not isinstance(part, str):
+        raise ValueError(f"Adapter: remote {what} must be a string.")
     segments = part.split("/")
-    if any(segment in ("", ".", "..") for segment in segments) or "\\" in part:
+    if (
+        any(segment in ("", ".", "..") for segment in segments)
+        or "\\" in part
+        or "\0" in part
+        or ntpath.splitdrive(part)[0]
+    ):
         raise ValueError(f"Adapter: remote {what} contains invalid path segments: `{part}`")
 
 
@@ -49,18 +57,32 @@ def parse_url(url: str) -> list[str]:
     }:
         return []
 
-    parts = parsed_url.path.strip("/").split("/")
-    if "blob" not in parts:
-        return []
-
-    idx = parts.index("blob")
-    if idx < 1 or len(parts) <= idx + 2:
+    parts = unquote(parsed_url.path).lstrip("/").split("/")
+    idx = next((index for index in (2, 1) if len(parts) > index and parts[index] == "blob"), None)
+    if idx is None or len(parts) <= idx + 2:
         return []
 
     repo_id = "/".join(parts[:idx])
     revision = parts[idx + 1]
     filename = "/".join(parts[idx + 2 :])
     return [repo_id, revision, filename]
+
+
+def _is_checkpoint_cache_blob(path: Path, checkpoint: Path) -> bool:
+    """Allow the same repository's standard HF snapshot-to-blob file links."""
+
+    if checkpoint.parent.name != "snapshots" or not _REVISION_RE.fullmatch(checkpoint.name):
+        return False
+    repo_cache = checkpoint.parent.parent
+    if not repo_cache.name.startswith("models--"):
+        return False
+    blobs = repo_cache / "blobs"
+    target = Path(os.path.abspath(path.parent / os.readlink(path)))
+    if target.parent != blobs or not (
+        _REVISION_RE.fullmatch(target.name) or _SHA256_RE.fullmatch(target.name)
+    ):
+        return False
+    return not blobs.is_symlink() and not target.is_symlink() and target.is_file()
 
 
 def resolve_checkpoint_adapter_path(
@@ -83,6 +105,13 @@ def resolve_checkpoint_adapter_path(
             "Adapter: adapter paths from quantize_config.json must be relative paths "
             "inside the checkpoint; use the explicit adapter= argument for external adapters."
         )
+    if "\\" in path or ".." in candidate.parts:
+        raise ValueError("Adapter: manifest adapter paths must stay inside the checkpoint directory.")
+    current = checkpoint
+    for part in candidate.parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError("Adapter: manifest adapter directories cannot contain symlinks.")
     candidate = checkpoint / candidate
 
     try:
@@ -105,6 +134,10 @@ def resolve_checkpoint_adapter_path(
             "Adapter: adapter paths from quantize_config.json must stay inside the checkpoint directory."
         ) from exc
 
+    for filename in ("adapter_config.json", "adapter_model.safetensors"):
+        adapter_file = resolved / filename
+        if adapter_file.is_symlink() and not _is_checkpoint_cache_blob(adapter_file, checkpoint):
+            raise ValueError("Adapter: manifest adapter files cannot link outside the checkpoint storage.")
     return str(resolved)
 
 
@@ -117,6 +150,9 @@ def configure_explicit_remote_adapter(
 ) -> None:
     """Attach caller-supplied remote pinning to an explicitly passed adapter."""
 
+    adapter._gptqmodel_remote_revision = None
+    adapter._gptqmodel_remote_sha256 = None
+    adapter._gptqmodel_checkpoint_source = None
     path = _as_path_str(getattr(adapter, "path", None))
     if path in (None, ""):
         if allow_remote or revision is not None or sha256 is not None:
@@ -133,6 +169,7 @@ def configure_explicit_remote_adapter(
             raise ValueError(
                 "Adapter: remote adapter options cannot be used with a local adapter directory."
             )
+        adapter.path = os.path.abspath(path)
         return
 
     if (
@@ -217,12 +254,20 @@ def resolve_path(
         raise ValueError(
             "Adapter: `path` must be a local directory or a Hub repository id."
         )
+    _check_remote_part(filename, "file name")
+    if expected_sha256 is not None and (
+        not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256)
+    ):
+        raise ValueError("Adapter: expected SHA-256 digest must contain exactly 64 hexadecimal characters.")
 
     if os.path.isdir(path):
+        if allow_remote or revision is not None:
+            raise ValueError("Adapter: remote adapter options cannot be used with a local adapter directory.")
         resolved_path = os.path.join(path, filename)
         log.info(f"Resolver: Local path: `{resolved_path}`")
         if not os.path.isfile(resolved_path):
             raise ValueError(f"Resolver: Cannot find file in path: `{resolved_path}`")
+        _verify_sha256(resolved_path, expected_sha256)
         return resolved_path
 
     if (
@@ -245,9 +290,9 @@ def resolve_path(
             raise ValueError(
                 "Resolver: adapter URL revision must match the explicitly pinned commit revision."
             )
-        filename = remote_filename
         _check_remote_part(repo_id, "repository id")
-        _check_remote_part(filename, "file name")
+        _check_remote_part(remote_filename, "file name")
+        filename = posixpath.join(posixpath.dirname(remote_filename), filename)
     else:
         _validate_remote_request(path, allow_remote=allow_remote, revision=revision)
         repo_id = path.rstrip("/")
@@ -292,9 +337,13 @@ def validate_remote_pin(revision: Optional[str], sha256: Optional[str]) -> None:
     adapter weights digest are recorded, so refuse half-configured adapters.
     """
 
-    if (revision is None) == (sha256 is None):
+    if revision is None and sha256 is None:
         return
-    raise ValueError(
-        "Adapter: remote adapters require both an immutable Hub commit revision "
-        "and the adapter_model.safetensors SHA-256 digest."
-    )
+    if revision is None or sha256 is None:
+        raise ValueError(
+            "Adapter: remote adapters require both an immutable Hub commit revision "
+            "and the adapter_model.safetensors SHA-256 digest."
+        )
+    _validate_remote_request("adapter", allow_remote=True, revision=revision)
+    if not isinstance(sha256, str) or not _SHA256_RE.fullmatch(sha256):
+        raise ValueError("Adapter: expected SHA-256 digest must contain exactly 64 hexadecimal characters.")

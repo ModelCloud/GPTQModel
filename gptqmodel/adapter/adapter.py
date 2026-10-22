@@ -13,7 +13,7 @@ import torch
 
 from ..utils.logger import setup_logger
 from .peft import LoraConfig
-from .remote import resolve_path, validate_remote_pin
+from .remote import resolve_checkpoint_adapter_path, resolve_path, validate_remote_pin
 
 log = setup_logger()
 LORA_MERGED_WEIGHT_PATHS = [None, ""]
@@ -69,6 +69,7 @@ class Adapter():
         self.path = path.strip() if isinstance(path, str) else path
         self._gptqmodel_remote_revision: Optional[str] = None
         self._gptqmodel_remote_sha256: Optional[str] = None
+        self._gptqmodel_checkpoint_source: Optional[Tuple[str, str]] = None
 
     def validate_path(self, local=False):
         """Validates that the configured adapter path matches the expected source type."""
@@ -189,9 +190,15 @@ class Lora(Adapter):
             self.lora_A, self.lora_B = lora_A, lora_B
             return
 
+        if self._gptqmodel_checkpoint_source is not None:
+            checkpoint_path, manifest_path = self._gptqmodel_checkpoint_source
+            self.path = resolve_checkpoint_adapter_path(manifest_path, checkpoint_path)
+
         remote_revision = getattr(self, "_gptqmodel_remote_revision", None)
         remote_sha256 = getattr(self, "_gptqmodel_remote_sha256", None)
         validate_remote_pin(remote_revision, remote_sha256)
+        if remote_revision is None and isinstance(self.path, str) and os.path.isdir(self.path):
+            self.path = os.path.abspath(self.path)
         cache_key = (self.path, remote_revision, remote_sha256)
         lora_cache = AdapterCache.get(cache_key)
         if lora_cache is None:
@@ -206,12 +213,6 @@ class Lora(Adapter):
 
             if not isinstance(lora_cfg, LoraConfig):
                 raise ValueError(f"Adapter: Expected `LoraConfig` in `{self.path}`, actual = `{lora_cfg}`")
-
-            if self.rank is None:
-                self.rank = lora_cfg.r
-            else:
-                if self.rank != lora_cfg.r:
-                    raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
             lora_path = resolve_path(
                 self.path,
@@ -229,6 +230,10 @@ class Lora(Adapter):
 
         # lora_cache result is a tuple
         lora_cfg, lora_weights = lora_cache
+        if self.rank is None:
+            self.rank = lora_cfg.r
+        elif self.rank != lora_cfg.r:
+            raise ValueError(f"Adapter: `rank` must match `LoraConfig.r`, expected `{self.rank}`, actual = `{lora_cfg.r}`")
 
         weight_key = weight_key.lower()
 
@@ -304,7 +309,7 @@ class Lora(Adapter):
 
         return {
             "name": self.name(),
-            "path": self.path,
+            "path": self._gptqmodel_checkpoint_source[1] if self._gptqmodel_checkpoint_source else self.path,
             "rank": self.rank
         }
 
@@ -335,7 +340,7 @@ def normalize_adapter(adapter:  Union[Dict, Adapter]):
 
     # Serialized manifests are data-only: never allow non-tensor adapter weights.
     for tensor_key in adapterCls.parameter_keys() or []:
-        if tensor_key in adapter and not isinstance(adapter[tensor_key], torch.Tensor):
+        if adapter.get(tensor_key) is not None and not isinstance(adapter[tensor_key], torch.Tensor):
             raise ValueError(f"Adapter: Invalid adapter config: `{adapter}`.")
 
     try:
