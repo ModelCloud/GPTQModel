@@ -1,16 +1,17 @@
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 import torch
 from safetensors.torch import save_file
 
+from gptqmodel.adapter import remote
 from gptqmodel.adapter.adapter import AdapterCache, Lora
 from gptqmodel.adapter.remote import (
     configure_explicit_remote_adapter,
     resolve_checkpoint_adapter_path,
 )
-from gptqmodel.adapter import remote
 
 
 def _write_adapter_files(adapter_dir):
@@ -53,6 +54,33 @@ def test_checkpoint_adapter_path_is_confined_to_checkpoint(tmp_path):
         resolve_checkpoint_adapter_path("../outside", str(checkpoint))
     with pytest.raises(ValueError, match="existing local directory"):
         resolve_checkpoint_adapter_path("attacker/untrusted-adapter", str(checkpoint))
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/outside/adapter",
+        "C:\\outside\\adapter",
+        "C:adapter",
+        "\\\\server\\share\\adapter",
+    ],
+)
+def test_checkpoint_rejects_absolute_manifest_paths_before_resolving(
+    path, tmp_path, monkeypatch
+):
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    original_resolve = Path.resolve
+
+    def resolve_checkpoint_only(candidate, *args, **kwargs):
+        if candidate != checkpoint:
+            pytest.fail(f"manifest path was resolved before rejection: {candidate}")
+        return original_resolve(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_checkpoint_only)
+
+    with pytest.raises(ValueError, match="relative paths inside the checkpoint"):
+        resolve_checkpoint_adapter_path(path, str(checkpoint))
 
 
 def test_explicit_remote_adapter_requires_opt_in_revision_and_digest():

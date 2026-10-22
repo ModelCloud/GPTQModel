@@ -61,8 +61,12 @@ def resolve_checkpoint_adapter_path(
 
     checkpoint = Path(checkpoint_path).resolve(strict=True)
     candidate = Path(path)
-    if not candidate.is_absolute() and not ntpath.isabs(path):
-        candidate = checkpoint / candidate
+    if candidate.is_absolute() or ntpath.isabs(path) or ntpath.splitdrive(path)[0]:
+        raise ValueError(
+            "Adapter: adapter paths from quantize_config.json must be relative paths "
+            "inside the checkpoint; use the explicit adapter= argument for external adapters."
+        )
+    candidate = checkpoint / candidate
 
     try:
         resolved = candidate.resolve(strict=True)
