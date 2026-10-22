@@ -1,10 +1,15 @@
-// Copyright (c) Microsoft Corporation. All rights reserved.
-// Licensed under the MIT License.
-// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: Microsoft Corporation
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
 // SPDX-License-Identifier: Apache-2.0 AND MIT
+// Contact: qubitium@modelcloud.ai, x.com/qubitium
 //
-// Adapted from https://github.com/microsoft/VPTQ
+// VPTQ CUDA inference kernels for packed-weight dequantization and linear.
+//
+// Algorithm reference: https://github.com/microsoft/VPTQ (MIT licensed),
+// "VPTQ: Extreme Low-bit Vector Post-Training Quantization for Large Language
+// Models" (https://arxiv.org/abs/2409.17066). The vectorized GEMV mapping is
+// adapted from the reference CUDA implementation; the kernels below adapt it
+// to GPT-QModel's packed checkpoint layout and inference features.
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
