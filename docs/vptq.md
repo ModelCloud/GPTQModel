@@ -167,11 +167,27 @@ mismatches use the CUDA dequantization op followed by Torch/cuBLAS GEMM. FP16,
 BF16, and FP32 are supported when stored in the checkpoint. Torch inference
 also runs on CPU and other Torch devices.
 
-To compare both paths on a CUDA host, run
+To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.
-The script reports median per-layer latency for batch sizes 1, 8, 16, 32, and
-128, speedup, and maximum output error. Run it on the target GPU before
-assessing the crossover for its layer shapes and activation dtype.
+Both forwards use the same module state and activation tensor. The benchmark
+reports median, minimum, and p90 latency, speedup, and output error by layer
+and activation row count. Use `--synthetic` to compare deterministic packed
+layers without loading a checkpoint, for example:
+
+```bash
+python scripts/benchmark_vptq_cuda.py \
+  --synthetic \
+  --shapes 2048x2048,4096x4096 \
+  --batch-sizes 1,8,32,128 \
+  --dtype bfloat16 \
+  --output ./vptq-backend-bf16.json
+```
+
+Synthetic codebooks are seeded and scaled to keep activation outputs near unit
+variance. The Torch path calls the portable `VPTQLinear.forward` implementation,
+including Torch index unpacking, codebook lookup, and `F.linear`; the CUDA path
+calls the native module forward. Run both FP16 and BF16 when comparing the
+target GPU.
 
 VPTQ checkpoints are not understood by Transformers, vLLM, or SGLang, and the
 checkpoint/resume feature is not available for VPTQ quantizations.
