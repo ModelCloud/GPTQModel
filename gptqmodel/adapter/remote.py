@@ -23,6 +23,22 @@ _REVISION_RE = re.compile(r"[0-9a-fA-F]{40}\Z")
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}\Z")
 
 
+def _as_path_str(path) -> Optional[str]:
+    """Coerce os.PathLike adapter locations to str so pathlib inputs keep working."""
+
+    if isinstance(path, os.PathLike):
+        return os.fspath(path)
+    return path
+
+
+def _check_remote_part(part: str, what: str) -> None:
+    """Reject traversal or host-path fragments inside remote repo/file names."""
+
+    segments = part.split("/")
+    if any(segment in ("", ".", "..") for segment in segments) or "\\" in part:
+        raise ValueError(f"Adapter: remote {what} contains invalid path segments: `{part}`")
+
+
 def parse_url(url: str) -> list[str]:
     """Extract a pinned Hugging Face repo, revision, and filename from a blob URL."""
 
@@ -38,7 +54,7 @@ def parse_url(url: str) -> list[str]:
         return []
 
     idx = parts.index("blob")
-    if idx < 2 or len(parts) <= idx + 2:
+    if idx < 1 or len(parts) <= idx + 2:
         return []
 
     repo_id = "/".join(parts[:idx])
@@ -54,6 +70,7 @@ def resolve_checkpoint_adapter_path(
 
     if path in (None, ""):
         return path
+    path = _as_path_str(path)
     if not isinstance(path, str):
         raise ValueError(
             "Adapter: checkpoint adapter path must be a local directory string."
@@ -100,7 +117,7 @@ def configure_explicit_remote_adapter(
 ) -> None:
     """Attach caller-supplied remote pinning to an explicitly passed adapter."""
 
-    path = getattr(adapter, "path", None)
+    path = _as_path_str(getattr(adapter, "path", None))
     if path in (None, ""):
         if allow_remote or revision is not None or sha256 is not None:
             raise ValueError(
@@ -109,6 +126,7 @@ def configure_explicit_remote_adapter(
         return
     if not isinstance(path, str):
         raise ValueError("Adapter: `path` must be a string.")
+    adapter.path = path
 
     if os.path.isdir(path):
         if allow_remote or revision is not None or sha256 is not None:
@@ -194,6 +212,7 @@ def resolve_path(
 ) -> str:
     """Resolve an adapter file locally or from an explicitly pinned Hub revision."""
 
+    path = _as_path_str(path)
     if not isinstance(path, str) or not path:
         raise ValueError(
             "Adapter: `path` must be a local directory or a Hub repository id."
@@ -227,6 +246,8 @@ def resolve_path(
                 "Resolver: adapter URL revision must match the explicitly pinned commit revision."
             )
         filename = remote_filename
+        _check_remote_part(repo_id, "repository id")
+        _check_remote_part(filename, "file name")
     else:
         _validate_remote_request(path, allow_remote=allow_remote, revision=revision)
         repo_id = path.rstrip("/")
@@ -237,6 +258,8 @@ def resolve_path(
             path_split = repo_id.split("/")
             repo_id = f"{path_split[0]}/{path_split[1]}"
             subfolder = "/".join(path_split[2:])
+            _check_remote_part(subfolder, "subfolder")
+        _check_remote_part(repo_id, "repository id")
 
         log.warn(
             f"SECURITY: downloading explicitly enabled LoRA adapter from `{repo_id}` "
@@ -260,3 +283,18 @@ def resolve_path(
     )
     _verify_sha256(resolved_path, expected_sha256)
     return resolved_path
+
+
+def validate_remote_pin(revision: Optional[str], sha256: Optional[str]) -> None:
+    """Require remote adapter pinning to be all-or-nothing.
+
+    Remote downloads are only safe when both the immutable Hub commit and the
+    adapter weights digest are recorded, so refuse half-configured adapters.
+    """
+
+    if (revision is None) == (sha256 is None):
+        return
+    raise ValueError(
+        "Adapter: remote adapters require both an immutable Hub commit revision "
+        "and the adapter_model.safetensors SHA-256 digest."
+    )

@@ -36,7 +36,7 @@ from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
@@ -1346,7 +1346,7 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
-            adapter: Optional[Adapter] = None,
+            adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
             allow_remote_adapter: bool = False,
@@ -1494,7 +1494,7 @@ def ModelLoader(cls):
             if qcfg.adapter is not None and qcfg.adapter.path not in (None, ""):
                 qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, model_local_path)
         else:
-            qcfg.adapter = adapter
+            qcfg.adapter = normalize_adapter(adapter)
             configure_explicit_remote_adapter(
                 qcfg.adapter,
                 allow_remote=allow_remote_adapter,
