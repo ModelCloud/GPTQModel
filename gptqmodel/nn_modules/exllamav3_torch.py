@@ -30,6 +30,8 @@ _EXL3_LOP3_BIAS = 0x3B603B60
 _CPU_BF16X3_ENV = "GPTQMODEL_EXL3_CPU_BF16X3"
 _CPU_BF16X3_MIN_WEIGHT_ELEMENTS = 1 << 19
 _CPU_BF16X3_MIN_MACS = 1 << 23
+# Bound each transient decode to 512 output columns without serializing many small GEMMs.
+_EXL3_OUTPUT_TILES_PER_CHUNK = 32
 
 
 @lru_cache(maxsize=1)
@@ -278,9 +280,6 @@ class ExllamaV3TorchLinear(nn.Module):
         self.tensor_storage = tensor_storage or {}
 
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
-        self._cache_signature: Optional[tuple[Any, ...]] = None
-        self._inner_weight_fp32: Optional[torch.Tensor] = None
-        self._weight_fp32: Optional[torch.Tensor] = None
 
         if tensors is not None:
             for buffer_name in _EXL3_BUFFER_NAMES:
@@ -318,31 +317,8 @@ class ExllamaV3TorchLinear(nn.Module):
             tensors=tensors,
         )
 
-    def _current_signature(self) -> tuple[Any, ...]:
-        trellis = getattr(self, "trellis", None)
-        if trellis is None or trellis.device.type == "meta":
-            return ("meta",)
-
-        signature: list[Any] = [str(trellis.device)]
-        for buffer_name in _EXL3_BUFFER_NAMES:
-            tensor = getattr(self, buffer_name, None)
-            if tensor is None:
-                signature.append(None)
-                continue
-            signature.append((tensor.data_ptr(), tuple(tensor.shape), str(tensor.dtype)))
-        return tuple(signature)
-
-    def _drop_cache(self) -> None:
-        self._cache_signature = None
-        self._inner_weight_fp32 = None
-        self._weight_fp32 = None
-
-    def _apply(self, fn):
-        self._drop_cache()
-        return super()._apply(fn)
-
     def post_init(self) -> None:
-        self._drop_cache()
+        """EXL3 has no runtime cache to initialize."""
 
     def _codebook_name(self) -> str:
         if getattr(self, "mcg", None) is not None:
@@ -363,16 +339,28 @@ class ExllamaV3TorchLinear(nn.Module):
             return torch.float32
         return torch.float16
 
-    def _unpack_indices(self) -> torch.Tensor:
+    def _unpack_indices(
+        self,
+        tile_n_start: int = 0,
+        tile_n_end: Optional[int] = None,
+    ) -> torch.Tensor:
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
         if trellis.device.type == "meta":
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
+        if tile_n_end is None:
+            tile_n_end = int(trellis.shape[1])
+        if not 0 <= tile_n_start < tile_n_end <= int(trellis.shape[1]):
+            raise ValueError(
+                f"Invalid EXL3 output tile range [{tile_n_start}, {tile_n_end}) "
+                f"for {trellis.shape[1]} tiles."
+            )
+
         bits = self._bits_per_weight()
         mask = (1 << bits) - 1
-        words = (trellis.to(torch.int32) & 0xFFFF).contiguous()
+        words = (trellis[:, tile_n_start:tile_n_end].to(torch.int32) & 0xFFFF).contiguous()
         words = words.view(*words.shape[:-1], -1, 2).flip(-1).reshape(*words.shape)
         words = words.view(*words.shape[:-1], 16, bits)
 
@@ -408,18 +396,18 @@ class ExllamaV3TorchLinear(nn.Module):
 
         return encoded
 
-    def _ensure_inner_weight_fp32(self) -> torch.Tensor:
+    def _decode_inner_weight(
+        self,
+        tile_n_start: int = 0,
+        tile_n_end: Optional[int] = None,
+    ) -> torch.Tensor:
         trellis = getattr(self, "trellis", None)
         if trellis is None:
             raise RuntimeError(f"EXL3 module `{self.name}` is missing `trellis`.")
         if trellis.device.type == "meta":
             raise RuntimeError(f"EXL3 module `{self.name}` has not been materialized from checkpoint tensors yet.")
 
-        signature = self._current_signature()
-        if self._inner_weight_fp32 is not None and self._cache_signature == signature:
-            return self._inner_weight_fp32
-
-        encoded = self._unpack_indices()
+        encoded = self._unpack_indices(tile_n_start, tile_n_end)
         lut = _codebook_lut(self._codebook_name(), trellis.device.type, trellis.device.index)
         decoded = lut[encoded]
 
@@ -429,35 +417,25 @@ class ExllamaV3TorchLinear(nn.Module):
         inner = decoded.view(tiles_k, tiles_n, 16, 16).permute(0, 2, 1, 3).reshape(
             tiles_k * 16, tiles_n * 16
         )
-
-        self._cache_signature = signature
-        self._inner_weight_fp32 = inner.contiguous().to(torch.float32)
-        self._weight_fp32 = None
-        return self._inner_weight_fp32
+        return inner.contiguous().to(torch.float32)
 
     def get_inner_weight_tensor(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        inner = self._ensure_inner_weight_fp32()
+        inner = self._decode_inner_weight()
         target_dtype = dtype or self._runtime_weight_dtype()
         if inner.dtype == target_dtype:
             return inner
         return inner.to(dtype=target_dtype)
 
-    def _ensure_weight_fp32(self) -> torch.Tensor:
-        signature = self._current_signature()
-        if self._weight_fp32 is not None and self._cache_signature == signature:
-            return self._weight_fp32
-
-        inner = self._ensure_inner_weight_fp32().clone()
+    def _materialize_weight_fp32(self) -> torch.Tensor:
+        inner = self._decode_inner_weight()
         inner = _apply_hadamard_left(inner)
         inner *= getattr(self, "suh").to(dtype=torch.float32).unsqueeze(1)
         inner = _apply_hadamard_right(inner)
         inner *= getattr(self, "svh").to(dtype=torch.float32).unsqueeze(0)
-
-        self._weight_fp32 = inner.contiguous()
-        return self._weight_fp32
+        return inner.contiguous()
 
     def get_weight_tensor(self, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
-        weight = self._ensure_weight_fp32()
+        weight = self._materialize_weight_fp32()
         target_dtype = dtype or self._runtime_weight_dtype()
         if weight.dtype == target_dtype:
             return weight
@@ -466,20 +444,45 @@ class ExllamaV3TorchLinear(nn.Module):
     def get_bias_tensor(self) -> torch.Tensor | None:
         return getattr(self, "bias", None)
 
+    def _forward_chunked(self, x_2d: torch.Tensor, compute_dtype: torch.dtype) -> torch.Tensor:
+        if self.out_features % 128 != 0:
+            raise ValueError(f"EXL3 expects out_features to be divisible by 128, got {self.out_features}.")
+        if x_2d.shape[0] == 0:
+            return x_2d.new_empty((0, self.out_features))
+
+        suh = getattr(self, "suh").to(dtype=compute_dtype)
+        svh = getattr(self, "svh").to(dtype=compute_dtype)
+        x_work = _apply_hadamard_right(x_2d * suh)
+        y = torch.empty(
+            (x_2d.shape[0], self.out_features),
+            dtype=compute_dtype,
+            device=x_2d.device,
+        )
+
+        tiles_n = self.out_features // 16
+        for tile_n_start in range(0, tiles_n, _EXL3_OUTPUT_TILES_PER_CHUNK):
+            tile_n_end = min(tile_n_start + _EXL3_OUTPUT_TILES_PER_CHUNK, tiles_n)
+            out_start = tile_n_start * 16
+            out_end = tile_n_end * 16
+            chunk = self._decode_inner_weight(tile_n_start, tile_n_end).to(dtype=compute_dtype)
+            y_chunk = _apply_hadamard_right(x_work @ chunk)
+            y_chunk *= svh[out_start:out_end]
+            y[:, out_start:out_end] = y_chunk
+        return y
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         compute_dtype = torch.float32 if x.device.type == "cpu" else torch.float16
         x_2d = x.view(-1, self.in_features).to(compute_dtype)
-        weight = self.get_weight_tensor(dtype=compute_dtype)
         if x.device.type == "cpu" and _cpu_bf16x3_should_use(
             x_2d.shape[0],
             self.in_features,
             self.out_features,
         ):
             with _cpu_bf16x3_matmul():
-                y = x_2d @ weight
+                y = self._forward_chunked(x_2d, compute_dtype)
         else:
-            y = x_2d @ weight
+            y = self._forward_chunked(x_2d, compute_dtype)
         bias = getattr(self, "bias", None)
         if bias is not None:
             y = y + bias.to(dtype=compute_dtype)

@@ -103,8 +103,10 @@ satisfies the kernel's 32-row and group-size alignment requirements. Supported
 group sizes are 16, 32, 64, 128, 256, and 512.
 
 `BACKEND.EXL3_TORCH` uses oneDNN BF16x3 FP32 matmul on AVX512-BF16 hosts for
-GEMMs large enough to amortize dispatch. Set `GPTQMODEL_EXL3_CPU_BF16X3=0` to
-disable this path.
+GEMMs large enough to amortize dispatch. Forward decodes at most 512 output
+columns at a time and never retains a dense dequantized weight;
+`get_weight_tensor()` materializes one on demand for export and tests. Set
+`GPTQMODEL_EXL3_CPU_BF16X3=0` to disable the BF16x3 path.
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
