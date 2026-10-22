@@ -18,6 +18,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.qqq import qqq_gemm, qqq_runtime_available, qqq_runtime_error
 from ...utils.rocm import IS_ROCM
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -402,6 +403,11 @@ class QQQLinear(GroupedQuantLinear):
             self.register_buffer("s_group", packed_s_group)
             self.register_buffer("s_channel", packed_s_channel)
         else:
+            if "s_group" not in self._buffers:
+                self.register_buffer(
+                    "s_group",
+                    torch.tensor([], dtype=torch.float16),
+                )
             self.register_buffer("s_channel", packed_s_channel)
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.detach().to(dtype=torch.float16))
@@ -478,6 +484,18 @@ class QQQTorchLinear(QQQLinear):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
         super().__init__(*args, **kwargs)
+        self._torch_weight_cache = None
+        self._torch_weight_cache_key = None
+        self._torch_int_mm_failed_shapes = set()
+
+    def post_init(self):
+        super().post_init()
+        self.clear_weight_cache()
+
+    def clear_weight_cache(self) -> None:
+        self._torch_weight_cache = None
+        self._torch_weight_cache_key = None
+        self._torch_int_mm_failed_shapes.clear()
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -523,22 +541,80 @@ class QQQTorchLinear(QQQLinear):
 
         return weight, s_channel
 
+    def _torch_weight_state_key(self):
+        return (
+            tensor_cache_key(self.B),
+            tensor_cache_key(self.s_channel),
+            tensor_cache_key(self.s_group),
+            self.group_size,
+            self.in_features,
+            self.out_features,
+        )
+
+    def _cached_weight_for_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
+        key = self._torch_weight_state_key()
+        cached = self._torch_weight_cache
+        if cached is not None and self._torch_weight_cache_key == key:
+            return cached
+
+        weight, s_channel = self._dequantize_weight_for_torch()
+        # Both QQQ layouts produce integer-valued dense weights. Keep the
+        # integer codes so the CPU path can use torch._int_mm instead of
+        # materializing and multiplying a float32 weight every token.
+        weight = weight.to(torch.int8).contiguous()
+        cached = (weight, s_channel.contiguous())
+        self._torch_weight_cache = cached
+        self._torch_weight_cache_key = key
+        return cached
+
+    def _int8_matmul(self, quant_A: torch.Tensor, weight: torch.Tensor) -> Optional[torch.Tensor]:
+        shape_key = (
+            quant_A.device,
+            int(quant_A.shape[0]),
+            int(quant_A.shape[1]),
+            int(weight.shape[1]),
+        )
+        if (
+            shape_key in self._torch_int_mm_failed_shapes
+            or quant_A.device.type != "cpu"
+            or quant_A.device != weight.device
+            or quant_A.dtype != torch.int8
+            or weight.dtype != torch.int8
+            or quant_A.ndim != 2
+            or weight.ndim != 2
+            or not quant_A.is_contiguous()
+            or not weight.is_contiguous()
+            or not hasattr(torch, "_int_mm")
+        ):
+            return None
+        try:
+            return torch._int_mm(quant_A, weight).to(torch.float32)
+        except (RuntimeError, NotImplementedError):
+            # A build may not expose an integer GEMM kernel for this exact
+            # shape. Remember only that shape so a later batch size/device can
+            # still use the optimized path, and so a transient failure does not
+            # permanently disable the module.
+            self._torch_int_mm_failed_shapes.add(shape_key)
+            return None
+
     def forward(self, A):
         if self.input_rows(A) == 0:
             return self.empty_linear_output(A)
 
         A_dtype = A.dtype
-        if A.dtype != torch.float16:
-            A = A.to(dtype=torch.float16)
-
         out_shape = A.shape[:-1] + (self.out_features,)
-        A = A.reshape(-1, A.shape[-1])
-        quant_A, s1 = self.dynamic_quant(A)
-        weight, s_channel = self._dequantize_weight_for_torch()
-        accum = torch.matmul(quant_A.to(torch.float32), weight.to(device=A.device, dtype=torch.float32))
+        A_flat = A.reshape(-1, A.shape[-1])
+        quant_A, s1 = self.dynamic_quant(A_flat)
+        weight, s_channel = self._cached_weight_for_torch()
+        accum = self._int8_matmul(quant_A, weight)
+        if accum is None:
+            accum = torch.matmul(
+                quant_A.to(torch.float32),
+                weight.to(device=A_flat.device, dtype=torch.float32),
+            )
         accum = accum * s1
-        accum = accum * s_channel.to(device=A.device, dtype=torch.float32)
-        D = accum.to(dtype=A.dtype).reshape(out_shape)
+        accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
+        D = accum.to(dtype=A_dtype).reshape(out_shape)
 
         if self.bias is not None:
             bias = self.bias
@@ -547,9 +623,9 @@ class QQQTorchLinear(QQQLinear):
             D.add_(bias)
 
         if self.adapter:
-            D = self.adapter.apply(x=A, out=D)
+            D = self.adapter.apply(x=A_flat, out=D)
 
-        return D.to(dtype=A_dtype)
+        return D
 
 
 __all__ = ["QQQLinear", "QQQTorchLinear"]

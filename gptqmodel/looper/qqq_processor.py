@@ -74,10 +74,14 @@ class QQQProcessor(LoopProcessor):
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
         if isinstance(device, DEVICE):
-            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device == DEVICE.NPU else (QQQLinear, BACKEND.QQQ)
+            if device in (DEVICE.CPU, DEVICE.NPU):
+                return QQQTorchLinear, BACKEND.QQQ_TORCH
+            return QQQLinear, BACKEND.QQQ
         if isinstance(device, torch.device):
-            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device.type == "npu" else (QQQLinear, BACKEND.QQQ)
-        if isinstance(device, str) and device.split(":")[0].lower() == "npu":
+            if device.type in ("cpu", "npu"):
+                return QQQTorchLinear, BACKEND.QQQ_TORCH
+            return QQQLinear, BACKEND.QQQ
+        if isinstance(device, str) and device.split(":")[0].lower() in ("cpu", "npu"):
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         return QQQLinear, BACKEND.QQQ
 

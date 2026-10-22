@@ -97,7 +97,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = TorchAtenLinear.SUPPORTS_ADAPTERS
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    # The ported HF kernel is BF16-only: its public entrypoint and SIMD core
+    # both consume/produce BF16. FP16 checkpoints use the native ATen FP16
+    # int4pack backend instead.
+    SUPPORTS_DTYPES = [torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -105,6 +108,7 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
 
     gemm_int4_qzero_group_scaled_cpu_kernel = None
     pack_gptq_int4_kernel = None
+    _fused_op_handles_bias = True
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.GPTQ_TORCH_CPU_AVX512)
@@ -138,12 +142,24 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         ok, _ = type(self).cached_validate_once()
         return ok
 
-    def transform_cpu(self):
+    def _fused_input_dtype(self, x: torch.Tensor) -> bool:
+        return x.dtype == torch.bfloat16
+
+    def transform_cpu(self, dtype: torch.dtype | None = None):
         if self._cpu_transformed:
             return
+        if dtype not in (None, torch.bfloat16):
+            raise RuntimeError(
+                f"{self.__class__.__name__} only supports bfloat16 fused activations, got {dtype}."
+            )
 
         self._dequant_scales_dtype = self.scales.dtype
-        self.scales = self.scales.to(torch.bfloat16).contiguous()
+        # Keep scales in FP32. BF16 scale rounding alone consumes most of the
+        # 2e-3 inference error budget on small-K layers; the dot product still
+        # uses BF16 inputs with FP32 accumulation.
+        self.scales = self.scales.to(torch.float32).contiguous()
+        if self.bias is not None:
+            self.bias = self.bias.to(torch.float32).contiguous()
 
         if self.pack_gptq_int4_kernel is None:
             ok, err = type(self).cached_validate_once()
@@ -162,6 +178,7 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
             self.out_features,
             self.in_features,
         )
+        self._cpu_transform_dtype = torch.bfloat16
         self._cpu_transformed = True
 
     def train(self, mode: bool = True):
@@ -209,18 +226,18 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         if x.device.type != "cpu":
             raise NotImplementedError
 
-        original_dtype = x.dtype
-        if original_dtype != torch.bfloat16:
-            x = x.to(torch.bfloat16)
+        if not self._fused_input_dtype(x):
+            raise RuntimeError(
+                f"{self.__class__.__name__} requires bfloat16 activations, got {x.dtype}."
+            )
         out = self.gemm_int4_qzero_group_scaled_cpu_kernel(
             x,
             self.qweight,
             self.qzeros,
             self.scales,
             self.group_size,
+            self.bias,
         )
-        if original_dtype != torch.bfloat16:
-            out = out.to(original_dtype)
         return out
 
 

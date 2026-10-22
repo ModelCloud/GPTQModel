@@ -20,6 +20,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from ...utils.vptq import (
     unpack_vptq_indices,
@@ -29,9 +30,12 @@ from ...utils.vptq import (
     vptq_packed_words,
 )
 from . import WeightOnlyQuantLinear
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
+
+_VPTQ_CACHE_WEIGHTS = env_flag("GPTQMODEL_VPTQ_CACHE_WEIGHTS", default=True)
 
 
 def _as_pair(value: Any, name: str) -> List[int]:
@@ -192,6 +196,8 @@ class VPTQLinear(WeightOnlyQuantLinear):
             # Keep `bias` defined so `forward`/`dequantize` can query it before
             # `pack()` allocates the real buffers.
             self.bias = None
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
 
     # ------------------------------------------------------------------
     # buffer management
@@ -268,8 +274,17 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 self.bias = None
 
     def post_init(self):
+        self.clear_weight_cache()
         self._validate_loaded_state()
         super().post_init()
+
+    def clear_weight_cache(self) -> None:
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
+
+    def train(self, mode: bool = True):
+        self.clear_weight_cache()
+        return super().train(mode=mode)
 
     def _validate_loaded_state(self) -> None:
         if self.indices.shape != (self.group_num, self.num_indices, self.packed_words):
@@ -408,6 +423,7 @@ class VPTQLinear(WeightOnlyQuantLinear):
                     f"VPTQLinear `{self.name}`: received a bias but the module was built without one."
                 )
             self.bias.data.copy_(bias.detach().to(device=device, dtype=self.bias.dtype))
+        self.clear_weight_cache()
 
     # ------------------------------------------------------------------
     # runtime
@@ -504,13 +520,37 @@ class VPTQLinear(WeightOnlyQuantLinear):
                 out = self.adapter.apply(x=x, out=out)
             return out
 
-        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        weight = self._dense_weight_for_inference(x)
         if bias is not None and bias.dtype != x.dtype:
             bias = bias.to(dtype=x.dtype)
         out = F.linear(x, weight, bias)
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)
         return out
+
+    def _dense_weight_for_inference(self, x: torch.Tensor) -> torch.Tensor:
+        if self.training or x.requires_grad or not _VPTQ_CACHE_WEIGHTS:
+            return self.dequantize().to(dtype=x.dtype, device=x.device)
+
+        key = (
+            tensor_cache_key(self.centroids.weight),
+            tensor_cache_key(self.res_centroids.weight) if self.enable_residual else None,
+            tensor_cache_key(self.outlier_centroids.weight) if self.enable_outlier else None,
+            tensor_cache_key(self.indices),
+            tensor_cache_key(self.outlier_indices) if self.enable_outlier else None,
+            tensor_cache_key(self.weight_scale) if self.enable_norm else None,
+            tensor_cache_key(self.weight_bias) if self.enable_norm else None,
+            tensor_cache_key(self.perm) if self.enable_perm else None,
+            x.device,
+            x.dtype,
+        )
+        if self._dense_weight_cache is not None and self._dense_weight_cache_key == key:
+            return self._dense_weight_cache
+
+        weight = self.dequantize().to(dtype=x.dtype, device=x.device)
+        self._dense_weight_cache = weight
+        self._dense_weight_cache_key = key
+        return weight
 
     def extra_repr(self) -> str:
         return (

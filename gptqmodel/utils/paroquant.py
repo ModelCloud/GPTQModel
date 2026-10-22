@@ -182,6 +182,87 @@ def apply_paroquant_rotation_reference(
     return out.reshape(orig_shape)
 
 
+def apply_paroquant_rotation_vectorized(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor] = None,
+    group_size: int = 128,
+) -> torch.Tensor:
+    """Apply the ParoQuant rotation without Python loops over groups.
+
+    This is the CPU inference implementation of
+    :func:`apply_paroquant_rotation_reference`.  It keeps the reference
+    arithmetic and per-rotation rounding contract, but moves the group loop
+    into batched gather/scatter operations.  The result is therefore suitable
+    for an exact A/B test against the reference path rather than being a
+    lower-precision approximation such as the composed rotation matrix.
+    """
+
+    orig_shape = x.shape
+    if x.dim() < 2:
+        raise ValueError(f"ParoQuant rotation expects rank >= 2, got shape {tuple(orig_shape)}.")
+
+    x2d = x.reshape(-1, orig_shape[-1])
+    hidden = x2d.shape[-1]
+    group_size = _normalize_group_size(group_size, hidden)
+    num_groups = hidden // group_size
+    half_group = group_size // 2
+
+    if scales is not None:
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
+        out = x2d * scale_tensor
+    else:
+        out = x2d.clone()
+
+    pairs = pairs.to(device=x2d.device, dtype=torch.int64)
+    theta = theta.to(device=x2d.device, dtype=torch.float32)
+    rows = x2d.shape[0]
+    out = out.reshape(rows, num_groups, group_size)
+
+    for rotation_index in range(pairs.shape[0]):
+        pair_row = pairs[rotation_index].reshape(num_groups, half_group, 2)
+        local_i = pair_row[..., 0]
+        local_j = pair_row[..., 1]
+        valid = (
+            (local_i >= 0)
+            & (local_j >= 0)
+            & (local_i < group_size)
+            & (local_j < group_size)
+        )
+        if not bool(valid.any()):
+            continue
+
+        # Gather padding slots from a harmless index, then restore their
+        # original values below. This keeps one vectorized update for layouts
+        # that use (-1, -1) padding.
+        safe_i = torch.where(valid, local_i, torch.zeros_like(local_i))
+        safe_j = torch.where(valid, local_j, torch.zeros_like(local_j))
+        gather_i = safe_i.view(1, num_groups, half_group).expand(rows, -1, -1)
+        gather_j = safe_j.view(1, num_groups, half_group).expand(rows, -1, -1)
+        xi = out.gather(2, gather_i)
+        xj = out.gather(2, gather_j)
+        angles = theta[rotation_index].reshape(num_groups, half_group)
+        cos_t = angles.cos().to(dtype=out.dtype).view(1, num_groups, half_group)
+        sin_t = angles.sin().to(dtype=out.dtype).view(1, num_groups, half_group)
+        valid_mask = valid.view(1, num_groups, half_group)
+
+        next_out = out.clone()
+        next_out.scatter_(
+            2,
+            gather_i,
+            torch.where(valid_mask, xi * cos_t + xj * sin_t, xi),
+        )
+        next_out.scatter_(
+            2,
+            gather_j,
+            torch.where(valid_mask, -xi * sin_t + xj * cos_t, xj),
+        )
+        out = next_out
+
+    return out.reshape(orig_shape)
+
+
 def _rotation_sources() -> list[str]:
     """Return the native extension sources for the fused CUDA rotation op.
 
@@ -1074,6 +1155,7 @@ __all__ = [
     "apply_paroquant_rotation",
     "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
+    "apply_paroquant_rotation_vectorized",
     "_rotation_launch_config",
     "build_identity_rotation_buffers",
     "clear_paroquant_rotation_autotune_cache",

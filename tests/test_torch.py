@@ -316,6 +316,43 @@ def test_cached_forward_matches_baseline():
     assert module._cached_weights[x.dtype].device.type == device.type
 
 
+def test_cached_forward_invalidates_after_weight_mutation_and_state_load():
+    module = _make_module(torch.device("cpu"))
+    module.enable_weight_cache(True)
+    module.clear_weight_cache()
+    x = torch.randn(8, module.in_features, dtype=torch.float16)
+
+    first = module(x)
+    cached = module._cached_weights[torch.float16]
+    assert torch.float16 in module._cached_weight_keys
+
+    with torch.no_grad():
+        module.qweight.add_(1)
+    second = module(x)
+    assert module._cached_weights[torch.float16] is not cached
+    assert not torch.equal(first, second)
+
+    module.load_state_dict(module.state_dict())
+    assert module._cached_weights == {}
+    assert module._cached_weight_keys == {}
+
+
+def test_cached_forward_reuses_inference_tensor_weight_cache():
+    with torch.inference_mode():
+        module = _make_module(torch.device("cpu"))
+        module.enable_weight_cache(True)
+        module.clear_weight_cache()
+        x = torch.randn(8, module.in_features, dtype=torch.float16)
+
+        first = module(x)
+        cached = module._cached_weights[torch.float16]
+        second = module(x)
+
+    assert module.qweight.is_inference()
+    assert module._cached_weights[torch.float16] is cached
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
+
+
 def test_torch_empty_cache_syncs_before_releasing_allocator(monkeypatch):
     calls = []
     device = torch.device("cpu")

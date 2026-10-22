@@ -277,6 +277,27 @@ class BaseQuantLinear(nn.Module):
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
 
+    def _clear_runtime_weight_cache(self) -> None:
+        clear = getattr(self, "clear_weight_cache", None)
+        if callable(clear):
+            clear()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        """Invalidate derived-weight caches after a state-dict load.
+
+        ``load_state_dict`` may copy into an existing buffer, which does not
+        replace the Python object. Cache keys catch versioned tensors, but an
+        inference tensor has no version counter, so clear unconditionally.
+        """
+
+        super()._load_from_state_dict(*args, **kwargs)
+        self._clear_runtime_weight_cache()
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        self._clear_runtime_weight_cache()
+        return result
+
     # public/stable api exposed to external integrations (optimum, auto-round, ...)
     def hf_pack(
             self,

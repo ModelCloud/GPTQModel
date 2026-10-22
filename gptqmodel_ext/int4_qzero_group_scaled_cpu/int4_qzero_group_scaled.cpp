@@ -10,7 +10,8 @@ namespace int4_qzero_group_scaled_cpu
 
     // Main dispatcher that selects the best implementation based on runtime CPU features
     void gemm_int4(const torch::Tensor &input, const torch::Tensor &weight, const torch::Tensor &zeros,
-        const torch::Tensor &absmax, torch::Tensor &out, int64_t blocksize)
+        const torch::Tensor &absmax, const std::optional<torch::Tensor> &bias,
+        torch::Tensor &out, int64_t blocksize)
     {
         int64_t M = input.size(0);
         int64_t N = weight.size(0);
@@ -18,6 +19,7 @@ namespace int4_qzero_group_scaled_cpu
         // strides
         int64_t x_strideM = input.stride(0);
         int64_t out_strideM = out.stride(0);
+        const float *bias_ptr = bias.has_value() ? bias->data_ptr<float>() : nullptr;
         // Runtime CPU feature detection and dispatch
         if (CPUFeatures::hasAVX512BF16())
         {
@@ -27,7 +29,8 @@ namespace int4_qzero_group_scaled_cpu
                 input.data_ptr<at::BFloat16>(),
                 weight.data_ptr<unsigned char>(),
                 zeros.data_ptr<uint8_t>(),
-                absmax.data_ptr<at::BFloat16>(),
+                absmax.data_ptr<float>(),
+                bias_ptr,
                 out.data_ptr<at::BFloat16>(),
                 blocksize, x_strideM, out_strideM);
         }
@@ -48,6 +51,10 @@ namespace int4_qzero_group_scaled_cpu
             auto original_weight = (unpacked_weight - zeros_expanded) * scales_expanded;
             auto weight_final = original_weight.t().to(input.dtype());
             torch::matmul_out(out, input, weight_final);
+            if (bias.has_value())
+            {
+                out.add_(*bias);
+            }
         }
     }
 } // namespace int4_qzero_group_scaled_cpu

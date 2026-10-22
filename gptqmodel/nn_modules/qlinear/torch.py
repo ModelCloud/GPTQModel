@@ -22,6 +22,7 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._runtime_cache import tensor_cache_key
 
 
 try:
@@ -209,11 +210,13 @@ class TorchLinear(PackableQuantLinear):
                 triton_flag not in {"0", "false", "False"}
             ) and _TRITON_DEQUANT_AVAILABLE
         self._cached_weights = {}
+        self._cached_weight_keys = {}
         self._lookahead_enabled = bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0")))
         self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
         self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
         self._lookahead_next = None
         self._prefetched_weights = {}
+        self._prefetched_weight_keys = {}
         self._prefetch_events = {}
         self._prefetch_streams = {}
         self._weight_metadata = _LinearWeightMetadata(self)
@@ -321,6 +324,7 @@ class TorchLinear(PackableQuantLinear):
                     self.qzero_format(format=1)
                     self._stream_reset_cache()
 
+        self.clear_weight_cache()
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
@@ -499,8 +503,12 @@ class TorchLinear(PackableQuantLinear):
             return None
         cached = self._cached_weights.get(x.dtype)
         if cached is not None:
-            if cached.device != x.device:
+            if self._cached_weight_keys.get(x.dtype) != self._weight_cache_key(
+                dtype=x.dtype,
+                device=x.device,
+            ):
                 self._cached_weights.pop(x.dtype, None)
+                self._cached_weight_keys.pop(x.dtype, None)
             else:
                 return cached
         return None
@@ -509,12 +517,30 @@ class TorchLinear(PackableQuantLinear):
         if not self._cache_enabled or self.training:
             return
         self._cached_weights[weights.dtype] = weights.detach()
+        self._cached_weight_keys[weights.dtype] = self._weight_cache_key(
+            dtype=weights.dtype,
+            device=weights.device,
+        )
+
+    def _weight_cache_key(self, *, dtype: torch.dtype, device: torch.device):
+        return (
+            dtype,
+            device,
+            self.qzero_format(),
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+            tensor_cache_key(self.g_idx),
+        )
 
     def _consume_prefetched_weights(self, dtype: torch.dtype, device: torch.device = None):
         if not self._lookahead_enabled or self.training:
             return None
         tensor = self._prefetched_weights.pop(dtype, None)
         if tensor is None:
+            return None
+        expected_key = self._prefetched_weight_keys.pop(dtype, None)
+        if expected_key != self._weight_cache_key(dtype=dtype, device=tensor.device):
             return None
         event = self._prefetch_events.pop(dtype, None)
         if device is not None and tensor.device != device:
@@ -666,6 +692,7 @@ class TorchLinear(PackableQuantLinear):
 
     def clear_weight_cache(self):
         self._cached_weights.clear()
+        self._cached_weight_keys.clear()
 
     def enable_lookahead(self, enabled: bool = True):
         self._lookahead_enabled = enabled
@@ -703,6 +730,7 @@ class TorchLinear(PackableQuantLinear):
                 event.destroy()
         self._prefetch_events.clear()
         self._prefetched_weights.clear()
+        self._prefetched_weight_keys.clear()
 
     def _maybe_schedule_lookahead(self, dtype: torch.dtype):
         if not self._lookahead_enabled or self.training:
@@ -733,6 +761,10 @@ class TorchLinear(PackableQuantLinear):
         event = torch.cuda.Event(enable_timing=False)
         event.record(stream)
         self._prefetched_weights[dtype] = weights
+        self._prefetched_weight_keys[dtype] = self._weight_cache_key(
+            dtype=dtype,
+            device=device,
+        )
         self._prefetch_events[dtype] = event
 
     def _prefetch_get_stream(self, device: torch.device) -> torch.cuda.Stream:

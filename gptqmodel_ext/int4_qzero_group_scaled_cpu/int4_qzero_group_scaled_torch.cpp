@@ -7,16 +7,18 @@
 #include "int4_qzero_group_scaled.hpp"
 #include "int4_qzero_group_scaled_pack.hpp"
 #include <limits>
+#include <optional>
 
 // Forward implementation for CPU
 torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     const torch::Tensor &input, const torch::Tensor &weight, const torch::Tensor &zeros,
-    const torch::Tensor &absmax, int64_t blocksize)
+    const torch::Tensor &absmax, int64_t blocksize,
+    const std::optional<torch::Tensor> &bias)
 {
     TORCH_CHECK(input.scalar_type() == at::kBFloat16, "input must be bfloat16");
     TORCH_CHECK(weight.scalar_type() == at::kByte, "weight must be uint8");
     TORCH_CHECK(zeros.scalar_type() == at::kByte, "zeros must be uint8");
-    TORCH_CHECK(absmax.scalar_type() == at::kBFloat16, "absmax must be bfloat16");
+    TORCH_CHECK(absmax.scalar_type() == at::kFloat, "absmax must be float32");
     TORCH_CHECK(input.dim() == 2, "input must be 2D");
     TORCH_CHECK(weight.dim() == 2, "weight must be 2D");
     TORCH_CHECK(zeros.dim() == 2, "zeros must be 2D");
@@ -38,6 +40,16 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     TORCH_CHECK(
         zeros.size(1) == weight.size(0),
         "zeros/absmax out_features does not match weight");
+    if (bias.has_value())
+    {
+        TORCH_CHECK(bias->device().is_cpu(), "bias must be a CPU tensor");
+        TORCH_CHECK(bias->scalar_type() == at::kFloat, "bias must be float32");
+        TORCH_CHECK(bias->dim() == 1, "bias must be 1D");
+        TORCH_CHECK(bias->is_contiguous(), "bias must be contiguous");
+        TORCH_CHECK(
+            bias->size(0) == weight.size(0),
+            "bias out_features does not match weight");
+    }
 
     auto output = at::empty({input.size(0), weight.size(0)}, input.options());
     if (input.size(0) == 0) {
@@ -49,6 +61,7 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
         weight,
         zeros,
         absmax,
+        bias,
         output,
         blocksize
     );

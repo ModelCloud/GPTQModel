@@ -8,6 +8,7 @@
 #include "cpu_features.hpp"
 #include "int4_qzero_group_scaled_avx512.hpp"
 #include <torch/all.h>
+#include <optional>
 #include <stdexcept>
 #include <ATen/ATen.h>
 
@@ -16,5 +17,6 @@ namespace int4_qzero_group_scaled_cpu
 
     // Main dispatcher that selects the best implementation based on runtime CPU features
     void gemm_int4(const torch::Tensor &input, const torch::Tensor &weight, const torch::Tensor &zeros,
-        const torch::Tensor &absmax, torch::Tensor &out, int64_t blocksize);
+        const torch::Tensor &absmax, const std::optional<torch::Tensor> &bias,
+        torch::Tensor &out, int64_t blocksize);
 } // namespace int4_qzero_group_scaled_cpu
