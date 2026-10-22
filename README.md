@@ -102,6 +102,10 @@ the AVX512 path ahead of the ATen int4pack fallback when the layer shape
 satisfies the kernel's 32-row and group-size alignment requirements. Supported
 group sizes are 16, 32, 64, 128, 256, and 512.
 
+`BACKEND.EXL3_TORCH` uses oneDNN BF16x3 FP32 matmul on AVX512-BF16 hosts for
+GEMMs large enough to amortize dispatch. Set `GPTQMODEL_EXL3_CPU_BF16X3=0` to
+disable this path.
+
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.

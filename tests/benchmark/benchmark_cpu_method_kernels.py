@@ -20,11 +20,15 @@ import time
 import torch
 import torch.nn as nn
 
+from gptqmodel.nn_modules.exllamav3_torch import (
+    ExllamaV3TorchLinear,
+    _cpu_bf16x3_support,
+)
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
-from gptqmodel.nn_modules.qlinear.vptq import VPTQLinear
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.quantization.awq.utils.packing_utils import (
     pack_awq,
     reverse_awq_order,
@@ -329,6 +333,55 @@ def _build_gguf(
     return make(), {"make": make, "linear": linear}
 
 
+def _build_exl3(
+    in_features: int,
+    out_features: int,
+) -> tuple[ExllamaV3TorchLinear, dict[str, object]]:
+    generator = torch.Generator().manual_seed(700 + in_features)
+    bits = 4
+    tensors = {
+        "trellis": torch.randint(
+            -32768,
+            32767,
+            (in_features // 16, out_features // 16, bits * 16),
+            dtype=torch.int16,
+            generator=generator,
+        ),
+        "suh": (torch.rand(in_features, generator=generator) * 0.02 + 0.001).to(torch.float16),
+        "svh": (torch.rand(out_features, generator=generator) * 0.02 + 0.001).to(torch.float16),
+        "bias": torch.randn(out_features, generator=generator, dtype=torch.float16) * 0.01,
+    }
+
+    def make() -> ExllamaV3TorchLinear:
+        return ExllamaV3TorchLinear.from_tensors(
+            in_features=in_features,
+            out_features=out_features,
+            name="cpu_audit_exl3",
+            tensors=tensors,
+        ).eval()
+
+    module = make()
+    return module, {
+        "make": make,
+        "weight": module.get_weight_tensor(torch.float32),
+        "bias": module.bias.float(),
+    }
+
+
+def _exl3_ieee_forward(
+    module: ExllamaV3TorchLinear,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    previous = torch.backends.mkldnn.matmul.fp32_precision
+    torch.backends.mkldnn.matmul.fp32_precision = "ieee"
+    try:
+        output = x.float() @ module.get_weight_tensor(torch.float32)
+    finally:
+        torch.backends.mkldnn.matmul.fp32_precision = previous
+    output = output + module.bias.float()
+    return output.view(*x.shape[:-1], module.out_features).to(x.dtype)
+
+
 def _add_row(
     rows: list[list[str]],
     *,
@@ -385,6 +438,7 @@ def main() -> int:
     paro, paro_meta = _build_paro(in_features, out_features, group_size)
     fp8, fp8_meta = _build_fp8(in_features, out_features)
     vptq, vptq_meta = _build_vptq(in_features, out_features, group_size)
+    exl3, exl3_meta = _build_exl3(in_features, out_features)
     gguf_variants = [
         (label, *_build_gguf(qtype, in_features, out_features))
         for label, qtype in (
@@ -402,6 +456,11 @@ def main() -> int:
             ["ParoQuant", f"{out_features}x{in_features}", f"{_pack_time(paro_meta['make']):.3f}"],
             ["FP8", f"{out_features}x{in_features}", f"{_pack_time(fp8_meta['make']):.3f}"],
             ["VPTQ", f"{out_features}x{in_features}", f"{_pack_time(vptq_meta['make']):.3f}"],
+            [
+                "EXL3",
+                f"{out_features}x{in_features}",
+                f"{_pack_time(lambda: exl3_meta['make']().get_weight_tensor(torch.float32)):.3f}",
+            ],
         ]
     )
     pack_rows.extend(
@@ -574,6 +633,46 @@ def main() -> int:
             visible_error=_visible_relative_error(vptq_uncached(x), vptq_oracle),
         )
 
+        exl3_oracle = (
+            x.double() @ exl3_meta["weight"].double()
+            + exl3_meta["bias"].double()
+        )
+        exl3_opt_time = _bench(
+            lambda: exl3(x),
+            warmup=args.warmup,
+            iters=args.iters,
+        )
+        exl3_base_time = _bench(
+            lambda: _exl3_ieee_forward(exl3, x),
+            warmup=args.warmup,
+            iters=args.iters,
+        )
+        with torch.inference_mode():
+            exl3_output = exl3(x)
+            exl3_base_output = _exl3_ieee_forward(exl3, x)
+        _add_row(
+            rows,
+            method="EXL3",
+            variant="auto (oneDNN BF16x3)",
+            shape=(out_features, in_features),
+            tokens=tokens,
+            timing=exl3_opt_time,
+            baseline_ms=exl3_base_time[0],
+            relative_error=_relative_error(exl3_output, exl3_oracle),
+            visible_error=_visible_relative_error(exl3_output, exl3_oracle),
+        )
+        _add_row(
+            rows,
+            method="EXL3",
+            variant="IEEE FP32 matmul",
+            shape=(out_features, in_features),
+            tokens=tokens,
+            timing=exl3_base_time,
+            baseline_ms=exl3_base_time[0],
+            relative_error=_relative_error(exl3_base_output, exl3_oracle),
+            visible_error=_visible_relative_error(exl3_base_output, exl3_oracle),
+        )
+
         for label, module, _ in gguf_variants:
             oracle = x.float() @ module.dequantize_weight(dtype=torch.float32)
             fused_time = _bench(
@@ -616,6 +715,7 @@ def main() -> int:
                 ["torch", torch.__version__],
                 ["torch_threads", str(torch.get_num_threads())],
                 ["interop_threads", str(torch.get_num_interop_threads())],
+                ["exl3_bf16x3", str(_cpu_bf16x3_support())],
                 ["shape", f"{out_features}x{in_features}"],
                 ["tokens", args.tokens],
                 ["warmup", str(args.warmup)],
