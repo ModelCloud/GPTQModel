@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 import torch
@@ -13,7 +14,11 @@ from safetensors.torch import save_file
 
 import gptqmodel.utils.model as model_utils
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.bitsandbytes import BITSANDBYTES_AVAILABLE, BitsAndBytesLinear
+from gptqmodel.nn_modules.qlinear.bitsandbytes import (
+    BITSANDBYTES_AVAILABLE,
+    BitsAndBytesLinear,
+    _cpu_packed_kernels,
+)
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
 from gptqmodel.utils.backend import BACKEND
@@ -55,6 +60,37 @@ def _build_kernel(bits: int, linear: nn.Linear) -> BitsAndBytesLinear:
     return kernel.eval()
 
 
+def _build_cpu_packed_kernel(
+    *,
+    in_features: int = 128,
+    out_features: int = 64,
+    register_buffers: bool = False,
+    bnb_format: str = "nf4",
+    compress_statistics: bool = False,
+    block_size: int = 128,
+    compute_dtype: torch.dtype = torch.bfloat16,
+) -> tuple[nn.Linear, BitsAndBytesLinear]:
+    torch.manual_seed(321)
+    linear = nn.Linear(in_features, out_features, bias=True).to(compute_dtype).eval()
+    kernel = BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=in_features,
+        out_features=out_features,
+        bias=True,
+        register_buffers=register_buffers,
+        format=bnb_format,
+        block_size=block_size,
+        compress_statistics=compress_statistics,
+        dtype=compute_dtype,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    return linear, kernel.eval()
+
+
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
 def test_bitsandbytes_kernel_selection():
     assert get_kernel_for_backend(BACKEND.BITSANDBYTES, METHOD.BITSANDBYTES, FORMAT.BITSANDBYTES) is BitsAndBytesLinear
@@ -79,8 +115,15 @@ def test_bitsandbytes_packing_and_schema_support_inference_and_meta_contexts():
     from gptqmodel.nn_modules.qlinear.bitsandbytes import _buffer_spec_4bit
 
     _buffer_spec_4bit.cache_clear()
-    kwargs = dict(bits=4, group_size=32, desc_act=False, sym=True,
-                  in_features=64, out_features=128, dtype=torch.float32)
+    kwargs = {
+        "bits": 4,
+        "group_size": 32,
+        "desc_act": False,
+        "sym": True,
+        "in_features": 64,
+        "out_features": 128,
+        "dtype": torch.float32,
+    }
     with torch.inference_mode(), torch.device("meta"):
         shell = BitsAndBytesLinear(**kwargs)
     assert all(value.device.type == "meta" for value in shell.state_dict().values())
@@ -156,6 +199,159 @@ def test_bitsandbytes_forward_matches_dequantized_reference(bits: int):
     atol = 1e-3 if bits == 4 else 1e-2
     rtol = 1e-3 if bits == 4 else 5e-2
     torch.testing.assert_close(out.to(torch.float32), expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(
+    _cpu_packed_kernels() is None,
+    reason="bitsandbytes CPU packed kernel unavailable",
+)
+@pytest.mark.parametrize(
+    ("bnb_format", "compress_statistics"),
+    [
+        ("nf4", False),
+        ("nf4", True),
+        ("fp4", False),
+        ("fp4", True),
+    ],
+)
+def test_bitsandbytes_cpu_packed_kernel_matches_oracle_and_preserves_checkpoint_schema(
+    bnb_format: str,
+    compress_statistics: bool,
+):
+    linear, kernel = _build_cpu_packed_kernel(
+        bnb_format=bnb_format,
+        compress_statistics=compress_statistics,
+    )
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+    canonical_state = {name: tensor.clone() for name, tensor in kernel.state_dict().items()}
+    dequant_weight = kernel.dequantize_weight().float()
+    expected = torch.matmul(x.float(), dequant_weight.t())
+    if kernel.bias is not None:
+        expected = expected + kernel.bias.float()
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    assert kernel._cpu_packing_active
+    assert out.dtype == torch.bfloat16
+    assert tuple(kernel.weight.shape) == (linear.out_features, linear.in_features // 2)
+    relative_error = (out.float() - expected).norm() / expected.norm()
+    assert relative_error < 4e-3
+    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+
+    with torch.inference_mode():
+        repeated = kernel(x)
+    assert torch.equal(repeated, out)
+
+    state_dict = kernel.state_dict()
+    assert not kernel._cpu_packing_active
+    for name, tensor in canonical_state.items():
+        assert torch.equal(state_dict[name], tensor)
+    assert tuple(state_dict["weight"].shape) == (
+        linear.out_features * linear.in_features // 2,
+        1,
+    )
+    torch.testing.assert_close(
+        kernel.dequantize_weight().float(),
+        dequant_weight,
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+    reloaded = BitsAndBytesLinear(
+        bits=4,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=linear.in_features,
+        out_features=linear.out_features,
+        bias=True,
+        register_buffers=True,
+        format=bnb_format,
+        block_size=128,
+        compress_statistics=compress_statistics,
+        dtype=torch.bfloat16,
+    ).eval()
+    reloaded.load_state_dict(state_dict, strict=True)
+    reloaded.post_init()
+
+    with torch.inference_mode():
+        reloaded_out = reloaded(x)
+    assert reloaded._cpu_packing_active
+    assert torch.equal(reloaded_out, out)
+
+
+@pytest.mark.skipif(
+    _cpu_packed_kernels() is None,
+    reason="bitsandbytes CPU packed kernel unavailable",
+)
+@pytest.mark.parametrize("block_size", [32, 64, 128, 256, 512])
+def test_bitsandbytes_cpu_packed_kernel_supports_bnb_block_sizes(block_size: int):
+    linear, kernel = _build_cpu_packed_kernel(
+        in_features=512,
+        block_size=block_size,
+    )
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    assert kernel._cpu_packing_active
+    assert out.dtype == torch.bfloat16
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.skipif(
+    _cpu_packed_kernels() is None,
+    reason="bitsandbytes CPU packed kernel unavailable",
+)
+def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeypatch):
+    linear, kernel = _build_cpu_packed_kernel(out_features=24)
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        kernel(x)
+    assert not kernel._cpu_packing_active
+
+    _, kernel = _build_cpu_packed_kernel()
+    with torch.inference_mode():
+        kernel(x)
+    assert kernel._cpu_packing_active
+    with torch.inference_mode():
+        kernel(torch.randn(65, kernel.in_features, dtype=torch.bfloat16))
+    assert not kernel._cpu_packing_active
+
+    _, kernel = _build_cpu_packed_kernel(compute_dtype=torch.float16)
+    with torch.inference_mode():
+        kernel(x.to(torch.float16))
+    assert not kernel._cpu_packing_active
+
+    _, kernel = _build_cpu_packed_kernel()
+    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "0")
+    with torch.inference_mode():
+        kernel(x)
+    assert not kernel._cpu_packing_active
+
+
+@pytest.mark.skipif(
+    _cpu_packed_kernels() is None,
+    reason="bitsandbytes CPU packed kernel unavailable",
+)
+def test_bitsandbytes_cpu_packed_kernel_falls_back_when_accuracy_gate_fails(monkeypatch):
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", 0.0)
+    linear, kernel = _build_cpu_packed_kernel()
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    assert not kernel._cpu_packing_active
+    assert kernel._cpu_packing_disabled
+    assert tuple(kernel.weight.shape) == (
+        linear.out_features * linear.in_features // 2,
+        1,
+    )
+    assert torch.isfinite(out).all()
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
