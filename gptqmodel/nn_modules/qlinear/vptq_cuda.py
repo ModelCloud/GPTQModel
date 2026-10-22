@@ -45,6 +45,13 @@ class VPTQCudaLinear(VPTQLinear):
         kwargs.setdefault("backend", BACKEND.VPTQ_CUDA)
         super().__init__(*args, **kwargs)
 
+    def optimize(self, backend: str = None, mode: str = None, fullgraph: bool = False):
+        # CUDA inference uses the fused native kernel (or its native
+        # dequantizer for larger batches), so the portable Torch dequantize
+        # graph is never on the hot path.
+        del backend, mode, fullgraph
+        self.optimized = True
+
     @torch.no_grad()
     def _dequantize_cuda(self) -> torch.Tensor:
         """Reconstruct weights with the native CUDA kernel for GEMM."""

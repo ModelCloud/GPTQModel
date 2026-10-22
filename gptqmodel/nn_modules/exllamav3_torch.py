@@ -364,37 +364,50 @@ class ExllamaV3TorchLinear(nn.Module):
         words = words.view(*words.shape[:-1], -1, 2).flip(-1).reshape(*words.shape)
         words = words.view(*words.shape[:-1], 16, bits)
 
-        symbols = torch.empty(
-            (*words.shape[:-2], 256),
-            dtype=torch.long,
-            device=words.device,
+        # Unpack all 16 positions in one pass. Each position selects one of the
+        # `bits` words and, for widths that do not divide 16, may straddle two
+        # words. The result is laid out tile-major so it is already the
+        # [..., 256] symbol stream consumed by the state recurrence below.
+        positions = torch.arange(16, device=words.device, dtype=torch.long)
+        bit_offsets = positions * bits
+        word_idx = bit_offsets // 16
+        bit_in_word = bit_offsets % 16
+        direct_shift = torch.where(
+            bit_in_word + bits <= 16,
+            16 - bit_in_word - bits,
+            torch.zeros_like(bit_in_word),
         )
-        for pos in range(16):
-            bit_offset = pos * bits
-            word_idx = bit_offset // 16
-            bit_in_word = bit_offset % 16
-            if bit_in_word + bits <= 16:
-                shift = 16 - bit_in_word - bits
-                value = _torch_right_shift(words[..., word_idx], shift) & mask
-            else:
-                bits_first = 16 - bit_in_word
-                bits_second = bits - bits_first
-                high = _torch_left_shift(words[..., word_idx] & ((1 << bits_first) - 1), bits_second)
-                low = _torch_right_shift(words[..., word_idx + 1], 16 - bits_second)
-                value = (high | low) & mask
-            symbols[..., pos::16] = value.to(torch.long)
+        value = (_torch_right_shift(words[..., word_idx], direct_shift) & mask).to(torch.long)
+        if 16 % bits:
+            bits_first = 16 - bit_in_word
+            bits_second = (bits - bits_first).clamp_min(0)
+            high = _torch_left_shift(
+                words[..., word_idx] & ((1 << bits_first) - 1),
+                bits_second,
+            )
+            low = _torch_right_shift(
+                words[..., (word_idx + 1).clamp_max(bits - 1)],
+                16 - bits_second,
+            )
+            value = torch.where(bit_in_word + bits > 16, (high | low) & mask, value)
+        symbols = value.reshape(*words.shape[:-2], 256)
 
         warmup = (16 + bits - 1) // bits - 1
-        state = torch.zeros_like(symbols[..., 0], dtype=torch.long)
-        for idx in range(256 - warmup, 256):
-            state = (_torch_left_shift(state, bits) | symbols[..., idx]) & 0xFFFF
+        if warmup == 0:
+            return symbols & 0xFFFF
 
-        encoded = torch.empty_like(symbols)
-        for idx in range(256):
-            state = (_torch_left_shift(state, bits) | symbols[..., idx]) & 0xFFFF
-            encoded[..., idx] = state
-
-        return encoded
+        # The EXL3 stream is tail-biting: encoded[i] is the low 16 bits of the
+        # sliding window ending at i, with the previous `warmup` symbols taken
+        # from the end of the 256-symbol block. Build all windows at once
+        # instead of replaying the recurrence 256 times in Python.
+        padded = torch.cat((symbols[..., -warmup:], symbols), dim=-1)
+        windows = padded.unfold(-1, warmup + 1, 1)
+        weights = torch.tensor(
+            [1 << (bits * (warmup - index)) for index in range(warmup + 1)],
+            dtype=torch.long,
+            device=symbols.device,
+        )
+        return (windows * weights).sum(dim=-1) & 0xFFFF
 
     def _decode_inner_weight(
         self,

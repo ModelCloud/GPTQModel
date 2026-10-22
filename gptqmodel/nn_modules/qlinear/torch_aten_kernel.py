@@ -47,7 +47,10 @@ class TorchAtenLinear(PackableQuantLinear):
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 110, FORMAT.GPTQ_V2: 110}
     SUPPORTS_BITS = [4]
-    SUPPORTS_GROUP_SIZE = [16, 32, 64, 128]
+    # aten::_weight_int4pack_mm_for_cpu accepts 32, 64, 128, or 256. Keep the
+    # selector aligned with the op contract so non-AVX512 hosts do not choose
+    # this backend for a group size that fails on the first forward.
+    SUPPORTS_GROUP_SIZE = [32, 64, 128, 256]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
