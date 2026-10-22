@@ -382,6 +382,21 @@ def _exl3_ieee_forward(
     return output.view(*x.shape[:-1], module.out_features).to(x.dtype)
 
 
+def _exl3_chunked_ieee_forward(
+    module: ExllamaV3TorchLinear,
+    x: torch.Tensor,
+) -> torch.Tensor:
+    previous = torch.backends.mkldnn.matmul.fp32_precision
+    torch.backends.mkldnn.matmul.fp32_precision = "ieee"
+    try:
+        x_2d = x.view(-1, module.in_features).float()
+        output = module._forward_chunked(x_2d, torch.float32)
+        output = output + module.bias.float()
+    finally:
+        torch.backends.mkldnn.matmul.fp32_precision = previous
+    return output.view(*x.shape[:-1], module.out_features).to(x.dtype)
+
+
 def _add_row(
     rows: list[list[str]],
     *,
@@ -459,7 +474,7 @@ def main() -> int:
             [
                 "EXL3",
                 f"{out_features}x{in_features}",
-                f"{_pack_time(lambda: exl3_meta['make']().get_weight_tensor(torch.float32)):.3f}",
+                f"{_pack_time(exl3_meta['make']):.3f}",
             ],
         ]
     )
@@ -615,13 +630,19 @@ def main() -> int:
             warmup=args.warmup,
             iters=args.iters,
         )
+        exl3_chunked_ieee_time = _bench(
+            lambda: _exl3_chunked_ieee_forward(exl3, x),
+            warmup=args.warmup,
+            iters=args.iters,
+        )
         with torch.inference_mode():
             exl3_output = exl3(x)
             exl3_base_output = _exl3_ieee_forward(exl3, x)
+            exl3_chunked_ieee_output = _exl3_chunked_ieee_forward(exl3, x)
         _add_row(
             rows,
             method="EXL3",
-            variant="auto (oneDNN BF16x3)",
+            variant="chunked decode + auto oneDNN BF16x3",
             shape=(out_features, in_features),
             tokens=tokens,
             timing=exl3_opt_time,
@@ -632,7 +653,18 @@ def main() -> int:
         _add_row(
             rows,
             method="EXL3",
-            variant="IEEE FP32 matmul",
+            variant="chunked decode + IEEE FP32 matmul",
+            shape=(out_features, in_features),
+            tokens=tokens,
+            timing=exl3_chunked_ieee_time,
+            baseline_ms=exl3_base_time[0],
+            relative_error=_relative_error(exl3_chunked_ieee_output, exl3_oracle),
+            visible_error=_visible_relative_error(exl3_chunked_ieee_output, exl3_oracle),
+        )
+        _add_row(
+            rows,
+            method="EXL3",
+            variant="dense materialize + IEEE FP32 matmul",
             shape=(out_features, in_features),
             tokens=tokens,
             timing=exl3_base_time,
@@ -726,7 +758,9 @@ def main() -> int:
         "the method's own dequantized weight. `raw` compares the kernel output "
         "to the unrounded oracle; `visible` rounds the oracle to the output "
         "dtype first. VPTQ packing time loads a precomputed quantization "
-        "result and excludes k-means training."
+        "result and excludes k-means training. EXL3 forward uses a bounded "
+        "chunked decode and does not retain a dense weight; the dense-materialize "
+        "row is a per-call baseline, not a cache."
     )
     return 0
 
