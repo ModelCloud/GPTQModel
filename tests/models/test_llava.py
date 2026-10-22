@@ -70,11 +70,7 @@ def test_llava_definition_maps_runtime_paths_to_hf_checkpoint_keys():
 @pytest.mark.slow
 @pytest.mark.cuda
 class TestLlava15(ModelTest):
-    NATIVE_MODEL_ID = os.environ.get("GPTQMODEL_LLAVA_MODEL_ID", "llava-hf/llava-1.5-7b-hf")
-    TRUST_REMOTE_CODE = False
-    EVAL_BATCH_SIZE = 1
-    USE_FLASH_ATTN = False
-    MODEL_COMPAT_FAST_LAYER_COUNT = "all"
+    NATIVE_MODEL_ID = "llava-hf/llava-1.5-7b-hf"
 
     def test_llava_15_quantize_and_generate_with_image(self):
         with self.model_compat_test_context():
