@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Paired VPTQ_CUDA vs VPTQ_TORCH inference benchmark.
+"""Benchmark VPTQ dispatch, fused GEMV, dequantized GEMM, and Torch paths.
 
 The two forwards use the same VPTQ module state and input tensor. A checkpoint
 can be measured directly, or --synthetic can create deterministic packed VPTQ
@@ -14,12 +14,14 @@ import gc
 import json
 import statistics
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import torch
+from torch.nn import functional as F
 
 from gptqmodel.nn_modules.qlinear.vptq_cuda import VPTQCudaLinear
 from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
@@ -27,41 +29,57 @@ from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.vptq import pack_vptq_indices
 
 
-def _measure_pair(
-    cuda_forward: Callable[[], torch.Tensor],
-    torch_forward: Callable[[], torch.Tensor],
+def _measure_routes(
+    functions: dict[str, Callable[[], torch.Tensor]],
     *,
     warmup: int,
     repeats: int,
-) -> tuple[dict[str, float], dict[str, float]]:
+    iterations_per_sample: int,
+) -> dict[str, dict[str, float]]:
     for _ in range(warmup):
-        torch_forward()
-        cuda_forward()
+        for function in functions.values():
+            function()
     torch.cuda.synchronize()
 
-    samples = {"vptq_cuda": [], "vptq_torch": []}
-    functions = {"vptq_cuda": cuda_forward, "vptq_torch": torch_forward}
+    samples = {name: {"gpu_ms": [], "wall_ms": []} for name in functions}
+    names = list(functions)
     for iteration in range(repeats):
-        # Alternate order to reduce systematic clock/cache bias between paths.
-        order = ("vptq_cuda", "vptq_torch") if iteration % 2 == 0 else ("vptq_torch", "vptq_cuda")
+        # Rotate order to reduce systematic clock/cache bias between paths.
+        offset = iteration % len(names)
+        order = names[offset:] + names[:offset]
         for name in order:
+            torch.cuda.synchronize()
+            wall_start = time.perf_counter()
             start = torch.cuda.Event(enable_timing=True)
             end = torch.cuda.Event(enable_timing=True)
             start.record()
-            functions[name]()
+            for _ in range(iterations_per_sample):
+                functions[name]()
             end.record()
-            end.synchronize()
-            samples[name].append(start.elapsed_time(end))
+            torch.cuda.synchronize()
+            wall_elapsed = (time.perf_counter() - wall_start) * 1000.0
+            samples[name]["gpu_ms"].append(start.elapsed_time(end) / iterations_per_sample)
+            samples[name]["wall_ms"].append(wall_elapsed / iterations_per_sample)
 
     def summarize(values: list[float]) -> dict[str, float]:
         ordered = sorted(values)
+        p90_position = 0.9 * (len(ordered) - 1)
+        p90_lower = int(p90_position)
+        p90_upper = min(p90_lower + 1, len(ordered) - 1)
+        p90_fraction = p90_position - p90_lower
         return {
             "median_ms": statistics.median(ordered),
             "min_ms": ordered[0],
-            "p90_ms": ordered[min(len(ordered) - 1, int(0.9 * len(ordered)))],
+            "p90_ms": ordered[p90_lower] * (1.0 - p90_fraction) + ordered[p90_upper] * p90_fraction,
         }
 
-    return summarize(samples["vptq_cuda"]), summarize(samples["vptq_torch"])
+    summary = {}
+    for name, measurements in samples.items():
+        summary[name] = {}
+        for clock, values in measurements.items():
+            stats = summarize(values)
+            summary[name].update({f"{clock}_{key}": value for key, value in stats.items()})
+    return summary
 
 
 def _synthetic_module(
@@ -71,6 +89,7 @@ def _synthetic_module(
     device: torch.device,
     *,
     seed: int,
+    vector_len: int = 4,
 ) -> VPTQCudaLinear:
     if in_features % 128:
         raise ValueError(f"Synthetic in_features must be divisible by 128, got {in_features}.")
@@ -80,7 +99,7 @@ def _synthetic_module(
         out_features=out_features,
         bias=True,
         dtype=dtype,
-        vector_lens=(-1, 4),
+        vector_lens=(-1, vector_len),
         num_centroids=(-1, 16),
         num_res_centroids=(-1, 16),
         group_size=128,
@@ -132,6 +151,7 @@ def _benchmark_module(
     device: torch.device,
     warmup: int,
     repeats: int,
+    iterations_per_sample: int,
     seed: int,
 ) -> list[dict[str, object]]:
     results = []
@@ -142,14 +162,50 @@ def _benchmark_module(
         )
         cuda_forward = lambda: module(x)
         torch_forward = lambda: VPTQLinear.forward(module, x)
+        from gptqmodel.utils.vptq_cuda import vptq_cuda_linear
+
+        fused_forward = lambda: vptq_cuda_linear(
+            x.contiguous(), module.indices, module.centroids.weight,
+            module.res_centroids.weight if module.enable_residual else None,
+            module.outlier_indices if module.enable_outlier else None,
+            module.outlier_centroids.weight if module.enable_outlier else None,
+            module.inverse_perm if module.enable_perm else None,
+            module.weight_scale if module.enable_norm else None,
+            module.weight_bias if module.enable_norm else None,
+            getattr(module, "bias", None),
+            group_size=module.group_size, in_features=module.in_features,
+            out_features=module.out_features, vector_len=module.vector_len,
+            outlier_size=module.outlier_size,
+            outlier_vector_len=module.outlier_vector_len,
+            num_centroids=module.num_centroids,
+            num_res_centroids=module.num_res_centroids,
+            index_bits=module.index_bits, res_bits=module.res_index_bits,
+            norm_dim=module.norm_dim,
+        )
+
+        def dense_forward():
+            weight = module._dequantize_cuda().to(dtype=x.dtype)
+            bias = getattr(module, "bias", None)
+            if bias is not None and bias.dtype != x.dtype:
+                bias = bias.to(dtype=x.dtype)
+            return F.linear(x, weight, bias)
 
         expected = torch_forward()
         actual = cuda_forward()
         torch.cuda.synchronize()
         error = (actual.float() - expected.float()).abs()
-        cuda_stats, torch_stats = _measure_pair(
-            cuda_forward, torch_forward, warmup=warmup, repeats=repeats
+        route_stats = _measure_routes(
+            {
+                "vptq_dispatch": cuda_forward,
+                "vptq_fused_gemv": fused_forward,
+                "vptq_dequant_gemm": dense_forward,
+                "vptq_torch": torch_forward,
+            },
+            warmup=warmup, repeats=repeats,
+            iterations_per_sample=iterations_per_sample,
         )
+        cuda_stats = route_stats["vptq_dispatch"]
+        torch_stats = route_stats["vptq_torch"]
         results.append(
             {
                 "module": name,
@@ -157,13 +213,16 @@ def _benchmark_module(
                 "out_features": module.out_features,
                 "rows": rows,
                 "dtype": dtype_name,
-                "vptq_cuda_median_ms": cuda_stats["median_ms"],
-                "vptq_torch_median_ms": torch_stats["median_ms"],
-                "speedup_cuda_over_torch": torch_stats["median_ms"] / cuda_stats["median_ms"],
-                "cuda_min_ms": cuda_stats["min_ms"],
-                "cuda_p90_ms": cuda_stats["p90_ms"],
-                "torch_min_ms": torch_stats["min_ms"],
-                "torch_p90_ms": torch_stats["p90_ms"],
+                "vptq_dispatch_gpu_median_ms": cuda_stats["gpu_ms_median_ms"],
+                "vptq_dispatch_wall_median_ms": cuda_stats["wall_ms_median_ms"],
+                "vptq_fused_gpu_median_ms": route_stats["vptq_fused_gemv"]["gpu_ms_median_ms"],
+                "vptq_fused_wall_median_ms": route_stats["vptq_fused_gemv"]["wall_ms_median_ms"],
+                "vptq_dequant_gemm_gpu_median_ms": route_stats["vptq_dequant_gemm"]["gpu_ms_median_ms"],
+                "vptq_dequant_gemm_wall_median_ms": route_stats["vptq_dequant_gemm"]["wall_ms_median_ms"],
+                "vptq_torch_gpu_median_ms": torch_stats["gpu_ms_median_ms"],
+                "vptq_torch_wall_median_ms": torch_stats["wall_ms_median_ms"],
+                "dispatch_gpu_p90_ms": cuda_stats["gpu_ms_p90_ms"],
+                "dispatch_wall_p90_ms": cuda_stats["wall_ms_p90_ms"],
                 "max_abs_error": float(error.max().item()),
                 "mean_abs_error": float(error.mean().item()),
             }
@@ -207,18 +266,21 @@ def main() -> None:
     parser.add_argument("--layer", help="Exact VPTQ module name for checkpoint mode; default benchmarks all VPTQ layers")
     parser.add_argument("--shapes", default="2048x2048,4096x4096", help="Synthetic INxOUT shapes, e.g. 2048x2048")
     parser.add_argument("--dtype", choices=("float16", "bfloat16", "float32"), default="float16")
-    parser.add_argument("--batch-sizes", default="1,8,16,32,128", help="Activation rows, comma-separated")
+    parser.add_argument("--batch-sizes", default="1,8,16,32,64,128,256,512,1024", help="Activation rows, comma-separated")
+    parser.add_argument("--vector-lens", default="4,8,16", help="Synthetic VPTQ vector lengths, comma-separated")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--repeats", type=int, default=30)
+    parser.add_argument("--iterations-per-sample", type=int, default=5,
+                        help="Forward calls per synchronized timing sample")
     parser.add_argument("--seed", type=int, default=2026)
     parser.add_argument("--output", type=Path, help="Optional JSON result path")
     args = parser.parse_args()
 
     if args.synthetic == bool(args.model):
         parser.error("Provide a checkpoint path, or pass --synthetic (but not both).")
-    if args.warmup < 0 or args.repeats < 1:
-        parser.error("--warmup must be non-negative and --repeats must be positive.")
+    if args.warmup < 0 or args.repeats < 1 or args.iterations_per_sample < 1:
+        parser.error("--warmup must be non-negative; --repeats and --iterations-per-sample must be positive.")
     device = torch.device(args.device)
     if device.type != "cuda" or not torch.cuda.is_available():
         raise SystemExit("A CUDA device is required.")
@@ -227,6 +289,7 @@ def main() -> None:
 
     dtype = getattr(torch, args.dtype)
     rows_list = _parse_ints(args.batch_sizes, "--batch-sizes")
+    vector_lens = _parse_ints(args.vector_lens, "--vector-lens")
     torch.manual_seed(args.seed)
     torch.cuda.set_device(device)
     results = []
@@ -240,18 +303,21 @@ def main() -> None:
         except ValueError as exc:
             parser.error("--shapes must be comma-separated INxOUT pairs with positive dimensions.")
         for index, (in_features, out_features) in enumerate(shapes):
-            module = _synthetic_module(
-                in_features, out_features, dtype, device, seed=args.seed + index
-            )
-            results.extend(
-                _benchmark_module(
-                    f"synthetic_{in_features}x{out_features}", module, rows_list,
-                    dtype_name=args.dtype, device=device, warmup=args.warmup,
-                    repeats=args.repeats, seed=args.seed,
+            for vector_len in vector_lens:
+                module = _synthetic_module(
+                    in_features, out_features, dtype, device,
+                    seed=args.seed + index + vector_len, vector_len=vector_len,
                 )
-            )
-            del module
-            torch.cuda.empty_cache()
+                results.extend(
+                    _benchmark_module(
+                        f"synthetic_{in_features}x{out_features}_v{vector_len}",
+                        module, rows_list, dtype_name=args.dtype, device=device,
+                        warmup=args.warmup, repeats=args.repeats,
+                        iterations_per_sample=args.iterations_per_sample, seed=args.seed,
+                    )
+                )
+                del module
+                torch.cuda.empty_cache()
     else:
         model, modules = _load_checkpoint_modules(args.model, dtype, device, args.layer)
         models.append(model)
@@ -263,7 +329,8 @@ def main() -> None:
             results.extend(
                 _benchmark_module(
                     name, module, rows_list, dtype_name=args.dtype, device=device,
-                    warmup=args.warmup, repeats=args.repeats, seed=args.seed,
+                    warmup=args.warmup, repeats=args.repeats,
+                    iterations_per_sample=args.iterations_per_sample, seed=args.seed,
                 )
             )
 
@@ -281,6 +348,7 @@ def main() -> None:
             "dtype": args.dtype,
             "warmup": args.warmup,
             "repeats": args.repeats,
+            "iterations_per_sample": args.iterations_per_sample,
             "results": results,
         }
         args.output.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")

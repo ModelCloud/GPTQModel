@@ -14,6 +14,16 @@ from ...utils.backend import BACKEND
 from .vptq_torch import VPTQLinear
 
 
+# Initial crossover point from paired RTX 4090 benchmarks. The existing fused
+# kernel is retained for decode-sized inputs; larger M reconstructs weights
+# once and uses cuBLAS GEMM. Keep this internal until broader device testing.
+_VPTQ_CUDA_FUSED_MAX_ROWS = 1
+
+
+def _vptq_cuda_fused_max_rows(module: VPTQLinear) -> int:
+    return _VPTQ_CUDA_FUSED_MAX_ROWS
+
+
 class VPTQCudaLinear(VPTQLinear):
     """VPTQ layer using native CUDA ops, following upstream quant_gemm dispatch."""
 
@@ -78,7 +88,8 @@ class VPTQCudaLinear(VPTQLinear):
         if self.indices.device != x.device or self.centroids.weight.device != x.device:
             raise RuntimeError("VPTQ_CUDA requires VPTQ buffers and activations on the same CUDA device.")
 
-        if x.dtype == self.centroids.weight.dtype:
+        fused_max_rows = _vptq_cuda_fused_max_rows(self)
+        if x.dtype == self.centroids.weight.dtype and rows <= fused_max_rows:
             from ...utils.vptq_cuda import vptq_cuda_linear
 
             out = vptq_cuda_linear(
@@ -105,8 +116,8 @@ class VPTQCudaLinear(VPTQLinear):
                 norm_dim=self.norm_dim,
             )
         else:
-            # The fused GEMV repeats weight reconstruction for each activation
-            # row. Dequantize once and let cuBLAS reuse the dense weight tiles.
+            # The fused GEMV repeats weight reconstruction across activation
+            # rows. For larger M, reconstruct once and let cuBLAS reuse weight.
             weight = self._dequantize_cuda().to(dtype=x.dtype)
             if bias is not None and bias.dtype != x.dtype:
                 bias = bias.to(dtype=x.dtype)

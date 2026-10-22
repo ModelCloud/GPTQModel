@@ -161,18 +161,21 @@ and trade extra quantization time for accuracy.
 Checkpoints saved by GPT-QModel contain `FORMAT.VPTQ`. Use
 `GPTQModel.load(quant_path, backend=BACKEND.VPTQ_CUDA)` for CUDA inference;
 `BACKEND.VPTQ_TORCH` remains available as the reference implementation.
-Matching activation and codebook dtypes use a fused CUDA kernel that reconstructs
-weights during the linear operation, for any activation row count. Dtype
-mismatches use the CUDA dequantization op followed by Torch/cuBLAS GEMM. FP16,
-BF16, and FP32 are supported when stored in the checkpoint. Torch inference
-also runs on CPU and other Torch devices.
+For matching activation and codebook dtypes, decode-sized inputs (one row) use
+the fused CUDA kernel. Larger activation batches reconstruct the dense weight
+once with the CUDA dequantization op, then use Torch/cuBLAS GEMM. Dtype
+mismatches use the same dequantization plus GEMM path. FP16, BF16, and FP32 are
+supported when stored in the checkpoint. Torch inference also runs on CPU and
+other Torch devices.
 
 To compare `VPTQ_CUDA` directly with `VPTQ_TORCH` on a CUDA host, run
 `python scripts/benchmark_vptq_cuda.py /path/to/checkpoint --dtype float16`.
-Both forwards use the same module state and activation tensor. The benchmark
-reports median, minimum, and p90 latency, speedup, and output error by layer
-and activation row count. Use `--synthetic` to compare deterministic packed
-layers without loading a checkpoint, for example:
+Both forwards use the same module state and activation tensor. It compares
+dispatch, direct fused GEMV, dequantization plus GEMM, and `VPTQ_TORCH`. The
+benchmark reports synchronized GPU-event time and full wall-clock latency for
+each route, with median, minimum, and p90 by layer and activation row count.
+Use `--synthetic` to compare deterministic packed layers without loading a
+checkpoint, for example:
 
 ```bash
 python scripts/benchmark_vptq_cuda.py \
