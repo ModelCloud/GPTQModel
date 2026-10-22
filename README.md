@@ -26,6 +26,7 @@
 
 ## Latest News 🗞️🚀
 
+* 10/22/2026 7.7.0-dev `main`: ✨ Added `llava` quantization support.
 * 10/14/2026 7.7.0-dev `main`: ✨ Added `qwen2_audio` quantization support.
 * 10/13/2026 7.7.0-dev `main`: ✨ Added `openvla` quantization support.
 
