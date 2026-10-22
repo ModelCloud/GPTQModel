@@ -1124,6 +1124,8 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ## Operational notes 🗒️
 
+For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide](docs/multi_gpu_quantization.md). Setting `CUDA_VISIBLE_DEVICES` exposes GPUs to the process; MoE device placement and free-threaded parallel quantization also need to be configured.
+
 ### Limit log level 🔇
 
 `GPT-QModel` uses a shared `LogBar` logger. Set the level once near process startup:
