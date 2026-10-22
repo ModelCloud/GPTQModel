@@ -1,5 +1,10 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+// SPDX-License-Identifier: MIT
 // SPDX-FileCopyrightText: 2026 ModelCloud.ai
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0 AND MIT
+//
+// Adapted from https://github.com/microsoft/VPTQ
 
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -221,6 +226,118 @@ __global__ void vptq_linear_kernel(
   }
 }
 
+// Follow VPTQ's GEMV mapping: one CTA computes a whole output code vector,
+// with each thread traversing input channels and accumulating all components.
+// This decodes each packed index once for the vector instead of once per output.
+template <typename scalar_t, typename weight_t>
+__global__ void vptq_linear_vec4_kernel(
+    const scalar_t* x,
+    scalar_t* output,
+    const int32_t* indices,
+    const weight_t* centroids,
+    const weight_t* res_centroids,
+    const int32_t* inverse_perm,
+    const weight_t* weight_scale,
+    const weight_t* weight_bias,
+    const scalar_t* bias,
+    int batch,
+    int group_size,
+    int in_features,
+    int out_features,
+    int outlier_size,
+    int num_centroids,
+    int num_res_centroids,
+    int index_bits,
+    int res_bits,
+    int packed_words,
+    int num_indices,
+    int norm_dim,
+    bool has_residual,
+    bool has_perm,
+    bool has_norm,
+    bool has_bias) {
+  const int b = blockIdx.y;
+  const int first_row = blockIdx.x * 4;
+  const int vector = first_row / 4;
+  using acc_t = float;
+  acc_t sums[4] = {0.0, 0.0, 0.0, 0.0};
+
+  for (int channel = threadIdx.x; channel < in_features; channel += blockDim.x) {
+    const int qchannel = has_perm ? inverse_perm[channel] : channel;
+    if (qchannel < outlier_size) continue;  // Generic kernel handles outliers.
+    const int main_channel = qchannel - outlier_size;
+    const int group = main_channel / group_size;
+    const int within_group = main_channel - group * group_size;
+    const int64_t packed_row =
+        (static_cast<int64_t>(group) * num_indices + vector) * packed_words;
+    const int bits_per_index = index_bits + res_bits;
+    const int bit = within_group * bits_per_index;
+    const int word = bit >> 5;
+    const int shift = bit & 31;
+    const uint64_t lo = static_cast<uint32_t>(indices[packed_row + word]);
+    const uint64_t hi = word + 1 < packed_words
+        ? static_cast<uint32_t>(indices[packed_row + word + 1])
+        : 0ULL;
+    const uint32_t mask = bits_per_index == 32
+        ? 0xffffffffu
+        : ((1u << bits_per_index) - 1u);
+    const uint32_t packed_index = static_cast<uint32_t>((lo | (hi << 32)) >> shift) & mask;
+    const uint32_t main_index = packed_index & ((1u << index_bits) - 1u);
+    const uint32_t residual_index = has_residual
+        ? ((packed_index >> index_bits) & ((1u << res_bits) - 1u))
+        : 0;
+    const float activation = load_float(x, static_cast<int64_t>(b) * in_features + channel);
+
+#pragma unroll
+    for (int component = 0; component < 4; ++component) {
+      const int row = first_row + component;
+      if (row >= out_features) continue;
+      float weight = load_float(centroids,
+          (static_cast<int64_t>(group) * num_centroids + main_index) * 4 + component);
+      if (has_residual) {
+        const float residual = load_float(res_centroids,
+            (static_cast<int64_t>(group) * num_res_centroids + residual_index) * 4 + component);
+        weight = static_cast<float>(rounded<weight_t>(weight + residual));
+      }
+      if (has_norm) {
+        const int norm_index = norm_dim == 0 ? channel : row;
+        weight = static_cast<float>(rounded<weight_t>(
+            weight * load_float(weight_scale, norm_index)));
+        weight = static_cast<float>(rounded<weight_t>(
+            weight + load_float(weight_bias, norm_index)));
+      }
+      sums[component] = fmaf(activation, weight, sums[component]);
+    }
+  }
+
+  __shared__ acc_t warp_sums[4][kThreads / 32];
+#pragma unroll
+  for (int component = 0; component < 4; ++component) {
+    acc_t sum = sums[component];
+    for (int offset = 16; offset > 0; offset >>= 1)
+      sum += __shfl_down_sync(0xffffffff, sum, offset);
+    if ((threadIdx.x & 31) == 0)
+      warp_sums[component][threadIdx.x >> 5] = sum;
+  }
+  __syncthreads();
+  if (threadIdx.x < 32) {
+#pragma unroll
+    for (int component = 0; component < 4; ++component) {
+      float total = threadIdx.x < (kThreads / 32)
+          ? warp_sums[component][threadIdx.x]
+          : 0.0;
+      for (int offset = 16; offset > 0; offset >>= 1)
+        total += __shfl_down_sync(0xffffffff, total, offset);
+      const int row = first_row + component;
+      if (threadIdx.x == 0 && row < out_features) {
+        if (has_bias) total += load_float(bias, row);
+        output[static_cast<int64_t>(b) * out_features + row] =
+            rounded<scalar_t>(static_cast<float>(total));
+      }
+    }
+  }
+}
+
 template <typename scalar_t, typename weight_t>
 void launch_dequantize(
     at::Tensor& output, const at::Tensor& indices, const at::Tensor& centroids,
@@ -266,9 +383,24 @@ void launch_linear(
     int64_t outlier_size, int64_t outlier_vector_len, int64_t num_centroids,
     int64_t num_res_centroids, int64_t index_bits, int64_t res_bits,
     int64_t norm_dim) {
-  const int64_t n = batch * out_features;
-  const int blocks = static_cast<int>(n);
-  vptq_linear_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+  const bool vectorized = vector_len == 4 && !outlier_indices.has_value();
+  if (vectorized) {
+    const dim3 blocks((out_features + 3) / 4, batch);
+    vptq_linear_vec4_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
+      x.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), indices.data_ptr<int32_t>(),
+      centroids.data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->data_ptr<weight_t>() : nullptr,
+      inverse_perm.has_value() ? inverse_perm->data_ptr<int32_t>() : nullptr,
+      weight_scale.has_value() ? weight_scale->data_ptr<weight_t>() : nullptr,
+      weight_bias.has_value() ? weight_bias->data_ptr<weight_t>() : nullptr,
+      bias.has_value() ? bias->data_ptr<scalar_t>() : nullptr, batch, group_size,
+      in_features, out_features, outlier_size, num_centroids, num_res_centroids,
+      index_bits, res_bits, indices.size(2),
+      (out_features + vector_len - 1) / vector_len, norm_dim, res_centroids.has_value(),
+      inverse_perm.has_value(), weight_scale.has_value(), bias.has_value());
+  } else {
+    const int64_t n = batch * out_features;
+    const int blocks = static_cast<int>(n);
+    vptq_linear_kernel<scalar_t, weight_t><<<blocks, kThreads, 0, at::cuda::getCurrentCUDAStream()>>>(
       x.data_ptr<scalar_t>(), output.data_ptr<scalar_t>(), indices.data_ptr<int32_t>(),
       centroids.data_ptr<weight_t>(), res_centroids.has_value() ? res_centroids->data_ptr<weight_t>() : nullptr,
       outlier_indices.has_value() ? outlier_indices->data_ptr<int32_t>() : nullptr,
@@ -283,6 +415,7 @@ void launch_linear(
       (out_features + vector_len - 1) / vector_len, res_centroids.has_value(),
       outlier_indices.has_value(), inverse_perm.has_value(), weight_scale.has_value(),
       bias.has_value());
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
