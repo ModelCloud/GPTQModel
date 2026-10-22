@@ -113,6 +113,57 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
     torch.testing.assert_close(out, expected, rtol=1e-3, atol=1e-3)
 
 
+def test_fp8_dequant_cache_reuses_and_invalidates():
+    torch.manual_seed(3)
+    linear = nn.Linear(64, 64, bias=True).eval()
+    kernel = TorchFP8Linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        in_features=64,
+        out_features=64,
+        bias=True,
+        pack_dtype=torch.int32,
+        format="float8_e4m3fn",
+        weight_scale_method="row",
+        weight_block_size=None,
+        register_buffers=False,
+    )
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel = kernel.eval()
+    kernel._scaled_mm_hard_disabled = True
+    x = torch.randn(5, 64)
+
+    with torch.inference_mode():
+        first = kernel(x)
+    cached = kernel._dequant_weight_cache
+    assert cached is not None
+    assert kernel._dequant_weight_cache_key is not None
+
+    with torch.inference_mode():
+        second = kernel(x)
+    assert kernel._dequant_weight_cache is cached
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+
+    with torch.inference_mode():
+        kernel.weight.copy_(kernel.weight)
+        third = kernel(x)
+    assert kernel._dequant_weight_cache is not cached
+    torch.testing.assert_close(third, first, rtol=0, atol=0)
+
+    with torch.inference_mode():
+        kernel.load_state_dict(kernel.state_dict())
+    assert kernel._dequant_weight_cache is None
+    assert kernel._dequant_weight_cache_key is None
+
+    with torch.inference_mode():
+        kernel(x)
+    assert kernel._dequant_weight_cache is not None
+    kernel.train(True)
+    assert kernel._dequant_weight_cache is None
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("fmt", _available_fp8_quant_formats())
 @pytest.mark.parametrize("weight_scale_method", ["tensor", "row"])

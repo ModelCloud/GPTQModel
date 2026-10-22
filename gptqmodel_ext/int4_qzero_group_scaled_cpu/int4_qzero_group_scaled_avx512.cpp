@@ -24,12 +24,12 @@ namespace int4_qzero_group_scaled_cpu
 
         inline void unpack_B(
             at::BFloat16 *__restrict__ Btmp, const unsigned char *__restrict__ packed_B,
-            const uint8_t* __restrict__ Bz, const at::BFloat16 *__restrict__ Bs,
-            int64_t N, int64_t K, int blocksize, int64_t ldb, int64_t ldb_tmp, int64_t strideBz, int64_t strideBs)
+            const uint8_t* __restrict__ Bz,
+            int64_t N, int64_t K, int64_t ldb, int64_t ldb_tmp, int64_t strideBz)
         {
-            // Dequant: (w - z) * s -> bf16
+            // Unpack (w - z) as exact BF16 integers. The group scale is
+            // applied after the BF16 dot product so it stays in FP32.
             const int64_t K2 = K >> 1; // 2 weights packed per byte
-            const int64_t gs2 = blocksize >> 1;
             const int64_t ldb2 = ldb;                          // packed leading dimension (bytes)
             const int64_t ldb_tmp2 = ldb_tmp;                  // output leading dimension in elements
             float *btmp_ptr = reinterpret_cast<float *>(Btmp); // direct bf16 storage
@@ -51,30 +51,16 @@ namespace int4_qzero_group_scaled_cpu
             __m512i s_idx0 = _mm512_set_epi32(7, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1, 0, 0);
 
             __m256i zeros_lo, zeros_hi;
-            __m512 scale_lo_fp32, scale_hi_fp32;
-            __m512 scales[4];
 
             for (int64_t n = 0; n < N; n += 32)
             {
+                // Every unpack_B call covers one quantization group, so all
+                // rows in this call share the same zero points.
+                __m256i zraw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(Bz + n));
+                zeros_lo = _mm256_permutexvar_epi8(z_idx0, zraw);
+                zeros_hi = _mm256_permutexvar_epi8(z_idx1, zraw);
                 for (int64_t k = 0; k < K2; ++k)
                 {
-                    if (k % gs2 == 0)
-                    {
-                        const int64_t kgs = k / gs2;
-                        // Load 32 zero points
-                        __m256i zraw = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(Bz + kgs * strideBz + n));
-                        zeros_lo = _mm256_permutexvar_epi8(z_idx0, zraw);
-                        zeros_hi = _mm256_permutexvar_epi8(z_idx1, zraw);
-                        // Load 32 scales (bf16) -> two fp32 vectors (first16, second16)
-                        __m512i scales_bf16 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(Bs + kgs * strideBs + n));
-                        scale_lo_fp32 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(scales_bf16, 0));
-                        scale_hi_fp32 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(scales_bf16, 1));
-                        scales[0] = _mm512_permutexvar_ps(s_idx0, scale_lo_fp32);
-                        scales[1] = _mm512_permutexvar_ps(s_idx1, scale_lo_fp32);
-                        scales[2] = _mm512_permutexvar_ps(s_idx0, scale_hi_fp32);
-                        scales[3] = _mm512_permutexvar_ps(s_idx1, scale_hi_fp32);
-                    }
-
                     // Load packed 32 bytes => 64 int4
                     __m256i w_u4 = _mm256_loadu_si256(reinterpret_cast<const __m256i *>(packed_B + k * ldb2 + n));
 
@@ -94,18 +80,9 @@ namespace int4_qzero_group_scaled_cpu
                     __m512i w_lo_bf16 = _mm512_permutexvar_epi16(_mm512_cvtepi8_epi16(w_lo), lut);
                     __m512i w_hi_bf16 = _mm512_permutexvar_epi16(_mm512_cvtepi8_epi16(w_hi), lut);
 
-                    __m512 w_lo_fp32_0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(w_lo_bf16, 0)) * scales[0];
-                    __m512 w_hi_fp32_0 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(w_lo_bf16, 1)) * scales[1];
-                    __m512 w_lo_fp32_1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(w_hi_bf16, 0)) * scales[2];
-                    __m512 w_hi_fp32_1 = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(w_hi_bf16, 1)) * scales[3];
-
-                    // Pack scaled (first 16 cols) then (second 16 cols) to bf16
-                    __m512bh packed0 = _mm512_cvtne2ps_pbh(w_hi_fp32_0, w_lo_fp32_0);
-                    __m512bh packed1 = _mm512_cvtne2ps_pbh(w_hi_fp32_1, w_lo_fp32_1);
-
-                    // Store: two blocks of 16 bf16 (32 elements) per k iteration
-                    _mm512_storeu_si512(btmp_ptr + (k * ldb_tmp2 + n + 0), (__m512i)packed0);
-                    _mm512_storeu_si512(btmp_ptr + (k * ldb_tmp2 + n + 16), (__m512i)packed1);
+                    // Store: two blocks of 32 bf16 values per k iteration.
+                    _mm512_storeu_si512(btmp_ptr + (k * ldb_tmp2 + n + 0), w_lo_bf16);
+                    _mm512_storeu_si512(btmp_ptr + (k * ldb_tmp2 + n + 16), w_hi_bf16);
                 }
             }
         }
@@ -114,8 +91,8 @@ namespace int4_qzero_group_scaled_cpu
         struct tinygemm_kernel_nn
         {
             static inline void apply(
-                const scalar_t *, const unsigned char *, const uint8_t*, scalar_t *, const scalar_t *, int64_t, int, int64_t, int64_t, int64_t,
-                int64_t, int64_t, int64_t)
+                const scalar_t *, const unsigned char *, const uint8_t*, scalar_t *, const scalar_t *,
+                const float *, int64_t, int, int64_t, int64_t, int64_t, int64_t, int64_t)
             {
                 static_assert(sizeof(scalar_t) == 0, "tinygemm_kernel_nn primary template should never be instantiated");
             }
@@ -127,7 +104,8 @@ namespace int4_qzero_group_scaled_cpu
         {
             static inline void apply(
                 const scalar_t *__restrict__ A, const unsigned char *__restrict__ B, scalar_t *__restrict__ C, const uint8_t* __restrict__ Bz,
-                const scalar_t *__restrict__ Bs, scalar_t *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
+                const float *__restrict__ Bs, const float *__restrict__ bias,
+                scalar_t *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
                 int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs)
             {
                 return;
@@ -139,7 +117,8 @@ namespace int4_qzero_group_scaled_cpu
         {
             static inline void apply(
                 const at::BFloat16 *__restrict__ A, const unsigned char *__restrict__ B, at::BFloat16 *__restrict__ C, const uint8_t* __restrict__ Bz,
-                const at::BFloat16 *__restrict__ Bs, int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs)
+                const float *__restrict__ Bs, const float *__restrict__ bias,
+                int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs)
             {
                 static_assert(BLOCK_N % 32 == 0);
                 constexpr int ROWS = BLOCK_M;      // 32
@@ -161,6 +140,7 @@ namespace int4_qzero_group_scaled_cpu
                             0x0000, -0x4080, -0x4000, -0x3FC0, -0x3F80, -0x3F60, -0x3F40, -0x3F20,
                             -0x3F00, -0x3EF0, -0x3EE0, -0x3ED0, -0x3EC0, -0x3EB0, -0x3EA0, -0x3E90);
                 __m512 scales[COLS];
+                __m512 bias_vec[COLS];
                 __m256i zeros[COLS * 2];
                 // repeat interleave
                 __m256i idx1 = _mm256_set_epi8(
@@ -175,9 +155,16 @@ namespace int4_qzero_group_scaled_cpu
                 const int64_t gs2 = blocksize >> 1; // 64 / 2 = 32
                 const float *a_ptr = reinterpret_cast<const float *>(A);
 
+                if (bias != nullptr)
+                {
+                    Unroll<COLS>{}([&](auto col)
+                    {
+                        bias_vec[col] = _mm512_loadu_ps(bias + col * 16);
+                    });
+                }
+
                 auto loadc = [&](auto i)
                 {
-                    constexpr int col = i % COLS;
                     vc_master[i] = _mm512_set1_ps(0.f);
                 };
                 Unroll<ROWS * COLS>{}(loadc);
@@ -198,9 +185,8 @@ namespace int4_qzero_group_scaled_cpu
                         zeros[col] = _mm256_permutexvar_epi8(idx0, tmp);
                         zeros[col + 1] = _mm256_permutexvar_epi8(idx1, tmp);
                         // Bs layout: [K/gs, BLOCK_N] : [strideBs, 1], dtype=bf16
-                        __m512i tmp2 = _mm512_loadu_si512(reinterpret_cast<const __m512i *>(Bs + kgs * strideBs + col * 16));
-                        scales[col] = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(tmp2, 0));
-                        scales[col + 1] = CVT_BF16_TO_FP32(_mm512_extracti32x8_epi32(tmp2, 1));
+                        scales[col] = _mm512_loadu_ps(Bs + kgs * strideBs + col * 16);
+                        scales[col + 1] = _mm512_loadu_ps(Bs + kgs * strideBs + col * 16 + 16);
                     }
                 };
                 auto compute = [&](auto i, int64_t k)
@@ -251,9 +237,16 @@ namespace int4_qzero_group_scaled_cpu
                     constexpr int col = i % COLS;
                     if constexpr (col % 2 == 0)
                     {
+                        __m512 result_lo = vc_master[i];
+                        __m512 result_hi = vc_master[i + 1];
+                        if (bias != nullptr)
+                        {
+                            result_lo = _mm512_add_ps(result_lo, bias_vec[col]);
+                            result_hi = _mm512_add_ps(result_hi, bias_vec[col + 1]);
+                        }
                         _mm512_storeu_si512(
                             reinterpret_cast<__m512i *>(C + row * ldc + col * 16),
-                            (__m512i)(_mm512_cvtne2ps_pbh(vc_master[i + 1], vc_master[i])));
+                            (__m512i)(_mm512_cvtne2ps_pbh(result_hi, result_lo)));
                     }
                 };
                 Unroll<ROWS * COLS>{}(storec);
@@ -263,7 +256,8 @@ namespace int4_qzero_group_scaled_cpu
 #define LAUNCH_TINYGEMM_KERNEL_NN(MB_SIZE, NB_SIZE)                                                       \
     tinygemm_kernel_nn<scalar_t, MB_SIZE, NB_SIZE>::apply(                                                \
         A + mb_start * lda, B + nb_start, C + mb_start * ldc + nb_start, Bz + nb_start, \
-        Bs + nb_start, K, blocksize, lda, ldb, ldc, strideBz, strideBs);
+        Bs + nb_start, bias == nullptr ? nullptr : bias + nb_start, \
+        K, blocksize, lda, ldb, ldc, strideBz, strideBs);
 
         inline uint16_t float_to_bf16_round(float x)
         {
@@ -293,7 +287,9 @@ namespace int4_qzero_group_scaled_cpu
         }
 
         template <typename scalar_t>
-        inline void copy_stub(scalar_t* __restrict__ out, const float* __restrict__ input, int64_t size) {
+        inline void copy_stub(
+            scalar_t* __restrict__ out, const float* __restrict__ input,
+            const float* __restrict__ bias, int64_t size) {
             using bVec = at::vec::Vectorized<scalar_t>;
             using fVec = at::vec::Vectorized<float>;
             constexpr int kVecSize = bVec::size();
@@ -303,11 +299,15 @@ namespace int4_qzero_group_scaled_cpu
             for (d = 0; d <= size - kVecSize; d += kVecSize) {
                 fVec data0 = fVec::loadu(input + d);
                 fVec data1 = fVec::loadu(input + d + fVec::size());
+                if (bias != nullptr) {
+                    data0 = data0 + fVec::loadu(bias + d);
+                    data1 = data1 + fVec::loadu(bias + d + fVec::size());
+                }
                 bVec out_vec = convert_from_float_ext<scalar_t>(data0, data1);
                 out_vec.store(out + d);
             }
             for (; d < size; ++d) {
-                out[d] = static_cast<scalar_t>(input[d]);
+                out[d] = static_cast<scalar_t>(input[d] + (bias != nullptr ? bias[d] : 0.0f));
             }
         }
 
@@ -316,29 +316,62 @@ namespace int4_qzero_group_scaled_cpu
         {
             static inline void apply(
                 const at::BFloat16 *__restrict__ A, const unsigned char *__restrict__ B, at::BFloat16 *__restrict__ C, const uint8_t* __restrict__ Bz,
-                const at::BFloat16 *__restrict__ Bs, at::BFloat16 *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
+                const float *__restrict__ Bs, const float *__restrict__ bias,
+                at::BFloat16 *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
                 int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs)
             {
                 constexpr int BLOCK_N = block_size_n();
                 const int ldb_tmp = BLOCK_N;
-                for (int64_t k = 0; k < K; k += BLOCK_K)
+                alignas(64) float Cacc[block_size_m() * BLOCK_N];
+
+                for (int64_t m = 0; m < M; ++m)
                 {
-                    int64_t kb_size = std::min(static_cast<int64_t>(BLOCK_K), K - k);
-                    const int64_t kgs = k / blocksize;
+                    std::fill_n(Cacc + m * BLOCK_N, N, 0.0f);
+                }
 
-                    unpack_B(
-                        Btmp, B + (k >> 1) * ldb, Bz + kgs * strideBz, Bs + kgs * strideBs,
-                        N, kb_size, blocksize, ldb, ldb_tmp, strideBz, strideBs);
+                for (int64_t group_start = 0; group_start < K; group_start += blocksize)
+                {
+                    const int64_t group_size = std::min<int64_t>(blocksize, K - group_start);
+                    const int64_t group_idx = group_start / blocksize;
 
-                    const bool add_C = k != 0;
-                    at::native::cpublas::brgemm(
-                        M, N, kb_size, lda, ldb_tmp, BLOCK_N, add_C, A + k, Btmp, Ctmp);
+                    for (int64_t group_offset = 0; group_offset < group_size; group_offset += BLOCK_K)
+                    {
+                        const int64_t k = group_start + group_offset;
+                        const int64_t kb_size = std::min<int64_t>(BLOCK_K, group_size - group_offset);
+
+                        unpack_B(
+                            Btmp, B + (k >> 1) * ldb, Bz + group_idx * strideBz,
+                            N, kb_size, ldb, ldb_tmp, strideBz);
+
+                        at::native::cpublas::brgemm(
+                            M, N, kb_size, lda, ldb_tmp, BLOCK_N, group_offset != 0, A + k, Btmp, Ctmp);
+                    }
+
+                    // Apply the group scale in FP32 after the exact integer
+                    // dot product, matching the tinygemm arithmetic order.
+                    for (int64_t m = 0; m < M; ++m)
+                    {
+                        const float *src = Ctmp + m * BLOCK_N;
+                        float *dst = Cacc + m * BLOCK_N;
+                        int64_t n = 0;
+                        for (; n + 16 <= N; n += 16)
+                        {
+                            const __m512 values = _mm512_loadu_ps(src + n);
+                            const __m512 scales = _mm512_loadu_ps(Bs + group_idx * strideBs + n);
+                            const __m512 acc = _mm512_loadu_ps(dst + n);
+                            _mm512_storeu_ps(dst + n, _mm512_fmadd_ps(values, scales, acc));
+                        }
+                        for (; n < N; ++n)
+                        {
+                            dst[n] = std::fma(src[n], Bs[group_idx * strideBs + n], dst[n]);
+                        }
+                    }
                 }
 
                 // copy from Ctmp to C
                 for (int64_t m = 0; m < M; ++m)
                 {
-                    copy_stub(C + m * ldc, Ctmp + m * BLOCK_N, N);
+                    copy_stub(C + m * ldc, Cacc + m * BLOCK_N, bias, N);
                 }
             }
         };
@@ -346,13 +379,14 @@ namespace int4_qzero_group_scaled_cpu
         template <typename scalar_t>
         void tinygemm_kernel(
             const scalar_t *__restrict__ A, const unsigned char *__restrict__ B, scalar_t *__restrict__ C, const uint8_t* __restrict__ Bz,
-            const scalar_t *__restrict__ Bs, scalar_t *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
+            const float *__restrict__ Bs, const float *__restrict__ bias,
+            scalar_t *__restrict__ Btmp, float *__restrict__ Ctmp, int64_t M, int64_t N,
             int64_t K, int blocksize, int64_t lda, int64_t ldb, int64_t ldc, int64_t strideBz, int64_t strideBs, bool brg)
         {
             if (brg)
             {
                 brgemm<scalar_t>::apply(
-                    A, B, C, Bz, Bs, Btmp, Ctmp, M, N, K, blocksize, lda, ldb, ldc, strideBz, strideBs);
+                    A, B, C, Bz, Bs, bias, Btmp, Ctmp, M, N, K, blocksize, lda, ldb, ldc, strideBz, strideBs);
                 return;
             }
             constexpr int64_t BLOCK_M = 4;
@@ -412,7 +446,8 @@ namespace int4_qzero_group_scaled_cpu
         template <typename T>
         void gemm_int4_inference(
             int64_t M, int64_t N, int64_t K, const T *__restrict__ x, const unsigned char *__restrict__ w, const uint8_t *__restrict__ zeros,
-            const T *__restrict__ absmax, T *__restrict__ out, int64_t blocksize, int64_t x_stride, int64_t out_stride)
+            const float *__restrict__ absmax, const float *__restrict__ bias, T *__restrict__ out,
+            int64_t blocksize, int64_t x_stride, int64_t out_stride)
         {
             constexpr int64_t BLOCK_M = block_size_m(); // 32
             constexpr int64_t BLOCK_N = block_size_n(); // 32
@@ -442,6 +477,7 @@ namespace int4_qzero_group_scaled_cpu
                             /*   C  */ out + mb_start * out_stride + nb_start,
                             /*  Bz  */ zeros + nb_start,
                             /*  Bs  */ absmax + nb_start,
+                            /* bias */ bias == nullptr ? nullptr : bias + nb_start,
                             /* Btmp */ Btmp_inner,
                             /* Ctmp */ Ctmp,
                             /*   M  */ mb_size,
@@ -469,6 +505,7 @@ namespace int4_qzero_group_scaled_cpu
 
         template void gemm_int4_inference<at::BFloat16>(
             int64_t M, int64_t N, int64_t K, const at::BFloat16 *__restrict__ x, const unsigned char *__restrict__ w, const uint8_t *__restrict__ zeros,
-            const at::BFloat16 *__restrict__ absmax, at::BFloat16 *__restrict__ out, int64_t blocksize, int64_t x_stride, int64_t out_stride);
+            const float *__restrict__ absmax, const float *__restrict__ bias, at::BFloat16 *__restrict__ out,
+            int64_t blocksize, int64_t x_stride, int64_t out_stride);
     } // namespace avx512
 } // namespace int4_qzero_group_scaled_cpu

@@ -1129,6 +1129,16 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
         blocks, rows, _ = self._reshape_blocks(device=target_device)
+        return self._dequantize_q4_0_blocks(blocks, target_dtype).reshape(
+            rows, self.padded_in_features
+        )
+
+    def _dequantize_q4_0_blocks(
+        self,
+        blocks: torch.Tensor,
+        target_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        rows, num_blocks = blocks.shape[0], blocks.shape[1]
 
         d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
         if d.dtype != target_dtype:
@@ -1140,7 +1150,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         values = torch.cat((low, high), dim=-1).to(torch.int16) - 8
 
         weight = d.unsqueeze(-1) * values.to(target_dtype)
-        return weight.reshape(rows, self.padded_in_features)
+        return weight.reshape(rows, num_blocks * self.gguf_block_size)
 
     def _dequantize_q8_0(
         self,
@@ -1150,6 +1160,16 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
         blocks, rows, _ = self._reshape_blocks(device=target_device)
+        return self._dequantize_q8_0_blocks(blocks, target_dtype).reshape(
+            rows, self.padded_in_features
+        )
+
+    def _dequantize_q8_0_blocks(
+        self,
+        blocks: torch.Tensor,
+        target_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        rows, num_blocks = blocks.shape[0], blocks.shape[1]
 
         d = blocks[..., :2].contiguous().view(torch.float16).squeeze(-1)
         if d.dtype != target_dtype:
@@ -1158,7 +1178,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         x = blocks[..., 2:].contiguous().view(torch.int8).to(target_dtype)
 
         weight = d.unsqueeze(-1) * x
-        return weight.reshape(rows, self.padded_in_features)
+        return weight.reshape(rows, num_blocks * self.gguf_block_size)
 
     def _dequantize_sign_only(
         self,
@@ -1311,7 +1331,8 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             return False
 
         return (
-            self.gguf_tensor_qtype in (_GGUF_K_QTYPES | set(_GGUF_SIGN_ONLY_TYPE_INFO))
+            self.gguf_tensor_qtype
+            in (_GGUF_K_QTYPES | set(_GGUF_SIGN_ONLY_TYPE_INFO) | {"Q4_0", "Q8_0"})
             and self.adapter is None
             and not self.training
             and max_rows > 0
@@ -1357,6 +1378,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         except Exception:
             return False
 
+    def clear_autotune(self):
+        super().clear_autotune()
+        self._gguf_fused_autotune_cache = {}
+
     def _should_use_fused_k_forward(self, x_flat: torch.Tensor) -> bool:
         if not self._is_fused_k_forward_candidate(x_flat):
             return False
@@ -1364,7 +1389,15 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         if not self.autotune_enabled:
             return True
 
-        return bool(self.maybe_autotune(x_flat))
+        key = (
+            x_flat.device.type,
+            x_flat.device.index,
+            x_flat.dtype,
+            tuple(x_flat.shape),
+        )
+        if key not in self._gguf_fused_autotune_cache:
+            self._gguf_fused_autotune_cache[key] = self._autotune(x_flat)
+        return bool(self._gguf_fused_autotune_cache[key])
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
@@ -1391,6 +1424,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                 weight_chunk = self._dequantize_q5_k_blocks(block_chunk, target_dtype)
             elif self.gguf_tensor_qtype == "Q6_K":
                 weight_chunk = self._dequantize_q6_k_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype == "Q4_0":
+                weight_chunk = self._dequantize_q4_0_blocks(block_chunk, target_dtype)
+            elif self.gguf_tensor_qtype == "Q8_0":
+                weight_chunk = self._dequantize_q8_0_blocks(block_chunk, target_dtype)
             elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
                 weight_chunk = _dequantize_sign_only_torch(
                     block_chunk.reshape(block_chunk.shape[0], -1),

@@ -121,6 +121,7 @@ namespace int4_qzero_group_scaled_cpu
         template <typename T>
         void gemm_int4_inference(
             int64_t M, int64_t N, int64_t K, const T *__restrict__ x, const unsigned char *__restrict__ w, const uint8_t *__restrict__ zeros,
-            const T *__restrict__ absmax, T *__restrict__ out, int64_t blocksize, int64_t x_stride, int64_t out_stride);
+            const float *__restrict__ absmax, const float *__restrict__ bias, T *__restrict__ out,
+            int64_t blocksize, int64_t x_stride, int64_t out_stride);
     } // namespace avx512
 } // namespace int4_qzero_group_scaled_cpu

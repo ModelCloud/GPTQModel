@@ -107,6 +107,36 @@ def _make_layer(
     return layer
 
 
+def _make_aten_layer(
+    *,
+    in_features: int,
+    out_features: int,
+    group_size: int,
+    desc_act: bool = False,
+    bias: bool = False,
+) -> TorchAtenAwqLinear:
+    layer = TorchAtenAwqLinear(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=desc_act,
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+    )
+    layer.post_init()
+    layer.eval()
+    return layer
+
+
+def _skip_unless_aten_cpu() -> None:
+    ok, err = TorchAtenAwqLinear.cached_validate_once()
+    if not ok:
+        pytest.skip(str(err))
+
+
 def _fill_layer(
     layer: TorchCpuAvx512AwqLinear,
     qweight: torch.Tensor,
@@ -116,6 +146,27 @@ def _fill_layer(
     layer.qweight.copy_(qweight)
     layer.qzeros.copy_(qzeros)
     layer.scales.copy_(scales)
+
+
+def _awq_affine_oracle(
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+    *,
+    group_size: int,
+) -> torch.Tensor:
+    """Reference for AWQ's signed-code plus rounded zero-offset ATen contract."""
+
+    codes, zeros = unpack_awq(qweight, qzeros, 4)
+    codes, zeros = reverse_awq_order(codes, zeros, 4)
+    codes = (codes & 0xF).to(torch.float32)
+    zeros = (zeros & 0xF).reshape(-1, scales.shape[-1])
+    group_index = torch.arange(codes.shape[0]) // group_size
+    scale = scales.to(torch.float32).index_select(0, group_index)
+    zero_offset = (
+        (8 - zeros).to(dtype=scales.dtype) * scales
+    ).index_select(0, group_index).to(torch.float32)
+    return (codes - 8.0) * scale + zero_offset
 
 
 @pytest.mark.parametrize(
@@ -283,7 +334,7 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
         in_features,
     )
     layer.transform_cpu()
-    assert layer.scales.dtype == torch.bfloat16
+    assert layer.scales.dtype == torch.float32
     assert torch.equal(layer.qweight, expected_packed)
     assert torch.equal(layer.qzeros, expected_zeros)
 
@@ -303,6 +354,7 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
 @pytest.mark.parametrize(
     ("tokens", "in_features", "out_features", "group_size"),
     (
+        (1, 512, 64, 16),
         (1, 256, 64, 32),
         (7, 512, 128, 32),
         (7, 1024, 128, 256),
@@ -339,7 +391,7 @@ def test_awq_layer_matches_dequantize_gemm_oracle(
     reference_weight = dequantize_gemm(
         qweight=qweight,
         qzeros=qzeros,
-        scales=scales.to(torch.bfloat16),
+        scales=scales,
         bits=4,
         group_size=group_size,
     )
@@ -351,8 +403,7 @@ def test_awq_layer_matches_dequantize_gemm_oracle(
     relative_error = torch.linalg.vector_norm(
         (output.float() - reference.float()).flatten()
     ) / torch.linalg.vector_norm(reference.float().flatten())
-    normalized_limit = 3.5e-3 if group_size >= 256 else 3e-3
-    assert relative_error < normalized_limit
+    assert relative_error < 2e-3
 
 
 @pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -385,6 +436,12 @@ def test_awq_layer_preserves_activation_dtype_and_rank(dtype):
 
     assert output.shape == (2, 3, 5, out_features)
     assert output.dtype == dtype
+    if dtype == torch.bfloat16:
+        assert layer.linear_mode == "inference"
+        assert layer._cpu_transformed is True
+    else:
+        assert layer.linear_mode == "train"
+        assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
 
     empty = torch.empty((0, in_features), dtype=dtype)
@@ -416,7 +473,7 @@ def test_awq_layer_adds_bias_after_shared_kernel():
     reference_weight = dequantize_gemm(
         qweight=qweight,
         qzeros=qzeros,
-        scales=scales.to(torch.bfloat16),
+        scales=scales,
         bits=4,
         group_size=group_size,
     )
@@ -426,6 +483,82 @@ def test_awq_layer_adds_bias_after_shared_kernel():
     output = layer(x)
 
     torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "checkpoint_scale_dtype"),
+    (
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.float16),
+    ),
+)
+def test_aten_awq_layer_matches_affine_oracle(dtype, checkpoint_scale_dtype):
+    _skip_unless_aten_cpu()
+    torch.manual_seed(6000 + (1 if dtype == torch.bfloat16 else 0))
+    tokens, in_features, out_features, group_size = 7, 512, 128, 128
+    qweight, qzeros, scales = _make_awq_buffers(
+        in_features,
+        out_features,
+        group_size,
+    )
+    scales = scales.to(checkpoint_scale_dtype)
+    layer = _make_aten_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+    )
+    _fill_layer(layer, qweight, qzeros, scales)
+
+    x = torch.randn(tokens, in_features, dtype=dtype)
+    arithmetic_scales = scales.to(dtype)
+    weight = _awq_affine_oracle(
+        qweight,
+        qzeros,
+        arithmetic_scales,
+        group_size=group_size,
+    )
+    reference_fp32 = torch.matmul(x.float(), weight)
+
+    with torch.inference_mode():
+        output = layer(x)
+
+    assert output.dtype == dtype
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+    assert layer._cpu_transform_dtype == dtype
+    assert layer.scales.dtype == dtype
+    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=0.2, rtol=0.01)
+    normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
+    assert normalized_error.item() < 2e-3
+
+
+@pytest.mark.parametrize(
+    ("first_dtype", "second_dtype"),
+    (
+        (torch.float16, torch.bfloat16),
+        (torch.bfloat16, torch.float16),
+    ),
+)
+def test_aten_awq_rejects_mixed_activation_dtype_after_transform(first_dtype, second_dtype):
+    _skip_unless_aten_cpu()
+    torch.manual_seed(7000)
+    in_features, out_features, group_size = 256, 64, 64
+    qweight, qzeros, scales = _make_awq_buffers(
+        in_features,
+        out_features,
+        group_size,
+    )
+    layer = _make_aten_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+    )
+    _fill_layer(layer, qweight, qzeros, scales)
+
+    with torch.inference_mode():
+        layer(torch.randn(1, in_features, dtype=first_dtype))
+        with pytest.raises(RuntimeError, match="activation dtype|received"):
+            layer(torch.randn(1, in_features, dtype=second_dtype))
 
 
 def test_awq_reuses_the_gptq_compute_kernel():

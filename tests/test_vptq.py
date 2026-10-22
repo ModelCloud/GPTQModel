@@ -1136,6 +1136,64 @@ def test_vptq_quantize_module_roundtrip(variant, overrides, dtype):
     assert torch.equal(dequantized.float(), oracle_reconstruct(result, module))
 
 
+def test_vptq_inference_cache_reuses_and_invalidates():
+    weight, hessian = synthetic_problem(out_features=16, in_features=32, seed=99)
+    qcfg = VPTQConfig(
+        num_centroids=[-1, 32],
+        num_res_centroids=[-1, -1],
+        vector_lens=[-1, 4],
+        kmeans_iters=4,
+        block_size=16,
+    )
+    quantizer = build_quantizer(weight, qcfg, dtype=torch.float32)
+    result, _loss = quantizer.quantize_weight(
+        weight,
+        hessian,
+        target_dtype=torch.float32,
+    )
+    module = build_module(
+        qcfg,
+        weight.shape[1],
+        weight.shape[0],
+        dtype=torch.float32,
+    )
+    module.pack(linear=quantizer.layer, vptq_result=result)
+    module.post_init()
+    module.eval()
+
+    x = torch.randn(3, weight.shape[1], dtype=torch.float32)
+    with torch.inference_mode():
+        first = module(x)
+    cached = module._dense_weight_cache
+    assert cached is not None
+    assert module._dense_weight_cache_key is not None
+
+    with torch.inference_mode():
+        second = module(x)
+    assert module._dense_weight_cache is cached
+    torch.testing.assert_close(second, first, rtol=0, atol=0)
+
+    with torch.no_grad():
+        module.centroids.weight.add_(0.01)
+    with torch.inference_mode():
+        module(x)
+    assert module._dense_weight_cache is not cached
+
+    module.load_quant_result(result)
+    assert module._dense_weight_cache is None
+    assert module._dense_weight_cache_key is None
+
+    with torch.inference_mode():
+        module(x)
+    assert module._dense_weight_cache is not None
+    module.to(dtype=torch.float16)
+    assert module._dense_weight_cache is None
+
+    with torch.inference_mode():
+        output = module(x.to(torch.float16))
+    assert output.dtype == torch.float16
+
+
 VPTQ_ORACLE_VARIANTS = [
     ("baseline", {}),
     ("group_size_remainder", {"group_size": 6}),

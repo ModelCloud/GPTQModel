@@ -17,13 +17,21 @@ import torch
 from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
-from ...quantization.awq.utils.packing_utils import dequantize_gemm
 from ...utils.backend import BACKEND
 from ...utils.env import env_flag
-from ...utils.paroquant import apply_paroquant_rotation, build_identity_rotation_buffers, is_identity_rotation
+from ...utils.logger import setup_logger
+from ...utils.paroquant import (
+    apply_paroquant_rotation,
+    apply_paroquant_rotation_vectorized,
+    build_identity_rotation_buffers,
+    is_identity_rotation,
+)
+from ._runtime_cache import tensor_cache_key
 from .gemm_awq import FP32_ACCUM, _awq_cuda_gemm_forward
 from .torch_awq import AwqTorchLinear
 
+
+log = setup_logger()
 
 # Rotated activations benchmark faster with a shallower K split than generic AWQ.
 _PAROQUANT_AWQ_SPLIT_K = 4
@@ -36,6 +44,11 @@ _PAROQUANT_CACHE_ROTATION_DTYPE = env_flag("GPTQMODEL_PAROQUANT_CACHE_ROTATION_D
 _PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE = env_flag(
     "GPTQMODEL_PAROQUANT_AUTO_CACHE_BF16_ROTATION_DTYPE", default=True
 )
+# CPU inference applies the same per-row rotation contract as the reference
+# implementation, but vectorizes the group loop.  The shared AWQ-layout AVX512
+# int4 GEMM then consumes the rotated BF16 activations; FP16 uses ATen's native
+# int4pack kernel because dense FP16 matmul is substantially slower on CPU.
+_PAROQUANT_CPU_AVX512 = env_flag("GPTQMODEL_PAROQUANT_CPU_AVX512", default=True)
 
 
 class ParoLinear(AwqTorchLinear):
@@ -96,6 +109,7 @@ class ParoLinear(AwqTorchLinear):
         self._rotation_runtime_device: Optional[torch.device] = None
         self._runtime_theta: Optional[torch.Tensor] = None
         self._runtime_channel_scales: Optional[torch.Tensor] = None
+        self._rotation_runtime_key = None
 
         super().__init__(
             bits=bits,
@@ -111,6 +125,10 @@ class ParoLinear(AwqTorchLinear):
             backend=kwargs.pop("backend", BACKEND.PAROQUANT_CUDA),
             **kwargs,
         )
+        self._cpu_aten_layer = None
+        self._cpu_aten_key = None
+        self._cpu_aten_failed_key = None
+        self._cpu_aten_warning_logged = False
         self._register_rotation_buffers()
         self._rotation_identity = True
 
@@ -147,6 +165,11 @@ class ParoLinear(AwqTorchLinear):
         self._clear_rotation_runtime_cache()
         self._rotation_identity = is_identity_rotation(self.theta, self.channel_scales)
 
+    def clear_weight_cache(self) -> None:
+        """Drop packed-weight and rotation-derived state after a mutation."""
+        super().clear_weight_cache()
+        self._clear_rotation_runtime_cache()
+
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
         """ParoQuant relies on AWQ validation and needs no extra one-time checks here."""
@@ -170,6 +193,10 @@ class ParoLinear(AwqTorchLinear):
         self._rotation_runtime_device = None
         self._runtime_theta = None
         self._runtime_channel_scales = None
+        self._rotation_runtime_key = None
+        self._cpu_aten_layer = None
+        self._cpu_aten_key = None
+        self._cpu_aten_failed_key = None
 
     def _ensure_runtime_dtype(self, device: torch.device, dtype: torch.dtype) -> None:
         if self.scales is not None and (self.scales.device != device or self.scales.dtype != dtype or not self.scales.is_contiguous()):
@@ -182,9 +209,14 @@ class ParoLinear(AwqTorchLinear):
         device: torch.device,
         dtype: torch.dtype,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        runtime_key = (
+            tensor_cache_key(self.theta),
+            tensor_cache_key(self.channel_scales),
+            device,
+            dtype,
+        )
         if (
-            self._rotation_runtime_device != device
-            or self._rotation_runtime_dtype != dtype
+            self._rotation_runtime_key != runtime_key
             or self._runtime_theta is None
             or self._runtime_channel_scales is None
             or not self._runtime_theta.is_contiguous()
@@ -194,12 +226,29 @@ class ParoLinear(AwqTorchLinear):
             self._runtime_channel_scales = self.channel_scales.to(device=device, dtype=dtype).contiguous()
             self._rotation_runtime_device = device
             self._rotation_runtime_dtype = dtype
+            self._rotation_runtime_key = runtime_key
         return self._runtime_theta, self._runtime_channel_scales
 
     def _rotate_inputs(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Apply the learned input transform before quantized matmul."""
         if self._rotation_identity:
             return x_flat
+        if (
+            x_flat.device.type == "cpu"
+            and not self.training
+            and not x_flat.requires_grad
+        ):
+            theta, channel_scales = self._ensure_rotation_runtime_dtype(
+                x_flat.device,
+                x_flat.dtype,
+            )
+            return apply_paroquant_rotation_vectorized(
+                x_flat,
+                self.pairs,
+                theta,
+                scales=channel_scales,
+                group_size=self.group_size,
+            )
         use_cached_rotation_dtype = self.cache_rotation_dtype or (
             self.auto_cache_bf16_rotation_dtype and x_flat.dtype == torch.bfloat16
         )
@@ -217,16 +266,7 @@ class ParoLinear(AwqTorchLinear):
 
     def _forward_dense(self, x_flat: torch.Tensor) -> torch.Tensor:
         """Fallback reference path: dequantize AWQ weights and run dense matmul."""
-        weight = dequantize_gemm(
-            qweight=self.qweight,
-            qzeros=self.qzeros,
-            scales=self.scales,
-            bits=self.bits,
-            group_size=self.group_size,
-        )
-        if weight.dtype != x_flat.dtype or weight.device != x_flat.device:
-            weight = weight.to(device=x_flat.device, dtype=x_flat.dtype)
-
+        weight = self._dense_weight_for_inference(x_flat, dtype=x_flat.dtype)
         out = torch.matmul(x_flat, weight)
         if self.bias is not None:
             out = out + self.bias.to(device=x_flat.device, dtype=x_flat.dtype)
@@ -278,6 +318,107 @@ class ParoLinear(AwqTorchLinear):
             out = out.to(dtype=x_flat.dtype)
         return out
 
+    def _forward_cpu_aten(self, x_flat: torch.Tensor) -> Optional[torch.Tensor]:
+        """Use ATen's native CPU int4pack GEMM for FP16/BF16 activations."""
+        if (
+            x_flat.device.type != "cpu"
+            or self.training
+            or x_flat.requires_grad
+            or x_flat.dtype not in (torch.float16, torch.bfloat16)
+            or self.bits != 4
+            or getattr(self, "requested_group_size", self.group_size) == -1
+            or self.group_size not in (32, 64, 128, 256)
+        ):
+            return None
+
+        from .torch_aten_kernel import _has_local_int4pack_cpu_ops
+
+        if not _has_local_int4pack_cpu_ops():
+            return None
+
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+            self.bits,
+            self.group_size,
+            self.in_features,
+            self.out_features,
+            x_flat.dtype,
+        )
+        if self._cpu_aten_failed_key == key:
+            return None
+
+        layer = self._cpu_aten_layer
+        if layer is None or self._cpu_aten_key != key:
+            from .torch_aten_kernel_awq import TorchAtenAwqLinear
+
+            ok, _ = TorchAtenAwqLinear.cached_validate_once()
+            if not ok:
+                return None
+
+            try:
+                layer = TorchAtenAwqLinear(
+                    bits=self.bits,
+                    group_size=self.group_size,
+                    sym=self.sym,
+                    desc_act=self.desc_act,
+                    in_features=self.in_features,
+                    out_features=self.out_features,
+                    bias=False,
+                    pack_dtype=self.pack_dtype,
+                    adapter=None,
+                    register_buffers=False,
+                    name=f"{self.name}.cpu_aten",
+                    backend=BACKEND.AWQ_TORCH_ATEN,
+                )
+                layer.qweight = self.qweight
+                layer.qzeros = self.qzeros
+                layer.scales = self.scales
+                layer.bias = None
+                layer.eval()
+                layer.transform_cpu(dtype=x_flat.dtype)
+            except Exception as exc:
+                if not self._cpu_aten_warning_logged:
+                    log.warning(
+                        "ParoQuant ATen CPU int4pack unavailable for `%s`; using dense fallback: %s",
+                        self.name,
+                        exc,
+                    )
+                    self._cpu_aten_warning_logged = True
+                self._cpu_aten_layer = None
+                self._cpu_aten_key = None
+                self._cpu_aten_failed_key = key
+                return None
+
+            self._cpu_aten_layer = layer
+            self._cpu_aten_key = key
+            self._cpu_aten_failed_key = None
+
+        try:
+            out = layer._fused_op_forward(x_flat)
+        except Exception as exc:
+            if not self._cpu_aten_warning_logged:
+                log.warning(
+                    "ParoQuant ATen CPU int4pack failed for `%s`; using dense fallback: %s",
+                    self.name,
+                    exc,
+                )
+                self._cpu_aten_warning_logged = True
+            self._cpu_aten_layer = None
+            self._cpu_aten_key = None
+            self._cpu_aten_failed_key = key
+            return None
+
+        if self.bias is not None:
+            # Accumulate the bias in FP32 before the visible dtype cast. ATen
+            # returns a BF16/FP16 result, and a same-dtype add would round both
+            # the bias and the sum again.
+            out = (out.float() + self.bias.float()).to(dtype=x_flat.dtype)
+        if out.dtype != x_flat.dtype:
+            out = out.to(dtype=x_flat.dtype)
+        return out
+
     def forward(self, x: torch.Tensor):
         """Rotate inputs, run quantized matmul, then apply adapters in input space."""
         original_shape = x.shape[:-1] + (self.out_features,)
@@ -289,6 +430,13 @@ class ParoLinear(AwqTorchLinear):
         rotated = self._rotate_inputs(x_flat)
 
         out = self._forward_cuda_awq_kernel(rotated)
+        if out is None:
+            out = self._forward_cpu_avx512(
+                rotated,
+                enabled=_PAROQUANT_CPU_AVX512 and rotated.dtype == torch.bfloat16,
+            )
+        if out is None:
+            out = self._forward_cpu_aten(rotated)
         if out is None:
             out = self._forward_dense(rotated)
 

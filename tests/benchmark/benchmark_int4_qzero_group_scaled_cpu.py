@@ -206,6 +206,9 @@ def _make_layers(
     g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
     layers = []
     for cls in (TorchCpuAvx512Linear, TorchAtenLinear):
+        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+            layers.append(None)
+            continue
         layer = cls(
             bits=4,
             group_size=group_size,
@@ -239,6 +242,9 @@ def _make_awq_layers(
     qweight, qzeros = pack_awq(codes, zeros, 4)
     layers = []
     for cls in (TorchCpuAvx512AwqLinear, TorchAtenAwqLinear):
+        if group_size not in cls.SUPPORTS_GROUP_SIZE:
+            layers.append(None)
+            continue
         layer = cls(
             bits=4,
             group_size=group_size,
@@ -550,15 +556,16 @@ def main() -> int:
                     avx_layer.scales,
                     group_size,
                 ),
-                "ATen int4pack": partial(
+                "dense BF16": partial(torch.matmul, x, dense_weight_kn),
+            }
+            if aten_layer is not None:
+                runners["ATen int4pack"] = partial(
                     torch.ops.aten._weight_int4pack_mm_for_cpu,
                     x,
                     aten_layer.qweight,
                     group_size,
                     aten_layer.scales_and_zeros,
-                ),
-                "dense BF16": partial(torch.matmul, x, dense_weight_kn),
-            }
+                )
             if torchao_model is not None:
                 runners["torchao W4A16"] = partial(torchao_model, x)
             if hasattr(torch.ops.onednn, "qlinear_prepack") and hasattr(
@@ -574,7 +581,7 @@ def main() -> int:
                 outputs[name] = output
                 timings[name] = _bench(runner, warmup=warmup, iters=iters)
 
-            aten_median = timings["ATen int4pack"][0]
+            aten_median = timings["ATen int4pack"][0] if "ATen int4pack" in timings else None
             for name, (median_ms, mean_ms) in timings.items():
                 relative, max_abs, _ = _metrics(outputs[name], reference)
                 inference_rows.append(
@@ -585,7 +592,7 @@ def main() -> int:
                         f"{median_ms:.3f}",
                         f"{mean_ms:.3f}",
                         f"{_gops(tokens, in_features, out_features, median_ms):.2f}",
-                        f"{aten_median / median_ms:.2f}x",
+                        f"{aten_median / median_ms:.2f}x" if aten_median is not None else "n/a",
                         f"{relative:.4e}",
                         f"{max_abs:.4e}",
                     ]
@@ -655,8 +662,9 @@ def main() -> int:
                 reference = x.float() @ dense_weight
                 runners = {
                     "AVX512 AWQ": partial(avx_layer, x),
-                    "ATen AWQ": partial(aten_layer, x),
                 }
+                if aten_layer is not None:
+                    runners["ATen AWQ"] = partial(aten_layer, x)
 
                 timings = {}
                 outputs = {}
@@ -665,7 +673,7 @@ def main() -> int:
                     outputs[name] = output
                     timings[name] = _bench(runner, warmup=warmup, iters=iters)
 
-                aten_median = timings["ATen AWQ"][0]
+                aten_median = timings["ATen AWQ"][0] if "ATen AWQ" in timings else None
                 for name, (median_ms, mean_ms) in timings.items():
                     relative, max_abs, _ = _metrics(outputs[name], reference)
                     awq_inference_rows.append(
@@ -676,7 +684,7 @@ def main() -> int:
                             f"{median_ms:.3f}",
                             f"{mean_ms:.3f}",
                             f"{_gops(tokens, in_features, out_features, median_ms):.2f}",
-                            f"{aten_median / median_ms:.2f}x",
+                            f"{aten_median / median_ms:.2f}x" if aten_median is not None else "n/a",
                             f"{relative:.4e}",
                             f"{max_abs:.4e}",
                         ]

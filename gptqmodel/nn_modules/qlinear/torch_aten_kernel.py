@@ -67,6 +67,7 @@ class TorchAtenLinear(PackableQuantLinear):
     QUANT_TYPE = "torch_aten_kernel"
 
     gemm_int4_forward_kernel = None
+    _fused_op_handles_bias = False
 
     def __init__(
         self,
@@ -100,6 +101,8 @@ class TorchAtenLinear(PackableQuantLinear):
 
         self.linear_mode = None
         self.dequant_dtype = torch.int8
+        self._cpu_transformed = False
+        self._cpu_transform_dtype = None
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -127,6 +130,13 @@ class TorchAtenLinear(PackableQuantLinear):
 
     def _cpu_fused_available(self) -> bool:
         return _has_local_int4pack_cpu_ops()
+
+    def _fused_input_dtype(self, x: torch.Tensor) -> bool:
+        if x.dtype not in (torch.float16, torch.bfloat16):
+            return False
+        if self._cpu_transform_dtype is not None:
+            return x.dtype == self._cpu_transform_dtype
+        return True
 
     def _build_ret_idx(self) -> torch.Tensor:
         existing = getattr(self, "ret_idx", None)
@@ -204,8 +214,20 @@ class TorchAtenLinear(PackableQuantLinear):
 
         return super().train(mode=mode)
 
-    def transform_cpu(self):
-        self.scales = self.scales.to(torch.bfloat16).contiguous()
+    def transform_cpu(self, dtype: torch.dtype | None = None):
+        if self._cpu_transformed:
+            return
+
+        # ATen int4pack requires the activation and scales/zero-points to have
+        # the same dtype. Choose that dtype from the first fused activation so
+        # an FP16 checkpoint loaded into a BF16 model does not silently fall
+        # back to dense dequantization on every token.
+        target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
+        if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            target_dtype = torch.bfloat16
+        if self.scales.dtype != target_dtype:
+            self.scales = self.scales.to(target_dtype)
+        self.scales = self.scales.contiguous()
 
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -228,10 +250,12 @@ class TorchAtenLinear(PackableQuantLinear):
         zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
         self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+        self._cpu_transform_dtype = target_dtype
+        self._cpu_transformed = True
 
-    def transform(self, device):
+    def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
-            self.transform_cpu()
+            self.transform_cpu(dtype=dtype)
         else:
             raise NotImplementedError
 
@@ -244,20 +268,28 @@ class TorchAtenLinear(PackableQuantLinear):
             and self.linear_mode is None
             and self._cpu_fused_available()
             and x.device.type == "cpu"
+            and self._fused_input_dtype(x)
         ):
-            self.transform(x.device.type)
+            self.transform(x.device.type, dtype=x.dtype)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
             self.linear_mode = "train"
 
         if self.linear_mode == "inference":
+            if not self._fused_input_dtype(x):
+                raise RuntimeError(
+                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"but received {x.dtype} activations. Keep one activation dtype per layer."
+                )
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             num_itr = self.g_idx.shape[0] // x.shape[-1]
             weights = self.dequantize_weight(num_itr=num_itr).to(x.dtype)
             out = torch.matmul(x, weights).reshape(out_shape)
 
-        if self.bias is not None:
+        if self.bias is not None and not (
+            self.linear_mode == "inference" and self._fused_op_handles_bias
+        ):
             out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
@@ -273,17 +305,17 @@ class TorchAtenLinear(PackableQuantLinear):
         if x.device.type != "cpu":
             raise NotImplementedError
 
-        original_dtype = x.dtype
-        if original_dtype != torch.bfloat16:
-            x = x.to(torch.bfloat16)
+        if not self._fused_input_dtype(x):
+            raise RuntimeError(
+                f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
+                f"{self.scales_and_zeros.dtype}, got {x.dtype}."
+            )
         out = torch.ops.aten._weight_int4pack_mm_for_cpu(
             x,
             self.qweight,
             self.group_size,
             self.scales_and_zeros,
         )
-        if original_dtype != torch.bfloat16:
-            out = out.to(original_dtype)
         return out
 
     def _empty_gptq_only_weights(self):

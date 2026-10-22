@@ -13,6 +13,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._runtime_cache import tensor_cache_key
 
 
 log = setup_logger()
@@ -77,13 +78,36 @@ class AwqTorchLinear(AWQuantLinear):
                 self.scales = self.scales.to(dtype=self.compute_dtype)
             if self.bias is not None and self.bias.dtype != self.compute_dtype:
                 self.bias = self.bias.to(dtype=self.compute_dtype)
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
+        self._cpu_packed_qweight = None
+        self._cpu_packed_qzeros = None
+        self._cpu_packed_scales = None
+        self._cpu_packed_bias = None
+        self._cpu_packed_key = None
+        self._cpu_packed_warning_logged = False
 
     def post_init(self):
         if self.scales is not None and self.scales.dtype not in (torch.float16, torch.bfloat16):
             self.scales = self.scales.to(dtype=torch.float16)
         if self.bias is not None and self.bias.dtype not in (torch.float16, torch.bfloat16):
             self.bias = self.bias.to(dtype=torch.float16)
+        self.clear_weight_cache()
         super().post_init()
+
+    def train(self, mode: bool = True):
+        self.clear_weight_cache()
+        return super().train(mode=mode)
+
+    def clear_weight_cache(self) -> None:
+        self._dense_weight_cache = None
+        self._dense_weight_cache_key = None
+        self._cpu_packed_qweight = None
+        self._cpu_packed_qzeros = None
+        self._cpu_packed_scales = None
+        self._cpu_packed_bias = None
+        self._cpu_packed_key = None
+        self._cpu_packed_warning_logged = False
 
     def extra_repr(self) -> str:
         return (
@@ -129,6 +153,148 @@ class AwqTorchLinear(AWQuantLinear):
         ):
             self.bias = self.bias.to(device=device, dtype=dtype).contiguous()
 
+    def _weight_cache_key(self, *, device: torch.device, dtype: torch.dtype):
+        return (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+            self.bits,
+            self.group_size,
+            device,
+            dtype,
+        )
+
+    def _dense_weight_for_inference(
+        self,
+        x_flat: torch.Tensor,
+        *,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if self.training or x_flat.requires_grad:
+            return dequantize_gemm(
+                qweight=self.qweight,
+                qzeros=self.qzeros,
+                scales=self.scales,
+                bits=self.bits,
+                group_size=self.group_size,
+            ).to(device=x_flat.device, dtype=dtype)
+
+        key = self._weight_cache_key(device=x_flat.device, dtype=dtype)
+        weight = self._dense_weight_cache
+        if weight is not None and self._dense_weight_cache_key == key:
+            return weight
+
+        weight = dequantize_gemm(
+            qweight=self.qweight,
+            qzeros=self.qzeros,
+            scales=self.scales,
+            bits=self.bits,
+            group_size=self.group_size,
+        )
+        if weight.dtype not in (torch.float16, torch.bfloat16):
+            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
+        if weight.dtype != dtype or weight.device != x_flat.device or not weight.is_contiguous():
+            weight = weight.to(device=x_flat.device, dtype=dtype).contiguous()
+        self._dense_weight_cache = weight
+        self._dense_weight_cache_key = key
+        return weight
+
+    def _cpu_avx512_eligible(self, x_flat: torch.Tensor) -> bool:
+        return (
+            x_flat.device.type == "cpu"
+            and not self.training
+            and not x_flat.requires_grad
+            and self.bits == 4
+            and self.group_size > 0
+            and self.group_size <= 512
+            and self.in_features % 2 == 0
+            and self.in_features % self.group_size == 0
+            and self.out_features % 32 == 0
+            and x_flat.shape[-1] == self.in_features
+            and x_flat.dtype == torch.bfloat16
+        )
+
+    def _ensure_cpu_packed(self) -> bool:
+        key = (
+            tensor_cache_key(self.qweight),
+            tensor_cache_key(self.qzeros),
+            tensor_cache_key(self.scales),
+            tensor_cache_key(self.bias) if self.bias is not None else None,
+            self.bits,
+            self.group_size,
+            self.out_features,
+            self.in_features,
+        )
+        if self._cpu_packed_key == key and self._cpu_packed_qweight is not None:
+            return True
+
+        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+
+        ok, _ = TorchCpuAvx512AwqLinear.cached_validate_once()
+        packer = TorchCpuAvx512AwqLinear.pack_awq_int4_kernel
+        if not ok or packer is None:
+            return False
+
+        try:
+            packed_qweight, packed_qzeros = packer(
+                self.qweight.contiguous(),
+                self.qzeros.contiguous(),
+                self.out_features,
+                self.in_features,
+            )
+        except Exception as exc:
+            if not self._cpu_packed_warning_logged:
+                log.warning(
+                    "AWQ CPU AVX512 packing unavailable for `%s`; using dense fallback: %s",
+                    self.name,
+                    exc,
+                )
+                self._cpu_packed_warning_logged = True
+            return False
+
+        self._cpu_packed_qweight = packed_qweight
+        self._cpu_packed_qzeros = packed_qzeros
+        self._cpu_packed_scales = self.scales.to(dtype=torch.float32).contiguous()
+        self._cpu_packed_bias = (
+            self.bias.to(dtype=torch.float32).contiguous()
+            if self.bias is not None
+            else None
+        )
+        self._cpu_packed_key = key
+        return True
+
+    def _forward_cpu_avx512(
+        self,
+        x_flat: torch.Tensor,
+        *,
+        enabled: bool = True,
+    ) -> torch.Tensor | None:
+        if not enabled or not self._cpu_avx512_eligible(x_flat) or not self._ensure_cpu_packed():
+            return None
+
+        from .torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
+
+        gemm = TorchCpuAvx512AwqLinear.gemm_int4_qzero_group_scaled_cpu_kernel
+        if gemm is None:
+            return None
+
+        original_dtype = x_flat.dtype
+        kernel_input = x_flat
+        if not kernel_input.is_contiguous():
+            kernel_input = kernel_input.contiguous()
+
+        output = gemm(
+            kernel_input,
+            self._cpu_packed_qweight,
+            self._cpu_packed_qzeros,
+            self._cpu_packed_scales,
+            self.group_size,
+            self._cpu_packed_bias,
+        )
+        if output.dtype != original_dtype:
+            output = output.to(dtype=original_dtype)
+        return output
+
     def forward(self, x: torch.Tensor):
         input_dtype = x.dtype
         compute_dtype = input_dtype if input_dtype in (torch.float16, torch.bfloat16) else torch.float16
@@ -142,20 +308,12 @@ class AwqTorchLinear(AWQuantLinear):
 
         self._ensure_runtime_dtype(device=device, dtype=compute_dtype)
 
-        weight = dequantize_gemm(
-            qweight=self.qweight,
-            qzeros=self.qzeros,
-            scales=self.scales,
-            bits=self.bits,
-            group_size=self.group_size,
-        )
-        if weight.dtype not in (torch.float16, torch.bfloat16):
-            raise AssertionError(f"weight {weight.dtype} is not float16 or bfloat16")
-        if weight.dtype != compute_dtype or weight.device != device or not weight.is_contiguous():
-            weight = weight.to(device=device, dtype=compute_dtype).contiguous()
-
+        # This is the portable/reference AWQ implementation.  Its arithmetic
+        # must remain the dense dequantize + matmul oracle; the BF16-only
+        # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
+        # Subclasses such as ParoQuant may still opt into the shared helper.
+        weight = self._dense_weight_for_inference(x_flat, dtype=compute_dtype)
         output = torch.matmul(x_flat, weight)
-
         if self.bias is not None:
             output = output + self.bias
 

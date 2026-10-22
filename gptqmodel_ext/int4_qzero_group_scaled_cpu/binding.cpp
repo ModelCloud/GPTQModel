@@ -3,6 +3,7 @@
 
 #include <torch/extension.h>
 #include <torch/library.h>
+#include <optional>
 #include <vector>
 
 torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
@@ -10,7 +11,8 @@ torch::Tensor gemm_int4_qzero_group_scaled_cpu_forward(
     const torch::Tensor &weight,
     const torch::Tensor &zeros,
     const torch::Tensor &absmax,
-    int64_t blocksize);
+    int64_t blocksize,
+    const std::optional<torch::Tensor> &bias);
 
 std::vector<torch::Tensor>
 pack_gptq_int4_cpu_forward(
@@ -32,7 +34,7 @@ int64_t parallel_thread_count_cpu(const torch::Tensor &input, int64_t rows);
 TORCH_LIBRARY(gptqmodel_int4_qzero_group_scaled_cpu, ops) {
     ops.def(
         "gemm_int4_qzero_group_scaled_cpu_forward(Tensor input, Tensor weight, "
-        "Tensor zeros, Tensor absmax, int blocksize) -> Tensor");
+        "Tensor zeros, Tensor absmax, int blocksize, Tensor? bias=None) -> Tensor");
     ops.impl(
         "gemm_int4_qzero_group_scaled_cpu_forward",
         torch::kCPU,

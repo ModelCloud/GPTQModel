@@ -476,6 +476,16 @@ def test_npu_qqq_processor_selects_torch_runtime_kernel():
     assert _npu_select_quant_linear(qcfg, method=METHOD.QQQ, fmt=FORMAT.QQQ) is QQQTorchLinear
 
 
+@pytest.mark.parametrize("device", [DEVICE.CPU, torch.device("cpu"), "cpu:0"])
+def test_cpu_qqq_processor_selects_torch_runtime_kernel(device):
+    qcfg = QQQConfig(bits=4, group_size=128, device=device, offload_to_disk=False)
+    processor = QQQProcessor(**_processor_common_kwargs(qcfg))
+    qlinear_cls, backend = processor._quant_linear_kernel()
+
+    assert qlinear_cls is QQQTorchLinear
+    assert backend is BACKEND.QQQ_TORCH
+
+
 def test_npu_gguf_weight_only_processor_has_torch_runtime_kernel():
     qcfg = GGUFConfig(bits="q4_0", device=DEVICE.NPU, offload_to_disk=False)
     processor = WeightOnlyProcessor(tokenizer=None, qcfg=qcfg)

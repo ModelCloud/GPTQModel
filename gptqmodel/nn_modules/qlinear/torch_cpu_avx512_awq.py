@@ -41,7 +41,9 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = TorchAtenLinear.SUPPORTS_ADAPTERS
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    # Shared with the BF16-only AVX512-BF16 GPTQ kernel. FP16 AWQ checkpoints
+    # use the native ATen FP16 int4pack backend.
+    SUPPORTS_DTYPES = [torch.bfloat16]
 
     REQUIRES_FORMAT_V2 = False
 
@@ -107,6 +109,9 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         ok, _ = type(self).cached_validate_once()
         return ok
 
+    def _fused_input_dtype(self, x: torch.Tensor) -> bool:
+        return x.dtype == torch.bfloat16
+
     def train(self, mode: bool = True):
         if mode:
             raise NotImplementedError(
@@ -125,7 +130,12 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             if not ok:
                 raise RuntimeError(str(err))
 
-        self.scales = self.scales.to(torch.bfloat16).contiguous()
+        # Keep the checkpoint scales in FP32. The shared AVX512 kernel uses
+        # BF16 activations and weights with FP32 accumulation; rounding scales
+        # to BF16 first would consume most of the inference error budget.
+        self.scales = self.scales.to(torch.float32).contiguous()
+        if self.bias is not None:
+            self.bias = self.bias.to(torch.float32).contiguous()
         self.qweight, self.qzeros = self.pack_awq_int4_kernel(
             self.qweight,
             self.qzeros,
@@ -178,18 +188,18 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         if x.device.type != "cpu":
             raise NotImplementedError
 
-        original_dtype = x.dtype
-        if original_dtype != torch.bfloat16:
-            x = x.to(torch.bfloat16)
+        if not self._fused_input_dtype(x):
+            raise RuntimeError(
+                f"{self.__class__.__name__} requires bfloat16 activations, got {x.dtype}."
+            )
         out = self.gemm_int4_qzero_group_scaled_cpu_kernel(
             x,
             self.qweight,
             self.qzeros,
             self.scales,
             self.group_size,
+            self.bias,
         )
-        if original_dtype != torch.bfloat16:
-            out = out.to(original_dtype)
         return out
 
     def forward(self, x: torch.Tensor):
@@ -201,6 +211,7 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             and self.linear_mode is None
             and self._cpu_fused_available()
             and x_flat.device.type == "cpu"
+            and self._fused_input_dtype(x_flat)
         ):
             self.transform("cpu")
             self.linear_mode = "inference"
@@ -208,13 +219,17 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             self.linear_mode = "train"
 
         if self.linear_mode == "inference":
+            if not self._fused_input_dtype(x_flat):
+                raise RuntimeError(
+                    f"{self.__class__.__name__} was transformed for bfloat16 "
+                    f"but received {x_flat.dtype} activations."
+                )
             out = self._fused_op_forward(x_flat).reshape(out_shape)
         else:
             weight = self.dequantize_weight().to(x_flat.dtype)
             out = torch.matmul(x_flat, weight).reshape(out_shape)
-
-        if self.bias is not None:
-            out.add_(self.bias)
+            if self.bias is not None:
+                out = out + self.bias
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

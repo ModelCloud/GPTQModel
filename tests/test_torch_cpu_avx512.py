@@ -10,7 +10,10 @@ import torch
 
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import torch_cpu_avx512 as avx512_module
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel import (
+    TorchAtenLinear,
+    _has_local_int4pack_cpu_ops,
+)
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import (
     TorchCpuAvx512Linear,
     pack_hf_int4,
@@ -58,6 +61,7 @@ def _make_layer(
     out_features: int,
     group_size: int,
     desc_act: bool,
+    bias: bool = False,
 ) -> TorchCpuAvx512Linear:
     layer = TorchCpuAvx512Linear(
         bits=4,
@@ -66,12 +70,43 @@ def _make_layer(
         desc_act=desc_act,
         in_features=in_features,
         out_features=out_features,
-        bias=False,
+        bias=bias,
         pack_dtype=torch.int32,
         register_buffers=True,
     )
     layer.post_init()
     return layer
+
+
+def _make_aten_layer(
+    *,
+    in_features: int,
+    out_features: int,
+    group_size: int,
+    desc_act: bool,
+    bias: bool = False,
+) -> TorchAtenLinear:
+    layer = TorchAtenLinear(
+        bits=4,
+        group_size=group_size,
+        sym=True,
+        desc_act=desc_act,
+        in_features=in_features,
+        out_features=out_features,
+        bias=bias,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+    )
+    layer.post_init()
+    return layer
+
+
+def _skip_unless_aten_cpu() -> None:
+    if not _has_local_int4pack_cpu_ops():
+        pytest.skip("ATen CPU int4pack ops are unavailable")
+    ok, err = TorchAtenLinear.cached_validate_once()
+    if not ok:
+        pytest.skip(str(err))
 
 
 def _fill_gptq_buffers(
@@ -115,8 +150,8 @@ def _dequantize_oracle(
     """Dequantize in FP32 so the oracle is independent of the kernel's BF16 path."""
 
     codes_kn = codes.t().to(torch.float32)
-    zeros_kn = zeros.repeat_interleave(group_size, dim=0).to(torch.float32)
-    scales_kn = scales.repeat_interleave(group_size, dim=0).to(torch.float32)
+    zeros_kn = zeros.to(torch.float32).repeat_interleave(group_size, dim=0)
+    scales_kn = scales.to(torch.float32).repeat_interleave(group_size, dim=0)
     return (codes_kn - zeros_kn) * scales_kn
 
 
@@ -133,6 +168,28 @@ def _layer_dequantize_oracle(
         (codes.float() - zeros.index_select(0, groups).float())
         * scales.index_select(0, groups).float()
     )
+
+
+def _aten_affine_oracle(
+    codes: torch.Tensor,
+    zeros: torch.Tensor,
+    scales: torch.Tensor,
+    g_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Reference for ATen int4pack's signed-code plus zero-offset contract.
+
+    ``_cpu_int4pack_zero_offsets`` materializes ``(8 - zero_code) * scale`` in
+    the scale dtype. The ATen GEMM then evaluates ``signed_code * scale +
+    zero_offset``. Keep that rounded zero-offset term in the oracle instead of
+    folding it into an exact ``(code - zero) * scale`` expression.
+    """
+
+    groups = g_idx.to(torch.long)
+    scale = scales.index_select(0, groups).to(torch.float32)
+    zero_offset = (
+        (8 - zeros).to(dtype=scales.dtype) * scales
+    ).index_select(0, groups).to(torch.float32)
+    return (codes.to(torch.float32) - 8.0) * scale + zero_offset
 
 
 def _packed_transform_oracle(layer: TorchCpuAvx512Linear):
@@ -504,6 +561,7 @@ def test_unsupported_host_disables_backend_and_falls_back(monkeypatch):
 @pytest.mark.parametrize(
     ("tokens", "in_features", "out_features", "group_size"),
     (
+        (1, 512, 64, 16),
         (1, 256, 64, 32),
         (7, 512, 128, 32),
         (7, 1024, 128, 256),
@@ -529,11 +587,12 @@ def test_kernel_matches_independent_bf16_oracle(
     groups = in_features // group_size
     codes = torch.randint(0, 16, (out_features, in_features), dtype=torch.uint8)
     zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.uint8)
-    scales = torch.rand((groups, out_features), dtype=torch.bfloat16) * 0.04 + 0.01
+    scales = torch.rand((groups, out_features), dtype=torch.float32) * 0.04 + 0.01
     x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
 
     weight = _dequantize_oracle(codes, zeros, scales, group_size)
-    reference = torch.matmul(x.float(), weight).to(torch.bfloat16)
+    reference_fp32 = torch.matmul(x.float(), weight)
+    reference = reference_fp32.to(torch.bfloat16)
     output = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel(
         x,
         pack_hf_int4(codes),
@@ -544,12 +603,13 @@ def test_kernel_matches_independent_bf16_oracle(
 
     assert output.dtype == torch.bfloat16
     torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
-    normalized_error = (output.float() - reference.float()).norm() / reference.float().norm()
-    normalized_limit = 3.5e-3 if group_size >= 256 else 3e-3
-    assert normalized_error.item() < normalized_limit
+    output_error = (output.float() - reference.float()).norm() / reference.float().norm()
+    arithmetic_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
+    assert output_error.item() < 2e-3
+    assert arithmetic_error.item() < 2e-3
 
 
-def test_kernel_preserves_fp16_input_dtype():
+def test_layer_fp16_dense_fallback_preserves_input_dtype():
     _skip_unless_avx512_bf16()
     torch.manual_seed(77)
     tokens, in_features, out_features, group_size = 7, 512, 128, 128
@@ -563,12 +623,13 @@ def test_kernel_preserves_fp16_input_dtype():
     codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
     zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
     scales = torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
     _fill_gptq_buffers(
         layer,
         codes=codes,
         zeros=zeros,
         scales=scales,
-        g_idx=torch.arange(in_features, dtype=torch.int32) // group_size,
+        g_idx=g_idx,
     )
     weight = layer.dequantize_weight()
     x = torch.randn(tokens, in_features, dtype=torch.float16)
@@ -578,7 +639,180 @@ def test_kernel_preserves_fp16_input_dtype():
     output = layer(x)
 
     assert output.dtype == torch.float16
+    assert layer.linear_mode == "train"
+    assert layer._cpu_transformed is False
     torch.testing.assert_close(output, reference, atol=0.25, rtol=0.02)
+
+
+@pytest.mark.parametrize(
+    ("dtype", "checkpoint_scale_dtype"),
+    (
+        (torch.float16, torch.float16),
+        (torch.bfloat16, torch.float16),
+    ),
+)
+def test_aten_cpu_fused_forward_matches_fp32_oracle(dtype, checkpoint_scale_dtype):
+    _skip_unless_aten_cpu()
+    torch.manual_seed(79 if dtype == torch.float16 else 80)
+    tokens, in_features, out_features, group_size = 7, 512, 128, 128
+    groups = in_features // group_size
+    layer = _make_aten_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        desc_act=False,
+    )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=checkpoint_scale_dtype) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    _fill_gptq_buffers(
+        layer,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
+    )
+
+    x = torch.randn(tokens, in_features, dtype=dtype)
+    # ATen int4pack requires scales/zero-points to share the activation dtype.
+    # The FP16 checkpoint scales are therefore rounded to BF16 for a BF16
+    # activation. Use that same representation in the arithmetic oracle so
+    # this test isolates kernel error from the intentional input conversion.
+    arithmetic_scales = scales.to(dtype)
+    weight = _aten_affine_oracle(codes, zeros, arithmetic_scales, g_idx)
+    reference_fp32 = torch.matmul(x.float(), weight)
+
+    layer.eval()
+    with torch.inference_mode():
+        output = layer(x)
+
+    assert output.dtype == dtype
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+    assert layer._cpu_transform_dtype == dtype
+    assert layer.scales.dtype == dtype
+    torch.testing.assert_close(output, reference_fp32.to(dtype), atol=0.2, rtol=0.01)
+    normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
+    assert normalized_error.item() < 2e-3
+
+
+@pytest.mark.parametrize(
+    ("first_dtype", "second_dtype"),
+    (
+        (torch.float16, torch.bfloat16),
+        (torch.bfloat16, torch.float16),
+    ),
+)
+def test_aten_cpu_rejects_mixed_activation_dtype_after_transform(first_dtype, second_dtype):
+    _skip_unless_aten_cpu()
+    torch.manual_seed(81)
+    in_features, out_features, group_size = 256, 64, 64
+    groups = in_features // group_size
+    layer = _make_aten_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        desc_act=False,
+    )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    _fill_gptq_buffers(
+        layer,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
+    )
+    layer.eval()
+
+    with torch.inference_mode():
+        layer(torch.randn(1, in_features, dtype=first_dtype))
+        with pytest.raises(RuntimeError, match="activation dtype|received"):
+            layer(torch.randn(1, in_features, dtype=second_dtype))
+
+
+def test_layer_fused_bias_matches_independent_fp32_oracle():
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(78)
+    tokens, in_features, out_features, group_size = 7, 512, 128, 128
+    groups = in_features // group_size
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        desc_act=False,
+        bias=True,
+    )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 16, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=torch.float32) * 0.04 + 0.01
+    bias = torch.randn(out_features, dtype=torch.float16)
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    _fill_gptq_buffers(
+        layer,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
+    )
+    layer.bias.copy_(bias)
+
+    x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx)
+    reference_fp32 = torch.matmul(x.float(), weight) + bias.float()
+    reference = reference_fp32.to(torch.bfloat16)
+
+    layer.eval()
+    with torch.inference_mode():
+        output = layer(x)
+
+    assert output.dtype == torch.bfloat16
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+    assert layer.bias.dtype == torch.float32
+    torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
+    normalized_error = (output.float() - reference_fp32).norm() / reference_fp32.norm()
+    assert normalized_error.item() < 2e-3
+
+
+def test_fused_bias_validation():
+    _skip_unless_avx512_bf16()
+    out_features, in_features, group_size = 64, 256, 128
+    groups = in_features // group_size
+    codes = torch.zeros((out_features, in_features), dtype=torch.uint8)
+    zeros = torch.zeros((groups, out_features), dtype=torch.uint8)
+    scales = torch.ones((groups, out_features), dtype=torch.float32)
+    x = torch.zeros((1, in_features), dtype=torch.bfloat16)
+    packed = pack_hf_int4(codes)
+    kernel = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel
+
+    with pytest.raises(RuntimeError, match="bias must be float32"):
+        kernel(x, packed, zeros, scales, group_size, torch.zeros(out_features, dtype=torch.float16))
+    with pytest.raises(RuntimeError, match="bias must be 1D"):
+        kernel(x, packed, zeros, scales, group_size, torch.zeros((1, out_features)))
+    with pytest.raises(RuntimeError, match="bias must be contiguous"):
+        kernel(
+            x,
+            packed,
+            zeros,
+            scales,
+            group_size,
+            torch.zeros((out_features * 2,))[::2],
+        )
+    with pytest.raises(RuntimeError, match="bias out_features"):
+        kernel(x, packed, zeros, scales, group_size, torch.zeros(out_features + 1))
+    with pytest.raises(RuntimeError, match="Meta tensors"):
+        kernel(
+            x,
+            packed,
+            zeros,
+            scales,
+            group_size,
+            torch.empty(out_features, device="meta"),
+        )
 
 
 def test_kernel_empty_batch_and_validation():
@@ -587,7 +821,7 @@ def test_kernel_empty_batch_and_validation():
     groups = in_features // group_size
     codes = torch.randint(0, 16, (out_features, in_features), dtype=torch.uint16).to(torch.uint8)
     zeros = torch.zeros((groups, out_features), dtype=torch.uint16).to(torch.uint8)
-    scales = torch.ones((groups, out_features), dtype=torch.bfloat16)
+    scales = torch.ones((groups, out_features), dtype=torch.float32)
     packed = pack_hf_int4(codes)
     kernel = TorchCpuAvx512Linear.gemm_int4_qzero_group_scaled_cpu_kernel
 
