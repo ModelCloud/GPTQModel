@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import math
 import struct
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
 
+from ..utils.cpu_features import has_avx512_bf16
+from ..utils.env import env_flag
 from .exllamav3 import _EXL3_BUFFER_NAMES, _torch_dtype
 
 
@@ -24,6 +27,59 @@ _EXL3_MUL1_MULT = 0x83DCD12D
 _EXL3_MUL1_ACC = 0x6400
 _EXL3_LOP3_MASK = 0x8FFF8FFF
 _EXL3_LOP3_BIAS = 0x3B603B60
+_CPU_BF16X3_ENV = "GPTQMODEL_EXL3_CPU_BF16X3"
+_CPU_BF16X3_MIN_WEIGHT_ELEMENTS = 1 << 19
+_CPU_BF16X3_MIN_MACS = 1 << 23
+
+
+@lru_cache(maxsize=1)
+def _cpu_bf16x3_support() -> bool:
+    """Return whether oneDNN BF16x3 FP32 matmul is usable on this host."""
+
+    if not env_flag(_CPU_BF16X3_ENV, default=True):
+        return False
+    if not has_avx512_bf16() or not torch.backends.mkldnn.is_available():
+        return False
+
+    try:
+        previous = torch.backends.mkldnn.matmul.fp32_precision
+        torch.backends.mkldnn.matmul.fp32_precision = "bf16"
+        torch.backends.mkldnn.matmul.fp32_precision = previous
+    except (AttributeError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _cpu_bf16x3_should_use(rows: int, in_features: int, out_features: int) -> bool:
+    """Return whether the BF16x3 GEMM is large enough to amortize dispatch."""
+
+    if rows <= 0 or in_features <= 0 or out_features <= 0:
+        return False
+    weight_elements = in_features * out_features
+    return (
+        weight_elements >= _CPU_BF16X3_MIN_WEIGHT_ELEMENTS
+        or rows * weight_elements >= _CPU_BF16X3_MIN_MACS
+    )
+
+
+@contextmanager
+def _cpu_bf16x3_matmul():
+    """Use oneDNN's BF16x3 FP32 matmul while preserving caller precision."""
+
+    if not _cpu_bf16x3_support():
+        yield
+        return
+
+    previous = torch.backends.mkldnn.matmul.fp32_precision
+    if previous == "bf16":
+        yield
+        return
+
+    torch.backends.mkldnn.matmul.fp32_precision = "bf16"
+    try:
+        yield
+    finally:
+        torch.backends.mkldnn.matmul.fp32_precision = previous
 
 
 def _tensor_core_perm_values() -> list[int]:
@@ -415,7 +471,15 @@ class ExllamaV3TorchLinear(nn.Module):
         compute_dtype = torch.float32 if x.device.type == "cpu" else torch.float16
         x_2d = x.view(-1, self.in_features).to(compute_dtype)
         weight = self.get_weight_tensor(dtype=compute_dtype)
-        y = x_2d @ weight
+        if x.device.type == "cpu" and _cpu_bf16x3_should_use(
+            x_2d.shape[0],
+            self.in_features,
+            self.out_features,
+        ):
+            with _cpu_bf16x3_matmul():
+                y = x_2d @ weight
+        else:
+            y = x_2d @ weight
         bias = getattr(self, "bias", None)
         if bias is not None:
             y = y + bias.to(dtype=compute_dtype)
