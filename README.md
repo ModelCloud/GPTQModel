@@ -198,6 +198,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | LLaDA2 MoE | `llada2_moe` |
 | Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
 | Llama 3.2 VL | `mllama`, `mllama_text_model` |
+| LLaVA-1.5 | `llava` |
 | FastVLM / LLaVA-Qwen2 | `llava_qwen2` |
 | LocateAnything | `locateanything` |
 | LongCat Flash | `longcat_flash` |

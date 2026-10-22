@@ -131,6 +131,7 @@ from .apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel
 from .axk2 import AXK2QModel
 from .klear import KlearQModel
 from .laguna import LagunaQModel
+from .llava import LlavaQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ
