@@ -1857,6 +1857,7 @@ def _int4_qzero_group_scaled_cpu_sources() -> list[str]:
         str(source_dir / "int4_qzero_group_scaled.cpp"),
         str(source_dir / "int4_qzero_group_scaled_avx512.cpp"),
         str(source_dir / "int4_qzero_group_scaled_pack.cpp"),
+        str(source_dir / "qqq_cpu.cpp"),
     ]
 
 
@@ -1917,6 +1918,7 @@ def _int4_qzero_group_scaled_cpu_extension() -> TorchOpsJitExtension:
                 "gemm_int4_qzero_group_scaled_cpu_forward",
                 "pack_gptq_int4",
                 "pack_awq_int4",
+                "qqq_int4",
             ),
             sources=_int4_qzero_group_scaled_cpu_sources,
             build_root_env="GPTQMODEL_EXT_BUILD",
