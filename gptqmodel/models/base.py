@@ -30,6 +30,7 @@ from transformers import (
 from .. import DEVICE_THREAD_POOL
 from ..adapter.adapter import Adapter
 from ..nn_modules.exllamav3 import ExllamaV3Linear
+from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..nn_modules.qlinear.fp4 import TorchFP4Linear
 from ..nn_modules.qlinear.fp8 import TorchFP8Linear
@@ -2649,7 +2650,7 @@ class BaseQModel(nn.Module):
             log.warn("model is not quantized, skip compiling...")
             return self
 
-        if TORCH_HAS_COMPILE:
+        if not TORCH_HAS_COMPILE:
             self.compiled = False
             log.warn("To use compile(), you need to have torch version >= 2.6.0, please "
                            "upgrade it by `pip install -U torch torchaudio torchvision`")
@@ -2659,7 +2660,10 @@ class BaseQModel(nn.Module):
         # torch._dynamo.config.capture_scalar_outputs = True
 
         log.info(f"Compiling qlinear modules with backend: `{backend}`, mode: `{mode}`")
-        modules = find_modules(self.model, layers=[BaseQuantLinear])
+        modules = find_modules(
+            self.model,
+            layers=[BaseQuantLinear, ExllamaV3TorchLinear],
+        )
         for name in modules.keys():
             modules[name].optimize(fullgraph=False, backend=backend, mode=mode)
 

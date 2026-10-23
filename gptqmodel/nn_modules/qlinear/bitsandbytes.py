@@ -21,6 +21,7 @@ from ...quantization.config import (
     _normalize_bitsandbytes_format,
 )
 from ...utils.backend import BACKEND
+from ...utils.cpu_features import has_avx512_bf16
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
@@ -48,6 +49,10 @@ _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
 _CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
 _CPU_PACKED_MAX_M = 64
 _CPU_PACKED_REL_TOL = 4e-3
+_CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
+_CPU_INT8_DENSE_MIN_ROWS = 16
+_CPU_INT8_DENSE_MAX_SHORT_DIM = 640
+_CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 640 * 1024
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -162,6 +167,35 @@ def _quantize_int8_weight_mlx_to_torch(weight: torch.Tensor):
     return _mlx_array_to_cpu_tensor(packed), _mlx_array_to_cpu_tensor(scales)
 
 
+def _dequantize_int8_weight(
+    weight: torch.Tensor,
+    weight_scb: torch.Tensor,
+) -> torch.Tensor:
+    """Dequantize BnB INT8 weights with the same row-scale math as the native op."""
+
+    return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
+
+
+def _cpu_int8_dense_should_use(
+    *,
+    rows: int,
+    in_features: int,
+    out_features: int,
+    compute_dtype: torch.dtype,
+) -> bool:
+    """Return whether recomputing a dense BF16 weight beats BnB's CPU INT8 path."""
+
+    if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
+        return False
+    if not has_avx512_bf16():
+        return False
+    if compute_dtype != torch.bfloat16 or rows < _CPU_INT8_DENSE_MIN_ROWS:
+        return False
+    if min(in_features, out_features) > _CPU_INT8_DENSE_MAX_SHORT_DIM:
+        return False
+    return in_features * out_features <= _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS
+
+
 BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
 
 
@@ -272,6 +306,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         self._quant_state_signature = None
         self._cpu_packing_active = False
         self._cpu_packing_disabled = False
+        self._int8_dense_disabled = False
 
         super().__init__(
             bits=bits,
@@ -536,7 +571,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         if self.is_4bit:
             quant_state = self._refresh_quant_state()
             return bnb.functional.dequantize_4bit(self.weight, quant_state=quant_state).contiguous()
-        return bnb.functional.int8_vectorwise_dequant(self.weight, self.weight_scb).contiguous()
+        return _dequantize_int8_weight(self.weight, self.weight_scb).contiguous()
 
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         self.pack_original(linear=linear, scales=scales, zeros=zeros, g_idx=g_idx)
@@ -701,6 +736,24 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                     quant_state=quant_state,
                     bias=bias,
                 )
+            return out.to(input_dtype)
+
+        rows = x.numel() // self.in_features
+        if (
+            not self._int8_dense_disabled
+            and self.weight.device.type == "cpu"
+            and not (torch.is_grad_enabled() and x.requires_grad)
+            and _cpu_int8_dense_should_use(
+                rows=rows,
+                in_features=self.in_features,
+                out_features=self.out_features,
+                compute_dtype=compute_dtype,
+            )
+        ):
+            weight = _dequantize_int8_weight(self.weight, self.weight_scb).to(compute_dtype)
+            out = torch.matmul(x.to(compute_dtype), weight.t())
+            if bias is not None:
+                out = out + bias
             return out.to(input_dtype)
 
         x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(

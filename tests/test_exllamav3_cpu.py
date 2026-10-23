@@ -287,6 +287,134 @@ def test_exllamav3_torch_forward_decodes_per_call_without_dense_cache(monkeypatc
     )
 
 
+def test_exllamav3_torch_optimize_compiles_cpu_forward(monkeypatch):
+    module = _make_module(size=512)
+    x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        eager = module(x)
+
+    calls = []
+
+    def fake_compile(fn, **kwargs):
+        calls.append(kwargs)
+
+        def compiled(value):
+            return fn(value)
+
+        return compiled
+
+    monkeypatch.setattr(exllamav3_torch, "TORCH_HAS_COMPILE", True)
+    monkeypatch.setattr(exllamav3_torch, "torch_compile", fake_compile)
+
+    assert module.optimize(backend="inductor") is module
+    assert module.optimized
+    assert module._compiled_forward is not None
+    assert calls == [{"backend": "inductor", "mode": None, "fullgraph": False}]
+
+    with torch.inference_mode():
+        compiled = module(x)
+    assert torch.equal(compiled, eager)
+
+    module.optimize(backend="inductor")
+    assert len(calls) == 1
+
+
+def test_exllamav3_torch_compiled_forward_invalidates_on_move_and_state_load(monkeypatch):
+    module = _make_module(size=256)
+    monkeypatch.setattr(exllamav3_torch, "TORCH_HAS_COMPILE", True)
+    monkeypatch.setattr(
+        exllamav3_torch,
+        "torch_compile",
+        lambda fn, **_kwargs: lambda value: fn(value),
+    )
+
+    module.optimize()
+    assert module._compiled_forward is not None
+    module._apply(lambda tensor: tensor)
+    assert module._compiled_forward is None
+    assert not module.optimized
+
+    module.optimize()
+    assert module._compiled_forward is not None
+    module.load_state_dict(module.state_dict())
+    assert module._compiled_forward is None
+    assert not module.optimized
+
+
+def test_exllamav3_torch_compiled_forward_falls_back_to_eager(monkeypatch):
+    module = _make_module(size=256)
+    x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        expected = module(x)
+
+    def fail(_value):
+        raise RuntimeError("compiled graph failed")
+
+    module._compiled_forward = fail
+    module.optimized = True
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    assert torch.equal(actual, expected)
+    assert module._compiled_forward is None
+    assert not module.optimized
+
+
+def test_exllamav3_torch_optimize_skips_non_cpu_tensors(monkeypatch):
+    module = _make_module(size=256)
+    module.trellis = module.trellis.to("meta")
+    calls = []
+    monkeypatch.setattr(exllamav3_torch, "TORCH_HAS_COMPILE", True)
+    monkeypatch.setattr(
+        exllamav3_torch,
+        "torch_compile",
+        lambda *args, **kwargs: calls.append((args, kwargs)),
+    )
+
+    module.optimize()
+
+    assert calls == []
+    assert not module.optimized
+
+
+def test_model_optimize_dispatches_to_exllamav3_cpu_module(monkeypatch):
+    import torch.nn as nn
+
+    import gptqmodel.models.base as model_base
+
+    model = model_base.BaseQModel.__new__(model_base.BaseQModel)
+    nn.Module.__init__(model)
+    model.quantized = True
+    model.compiled = False
+    model.model = nn.Module()
+
+    module = _make_module(size=256)
+    model.model.add_module("proj", module)
+    calls = []
+
+    monkeypatch.setattr(model_base, "TORCH_HAS_COMPILE", True)
+    monkeypatch.setattr(
+        module,
+        "optimize",
+        lambda **kwargs: calls.append(kwargs),
+    )
+    monkeypatch.setattr(
+        model_base,
+        "torch_compile",
+        lambda target, **kwargs: target,
+    )
+
+    assert model.optimize(backend="inductor", mode="reduce-overhead") is model
+    assert calls == [
+        {
+            "fullgraph": False,
+            "backend": "inductor",
+            "mode": "reduce-overhead",
+        }
+    ]
+
+
 def test_exllamav3_torch_unpack_indices_slices_output_tiles():
     module = _make_module(size=512)
 
