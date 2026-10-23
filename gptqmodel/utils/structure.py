@@ -1286,6 +1286,24 @@ class LazyTurtle:
         return reversed_map or None
 
     @classmethod
+    def convert_hf_checkpoint_key(
+        cls,
+        key: str,
+        conversion_mapping: Optional[Any],
+        *,
+        to_runtime: bool = False,
+    ) -> str:
+        """Apply one reversible key rename from a model's HF conversion map."""
+        if to_runtime:
+            conversion_mapping = cls.reverse_hf_conversion_map(conversion_mapping)
+
+        for renaming in cls._normalize_runtime_to_checkpoint_renamings(conversion_mapping):
+            converted, _ = renaming.rename_source_key(key)
+            if converted != key:
+                return converted
+        return key
+
+    @classmethod
     def infer_hf_conversion_map_reversed(
         cls,
         *,

@@ -14,6 +14,7 @@ from transformers import AutoProcessor, ProcessorMixin
 from ...utils.calibration import batched_conversations
 from ...utils.model import MODALITY, move_to
 from ...utils.offload import offload_to_disk
+from ...utils.structure import LazyTurtle
 from .._const import CPU
 from ..base import BaseQModel
 from . import LlamaQModel
@@ -30,33 +31,19 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
     require_load_processor = True
 
-    @staticmethod
-    def checkpoint_key_for_save(name: str) -> str:
-        """Write Transformers 5 shell names using Gemma 3's HF checkpoint names."""
-        if name.startswith("model.language_model."):
-            suffix = name[len("model.language_model."):]
-            if not suffix.startswith("model."):
-                suffix = "model." + suffix
-            return "language_model." + suffix
-        if name.startswith("model.vision_tower."):
-            suffix = name[len("model.vision_tower."):]
-            if not suffix.startswith("vision_model."):
-                suffix = "vision_model." + suffix
-            return "vision_tower." + suffix
-        if name.startswith("model.multi_modal_projector."):
-            return name[len("model."):]
-        return name
+    @classmethod
+    def checkpoint_key_for_save(cls, name: str) -> str:
+        """Use the model's HF conversion map when writing checkpoint keys."""
+        return LazyTurtle.convert_hf_checkpoint_key(name, cls.HF_CONVERSION_MAP_REVERSED)
 
-    @staticmethod
-    def checkpoint_key_for_load(name: str) -> str:
-        """Map saved Hugging Face Gemma 3 names back to Transformers 5 shell names."""
-        if name.startswith("language_model.model."):
-            return "model.language_model." + name[len("language_model.model."):]
-        if name.startswith("vision_tower.vision_model."):
-            return "model.vision_tower." + name[len("vision_tower.vision_model."):]
-        if name.startswith("multi_modal_projector."):
-            return "model." + name
-        return name
+    @classmethod
+    def checkpoint_key_for_load(cls, name: str) -> str:
+        """Reverse the model's HF conversion map when loading checkpoint keys."""
+        return LazyTurtle.convert_hf_checkpoint_key(
+            name,
+            cls.HF_CONVERSION_MAP_REVERSED,
+            to_runtime=True,
+        )
 
     def prepare_quantize_config_for_save(self, quantize_config) -> None:
         # Gemma 3's vision tower and projector remain in their source dtype.
@@ -92,6 +79,11 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
         SimpleNamespace(
             source_patterns=[r"^model\.vision_tower\.(?!vision_model\.)(.+)$"],
             target_patterns=[r"^vision_tower.vision_model.\1"],
+            operations=[],
+        ),
+        SimpleNamespace(
+            source_patterns=[r"^model\.language_model\.(model\..+)$"],
+            target_patterns=[r"^language_model\.(model\..+)$"],
             operations=[],
         ),
         SimpleNamespace(
