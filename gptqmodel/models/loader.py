@@ -1857,7 +1857,12 @@ def ModelLoader(cls):
                     is_sharded=is_sharded,
                 )
 
-        validate_checkpoint_qweights(model, model_save_name, format_code)
+        validate_checkpoint_qweights(
+            model,
+            model_save_name,
+            format_code,
+            key_converter=getattr(cls, "checkpoint_key_for_save", None),
+        )
 
         if isinstance(requested_device_map, str) and requested_device_map not in [
                 "auto",
@@ -2074,6 +2079,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 offload_state_dict=True,
                 offload_buffers=True,
+                key_converter=getattr(cls, "checkpoint_key_for_load", None),
             )
 
             load_checkpoint_in_model = False
@@ -2156,6 +2162,7 @@ def ModelLoader(cls):
                 device_map=device_map,
                 # offload_state_dict=True,
                 # offload_buffers=True,
+                key_converter=getattr(cls, "checkpoint_key_for_load", None),
             )
 
         if native_gguf_qspec is not None:

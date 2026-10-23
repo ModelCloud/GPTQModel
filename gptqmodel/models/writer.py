@@ -82,6 +82,18 @@ PROCESS_USED_MEMORY = "(v)ram"
 
 EORA_DEFAULT_FILE = "eora.safetensors"
 
+
+def _convert_checkpoint_state_dict_keys(state_dict: Dict[str, Any], key_converter) -> Dict[str, Any]:
+    converted_state_dict = {}
+    for name, tensor in state_dict.items():
+        converted_name = key_converter(name)
+        if converted_name in converted_state_dict:
+            raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
+        if isinstance(tensor, TensorSource):
+            tensor.name = converted_name
+        converted_state_dict[converted_name] = tensor
+    return converted_state_dict
+
 # disable gptqmodel split_by layer feature (until sglang pr is merged since our dir struct is not compatible)
 # SUPPORTED_SPLIT_BY = {None, "layer"}
 SUPPORTED_SPLIT_BY = {None}
@@ -1105,6 +1117,9 @@ def ModelWriter(cls):
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
+        checkpoint_key_for_save = getattr(self, "checkpoint_key_for_save", None)
+        if callable(checkpoint_key_for_save):
+            state_dict = _convert_checkpoint_state_dict_keys(state_dict, checkpoint_key_for_save)
         state_dict.update(out_of_model_state_dict)
         out_of_model_state_dict.clear()
 

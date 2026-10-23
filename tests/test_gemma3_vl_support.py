@@ -4,6 +4,8 @@
 from types import SimpleNamespace
 
 import torch
+from safetensors import safe_open
+from safetensors.torch import save_file
 from torch import nn
 
 from gptqmodel.models import auto
@@ -11,7 +13,8 @@ from gptqmodel.models.definitions import gemma3 as gemma3_def
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
 from transformers import BatchEncoding
 
-from gptqmodel.utils.model import MODALITY
+from gptqmodel.models.writer import _convert_checkpoint_state_dict_keys
+from gptqmodel.utils.model import MODALITY, TensorSource, _remap_safetensors_checkpoint_keys
 
 
 class _FakeProcessor:
@@ -145,6 +148,58 @@ def test_gemma3_vl_prepare_dataset_accepts_pretokenized_text_without_processor(m
     assert [row["input_ids"].shape for row in prepared] == [(1, 12), (1, 13)]
     assert prepared[0]["input_ids"].tolist() == [list(range(12))]
     assert prepared[1]["input_ids"].tolist() == [list(range(13))]
+
+
+def test_gemma3_checkpoint_keys_are_saved_in_huggingface_layout():
+    convert = Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save
+
+    assert convert("model.language_model.layers.0.self_attn.q_proj.qweight") == (
+        "language_model.model.layers.0.self_attn.q_proj.qweight"
+    )
+    assert convert("model.language_model.model.norm.weight") == "language_model.model.norm.weight"
+    assert convert("model.vision_tower.encoder.layers.0.self_attn.q_proj.weight") == (
+        "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"
+    )
+    assert convert("model.vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight") == (
+        "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"
+    )
+    assert convert("model.multi_modal_projector.mm_input_projection_weight") == (
+        "multi_modal_projector.mm_input_projection_weight"
+    )
+
+def test_checkpoint_key_conversion_updates_tensor_source_names():
+    source = TensorSource(
+        name="model.vision_tower.encoder.layers.0.self_attn.q_proj.weight",
+        torch_dtype=torch.float16,
+        shape=(2, 2),
+        source=torch.zeros((2, 2), dtype=torch.float16),
+    )
+
+    converted = _convert_checkpoint_state_dict_keys(
+        {source.name: source},
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save,
+    )
+
+    assert list(converted) == ["vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"]
+    assert source.name == list(converted)[0]
+
+def test_gemma3_checkpoint_load_remaps_huggingface_names_for_transformers5(tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    save_file({"vision_tower.vision_model.encoder.weight": torch.ones((2, 2))}, str(checkpoint))
+
+    converted_path = _remap_safetensors_checkpoint_keys(
+        checkpoint,
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load,
+    )
+    try:
+        assert converted_path is not None
+        with safe_open(converted_path, framework="pt", device="cpu") as checkpoint_file:
+            assert list(checkpoint_file.keys()) == ["model.vision_tower.encoder.weight"]
+            assert torch.equal(checkpoint_file.get_tensor("model.vision_tower.encoder.weight"), torch.ones((2, 2)))
+    finally:
+        if converted_path:
+            import os
+            os.unlink(converted_path)
 
 def test_gemma3_vl_calibration_dataset_resolves_to_image_conversations(monkeypatch):
     from ovis import image_to_test_dataset
