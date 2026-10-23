@@ -504,6 +504,8 @@ def main() -> int:
     qqq, qqq_meta = _build_qqq(in_features, out_features, group_size)
     paro, paro_meta = _build_paro(in_features, out_features, group_size)
     fp8, fp8_meta = _build_fp8(in_features, out_features)
+    fp8_compiled = copy.deepcopy(fp8)
+    fp8_compiled.optimize()
     vptq, vptq_meta = _build_vptq(in_features, out_features, group_size)
     exl3, exl3_meta = _build_exl3(in_features, out_features)
     exl3_compiled, _ = _build_exl3(in_features, out_features)
@@ -682,6 +684,25 @@ def main() -> int:
             relative_error=_relative_error(fp8_output, fp8_oracle),
             visible_error=_visible_relative_error(fp8_output, fp8_oracle),
         )
+        if fp8_compiled._compiled_forward is not None:
+            fp8_compiled_time = _bench(
+                lambda: fp8_compiled(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            with torch.inference_mode():
+                fp8_compiled_output = fp8_compiled(x)
+            _add_row(
+                rows,
+                method="FP8",
+                variant="compiled dequant + matmul (no dense cache)",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=fp8_compiled_time,
+                baseline_ms=fp8_time[0],
+                relative_error=_relative_error(fp8_compiled_output, fp8_oracle),
+                visible_error=_visible_relative_error(fp8_compiled_output, fp8_oracle),
+            )
 
         vptq_oracle = torch.nn.functional.linear(
             x.float(),
