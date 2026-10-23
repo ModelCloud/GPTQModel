@@ -63,10 +63,6 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             "preprocessor_config.json",
             "processor_config.json",
             "tokenizer_config.json",
-            "special_tokens_map.json",
-            "tokenizer.model",
-            "added_tokens.json",
-            "chat_template.json",
         )
         for filename in filenames:
             source = os.path.join(self.model_local_path, filename)

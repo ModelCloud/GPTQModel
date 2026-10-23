@@ -224,14 +224,16 @@ def test_gemma3_save_copies_legacy_processor_assets(tmp_path):
     target.mkdir()
     (source / "preprocessor_config.json").write_text("{}")
     (source / "processor_config.json").write_text("{}")
-    (source / "tokenizer.model").write_bytes(b"tokenizer")
+    (source / "tokenizer_config.json").write_text("{}")
+    (source / "tokenizer.model").write_bytes(b"unused")
 
     model = SimpleNamespace(model_local_path=str(source))
     Gemma3ForConditionalGenerationGPTQ.copy_checkpoint_auxiliary_files_for_save(model, str(target))
 
     assert (target / "preprocessor_config.json").read_text() == "{}"
     assert (target / "processor_config.json").read_text() == "{}"
-    assert (target / "tokenizer.model").read_bytes() == b"tokenizer"
+    assert (target / "tokenizer_config.json").read_text() == "{}"
+    assert not os.path.exists(target / "tokenizer.model")
     assert not os.path.exists(target / "chat_template.json")
 
 
