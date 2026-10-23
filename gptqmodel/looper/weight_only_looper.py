@@ -21,12 +21,13 @@ from concurrent.futures import as_completed
 from typing import Dict, List, Optional, Tuple
 
 import torch
+from accelerate.utils import find_tied_parameters
 from defuser.modeling.replace_modules import materialize_model
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.module_preprocessor import ModulePreProcessor
-from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..looper.named_module import NamedModule
+from ..looper.weight_only_processor import WeightOnlyProcessor
 from ..models import BaseQModel
 from ..models._const import CPU, SUPPORTS_MODULE_TYPES
 from ..nn_modules.converter import MODULE_CONVERTER_MAP
@@ -818,13 +819,15 @@ class WeightOnlyLooper(DeviceAssignmentState):
         embedding_target_names = {name for name, _module, _label in embedding_targets}
         lm_head_name = self.gptq_model.get_output_embeddings_name() or self.gptq_model.lm_head
         if not embed_only and quant_config.lm_head and lm_head_name not in embedding_target_names:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
-                for item in tied_keys:
-                    if lm_head_name in item:
-                        raise NotImplementedError(
-                            "quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`."
-                        )
+            # The output head may belong to a nested multimodal text model.
+            if any(
+                f"{lm_head_name}.weight" in names
+                for names in find_tied_parameters(self.gptq_model.model)
+            ):
+                raise NotImplementedError(
+                    "quantization of `lm_head` layer with tied weights is not supported. "
+                    "Untie the model weights before quantization."
+                )
 
             lm_head_module = get_module(self.gptq_model.model, key=lm_head_name)
             if lm_head_module is None:
