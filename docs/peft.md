@@ -35,6 +35,108 @@ model = get_peft_model(
 model.save_pretrained(adapter_path)
 ```
 
+## FSDP LoRA fine-tuning
+
+FSDP can shard a GPTQ model across multiple GPUs while PEFT trains only the LoRA adapter. Use the maintained SFT training script in [PEFT's `examples/sft`](https://github.com/huggingface/peft/tree/main/examples/sft) with a current PEFT checkout. The GPTQ backend must be set to `gptq_torch` before loading the model.
+
+Install the example dependencies in the same environment as GPT-QModel:
+
+```bash
+git clone https://github.com/huggingface/peft.git
+cd peft/examples/sft
+pip install -r requirements.txt
+```
+
+In `utils.py`, load the quantized model with a training-capable GPTQ backend. Replace the `AutoModelForCausalLM.from_pretrained(...)` call in `create_and_prepare_model` with:
+
+```py
+config = transformers.AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=True)
+if config.quantization_config["quant_method"] == "gptq":
+    config.quantization_config["backend"] = "gptq_torch"
+model = AutoModelForCausalLM.from_pretrained(
+    args.model_name_or_path,
+    config=config,
+    **model_kwargs,
+)
+```
+
+In `train.py`, after creating `SFTTrainer` and before calling `trainer.train()`, set PEFT's FSDP auto-wrap policy. With `fsdp_use_orig_params: false`, this wraps trainable adapter parameters separately from frozen base parameters:
+
+```py
+if model_args.use_peft_lora and trainer.is_fsdp_enabled:
+    from peft.utils.other import fsdp_auto_wrap_policy
+
+    trainer.accelerator.state.fsdp_plugin.auto_wrap_policy = fsdp_auto_wrap_policy(trainer.model)
+```
+
+For GPTQ LoRA, export adapter tensors from the gathered full state dict. Replace the final `trainer.save_model()` with:
+
+```py
+import os
+from safetensors.torch import save_file
+
+if trainer.is_fsdp_enabled:
+    trainer.accelerator.state.fsdp_plugin.set_state_dict_type("FULL_STATE_DICT")
+    state_dict = trainer.accelerator.get_state_dict(trainer.model)
+    trainer.save_model()
+
+    if trainer.is_world_process_zero():
+        adapter_state_dict = {
+            key.replace(".default.weight", ".weight"): value.cpu().contiguous()
+            for key, value in state_dict.items()
+            if key.endswith((".lora_A.default.weight", ".lora_B.default.weight"))
+        }
+        if not adapter_state_dict:
+            raise RuntimeError("FSDP full state dict contains no GPTQ LoRA tensors")
+        save_file(adapter_state_dict, os.path.join(training_args.output_dir, "adapter_model.safetensors"))
+else:
+    trainer.save_model()
+```
+
+The export writes standard PEFT adapter keys, which can be loaded with `PeftModel.from_pretrained`. With the PEFT/Transformers versions used for the smoke test, the regular Trainer save created an empty adapter file for this GPTQ FSDP path, so verify that `adapter_model.safetensors` is non-empty before using the output.
+
+Use an Accelerate FSDP config with one process per GPU. This repository provides a four-GPU config at [`docs/peft/fsdp_config.yaml`](peft/fsdp_config.yaml). From the PEFT `examples/sft` directory, launch the official script:
+
+```bash
+accelerate launch --config_file /path/to/GPTQModel/docs/peft/fsdp_config.yaml train.py \
+  --seed 100 \
+  --model_name_or_path hugging-quants/Meta-Llama-3.1-8B-Instruct-GPTQ-INT4 \
+  --dataset_name smangrul/ultrachat-10k-chatml \
+  --chat_template_format chatml \
+  --add_special_tokens False \
+  --append_concat_token False \
+  --splits train,test \
+  --max_length 2048 \
+  --num_train_epochs 1 \
+  --logging_steps 5 \
+  --logging_strategy steps \
+  --eval_strategy epoch \
+  --save_strategy epoch \
+  --bf16 True \
+  --packing True \
+  --learning_rate 1e-4 \
+  --lr_scheduler_type cosine \
+  --weight_decay 1e-4 \
+  --warmup_steps 0 \
+  --max_grad_norm 1.0 \
+  --output_dir llama3-8b-gptq-lora-fsdp \
+  --per_device_train_batch_size 1 \
+  --per_device_eval_batch_size 1 \
+  --gradient_accumulation_steps 4 \
+  --gradient_checkpointing True \
+  --use_reentrant False \
+  --dataset_text_field content \
+  --use_flash_attn False \
+  --use_peft_lora True \
+  --lora_r 8 \
+  --lora_alpha 16 \
+  --lora_dropout 0.1 \
+  --lora_target_modules q_proj,k_proj,v_proj,o_proj,up_proj,gate_proj \
+  --use_4bit_quantization False
+```
+
+The checkpoint is already GPTQ-quantized, so keep `--use_4bit_quantization False`; that flag enables bitsandbytes QLoRA. The command above uses BF16 activations and batch size 1 per GPU. Adjust sequence length or batch size to fit the available GPU memory. FSDP checkpoints are saved under `--output_dir`.
+
 ## Load an existing adapter
 
 ```py
