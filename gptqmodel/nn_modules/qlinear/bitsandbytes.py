@@ -21,7 +21,7 @@ from ...quantization.config import (
     _normalize_bitsandbytes_format,
 )
 from ...utils.backend import BACKEND
-from ...utils.cpu_features import has_avx512_bf16
+from ...utils.cpu_features import cpu_bf16x3_matmul, has_avx512_bf16
 from ...utils.env import env_flag
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
@@ -53,11 +53,13 @@ _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
 _CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
 _CPU_PACKED_SINGLE_THREAD_MAX_M = 32
 _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
-_CPU_PACKED_REL_TOL = 4e-3
+_CPU_PACKED_REL_TOL = 2e-3
 _CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
-_CPU_INT8_DENSE_MIN_ROWS = 16
-_CPU_INT8_DENSE_MAX_SHORT_DIM = 640
-_CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 640 * 1024
+_CPU_INT8_DENSE_MIN_ROWS = 64
+_CPU_INT8_DENSE_MAX_ROWS = 256
+_CPU_INT8_DENSE_SQUARE = 512
+_CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 512 * 512
+_CPU_INT8_DENSE_TILE_FEATURES = 512
 
 
 def _is_bitsandbytes_available() -> bool:
@@ -213,15 +215,26 @@ def _cpu_int8_dense_should_use(
     out_features: int,
     compute_dtype: torch.dtype,
 ) -> bool:
-    """Return whether recomputing a dense BF16 weight beats BnB's CPU INT8 path."""
+    """Return whether a tiled FP32 recompute is accurate and faster than native INT8.
+
+    The native path is an A8W8 format: it quantizes activations as well as
+    weights. The measured crossover for a 512x512 BF16 layer is 64 to 256 rows;
+    below that the native A8W8 kernel wins, and above it the larger oneDNN
+    native GEMM catches up. Other small shapes regress in the current oneDNN
+    dispatch, so they stay native until a shape-specific crossover is measured.
+    The tiled path dequantizes only one bounded feature tile at a time and never
+    retains a dense weight.
+    """
 
     if not env_flag(_CPU_INT8_DENSE_ENV, default=True):
         return False
     if not has_avx512_bf16():
         return False
-    if compute_dtype != torch.bfloat16 or rows < _CPU_INT8_DENSE_MIN_ROWS:
+    if compute_dtype != torch.bfloat16 or not (
+        _CPU_INT8_DENSE_MIN_ROWS <= rows <= _CPU_INT8_DENSE_MAX_ROWS
+    ):
         return False
-    if min(in_features, out_features) > _CPU_INT8_DENSE_MAX_SHORT_DIM:
+    if in_features != _CPU_INT8_DENSE_SQUARE or out_features != _CPU_INT8_DENSE_SQUARE:
         return False
     return in_features * out_features <= _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS
 
@@ -477,7 +490,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
         return self.quant_state
 
     def _cpu_packing_supported(self, x: torch.Tensor, compute_dtype: torch.dtype) -> bool:
-        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=True):
+        if self._cpu_packing_disabled or not env_flag(_CPU_PACKED_ENV, default=False):
             return False
         if not self.is_4bit or self.training or self.weight.device.type != "cpu":
             return False
@@ -555,6 +568,36 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             return torch.equal(packed, canonical)
         relative_error = (packed - canonical).norm() / denominator
         return bool(relative_error <= _CPU_PACKED_REL_TOL)
+
+    def _cpu_int8_tiled_forward(
+        self,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Recompute an INT8 layer from bounded FP32 tiles without caching weights."""
+
+        x_flat = x.reshape(-1, self.in_features)
+        output = torch.zeros(
+            (x_flat.shape[0], self.out_features),
+            dtype=torch.float32,
+            device=x_flat.device,
+        )
+
+        with cpu_bf16x3_matmul():
+            for start in range(0, self.in_features, _CPU_INT8_DENSE_TILE_FEATURES):
+                end = min(start + _CPU_INT8_DENSE_TILE_FEATURES, self.in_features)
+                weight = _dequantize_int8_weight(
+                    self.weight[:, start:end],
+                    self.weight_scb,
+                )
+                output = output + torch.matmul(
+                    x_flat[:, start:end].to(torch.float32),
+                    weight.t(),
+                )
+
+        if bias is not None:
+            output = output + bias.to(torch.float32)
+        return output.reshape(x.shape[:-1] + (self.out_features,)).to(x.dtype)
 
     def _save_to_state_dict(self, destination, prefix, keep_vars):
         self._ensure_unpacked()
@@ -783,11 +826,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
                 compute_dtype=compute_dtype,
             )
         ):
-            weight = _dequantize_int8_weight(self.weight, self.weight_scb).to(compute_dtype)
-            out = torch.matmul(x.to(compute_dtype), weight.t())
-            if bias is not None:
-                out = out + bias
-            return out.to(input_dtype)
+            return self._cpu_int8_tiled_forward(x, bias)
 
         x_int8, x_stats, outlier_cols = bnb.functional.int8_vectorwise_quant(
             x.to(torch.float16),

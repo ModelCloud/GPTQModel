@@ -8,11 +8,17 @@ import numpy as np
 import pytest
 import torch
 
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.gguf import (
+    GGUFTorchLinear,
+    _dequantize_gguf_tensor_numpy,
+)
 
 
 def _oracle_dequantize(qweight: torch.Tensor, tensor_qtype: str) -> np.ndarray:
     raw = qweight.detach().cpu().numpy()
+    if tensor_qtype in {"Q4_K", "Q5_K", "Q6_K"}:
+        return _dequantize_gguf_tensor_numpy(raw, tensor_qtype)
+
     rows = raw.shape[0]
     type_size = 18 if tensor_qtype == "Q4_0" else 34
     block_size = 32
@@ -143,9 +149,22 @@ def test_gguf_q8_0_uses_fp16_scale_and_signed_int8_layout():
     torch.testing.assert_close(actual, expected, rtol=0.0, atol=0.0)
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-@pytest.mark.parametrize(("bits", "tensor_qtype"), [("q4_0", "Q4_0"), ("q8_0", "Q8_0")])
-def test_gguf_q4_q8_forward_matches_dense_oracle_and_fused_path(
+@pytest.mark.parametrize(
+    "dtype",
+    [torch.float32, torch.bfloat16, torch.float16],
+    ids=["fp32", "bf16", "fp16"],
+)
+@pytest.mark.parametrize(
+    ("bits", "tensor_qtype"),
+    [
+        ("q4_0", "Q4_0"),
+        ("q8_0", "Q8_0"),
+        ("q4_k", "Q4_K"),
+        ("q5_k", "Q5_K"),
+        ("q6_k", "Q6_K"),
+    ],
+)
+def test_gguf_cpu_fused_forward_matches_independent_oracle(
     dtype: torch.dtype,
     bits: str,
     tensor_qtype: str,
@@ -164,15 +183,46 @@ def test_gguf_q4_q8_forward_matches_dense_oracle_and_fused_path(
     expected = expected_linear + module.bias.to(torch.float32)
 
     with torch.inference_mode():
-        dense = module._forward_dequant_matmul(x)
-        fused = module._forward_fused_k(x)
+        fused = module._forward_fused_k(x, bias=module.bias)
         actual = module(x)
 
-    tolerance = {"rtol": 2e-3, "atol": 2e-3} if dtype == torch.bfloat16 else {"rtol": 1e-5, "atol": 1e-5}
-    torch.testing.assert_close(dense.to(torch.float32), expected_linear, **tolerance)
-    torch.testing.assert_close(fused.to(torch.float32), dense.to(torch.float32), **tolerance)
-    torch.testing.assert_close(actual.to(torch.float32), expected, **tolerance)
+    raw_error = (fused.float() - expected).norm() / expected.norm().clamp_min(1e-12)
+    visible_error = (fused.float() - expected.to(dtype).float()).norm() / expected.to(dtype).float().norm().clamp_min(1e-12)
+    assert raw_error < 2e-3
+    assert visible_error < 2e-3
+    assert fused.dtype == dtype
+    assert actual.dtype == dtype
+    torch.testing.assert_close(actual, expected.to(dtype), rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(actual, fused, rtol=0.0, atol=0.0)
     assert module._should_use_fused_k_forward(x)
+
+
+def test_gguf_cpu_fused_forward_retains_only_packed_weight():
+    _, module = _build_module("q4_k", in_features=37, out_features=5, seed=74)
+    module.gguf_fused_cpu_max_rows = 16
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.autotune_enabled = False
+    module.clear_autotune()
+    module.clear_weight_cache()
+
+    x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        first = module(x)
+        second = module(x)
+
+    assert torch.equal(first, second)
+    assert module._should_use_fused_k_forward(x)
+    assert set(dict(module.named_buffers())) == {"qweight", "bias"}
+    dense_shape = (module.out_features, module.in_features)
+    assert not any(
+        tuple(value.shape) == dense_shape
+        for value in vars(module).values()
+        if torch.is_tensor(value)
+    )
+    assert not any(
+        name in vars(module)
+        for name in ("_dequantized_weight", "_dense_weight", "_weight_cache")
+    )
 
 
 def test_gguf_fused_autotune_is_cached_per_shape(monkeypatch):
