@@ -201,6 +201,19 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
     *reinterpret_cast<half2*>(&t1),
     *reinterpret_cast<half2*>(&double_s), *reinterpret_cast<const half2*>(&MAGIC_NUM)
   );
+  // The magic-number conversion below encodes rounded INT8 values with an
+  // offset of 1152. Clamp in that offset domain before extracting the low
+  // byte; otherwise values outside [-128, 127] wrap around when converted.
+  static constexpr uint32_t INT8_MIN_OFFSET = 0x64006400;  // half2(1024)
+  static constexpr uint32_t INT8_MAX_OFFSET = 0x64ff64ff;  // half2(1279)
+  *reinterpret_cast<half2*>(&t0) = __hmin2(
+    __hmax2(*reinterpret_cast<const half2*>(&t0), *reinterpret_cast<const half2*>(&INT8_MIN_OFFSET)),
+    *reinterpret_cast<const half2*>(&INT8_MAX_OFFSET)
+  );
+  *reinterpret_cast<half2*>(&t1) = __hmin2(
+    __hmax2(*reinterpret_cast<const half2*>(&t1), *reinterpret_cast<const half2*>(&INT8_MIN_OFFSET)),
+    *reinterpret_cast<const half2*>(&INT8_MAX_OFFSET)
+  );
   // take out the 4 uint8 from 4 half, then convert them to 4 int8 and pack 4 int8 into 1 uint32
   FragB frag_b;
   uint32_t uint8s;
