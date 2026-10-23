@@ -19,6 +19,13 @@ def test_qqq_config_defaults_to_no_activation_order():
     assert config.to_dict()["desc_act"] is False
 
 
+def test_qqq_config_serializes_vllm_weight_bits_alias():
+    payload = QQQConfig(bits=4, group_size=128, offload_to_disk=False).to_dict()
+
+    assert payload["bits"] == 4
+    assert payload["wbits"] == 4
+
+
 def test_quantize_config_factory_defaults_qqq_to_no_activation_order():
     config = QuantizeConfig(
         bits=4,

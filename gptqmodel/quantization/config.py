@@ -4633,6 +4633,12 @@ class QQQConfig(GPTQConfig):
     def supported_export_formats(self) -> Tuple[FORMAT, ...]:
         return QQQ_EXPORT_FORMATS
 
+    def _update_output_payload(self, out: Dict[str, Any]) -> None:
+        super()._update_output_payload(out)
+        # vLLM's QQQ config loader reads the weight width from ``wbits``.
+        # Keep ``bits`` as well for GPTQModel and other Hugging Face consumers.
+        out["wbits"] = serialize_quant_bits(self.bits)
+
     def default_desc_act(self) -> bool:
         # QQQ's packed runtime has contiguous 128-column group scales and no
         # g_idx buffer, so GPTQ-style activation reordering cannot be
