@@ -6,7 +6,6 @@ import torch
 import torch.nn as nn
 
 import gptqmodel.nn_modules.qlinear.fp8 as fp8_module
-from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear, quantize_fp8_weight
 from gptqmodel.quantization.dtype import available_float8_dtype_names
 
 
@@ -14,10 +13,10 @@ def _available_fp8_quant_formats():
     return [fmt for fmt in available_float8_dtype_names() if fmt != "float8_e8m0fnu"]
 
 
-def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> TorchFP8Linear:
+def _make_fp8_kernel(*, in_features: int = 64, out_features: int = 64) -> fp8_module.TorchFP8Linear:
     torch.manual_seed(3)
     linear = nn.Linear(in_features, out_features, bias=True).eval()
-    kernel = TorchFP8Linear(
+    kernel = fp8_module.TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -43,7 +42,7 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
     linear = nn.Linear(64, 64, bias=True).eval()
     block_size = (16, 16) if weight_scale_method == "block" else None
 
-    kernel = TorchFP8Linear(
+    kernel = fp8_module.TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -59,7 +58,7 @@ def test_fp8_pack_matches_reference_quantizer(fmt: str, weight_scale_method: str
     )
     kernel.pack_original(linear=linear, scales=None, zeros=None)
 
-    expected_weight, expected_scale_inv = quantize_fp8_weight(
+    expected_weight, expected_scale_inv = fp8_module.quantize_fp8_weight(
         linear.weight.detach().to(torch.float32),
         format=fmt,
         weight_scale_method=weight_scale_method,
@@ -76,7 +75,7 @@ def test_fp8_pack_rejects_e8m0fnu(weight_scale_method: str):
     linear = nn.Linear(64, 64, bias=True).eval()
     block_size = (16, 16) if weight_scale_method == "block" else None
 
-    kernel = TorchFP8Linear(
+    kernel = fp8_module.TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -103,7 +102,7 @@ def test_fp8_forward_matches_dequantized_reference(fmt: str, weight_scale_method
     linear = nn.Linear(64, 64, bias=True).eval()
     block_size = (16, 16) if weight_scale_method == "block" else None
 
-    kernel = TorchFP8Linear(
+    kernel = fp8_module.TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
@@ -279,7 +278,7 @@ def test_fp8_scaled_mm_matches_dense_reference(fmt: str, weight_scale_method: st
     torch.manual_seed(2)
     linear = nn.Linear(64, 64, bias=False).eval()
 
-    kernel = TorchFP8Linear(
+    kernel = fp8_module.TorchFP8Linear(
         bits=8,
         group_size=-1,
         desc_act=False,
