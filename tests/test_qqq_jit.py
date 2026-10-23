@@ -122,6 +122,7 @@ def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     assert module._packed_weight_for_cpu()[0] is first_weight
     assert first_weight.dtype == torch.uint8
     assert first_weight.numel() == module.in_features * module.out_features // 2
+    assert first_weight.untyped_storage().nbytes() == first_weight.numel()
 
     module.s_channel.add_(1.0)
     second_weight, _, second_channel = module._packed_weight_for_cpu()

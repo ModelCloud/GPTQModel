@@ -1,3 +1,8 @@
+import os
+import subprocess
+import sys
+import weakref
+
 import pytest
 import torch
 
@@ -128,8 +133,24 @@ def test_qqq_no_kernel_redequantizes_without_caching(monkeypatch):
     module, _, weight, channels = build_case()
     activation = torch.randn(7, module.in_features, dtype=torch.float16)
     _, _, _, expected = oracle(module, activation, weight, channels)
+    scratch = []
+    original_dequantize = module._dequantize_weight_for_torch
+    original_matmul = module._int8_matmul
+
+    def record_dequantize():
+        expanded, scales = original_dequantize()
+        scratch.append(weakref.ref(expanded))
+        return expanded, scales
+
+    def record_matmul(quantized, expanded):
+        scratch.append(weakref.ref(expanded))
+        return original_matmul(quantized, expanded)
+
+    monkeypatch.setattr(module, "_dequantize_weight_for_torch", record_dequantize)
+    monkeypatch.setattr(module, "_int8_matmul", record_matmul)
     for _ in range(2):
         torch.testing.assert_close(module(activation), expected, rtol=0, atol=0)
+        assert all(reference() is None for reference in scratch)
         assert module._torch_packed_cache is None
         assert not hasattr(module, "_torch_weight_cache")
 
@@ -207,3 +228,27 @@ def test_qqq_nonfinite_scale_cast_matches_torch(packed_kernel):
     activation = torch.eye(256, dtype=torch.int8)
     actual = packed_kernel(activation, pack_hf_int4(codes), scales, 128)
     torch.testing.assert_close(actual, weight.float(), rtol=0, atol=0)
+
+
+def test_qqq_onednn_isa_cap_falls_back(packed_kernel):
+    code = """
+import torch
+from gptqmodel.nn_modules.qlinear.qqq import _qqq_cpu_kernel
+from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import pack_hf_int4
+torch.set_num_threads(2)
+torch.manual_seed(47)
+codes = torch.randint(0, 16, (32, 256), dtype=torch.uint8)
+activation = torch.randint(-128, 128, (7, 256), dtype=torch.int8)
+scales = torch.ones(2, 32)
+expected = activation.float() @ (codes.t().float() - 8)
+actual = _qqq_cpu_kernel()(activation, pack_hf_int4(codes), scales, 128)
+torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+"""
+    environment = dict(os.environ)
+    environment["ONEDNN_MAX_CPU_ISA"] = "AVX2"
+    environment["DNNL_MAX_CPU_ISA"] = "AVX2"
+    result = subprocess.run(
+        [sys.executable, "-c", code], env=environment,
+        capture_output=True, text=True, timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

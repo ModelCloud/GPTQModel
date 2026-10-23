@@ -6,6 +6,27 @@
 
 namespace {
 
+bool qqq_brgemm_available() {
+    if (!at::hasMKLDNN() || !at::globalContext().userEnabledMkldnn() ||
+        !__builtin_cpu_supports("avx512vnni")) {
+        return false;
+    }
+    static const bool available = [] {
+        alignas(64) uint8_t input[4] = {};
+        alignas(64) int8_t weight[4 * 32] = {};
+        alignas(64) int32_t output[32] = {};
+        try {
+            at::native::cpublas::brgemm(1, 32, 4, 4, 32, 32, false, input, weight, output);
+            at::native::cpublas::brgemm_release();
+            return true;
+        } catch (const c10::Error&) {
+            at::native::cpublas::brgemm_release();
+            return false;
+        }
+    }();
+    return available;
+}
+
 __m512i qqq_weight_pair(__m256i codes, const float* scales) {
     const __m512i centered = _mm512_sub_epi16(
         _mm512_cvtepu8_epi16(codes), _mm512_set1_epi16(8));
@@ -160,8 +181,7 @@ at::Tensor qqq_int4_cpu(const at::Tensor& input, const at::Tensor& weight,
     const auto* packed = weight.data_ptr<uint8_t>();
     const auto* group_scales = scales.numel() == 0 ? nullptr : scales.data_ptr<float>();
     auto* result = output.data_ptr<float>();
-    const bool use_brgemm = rows > 4 && group_size % 4 == 0 && at::hasMKLDNN() &&
-        at::globalContext().userEnabledMkldnn() && __builtin_cpu_supports("avx512vnni");
+    const bool use_brgemm = rows > 4 && group_size % 4 == 0 && qqq_brgemm_available();
     const int64_t row_tile = use_brgemm ? (out_features / 32 >= at::get_num_threads() ? 128 : 32) : 4;
     const auto unsigned_input = use_brgemm ? input.to(at::kByte).add_(128) : at::Tensor();
     int4_qzero_group_scaled_cpu::avx512::parallel_2d(
