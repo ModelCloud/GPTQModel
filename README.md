@@ -76,6 +76,10 @@ lossless repacking of arbitrary grouped/asymmetric GPTQ weights.
 
 ## Quantization Support 🛠️
 
+Start with the **[quantization guide and end-to-end recipes](docs/quantization-guide.md)**
+to choose weight and activation precision, prepare calibration data, quantize,
+save, reload, and validate a model. It also maps advanced features to their guides.
+
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.
 
 | Feature      | GPT-QModel | Transformers | vLLM | SGLang | Lora Training |
