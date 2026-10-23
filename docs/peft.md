@@ -37,9 +37,9 @@ model.save_pretrained(adapter_path)
 
 ## FSDP LoRA fine-tuning
 
-FSDP can shard a GPTQ model across multiple GPUs while PEFT trains only the LoRA adapter. Use the maintained SFT training script in [PEFT's `examples/sft`](https://github.com/huggingface/peft/tree/main/examples/sft) with a current PEFT checkout. The GPTQ backend must be set to `gptq_torch` before loading the model.
+Use PEFT's maintained [`examples/sft`](https://github.com/huggingface/peft/tree/main/examples/sft) script with a current PEFT checkout. The recipe below uses FSDP to shard the GPTQ model and train only its LoRA adapter. It was validated with the 8B Llama 3.1 GPTQ checkpoint on four RTX 4090 GPUs.
 
-Install the example dependencies in the same environment as GPT-QModel:
+Clone PEFT and install the SFT example dependencies in the GPT-QModel environment:
 
 ```bash
 git clone https://github.com/huggingface/peft.git
@@ -47,7 +47,7 @@ cd peft/examples/sft
 pip install -r requirements.txt
 ```
 
-In `utils.py`, load the quantized model with a training-capable GPTQ backend. Replace the `AutoModelForCausalLM.from_pretrained(...)` call in `create_and_prepare_model` with:
+In PEFT's `examples/sft/utils.py`, set the GPTQ backend before loading the model. Replace the existing `from_pretrained` call in `create_and_prepare_model` with:
 
 ```py
 config = transformers.AutoConfig.from_pretrained(args.model_name_or_path, trust_remote_code=True)
@@ -60,7 +60,7 @@ model = AutoModelForCausalLM.from_pretrained(
 )
 ```
 
-In `train.py`, after creating `SFTTrainer` and before calling `trainer.train()`, set PEFT's FSDP auto-wrap policy. With `fsdp_use_orig_params: false`, this wraps trainable adapter parameters separately from frozen base parameters:
+In `train.py`, after creating `SFTTrainer` and before `trainer.train()`, set PEFT's FSDP auto-wrap policy. This pairs with `fsdp_use_orig_params: false` in the config below:
 
 ```py
 if model_args.use_peft_lora and trainer.is_fsdp_enabled:
@@ -69,7 +69,7 @@ if model_args.use_peft_lora and trainer.is_fsdp_enabled:
     trainer.accelerator.state.fsdp_plugin.auto_wrap_policy = fsdp_auto_wrap_policy(trainer.model)
 ```
 
-For GPTQ LoRA, export adapter tensors from the gathered full state dict. Replace the final `trainer.save_model()` with:
+Finally, replace the last `trainer.save_model()` call in `train.py` with the following so the gathered LoRA tensors are written using standard PEFT keys:
 
 ```py
 import os
@@ -93,9 +93,9 @@ else:
     trainer.save_model()
 ```
 
-The export writes standard PEFT adapter keys, which can be loaded with `PeftModel.from_pretrained`. With the PEFT/Transformers versions used for the smoke test, the regular Trainer save created an empty adapter file for this GPTQ FSDP path, so verify that `adapter_model.safetensors` is non-empty before using the output.
+In the tested PEFT/Transformers setup, the regular Trainer save produced an empty adapter file for this GPTQ FSDP path. The explicit export above writes `adapter_model.safetensors`, which can be loaded with `PeftModel.from_pretrained`.
 
-Use an Accelerate FSDP config with one process per GPU. This repository provides a four-GPU config at [`docs/peft/fsdp_config.yaml`](peft/fsdp_config.yaml). From the PEFT `examples/sft` directory, launch the official script:
+From `examples/sft`, launch with the four-GPU config at [`docs/peft/fsdp_config.yaml`](peft/fsdp_config.yaml):
 
 ```bash
 accelerate launch --config_file /path/to/GPTQModel/docs/peft/fsdp_config.yaml train.py \
@@ -135,7 +135,7 @@ accelerate launch --config_file /path/to/GPTQModel/docs/peft/fsdp_config.yaml tr
   --use_4bit_quantization False
 ```
 
-The checkpoint is already GPTQ-quantized, so keep `--use_4bit_quantization False`; that flag enables bitsandbytes QLoRA. The command above uses BF16 activations and batch size 1 per GPU. Adjust sequence length or batch size to fit the available GPU memory. FSDP checkpoints are saved under `--output_dir`.
+The checkpoint is already GPTQ-quantized, so keep `--use_4bit_quantization False` (it enables bitsandbytes QLoRA). This command uses BF16 and batch size 1 per GPU; lower `--max_length` if memory is limited. Checkpoints are written to `--output_dir`.
 
 ## Load an existing adapter
 
