@@ -3,11 +3,14 @@
 
 from types import SimpleNamespace
 
+import torch
 from torch import nn
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions import gemma3 as gemma3_def
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
+from transformers import BatchEncoding
+
 from gptqmodel.utils.model import MODALITY
 
 
@@ -123,6 +126,25 @@ def test_gemma3_vl_prepare_dataset_honors_batch_size(monkeypatch):
     assert len(prepared) == 1
     assert [len(conversations) for conversations, _ in processor.template_calls] == [2]
 
+
+def test_gemma3_vl_prepare_dataset_accepts_pretokenized_text_without_processor(monkeypatch):
+    rows = [
+        BatchEncoding({"input_ids": list(range(12)), "attention_mask": [0] + [1] * 11}),
+        BatchEncoding({"input_ids": list(range(13)), "attention_mask": [0] + [1] * 12}),
+    ]
+    model = _vl_qmodel()
+
+    def fail_load_processor(self):
+        raise AssertionError("Pre-tokenized text calibration must not use the multimodal processor")
+
+    monkeypatch.setattr(Gemma3ForConditionalGenerationGPTQ, "load_processor", fail_load_processor)
+
+    prepared = model.prepare_dataset(rows, batch_size=1)
+
+    assert len(prepared) == 2
+    assert [row["input_ids"].shape for row in prepared] == [(1, 12), (1, 13)]
+    assert prepared[0]["input_ids"].tolist() == [list(range(12))]
+    assert prepared[1]["input_ids"].tolist() == [list(range(13))]
 
 def test_gemma3_vl_calibration_dataset_resolves_to_image_conversations(monkeypatch):
     from ovis import image_to_test_dataset
