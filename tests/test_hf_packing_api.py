@@ -29,16 +29,16 @@ from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
 from gptqmodel.quantization import FORMAT, METHOD, QuantizeConfig
 from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.model import (
+    convert_gptq_v1_to_v2_format_module,
+    convert_gptq_v2_to_v1_format_module,
+)
 from gptqmodel.utils.packing import (
     hf_check_best_packing_format,
     hf_check_packing_feasibility,
     hf_pack_layer,
     hf_post_init,
     hf_repack_layer,
-)
-from gptqmodel.utils.model import (
-    convert_gptq_v1_to_v2_format_module,
-    convert_gptq_v2_to_v1_format_module,
 )
 
 
@@ -153,9 +153,12 @@ def test_feasibility_repack_targets_include_plain_gptq_kernels():
 
 def test_feasibility_rejects_repack_only_int8_kernel_for_raw_packing():
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU
+        8, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU
     )
     assert hf_check_packing_feasibility(
+        8, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU, repack=True
+    )
+    assert not hf_check_packing_feasibility(
         4, 32, False, True, backend=BACKEND.GPTQ_TORCH_INT8, device=DEVICE.CPU, repack=True
     )
 
@@ -171,7 +174,7 @@ def test_feasibility_rejects_repack_only_awq_int8_kernel_for_raw_packing():
         backend=BACKEND.AWQ_TORCH_INT8,
         device=DEVICE.CPU,
     )
-    assert hf_check_packing_feasibility(
+    assert not hf_check_packing_feasibility(
         4,
         32,
         False,
