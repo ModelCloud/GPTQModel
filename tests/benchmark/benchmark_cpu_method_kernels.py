@@ -28,6 +28,7 @@ from gptqmodel.nn_modules.exllamav3_torch import (
 from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
+    _cpu_int8_dense_should_use,
     _cpu_packed_kernels,
     _dequantize_int8_weight,
 )
@@ -85,6 +86,24 @@ def _visible_relative_error(output: torch.Tensor, reference: torch.Tensor) -> fl
     visible_reference = reference.to(dtype=output.dtype)
     difference = output.float() - visible_reference.float()
     return (difference.norm() / visible_reference.float().norm().clamp_min(1e-12)).item()
+
+
+def _bnb_int8_a8w8_oracle(x: torch.Tensor, module: BitsAndBytesLinear) -> torch.Tensor:
+    """Independent Torch model of BnB's INT8 activation/weight path."""
+
+    x_fp16 = x.to(torch.float16).float()
+    absmax = x_fp16.abs().amax(dim=1)
+    x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
+    x_int8 = (x_fp16 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    weight_scale = module.weight_scb.float() / 127.0
+    output = (
+        (x_int8.float() @ module.weight.float().t())
+        * x_scale[:, None]
+        * weight_scale[None, :]
+    )
+    if module.bias is not None:
+        output = output + module.bias.float()
+    return output
 
 
 def _gops(tokens: int, in_features: int, out_features: int, median_ms: float) -> float:
@@ -531,11 +550,18 @@ def main() -> int:
     parser.add_argument("--threads", type=int, default=min(8, os.cpu_count() or 1))
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument(
+        "--include-bnb-packed",
+        action="store_true",
+        help="opt into the packed BnB 4-bit candidate (subject to the 2e-3 accuracy gate)",
+    )
     args = parser.parse_args()
 
     out_features, in_features = (int(part) for part in args.shape.lower().split("x", 1))
     tokens_list = _parse_ints(args.tokens)
     group_size = 128
+    if args.include_bnb_packed:
+        os.environ["GPTQMODEL_BITSANDBYTES_CPU_PACKED"] = "1"
     torch.set_num_threads(args.threads)
     try:
         torch.set_num_interop_threads(1)
@@ -970,9 +996,16 @@ def main() -> int:
             )
 
         if bnb8_auto is not None:
-            bnb8_oracle = (
+            bnb8_oracle_a16 = (
                 x.float() @ bnb8_auto.dequantize_weight().float().t()
                 + bnb8_auto.bias.float()
+            )
+            bnb8_oracle_a8w8 = _bnb_int8_a8w8_oracle(x, bnb8_auto)
+            bnb8_uses_tiled = _cpu_int8_dense_should_use(
+                rows=tokens,
+                in_features=in_features,
+                out_features=out_features,
+                compute_dtype=torch.bfloat16,
             )
 
             def bnb8_dense(x_input: torch.Tensor) -> torch.Tensor:
@@ -1011,8 +1044,8 @@ def main() -> int:
                 tokens=tokens,
                 timing=bnb8_native_time,
                 baseline_ms=bnb8_native_time[0],
-                relative_error=_relative_error(bnb8_native_output, bnb8_oracle),
-                visible_error=_visible_relative_error(bnb8_native_output, bnb8_oracle),
+                relative_error=_relative_error(bnb8_native_output, bnb8_oracle_a8w8),
+                visible_error=_visible_relative_error(bnb8_native_output, bnb8_oracle_a8w8),
             )
             _add_row(
                 rows,
@@ -1022,8 +1055,14 @@ def main() -> int:
                 tokens=tokens,
                 timing=bnb8_auto_time,
                 baseline_ms=bnb8_native_time[0],
-                relative_error=_relative_error(bnb8_auto_output, bnb8_oracle),
-                visible_error=_visible_relative_error(bnb8_auto_output, bnb8_oracle),
+                relative_error=_relative_error(
+                    bnb8_auto_output,
+                    bnb8_oracle_a16 if bnb8_uses_tiled else bnb8_oracle_a8w8,
+                ),
+                visible_error=_visible_relative_error(
+                    bnb8_auto_output,
+                    bnb8_oracle_a16 if bnb8_uses_tiled else bnb8_oracle_a8w8,
+                ),
             )
             _add_row(
                 rows,
@@ -1033,8 +1072,8 @@ def main() -> int:
                 tokens=tokens,
                 timing=bnb8_dense_time,
                 baseline_ms=bnb8_native_time[0],
-                relative_error=_relative_error(bnb8_dense_output, bnb8_oracle),
-                visible_error=_visible_relative_error(bnb8_dense_output, bnb8_oracle),
+                relative_error=_relative_error(bnb8_dense_output, bnb8_oracle_a16),
+                visible_error=_visible_relative_error(bnb8_dense_output, bnb8_oracle_a16),
             )
 
     print("Environment")
@@ -1047,7 +1086,8 @@ def main() -> int:
                 ["exl3_bf16x3", str(_cpu_bf16x3_support())],
                 ["bitsandbytes", _package_version("bitsandbytes")],
                 ["torchao", _package_version("torchao")],
-                ["bnb_cpu_packed", str(_cpu_packed_kernels() is not None)],
+                ["bnb_cpu_packed_available", str(_cpu_packed_kernels() is not None)],
+                ["bnb_cpu_packed_opt_in", str(args.include_bnb_packed)],
                 ["hf_kernels", _package_version("kernels")],
                 ["shape", f"{out_features}x{in_features}"],
                 ["tokens", args.tokens],
@@ -1093,14 +1133,15 @@ def main() -> int:
         "dtype first. VPTQ packing time loads a precomputed quantization "
         "result and excludes k-means training. EXL3 forward uses a bounded "
         "chunked decode and does not retain a dense weight; the dense-materialize "
-        "row is a per-call baseline, not a cache. BitsAndBytes 4-bit uses a "
-        "shape- and thread-aware crossover between the packed AVX512-BF16 path "
-        "and the canonical CPU path. The 8-bit dense baseline includes "
-        "dequantization on every call; "
-        "the shape-aware row keeps BnB's native INT8 kernel for large layers and "
-        "uses that recomputed dense BF16 path only where it is faster. NVFP4 "
-        "compares the native CPU decode against torchao's NVFP4Tensor linear; "
-        "neither path retains a dense weight."
+        "row is a per-call baseline, not a cache. The packed BnB 4-bit candidate "
+        "is opt-in via --include-bnb-packed and is rejected when its normalized "
+        "error exceeds 2e-3. The BnB 8-bit native row is compared with an "
+        "independent A8W8 oracle; the shape-aware tiled row and dense reference "
+        "are compared with an A16 dequantize-and-matmul oracle. The 8-bit dense "
+        "baseline dequantizes on every call, while the shape-aware tiled path "
+        "uses bounded feature tiles and retains no dense weight. NVFP4 compares "
+        "the native CPU decode against torchao's NVFP4Tensor linear; neither "
+        "path retains a dense weight."
     )
     if bnb_error is not None:
         print(f"BitsAndBytes benchmark was unavailable: {bnb_error}")

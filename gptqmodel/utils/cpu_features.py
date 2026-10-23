@@ -4,8 +4,16 @@
 from __future__ import annotations
 
 import platform
+from contextlib import contextmanager
 from functools import lru_cache
 from pathlib import Path
+
+import torch
+
+from .env import env_flag
+
+
+_CPU_BF16X3_ENV = "GPTQMODEL_CPU_BF16X3"
 
 
 _REQUIRED_AVX512_BF16_FLAGS = frozenset(
@@ -56,3 +64,41 @@ def avx512_bf16_error() -> str:
         "XSAVE, AVX512F, AVX512BW, AVX512DQ, AVX512VL, AVX512-VBMI, and "
         "AVX512-BF16."
     )
+
+
+@lru_cache(maxsize=1)
+def has_cpu_bf16x3_matmul() -> bool:
+    """Return whether oneDNN can execute an FP32 matmul as BF16x3."""
+
+    if not env_flag(_CPU_BF16X3_ENV, default=True):
+        return False
+    if not has_avx512_bf16() or not torch.backends.mkldnn.is_available():
+        return False
+
+    try:
+        previous = torch.backends.mkldnn.matmul.fp32_precision
+        torch.backends.mkldnn.matmul.fp32_precision = "bf16"
+        torch.backends.mkldnn.matmul.fp32_precision = previous
+    except (AttributeError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+@contextmanager
+def cpu_bf16x3_matmul():
+    """Use oneDNN BF16x3 for FP32 matmul while restoring caller precision."""
+
+    if not has_cpu_bf16x3_matmul():
+        yield
+        return
+
+    previous = torch.backends.mkldnn.matmul.fp32_precision
+    if previous == "bf16":
+        yield
+        return
+
+    torch.backends.mkldnn.matmul.fp32_precision = "bf16"
+    try:
+        yield
+    finally:
+        torch.backends.mkldnn.matmul.fp32_precision = previous

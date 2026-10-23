@@ -21,6 +21,7 @@ from functools import partial
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
@@ -44,6 +45,17 @@ HF_KERNELS_GPTQ_REVISION = "c467920211e144ea621d9e8193ff71ec160ce256"
 DEFAULT_SHAPES = ("4096x4096", "14336x4096", "4096x14336")
 DEFAULT_TOKENS = (1, 8, 32, 128, 512)
 DEFAULT_GROUP_SIZE = 128
+
+
+try:
+    from torchao.prototype.quantization.int4 import Int4OpaqueTensor
+except Exception:
+    Int4OpaqueTensor = None
+
+try:
+    from torchao.quantization import Int4WeightOnlyQuantizer
+except Exception:
+    Int4WeightOnlyQuantizer = None
 
 
 def _positive_int(value: int, name: str) -> int:
@@ -269,8 +281,13 @@ def _torchao_model(
     *,
     group_size: int,
 ):
-    from torchao.quantization import Int4WeightOnlyQuantizer
+    if Int4OpaqueTensor is not None:
+        if group_size not in (32, 64, 128):
+            raise ValueError("torchao Int4OpaqueTensor supports group sizes 32/64/128")
+        return Int4OpaqueTensor.from_hp(dense_weight, [1, group_size])
 
+    if Int4WeightOnlyQuantizer is None:
+        raise RuntimeError("torchao INT4 CPU quantization is unavailable")
     out_features, in_features = dense_weight.shape
     model = torch.nn.Sequential(torch.nn.Linear(in_features, out_features, bias=False))
     model[0].weight.data.copy_(dense_weight)
@@ -567,7 +584,7 @@ def main() -> int:
                     aten_layer.scales_and_zeros,
                 )
             if torchao_model is not None:
-                runners["torchao W4A16"] = partial(torchao_model, x)
+                runners["torchao W4A16"] = partial(F.linear, x, torchao_model)
             if hasattr(torch.ops.onednn, "qlinear_prepack") and hasattr(
                 torch.ops.onednn,
                 "qlinear_pointwise",
@@ -754,9 +771,8 @@ def main() -> int:
         print(f"torchao quantization was unavailable: {torchao_error}")
     if not mslk_available:
         print(
-            "torchao's newer Int4Tensor CPU path requires mslk; this benchmark "
-            "uses torchao's legacy W4A16 path, which calls the same ATen CPU "
-            "int4pack kernel."
+            "torchao A16W4 uses Int4OpaqueTensor/ATen int4pack and does not "
+            "require mslk; torchao DA8W4 requires mslk and is not benchmarked."
         )
     return 0
 

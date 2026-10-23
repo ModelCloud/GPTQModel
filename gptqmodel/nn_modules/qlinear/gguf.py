@@ -8,6 +8,7 @@ import os
 import platform
 import sys
 import time
+from contextlib import nullcontext
 from functools import lru_cache
 
 import numpy as np
@@ -30,6 +31,7 @@ from ...quantization.config import (
 )
 from ...quantization.fallback_smooth import smooth_block
 from ...utils.backend import BACKEND
+from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
 
@@ -1397,14 +1399,21 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         )
         if key not in self._gguf_fused_autotune_cache:
             self._gguf_fused_autotune_cache[key] = self._autotune(x_flat)
-        return bool(self._gguf_fused_autotune_cache[key])
+        self._autotune_result = bool(self._gguf_fused_autotune_cache[key])
+        return self._autotune_result
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return torch.matmul(x_flat, weight)
 
-    def _forward_fused_k(self, x_flat: torch.Tensor) -> torch.Tensor:
+    def _forward_fused_k(
+        self,
+        x_flat: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         target_dtype = x_flat.dtype
+        is_cpu = x_flat.device.type == "cpu"
+        accum_dtype = torch.float32 if is_cpu else target_dtype
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
 
         if x_flat.shape[-1] != self.padded_in_features:
@@ -1412,49 +1421,57 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         else:
             x_work = x_flat
 
-        output = torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=target_dtype)
+        output = torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=accum_dtype)
+        precision_context = cpu_bf16x3_matmul() if is_cpu else nullcontext()
 
-        for start in range(0, num_blocks, self.gguf_fused_chunk_blocks):
-            end = min(start + self.gguf_fused_chunk_blocks, num_blocks)
-            block_chunk = blocks[:, start:end, :]
+        with precision_context:
+            for start in range(0, num_blocks, self.gguf_fused_chunk_blocks):
+                end = min(start + self.gguf_fused_chunk_blocks, num_blocks)
+                block_chunk = blocks[:, start:end, :]
 
-            if self.gguf_tensor_qtype == "Q4_K":
-                weight_chunk = self._dequantize_q4_k_blocks(block_chunk, target_dtype)
-            elif self.gguf_tensor_qtype == "Q5_K":
-                weight_chunk = self._dequantize_q5_k_blocks(block_chunk, target_dtype)
-            elif self.gguf_tensor_qtype == "Q6_K":
-                weight_chunk = self._dequantize_q6_k_blocks(block_chunk, target_dtype)
-            elif self.gguf_tensor_qtype == "Q4_0":
-                weight_chunk = self._dequantize_q4_0_blocks(block_chunk, target_dtype)
-            elif self.gguf_tensor_qtype == "Q8_0":
-                weight_chunk = self._dequantize_q8_0_blocks(block_chunk, target_dtype)
-            elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
-                weight_chunk = _dequantize_sign_only_torch(
-                    block_chunk.reshape(block_chunk.shape[0], -1),
-                    block_size=self.gguf_block_size,
-                    type_size=self.gguf_type_size,
-                    device=x_flat.device,
-                    dtype=target_dtype,
-                )
-            else:  # pragma: no cover - guarded by _should_use_fused_k_forward
-                raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
+                if self.gguf_tensor_qtype == "Q4_K":
+                    weight_chunk = self._dequantize_q4_k_blocks(block_chunk, accum_dtype)
+                elif self.gguf_tensor_qtype == "Q5_K":
+                    weight_chunk = self._dequantize_q5_k_blocks(block_chunk, accum_dtype)
+                elif self.gguf_tensor_qtype == "Q6_K":
+                    weight_chunk = self._dequantize_q6_k_blocks(block_chunk, accum_dtype)
+                elif self.gguf_tensor_qtype == "Q4_0":
+                    weight_chunk = self._dequantize_q4_0_blocks(block_chunk, accum_dtype)
+                elif self.gguf_tensor_qtype == "Q8_0":
+                    weight_chunk = self._dequantize_q8_0_blocks(block_chunk, accum_dtype)
+                elif self.gguf_tensor_qtype in _GGUF_SIGN_ONLY_TYPE_INFO:
+                    weight_chunk = _dequantize_sign_only_torch(
+                        block_chunk.reshape(block_chunk.shape[0], -1),
+                        block_size=self.gguf_block_size,
+                        type_size=self.gguf_type_size,
+                        device=x_flat.device,
+                        dtype=accum_dtype,
+                    )
+                else:  # pragma: no cover - guarded by _should_use_fused_k_forward
+                    raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
 
-            x_chunk = x_work[:, start * self.gguf_block_size : end * self.gguf_block_size]
-            output = output + torch.matmul(x_chunk, weight_chunk.transpose(0, 1))
+                x_chunk = x_work[
+                    :, start * self.gguf_block_size : end * self.gguf_block_size
+                ].to(accum_dtype)
+                output = output + torch.matmul(x_chunk, weight_chunk.transpose(0, 1))
 
-        return output
+        if bias is not None:
+            output = output + bias.to(device=x_flat.device, dtype=accum_dtype)
+
+        return output.to(target_dtype)
 
     def forward(self, x: torch.Tensor):
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
 
         if self._should_use_fused_k_forward(x_flat):
-            output = self._forward_fused_k(x_flat)
+            output = self._forward_fused_k(x_flat, bias=self.bias)
+            bias = None
         else:
             output = self._forward_dequant_matmul(x_flat)
-
-        if self.bias is not None:
             bias = self.bias
+
+        if bias is not None:
             if bias.device != output.device or bias.dtype != output.dtype:
                 bias = bias.to(device=output.device, dtype=output.dtype)
             output = output + bias

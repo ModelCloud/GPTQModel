@@ -94,6 +94,17 @@ def _build_cpu_packed_kernel(
     return linear, kernel.eval()
 
 
+def _relative_l2(output: torch.Tensor, reference: torch.Tensor) -> float:
+    difference = output.float() - reference.float()
+    return (difference.norm() / reference.float().norm().clamp_min(1e-12)).item()
+
+
+def _enable_packed_candidate(monkeypatch, *, accuracy_tol: float = 1.0) -> None:
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", "1")
+    monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", accuracy_tol)
+
+
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
 def test_bitsandbytes_kernel_selection():
     assert get_kernel_for_backend(BACKEND.BITSANDBYTES, METHOD.BITSANDBYTES, FORMAT.BITSANDBYTES) is BitsAndBytesLinear
@@ -223,19 +234,37 @@ def test_bitsandbytes_int8_dense_dispatch_gate(monkeypatch):
     monkeypatch.setattr(bnb_module, "has_avx512_bf16", lambda: True)
 
     assert _cpu_int8_dense_should_use(
-        rows=16,
+        rows=64,
         in_features=512,
         out_features=512,
         compute_dtype=torch.bfloat16,
     )
     assert _cpu_int8_dense_should_use(
+        rows=256,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
         rows=32,
         in_features=640,
         out_features=1024,
         compute_dtype=torch.bfloat16,
     )
     assert not _cpu_int8_dense_should_use(
-        rows=15,
+        rows=32,
+        in_features=512,
+        out_features=1024,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=63,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=257,
         in_features=512,
         out_features=512,
         compute_dtype=torch.bfloat16,
@@ -288,11 +317,12 @@ def test_bitsandbytes_cpu_packed_dispatch_is_shape_and_thread_aware():
 
 
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
-def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
+def test_bitsandbytes_int8_small_bf16_uses_tiled_recompute_without_caching(monkeypatch):
     import bitsandbytes.functional as bnb_functional
 
     bnb_module = sys.modules[BitsAndBytesLinear.__module__]
     monkeypatch.setattr(bnb_module, "has_avx512_bf16", lambda: True)
+    monkeypatch.setattr(bnb_module, "_CPU_INT8_DENSE_TILE_FEATURES", 128)
 
     torch.manual_seed(501)
     linear = nn.Linear(512, 512, bias=True).to(torch.bfloat16).eval()
@@ -309,7 +339,7 @@ def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
     kernel.pack_original(linear=linear, scales=None, zeros=None)
     kernel.post_init()
 
-    x = torch.randn(16, 512, dtype=torch.bfloat16)
+    x = torch.randn(64, 512, dtype=torch.bfloat16)
     expected = (
         x.float() @ kernel.dequantize_weight().float().t()
         + kernel.bias.float()
@@ -332,14 +362,66 @@ def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
     with torch.inference_mode():
         out = kernel(x)
 
-    assert calls == [kernel.weight.shape]
+    assert calls == [(512, 128)] * 4
     assert out.dtype == x.dtype
-    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
-    assert all(
-        tensor.numel() != kernel.in_features * kernel.out_features
-        or tensor.dtype == torch.int8
-        for tensor in kernel._buffers.values()
+    assert _relative_l2(out, expected) < 2e-3
+    torch.testing.assert_close(
+        out,
+        expected.to(torch.bfloat16),
+        rtol=2e-3,
+        atol=2e-3,
     )
+    assert kernel.weight.dtype == torch.int8
+    assert kernel.weight.numel() == kernel.in_features * kernel.out_features
+    assert not any(
+        name in vars(kernel)
+        for name in ("_dequantized_weight", "_dense_weight", "_weight_cache")
+    )
+
+    calls.clear()
+    with torch.inference_mode():
+        repeated = kernel(x)
+    assert calls == [(512, 128)] * 4
+    assert torch.equal(repeated, out)
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_bitsandbytes_int8_native_matches_independent_a8w8_oracle():
+    torch.manual_seed(501)
+    linear = nn.Linear(512, 512, bias=True).to(torch.bfloat16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=512,
+        out_features=512,
+        bias=True,
+        dtype=torch.bfloat16,
+    ).eval()
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+    kernel._int8_dense_disabled = True
+
+    x = torch.randn(16, 512, dtype=torch.bfloat16)
+    with torch.inference_mode():
+        out = kernel(x)
+
+    x_fp16 = x.to(torch.float16).float()
+    absmax = x_fp16.abs().amax(dim=1)
+    x_scale = (absmax / 127.0).clamp_min(torch.finfo(torch.float32).tiny)
+    x_int8 = (x_fp16 / x_scale[:, None]).round().clamp(-127, 127).to(torch.int8)
+    weight_scale = kernel.weight_scb.float() / 127.0
+    expected = (
+        (x_int8.float() @ kernel.weight.float().t())
+        * x_scale[:, None]
+        * weight_scale[None, :]
+        + kernel.bias.float()
+    )
+
+    assert out.dtype == x.dtype
+    assert _relative_l2(out, expected) < 2e-3
+    assert _relative_l2(out, expected.to(torch.float16)) < 2e-3
 
 
 @pytest.mark.skipif(
@@ -358,7 +440,9 @@ def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
 def test_bitsandbytes_cpu_packed_kernel_matches_oracle_and_preserves_checkpoint_schema(
     bnb_format: str,
     compress_statistics: bool,
+    monkeypatch,
 ):
+    _enable_packed_candidate(monkeypatch)
     linear, kernel = _build_cpu_packed_kernel(
         bnb_format=bnb_format,
         compress_statistics=compress_statistics,
@@ -376,9 +460,10 @@ def test_bitsandbytes_cpu_packed_kernel_matches_oracle_and_preserves_checkpoint_
     assert kernel._cpu_packing_active
     assert out.dtype == torch.bfloat16
     assert tuple(kernel.weight.shape) == (linear.out_features, linear.in_features // 2)
-    relative_error = (out.float() - expected).norm() / expected.norm()
+    relative_error = _relative_l2(out, expected)
     assert relative_error < 4e-3
-    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+    assert relative_error > 2e-3
+    torch.testing.assert_close(out.float(), expected, rtol=4e-3, atol=4e-3)
 
     with torch.inference_mode():
         repeated = kernel(x)
@@ -427,7 +512,8 @@ def test_bitsandbytes_cpu_packed_kernel_matches_oracle_and_preserves_checkpoint_
     reason="bitsandbytes CPU packed kernel unavailable",
 )
 @pytest.mark.parametrize("block_size", [32, 64, 128, 256, 512])
-def test_bitsandbytes_cpu_packed_kernel_supports_bnb_block_sizes(block_size: int):
+def test_bitsandbytes_cpu_packed_kernel_supports_bnb_block_sizes(block_size: int, monkeypatch):
+    _enable_packed_candidate(monkeypatch)
     linear, kernel = _build_cpu_packed_kernel(
         in_features=512,
         block_size=block_size,
@@ -447,6 +533,7 @@ def test_bitsandbytes_cpu_packed_kernel_supports_bnb_block_sizes(block_size: int
     reason="bitsandbytes CPU packed kernel unavailable",
 )
 def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeypatch):
+    _enable_packed_candidate(monkeypatch)
     linear, kernel = _build_cpu_packed_kernel(out_features=24)
     x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
     with torch.inference_mode():
@@ -483,9 +570,8 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     _cpu_packed_kernels() is None,
     reason="bitsandbytes CPU packed kernel unavailable",
 )
-def test_bitsandbytes_cpu_packed_kernel_falls_back_when_accuracy_gate_fails(monkeypatch):
-    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
-    monkeypatch.setattr(bnb_module, "_CPU_PACKED_REL_TOL", 0.0)
+def test_bitsandbytes_cpu_packed_defaults_to_opt_in(monkeypatch):
+    monkeypatch.delenv("GPTQMODEL_BITSANDBYTES_CPU_PACKED", raising=False)
     linear, kernel = _build_cpu_packed_kernel()
     x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
 
@@ -493,7 +579,27 @@ def test_bitsandbytes_cpu_packed_kernel_falls_back_when_accuracy_gate_fails(monk
         out = kernel(x)
 
     assert not kernel._cpu_packing_active
+    assert not kernel._cpu_packing_disabled
+    assert torch.isfinite(out).all()
+
+
+@pytest.mark.skipif(
+    _cpu_packed_kernels() is None,
+    reason="bitsandbytes CPU packed kernel unavailable",
+)
+def test_bitsandbytes_cpu_packed_kernel_falls_back_when_accuracy_gate_fails(monkeypatch):
+    _enable_packed_candidate(monkeypatch, accuracy_tol=2e-3)
+    linear, kernel = _build_cpu_packed_kernel()
+    x = torch.randn(7, linear.in_features, dtype=torch.bfloat16)
+    dequant_weight = kernel.dequantize_weight().float()
+    expected = torch.matmul(x.float(), dequant_weight.t()) + kernel.bias.float()
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    assert not kernel._cpu_packing_active
     assert kernel._cpu_packing_disabled
+    assert _relative_l2(out, expected) < 2e-3
     assert tuple(kernel.weight.shape) == (
         linear.out_features * linear.in_features // 2,
         1,
