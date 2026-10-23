@@ -17,8 +17,12 @@ import torch.nn as nn
 
 from ..utils.cpu_features import has_avx512_bf16
 from ..utils.env import env_flag
+from ..utils.logger import setup_logger
+from ..utils.torch import TORCH_HAS_COMPILE, torch_compile
 from .exllamav3 import _EXL3_BUFFER_NAMES, _torch_dtype
 
+
+log = setup_logger()
 
 _EXL3_3INST_MULT = 89226354
 _EXL3_3INST_ADD = 64248484
@@ -278,6 +282,8 @@ class ExllamaV3TorchLinear(nn.Module):
         self.name = name
         self.out_dtype = out_dtype
         self.tensor_storage = tensor_storage or {}
+        self.optimized = False
+        self._compiled_forward = None
 
         self.weight = torch.zeros((1,), dtype=torch.float16, device="meta")
 
@@ -483,7 +489,7 @@ class ExllamaV3TorchLinear(nn.Module):
             y[:, out_start:out_end] = y_chunk
         return y
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def _forward_eager(self, x: torch.Tensor) -> torch.Tensor:
         input_dtype = x.dtype
         compute_dtype = torch.float32 if x.device.type == "cpu" else torch.float16
         x_2d = x.view(-1, self.in_features).to(compute_dtype)
@@ -501,6 +507,64 @@ class ExllamaV3TorchLinear(nn.Module):
             y = y + bias.to(dtype=compute_dtype)
         y = y.view(*x.shape[:-1], self.out_features)
         return y.to(input_dtype)
+
+    def optimize(
+        self,
+        backend: str = "inductor",
+        mode: Optional[str] = None,
+        fullgraph: bool = False,
+    ) -> "ExllamaV3TorchLinear":
+        """Compile the CPU decode path after the caller explicitly opts in."""
+
+        if self.optimized:
+            return self
+        if not TORCH_HAS_COMPILE:
+            return self
+
+        trellis = getattr(self, "trellis", None)
+        if trellis is None or trellis.device.type != "cpu":
+            return self
+
+        compiled = torch_compile(
+            self._forward_eager,
+            backend=backend,
+            mode=mode,
+            fullgraph=fullgraph,
+        )
+        if compiled is self._forward_eager:
+            return self
+
+        self._compiled_forward = compiled
+        self.optimized = True
+        log.info.once("Optimize: `ExllamaV3TorchLinear` CPU compilation triggered.")
+        return self
+
+    def _invalidate_compiled(self) -> None:
+        self._compiled_forward = None
+        self.optimized = False
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        self._invalidate_compiled()
+        return result
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        self._invalidate_compiled()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        compiled = self._compiled_forward
+        if compiled is None:
+            return self._forward_eager(x)
+
+        try:
+            return compiled(x)
+        except Exception as exc:
+            log.warn.once(
+                f"EXL3 compiled CPU forward failed; falling back to eager: {exc}"
+            )
+            self._invalidate_compiled()
+            return self._forward_eager(x)
 
     def _multiplier_value(self, name: str) -> Optional[int]:
         tensor = getattr(self, name, None)

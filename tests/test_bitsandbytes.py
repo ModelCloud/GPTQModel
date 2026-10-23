@@ -17,7 +17,9 @@ from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
+    _cpu_int8_dense_should_use,
     _cpu_packed_kernels,
+    _dequantize_int8_weight,
 )
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.quantization.config import BitsAndBytesConfig
@@ -199,6 +201,133 @@ def test_bitsandbytes_forward_matches_dequantized_reference(bits: int):
     atol = 1e-3 if bits == 4 else 1e-2
     rtol = 1e-3 if bits == 4 else 5e-2
     torch.testing.assert_close(out.to(torch.float32), expected, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_bitsandbytes_int8_dequant_matches_native_op():
+    from gptqmodel.nn_modules.qlinear.bitsandbytes import import_bitsandbytes
+
+    bnb = import_bitsandbytes()
+    weight = torch.randint(-127, 128, (64, 128), dtype=torch.int8)
+    weight_scb = torch.rand(64, dtype=torch.float32) + 0.5
+
+    expected = bnb.functional.int8_vectorwise_dequant(weight, weight_scb)
+    actual = _dequantize_int8_weight(weight, weight_scb)
+
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+def test_bitsandbytes_int8_dense_dispatch_gate(monkeypatch):
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    monkeypatch.setattr(bnb_module, "has_avx512_bf16", lambda: True)
+
+    assert _cpu_int8_dense_should_use(
+        rows=16,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+    assert _cpu_int8_dense_should_use(
+        rows=32,
+        in_features=640,
+        out_features=1024,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=15,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=64,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.float16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=64,
+        in_features=1024,
+        out_features=1024,
+        compute_dtype=torch.bfloat16,
+    )
+    assert not _cpu_int8_dense_should_use(
+        rows=64,
+        in_features=512,
+        out_features=2048,
+        compute_dtype=torch.bfloat16,
+    )
+
+    monkeypatch.setenv("GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE", "0")
+    assert not _cpu_int8_dense_should_use(
+        rows=64,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+
+    monkeypatch.setattr(bnb_module, "has_avx512_bf16", lambda: False)
+    assert not _cpu_int8_dense_should_use(
+        rows=64,
+        in_features=512,
+        out_features=512,
+        compute_dtype=torch.bfloat16,
+    )
+
+
+@pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
+def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
+    import bitsandbytes.functional as bnb_functional
+
+    bnb_module = sys.modules[BitsAndBytesLinear.__module__]
+    monkeypatch.setattr(bnb_module, "has_avx512_bf16", lambda: True)
+
+    torch.manual_seed(501)
+    linear = nn.Linear(512, 512, bias=True).to(torch.bfloat16).eval()
+    kernel = BitsAndBytesLinear(
+        bits=8,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=512,
+        out_features=512,
+        bias=True,
+        dtype=torch.bfloat16,
+    ).eval()
+    kernel.pack_original(linear=linear, scales=None, zeros=None)
+    kernel.post_init()
+
+    x = torch.randn(16, 512, dtype=torch.bfloat16)
+    expected = (
+        x.float() @ kernel.dequantize_weight().float().t()
+        + kernel.bias.float()
+    )
+
+    calls = []
+    original_dequant = bnb_module._dequantize_int8_weight
+
+    def counted_dequant(weight, weight_scb):
+        calls.append(weight.shape)
+        return original_dequant(weight, weight_scb)
+
+    monkeypatch.setattr(bnb_module, "_dequantize_int8_weight", counted_dequant)
+    monkeypatch.setattr(
+        bnb_functional,
+        "int8_linear_matmul",
+        lambda *_args, **_kwargs: pytest.fail("native INT8 path should not run"),
+    )
+
+    with torch.inference_mode():
+        out = kernel(x)
+
+    assert calls == [kernel.weight.shape]
+    assert out.dtype == x.dtype
+    torch.testing.assert_close(out.float(), expected, rtol=2e-2, atol=2e-2)
+    assert all(
+        tensor.numel() != kernel.in_features * kernel.out_features
+        or tensor.dtype == torch.int8
+        for tensor in kernel._buffers.values()
+    )
 
 
 @pytest.mark.skipif(

@@ -29,6 +29,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
     _cpu_packed_kernels,
+    _dequantize_int8_weight,
 )
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
@@ -505,6 +506,8 @@ def main() -> int:
     fp8, fp8_meta = _build_fp8(in_features, out_features)
     vptq, vptq_meta = _build_vptq(in_features, out_features, group_size)
     exl3, exl3_meta = _build_exl3(in_features, out_features)
+    exl3_compiled, _ = _build_exl3(in_features, out_features)
+    exl3_compiled.optimize()
     gguf_variants = [
         (label, *_build_gguf(qtype, in_features, out_features))
         for label, qtype in (
@@ -564,7 +567,10 @@ def main() -> int:
     bnb4_canonical = copy.deepcopy(bnb4) if bnb4 is not None else None
     if bnb4_canonical is not None:
         bnb4_canonical._cpu_packing_disabled = True
+    bnb8_auto = copy.deepcopy(bnb8) if bnb8 is not None else None
     bnb8_native = copy.deepcopy(bnb8) if bnb8 is not None else None
+    if bnb8_native is not None:
+        bnb8_native._int8_dense_disabled = True
 
     for tokens in tokens_list:
         torch.manual_seed(600 + tokens)
@@ -753,6 +759,25 @@ def main() -> int:
             relative_error=_relative_error(exl3_base_output, exl3_oracle),
             visible_error=_visible_relative_error(exl3_base_output, exl3_oracle),
         )
+        if exl3_compiled.optimized:
+            exl3_compiled_time = _bench(
+                lambda: exl3_compiled(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            with torch.inference_mode():
+                exl3_compiled_output = exl3_compiled(x)
+            _add_row(
+                rows,
+                method="EXL3",
+                variant="chunked decode + torch.compile",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=exl3_compiled_time,
+                baseline_ms=exl3_opt_time[0],
+                relative_error=_relative_error(exl3_compiled_output, exl3_oracle),
+                visible_error=_visible_relative_error(exl3_compiled_output, exl3_oracle),
+            )
 
         for label, module, _ in gguf_variants:
             oracle = x.float() @ module.dequantize_weight(dtype=torch.float32)
@@ -835,20 +860,28 @@ def main() -> int:
                 visible_error=_visible_relative_error(bnb4_canonical_output, bnb4_oracle),
             )
 
-        if bnb8_native is not None:
+        if bnb8_auto is not None:
             bnb8_oracle = (
-                x.float() @ bnb8_native.dequantize_weight().float().t()
-                + bnb8_native.bias.float()
+                x.float() @ bnb8_auto.dequantize_weight().float().t()
+                + bnb8_auto.bias.float()
             )
 
             def bnb8_dense(x_input: torch.Tensor) -> torch.Tensor:
-                weight = bnb8_native.dequantize_weight().float()
+                weight = _dequantize_int8_weight(
+                    bnb8_auto.weight,
+                    bnb8_auto.weight_scb,
+                )
                 return (
-                    x_input.float() @ weight.t() + bnb8_native.bias.float()
+                    x_input.float() @ weight.t() + bnb8_auto.bias.float()
                 ).to(x_input.dtype)
 
             bnb8_native_time = _bench(
                 lambda: bnb8_native(x),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            bnb8_auto_time = _bench(
+                lambda: bnb8_auto(x),
                 warmup=args.warmup,
                 iters=args.iters,
             )
@@ -859,26 +892,38 @@ def main() -> int:
             )
             with torch.inference_mode():
                 bnb8_native_output = bnb8_native(x)
+                bnb8_auto_output = bnb8_auto(x)
                 bnb8_dense_output = bnb8_dense(x)
             _add_row(
                 rows,
                 method="BitsAndBytes 8-bit",
-                variant="native int8 matmul",
+                variant="native int8 matmul (forced)",
                 shape=(out_features, in_features),
                 tokens=tokens,
                 timing=bnb8_native_time,
-                baseline_ms=bnb8_dense_time[0],
+                baseline_ms=bnb8_native_time[0],
                 relative_error=_relative_error(bnb8_native_output, bnb8_oracle),
                 visible_error=_visible_relative_error(bnb8_native_output, bnb8_oracle),
             )
             _add_row(
                 rows,
                 method="BitsAndBytes 8-bit",
-                variant="dense dequant + matmul",
+                variant="shape-aware CPU dispatch",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=bnb8_auto_time,
+                baseline_ms=bnb8_native_time[0],
+                relative_error=_relative_error(bnb8_auto_output, bnb8_oracle),
+                visible_error=_visible_relative_error(bnb8_auto_output, bnb8_oracle),
+            )
+            _add_row(
+                rows,
+                method="BitsAndBytes 8-bit",
+                variant="dense dequant + matmul (reference)",
                 shape=(out_features, in_features),
                 tokens=tokens,
                 timing=bnb8_dense_time,
-                baseline_ms=bnb8_dense_time[0],
+                baseline_ms=bnb8_native_time[0],
                 relative_error=_relative_error(bnb8_dense_output, bnb8_oracle),
                 visible_error=_visible_relative_error(bnb8_dense_output, bnb8_oracle),
             )
@@ -940,7 +985,9 @@ def main() -> int:
         "chunked decode and does not retain a dense weight; the dense-materialize "
         "row is a per-call baseline, not a cache. BitsAndBytes 4-bit uses the "
         "packed AVX512-BF16 path for M <= 64; larger batches use the canonical "
-        "CPU path. The 8-bit dense baseline includes dequantization on every call."
+        "CPU path. The 8-bit dense baseline includes dequantization on every call; "
+        "the shape-aware row keeps BnB's native INT8 kernel for large layers and "
+        "uses that recomputed dense BF16 path only where it is faster."
     )
     if bnb_error is not None:
         print(f"BitsAndBytes benchmark was unavailable: {bnb_error}")
