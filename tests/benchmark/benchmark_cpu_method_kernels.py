@@ -31,6 +31,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     _cpu_packed_kernels,
     _dequantize_int8_weight,
 )
+from gptqmodel.nn_modules.qlinear.fp4 import TorchFP4Linear
 from gptqmodel.nn_modules.qlinear.fp8 import TorchFP8Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
@@ -48,6 +49,12 @@ from gptqmodel.utils.paroquant import (
     apply_paroquant_rotation_reference,
     build_identity_rotation_buffers,
 )
+
+
+try:
+    from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
+except Exception:
+    NVFP4Tensor = None
 
 
 def _parse_ints(raw: str) -> tuple[int, ...]:
@@ -246,6 +253,34 @@ def _build_fp8(
         return module.eval()
 
     return make(), {"make": make, "linear": linear}
+
+
+def _build_fp4(
+    in_features: int,
+    out_features: int,
+) -> tuple[TorchFP4Linear, dict[str, object]]:
+    torch.manual_seed(350 + in_features)
+    linear = nn.Linear(in_features, out_features, bias=True, dtype=torch.bfloat16)
+    linear.weight.data.normal_(0.0, 0.04)
+    linear.bias.data.normal_(0.0, 0.01)
+    native = NVFP4Tensor.to_nvfp4(linear.weight.detach(), block_size=16)
+
+    def make() -> TorchFP4Linear:
+        return TorchFP4Linear(
+            in_features=in_features,
+            out_features=out_features,
+            weight=native.qdata.clone(),
+            weight_scale=native.scale.clone(),
+            weight_block_size=16,
+            orig_dtype=torch.bfloat16,
+            bias=linear.bias.detach().clone(),
+        ).eval()
+
+    return make(), {
+        "make": make,
+        "native": native,
+        "dense": native.dequantize(torch.float32),
+    }
 
 
 def _vptq_problem(
@@ -506,6 +541,9 @@ def main() -> int:
     fp8, fp8_meta = _build_fp8(in_features, out_features)
     fp8_compiled = copy.deepcopy(fp8)
     fp8_compiled.optimize()
+    fp4 = fp4_meta = None
+    if NVFP4Tensor is not None:
+        fp4, fp4_meta = _build_fp4(in_features, out_features)
     vptq, vptq_meta = _build_vptq(in_features, out_features, group_size)
     exl3, exl3_meta = _build_exl3(in_features, out_features)
     exl3_compiled, _ = _build_exl3(in_features, out_features)
@@ -535,6 +573,11 @@ def main() -> int:
             ["QQQ", f"{out_features}x{in_features}", f"{_pack_time(qqq_meta['make']):.3f}"],
             ["ParoQuant", f"{out_features}x{in_features}", f"{_pack_time(paro_meta['make']):.3f}"],
             ["FP8", f"{out_features}x{in_features}", f"{_pack_time(fp8_meta['make']):.3f}"],
+            *(
+                [["NVFP4", f"{out_features}x{in_features}", f"{_pack_time(fp4_meta['make']):.3f}"]]
+                if fp4_meta is not None
+                else []
+            ),
             ["VPTQ", f"{out_features}x{in_features}", f"{_pack_time(vptq_meta['make']):.3f}"],
             [
                 "EXL3",
@@ -702,6 +745,40 @@ def main() -> int:
                 baseline_ms=fp8_time[0],
                 relative_error=_relative_error(fp8_compiled_output, fp8_oracle),
                 visible_error=_visible_relative_error(fp8_compiled_output, fp8_oracle),
+            )
+
+        if fp4 is not None:
+            fp4_oracle = torch.matmul(x.float(), fp4_meta["dense"].t()) + fp4.bias.float()
+            fp4_time = _bench(lambda: fp4(x), warmup=args.warmup, iters=args.iters)
+            fp4_torchao_time = _bench(
+                lambda: torch.nn.functional.linear(x, fp4_meta["native"], fp4.bias),
+                warmup=args.warmup,
+                iters=args.iters,
+            )
+            with torch.inference_mode():
+                fp4_output = fp4(x)
+                fp4_torchao_output = torch.nn.functional.linear(x, fp4_meta["native"], fp4.bias)
+            _add_row(
+                rows,
+                method="NVFP4",
+                variant="native floatx decode + matmul (no dense cache)",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=fp4_time,
+                baseline_ms=fp4_torchao_time[0],
+                relative_error=_relative_error(fp4_output, fp4_oracle),
+                visible_error=_visible_relative_error(fp4_output, fp4_oracle),
+            )
+            _add_row(
+                rows,
+                method="NVFP4",
+                variant="torchao NVFP4Tensor linear",
+                shape=(out_features, in_features),
+                tokens=tokens,
+                timing=fp4_torchao_time,
+                baseline_ms=fp4_torchao_time[0],
+                relative_error=_relative_error(fp4_torchao_output, fp4_oracle),
+                visible_error=_visible_relative_error(fp4_torchao_output, fp4_oracle),
             )
 
         vptq_oracle = torch.nn.functional.linear(
@@ -958,6 +1035,7 @@ def main() -> int:
                 ["interop_threads", str(torch.get_num_interop_threads())],
                 ["exl3_bf16x3", str(_cpu_bf16x3_support())],
                 ["bitsandbytes", _package_version("bitsandbytes")],
+                ["torchao", _package_version("torchao")],
                 ["bnb_cpu_packed", str(_cpu_packed_kernels() is not None)],
                 ["hf_kernels", _package_version("kernels")],
                 ["shape", f"{out_features}x{in_features}"],
@@ -1008,7 +1086,9 @@ def main() -> int:
         "packed AVX512-BF16 path for M <= 64; larger batches use the canonical "
         "CPU path. The 8-bit dense baseline includes dequantization on every call; "
         "the shape-aware row keeps BnB's native INT8 kernel for large layers and "
-        "uses that recomputed dense BF16 path only where it is faster."
+        "uses that recomputed dense BF16 path only where it is faster. NVFP4 "
+        "compares the native CPU decode against torchao's NVFP4Tensor linear; "
+        "neither path retains a dense weight."
     )
     if bnb_error is not None:
         print(f"BitsAndBytes benchmark was unavailable: {bnb_error}")
