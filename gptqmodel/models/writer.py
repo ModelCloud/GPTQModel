@@ -1062,6 +1062,9 @@ def ModelWriter(cls):
             log.info("Model: Sanitized `generation_config.json` before packaging.")
 
         # Save `quantize_config.json`
+        prepare_quantize_config_for_save = getattr(self, "prepare_quantize_config_for_save", None)
+        if callable(prepare_quantize_config_for_save):
+            prepare_quantize_config_for_save(quantize_config)
         quantize_config.save_pretrained(save_dir)
 
         if quantize_config.dynamic:
@@ -1268,6 +1271,10 @@ def ModelWriter(cls):
         # processor template (e.g. Qwen2-Audio), breaking multimodal chat rendering on reload.
         if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
             self.processor.save_pretrained(save_dir)
+
+        copy_checkpoint_auxiliary_files_for_save = getattr(self, "copy_checkpoint_auxiliary_files_for_save", None)
+        if callable(copy_checkpoint_auxiliary_files_for_save):
+            copy_checkpoint_auxiliary_files_for_save(save_dir)
 
         if self.tokenizer:
             # Use source model's tokenizer_class for cross-version compatibility

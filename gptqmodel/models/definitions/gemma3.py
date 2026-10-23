@@ -58,6 +58,33 @@ class Gemma3ForConditionalGenerationGPTQ(BaseQModel):
             return "model." + name
         return name
 
+    def prepare_quantize_config_for_save(self, quantize_config) -> None:
+        # Gemma 3's vision tower and projector remain in their source dtype.
+        # Tell vLLM's GPTQ loader not to allocate quantized linear layers for them.
+        dynamic = dict(quantize_config.dynamic or {})
+        dynamic.setdefault(r"-:vision_tower\..*", {})
+        dynamic.setdefault(r"-:multi_modal_projector\..*", {})
+        quantize_config.dynamic = dynamic
+
+    def copy_checkpoint_auxiliary_files_for_save(self, save_dir: str) -> None:
+        # Keep the standalone processor/tokenizer files required by Transformers 4.x
+        # and vLLM releases that predate the consolidated Transformers 5 format.
+        import os
+        import shutil
+
+        filenames = (
+            "preprocessor_config.json",
+            "processor_config.json",
+            "tokenizer_config.json",
+            "special_tokens_map.json",
+            "tokenizer.model",
+            "added_tokens.json",
+            "chat_template.json",
+        )
+        for filename in filenames:
+            source = os.path.join(self.model_local_path, filename)
+            if os.path.isfile(source):
+                shutil.copy2(source, os.path.join(save_dir, filename))
 
     HF_CONVERSION_MAP_REVERSED = (
         # Gemma 3 shells expose `model.vision_tower.*`, but checkpoint tensors
