@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
+from accelerate.utils import find_tied_parameters
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
@@ -66,12 +67,13 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
-from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .execution_state import DeviceAssignmentState
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -1576,11 +1578,16 @@ class ModuleLooper(DeviceAssignmentState):
                 self.gptq_model.quantize_config.dynamic = {**missing_defaults, **dynamic}
 
         if self.gptq_model.quantize_config.lm_head:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
-                for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
-                        raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
+            # Composite models can keep both the head and tying configuration
+            # below the root. Check actual sharing by the fully qualified name.
+            if any(
+                f"{self.gptq_model.lm_head}.weight" in names
+                for names in find_tied_parameters(self.gptq_model.model)
+            ):
+                raise NotImplementedError(
+                    "quantization of `lm_head` layer with tied weights is not supported. "
+                    "Untie the model weights before quantization."
+                )
 
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
             if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:

@@ -279,6 +279,24 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | ZDTaichu 5.0 | `zdtaichu5_0` |
 <!-- model-types:end -->
 
+Qwen2.5-Omni supports quantizing its text output head with `lm_head=True`.
+The head is `thinker.lm_head`; GPTQ defaults it to 8-bit, group size 32.
+To use a 4-bit head, configure an explicit dynamic override:
+
+```python
+from gptqmodel import QuantizeConfig
+
+quantize_config = QuantizeConfig(
+    bits=4,
+    group_size=128,
+    lm_head=True,
+    dynamic={r"thinker\.lm_head$": {"bits": 4, "group_size": 32, "desc_act": False}},
+)
+```
+
+This option quantizes the thinker's text head; the talker and audio decoder
+retain their original weights. Tied output-head weights must be untied first.
+
 ## Platform and HW Support 🖥️
 
 GPT-QModel is validated on Linux, macOS, and Windows 11:
