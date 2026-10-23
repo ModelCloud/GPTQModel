@@ -191,7 +191,8 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
   uint32_t double_s;
   // pack 2xfp16 to half2
   asm volatile("mov.b32 %0, {%1, %2};\n" : "=r"(double_s) : "h"(s), "h"(s));
-  // dequant and convert 4 half to 4 uint8 (be placed at the low 8 bits of 4 half, respectively)
+  // Dequantize and convert 4 half values to uint8 values stored in each half's low byte.
+  // half2(1152) biases the rounded signed values into the magic-number conversion domain.
   static constexpr uint32_t MAGIC_NUM = 0x64806480;
   *reinterpret_cast<half2*>(&t0) = __hfma2(
     *reinterpret_cast<half2*>(&t0),
@@ -201,9 +202,9 @@ __device__ inline FragB dequant_per_group(int q, FragS_GROUP& frag_s, int i) {
     *reinterpret_cast<half2*>(&t1),
     *reinterpret_cast<half2*>(&double_s), *reinterpret_cast<const half2*>(&MAGIC_NUM)
   );
-  // The magic-number conversion below encodes rounded INT8 values with an
-  // offset of 1152. Clamp in that offset domain before extracting the low
-  // byte; otherwise values outside [-128, 127] wrap around when converted.
+  // After adding the 1152 bias, valid INT8 values [-128, 127] map to [1024, 1279].
+  // Clamp in this offset domain before extracting the low byte; otherwise out-of-range
+  // values wrap around during byte packing instead of saturating like the Torch path.
   static constexpr uint32_t INT8_MIN_OFFSET = 0x64006400;  // half2(1024)
   static constexpr uint32_t INT8_MAX_OFFSET = 0x64ff64ff;  // half2(1279)
   *reinterpret_cast<half2*>(&t0) = __hmin2(
