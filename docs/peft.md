@@ -93,7 +93,7 @@ else:
     trainer.save_model()
 ```
 
-In the tested PEFT/Transformers setup, the regular Trainer save produced an empty adapter file for this GPTQ FSDP path. The explicit export above writes `adapter_model.safetensors`, which can be loaded with `PeftModel.from_pretrained`.
+With the tested PEFT/Transformers versions, `trainer.save_model()` created an empty adapter weights file for this GPTQ FSDP setup. The code above then collects the LoRA weights from the full FSDP state dict and writes them to `adapter_model.safetensors`. PEFT can load the resulting adapter with `PeftModel.from_pretrained`.
 
 From `examples/sft`, launch with the four-GPU config at [`docs/peft/fsdp_config.yaml`](peft/fsdp_config.yaml):
 
