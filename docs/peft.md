@@ -2,7 +2,7 @@
 
 GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tuned with PEFT LoRA. The quantized base weights stay frozen; only the LoRA adapter parameters are trained.
 
-Use a current PEFT release together with `optimum>=1.24.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The examples below were validated with PEFT 0.21.2, Optimum 2.3.0, Transformers 5.19.0, and PyTorch 2.14.
+Use a current PEFT release together with `optimum>=1.24.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The FSDP recipe was validated with PEFT `0.21.3.dev0` (main checkout), Optimum 2.3.0, Transformers 5.20.2, and PyTorch 2.14.
 
 For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
@@ -93,7 +93,7 @@ else:
     trainer.save_model()
 ```
 
-With the tested PEFT/Transformers versions, `trainer.save_model()` created an empty adapter weights file for this GPTQ FSDP setup. The code above then collects the LoRA weights from the full FSDP state dict and writes them to `adapter_model.safetensors`. PEFT can load the resulting adapter with `PeftModel.from_pretrained`.
+With PEFT `0.21.3.dev0` and Transformers `5.20.2`, `trainer.save_model()` created an empty adapter weights file for this GPTQ FSDP setup. The code above then collects the LoRA weights from the full FSDP state dict and writes them to `adapter_model.safetensors`. PEFT can load the resulting adapter with `PeftModel.from_pretrained`.
 
 From `examples/sft`, launch with the four-GPU config at [`docs/peft/fsdp_config.yaml`](peft/fsdp_config.yaml):
 
