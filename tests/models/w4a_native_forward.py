@@ -90,8 +90,6 @@ class NativeForward:
             if not torch.equal(target.qweight, packed):
                 target.qweight.copy_(packed)
                 target.clear_weight_cache()
-                target._stream_reset_cache()
-                target._reset_prefetch_state()
                 changed += 1
         return changed
 

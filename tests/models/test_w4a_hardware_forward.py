@@ -326,7 +326,7 @@ def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtyp
             module.online_full_had = True
             student.get_submodule(name).online_full_had = True
         module.post_init()
-        module.eval().enable_weight_cache()
+        module.eval()
         owner, leaf = name.rsplit(".", 1)
         setattr(runtime.get_submodule(owner), leaf, module)
         # Decode nibbles independently of the training helper.
@@ -379,7 +379,8 @@ def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtyp
             expired.backward()
         name, module = next(iter(modules.items()))
         target = runtime.get_submodule(name)
-        assert target._cached_weights
+        target._stream_decode_qzeros()
+        assert target._zeros_cache is not None
         with torch.no_grad():
             scale = 1. if parameterization == "code_cell" else module._w4a_qad_scales.T[0, 0]
             value = (module._w4a_qad_latent_codes if parameterization == "code_cell"
@@ -387,7 +388,7 @@ def test_native_preservation_forward_gradients_refresh_and_lifetime(device, dtyp
             old_code = int((value / scale).round())
             new_code = old_code - 1 if old_code == 7 else old_code + 1
             value.copy_(new_code * scale)
-        assert proxy.sync_weights() == 1 and not target._cached_weights
+        assert proxy.sync_weights() == 1 and target._zeros_cache is None
         assert int((target.qweight[0, 0] & 15) - 8) == new_code
         assert proxy.sync_weights() == 0
         with proxy.frame(ids) as frame:
