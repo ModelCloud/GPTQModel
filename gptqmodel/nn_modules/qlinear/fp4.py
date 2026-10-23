@@ -9,6 +9,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...quantization.dtype import dequantize_f4_e2m1
+
 
 try:
     from torchao.prototype.mx_formats.nvfp4_tensor import NVFP4Tensor
@@ -54,10 +56,23 @@ class TorchFP4Linear(nn.Module):
             orig_dtype=self.orig_dtype,
         )
 
+    def _cpu_forward(self, x: torch.Tensor, bias: Optional[torch.Tensor]) -> torch.Tensor:
+        """Decode live FP4 buffers on CPU without retaining a dense weight."""
+
+        weight = dequantize_f4_e2m1(
+            self.weight,
+            scale=self.weight_scale,
+            axis=None,
+            target_dtype=x.dtype,
+        )
+        return F.linear(x, weight, bias)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Dispatch one dense linear projection through the NVFP4 tensor wrapper."""
 
         bias = self.bias
         if isinstance(bias, torch.Tensor) and bias.dtype != x.dtype:
             bias = bias.to(dtype=x.dtype)
+        if x.device.type == "cpu" and self.weight.device.type == "cpu":
+            return self._cpu_forward(x, bias)
         return F.linear(x, self._native_weight(), bias)

@@ -198,3 +198,34 @@ def test_gguf_fused_autotune_is_cached_per_shape(monkeypatch):
     assert module._should_use_fused_k_forward(single_token) is False
     assert module._should_use_fused_k_forward(many_tokens) is True
     assert calls == [(1, module.in_features), (7, module.in_features)]
+
+
+@pytest.mark.parametrize("bits", ["q4_0", "q8_0"])
+def test_gguf_forward_uses_dense_when_fused_autotune_loses(bits: str, monkeypatch):
+    _, module = _build_module(bits, in_features=64, out_features=8)
+    module.gguf_fused_cpu_max_rows = 16
+    module.gguf_fused_cpu_min_matrix_elements = 0
+    module.autotune_enabled = True
+    module.clear_autotune()
+    x = torch.randn(7, module.in_features, dtype=torch.bfloat16)
+    calls = []
+
+    monkeypatch.setattr(type(module), "_autotune", lambda self, x_flat: False)
+    monkeypatch.setattr(
+        module,
+        "_forward_dequant_matmul",
+        lambda x_flat: calls.append("dense") or torch.zeros(
+            x_flat.shape[0], module.out_features, dtype=x_flat.dtype
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_forward_fused_k",
+        lambda x_flat: pytest.fail("losing fused path must not run"),
+    )
+
+    with torch.inference_mode():
+        output = module(x)
+
+    assert calls == ["dense"]
+    assert output.shape == (x.shape[0], module.out_features)
