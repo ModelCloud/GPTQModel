@@ -29,7 +29,7 @@ def tensor_cache_key(tensor: Optional[torch.Tensor]):
     if not isinstance(tensor, torch.Tensor):
         return None
     try:
-        version = tensor._version
+        version = None if tensor.is_inference() else tensor._version
     except RuntimeError:
         version = None
     return (

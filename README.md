@@ -52,6 +52,15 @@ GPT-QModel provides a consistent API for calibration, quantization, quality eval
 
 Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
 
+`TorchLinear` never retains dense/dequantized weights between inference calls.
+The legacy `GPTQ_TORCH_CACHE_WEIGHTS` / `GPTQ_TORCH_LOOKAHEAD` flags and
+`enable_weight_cache(True)` / `enable_lookahead(True)` APIs now warn and leave
+these features disabled. CUDA streaming uses per-forward tiles, not persistent
+dequantized workspaces. Only zero-point and group-index metadata is cached;
+call `clear_weight_cache()` after manually mutating inference-mode tensors
+without version counters. Normal tensor mutations, checkpoint loads, and
+device/dtype moves invalidate this metadata automatically.
+
 ## Quantization Support 🛠️
 
 Every quantization method shares a common lifecycle—calibrate, quantize, validate, save, load, and serve—while retaining method-specific controls where they matter. New methods and kernels plug into that lifecycle instead of creating another disconnected toolchain.

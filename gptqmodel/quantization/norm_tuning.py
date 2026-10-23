@@ -244,7 +244,7 @@ def validate_tuning_model(model: nn.Module) -> None:
             raise ValueError(f"Norm tuning: `{name}` has checkpoint-format GPTQ-v1 zero points. {recovery}")
 
 
-def _prepare_runtime_for_tuning(model: nn.Module) -> list[tuple[nn.Module, bool, bool, bool, int, Any]]:
+def _prepare_runtime_for_tuning(model: nn.Module) -> list[tuple[nn.Module, bool, int]]:
     """Drop inference-only quantized linear caches before enabling autograd."""
     from ..nn_modules.qlinear.torch import TorchLinear
 
@@ -255,28 +255,18 @@ def _prepare_runtime_for_tuning(model: nn.Module) -> list[tuple[nn.Module, bool,
         states.append(
             (
                 module,
-                module._cache_enabled,
-                module._lookahead_enabled,
                 module._streaming_enabled,
                 module._stream_tile_cols,
-                module._lookahead_next,
             )
         )
         module.clear_weight_cache()
-        module._stream_reset_cache()
-        module._reset_prefetch_state()
-        module.enable_weight_cache(False)
-        module.enable_lookahead(False)
         module.enable_streaming(False)
     return states
 
 
 def _restore_runtime_after_tuning(states) -> None:
-    for module, cache_enabled, lookahead_enabled, streaming_enabled, tile_cols, lookahead_next in states:
-        module.enable_weight_cache(cache_enabled)
+    for module, streaming_enabled, tile_cols in states:
         module.enable_streaming(streaming_enabled, tile_cols=tile_cols)
-        module.enable_lookahead(lookahead_enabled)
-        module.set_lookahead_next(lookahead_next)
 
 
 def tune_norm_params(
