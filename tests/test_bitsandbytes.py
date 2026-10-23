@@ -18,6 +18,7 @@ from gptqmodel.nn_modules.qlinear.bitsandbytes import (
     BITSANDBYTES_AVAILABLE,
     BitsAndBytesLinear,
     _cpu_int8_dense_should_use,
+    _cpu_packed_max_rows,
     _cpu_packed_kernels,
     _dequantize_int8_weight,
 )
@@ -275,6 +276,17 @@ def test_bitsandbytes_int8_dense_dispatch_gate(monkeypatch):
     )
 
 
+def test_bitsandbytes_cpu_packed_dispatch_is_shape_and_thread_aware():
+    assert _cpu_packed_max_rows(in_features=512, out_features=512, threads=1) == 32
+    assert _cpu_packed_max_rows(in_features=512, out_features=512, threads=2) == 64
+    assert _cpu_packed_max_rows(in_features=512, out_features=512, threads=4) == 512
+    assert _cpu_packed_max_rows(in_features=512, out_features=512, threads=8) == 512
+
+    assert _cpu_packed_max_rows(in_features=512, out_features=2048, threads=1) == 32
+    assert _cpu_packed_max_rows(in_features=512, out_features=2048, threads=2) == 48
+    assert _cpu_packed_max_rows(in_features=512, out_features=2048, threads=8) == 48
+
+
 @pytest.mark.skipif(not BITSANDBYTES_AVAILABLE, reason="bitsandbytes backend unavailable")
 def test_bitsandbytes_int8_small_bf16_uses_dense_without_caching(monkeypatch):
     import bitsandbytes.functional as bnb_functional
@@ -445,9 +457,15 @@ def test_bitsandbytes_cpu_packed_kernel_skips_unsupported_shapes_and_env(monkeyp
     with torch.inference_mode():
         kernel(x)
     assert kernel._cpu_packing_active
+
+    _, wide_kernel = _build_cpu_packed_kernel(in_features=2048, out_features=512)
+    wide_x = torch.randn(7, wide_kernel.in_features, dtype=torch.bfloat16)
     with torch.inference_mode():
-        kernel(torch.randn(65, kernel.in_features, dtype=torch.bfloat16))
-    assert not kernel._cpu_packing_active
+        wide_kernel(wide_x)
+    assert wide_kernel._cpu_packing_active
+    with torch.inference_mode():
+        wide_kernel(torch.randn(49, wide_kernel.in_features, dtype=torch.bfloat16))
+    assert not wide_kernel._cpu_packing_active
 
     _, kernel = _build_cpu_packed_kernel(compute_dtype=torch.float16)
     with torch.inference_mode():

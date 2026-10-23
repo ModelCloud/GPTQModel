@@ -47,7 +47,12 @@ _BITSANDBYTES_8BIT_STATE_BUFFER_NAMES = ("weight_scb",)
 _MLX_4BIT_MIN_ELEMENTS = 4 * 1024 * 1024
 _MLX_INT8_MIN_ELEMENTS = 8 * 1024 * 1024
 _CPU_PACKED_ENV = "GPTQMODEL_BITSANDBYTES_CPU_PACKED"
-_CPU_PACKED_MAX_M = 64
+_CPU_PACKED_SMALL_WEIGHT_ELEMENTS = 512 * 512
+_CPU_PACKED_SMALL_WEIGHT_MAX_M = 512
+_CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M = 64
+_CPU_PACKED_WIDE_WEIGHT_MAX_M = 48
+_CPU_PACKED_SINGLE_THREAD_MAX_M = 32
+_CPU_PACKED_SMALL_WEIGHT_MIN_THREADS = 4
 _CPU_PACKED_REL_TOL = 4e-3
 _CPU_INT8_DENSE_ENV = "GPTQMODEL_BITSANDBYTES_CPU_INT8_DENSE"
 _CPU_INT8_DENSE_MIN_ROWS = 16
@@ -174,6 +179,31 @@ def _dequantize_int8_weight(
     """Dequantize BnB INT8 weights with the same row-scale math as the native op."""
 
     return weight.to(torch.float32) * (weight_scb.to(torch.float32) / 127.0).unsqueeze(1)
+
+
+def _cpu_packed_max_rows(
+    *,
+    in_features: int,
+    out_features: int,
+    threads: Optional[int] = None,
+) -> int:
+    """Return the measured packed-kernel crossover for the current CPU shape.
+
+    The packed GEMV path wins decode-sized batches. Its tiled GEMM scales worse
+    than canonical dequantize-plus-GEMM as rows grow, while smaller weights
+    amortize that overhead over more rows. The crossover also depends on the
+    active PyTorch intra-op thread count.
+    """
+
+    if threads is None:
+        threads = torch.get_num_threads()
+    if threads <= 1:
+        return _CPU_PACKED_SINGLE_THREAD_MAX_M
+    if in_features * out_features <= _CPU_PACKED_SMALL_WEIGHT_ELEMENTS:
+        if threads >= _CPU_PACKED_SMALL_WEIGHT_MIN_THREADS:
+            return _CPU_PACKED_SMALL_WEIGHT_MAX_M
+        return _CPU_PACKED_SMALL_WEIGHT_MULTITHREAD_MAX_M
+    return _CPU_PACKED_WIDE_WEIGHT_MAX_M
 
 
 def _cpu_int8_dense_should_use(
@@ -463,7 +493,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
             return False
 
         rows = x.numel() // self.in_features
-        if rows <= 0 or rows > _CPU_PACKED_MAX_M:
+        if rows <= 0 or rows > _cpu_packed_max_rows(
+            in_features=self.in_features,
+            out_features=self.out_features,
+        ):
             return False
         return _cpu_packed_kernels() is not None
 
