@@ -26,9 +26,14 @@
 
 ## Latest News 🗞️🚀
 
-* 10/22/2026 7.7.0-dev `main`: ✨ Added `llava` quantization support.
-* 10/14/2026 7.7.0-dev `main`: ✨ Added `qwen2_audio` quantization support.
-* 10/13/2026 7.7.0-dev `main`: ✨ Added `openvla` quantization support.
+* **7.7.0**:
+  * **CPU inference:** Added the shared AVX512-BF16 `int4_qzero_group_scaled_cpu` kernel for GPTQ/AWQ group sizes 16/32/64/128/256/512 and prioritized it ahead of ATen when supported. Added packed/low-precision CPU decode paths for QQQ, VPTQ, EXL3, FP8, NVFP4, and BitsAndBytes, plus oneDNN BF16x3 accumulation and shape-aware BitsAndBytes INT8 dispatch. GPTQ/AWQ measured up to 2.02x faster than ATen; BitsAndBytes INT8 reached 1.28x at M=64.
+  * **GGUF:** Added fused CPU Q4_0/Q8_0/Q4_K/Q5_K/Q6_K forward with FP32 accumulation under oneDNN BF16x3, fused bias, per-shape autotuning, and no retained dense weights. K-quant fused paths measured up to 1.92x faster than dense at M=7.
+  * **Quantized storage:** Removed persistent dense, dequantized, expanded, and INT4-to-INT8 inference caches across GPTQ/AWQ, QQQ, EXL3, VPTQ, FP8, FP4, GGUF, BitsAndBytes, and INT8. Only packed weights, scales, zero points, and metadata persist; temporary dequantization uses bounded tiles.
+  * **Quantization quality:** Added token-normalized GPTQ loss reporting, on-device embedding diagonal flooring and VPTQ Hessian damping, and QQQ vLLM compatibility/CUDA saturation fixes.
+  * **Models and runtimes:** Added LLaVA quantization support, fused VPTQ CUDA inference, and hardened remote LoRA adapter loading.
+  * **Docs and tooling:** Added the GPTQ FSDP/PEFT LoRA example, multi-GPU MoE quantization guide, and independent Torch-oracle accuracy and CPU speed benchmarks.
+  * **Dependencies:** Refreshed runtime and optional dependency floors to current stable releases, including PyTorch 2.14.1, Transformers 5.20.2, Datasets 5.1.0, and Optimum 2.3.0. vLLM/SGLang extras retain their upstream framework pins and should be installed in dedicated environments.
 
 * **7.6.0**:
   * **Model support:** Added Jamba/Jamba2, SmolVLM, Granite MoE, InternVL, EXAONE 4.5, Qwen3-VL MoE, Qwen4-Exp text, OLMoE, ZDTaichu 5.0, Agnes 3.0 Flash, and Xing4.0 quantization support, plus MiMo V2.6 Flash-RL and Pro-RL checkpoint support.
@@ -336,8 +341,9 @@ Pass an MLX token array as `calibration_data` to use your own calibration set.
 ### PIP/UV 💿
 
 ```bash
-# You can install optional modules like autoround, ipex, vllm, sglang, bitblas.
-# Example: pip install -v gptqmodel[vllm,sglang,bitblas]
+# vLLM and SGLang publish their own Torch/Transformers pins. Install one engine
+# in a dedicated environment aligned to that engine's release.
+# Example optional module: pip install -v "gptqmodel[bitblas]"
 pip install -v gptqmodel
 uv pip install -v gptqmodel
 ```
@@ -354,8 +360,7 @@ git clone https://github.com/ModelCloud/GPTQModel.git && cd GPTQModel
 apt install python3-dev
 
 # pip: install from source
-# You can install optional modules like  vllm, sglang, bitblas.
-# Example: pip install -v .[vllm,sglang,bitblas]
+# Example optional module: pip install -v ".[bitblas]"
 pip install -v .
 ```
 
@@ -816,7 +821,7 @@ containing folder at the supplied revision.
 
 ### PEFT LoRA Training and Adapter Loading 🤗
 
-GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded through `PeftModel`. Use a current PEFT release with `optimum>=1.24.0`; older combinations may warn that the quantized layer type is unsupported. For training, select the method-specific trainable backend (`gptq_torch` for GPTQ, `torch_awq` for AWQ); default inference kernels do not propagate gradients.
+GPT-QModel GPTQ/AWQ checkpoints can be fine-tuned with PEFT LoRA and loaded through `PeftModel`. Use a current PEFT release with `optimum>=2.3.0`; older combinations may warn that the quantized layer type is unsupported. For training, select the method-specific trainable backend (`gptq_torch` for GPTQ, `torch_awq` for AWQ); default inference kernels do not propagate gradients.
 
 PEFT cannot merge LoRA deltas into packed GPTQ/AWQ weights. Keep the adapter separate for quantized inference, or merge it into the original full-precision model and then quantize the merged model. See [docs/peft.md](docs/peft.md) for tested training, loading, and merge examples.
 

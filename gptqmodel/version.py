@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-# odd minor versions are dev (main) branch
-# even minor versions are release
-# 5.2.0 => release, 5.1.0 => devel
-# micro version (5.2.x) denotes patch fix, i.e. 5.2.1 is a patch fix release
-__version__ = "7.6.0"
+# minor versions add features; micro versions are patch fixes
+# 7.7.0 => feature release, 7.7.1 => patch release
+__version__ = "7.7.0"

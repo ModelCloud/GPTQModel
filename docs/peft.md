@@ -2,7 +2,7 @@
 
 GPT-QModel GPTQ/AWQ checkpoints can be loaded through Transformers and fine-tuned with PEFT LoRA. The quantized base weights stay frozen; only the LoRA adapter parameters are trained.
 
-Use a current PEFT release together with `optimum>=1.24.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The FSDP recipe was validated with PEFT `0.21.3.dev0` (main checkout), Optimum 2.3.0, Transformers 5.20.2, and PyTorch 2.14.
+Use a current PEFT release together with `optimum>=2.3.0`. Older PEFT/Optimum combinations may warn that the GPT-QModel quantized layer type is unsupported. The FSDP recipe was validated with PEFT `0.21.3.dev0` (main checkout), Optimum 2.3.0, Transformers 5.20.2, and PyTorch 2.14.
 
 For training, select the trainable kernel for the checkpoint's quantization method: `gptq_torch` for GPTQ and `torch_awq` for AWQ. `torch_awq` is the Transformers-facing alias for GPT-QModel's `AWQ_TORCH` kernel. The default inference kernels do not propagate gradients through the quantized layers, so a backward pass will fail.
 
