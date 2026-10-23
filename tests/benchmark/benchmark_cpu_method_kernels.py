@@ -139,15 +139,16 @@ def _build_qqq(
     torch.manual_seed(100 + in_features)
     linear = nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
     linear.weight.data.normal_(0.0, 0.04)
+    effective_group = in_features if group_size == -1 else group_size
     scales = (
         torch.rand(
-            (out_features, in_features // group_size),
+            (out_features, in_features // effective_group),
             dtype=torch.float16,
         )
         * 0.02
         + 0.005
     )
-    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.5 + 0.75
+    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.002 + 0.001
 
     def make():
         module = QQQTorchLinear(
@@ -165,9 +166,18 @@ def _build_qqq(
         return module.eval()
 
     module = make()
-    weight, channel = module._cached_weight_for_torch()
-    dense = weight.float() * channel
-    return module, {"make": make, "dense": dense}
+    codes = (linear.weight.detach() / scales.repeat_interleave(effective_group, dim=1)).round()
+    if effective_group != in_features:
+        codes = (codes + 8).clamp(0, 15)
+        group_scales = (scales.t() / s_channel).half().float()
+        weight = ((codes.t().float() - 8) * group_scales.repeat_interleave(effective_group, dim=0)).round().clamp(-128, 127)
+        channel = s_channel.reshape(1, -1)
+    else:
+        codes = codes.clamp(-15, 15).to(torch.int32) & 15
+        weight = torch.where(codes.t() >= 8, codes.t() - 16, codes.t()).float() * 16
+        channel = (scales.t() / 16).float()
+    dense = weight * channel
+    return module, {"make": make, "dense": dense, "weight": weight, "channel": channel}
 
 
 def _build_paro(
@@ -621,12 +631,13 @@ def main() -> int:
         torch.manual_seed(600 + tokens)
         x = torch.randn(tokens, in_features, dtype=torch.bfloat16)
 
-        qqq_dense = qqq_meta["dense"].to(torch.float32)
-        qqq_oracle = x.float() @ qqq_dense
+        qqq_scale_a = x.abs().amax(-1, keepdim=True).div(127).float()
+        qqq_quant_a = (x / qqq_scale_a).round().clamp(-128, 127).to(torch.int8)
+        qqq_oracle = (qqq_quant_a.float() @ qqq_meta["weight"]) * qqq_scale_a * qqq_meta["channel"]
 
         def qqq_fallback(x_input: torch.Tensor) -> torch.Tensor:
             quant_a, scale_a = qqq.dynamic_quant(x_input)
-            weight, scale_channel = qqq._cached_weight_for_torch()
+            weight, scale_channel = qqq._dequantize_weight_for_torch()
             accum = torch.matmul(quant_a.float(), weight.float())
             return (accum * scale_a * scale_channel).to(x_input.dtype)
 
@@ -637,7 +648,7 @@ def main() -> int:
         _add_row(
             rows,
             method="QQQ",
-            variant="int8 mm + cached weight",
+            variant="packed int4 CPU",
             shape=(out_features, in_features),
             tokens=tokens,
             timing=qqq_opt_time,
@@ -648,7 +659,7 @@ def main() -> int:
         _add_row(
             rows,
             method="QQQ",
-            variant="fp32 matmul",
+            variant="uncached dequant + fp32 matmul",
             shape=(out_features, in_features),
             tokens=tokens,
             timing=qqq_base_time,

@@ -5,6 +5,7 @@
 
 # Adapted from vllm at https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/quantization/gptq_marlin.py
 
+from functools import lru_cache
 from typing import List, Optional, Tuple
 
 import numpy as np
@@ -25,6 +26,20 @@ log = setup_logger()
 
 
 _INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
+
+
+@lru_cache(maxsize=1)
+def _qqq_cpu_kernel():
+    from ...extension import op as extension_op
+    from ...utils.cpu_features import has_avx512_bf16
+
+    if not has_avx512_bf16():
+        return None
+    try:
+        return extension_op("int4_qzero_group_scaled_cpu", "qqq_int4")
+    except (RuntimeError, ImportError, OSError) as exc:
+        log.warning("QQQ packed CPU kernel unavailable: %s", exc)
+        return None
 
 
 def _invert_permutation(values) -> torch.Tensor:
@@ -484,8 +499,8 @@ class QQQTorchLinear(QQQLinear):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.QQQ_TORCH)
         super().__init__(*args, **kwargs)
-        self._torch_weight_cache = None
-        self._torch_weight_cache_key = None
+        self._torch_packed_cache = None
+        self._torch_packed_cache_key = None
         self._torch_int_mm_failed_shapes = set()
 
     def post_init(self):
@@ -493,8 +508,8 @@ class QQQTorchLinear(QQQLinear):
         self.clear_weight_cache()
 
     def clear_weight_cache(self) -> None:
-        self._torch_weight_cache = None
-        self._torch_weight_cache_key = None
+        self._torch_packed_cache = None
+        self._torch_packed_cache_key = None
         self._torch_int_mm_failed_shapes.clear()
 
     @classmethod
@@ -551,21 +566,35 @@ class QQQTorchLinear(QQQLinear):
             self.out_features,
         )
 
-    def _cached_weight_for_torch(self) -> tuple[torch.Tensor, torch.Tensor]:
+    def _packed_weight_for_cpu(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Cache only INT4 codes and unpermuted scales for CPU inference."""
+        from .torch_cpu_avx512 import pack_hf_int4
+
         key = self._torch_weight_state_key()
-        cached = self._torch_weight_cache
-        if cached is not None and self._torch_weight_cache_key == key:
+        cached = self._torch_packed_cache
+        if cached is not None and self._torch_packed_cache_key == key:
             return cached
 
-        weight, s_channel = self._dequantize_weight_for_torch()
-        # Both QQQ layouts produce integer-valued dense weights. Keep the
-        # integer codes so the CPU path can use torch._int_mm instead of
-        # materializing and multiplying a float32 weight every token.
-        weight = weight.to(torch.int8).contiguous()
-        cached = (weight, s_channel.contiguous())
-        self._torch_weight_cache = cached
-        self._torch_weight_cache_key = key
+        codes = self._unpack_weight_codes().t().to(torch.uint8)
+        s_channel = self._unpermute_scales(self.s_channel, self._scale_perm_single_i).float().contiguous()
+        if self.group_size == self.in_features:
+            codes = codes ^ 8
+            s_group = torch.empty(0, dtype=torch.float32, device=self.B.device)
+        else:
+            s_group = self._unpermute_scales(self.s_group, self._scale_perm_i).float().contiguous()
+        cached = (pack_hf_int4(codes), s_group, s_channel)
+        self._torch_packed_cache = cached
+        self._torch_packed_cache_key = key
         return cached
+
+    def _packed_cpu_matmul(self, quant_A: torch.Tensor):
+        if quant_A.device.type != "cpu" or self.B.device.type != "cpu" or self.in_features > 131071:
+            return None
+        kernel = _qqq_cpu_kernel()
+        if kernel is None:
+            return None
+        packed, s_group, s_channel = self._packed_weight_for_cpu()
+        return kernel(quant_A.contiguous(), packed, s_group, self.group_size), s_channel
 
     def _int8_matmul(self, quant_A: torch.Tensor, weight: torch.Tensor) -> Optional[torch.Tensor]:
         shape_key = (
@@ -605,13 +634,18 @@ class QQQTorchLinear(QQQLinear):
         out_shape = A.shape[:-1] + (self.out_features,)
         A_flat = A.reshape(-1, A.shape[-1])
         quant_A, s1 = self.dynamic_quant(A_flat)
-        weight, s_channel = self._cached_weight_for_torch()
-        accum = self._int8_matmul(quant_A, weight)
-        if accum is None:
-            accum = torch.matmul(
-                quant_A.to(torch.float32),
-                weight.to(device=A_flat.device, dtype=torch.float32),
-            )
+        packed_result = self._packed_cpu_matmul(quant_A)
+        if packed_result is not None:
+            accum, s_channel = packed_result
+        else:
+            weight, s_channel = self._dequantize_weight_for_torch()
+            weight = weight.to(torch.int8).contiguous()
+            accum = self._int8_matmul(quant_A, weight)
+            if accum is None:
+                accum = torch.matmul(
+                    quant_A.to(torch.float32),
+                    weight.to(device=A_flat.device, dtype=torch.float32),
+                )
         accum = accum * s1
         accum = accum * s_channel.to(device=A_flat.device, dtype=torch.float32)
         D = accum.to(dtype=A_dtype).reshape(out_shape)

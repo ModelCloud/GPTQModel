@@ -33,7 +33,7 @@ def _build_cpu_torch_module(
     linear = torch.nn.Linear(in_features, out_features, bias=False, dtype=torch.float16)
     linear.weight.data.normal_(0, 0.08)
     scales = torch.rand((out_features, groups), dtype=torch.float16) * 0.04 + 0.01
-    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.5 + 0.75
+    s_channel = torch.rand(out_features, dtype=torch.float32) * 0.001 + 0.002
 
     module = qqq_module.QQQTorchLinear(
         bits=4,
@@ -56,10 +56,12 @@ def test_qqq_torch_cpu_int_mm_matches_fp32_fallback(monkeypatch):
         pytest.skip("torch._int_mm is unavailable")
 
     module = _build_cpu_torch_module()
+    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: None)
     x = torch.randn(17, module.in_features, dtype=torch.float16)
 
     quant_a, _ = module.dynamic_quant(x)
-    weight, _ = module._cached_weight_for_torch()
+    weight, _ = module._dequantize_weight_for_torch()
+    weight = weight.to(torch.int8).contiguous()
     if module._int8_matmul(quant_a, weight) is None:
         pytest.skip("torch._int_mm has no CPU kernel for this shape")
 
@@ -92,7 +94,9 @@ def test_qqq_torch_cpu_int_mm_failure_is_shape_scoped(monkeypatch):
     module = _build_cpu_torch_module()
     x = torch.randn(11, module.in_features, dtype=torch.float16)
     quant_a, _ = module.dynamic_quant(x)
-    weight, _ = module._cached_weight_for_torch()
+    weight, _ = module._dequantize_weight_for_torch()
+    weight = weight.to(torch.int8).contiguous()
+    monkeypatch.setattr(qqq_module, "_qqq_cpu_kernel", lambda: None)
 
     def unsupported(*_args):
         raise RuntimeError("no integer GEMM kernel for this shape")
@@ -114,22 +118,24 @@ def test_qqq_torch_cpu_int_mm_failure_is_shape_scoped(monkeypatch):
 
 def test_qqq_torch_cpu_cache_invalidates_on_mutation_load_and_move():
     module = _build_cpu_torch_module()
-    first_weight, first_channel = module._cached_weight_for_torch()
-    assert module._cached_weight_for_torch()[0] is first_weight
+    first_weight, _, first_channel = module._packed_weight_for_cpu()
+    assert module._packed_weight_for_cpu()[0] is first_weight
+    assert first_weight.dtype == torch.uint8
+    assert first_weight.numel() == module.in_features * module.out_features // 2
 
     module.s_channel.add_(1.0)
-    second_weight, second_channel = module._cached_weight_for_torch()
+    second_weight, _, second_channel = module._packed_weight_for_cpu()
     assert second_weight is not first_weight
     assert second_channel is not first_channel
 
     module.load_state_dict(module.state_dict())
-    assert module._torch_weight_cache is None
-    assert module._torch_weight_cache_key is None
+    assert module._torch_packed_cache is None
+    assert module._torch_packed_cache_key is None
 
-    moved_weight, _ = module._cached_weight_for_torch()
+    moved_weight, _, _ = module._packed_weight_for_cpu()
     assert moved_weight is not None
     module.to(dtype=torch.bfloat16)
-    assert module._torch_weight_cache is None
+    assert module._torch_packed_cache is None
 
     x = torch.randn(3, module.in_features, dtype=torch.bfloat16)
     with torch.inference_mode():

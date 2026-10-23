@@ -102,6 +102,15 @@ the AVX512 path ahead of the ATen int4pack fallback when the layer shape
 satisfies the kernel's 32-row and group-size alignment requirements. Supported
 group sizes are 16, 32, 64, 128, 256, and 512.
 
+`BACKEND.QQQ_TORCH` uses the same packed INT4 CPU layout with a QQQ-specific
+integer GEMM that preserves round-to-nearest-even and INT8 saturation for
+group size 128, plus the signed per-channel layout for group size -1.
+Small batches use AVX512 integer dot products; larger batches use oneDNN
+integer GEMM with temporary 128-by-32 weight tiles when available. Runtime
+caches retain only packed INT4 codes and scales. Unsupported hosts use the
+Torch fallback without retaining dequantized weights. Both FP16 and BF16
+activations keep their output dtype.
+
 `BACKEND.EXL3_TORCH` uses oneDNN BF16x3 FP32 matmul on AVX512-BF16 hosts for
 GEMMs large enough to amortize dispatch. Forward decodes at most 512 output
 columns at a time and never retains a dense dequantized weight;
