@@ -497,19 +497,35 @@ model.save(quant_path)
 #### Calibration grid workspaces
 
 GPTQ/QQQ MSE shrink searches and AWQ clipping searches evaluate candidates in
-chunks. Their temporary workspace targets can be adjusted with integer MiB
-environment variables:
+chunks. Their temporary workspace targets can be adjusted per
+`QuantizeConfig` via `MSEConfig` on the `mse` field (a bare float, e.g.
+`mse=2.4`, still works and only sets the search exponent `norm`):
 
-| Variable | Search | CPU default | GPU default |
+```py
+from gptqmodel import GPTQConfig, MSEConfig
+
+quant_config = GPTQConfig(
+    bits=4,
+    group_size=128,
+    mse=MSEConfig(norm=2.4, grid_budget="64M", clip_grid_budget="64M"),
+)
+```
+
+| `MSEConfig` field | Search | CPU default | GPU default |
 |---|---|---:|---:|
-| `GPTQMODEL_MSE_GRID_BUDGET_MB` | GPTQ/QQQ MSE shrink grid | 16 | 256 |
-| `GPTQMODEL_CLIP_GRID_BUDGET_MB` | AWQ clipping grid | 16 | 256 |
+| `norm` | MSE objective exponent (`0` disables the search) | — | — |
+| `grid_budget` | GPTQ/QQQ MSE shrink grid | `16M` | `256M` |
+| `clip_grid_budget` | AWQ clipping grid | `16M` | `256M` |
 
-Set either to `0` to evaluate one candidate at a time; AWQ also uses one-token
-product tiles. These are chunk-sizing targets, not limits on total process
-memory: AWQ sizes its scratch buffers independently, and a single candidate,
-full-token error buffer, or minimum product tile can exceed the target.
-These settings affect calibration scratch only, not stored quantized weights.
+Budget values are byte counts (ints) or strings with a `K`/`M`/`G` postfix
+(e.g. `"256M"`, `"1G"`).
+
+Set either field to `0` to evaluate one candidate at a time; AWQ also uses
+one-token product tiles. These are chunk-sizing targets, not limits on total
+process memory: AWQ sizes its scratch buffers independently, and a single
+candidate, full-token error buffer, or minimum product tile can exceed the
+target. These settings affect calibration scratch only, not stored quantized
+weights.
 
 #### Checkpoint and Resume Long Quantization Jobs 💾
 

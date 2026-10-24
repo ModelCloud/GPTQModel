@@ -303,6 +303,7 @@ from .quantization import (
     GGUFConfig,
     GPTAQConfig,
     GPTQConfig,
+    MSEConfig,
     NormConfig,
     NormType,
     QQQConfig,

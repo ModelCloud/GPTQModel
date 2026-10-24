@@ -7,16 +7,14 @@ The selection must stay identical: same objective values, first-minimum tie
 order, and NaN rejection. The sequential loop and quantization arithmetic below
 are independent of the batched implementation.
 """
-import os
 import unittest
-from unittest.mock import patch
 
 import pytest
 import torch
 from parameterized import parameterized, parameterized_class
 from torch.utils._python_dispatch import TorchDispatchMode
 
-from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.quantization.config import MSEConfig, QuantizeConfig
 from gptqmodel.quantization.quantizer import QQQQuantizer, Quantizer, _mse_shrink_grid
 
 
@@ -78,7 +76,8 @@ def _legacy_find_params(self, x, weight=False):
             else:
                 self.zero = torch.round(-xmin / self.scale)
 
-    mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+    mse_attr = getattr(self.qcfg, "mse", 0.0)
+    mse = float(mse_attr.norm if isinstance(mse_attr, MSEConfig) else mse_attr or 0.0)
     if mse > 0.0:
         best = torch.full([x.shape[0]], float("inf"), device=dev)
         search_adjacent_zero_points = (
@@ -236,14 +235,16 @@ class TestMseShrinkGridVectorized(unittest.TestCase):
 
     def test_tiny_budget_chunking_matches_oracle(self):
         """A 0-MB budget forces one candidate per chunk; exercise the boundary."""
-        with patch.dict(os.environ, {"GPTQMODEL_MSE_GRID_BUDGET_MB": "0"}):
-            qcfg = QuantizeConfig(bits=4, group_size=-1, sym=False, mse=2.4)
-            x = _case("randn", (96, 512))
-            legacy, new = self._run_pair(qcfg, x, weight=True, perchannel=True)
-            self.assertTrue(
-                torch.allclose(legacy.scale, new.scale, rtol=0, atol=0, equal_nan=True))
-            self.assertTrue(
-                torch.allclose(legacy.zero, new.zero, rtol=0, atol=0, equal_nan=True))
+        qcfg = QuantizeConfig(
+            bits=4, group_size=-1, sym=False,
+            mse={"norm": 2.4, "grid_budget": 0},
+        )
+        x = _case("randn", (96, 512))
+        legacy, new = self._run_pair(qcfg, x, weight=True, perchannel=True)
+        self.assertTrue(
+            torch.allclose(legacy.scale, new.scale, rtol=0, atol=0, equal_nan=True))
+        self.assertTrue(
+            torch.allclose(legacy.zero, new.zero, rtol=0, atol=0, equal_nan=True))
 
     @parameterized.expand([
         (torch.float16, Quantizer, False),
@@ -268,9 +269,8 @@ class TestMseShrinkGridVectorized(unittest.TestCase):
         not torch.cuda.is_available(), reason="CUDA unavailable",
     )),
 ])
-@pytest.mark.parametrize("budget", ["0", "1"])
-def test_mse_thresholds_and_candidate_ties(device, budget, monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_MSE_GRID_BUDGET_MB", budget)
+@pytest.mark.parametrize("budget", [0, 1])
+def test_mse_thresholds_and_candidate_ties(device, budget):
     centers = torch.tensor([-2.5, -1.5, -0.5, 0.5, 1.5, 2.5], device=device)
     x = torch.cat([
         centers, torch.nextafter(centers, torch.full_like(centers, -torch.inf)),
@@ -292,14 +292,14 @@ def test_mse_thresholds_and_candidate_ties(device, budget, monkeypatch):
     actual_scale, actual_zero = _mse_shrink_grid(
         x, scales, zeros, 2.4, maxq_value=3, groupwise=True,
         guard_zero_scale=True, scale=initial, zero=initial,
+        grid_budget=budget,
     )
     torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
     torch.testing.assert_close(actual_zero, expected_zero, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("budget", ["0", "1"])
-def test_mse_strided_transpose_objectives(budget, monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_MSE_GRID_BUDGET_MB", budget)
+@pytest.mark.parametrize("budget", [0, 1])
+def test_mse_strided_transpose_objectives(budget):
     x = torch.randn(64, 128, generator=torch.Generator().manual_seed(0))[::2, ::2].t()
     scales = torch.tensor([0.125, 0.25, 0.5])[:, None].expand(-1, x.shape[0])
     zeros = torch.full_like(scales, 8.0)
@@ -320,6 +320,7 @@ def test_mse_strided_transpose_objectives(budget, monkeypatch):
         _mse_shrink_grid(
             x, scales, zeros, 2.4, maxq_value=15, groupwise=False,
             guard_zero_scale=True, scale=scales[0], zero=zeros[0],
+            grid_budget=budget,
         )
     torch.testing.assert_close(torch.cat(errors), torch.stack(expected), rtol=0, atol=0)
 

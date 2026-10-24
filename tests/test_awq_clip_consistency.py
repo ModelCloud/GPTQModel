@@ -49,14 +49,14 @@ def _sequential_clip_grid(qcfg, w, input_feat, n_grid=20, max_shrink=0.5):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("sym", [False, True])
 @pytest.mark.parametrize("group_size", [-1, 32])
-@pytest.mark.parametrize("budget", ["0", "1"])
-def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget, monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", budget)
+@pytest.mark.parametrize("budget", [0, 1])
+def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget):
     g = torch.Generator().manual_seed(42)
     w = torch.randn(64, 128, generator=g).to(device=device, dtype=dtype)
     x = torch.randn(19, 128, generator=g).to(device=device, dtype=dtype)
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size, sym=sym,
+        mse={"clip_grid_budget": budget},
     )
     processor = _ClipTestAWQProcessor(qcfg)
     expected = _sequential_clip_grid(qcfg, w, x)
@@ -66,8 +66,7 @@ def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget, 
 
 @pytest.mark.parametrize("device", _GRID_DEVICES)
 @pytest.mark.parametrize("kind", ["empty_grid", "ties", "overflow", "mixed_dtype"])
-def test_clip_grid_edge_cases(device, kind, monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", "0")
+def test_clip_grid_edge_cases(device, kind):
     g = torch.Generator().manual_seed(42)
     w = torch.randn(128, 64, generator=g).to(device=device, dtype=torch.float16)
     x = torch.randn(7, 64, generator=g).to(device=device, dtype=torch.float16)
@@ -78,16 +77,18 @@ def test_clip_grid_edge_cases(device, kind, monkeypatch):
         x.mul_(1e4)
     elif kind == "mixed_dtype":
         x = x.float()
-    qcfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
+        mse={"clip_grid_budget": 0},
+    )
     processor = _ClipTestAWQProcessor(qcfg)
     expected = _sequential_clip_grid(qcfg, w, x, max_shrink=shrink)
     actual = processor._compute_best_clip(w, x, max_shrink=shrink)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
-def test_clip_grid_slices_reference_product(monkeypatch):
+def test_clip_grid_slices_reference_product():
     """The unclipped reference must obey the same token tiling as candidates."""
-    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", "0")
     products = []
 
     class TrackProducts(TorchDispatchMode):
@@ -97,7 +98,10 @@ def test_clip_grid_slices_reference_product(monkeypatch):
                 products.append(output.numel())
             return output
 
-    qcfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
+        mse={"clip_grid_budget": 0},
+    )
     processor = _ClipTestAWQProcessor(qcfg)
     w = torch.ones(64, 128)
     x = torch.ones(19, 128)
