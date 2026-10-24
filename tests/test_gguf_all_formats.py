@@ -120,7 +120,9 @@ def test_gguf_dequantize_matches_native_and_reference(alias):
     bridge = None
     try:
         bridge = _get_ggml_bridge()
-    except Exception:
+    except (ModuleNotFoundError, ImportError, OSError, RuntimeError):
+        # llama-cpp-python is optional: when absent, the ggml-native
+        # assertions below are skipped and only the `gguf` oracle runs.
         pass
     if bridge is not None and qtype not in _GGUF_LIB_SKIP_QTYPES:
         ggml_out = bridge.dequantize_rows(
@@ -219,6 +221,11 @@ def test_gguf_cpp_kernel_forward(alias):
     # Same packed input through two implementations must stay in float precision.
     diff = (cpp_out - torch_out).abs().max().item()
     assert diff <= 0.05
+
+    if qtype in _GGML_MATMUL_SKIP_QTYPES:
+        # ggml mul_mat has no F32-source vec_dot for these types and would
+        # segfault; the kernel must select the torch path instead.
+        assert cpp_mod._use_ggml_cpu_matmul(x.reshape(-1, block)) is False
 
 
 @pytest.mark.parametrize("alias", ALL_ALIASES)
