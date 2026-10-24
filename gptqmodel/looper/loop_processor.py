@@ -34,7 +34,7 @@ from ..quantization.config import QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU, memory_stats_for_device
 
 
 log = setup_logger()
@@ -1051,13 +1051,13 @@ class LoopProcessor:
         pass
 
 def get_max_memory() -> str:
-    """Returns current CUDA memory usage for the first one or two devices."""
+    """Returns current accelerator memory usage for the first one or two devices."""
 
-    stats_0 = torch.cuda.memory_stats(DEVICE_0)
+    stats_0 = memory_stats_for_device(DEVICE_0)
     active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
 
-    if torch.cuda.device_count() > 1:
-        stats_1 = torch.cuda.memory_stats(DEVICE_1)
+    if DEVICE_1 != DEVICE_0:
+        stats_1 = memory_stats_for_device(DEVICE_1)
         active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
 
         max_memory = f"{active_0:.2f}MB, {active_1:.2f}MB"
