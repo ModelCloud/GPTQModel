@@ -366,6 +366,52 @@ def empty_cache_for_device(device: torch.device) -> bool:
     return False
 
 
+@lru_cache(maxsize=12)
+def resolve_memory_stats_callable(device_type: str) -> Optional[Callable[[torch.device], dict]]:
+    """Return the allocator-stats callable for `device_type`, or None when absent.
+
+    Mirrors ``resolve_empty_cache_callable``: allocator diagnostics should ask the
+    active accelerator, because ``torch.cuda`` only reports CUDA allocations and
+    stays empty on NPU/XPU/CPU-only builds.
+    """
+
+    try:
+        if device_type == "cuda" and HAS_CUDA:
+            candidate = torch.cuda.memory_stats
+        elif device_type == "xpu" and HAS_XPU:
+            candidate = torch.xpu.memory_stats
+        elif device_type == "npu" and HAS_NPU:
+            candidate = torch.npu.memory_stats
+        else:
+            candidate = None
+    except Exception:
+        candidate = None
+
+    if callable(candidate):
+        return candidate
+
+    return None
+
+
+def memory_stats_for_device(device: torch.device) -> dict:
+    """Return allocator statistics for `device`, or an empty mapping when unsupported.
+
+    Best-effort telemetry uses this instead of ``torch.cuda.memory_stats``. The
+    CUDA call reports nothing for a non-CUDA device, so accelerator memory log
+    rows silently read zero on NPU/XPU/CPU-only builds even while the device is
+    holding allocations.
+    """
+
+    fn = resolve_memory_stats_callable(device.type)
+    if fn is None:
+        return {}
+
+    try:
+        return fn(device)
+    except Exception:
+        return {}
+
+
 def torch_empty_cache_any(
     device: Union[torch.device, str, int, None] = None,
     gc: bool = True,

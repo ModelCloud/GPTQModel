@@ -21,7 +21,7 @@ from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.device import get_device
 from ..utils.model import move_to
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1, memory_stats_for_device, torch_streamCtx, torch_sync
 from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
 
 log = setup_logger()
@@ -339,12 +339,12 @@ class EoraProcessor(LoopProcessor):
             self.durations.append(duration)
             self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stats_0 = torch.cuda.memory_stats(DEVICE_0)
+        stats_0 = memory_stats_for_device(DEVICE_0)
         active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
-        if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(DEVICE_1)
+        stats_1 = memory_stats_for_device(DEVICE_1) if DEVICE_1 != DEVICE_0 else {}
+        if stats_1:
             active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
