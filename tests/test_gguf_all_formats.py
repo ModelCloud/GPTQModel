@@ -502,6 +502,41 @@ def test_native_bridge_initialized_once_across_threads(monkeypatch):
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize("alias", ALL_ALIASES)
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_native_random_activations_match_independent_a8_oracle(alias, dtype):
+    qtype = _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE[alias]
+    if qtype in _GGML_MATMUL_SKIP_QTYPES or _llama_cpp_lib is None:
+        pytest.skip("native ggml matmul unavailable for this format")
+    block = _GGUF_TYPE_INFO[qtype]["block_size"]
+    lin, x = _lin_and_x(block)
+    x = x.to(dtype)
+    module = GGUFTorchLinear(
+        bits=alias, group_size=-1, sym=True, desc_act=False,
+        in_features=block, out_features=16,
+    )
+    module.pack_original(lin, None, None)
+    weight = _reference_dequantize(module.qweight.numpy(), qtype)
+    # ggml pairs K/IQ/TQ weights with Q8_K activations, other formats with
+    # Q8_0 or Q8_1. The latter store an FP16 activation scale.
+    activation_block = 256 if block == 256 else 32
+    blocks = x.float().reshape(-1, activation_block)
+    if activation_block == 256:
+        peak = blocks.gather(1, blocks.abs().argmax(1, keepdim=True))
+        inverse = torch.where(peak == 0, 0, torch.div(torch.full_like(peak, -127), peak))
+        scale = torch.where(inverse == 0, 0, inverse.reciprocal())
+    else:
+        scale = blocks.abs().amax(1, keepdim=True) / 127
+        inverse = torch.where(scale == 0, 0, scale.reciprocal())
+    codes = (blocks * inverse).round().clamp(-127, 127)
+    if activation_block == 32:
+        scale = scale.half().float()
+    activation = (codes * scale).reshape_as(x)
+    expected = activation @ weight.T
+    result = _cpp_from_torch(module)._forward_ggml_cpu(x)
+    torch.testing.assert_close(result, expected, rtol=2e-3, atol=2e-3)
+
+
 def test_native_cpu_backend_serializes_shared_scratch(monkeypatch):
     if _llama_cpp_lib is None:
         pytest.skip("llama-cpp-python not installed")
