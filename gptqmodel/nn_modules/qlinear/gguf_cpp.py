@@ -17,7 +17,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from .gguf import GGUFTorchLinear
+from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
 
 try:
@@ -135,6 +135,7 @@ class _GGMLBridge:
         if "Q1_0" in self.ggml_qtypes:
             self.ggml_qtypes["Q1_0_g128"] = self.ggml_qtypes["Q1_0"]
         self._cpu_backend: Optional[int] = None
+        self._cpu_backend_lock = threading.RLock()
         self._cuda_backends: Dict[int, int] = {}
         self._quantize_initialized: set[int] = set()
         self._quantize_init_lock = threading.Lock()
@@ -301,6 +302,16 @@ class _GGMLBridge:
     ) -> np.ndarray:
         """Dequantize packed ggml rows via the native `dequantize_row_*` kernels."""
 
+        info = _GGUF_TYPE_INFO.get(gguf_tensor_qtype)
+        if info is None:
+            raise NotImplementedError(f"Unknown GGUF tensor type `{gguf_tensor_qtype}`.")
+        raw = np.ascontiguousarray(data, dtype=np.uint8)
+        if raw.ndim == 0 or raw.shape[-1] % info["type_size"]:
+            raise ValueError("GGML dequantization requires complete packed rows.")
+        expected_shape = (*raw.shape[:-1], raw.shape[-1] // info["type_size"] * info["block_size"])
+        if tuple(out_shape) != expected_shape:
+            raise ValueError(f"GGML dequantized shape must be {expected_shape}, got {out_shape}.")
+
         fn = self._dequantize_fns.get(gguf_tensor_qtype)
         if fn is None:
             name = self._GGML_DEQUANT_FN_NAMES.get(gguf_tensor_qtype)
@@ -317,7 +328,6 @@ class _GGMLBridge:
             fn.restype = None
             self._dequantize_fns[gguf_tensor_qtype] = fn
 
-        raw = np.ascontiguousarray(data, dtype=np.uint8)
         output = np.empty(out_shape, dtype=np.float32)
         fn(
             raw.ctypes.data_as(ctypes.c_void_p),
@@ -358,13 +368,14 @@ class _GGMLBridge:
         return True, None
 
     def _get_cpu_backend(self) -> int:
-        if self._cpu_backend is None:
-            backend = self._ggml_cpu.ggml_backend_cpu_init()
-            if not backend:
-                raise RuntimeError("GGUFCppKernel failed to initialize GGML CPU backend.")
-            self._ggml_cpu.ggml_backend_cpu_set_n_threads(backend, self._cpu_threads())
-            self._cpu_backend = backend
-        return self._cpu_backend
+        with self._cpu_backend_lock:
+            if self._cpu_backend is None:
+                backend = self._ggml_cpu.ggml_backend_cpu_init()
+                if not backend:
+                    raise RuntimeError("GGUFCppKernel failed to initialize GGML CPU backend.")
+                self._ggml_cpu.ggml_backend_cpu_set_n_threads(backend, self._cpu_threads())
+                self._cpu_backend = backend
+            return self._cpu_backend
 
     def _get_cuda_backend(self, device_index: int) -> int:
         if self._ggml_cuda is None:
@@ -683,16 +694,30 @@ class _GGMLBridge:
             raise NotImplementedError(
                 f"ggml CPU matmul does not support `{gguf_tensor_qtype}` weights."
             )
+        info = _GGUF_TYPE_INFO.get(gguf_tensor_qtype)
+        if info is None or gguf_tensor_qtype not in self.ggml_qtypes:
+            raise NotImplementedError(f"ggml CPU matmul does not support `{gguf_tensor_qtype}` weights.")
+        if padded_in_features <= 0 or padded_in_features % info["block_size"] or out_features <= 0:
+            raise ValueError("GGML matmul requires positive dimensions and complete weight blocks.")
+        expected_shape = (out_features, padded_in_features // info["block_size"] * info["type_size"])
+        if qweight.dtype != torch.uint8 or tuple(qweight.shape) != expected_shape:
+            raise ValueError(f"GGML matmul requires packed uint8 weights of shape {expected_shape}.")
+        if x.ndim != 2 or not 0 < x.shape[-1] <= padded_in_features:
+            raise ValueError("GGML matmul input must be a 2D matrix within the padded weight width.")
+        if x.shape[0] == 0:
+            return torch.empty((0, out_features), device=x.device, dtype=torch.float32)
 
-        return self._run_quantized_matmul(
-            backend=self._get_cpu_backend(),
-            qweight_cpu=self._normalize_qweight_cpu(qweight),
-            x_cpu=self._normalize_input_cpu(x, padded_in_features),
-            gguf_tensor_qtype=gguf_tensor_qtype,
-            padded_in_features=padded_in_features,
-            out_features=out_features,
-            kernel_name="GGUFCppKernel",
-        )
+        # ggml's CPU backend owns mutable graph scratch shared by all callers.
+        with self._cpu_backend_lock:
+            return self._run_quantized_matmul(
+                backend=self._get_cpu_backend(),
+                qweight_cpu=self._normalize_qweight_cpu(qweight),
+                x_cpu=self._normalize_input_cpu(x, padded_in_features),
+                gguf_tensor_qtype=gguf_tensor_qtype,
+                padded_in_features=padded_in_features,
+                out_features=out_features,
+                kernel_name="GGUFCppKernel",
+            )
 
     def quantized_matmul_cuda(
         self,
@@ -732,13 +757,15 @@ class _GGMLBridge:
 
 
 _GGML_BRIDGE: Optional[_GGMLBridge] = None
+_GGML_BRIDGE_LOCK = threading.Lock()
 
 
 def _get_ggml_bridge() -> _GGMLBridge:
     global _GGML_BRIDGE
-    if _GGML_BRIDGE is None:
-        _GGML_BRIDGE = _GGMLBridge()
-    return _GGML_BRIDGE
+    with _GGML_BRIDGE_LOCK:
+        if _GGML_BRIDGE is None:
+            _GGML_BRIDGE = _GGMLBridge()
+        return _GGML_BRIDGE
 
 
 class GGUFCppKernel(GGUFTorchLinear):
@@ -819,6 +846,8 @@ class GGUFCppKernel(GGUFTorchLinear):
         return self._forward_dequant_matmul(x_flat)
 
     def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
+        if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
+            return False
         override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
         if override is not None:
             return override.strip().lower() not in {"0", "false", "off"}
@@ -841,7 +870,13 @@ class GGUFCppKernel(GGUFTorchLinear):
             self._gguf_cpu_autotune_cache[key] = cached
         return cached
 
+    def clear_autotune(self):
+        super().clear_autotune()
+        self._gguf_cpu_autotune_cache = {}
+
     def forward(self, x: torch.Tensor):
+        if x.ndim == 0 or x.shape[-1] != self.in_features:
+            raise ValueError(f"Expected input with last dimension {self.in_features}, got {tuple(x.shape)}.")
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         if x_flat.device.type != "cpu":

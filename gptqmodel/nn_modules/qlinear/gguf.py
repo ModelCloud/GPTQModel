@@ -582,8 +582,12 @@ def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
     amax = np.abs(blocks).max(axis=1, keepdims=True)
     d = np.where(amax == 0, 0.0, amax / 127.0).astype(np.float32)
     safe_d = np.where(d == 0, 1.0, d)
-    q = np.clip(np.rint(blocks / safe_d), -127, 127).astype(np.int8)
-    s = (q.astype(np.float32) * d).sum(axis=1, keepdims=True)
+    scaled = blocks * (np.float32(1.0) / safe_d)
+    magnitude = np.abs(scaled)
+    integral = np.trunc(magnitude)
+    # ggml's reference uses roundf (ties away from zero), not nearest-even.
+    q = np.copysign(integral + (magnitude - integral >= 0.5), scaled).astype(np.int8)
+    s = q.astype(np.float32).sum(axis=1, keepdims=True) * d
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
     out[:, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, 2)
@@ -595,10 +599,12 @@ def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
 def _gguf_quantize_q8_k(blocks: np.ndarray) -> np.ndarray:
     # block_q8_K = { fp32 d, int8 qs[256], int16 bsums[16] }; bsums[i] is the
     # int8 code sum of group i (16 elements), used by upstream dot kernels.
-    amax = np.abs(blocks).max(axis=1, keepdims=True)
-    d = np.where(amax == 0, 0.0, amax / 127.0).astype(np.float32)
-    safe_d = np.where(d == 0, 1.0, d)
-    q = np.clip(np.rint(blocks / safe_d), -127, 127).astype(np.int8)
+    signed_max = np.take_along_axis(blocks, np.abs(blocks).argmax(axis=1, keepdims=True), axis=1)
+    iscale = np.divide(
+        np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=signed_max != 0
+    )
+    d = np.divide(np.float32(1.0), iscale, out=np.zeros_like(iscale), where=iscale != 0)
+    q = np.clip(np.rint(blocks * iscale), -127, 127).astype(np.int8)
     bsums = q.reshape(-1, 16, 16).sum(axis=2).astype(np.int16)
     rows = blocks.shape[0]
     out = np.empty((rows, _GGUF_TYPE_INFO["Q8_K"]["type_size"]), dtype=np.uint8)
@@ -1514,6 +1520,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        target_device, output_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        # Reconstruct in FP32 before the final CPU cast; BF16 scale arithmetic
+        # otherwise rounds each intermediate, not just the reconstructed weight.
+        dtype = torch.float32 if target_device.type == "cpu" else output_dtype
         if self.gguf_tensor_qtype == "Q4_0":
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
@@ -1541,7 +1551,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                 dtype=dtype,
             )
 
-        return weight[:, : self.in_features].transpose(0, 1).contiguous()
+        return weight[:, : self.in_features].to(output_dtype).transpose(0, 1).contiguous()
 
     def _is_fused_k_forward_candidate(self, x_flat: torch.Tensor) -> bool:
         if x_flat.device.type == "cuda":
