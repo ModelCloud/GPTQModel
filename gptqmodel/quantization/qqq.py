@@ -136,6 +136,7 @@ class Quantizer(nn.Module):
             grid=100,
             maxshrink=0.8,
             trits=False,
+            grid_budget_mb=None,
     ):
         if groupsize != -1 or not sym:
             self.maxq = torch.tensor(2 ** bits - 1)
@@ -148,6 +149,7 @@ class Quantizer(nn.Module):
         self.norm = norm
         self.grid = grid
         self.maxshrink = maxshrink
+        self.grid_budget_mb = grid_budget_mb
         if trits:
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
@@ -231,6 +233,7 @@ class Quantizer(nn.Module):
                     guard_zero_scale=False,
                     scale=self.scale,
                     zero=self.zero,
+                    grid_budget_mb=self.grid_budget_mb,
                 )
         if not self.perchannel:
             if weight:

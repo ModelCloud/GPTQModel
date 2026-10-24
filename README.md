@@ -497,19 +497,30 @@ model.save(quant_path)
 #### Calibration grid workspaces
 
 GPTQ/QQQ MSE shrink searches and AWQ clipping searches evaluate candidates in
-chunks. Their temporary workspace targets can be adjusted with integer MiB
-environment variables:
+chunks. Their temporary workspace targets (MiB) can be adjusted per
+`QuantizeConfig` via `MSEConfig`:
 
-| Variable | Search | CPU default | GPU default |
+```py
+from gptqmodel import GPTQConfig, MSEConfig
+
+quant_config = GPTQConfig(
+    bits=4,
+    group_size=128,
+    mse_config=MSEConfig(grid_budget_mb=64, clip_grid_budget_mb=64),
+)
+```
+
+| `MSEConfig` field | Search | CPU default | GPU default |
 |---|---|---:|---:|
-| `GPTQMODEL_MSE_GRID_BUDGET_MB` | GPTQ/QQQ MSE shrink grid | 16 | 256 |
-| `GPTQMODEL_CLIP_GRID_BUDGET_MB` | AWQ clipping grid | 16 | 256 |
+| `grid_budget_mb` | GPTQ/QQQ MSE shrink grid | 16 | 256 |
+| `clip_grid_budget_mb` | AWQ clipping grid | 16 | 256 |
 
-Set either to `0` to evaluate one candidate at a time; AWQ also uses one-token
-product tiles. These are chunk-sizing targets, not limits on total process
-memory: AWQ sizes its scratch buffers independently, and a single candidate,
-full-token error buffer, or minimum product tile can exceed the target.
-These settings affect calibration scratch only, not stored quantized weights.
+Set either field to `0` to evaluate one candidate at a time; AWQ also uses
+one-token product tiles. These are chunk-sizing targets, not limits on total
+process memory: AWQ sizes its scratch buffers independently, and a single
+candidate, full-token error buffer, or minimum product tile can exceed the
+target. These settings affect calibration scratch only, not stored quantized
+weights.
 
 #### Checkpoint and Resume Long Quantization Jobs 💾
 

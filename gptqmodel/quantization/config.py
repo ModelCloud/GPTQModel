@@ -1431,6 +1431,54 @@ class HessianConfig:
             raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
 
 
+@dataclass
+class MSEConfig:
+    """Workspace budgets for the vectorized grid searches used at calibration.
+
+    The GPTQ/QQQ MSE shrink grid and the AWQ clip grid evaluate candidates in
+    batched chunks; these fields bound each chunk's workspace in MiB. They are
+    chunk-sizing targets, not limits on total process memory: the AWQ path
+    sizes several scratch buffers independently, and a single candidate or
+    minimum product tile can exceed the target.
+
+    ``None`` selects a device-derived default (16 MiB on CPU, 256 MiB on GPU);
+    ``0`` forces single-candidate chunking (and one-token product tiles for
+    AWQ). These settings only affect calibration-time scratch, never the
+    stored quantized weights.
+    """
+
+    grid_budget_mb: Optional[int] = field(
+        default=None,
+        metadata={"help": "Workspace budget (MiB) per candidate chunk for the GPTQ/QQQ MSE shrink grid"},
+    )
+    clip_grid_budget_mb: Optional[int] = field(
+        default=None,
+        metadata={"help": "Workspace budget (MiB) per scratch buffer for the AWQ clip grid"},
+    )
+
+    def __post_init__(self):
+        for name in ("grid_budget_mb", "clip_grid_budget_mb"):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, int) or isinstance(value, bool):
+                    raise ValueError(f"MSEConfig: `{name}` must be an integer or None.")
+                if value < 0:
+                    raise ValueError(f"MSEConfig: `{name}` must be a non-negative integer amount of MiB.")
+
+    @staticmethod
+    def resolve_budget_bytes(budget_mb: Optional[int], device: torch.device) -> int:
+        """Resolve a MiB budget into bytes; ``None`` uses the device default."""
+        if budget_mb is None:
+            budget_mb = 16 if device.type == "cpu" else 256
+        return budget_mb << 20
+
+    def grid_budget_bytes(self, device: torch.device) -> int:
+        return self.resolve_budget_bytes(self.grid_budget_mb, device)
+
+    def clip_grid_budget_bytes(self, device: torch.device) -> int:
+        return self.resolve_budget_bytes(self.clip_grid_budget_mb, device)
+
+
 # Activation operand formats accepted by the W4A stream. `w4afp8` carries E4M3
 # codes with one FP32 scale per token; `w4a_nvfp4` carries E2M1 codes with one
 # E4M3 scale per 16-element block plus one FP32 global scale per tensor.
@@ -3073,6 +3121,16 @@ def _normalize_hessian(hessian: Optional[Union[HessianConfig, Dict[str, Any]]]) 
     return hessian
 
 
+def _normalize_mse_config(mse_config: Optional[Union[MSEConfig, Dict[str, Any]]]) -> MSEConfig:
+    if mse_config is None:
+        return MSEConfig()
+    if isinstance(mse_config, dict):
+        return MSEConfig(**mse_config)
+    if not isinstance(mse_config, MSEConfig):
+        raise ValueError("QuantizeConfig: `mse_config` must be a MSEConfig, dict, or None.")
+    return mse_config
+
+
 def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Optional[GPTAQConfig]:
     if gptaq is None:
         return None
@@ -3543,6 +3601,14 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     telemetry: Union[TelemetryConfig, Dict[str, Any]] = field(default_factory=TelemetryConfig)
 
+    # Calibration-time workspace budgets for the vectorized MSE shrink-grid and
+    # AWQ clip-grid searches. A tuning knob only; never part of quantization or
+    # checkpoint identity.
+    mse_config: Union[MSEConfig, Dict[str, Any]] = field(
+        default_factory=MSEConfig,
+        metadata={"help": "Workspace budgets (MiB) for the MSE shrink-grid and AWQ clip-grid searches"},
+    )
+
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
     # allowing using different dtypes used for packing quantized weights
     # affects [`qweights`, `qzeros`]
@@ -3856,6 +3922,8 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
             self.telemetry = TelemetryConfig(**self.telemetry)
         elif not isinstance(self.telemetry, TelemetryConfig):
             raise ValueError("telemetry must be a TelemetryConfig or dictionary")
+
+        self.mse_config = _normalize_mse_config(self.mse_config)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.

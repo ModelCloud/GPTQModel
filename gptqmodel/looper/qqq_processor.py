@@ -135,6 +135,7 @@ class QQQProcessor(LoopProcessor):
             mse=mse,
             norm=norm,
             groupsize=self.qcfg.group_size,
+            grid_budget_mb=self.qcfg.mse_config.grid_budget_mb,
         )
 
         self.tasks[module.name] = tmp

@@ -5,30 +5,16 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
-import os
-
 import torch
 import torch.nn as nn
 
 from ..utils.logger import setup_logger
-from .config import BaseQuantizeConfig, _normalize_quant_bits, resolve_quant_format
+from .config import BaseQuantizeConfig, MSEConfig, _normalize_quant_bits, resolve_quant_format
 
 
 log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
-
-# Per-call workspace cap for the vectorized shrink-grid evaluation, in MiB.
-# The grid materializes one ``(candidates, channels, columns)`` error tensor per
-# chunk. On GPU a large chunk amortizes the per-candidate launch storm and feeds
-# the wide memory bus; on CPU the same footprint only evicts the L3-resident
-# working set the sequential loop enjoyed, so the CPU default stays small.
-_MSE_GRID_BUDGET_ENV = "GPTQMODEL_MSE_GRID_BUDGET_MB"
-
-
-def _mse_grid_budget_bytes(device: torch.device) -> int:
-    default = "16" if device.type == "cpu" else "256"
-    return int(os.getenv(_MSE_GRID_BUDGET_ENV, default)) << 20
 
 
 def _replace_zero_scale(
@@ -112,6 +98,7 @@ def _mse_shrink_grid(
     guard_zero_scale: bool,
     scale: torch.Tensor,
     zero: torch.Tensor,
+    grid_budget_mb: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pick each channel's best ``(scale, zero)`` candidate by ``|deq(x)-x|^mse``.
 
@@ -142,7 +129,11 @@ def _mse_shrink_grid(
         else 2 * torch.tensor(0.0).element_size() + max(elem_size, 4)
     )
 
-    budget = _mse_grid_budget_bytes(dev)
+    # Per-chunk workspace cap in bytes. On GPU a large chunk amortizes the
+    # per-candidate launch storm and feeds the wide memory bus; on CPU the same
+    # footprint only evicts the L3-resident working set the sequential loop
+    # enjoyed, so ``None`` resolves to a small CPU default.
+    budget = MSEConfig.resolve_budget_bytes(grid_budget_mb, dev)
     chunk = max(
         1, min(n_candidates, budget // max(bytes_per_elem * rows * cols, 1))
     )
@@ -429,6 +420,7 @@ class Quantizer(nn.Module):
         else:
             scales, zeros = scale1, zero1
 
+        mse_config = getattr(self.qcfg, "mse_config", None)
         self.scale, self.zero = _mse_shrink_grid(
             x,
             scales,
@@ -439,6 +431,9 @@ class Quantizer(nn.Module):
             guard_zero_scale=True,
             scale=self.scale,
             zero=self.zero,
+            grid_budget_mb=(
+                mse_config.grid_budget_mb if isinstance(mse_config, MSEConfig) else None
+            ),
         )
 
     def quantize(self, x):
