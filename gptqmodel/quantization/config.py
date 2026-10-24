@@ -279,7 +279,18 @@ _GGUF_BITS_ALIAS_INFO = {
     "q1_0_g128": {"bits": 1, "version": "q", "variant": "0", "quality": "g128"},
     "q2_0": {"bits": 2, "version": "q", "variant": "0", "quality": None},
     "q4_0": {"bits": 4, "version": "q", "variant": "0", "quality": None},
+    "q4_1": {"bits": 4, "version": "q", "variant": "1", "quality": None},
+    "q5_0": {"bits": 5, "version": "q", "variant": "0", "quality": None},
+    "q5_1": {"bits": 5, "version": "q", "variant": "1", "quality": None},
     "q8_0": {"bits": 8, "version": "q", "variant": "0", "quality": None},
+    "q8_1": {"bits": 8, "version": "q", "variant": "1", "quality": None},
+    "q2_k": {"bits": 2, "version": "q", "variant": "k", "quality": None},
+    "q2_k_s": {"bits": 2, "version": "q", "variant": "k", "quality": "s"},
+    "q2_k_m": {"bits": 2, "version": "q", "variant": "k", "quality": "m"},
+    "q3_k": {"bits": 3, "version": "q", "variant": "k", "quality": None},
+    "q3_k_s": {"bits": 3, "version": "q", "variant": "k", "quality": "s"},
+    "q3_k_m": {"bits": 3, "version": "q", "variant": "k", "quality": "m"},
+    "q3_k_l": {"bits": 3, "version": "q", "variant": "k", "quality": "l"},
     "q4_k": {"bits": 4, "version": "q", "variant": "k", "quality": None},
     "q4_k_s": {"bits": 4, "version": "q", "variant": "k", "quality": "s"},
     "q4_k_m": {"bits": 4, "version": "q", "variant": "k", "quality": "m"},
@@ -287,10 +298,26 @@ _GGUF_BITS_ALIAS_INFO = {
     "q5_k_s": {"bits": 5, "version": "q", "variant": "k", "quality": "s"},
     "q5_k_m": {"bits": 5, "version": "q", "variant": "k", "quality": "m"},
     "q6_k": {"bits": 6, "version": "q", "variant": "k", "quality": None},
+    "q8_k": {"bits": 8, "version": "q", "variant": "k", "quality": None},
+    "iq1_s": {"bits": 1, "version": "iq", "variant": "s", "quality": None},
+    "iq1_m": {"bits": 1, "version": "iq", "variant": "m", "quality": None},
+    "iq2_xxs": {"bits": 2, "version": "iq", "variant": "xxs", "quality": None},
+    "iq2_xs": {"bits": 2, "version": "iq", "variant": "xs", "quality": None},
+    "iq2_s": {"bits": 2, "version": "iq", "variant": "s", "quality": None},
+    "iq3_xxs": {"bits": 3, "version": "iq", "variant": "xxs", "quality": None},
+    "iq3_s": {"bits": 3, "version": "iq", "variant": "s", "quality": None},
+    "iq4_nl": {"bits": 4, "version": "iq", "variant": "nl", "quality": None},
+    "iq4_xs": {"bits": 4, "version": "iq", "variant": "xs", "quality": None},
+    "tq1_0": {"bits": 1, "version": "tq", "variant": "0", "quality": None},
+    "tq2_0": {"bits": 2, "version": "tq", "variant": "0", "quality": None},
+    # Microscaling formats embed their width in the name (variant == "").
+    "mxfp4": {"bits": 4, "version": "mxfp", "variant": "", "quality": None},
+    "nvfp4": {"bits": 4, "version": "nvfp", "variant": "", "quality": None},
 }
 _GGUF_DEFAULT_BITS_ALIAS_BY_WIDTH = {
     1: "q1_0",
     2: "q2_0",
+    3: "q3_k",
     4: "q4_0",
     5: "q5_k_m",
     6: "q6_k",
@@ -301,7 +328,18 @@ _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
     "q1_0_g128": 1.125,
     "q2_0": 2.25,
     "q4_0": 4.5,
+    "q4_1": 5.0,
+    "q5_0": 5.5,
+    "q5_1": 6.0,
     "q8_0": 8.5,
+    "q8_1": 9.0,
+    "q2_k": 2.625,
+    "q2_k_s": 2.625,
+    "q2_k_m": 2.625,
+    "q3_k": 3.4375,
+    "q3_k_s": 3.4375,
+    "q3_k_m": 3.4375,
+    "q3_k_l": 3.4375,
     "q4_k": 4.5,
     "q4_k_s": 4.5,
     "q4_k_m": 4.5,
@@ -309,6 +347,20 @@ _GGUF_APPROX_BITS_PER_WEIGHT_BY_ALIAS = {
     "q5_k_s": 5.0,
     "q5_k_m": 5.5,
     "q6_k": 6.0,
+    "q8_k": 9.125,
+    "iq1_s": 1.5625,
+    "iq1_m": 1.75,
+    "iq2_xxs": 2.0625,
+    "iq2_xs": 2.3125,
+    "iq2_s": 2.5625,
+    "iq3_xxs": 3.0625,
+    "iq3_s": 3.4375,
+    "iq4_nl": 4.5,
+    "iq4_xs": 4.25,
+    "tq1_0": 1.6875,
+    "tq2_0": 2.0625,
+    "mxfp4": 4.25,
+    "nvfp4": 4.5,
 }
 
 
@@ -520,10 +572,12 @@ class GGUFBits(BaseComplexBits):
 
         if self.bits <= 0:
             raise ValueError("GGUFBits: `bits` must be a positive integer.")
-        if self.version not in {"q", "iq"}:
-            raise ValueError("GGUFBits: `version` must be `q` or `iq`.")
-        if self.variant not in {"0", "k"}:
-            raise ValueError("GGUFBits: `variant` must be `0` or `k`.")
+        if self.version not in {"q", "iq", "tq", "mxfp", "nvfp"}:
+            raise ValueError("GGUFBits: `version` must be one of `[q, iq, tq, mxfp, nvfp]`.")
+        if self.variant not in {"", "0", "1", "k", "xxs", "xs", "s", "m", "nl"}:
+            raise ValueError(
+                "GGUFBits: `variant` must be one of `['', 0, 1, k, xxs, xs, s, m, nl]`."
+            )
         if self.quality not in {None, "xs", "s", "m", "l", "g128"}:
             raise ValueError("GGUFBits: `quality` must be one of `[None, xs, s, m, l, g128]`.")
 
@@ -546,7 +600,9 @@ class GGUFBits(BaseComplexBits):
     def to_string(self) -> str:
         """Serialize this GGUF bit spec back to its alias form."""
 
-        alias = f"{self.version}{self.bits}_{self.variant}"
+        alias = f"{self.version}{self.bits}"
+        if self.variant:
+            alias = f"{alias}_{self.variant}"
         if self.quality is not None:
             alias = f"{alias}_{self.quality}"
         return alias
@@ -570,6 +626,9 @@ class GGUFBits(BaseComplexBits):
     def to_public_format(self) -> str:
         """Return the GGUF public subtype string without the width prefix."""
 
+        if not self.variant:
+            # Width-in-name formats (mxfp4, nvfp4) cannot strip the bit width.
+            return self.to_string()
         public_format = f"{self.version}_{self.variant}"
         if self.quality is not None:
             public_format = f"{public_format}_{self.quality}"
@@ -580,7 +639,7 @@ class GGUFBits(BaseComplexBits):
 QuantBits = GGUFBits
 
 
-_GGUF_PUBLIC_FORMAT_RE = pcre.compile(r"^(q|iq)_(0|k)(?:_(xs|s|m|l|g128))?$")
+_GGUF_PUBLIC_FORMAT_RE = pcre.compile(r"^(q|iq|tq)_(0|1|k|xxs|xs|s|m|nl)(?:_(xs|s|m|l|g128))?$")
 
 
 def _gguf_public_format_from_bits(bits: GGUFBits) -> str:
@@ -626,10 +685,21 @@ def _default_gguf_public_format(bits: int) -> str:
 def _gguf_bits_from_components(bits: int, public_format: str) -> GGUFBits:
     """Build a validated ``GGUFBits`` object from width and subtype parts."""
 
+    if public_format in _GGUF_BITS_ALIAS_INFO:
+        # Full-alias subtypes (e.g. ``mxfp4``, ``nvfp4``) do not fit the
+        # ``version_variant[_quality]`` grammar; resolve them directly.
+        bits_spec = GGUFBits.from_alias(public_format)
+        if bits_spec.bits != bits:
+            raise ValueError(
+                f"Unsupported GGUF combination: bits={bits}, format={public_format}."
+            )
+        return bits_spec
+
     match = _GGUF_PUBLIC_FORMAT_RE.fullmatch(public_format)
     if match is None:
         raise ValueError(
-            "GGUFConfig: `format` must be a GGUF subtype like `q_0`, `q_k`, `q_k_s`, or `q_k_m`."
+            "GGUFConfig: `format` must be a GGUF subtype like `q_0`, `q_k`, `q_k_s`, `q_k_m`, "
+            "`iq_xxs`, or `mxfp4`."
         )
 
     version_name, variant, quality = match.groups()

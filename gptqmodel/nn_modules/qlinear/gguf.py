@@ -48,25 +48,62 @@ except Exception:  # pragma: no cover - optional dependency
 setup_logger()
 
 _GGUF_TYPE_INFO = {
+    "F32": {"bits": 32, "block_size": 1, "type_size": 4},
+    "F16": {"bits": 16, "block_size": 1, "type_size": 2},
+    "BF16": {"bits": 16, "block_size": 1, "type_size": 2},
     "Q1_0": {"bits": 1, "block_size": 128, "type_size": 18},
     "Q1_0_g128": {"bits": 1, "block_size": 128, "type_size": 18},
     "Q2_0": {"bits": 2, "block_size": 64, "type_size": 18},
     "Q4_0": {"bits": 4, "block_size": 32, "type_size": 18},
+    "Q4_1": {"bits": 4, "block_size": 32, "type_size": 20},
+    "Q5_0": {"bits": 5, "block_size": 32, "type_size": 22},
+    "Q5_1": {"bits": 5, "block_size": 32, "type_size": 24},
     "Q8_0": {"bits": 8, "block_size": 32, "type_size": 34},
+    "Q8_1": {"bits": 8, "block_size": 32, "type_size": 36},
+    "Q2_K": {"bits": 2, "block_size": 256, "type_size": 84},
+    "Q3_K": {"bits": 3, "block_size": 256, "type_size": 110},
     "Q4_K": {"bits": 4, "block_size": 256, "type_size": 144},
     "Q5_K": {"bits": 5, "block_size": 256, "type_size": 176},
     "Q6_K": {"bits": 6, "block_size": 256, "type_size": 210},
+    "Q8_K": {"bits": 8, "block_size": 256, "type_size": 292},
+    "IQ1_S": {"bits": 1, "block_size": 256, "type_size": 50},
+    "IQ1_M": {"bits": 1, "block_size": 256, "type_size": 56},
+    "IQ2_XXS": {"bits": 2, "block_size": 256, "type_size": 66},
+    "IQ2_XS": {"bits": 2, "block_size": 256, "type_size": 74},
+    "IQ2_S": {"bits": 2, "block_size": 256, "type_size": 82},
+    "IQ3_XXS": {"bits": 3, "block_size": 256, "type_size": 98},
+    "IQ3_S": {"bits": 3, "block_size": 256, "type_size": 110},
+    "IQ4_NL": {"bits": 4, "block_size": 32, "type_size": 18},
+    "IQ4_XS": {"bits": 4, "block_size": 256, "type_size": 136},
     "TQ1_0": {"bits": 1, "block_size": 256, "type_size": 54},
     "TQ2_0": {"bits": 2, "block_size": 256, "type_size": 66},
     "MXFP4": {"bits": 4, "block_size": 32, "type_size": 17},
     "NVFP4": {"bits": 4, "block_size": 64, "type_size": 36},
+    # Raw storage types are resolvable for GGUF loading/dequant but are
+    # never exposed as quantize targets through bits aliases.
+    "I8": {"bits": 8, "block_size": 1, "type_size": 1},
+    "I16": {"bits": 16, "block_size": 1, "type_size": 2},
+    "I32": {"bits": 32, "block_size": 1, "type_size": 4},
+    "I64": {"bits": 64, "block_size": 1, "type_size": 8},
+    "F64": {"bits": 64, "block_size": 1, "type_size": 8},
 }
 _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q1_0": "Q1_0",
     "q1_0_g128": "Q1_0_g128",
     "q2_0": "Q2_0",
     "q4_0": "Q4_0",
+    "q4_1": "Q4_1",
+    "q5_0": "Q5_0",
+    "q5_1": "Q5_1",
     "q8_0": "Q8_0",
+    "q8_1": "Q8_1",
+    "q2_k": "Q2_K",
+    "q2_k_s": "Q2_K",
+    "q2_k_m": "Q2_K",
+    "q3_k": "Q3_K",
+    "q3_k_s": "Q3_K",
+    "q3_k_m": "Q3_K",
+    "q3_k_l": "Q3_K",
     "q4_k": "Q4_K",
     "q4_k_s": "Q4_K",
     "q4_k_m": "Q4_K",
@@ -74,10 +111,33 @@ _GGUF_BITS_ALIAS_TO_TENSOR_QTYPE = {
     "q5_k_s": "Q5_K",
     "q5_k_m": "Q5_K",
     "q6_k": "Q6_K",
+    "q8_k": "Q8_K",
+    "iq1_s": "IQ1_S",
+    "iq1_m": "IQ1_M",
+    "iq2_xxs": "IQ2_XXS",
+    "iq2_xs": "IQ2_XS",
+    "iq2_s": "IQ2_S",
+    "iq3_xxs": "IQ3_XXS",
+    "iq3_s": "IQ3_S",
+    "iq4_nl": "IQ4_NL",
+    "iq4_xs": "IQ4_XS",
+    "tq1_0": "TQ1_0",
+    "tq2_0": "TQ2_0",
+    "mxfp4": "MXFP4",
+    "nvfp4": "NVFP4",
 }
 _GGUF_SCALE_QUANT_MAX = 63
 _GGUF_Q6_SCALE_QUANT_MAX = 127
 _GGUF_K_QTYPES = {"Q4_K", "Q5_K", "Q6_K"}
+# GGML tensor types that are not valid quantize targets / inference layouts for
+# the linear path (raw numeric storage and ARM repack variants are excluded).
+_GGUF_QUANT_QTYPES = {
+    "Q1_0", "Q1_0_g128", "Q2_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+    "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K",
+    "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S",
+    "IQ4_NL", "IQ4_XS",
+    "TQ1_0", "TQ2_0", "MXFP4", "NVFP4",
+}
 PRISM_Q1_0_G128_NAME = "Q1_0_g128"
 PRISM_Q1_0_G128_VALUE = 41
 PRISM_Q1_0_G128_BLOCK_SIZE = 128
@@ -96,10 +156,31 @@ _GGUF_TENSOR_QTYPE_BY_VALUE = {
     0: "F32",
     1: "F16",
     2: "Q4_0",
+    3: "Q4_1",
+    6: "Q5_0",
+    7: "Q5_1",
     8: "Q8_0",
+    9: "Q8_1",
+    10: "Q2_K",
+    11: "Q3_K",
     12: "Q4_K",
     13: "Q5_K",
     14: "Q6_K",
+    15: "Q8_K",
+    16: "IQ2_XXS",
+    17: "IQ2_XS",
+    18: "IQ3_XXS",
+    19: "IQ1_S",
+    20: "IQ4_NL",
+    21: "IQ3_S",
+    22: "IQ2_S",
+    23: "IQ4_XS",
+    24: "I8",
+    25: "I16",
+    26: "I32",
+    27: "I64",
+    28: "F64",
+    29: "IQ1_M",
     30: "BF16",
     34: "TQ1_0",
     35: "TQ2_0",
@@ -495,6 +576,44 @@ def _gguf_quantize_q6_k(blocks: np.ndarray) -> np.ndarray:
     )
 
 
+def _gguf_quantize_q8_1(blocks: np.ndarray) -> np.ndarray:
+    # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s = sum(d * q), used by
+    # upstream dot kernels that fold the scale-sum into int8 dot products.
+    amax = np.abs(blocks).max(axis=1, keepdims=True)
+    d = np.where(amax == 0, 0.0, amax / 127.0).astype(np.float32)
+    safe_d = np.where(d == 0, 1.0, d)
+    scaled = blocks * (np.float32(1.0) / safe_d)
+    magnitude = np.abs(scaled)
+    integral = np.trunc(magnitude)
+    # ggml's reference uses roundf (ties away from zero), not nearest-even.
+    q = np.copysign(integral + (magnitude - integral >= 0.5), scaled).astype(np.int8)
+    s = q.astype(np.float32).sum(axis=1, keepdims=True) * d
+    rows = blocks.shape[0]
+    out = np.empty((rows, _GGUF_TYPE_INFO["Q8_1"]["type_size"]), dtype=np.uint8)
+    out[:, :2] = d.astype(np.float16).view(np.uint8).reshape(rows, 2)
+    out[:, 2:4] = s.astype(np.float16).view(np.uint8).reshape(rows, 2)
+    out[:, 4:] = q.view(np.uint8).reshape(rows, -1)
+    return out
+
+
+def _gguf_quantize_q8_k(blocks: np.ndarray) -> np.ndarray:
+    # block_q8_K = { fp32 d, int8 qs[256], int16 bsums[16] }; bsums[i] is the
+    # int8 code sum of group i (16 elements), used by upstream dot kernels.
+    signed_max = np.take_along_axis(blocks, np.abs(blocks).argmax(axis=1, keepdims=True), axis=1)
+    iscale = np.divide(
+        np.float32(-127.0), signed_max, out=np.zeros_like(signed_max), where=signed_max != 0
+    )
+    d = np.divide(np.float32(1.0), iscale, out=np.zeros_like(iscale), where=iscale != 0)
+    q = np.clip(np.rint(blocks * iscale), -127, 127).astype(np.int8)
+    bsums = q.reshape(-1, 16, 16).sum(axis=2).astype(np.int16)
+    rows = blocks.shape[0]
+    out = np.empty((rows, _GGUF_TYPE_INFO["Q8_K"]["type_size"]), dtype=np.uint8)
+    out[:, :4] = d.reshape(rows, 1).view(np.uint8).reshape(rows, 4)
+    out[:, 4:260] = q.view(np.uint8).reshape(rows, -1)
+    out[:, 260:] = bsums.view(np.uint8).reshape(rows, 32)
+    return out
+
+
 def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray:
     if weight.ndim != 2:
         raise ValueError(f"GGUF quantization expects a 2D weight matrix, got shape {weight.shape}.")
@@ -526,6 +645,10 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
         quantized_blocks = _gguf_quantize_tq2_0(blocks)
     elif tensor_qtype == "MXFP4":
         quantized_blocks = _gguf_quantize_mxfp4(blocks)
+    elif tensor_qtype == "Q8_1":
+        quantized_blocks = _gguf_quantize_q8_1(blocks)
+    elif tensor_qtype == "Q8_K":
+        quantized_blocks = _gguf_quantize_q8_k(blocks)
     else:  # pragma: no cover - guarded by class SUPPORTS_BITS
         raise NotImplementedError(f"Unsupported GGUF qtype: {tensor_qtype}")
 
@@ -536,6 +659,46 @@ def _fallback_gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray
 
 def _gguf_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray:
     return _quantize_gguf_tensor_numpy(weight, tensor_qtype)
+
+
+def _ggml_native_quantize(weight: np.ndarray, tensor_qtype: str) -> np.ndarray | None:
+    """Quantize via llama.cpp's ggml runtime; ``None`` when llama-cpp is absent."""
+
+    try:
+        from .gguf_cpp import _get_ggml_bridge
+    except Exception:
+        return None
+    try:
+        bridge = _get_ggml_bridge()
+    except Exception:
+        return None
+    return bridge.quantize_chunk(weight, tensor_qtype)
+
+
+def _ggml_native_dequantize(data: np.ndarray, tensor_qtype: str) -> np.ndarray | None:
+    """Dequantize via llama.cpp's ggml runtime; ``None`` when llama-cpp is absent."""
+
+    try:
+        from .gguf_cpp import _get_ggml_bridge
+    except Exception:
+        return None
+    try:
+        bridge = _get_ggml_bridge()
+    except Exception:
+        return None
+    qtype_info = _GGUF_TYPE_INFO.get(tensor_qtype)
+    if qtype_info is None:
+        return None
+    type_size = qtype_info["type_size"]
+    block_size = qtype_info["block_size"]
+    raw = np.ascontiguousarray(data, dtype=np.uint8)
+    if raw.shape[-1] % type_size != 0:
+        return None
+    out_shape = (*raw.shape[:-1], raw.shape[-1] // type_size * block_size)
+    try:
+        return bridge.dequantize_rows(raw, tensor_qtype, out_shape)
+    except Exception:
+        return None
 
 
 def _resolve_gguf_tensor_qtype(tensor_type) -> str:
@@ -672,7 +835,17 @@ def _quantize_gguf_tensor_numpy(weight: np.ndarray, tensor_qtype) -> np.ndarray:
                 return gguf_lib.quantize(weight, qtype)
         except NotImplementedError:
             pass
-    return _fallback_gguf_quantize(weight, resolved_qtype)
+    try:
+        return _fallback_gguf_quantize(weight, resolved_qtype)
+    except NotImplementedError:
+        pass
+    packed = _ggml_native_quantize(weight, resolved_qtype)
+    if packed is None:
+        raise NotImplementedError(
+            f"Unsupported GGUF quantize target `{resolved_qtype}`: install "
+            "`llama-cpp-python` for native ggml quantization of this format."
+        )
+    return packed
 
 
 def _dequantize_q4_k_numpy(qweight: np.ndarray) -> np.ndarray:
@@ -821,6 +994,35 @@ def _dequantize_q6_k_numpy(qweight: np.ndarray) -> np.ndarray:
     return (d * q).reshape(rows, -1)
 
 
+def _dequantize_q8_1_numpy(qweight: np.ndarray) -> np.ndarray:
+    # block_q8_1 = { fp16 d, fp16 s, int8 qs[32] }; s is a dot-product
+    # auxiliary sum and is unused for weight reconstruction.
+    output_shape = _gguf_dequantized_shape(qweight, "Q8_1")
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["Q8_1"]["type_size"])
+    d = blocks[:, :2].view(np.float16).astype(np.float32)
+    q = blocks[:, 4:].view(np.int8).astype(np.float32)
+    return (d * q).reshape(output_shape)
+
+
+def _dequantize_q8_k_numpy(qweight: np.ndarray) -> np.ndarray:
+    # block_q8_K = { fp32 d, int8 qs[256], int16 bsums[16] }; bsums is a
+    # dot-product auxiliary and is unused for weight reconstruction.
+    output_shape = _gguf_dequantized_shape(qweight, "Q8_K")
+    blocks = qweight.reshape(-1, _GGUF_TYPE_INFO["Q8_K"]["type_size"])
+    d = blocks[:, :4].view(np.float32)
+    q = blocks[:, 4:260].view(np.int8).astype(np.float32)
+    return (d * q).reshape(output_shape)
+
+
+_GGUF_RAW_NUMPY_DTYPES = {
+    "I8": np.int8,
+    "I16": np.int16,
+    "I32": np.int32,
+    "I64": np.int64,
+    "F64": np.float64,
+}
+
+
 def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     resolved_qtype = _resolve_gguf_tensor_qtype(tensor_type)
 
@@ -831,6 +1033,9 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
     if resolved_qtype == "BF16":
         rows = np.asarray(data, dtype=np.uint16).astype(np.uint32)
         return np.left_shift(rows, np.uint32(16)).view(np.float32)
+    raw_dtype = _GGUF_RAW_NUMPY_DTYPES.get(resolved_qtype)
+    if raw_dtype is not None:
+        return np.asarray(data, dtype=raw_dtype).astype(np.float32)
     if resolved_qtype == "Q4_0":
         rows = np.asarray(data, dtype=np.uint8)
         type_size = _GGUF_TYPE_INFO["Q4_0"]["type_size"]
@@ -872,6 +1077,24 @@ def _dequantize_gguf_tensor_numpy(data: np.ndarray, tensor_type) -> np.ndarray:
         )
     if resolved_qtype == PRISM_Q1_0_G128_NAME:
         return _dequantize_prism_q1_0_g128(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q8_1":
+        return _dequantize_q8_1_numpy(np.asarray(data, dtype=np.uint8))
+    if resolved_qtype == "Q8_K":
+        return _dequantize_q8_k_numpy(np.asarray(data, dtype=np.uint8))
+
+    # Remaining formats (Q4_1, Q5_0, Q5_1, Q2_K, Q3_K, all IQ variants):
+    # prefer llama.cpp's native SIMD dequantizer when available, then fall
+    # back to the pure-numpy `gguf` reference implementation.
+    dequantized = _ggml_native_dequantize(np.asarray(data, dtype=np.uint8), resolved_qtype)
+    if dequantized is not None:
+        return dequantized
+    if _GGUF_AVAILABLE:
+        qtype = getattr(gguf_lib.GGMLQuantizationType, resolved_qtype, None)
+        if qtype is not None:
+            try:
+                return gguf_lib.dequantize(np.asarray(data, dtype=np.uint8), qtype)
+            except NotImplementedError:
+                pass
 
     raise NotImplementedError(f"Unsupported GGUF qtype: {resolved_qtype}")
 
@@ -880,7 +1103,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_TORCH]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 15}
-    SUPPORTS_BITS = [1, 2, 4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = True
@@ -1297,6 +1520,10 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         device: torch.device | str | None = None,
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
+        target_device, output_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
+        # Reconstruct in FP32 before the final CPU cast; BF16 scale arithmetic
+        # otherwise rounds each intermediate, not just the reconstructed weight.
+        dtype = torch.float32 if target_device.type == "cpu" else output_dtype
         if self.gguf_tensor_qtype == "Q4_0":
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
@@ -1317,10 +1544,14 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             target_device, target_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
             blocks, _, _ = self._reshape_blocks(device=target_device)
             weight = self._dequantize_q6_k_blocks(blocks, target_dtype)
-        else:  # pragma: no cover - guarded by class SUPPORTS_BITS
-            raise NotImplementedError(f"Unsupported GGUF qtype: {self.gguf_tensor_qtype}")
+        else:
+            weight = self._dequantize_numpy(
+                lambda qweight: _dequantize_gguf_tensor_numpy(qweight, self.gguf_tensor_qtype),
+                device=device,
+                dtype=dtype,
+            )
 
-        return weight[:, : self.in_features].transpose(0, 1).contiguous()
+        return weight[:, : self.in_features].to(output_dtype).transpose(0, 1).contiguous()
 
     def _is_fused_k_forward_candidate(self, x_flat: torch.Tensor) -> bool:
         if x_flat.device.type == "cuda":
@@ -1333,8 +1564,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
             return False
 
         return (
-            self.gguf_tensor_qtype
-            in (_GGUF_K_QTYPES | set(_GGUF_SIGN_ONLY_TYPE_INFO) | {"Q4_0", "Q8_0"})
+            self.gguf_tensor_qtype in _GGUF_QUANT_QTYPES
             and self.adapter is None
             and not self.training
             and max_rows > 0
@@ -1447,8 +1677,15 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
                         device=x_flat.device,
                         dtype=accum_dtype,
                     )
-                else:  # pragma: no cover - guarded by _should_use_fused_k_forward
-                    raise NotImplementedError(f"Unsupported GGUF fused qtype: {self.gguf_tensor_qtype}")
+                else:
+                    # Generic chunked numpy dequant for every remaining GGUF
+                    # format; keeps dequantization bounded per chunk.
+                    packed_chunk = block_chunk.reshape(block_chunk.shape[0], -1).cpu().numpy()
+                    weight_chunk = torch.from_numpy(
+                        np.ascontiguousarray(
+                            _dequantize_gguf_tensor_numpy(packed_chunk, self.gguf_tensor_qtype)
+                        )
+                    ).to(device=x_flat.device, dtype=accum_dtype)
 
                 x_chunk = x_work[
                     :, start * self.gguf_block_size : end * self.gguf_block_size

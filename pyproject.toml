@@ -68,6 +68,10 @@ bitblas = [
 bitsandbytes = [
     "bitsandbytes>=0.50.2",
 ]
+gguf = [
+    "gguf>=0.19.0",
+    "llama-cpp-python>=0.3.36",
+]
 hf = [
     "optimum>=2.3.0",
 ]
