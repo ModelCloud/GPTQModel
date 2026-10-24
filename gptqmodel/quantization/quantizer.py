@@ -98,7 +98,7 @@ def _mse_shrink_grid(
     guard_zero_scale: bool,
     scale: torch.Tensor,
     zero: torch.Tensor,
-    grid_budget_mb: int | None = None,
+    grid_budget: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Pick each channel's best ``(scale, zero)`` candidate by ``|deq(x)-x|^mse``.
 
@@ -133,7 +133,7 @@ def _mse_shrink_grid(
     # per-candidate launch storm and feeds the wide memory bus; on CPU the same
     # footprint only evicts the L3-resident working set the sequential loop
     # enjoyed, so ``None`` resolves to a small CPU default.
-    budget = MSEConfig.resolve_budget_bytes(grid_budget_mb, dev)
+    budget = MSEConfig.resolve_budget_bytes(grid_budget, dev)
     chunk = max(
         1, min(n_candidates, budget // max(bytes_per_elem * rows * cols, 1))
     )
@@ -338,7 +338,8 @@ class Quantizer(nn.Module):
                 else:
                     self.zero = torch.round(-xmin / self.scale)
 
-        mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
+        mse_cfg = getattr(self.qcfg, "mse", None)
+        mse = mse_cfg.norm if isinstance(mse_cfg, MSEConfig) else float(mse_cfg or 0.0)
         if mse > 0.0:
             self._mse_shrink_grid(x, xmin, xmax, mse)
         if not self.perchannel:
@@ -420,7 +421,7 @@ class Quantizer(nn.Module):
         else:
             scales, zeros = scale1, zero1
 
-        mse_config = getattr(self.qcfg, "mse_config", None)
+        mse_cfg = getattr(self.qcfg, "mse", None)
         self.scale, self.zero = _mse_shrink_grid(
             x,
             scales,
@@ -431,9 +432,7 @@ class Quantizer(nn.Module):
             guard_zero_scale=True,
             scale=self.scale,
             zero=self.zero,
-            grid_budget_mb=(
-                mse_config.grid_budget_mb if isinstance(mse_config, MSEConfig) else None
-            ),
+            grid_budget=mse_cfg.grid_budget if isinstance(mse_cfg, MSEConfig) else None,
         )
 
     def quantize(self, x):

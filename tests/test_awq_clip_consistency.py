@@ -56,7 +56,7 @@ def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget):
     x = torch.randn(19, 128, generator=g).to(device=device, dtype=dtype)
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size, sym=sym,
-        mse_config={"clip_grid_budget_mb": budget},
+        mse={"clip_grid_budget": budget},
     )
     processor = _ClipTestAWQProcessor(qcfg)
     expected = _sequential_clip_grid(qcfg, w, x)
@@ -79,7 +79,7 @@ def test_clip_grid_edge_cases(device, kind):
         x = x.float()
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
-        mse_config={"clip_grid_budget_mb": 0},
+        mse={"clip_grid_budget": 0},
     )
     processor = _ClipTestAWQProcessor(qcfg)
     expected = _sequential_clip_grid(qcfg, w, x, max_shrink=shrink)
@@ -100,7 +100,7 @@ def test_clip_grid_slices_reference_product():
 
     qcfg = QuantizeConfig(
         quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32,
-        mse_config={"clip_grid_budget_mb": 0},
+        mse={"clip_grid_budget": 0},
     )
     processor = _ClipTestAWQProcessor(qcfg)
     w = torch.ones(64, 128)

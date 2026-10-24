@@ -40,7 +40,7 @@ from ..quantization.activation_floatx import (
     nvfp4_global_scale,
     nvfp4_uses_headroom,
 )
-from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, resolve_quant_format
+from ..quantization.config import METHOD, FOEMConfig, GPTAQConfig, HessianConfig, QuantizeConfig, _normalize_mse, resolve_quant_format
 from ..quantization.gptq import SharedHessianFactorCache
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
@@ -126,7 +126,9 @@ def clone_gptq_config_for_module(
     if qcfg.dynamic is not None:
         qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
         qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.mse = qcfg.dynamic_get(module_full_name, "mse", qcfg_clone.mse)
+        qcfg_clone.mse = _normalize_mse(
+            qcfg.dynamic_get(module_full_name, "mse", None), base=qcfg_clone.mse,
+        )
 
         qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
         desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)

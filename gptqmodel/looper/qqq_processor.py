@@ -25,7 +25,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import METHOD, QuantizeConfig, _normalize_mse, resolve_quant_format
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
@@ -103,7 +103,9 @@ class QQQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
             qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
+            qcfg_clone.mse = _normalize_mse(
+                self.qcfg.dynamic_get(module.full_name, "mse", None), base=qcfg_clone.mse,
+            )
 
             qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
             desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
@@ -122,9 +124,9 @@ class QQQProcessor(LoopProcessor):
         tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
-        if self.qcfg.mse > 0.0:
+        if self.qcfg.mse.norm > 0.0:
             mse = True
-            norm = self.qcfg.mse
+            norm = self.qcfg.mse.norm
         else:
             mse = False
             norm = 100
@@ -135,7 +137,6 @@ class QQQProcessor(LoopProcessor):
             mse=mse,
             norm=norm,
             groupsize=self.qcfg.group_size,
-            grid_budget_mb=self.qcfg.mse_config.grid_budget_mb,
         )
 
         self.tasks[module.name] = tmp

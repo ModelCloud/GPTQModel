@@ -17,7 +17,7 @@ from torch import nn
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
-from ..quantization.config import FallbackStrategy, SmoothMSE
+from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
 from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
@@ -112,8 +112,9 @@ def quantize(x, scale, zero, maxq, sym, groupsize):
 
 
 class Quantizer(nn.Module):
-    def __init__(self, shape=1):
+    def __init__(self, qcfg: Optional[QuantizeConfig] = None, shape=1):
         super(Quantizer, self).__init__()
+        self.qcfg = qcfg
         self.register_buffer("maxq", torch.tensor(0))
         # Host mirror of the ``maxq`` buffer. ``configure()`` is the only writer,
         # so the block loop avoids a device-to-host scalar read per column.
@@ -136,7 +137,6 @@ class Quantizer(nn.Module):
             grid=100,
             maxshrink=0.8,
             trits=False,
-            grid_budget_mb=None,
     ):
         if groupsize != -1 or not sym:
             self.maxq = torch.tensor(2 ** bits - 1)
@@ -149,7 +149,6 @@ class Quantizer(nn.Module):
         self.norm = norm
         self.grid = grid
         self.maxshrink = maxshrink
-        self.grid_budget_mb = grid_budget_mb
         if trits:
             self.maxq = torch.tensor(-1)
         self._maxq_value = int(self.maxq)
@@ -233,7 +232,11 @@ class Quantizer(nn.Module):
                     guard_zero_scale=False,
                     scale=self.scale,
                     zero=self.zero,
-                    grid_budget_mb=self.grid_budget_mb,
+                    grid_budget=(
+                        self.qcfg.mse.grid_budget
+                        if isinstance(getattr(self.qcfg, "mse", None), MSEConfig)
+                        else None
+                    ),
                 )
         if not self.perchannel:
             if weight:
@@ -327,7 +330,7 @@ class QQQ:
 
         self.nsamples = 0
 
-        self.quantizer = Quantizer()
+        self.quantizer = Quantizer(qcfg=self.qcfg)
 
         # fwd counter
         self.fwd_counter = 0
@@ -494,7 +497,7 @@ class QQQ:
 
         scale_extra = None
         if group_size != self.columns:
-            quantizer_extra = Quantizer()
+            quantizer_extra = Quantizer(qcfg=self.qcfg)
             quantizer_extra.configure(
                 bits=8,
                 perchannel=True,
@@ -942,7 +945,7 @@ class QQQ:
 
         # post int8 quant
         if scale_extra is None and groupsize != self.columns:
-            quantizer_extra = Quantizer()
+            quantizer_extra = Quantizer(qcfg=self.qcfg)
             quantizer_extra.configure(
                 bits=8,
                 perchannel=True,

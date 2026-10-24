@@ -950,7 +950,7 @@ def ModelWriter(cls):
 
         self.quantize_config.meta_set(
             key=META_FIELD_MSE,
-            value=getattr(self.quantize_config, "mse", None)
+            value=getattr(getattr(self.quantize_config, "mse", None), "norm", None)
         )
 
         self.quantize_config.meta_set(

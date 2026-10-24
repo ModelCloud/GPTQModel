@@ -14,7 +14,7 @@ import weakref
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, replace
 from enum import Enum
 from functools import total_ordering
 from os.path import join
@@ -1431,15 +1431,47 @@ class HessianConfig:
             raise ValueError("HessianConfig: `staging_dtype` must be a torch.dtype or string.")
 
 
+_MSE_BUDGET_UNITS = {"K": 10, "M": 20, "G": 30}
+
+
+def _normalize_budget_bytes(value: Union[int, str, None], field_name: str) -> Optional[int]:
+    """Normalize a workspace budget to bytes.
+
+    ``int`` is a byte count; a string may carry a ``K``/``M``/``G`` postfix
+    (``"256M"``, ``"1G"``) with an optional trailing ``B``. ``None`` keeps the
+    device-derived default.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"MSEConfig: `{field_name}` must be bytes (int) or a '256M'/'1G' string.")
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(f"MSEConfig: `{field_name}` must be a non-negative amount of bytes.")
+        return value
+    if isinstance(value, str):
+        text = value.strip().upper()
+        if text.endswith("B"):
+            text = text[:-1]
+        unit = _MSE_BUDGET_UNITS.get(text[-1:], 0)
+        if unit:
+            text = text[:-1]
+        if text.isdigit():
+            return int(text) << unit
+    raise ValueError(f"MSEConfig: `{field_name}` must be bytes (int) or a '256M'/'1G' string.")
+
+
 @dataclass
 class MSEConfig:
-    """Workspace budgets for the vectorized grid searches used at calibration.
+    """MSE shrink-grid search controls used at calibration.
 
-    The GPTQ/QQQ MSE shrink grid and the AWQ clip grid evaluate candidates in
-    batched chunks; these fields bound each chunk's workspace in MiB. They are
-    chunk-sizing targets, not limits on total process memory: the AWQ path
-    sizes several scratch buffers independently, and a single candidate or
-    minimum product tile can exceed the target.
+    ``norm`` is the exponent of the ``|deq(x)-x|^norm`` objective; ``0``
+    disables the search. The GPTQ/QQQ MSE shrink grid and the AWQ clip grid
+    evaluate candidates in batched chunks; the budget fields bound each
+    chunk's workspace in bytes (ints) or postfixed strings (``"256M"``,
+    ``"1G"``). They are chunk-sizing targets, not limits on total process
+    memory: the AWQ path sizes several scratch buffers independently, and a
+    single candidate or minimum product tile can exceed the target.
 
     ``None`` selects a device-derived default (16 MiB on CPU, 256 MiB on GPU);
     ``0`` forces single-candidate chunking (and one-token product tiles for
@@ -1447,36 +1479,41 @@ class MSEConfig:
     stored quantized weights.
     """
 
-    grid_budget_mb: Optional[int] = field(
-        default=None,
-        metadata={"help": "Workspace budget (MiB) per candidate chunk for the GPTQ/QQQ MSE shrink grid"},
+    norm: float = field(
+        default=0.0,
+        metadata={"help": "Exponent of the MSE objective; 0 disables the shrink-grid search"},
     )
-    clip_grid_budget_mb: Optional[int] = field(
+    grid_budget: Optional[Union[int, str]] = field(
         default=None,
-        metadata={"help": "Workspace budget (MiB) per scratch buffer for the AWQ clip grid"},
+        metadata={"help": "Workspace budget per candidate chunk for the GPTQ/QQQ MSE shrink grid (bytes, or '256M'/'1G')"},
+    )
+    clip_grid_budget: Optional[Union[int, str]] = field(
+        default=None,
+        metadata={"help": "Workspace budget per scratch buffer for the AWQ clip grid (bytes, or '256M'/'1G')"},
     )
 
     def __post_init__(self):
-        for name in ("grid_budget_mb", "clip_grid_budget_mb"):
-            value = getattr(self, name)
-            if value is not None:
-                if not isinstance(value, int) or isinstance(value, bool):
-                    raise ValueError(f"MSEConfig: `{name}` must be an integer or None.")
-                if value < 0:
-                    raise ValueError(f"MSEConfig: `{name}` must be a non-negative integer amount of MiB.")
+        if not isinstance(self.norm, (int, float)) or isinstance(self.norm, bool):
+            raise ValueError("MSEConfig: `norm` must be a number.")
+        self.norm = float(self.norm)
+        self.grid_budget = _normalize_budget_bytes(self.grid_budget, "grid_budget")
+        self.clip_grid_budget = _normalize_budget_bytes(self.clip_grid_budget, "clip_grid_budget")
+
+    def __bool__(self):
+        return self.norm > 0.0
 
     @staticmethod
-    def resolve_budget_bytes(budget_mb: Optional[int], device: torch.device) -> int:
-        """Resolve a MiB budget into bytes; ``None`` uses the device default."""
-        if budget_mb is None:
-            budget_mb = 16 if device.type == "cpu" else 256
-        return budget_mb << 20
+    def resolve_budget_bytes(budget: Optional[int], device: torch.device) -> int:
+        """Resolve a byte budget; ``None`` uses the device default."""
+        if budget is None:
+            budget = (16 if device.type == "cpu" else 256) << 20
+        return budget
 
     def grid_budget_bytes(self, device: torch.device) -> int:
-        return self.resolve_budget_bytes(self.grid_budget_mb, device)
+        return self.resolve_budget_bytes(self.grid_budget, device)
 
     def clip_grid_budget_bytes(self, device: torch.device) -> int:
-        return self.resolve_budget_bytes(self.clip_grid_budget_mb, device)
+        return self.resolve_budget_bytes(self.clip_grid_budget, device)
 
 
 # Activation operand formats accepted by the W4A stream. `w4afp8` carries E4M3
@@ -3121,14 +3158,28 @@ def _normalize_hessian(hessian: Optional[Union[HessianConfig, Dict[str, Any]]]) 
     return hessian
 
 
-def _normalize_mse_config(mse_config: Optional[Union[MSEConfig, Dict[str, Any]]]) -> MSEConfig:
-    if mse_config is None:
-        return MSEConfig()
-    if isinstance(mse_config, dict):
-        return MSEConfig(**mse_config)
-    if not isinstance(mse_config, MSEConfig):
-        raise ValueError("QuantizeConfig: `mse_config` must be a MSEConfig, dict, or None.")
-    return mse_config
+def _normalize_mse(
+    mse: Optional[Union[MSEConfig, Dict[str, Any], int, float]],
+    base: Optional[MSEConfig] = None,
+) -> MSEConfig:
+    """Normalize a ``mse`` config value into an ``MSEConfig``.
+
+    A bare number is the legacy ``mse`` exponent: it becomes ``norm`` and, when
+    ``base`` is given (e.g. a per-layer dynamic override), keeps the base's
+    workspace budgets. Dicts merge onto ``base`` field-wise.
+    """
+    if mse is None:
+        return base if base is not None else MSEConfig()
+    if isinstance(mse, MSEConfig):
+        return mse
+    if isinstance(mse, dict):
+        payload = asdict(base) if base is not None else {}
+        return MSEConfig(**{**payload, **mse})
+    if isinstance(mse, (int, float)) and not isinstance(mse, bool):
+        if base is not None:
+            return replace(base, norm=float(mse))
+        return MSEConfig(norm=float(mse))
+    raise ValueError("QuantizeConfig: `mse` must be a MSEConfig, dict, number, or None.")
 
 
 def _normalize_gptaq(gptaq: Optional[Union[GPTAQConfig, Dict[str, Any]]]) -> Optional[GPTAQConfig]:
@@ -3601,12 +3652,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
     telemetry: Union[TelemetryConfig, Dict[str, Any]] = field(default_factory=TelemetryConfig)
 
-    # Calibration-time workspace budgets for the vectorized MSE shrink-grid and
-    # AWQ clip-grid searches. A tuning knob only; never part of quantization or
-    # checkpoint identity.
-    mse_config: Union[MSEConfig, Dict[str, Any]] = field(
+    # MSE shrink-grid search config: the `norm` exponent plus calibration-time
+    # workspace budgets for the vectorized MSE and AWQ clip grids. A bare
+    # number is the legacy exponent form (`mse=2.4` == `MSEConfig(norm=2.4)`).
+    mse: Union[MSEConfig, Dict[str, Any], int, float] = field(
         default_factory=MSEConfig,
-        metadata={"help": "Workspace budgets (MiB) for the MSE shrink-grid and AWQ clip-grid searches"},
+        metadata={"help": "MSE shrink-grid search config (norm exponent, grid/clip workspace budgets)"},
     )
 
     # gptq was originally designed to pack quantized weights inside INT32 dtypes
@@ -3923,7 +3974,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         elif not isinstance(self.telemetry, TelemetryConfig):
             raise ValueError("telemetry must be a TelemetryConfig or dictionary")
 
-        self.mse_config = _normalize_mse_config(self.mse_config)
+        self.mse = _normalize_mse(self.mse)
 
         # Rotation fuses orthogonal transforms into the weights and requires
         # materialized tensors; meta-device/shell loading cannot be used.
@@ -4429,7 +4480,6 @@ class GPTQConfig(PreProcessorConfig):
     damp_auto_increment: Optional[float] = field(default=None)
     act_group_aware: Optional[bool] = field(default=None)
     static_groups: bool = field(default=False)
-    mse: float = field(default=0.0)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
     mock_quantization: bool = field(
@@ -4513,7 +4563,7 @@ class GPTQConfig(PreProcessorConfig):
                 "device": device if isinstance(device, str) else str(device),
             }
 
-        meta_payload["mse"] = self.mse
+        meta_payload["mse"] = self.mse.norm
         meta_payload["mock_quantization"] = self.mock_quantization
         meta_payload["act_group_aware"] = self.act_group_aware
         meta_payload["hessian"] = {

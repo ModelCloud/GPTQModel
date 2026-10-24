@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from gptqmodel.quantization.config import MSEConfig, QuantizeConfig
 from gptqmodel.quantization.qqq import Quantizer, quantize
 
 
@@ -269,10 +270,11 @@ def test_qqq_ready_flag_survives_deepcopy():
 def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget):
     weights = torch.randn(128, 32, generator=torch.Generator().manual_seed(7))
     weights = weights.to(device=device, dtype=dtype)[::2, ::2].t()
-    quantizer = Quantizer()
+    quantizer = Quantizer(
+        qcfg=QuantizeConfig(mse=MSEConfig(norm=2.4, grid_budget=budget)),
+    )
     quantizer.configure(
         bits=bits, perchannel=True, sym=sym, groupsize=groupsize, mse=True,
-        grid_budget_mb=budget,
     )
     quantizer.find_params(weights, weight=True)
     scale, zero = _legacy_qqq_find_params(

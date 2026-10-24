@@ -1754,9 +1754,9 @@ class AWQProcessor(LoopProcessor):
         # On CPU a large transient only evicts the L3-resident working set the
         # sequential loop enjoyed, so the CPU default stays small; on GPU the
         # larger chunk amortizes launches and feeds the wide memory bus.
-        mse_config = getattr(self.qcfg, "mse_config", None)
+        mse_cfg = getattr(self.qcfg, "mse", None)
         budget = MSEConfig.resolve_budget_bytes(
-            mse_config.clip_grid_budget_mb if isinstance(mse_config, MSEConfig) else None,
+            mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
             device,
         )
         row_elems = oc_batch_size * n_group * group_w
