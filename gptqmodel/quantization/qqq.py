@@ -18,7 +18,7 @@ from torch import nn
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
 from ..quantization.config import FallbackStrategy, SmoothMSE
-from ..quantization.quantizer import HF_OPTIMUM, _neutralize_dead_columns
+from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
 from ..utils.env import env_flag
@@ -198,33 +198,40 @@ class Quantizer(nn.Module):
                 self.zero = torch.zeros_like(self.scale)
 
         if self.mse:
-            best = torch.full([x.shape[0]], float("inf"), device=dev)
-            for i in range(int(self.maxshrink * self.grid)):
-                p = 1 - i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
+            steps = int(self.maxshrink * self.grid)
+            if steps > 0:
+                groupwise = self.groupsize == -1 and self.sym
+                # ``1 - i/grid`` in host float, rounded to ``xmin``'s dtype,
+                # reproduces the values the per-step loop got from ``p * xmin``.
+                p = torch.tensor(
+                    [1 - i / self.grid for i in range(steps)],
+                    dtype=xmin.dtype,
+                    device=dev,
+                ).unsqueeze(1)
+                xmin1 = p * xmin.unsqueeze(0)
+                xmax1 = p * xmax.unsqueeze(0)
                 scale1 = (
                     (xmax1 - xmin1) / self.maxq
-                    if (self.groupsize != -1 or not self.sym)
+                    if not groupwise
                     else xmax1 / self.maxq
                 )
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
-                q = quantize(
-                    x,
-                    scale1.unsqueeze(1),
-                    zero1.unsqueeze(1),
-                    self._maxq_value,
-                    self.sym,
-                    self.groupsize,
+                zero1 = (
+                    torch.round(-xmin1 / scale1)
+                    if not self.sym
+                    else self.zero.unsqueeze(0).expand(steps, x.shape[0])
                 )
-                q -= x
-                q.abs_()
-                q.pow_(self.norm)
-                err = torch.sum(q, 1)
-                better = err < best
-                best = torch.where(better, err, best)
-                self.scale = torch.where(better, scale1, self.scale)
-                self.zero = torch.where(better, zero1, self.zero)
+                self.scale, self.zero = _mse_shrink_grid(
+                    x,
+                    scale1,
+                    zero1,
+                    float(self.norm),
+                    maxq_value=self._maxq_value,
+                    groupwise=groupwise,
+                    # QQQ's ``quantize`` never guarded zero scales; keep that.
+                    guard_zero_scale=False,
+                    scale=self.scale,
+                    zero=self.zero,
+                )
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
