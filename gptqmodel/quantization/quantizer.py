@@ -5,6 +5,8 @@
 
 # adapted from @qwopqwop200 's [GPTQ-for-LLaMa](https://github.com/qwopqwop200/GPTQ-for-LLaMa/tree/cuda), which itself is based on [gptq](https://github.com/IST-DASLab/gptq)
 
+import os
+
 import torch
 import torch.nn as nn
 
@@ -15,6 +17,18 @@ from .config import BaseQuantizeConfig, _normalize_quant_bits, resolve_quant_for
 log = setup_logger()
 
 HF_OPTIMUM = "hf_optimum"
+
+# Per-call workspace cap for the vectorized shrink-grid evaluation, in MiB.
+# The grid materializes one ``(candidates, channels, columns)`` error tensor per
+# chunk. On GPU a large chunk amortizes the per-candidate launch storm and feeds
+# the wide memory bus; on CPU the same footprint only evicts the L3-resident
+# working set the sequential loop enjoyed, so the CPU default stays small.
+_MSE_GRID_BUDGET_ENV = "GPTQMODEL_MSE_GRID_BUDGET_MB"
+
+
+def _mse_grid_budget_bytes(device: torch.device) -> int:
+    default = "16" if device.type == "cpu" else "256"
+    return int(os.getenv(_MSE_GRID_BUDGET_ENV, default)) << 20
 
 
 def _replace_zero_scale(
@@ -85,6 +99,122 @@ def quantize(x, scale, zero, maxq, requires_groupwise_processing: bool):
     else:
         q = torch.clamp(torch.round(x / scale) + zero, 0, maxq)
         return scale * (q - zero)
+
+
+def _mse_shrink_grid(
+    x: torch.Tensor,
+    scales: torch.Tensor,
+    zeros: torch.Tensor,
+    mse: float,
+    *,
+    maxq_value: int,
+    groupwise: bool,
+    guard_zero_scale: bool,
+    scale: torch.Tensor,
+    zero: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pick each channel's best ``(scale, zero)`` candidate by ``|deq(x)-x|^mse``.
+
+    ``scales``/``zeros`` list every ``(n_candidates, rows)`` candidate in
+    priority order.  The per-step loop previously launched a dozen small
+    kernels per candidate; batching the grid collapses that into a few large
+    ops per chunk.  Candidate order, objective values, and the first-minimum
+    tie break are identical to evaluating candidates one at a time, so the
+    returned ``scale``/``zero`` are bitwise-equal to the sequential loop's
+    result.  ``scale``/``zero`` are the current winners the candidates must
+    beat.
+    """
+    dev = x.device
+    rows, cols = x.shape
+    n_candidates = scales.shape[0]
+
+    # The elementwise chain promotes exactly like the per-candidate
+    # ``quantize()`` call did; a single up-front cast keeps it that way.
+    work_dtype = torch.result_type(x, scales)
+    scales = scales.to(work_dtype)
+    zeros = zeros.to(work_dtype)
+    # The affine path needs only the ``q`` workspace; trits additionally
+    # hold two f32 dequant masks while forming the output.
+    elem_size = torch.empty((), dtype=work_dtype).element_size()
+    bytes_per_elem = (
+        elem_size
+        if maxq_value >= 0
+        else 2 * torch.tensor(0.0).element_size() + max(elem_size, 4)
+    )
+
+    budget = _mse_grid_budget_bytes(dev)
+    chunk = max(
+        1, min(n_candidates, budget // max(bytes_per_elem * rows * cols, 1))
+    )
+
+    # ``x`` can be a transposed view (activation find_params reshapes 2-D/3-D
+    # inputs with ``.t()``).  The sequential code's ``quantize`` output then
+    # inherited that column-major physical order, and its ``torch.sum(q, 1)``
+    # accumulated in that order.  Keep the workspace in the same physical
+    # order so the reduction walks memory identically: a 1-ULP different sum
+    # would flip strict-``<`` ties and change candidate selection.
+    col_major = 0 < x.stride(0) < x.stride(1)
+    if col_major:
+        q_phys = torch.empty((chunk, cols, rows), dtype=work_dtype, device=dev)
+        q_buf = q_phys.transpose(1, 2)  # logical (n, rows, cols)
+    else:
+        q_phys = torch.empty((chunk, rows, cols), dtype=work_dtype, device=dev)
+        q_buf = q_phys
+    best = torch.full([rows], float("inf"), device=dev)
+    xr = x.unsqueeze(0)
+    for start in range(0, n_candidates, chunk):
+        n = min(chunk, n_candidates - start)
+        sc = scales[start:start + n]
+        zc = zeros[start:start + n]
+        q = q_buf[:n]
+
+        if maxq_value < 0:
+            # ``quantize`` bypasses the zero-scale guard for ``maxq < 0``;
+            # keep the same mask -> dequant -> error order for trits.
+            s3, z3 = sc.unsqueeze(-1), zc.unsqueeze(-1)
+            q.copy_((xr > s3 / 2).float() * s3 + (xr < z3 / 2).float() * z3)
+        else:
+            if guard_zero_scale:
+                # Selection must store the raw candidates, so keep ``sc``/``zc``
+                # untouched and only guard the tensors the division reads.
+                safe_scale, safe_zero = _replace_zero_scale(sc, zc)
+            else:
+                safe_scale, safe_zero = sc, zc
+            s3, z3 = safe_scale.unsqueeze(-1), safe_zero.unsqueeze(-1)
+            torch.div(xr, s3, out=q)
+            q.round_()
+            if groupwise:
+                q.clamp_(-maxq_value, maxq_value)
+                q.mul_(s3)
+            else:
+                # Same op order as ``quantize``: +zero, clamp, -zero, *scale.
+                q.add_(z3).clamp_(0, maxq_value).sub_(z3).mul_(s3)
+        q.sub_(xr)
+        q.abs_()
+        q.pow_(mse)
+        err = (
+            q_phys[:n].sum(dim=1)
+            if col_major
+            else q.reshape(n * rows, cols).sum(dim=1).reshape(n, rows)
+        )
+
+        # NaN objectives could never satisfy the sequential ``err < best``;
+        # pin them to +inf so ``argmin`` cannot select them either.
+        err = torch.where(
+            torch.isnan(err), torch.full_like(err, float("inf")), err
+        )
+        idx = err.argmin(dim=0)  # first minimum == sequential tie order
+        chunk_best = err.gather(0, idx.unsqueeze(0)).squeeze(0)
+        better = chunk_best < best  # strict across chunks
+        scale = torch.where(
+            better, sc.gather(0, idx.unsqueeze(0)).squeeze(0), scale
+        )
+        zero = torch.where(
+            better, zc.gather(0, idx.unsqueeze(0)).squeeze(0), zero
+        )
+        best = torch.where(better, chunk_best, best)
+
+    return scale, zero
 
 
 class Quantizer(nn.Module):
@@ -219,49 +349,7 @@ class Quantizer(nn.Module):
 
         mse = float(getattr(self.qcfg, "mse", 0.0) or 0.0)
         if mse > 0.0:
-            best = torch.full([x.shape[0]], float("inf"), device=dev)
-            search_adjacent_zero_points = self._search_adjacent_zero_points()
-            maxq_value = self._maxq_value if search_adjacent_zero_points else 0
-            for i in range(int(self.maxshrink * self.grid)):
-                p = 1 - i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
-                scale1 = (
-                    xmax1 / self.maxq
-                    if self.requires_groupwise_processing()
-                    else (xmax1 - xmin1) / self.maxq
-                )
-                zero1 = torch.round(-xmin1 / scale1) if not self.qcfg.sym else self.zero
-                zero_candidates = (zero1,)
-                if search_adjacent_zero_points:
-                    alternate_zero = self._adjacent_zero_point(
-                        xmin1,
-                        scale1,
-                        zero1,
-                        maxq=maxq_value,
-                    )
-                    zero_candidates = (zero1, alternate_zero)
-
-                for zero_candidate in zero_candidates:
-                    q = quantize(
-                        x,
-                        scale1.unsqueeze(1),
-                        zero_candidate.unsqueeze(1),
-                        self._maxq_value,
-                        self.requires_groupwise_processing(),
-                    )
-                    q -= x
-                    q.abs_()
-                    q.pow_(mse)
-                    err = torch.sum(q, 1)
-                    # Select on the device.  The masked writes this replaces
-                    # needed a ``nonzero`` scan plus a host round trip per grid
-                    # step, and the surrounding ``torch.any`` forced the same
-                    # synchronization even when no lane improved.
-                    better = err < best
-                    best = torch.where(better, err, best)
-                    self.scale = torch.where(better, scale1, self.scale)
-                    self.zero = torch.where(better, zero_candidate, self.zero)
+            self._mse_shrink_grid(x, xmin, xmax, mse)
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -284,6 +372,74 @@ class Quantizer(nn.Module):
         if len(shape) == 2:
             self.scale = self.scale.unsqueeze(0)
             self.zero = self.zero.unsqueeze(0)
+
+    def _mse_shrink_grid(
+        self,
+        x: torch.Tensor,
+        xmin: torch.Tensor,
+        xmax: torch.Tensor,
+        mse: float,
+    ) -> None:
+        """Evaluate every shrink-grid candidate's scale/zero and keep the winners.
+
+        The per-step loop previously launched a dozen small kernels for each of
+        the ``maxshrink * grid`` candidates (times two when the 2-bit adjacent
+        zero point is searched).  Batching the grid collapses that into a few
+        large ops per chunk.  Candidate order, objective values, and the
+        first-minimum tie break are identical to evaluating the candidates one
+        at a time, so the selected ``scale``/``zero`` are bitwise-equal to the
+        sequential loop's result.
+        """
+        dev = x.device
+        rows = x.shape[0]
+        steps = int(self.maxshrink * self.grid)
+        if steps <= 0:
+            return
+
+        groupwise = self.requires_groupwise_processing()
+        search_adjacent = self._search_adjacent_zero_points()
+
+        # ``1 - i/grid`` in host float, rounded to ``xmin``'s dtype, reproduces
+        # the values the per-step loop got from ``p * xmin``.
+        p = torch.tensor(
+            [1 - i / self.grid for i in range(steps)],
+            dtype=xmin.dtype,
+            device=dev,
+        ).unsqueeze(1)
+        xmin1 = p * xmin.unsqueeze(0)
+        xmax1 = p * xmax.unsqueeze(0)
+        scale1 = xmax1 / self.maxq if groupwise else (xmax1 - xmin1) / self.maxq
+        if self.qcfg.sym:
+            zero1 = self.zero.unsqueeze(0).expand(steps, rows)
+        else:
+            zero1 = torch.round(-xmin1 / scale1)
+
+        # Step-major order -- (i=0,z0), (i=0,z1), (i=1,z0), ... -- preserves the
+        # sequential candidate order, so the first-minimum ``argmin`` below
+        # picks the same winner the sequential strict ``<`` updates did.
+        if search_adjacent:
+            alternate_zero = self._adjacent_zero_point(
+                xmin1,
+                scale1,
+                zero1,
+                maxq=self._maxq_value,
+            )
+            scales = scale1.repeat_interleave(2, dim=0)
+            zeros = torch.stack((zero1, alternate_zero), dim=1).reshape(2 * steps, rows)
+        else:
+            scales, zeros = scale1, zero1
+
+        self.scale, self.zero = _mse_shrink_grid(
+            x,
+            scales,
+            zeros,
+            mse,
+            maxq_value=self._maxq_value,
+            groupwise=groupwise,
+            guard_zero_scale=True,
+            scale=self.scale,
+            zero=self.zero,
+        )
 
     def quantize(self, x):
         # ``maxq`` is a device tensor, so passing it into the elementwise helper

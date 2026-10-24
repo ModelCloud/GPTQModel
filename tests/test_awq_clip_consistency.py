@@ -1,8 +1,110 @@
+import pytest
 import torch
 from parameterized import parameterized
+from torch.utils._python_dispatch import TorchDispatchMode
 
 from gptqmodel.looper.awq_processor import AWQProcessor
 from gptqmodel.quantization.config import FORMAT, METHOD, QuantizeConfig
+
+
+_GRID_DEVICES = ["cpu", pytest.param(
+    "cuda", marks=pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable"),
+)]
+
+
+def _sequential_clip_grid(qcfg, w, input_feat, n_grid=20, max_shrink=0.5):
+    """Independent scalar-grid oracle, including low-precision arithmetic."""
+    group_size = qcfg.group_size if qcfg.group_size > 0 else w.shape[1]
+    x = input_feat.reshape(1, -1, w.shape[1] // group_size, group_size)
+    w = w.reshape(w.shape[0], 1, -1, group_size)
+    original_bound = w.abs().amax(dim=-1, keepdim=True)
+    best_bound = original_bound.clone()
+    best_error = torch.full_like(original_bound, float("inf"))
+    original_output = (x * w).sum(-1)
+    for step in range(int(n_grid * max_shrink)):
+        bound = original_bound * (1 - step / n_grid)
+        clipped = torch.clamp(w, -bound, bound)
+        if qcfg.sym:
+            scale = clipped.abs().amax(-1, keepdim=True).clamp(min=1e-5)
+            scale = scale / (2 ** (qcfg.bits - 1) - 1)
+            quantized = torch.round(clipped / scale).clamp(
+                -(2 ** (qcfg.bits - 1)), 2 ** (qcfg.bits - 1) - 1,
+            ) * scale
+        else:
+            low = clipped.amin(-1, keepdim=True)
+            high = clipped.amax(-1, keepdim=True)
+            maxq = 2 ** qcfg.bits - 1
+            scale = (high - low).clamp(min=1e-5) / maxq
+            zero = (-torch.round(low / scale)).clamp(0, maxq)
+            quantized = (torch.clamp(torch.round(clipped / scale) + zero, 0, maxq) - zero) * scale
+        output = (x * quantized).sum(-1)
+        error = (output - original_output).pow(2).mean(1).reshape_as(best_error)
+        better = error < best_error
+        best_bound = torch.where(better, bound, best_bound)
+        best_error = torch.where(better, error, best_error)
+    return best_bound.squeeze(1)
+
+
+@pytest.mark.parametrize("device", _GRID_DEVICES)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("sym", [False, True])
+@pytest.mark.parametrize("group_size", [-1, 32])
+@pytest.mark.parametrize("budget", ["0", "1"])
+def test_clip_grid_low_precision_oracle(device, dtype, sym, group_size, budget, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", budget)
+    g = torch.Generator().manual_seed(42)
+    w = torch.randn(64, 128, generator=g).to(device=device, dtype=dtype)
+    x = torch.randn(19, 128, generator=g).to(device=device, dtype=dtype)
+    qcfg = QuantizeConfig(
+        quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=group_size, sym=sym,
+    )
+    processor = _ClipTestAWQProcessor(qcfg)
+    expected = _sequential_clip_grid(qcfg, w, x)
+    actual = processor._compute_best_clip(w, x)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", _GRID_DEVICES)
+@pytest.mark.parametrize("kind", ["empty_grid", "ties", "overflow", "mixed_dtype"])
+def test_clip_grid_edge_cases(device, kind, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", "0")
+    g = torch.Generator().manual_seed(42)
+    w = torch.randn(128, 64, generator=g).to(device=device, dtype=torch.float16)
+    x = torch.randn(7, 64, generator=g).to(device=device, dtype=torch.float16)
+    shrink = 0.0 if kind == "empty_grid" else 0.5
+    if kind == "ties":
+        x.zero_()
+    elif kind == "overflow":
+        x.mul_(1e4)
+    elif kind == "mixed_dtype":
+        x = x.float()
+    qcfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32)
+    processor = _ClipTestAWQProcessor(qcfg)
+    expected = _sequential_clip_grid(qcfg, w, x, max_shrink=shrink)
+    actual = processor._compute_best_clip(w, x, max_shrink=shrink)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_clip_grid_slices_reference_product(monkeypatch):
+    """The unclipped reference must obey the same token tiling as candidates."""
+    monkeypatch.setenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", "0")
+    products = []
+
+    class TrackProducts(TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            output = func(*args, **(kwargs or {}))
+            if func in (torch.ops.aten.mul.Tensor, torch.ops.aten.mul.out) and output.ndim >= 4:
+                products.append(output.numel())
+            return output
+
+    qcfg = QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=32)
+    processor = _ClipTestAWQProcessor(qcfg)
+    w = torch.ones(64, 128)
+    x = torch.ones(19, 128)
+    with TrackProducts():
+        processor._compute_best_clip(w, x)
+    assert products
+    assert max(products) <= w.numel()
 
 
 class _ClipTestAWQProcessor(AWQProcessor):
@@ -64,7 +166,7 @@ def _legacy_clip(processor: AWQProcessor, w: torch.Tensor, input_feat: torch.Ten
 ])
 def test_awq_clip_consistency(device_name: str, device_str: str):
     if device_name == "cuda" and not torch.cuda.is_available():
-        raise AssertionError("CUDA is not available for clip consistency test")
+        pytest.skip("CUDA is not available for clip consistency test")
 
     dtype = torch.float32 if device_name == "cpu" else torch.float16
     processor = _ClipTestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
@@ -90,7 +192,7 @@ def test_awq_clip_consistency(device_name: str, device_str: str):
 ])
 def test_awq_clip_bound_fast_path_matches_derived(device_name: str, device_str: str):
     if device_name == "cuda" and not torch.cuda.is_available():
-        raise AssertionError("CUDA is not available for the clip bound fast path test")
+        pytest.skip("CUDA is not available for the clip bound fast path test")
 
     dtype = torch.float32 if device_name == "cpu" else torch.float16
     processor = _ClipTestAWQProcessor(QuantizeConfig(quant_method=METHOD.AWQ, format=FORMAT.GEMM, group_size=128))
