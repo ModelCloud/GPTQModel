@@ -6,6 +6,7 @@
 import copy
 import inspect
 import math
+import os
 import threading
 import time
 from collections.abc import Mapping
@@ -1733,55 +1734,138 @@ class AWQProcessor(LoopProcessor):
         w_all = w
         best_max_val_all = []
         device = w_all.device
-        # Pre-allocate scratch buffers so the inner clamp loop never allocates large temporaries.
-        scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
-        scratch_quant = torch.empty_like(scratch_clamp)
+        n_group, group_w = w_all.shape[2], w_all.shape[3]
+        n_tokens = input_feat.shape[1]
+        steps = int(max_shrink * n_grid)
         input_feat = input_feat.to(device)
+
+        # Batch the shrink candidates so each grid step no longer launches its
+        # own clamp/quantize/error kernel chain. Candidate order and the
+        # first-minimum tie break below are identical to stepping through the
+        # shrink factors one at a time.
+        factors = torch.tensor(
+            [1 - i_s / n_grid for i_s in range(steps)],
+            dtype=w_all.dtype,
+            device=device,
+        )
+        elem_size = torch.empty((), dtype=torch.result_type(input_feat, w_all)).element_size()
+        # Three workspaces are capped independently at `budget`: the per-
+        # candidate clamped+quantized pair, the full-token error input
+        # `cur_out`, and each (cand, co, token, group, group_w) product slice.
+        # On CPU a large transient only evicts the L3-resident working set the
+        # sequential loop enjoyed, so the CPU default stays small; on GPU the
+        # larger chunk amortizes launches and feeds the wide memory bus.
+        budget = int(
+            os.getenv(
+                "GPTQMODEL_CLIP_GRID_BUDGET_MB",
+                "16" if device.type == "cpu" else "256",
+            )
+        ) << 20
+        row_elems = oc_batch_size * n_group * group_w
+        out_elems = oc_batch_size * n_tokens * n_group
+        cand_chunk = max(
+            1,
+            min(
+                steps,
+                budget // max(2 * row_elems * elem_size, 1),
+                budget // max(out_elems * elem_size, 1),
+            ),
+        )
+        token_chunk = max(
+            1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
+        )
+
+        # Pre-allocate scratch buffers so the inner loops never allocate large temporaries.
+        scratch_clamp = torch.empty(
+            (cand_chunk, oc_batch_size, 1, n_group, group_w), dtype=w_all.dtype, device=device
+        )
+        scratch_quant = torch.empty_like(scratch_clamp)
+        scratch_out = torch.empty(
+            (cand_chunk, oc_batch_size, n_tokens, n_group),
+            dtype=torch.result_type(input_feat, w_all),
+            device=device,
+        )
+        scratch_prod = torch.empty(
+            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
+            dtype=scratch_out.dtype,
+            device=device,
+        )
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
+            # `org_max_val * (1 - i_s / n_grid)` per step, batched: the host
+            # float factor is first rounded to `w`'s dtype, matching the
+            # scalar-tensor promotion the per-step loop applied.
+            cand_max_val = org_max_val.unsqueeze(0) * factors.view(-1, 1, 1, 1, 1)
+
             # Keep the pristine bound as the initial candidate. The previous loop
             # compared against an FP16 `1e9` sentinel, which overflows to `+inf`, so
             # an all-NaN/all-infinite grid retained `org_max_val`. Stacking the
             # errors and selecting once preserves that behavior while replacing two
             # `where` launches per grid step with one `argmin` per output batch.
-            errs = [torch.full_like(org_max_val, float("inf"))]
-            max_vals = [org_max_val]
-            clamp_slice = scratch_clamp[: w.shape[0]]
-            quant_slice = scratch_quant[: w.shape[0]]
+            err_chunks = [torch.full_like(org_max_val, float("inf")).unsqueeze(0)]
+            max_val_chunks = [org_max_val.unsqueeze(0)]
 
             org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
 
-            for i_s in range(int(max_shrink * n_grid)):
-                max_val = org_max_val * (1 - i_s / n_grid)
-                min_val = -max_val
-                torch.clamp(w, min_val, max_val, out=clamp_slice)
+            for s0 in range(0, steps, cand_chunk):
+                tc = min(cand_chunk, steps - s0)
+                max_val = cand_max_val[s0:s0 + tc]  # [tc, co_batch, 1, n_group, 1]
+                clamp_slice = scratch_clamp[:tc]
+                quant_slice = scratch_quant[:tc]
+                torch.clamp(w.unsqueeze(0), -max_val, max_val, out=clamp_slice)
                 # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
                 # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
                 # `org_max_val` is `|w|.amax()` and `max_val` is it scaled by a factor in
                 # `[0.5, 1]`, so the minimum is `max_val` itself: passing it straight
                 # through drops a kernel and a buffer per grid step without changing a
                 # single value.
-                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice, abs_max=max_val)
-                cur_out = (input_feat * quant_slice).sum(dim=-1)
+                # Flatten the candidate axis into the batch axis: the per-row
+                # stats inside `_pseudo_quantize_tensor_into` then reduce over
+                # the same `group_size` (or whole-row) axis as the per-step
+                # calls did, and `abs_max` flattens in the same order.
+                self._pseudo_quantize_tensor_into(
+                    clamp_slice.reshape(-1, 1, n_group, group_w),
+                    quant_slice.reshape(-1, 1, n_group, group_w),
+                    abs_max=max_val,
+                )
 
-                # Evaluate the reconstruction error for the current clamp ratio and keep the best
-                # one. `cur_out` is a private temporary so the difference and square happen in
-                # place.
-                cur_out.sub_(org_out).pow_(2)
-                errs.append(cur_out.mean(dim=1).view(org_max_val.shape))
-                max_vals.append(max_val)
+                # (input_feat * quant).sum(-1) per candidate, sliced over tokens
+                # so the product stays under the workspace cap. Slicing the
+                # token axis does not change any element's sum over `group_w`,
+                # and the mean below still reduces the same full token axis.
+                cur_out = scratch_out[:tc]
+                for t0 in range(0, n_tokens, token_chunk):
+                    t1 = min(t0 + token_chunk, n_tokens)
+                    torch.mul(
+                        input_feat[:, t0:t1],
+                        quant_slice,
+                        out=scratch_prod[:tc, :, : t1 - t0],
+                    )
+                    torch.sum(
+                        scratch_prod[:tc, :, : t1 - t0],
+                        dim=-1,
+                        out=cur_out[:, :, t0:t1],
+                    )
+
+                # `cur_out` is scratch, so the difference and square happen in place.
+                cur_out.sub_(org_out.unsqueeze(0)).pow_(2)
+                err_chunks.append(cur_out.mean(dim=2).view(tc, *org_max_val.shape))
+                max_val_chunks.append(max_val)
+
+            errs = torch.cat(err_chunks, dim=0)
+            max_vals = torch.cat(max_val_chunks, dim=0)
 
             # `argmin` returns the first occurrence on ties, matching the old
             # strict-`<` update. NaN candidates were never selected before, so map
             # them to `+inf` and let the pristine-bound sentinel absorb an all-NaN
             # grid.
-            best_index = torch.stack(errs, dim=0).nan_to_num(nan=torch.inf).argmin(dim=0)
+            best_index = errs.nan_to_num(nan=torch.inf).argmin(dim=0)
             best_max_val = torch.gather(
-                torch.stack(max_vals, dim=0),
+                max_vals,
                 dim=0,
                 index=best_index.unsqueeze(0),
             ).squeeze(0)
