@@ -158,7 +158,7 @@ quantization phase and the previous backend is restored afterwards. Set
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
 * ✨ GPTQ, AWQ, ParoQuant, QQQ, VPTQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
-* ✨ Current GGUF tensor assignments are supported, with native quantization and dequantization for `Q1_0`, `Q2_0`, `TQ1_0`, `TQ2_0`, and `MXFP4`, plus native `NVFP4` dequantization. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
+* ✨ All current GGUF tensor types are supported end to end for CPU quantization and inference: every `Q*_0`/`Q*_1`, `Q2_K`-`Q8_K`, `IQ1_S`-`IQ4_XS`, `TQ1_0`/`TQ2_0`, `MXFP4`, `NVFP4`, `Q1_0`, `Q2_0`, and the `Q1_0_g128` sign-only variant. Install the latest stable bindings with `pip install gptqmodel[gguf]` (`gguf>=0.19.0`, `llama-cpp-python>=0.3.36`). CPU inference uses llama.cpp's native SIMD kernels (`BACKEND.GGUF_CPP_CPU`, 3-100x faster than dense dequantize+matmul) with a per-shape autotuned torch fallback; `Q8_1`/`Q8_K` remain torch-only since upstream ggml exposes no matmul for them. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
 * 🚀 Optimized for Python >= 3.13t (free threading) with lock-free threading.
