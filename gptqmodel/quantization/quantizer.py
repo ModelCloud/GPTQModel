@@ -20,9 +20,15 @@ HF_OPTIMUM = "hf_optimum"
 
 # Per-call workspace cap for the vectorized shrink-grid evaluation, in MiB.
 # The grid materializes one ``(candidates, channels, columns)`` error tensor per
-# chunk; 256 MiB keeps the transient well below a single layer's Hessian while
-# still collapsing the per-step launch storm.
+# chunk. On GPU a large chunk amortizes the per-candidate launch storm and feeds
+# the wide memory bus; on CPU the same footprint only evicts the L3-resident
+# working set the sequential loop enjoyed, so the CPU default stays small.
 _MSE_GRID_BUDGET_ENV = "GPTQMODEL_MSE_GRID_BUDGET_MB"
+
+
+def _mse_grid_budget_bytes(device: torch.device) -> int:
+    default = "16" if device.type == "cpu" else "256"
+    return int(os.getenv(_MSE_GRID_BUDGET_ENV, default)) << 20
 
 
 def _replace_zero_scale(
@@ -136,7 +142,7 @@ def _mse_shrink_grid(
         else 2 * torch.tensor(0.0).element_size() + max(elem_size, 4)
     )
 
-    budget = int(os.getenv(_MSE_GRID_BUDGET_ENV, "256")) << 20
+    budget = _mse_grid_budget_bytes(dev)
     chunk = max(
         1, min(n_candidates, budget // max(bytes_per_elem * rows * cols, 1))
     )

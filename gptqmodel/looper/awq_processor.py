@@ -1752,7 +1752,15 @@ class AWQProcessor(LoopProcessor):
         # Three workspaces are capped independently at `budget`: the per-
         # candidate clamped+quantized pair, the full-token error input
         # `cur_out`, and each (cand, co, token, group, group_w) product slice.
-        budget = int(os.getenv("GPTQMODEL_CLIP_GRID_BUDGET_MB", "256")) << 20
+        # On CPU a large transient only evicts the L3-resident working set the
+        # sequential loop enjoyed, so the CPU default stays small; on GPU the
+        # larger chunk amortizes launches and feeds the wide memory bus.
+        budget = int(
+            os.getenv(
+                "GPTQMODEL_CLIP_GRID_BUDGET_MB",
+                "16" if device.type == "cpu" else "256",
+            )
+        ) << 20
         row_elems = oc_batch_size * n_group * group_w
         out_elems = oc_batch_size * n_tokens * n_group
         cand_chunk = max(
