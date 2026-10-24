@@ -254,3 +254,29 @@ def test_qqq_ready_flag_survives_deepcopy():
 
     clone = copy.deepcopy(quantizer)
     assert clone.ready() is True
+
+
+@pytest.mark.parametrize("device", [
+    "cpu", pytest.param("cuda", marks=pytest.mark.skipif(
+        not torch.cuda.is_available(), reason="CUDA unavailable",
+    )),
+])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("bits,sym,groupsize", [
+    (2, False, 32), (3, True, -1), (4, True, 32), (8, False, -1),
+])
+@pytest.mark.parametrize("budget", ["0", "1"])
+def test_qqq_mse_grid_chunks(device, dtype, bits, sym, groupsize, budget, monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_MSE_GRID_BUDGET_MB", budget)
+    weights = torch.randn(128, 32, generator=torch.Generator().manual_seed(7))
+    weights = weights.to(device=device, dtype=dtype)[::2, ::2].t()
+    quantizer = Quantizer()
+    quantizer.configure(
+        bits=bits, perchannel=True, sym=sym, groupsize=groupsize, mse=True,
+    )
+    quantizer.find_params(weights, weight=True)
+    scale, zero = _legacy_qqq_find_params(
+        weights, bits=bits, sym=sym, groupsize=groupsize, mse=True,
+    )
+    torch.testing.assert_close(quantizer.scale.flatten(), scale, rtol=0, atol=0)
+    torch.testing.assert_close(quantizer.zero.flatten(), zero, rtol=0, atol=0)

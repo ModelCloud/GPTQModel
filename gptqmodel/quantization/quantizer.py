@@ -153,7 +153,7 @@ def _mse_shrink_grid(
     # accumulated in that order.  Keep the workspace in the same physical
     # order so the reduction walks memory identically: a 1-ULP different sum
     # would flip strict-``<`` ties and change candidate selection.
-    col_major = x.stride(0) == 1 and x.stride(1) == rows
+    col_major = 0 < x.stride(0) < x.stride(1)
     if col_major:
         q_phys = torch.empty((chunk, cols, rows), dtype=work_dtype, device=dev)
         q_buf = q_phys.transpose(1, 2)  # logical (n, rows, cols)

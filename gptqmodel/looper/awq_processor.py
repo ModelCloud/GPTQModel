@@ -1745,7 +1745,7 @@ class AWQProcessor(LoopProcessor):
         # shrink factors one at a time.
         factors = torch.tensor(
             [1 - i_s / n_grid for i_s in range(steps)],
-            dtype=w_all.dtype,
+            dtype=torch.float32 if w_all.dtype in (torch.float16, torch.bfloat16) else w_all.dtype,
             device=device,
         )
         elem_size = torch.empty((), dtype=torch.result_type(input_feat, w_all)).element_size()
@@ -1785,6 +1785,7 @@ class AWQProcessor(LoopProcessor):
             dtype=torch.result_type(input_feat, w_all),
             device=device,
         )
+        org_out = torch.empty_like(scratch_out[0])
         scratch_prod = torch.empty(
             (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
             dtype=scratch_out.dtype,
@@ -1796,10 +1797,11 @@ class AWQProcessor(LoopProcessor):
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
-            # `org_max_val * (1 - i_s / n_grid)` per step, batched: the host
-            # float factor is first rounded to `w`'s dtype, matching the
-            # scalar-tensor promotion the per-step loop applied.
-            cand_max_val = org_max_val.unsqueeze(0) * factors.view(-1, 1, 1, 1, 1)
+            # Half/bfloat16 scalar multiplication computes in float32 and only
+            # rounds the result. Do not round the factors to the weight dtype.
+            cand_max_val = (
+                org_max_val.unsqueeze(0) * factors.view(-1, 1, 1, 1, 1)
+            ).to(w_all.dtype)
 
             # Keep the pristine bound as the initial candidate. The previous loop
             # compared against an FP16 `1e9` sentinel, which overflows to `+inf`, so
@@ -1809,7 +1811,11 @@ class AWQProcessor(LoopProcessor):
             err_chunks = [torch.full_like(org_max_val, float("inf")).unsqueeze(0)]
             max_val_chunks = [org_max_val.unsqueeze(0)]
 
-            org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
+            for t0 in range(0, n_tokens, token_chunk):
+                t1 = min(t0 + token_chunk, n_tokens)
+                prod = scratch_prod[0, :, : t1 - t0]
+                torch.mul(input_feat[:, t0:t1], w, out=prod)
+                torch.sum(prod, dim=-1, out=org_out[:, t0:t1])
 
             for s0 in range(0, steps, cand_chunk):
                 tc = min(cand_chunk, steps - s0)
