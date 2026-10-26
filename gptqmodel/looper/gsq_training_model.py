@@ -3,11 +3,80 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import hashlib
 import os
 from pathlib import Path
 import torch
 from ..quantization.gsq_training_config import GSQTrainingConfig
 from .gsq_training_capture import capture_llama_gsq_inputs, quantize_llama_gsq_capture
+
+
+def _checkpoint_documents_digest(documents):
+    """Identify the exact token documents consumed by staged capture."""
+    digest = hashlib.sha256()
+    digest.update(len(documents).to_bytes(8, 'little'))
+    for document in documents:
+        if not isinstance(document, dict) or 'input_ids' not in document:
+            raise ValueError('GSQ checkpointing requires documents with input_ids')
+        ids = torch.as_tensor(document['input_ids'], device='cpu')
+        if ids.ndim != 1 or ids.dtype not in (torch.int32, torch.int64):
+            raise ValueError('GSQ checkpointing requires rank-1 integer input_ids')
+        ids = ids.to(torch.int64).contiguous()
+        digest.update(ids.numel().to_bytes(8, 'little'))
+        digest.update(ids.numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _checkpoint_module_digest(module):
+    """Identify a source block without retaining a second full model copy."""
+    digest = hashlib.sha256()
+    for name, value in module.state_dict().items():
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f'Unsupported GSQ checkpoint state value: {name}')
+        value = value.detach().to(device='cpu').contiguous()
+        digest.update(name.encode('utf-8'))
+        digest.update(str(value.dtype).encode('ascii'))
+        digest.update(repr(tuple(value.shape)).encode('ascii'))
+        digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _checkpoint_prefix_digests(model, layer_indices):
+    """Identify the model weights that produced each selected layer's inputs."""
+    requested = set(layer_indices)
+    maximum = max(requested)
+    digest = hashlib.sha256()
+    digest.update(b'model.embed_tokens\0')
+    digest.update(bytes.fromhex(_checkpoint_module_digest(model.model.embed_tokens)))
+    result = {}
+    for index, layer in enumerate(model.model.layers[:maximum+1]):
+        digest.update(index.to_bytes(8, 'little'))
+        digest.update(bytes.fromhex(_checkpoint_module_digest(layer)))
+        if index in requested:
+            result[index] = digest.hexdigest()
+    return result
+
+
+def _restore_packed_layer(layer, state_dict, *, names, bits, group_size, device):
+    """Rebuild packed modules from the caller's block and tensor-only state."""
+    import copy
+
+    from ..nn_modules.qlinear.torch import TorchLinear
+    from ..utils.backend import BACKEND
+
+    packed = copy.deepcopy(layer).cpu()
+    for name in names:
+        source = packed.get_submodule(name)
+        linear = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
+                             in_features=source.in_features, out_features=source.out_features,
+                             bias=source.bias is not None, backend=BACKEND.TORCH)
+        linear = linear.to(dtype=source.weight.dtype)
+        parent, leaf = name.rsplit('.', 1)
+        setattr(packed.get_submodule(parent), leaf, linear)
+    packed.load_state_dict(state_dict, strict=True)
+    for name in names:
+        packed.get_submodule(name).post_init()
+    return packed.to(device).eval()
 
 
 def staged_documents_from_prepared(prepared):
@@ -116,12 +185,20 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
         model.gsq_training_runs = []
     model.gsq_training_runs.append(run)
     signature = None
+    source_prefixes = None
     if checkpoint_directory is not None:
         signature = dict(bits=bits, group_size=group_size, gsq_training=effective,
                          layer_indices=indices, model_config=model.config.to_dict(),
-                         training_documents=len(documents),
-                         initialization_documents=run['initialization_documents'],
-                         validation_documents=run['validation_documents'])
+                         training_documents=_checkpoint_documents_digest(documents),
+                         initialization_documents=_checkpoint_documents_digest(
+                             documents if initialization_documents is None else initialization_documents),
+                         validation_documents=(None if validation_documents is None else
+                                               _checkpoint_documents_digest(validation_documents)),
+                         capture_batch_size=capture_batch_size,
+                         attention_implementation=getattr(model.config, '_attn_implementation', None),
+                         device=str(device),
+                         deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
+        source_prefixes = _checkpoint_prefix_digests(model, indices)
         checkpoint_directory.mkdir(parents=True, exist_ok=True)
     try:
         for index in indices:
@@ -132,19 +209,27 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             checkpoint = (checkpoint_directory/f'layer-{index:02d}.pt'
                           if checkpoint_directory is not None else None)
             if checkpoint is not None and checkpoint.exists():
-                saved = torch.load(checkpoint, map_location='cpu', weights_only=False)
-                if (saved.get('signature') != signature or saved.get('layer_index') != index
-                        or not isinstance(saved.get('packed'), type(layers[index]))):
+                saved = torch.load(checkpoint, map_location='cpu', weights_only=True)
+                layer_signature = dict(signature, source_prefix=source_prefixes[index])
+                if (not isinstance(saved, dict) or saved.get('signature') != layer_signature
+                        or saved.get('layer_index') != index
+                        or not isinstance(saved.get('state_dict'), dict)
+                        or not isinstance(saved.get('record'), dict)):
                     raise ValueError(f'GSQ block checkpoint does not match this run: {checkpoint}')
+                packed = _restore_packed_layer(
+                    layers[index], saved['state_dict'], names=names, bits=bits,
+                    group_size=group_size, device=device)
                 from ..nn_modules.qlinear.torch import TorchLinear
 
-                if any(not isinstance(saved['packed'].get_submodule(name), TorchLinear) for name in names):
+                if any(not isinstance(packed.get_submodule(name), TorchLinear) for name in names):
                     raise ValueError(f'GSQ block checkpoint is not fully packed: {checkpoint}')
-                layers[index] = saved['packed'].to(device).eval()
+                layers[index] = packed
                 run['blocks'].append(saved['record'])
                 del saved
                 logging.getLogger(__name__).info('Resumed packed GSQ block %d/%d', index+1, len(layers))
                 continue
+            layer_signature = (dict(signature, source_prefix=source_prefixes[index])
+                               if checkpoint is not None else None)
             capture_options = {}
             if offload_capture:
                 capture_options['offload_to_cpu'] = True
@@ -183,8 +268,10 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             if checkpoint is not None:
                 temporary = checkpoint.with_suffix('.pt.tmp')
                 try:
-                    torch.save(dict(signature=signature, layer_index=index,
-                                    packed=packed.cpu(), record=record), temporary)
+                    torch.save(dict(signature=layer_signature, layer_index=index,
+                                    state_dict={name: value.detach().cpu().clone()
+                                                for name, value in packed.state_dict().items()},
+                                    record=record), temporary)
                     os.replace(temporary, checkpoint)
                 finally:
                     temporary.unlink(missing_ok=True)
@@ -236,8 +323,8 @@ def prepare_llama_gsq_export(model, run):
 
     # The public loader constructs these frequencies on CPU before transfer;
     # constructing directly on CUDA can differ by FP32 ulps in pow/division.
-    model.model.rotary_emb = LlamaRotaryEmbedding(
-        model.config, device='cpu').to(model.model.embed_tokens.weight.device).eval()
+    model.model.rotary_emb = LlamaRotaryEmbedding(model.config).to(
+        model.model.embed_tokens.weight.device).eval()
     return qcfg
 
 

@@ -23,6 +23,16 @@ from gptqmodel.quantization.gsq_training import (
 )
 
 
+def _cuda_relaxation_available():
+    """Check the optional NVRTC path before asserting fused-kernel behavior."""
+    logits = torch.zeros((5, 1, 1), device="cuda", dtype=torch.bfloat16)
+    scales = torch.ones((1, 1), device="cuda", dtype=torch.float32)
+    initial = torch.zeros((1, 1), device="cuda", dtype=torch.float32)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    uniform = torch.full_like(logits, 0.5)
+    return cuda_relaxed_scalar_weights(logits, scales, initial, valid, uniform, 1, 1.0, 1.0) is not None
+
+
 @pytest.mark.parametrize("bits,group_size,logits_dtype,temperature,multiplier", [
     (3, 32, torch.bfloat16, .7, 125.), (3, 48, torch.bfloat16, .7, 125.),
     (3, 128, torch.bfloat16, .7, 125.), (4, 128, torch.bfloat16, .7, 125.),
@@ -33,6 +43,8 @@ def test_cuda_gsq_relaxation_matches_eager_forward_and_gradients(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     torch.manual_seed(102)
     rows, columns = 8, 256
     weight = (torch.randn(rows, columns, device="cuda", dtype=torch.bfloat16)*.02).clamp(-.04, .04)
@@ -113,6 +125,8 @@ def test_cuda_gsq_30_update_trajectory_matches_eager(bits, logits_dtype, monkeyp
     """Compare learning, hard choices, and held-out loss under matched draws."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     torch.manual_seed(2026 + bits)
     rows, columns, group_size = 128, 256, 64
     scales = torch.full((rows, columns // group_size), .02, device="cuda")
@@ -122,6 +136,10 @@ def test_cuda_gsq_30_update_trajectory_matches_eager(bits, logits_dtype, monkeyp
     noise = torch.randn(5, rows, columns, device="cuda", dtype=torch.bfloat16)
     initial = GSQScalarTrainingModule(weight, scales, group_size, bits=bits,
                                       noise=noise, logits_dtype=logits_dtype)
+    probe_uniform = torch.full_like(initial.logits, 0.5)
+    if cuda_relaxed_scalar_weights(initial.logits, initial.scales, initial.initial,
+                                   initial.valid, probe_uniform, group_size, 1.0, 1.0) is None:
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     eager, fused = copy.deepcopy(initial), copy.deepcopy(initial)
     inputs = torch.randn(128, columns, device="cuda", dtype=torch.bfloat16)
     target = torch.randn(128, rows, device="cuda", dtype=torch.bfloat16) * .02
@@ -164,6 +182,8 @@ def test_cuda_gsq_30_update_trajectory_matches_eager(bits, logits_dtype, monkeyp
 def test_cuda_cached_llama_rms_norm_matches_eager_bf16():
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     torch.manual_seed(23)
     hidden = torch.randn(2, 64, 2048, device="cuda", dtype=torch.bfloat16)
     weight = torch.randn(2048, device="cuda", dtype=torch.bfloat16)
@@ -178,6 +198,8 @@ def test_cuda_cached_llama_rms_norm_matches_eager_bf16():
 def test_cuda_staged_llama_uses_fused_training_and_disk_targets(tmp_path, monkeypatch):
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model
@@ -222,6 +244,8 @@ def test_cuda_and_eager_staged_llama_agree_after_packed_training(tmp_path, monke
     """Exercise the seven-projection W3 lifecycle with matched training seeds."""
     if not torch.cuda.is_available():
         pytest.skip("CUDA device required")
+    if not _cuda_relaxation_available():
+        pytest.skip("CUDA NVRTC relaxation unavailable")
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model

@@ -107,7 +107,7 @@ def test_gsq_method_checkpoint_roundtrip(tmp_path, method):
 @pytest.mark.parametrize("group_size", [-1, 128])
 def test_qqq_packed_gsq_payload_has_reloadable_runtime_buffers(group_size):
     """QQQ's native extension is optional; its packed state still must reload."""
-    from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
+    from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
     from gptqmodel.quantization.gsq_qqq import qqq_codes_to_packer_weight
 
     torch.manual_seed(7)
@@ -119,8 +119,8 @@ def test_qqq_packed_gsq_payload_has_reloadable_runtime_buffers(group_size):
     linear = torch.nn.Linear(width, 128, bias=False, dtype=torch.float16)
     with torch.no_grad():
         linear.weight.copy_(weight)
-    packed = QQQLinear(bits=4, group_size=group_size, desc_act=False, sym=True,
-                       in_features=width, out_features=128, register_buffers=False)
+    packed = QQQTorchLinear(bits=4, group_size=group_size, desc_act=False, sym=True,
+                            in_features=width, out_features=128, register_buffers=False)
     extra = torch.full((128,), 0.05, dtype=torch.float32) if group_size != -1 else None
     packed.pack(linear, scales, s_extra=extra)
     assert packed.workspace.numel() > 0
@@ -128,8 +128,8 @@ def test_qqq_packed_gsq_payload_has_reloadable_runtime_buffers(group_size):
     assert (packed.s_group.numel() == 0) == (group_size == -1)
     saved = packed.state_dict()
     assert "workspace" not in saved and "reduce_buffer" not in saved
-    loaded = QQQLinear(bits=4, group_size=group_size, desc_act=False, sym=True,
-                       in_features=width, out_features=128, register_buffers=True)
+    loaded = QQQTorchLinear(bits=4, group_size=group_size, desc_act=False, sym=True,
+                            in_features=width, out_features=128, register_buffers=True)
     loaded.load_state_dict(saved)
     torch.testing.assert_close(loaded.B, packed.B, rtol=0, atol=0)
     torch.testing.assert_close(loaded.s_channel, packed.s_channel, rtol=0, atol=0)
