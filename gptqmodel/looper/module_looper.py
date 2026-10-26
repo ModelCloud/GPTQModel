@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional
 
 import torch
 import torch.nn as nn
+from accelerate.utils import find_tied_parameters
 
 from .. import DEVICE_THREAD_POOL
 from ..looper.dequantize_processor import DequantizeProcessor
@@ -66,12 +67,13 @@ from ..utils.offload import offload_to_disk
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
-from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .execution_state import DeviceAssignmentState
+from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 from .forward_executor import ForwardExecutor
 from .paroquant_processor import ParoQuantProcessor
 from .stage_inputs_capture import StageInputsCapture
 from .stage_layer import run_layer_stage
+
 
 log = setup_logger()
 
@@ -148,8 +150,11 @@ class StopMainLoop(Exception):
     """Signal that the module loop should abort immediately."""
 
 
-def io_write_performance() -> Optional[float]:
-    """Estimate and cache sustained disk write throughput in MB/s."""
+def io_write_performance(enabled: bool = True) -> Optional[float]:
+    """Cache disk write throughput in MB/s when the run expects disk writes."""
+
+    if not enabled:
+        return None
 
     global _IO_WRITE_SPEED_MB
     if _IO_WRITE_SPEED_MB is not None:
@@ -179,6 +184,7 @@ class ModuleLooper(DeviceAssignmentState):
         embed_quant_config: Optional[QuantizeEmbedConfig] = None,
         *,
         extensions=(),
+        disk_write_expected: bool = False,
     ):
         """Initialize loop state, device policy, and callback wiring."""
 
@@ -198,7 +204,7 @@ class ModuleLooper(DeviceAssignmentState):
         self._dangling_threads: List[threading.Thread] = []
         self._dangling_threads_lock = threading.Lock()
 
-        io_write_speed = io_write_performance()
+        io_write_speed = io_write_performance(disk_write_expected)
         if io_write_speed is not None:
             if io_write_speed < 100:
                 log.error(
@@ -759,6 +765,14 @@ class ModuleLooper(DeviceAssignmentState):
 
         tls = self._processor_mask_tls(processor)
         tls.value = mask
+        # ``mask`` is [batch, seq] on the execution device. Derive the
+        # per-sample emptiness flags once per batch here; every module's
+        # forward hook would otherwise synchronize once per sample.
+        tls.sample_has_tokens = (
+            mask.any(dim=1).tolist()
+            if torch.is_tensor(mask) and mask.ndim == 2
+            else None
+        )
 
     def _get_processor_mask(self, processor: LoopProcessor):
         """Return the sequence mask bound to the current worker thread."""
@@ -1041,7 +1055,13 @@ class ModuleLooper(DeviceAssignmentState):
                 target_device=target,
             )
             move_to(module_ref, device=target)
-            rehome_module_to_device(module_ref, target, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_ref,
+                target,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", target)
             setattr(module_ref, "target_device", target)
@@ -1076,7 +1096,13 @@ class ModuleLooper(DeviceAssignmentState):
                 target_device=revert_device,
             )
             move_to(module_ref, device=revert_device)
-            rehome_module_to_device(module_ref, revert_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_ref,
+                revert_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             if isinstance(named_module, NamedModule):
                 setattr(named_module, "target_device", revert_device)
             setattr(module_ref, "target_device", revert_device)
@@ -1109,13 +1135,25 @@ class ModuleLooper(DeviceAssignmentState):
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
             move_to(module_attr, device=target_device)
-            rehome_module_to_device(module_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                module_attr,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
             move_to(layer_attr, device=target_device)
-            rehome_module_to_device(layer_attr, target_device, move_parameters=True, move_buffers=True)
+            rehome_module_to_device(
+                layer_attr,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
             setattr(layer_attr, "target_device", target_device)
 
         quantizer = getattr(task, "quantizer", None)
@@ -1192,7 +1230,13 @@ class ModuleLooper(DeviceAssignmentState):
                 named_module.module = prepared
         else:
             move_to(named_module.module, device=target_device)
-        rehome_module_to_device(named_module.module, target_device, move_parameters=True, move_buffers=True)
+        rehome_module_to_device(
+            named_module.module,
+            target_device,
+            move_parameters=True,
+            move_buffers=True,
+            root_module=getattr(self.gptq_model, "model", None),
+        )
 
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
@@ -1534,11 +1578,16 @@ class ModuleLooper(DeviceAssignmentState):
                 self.gptq_model.quantize_config.dynamic = {**missing_defaults, **dynamic}
 
         if self.gptq_model.quantize_config.lm_head:
-            if self.gptq_model.model.config.tie_word_embeddings and hasattr(self.gptq_model.model.model, "_tied_weights_keys"):
-                tied_keys = self.gptq_model.model._tied_weights_keys
-                for item in tied_keys:
-                    if self.gptq_model.lm_head in item:
-                        raise NotImplementedError("quantization of `lm_head` layer with `tied_weights=True` model state is not supported. Please check model has `tied_weights=False`.")
+            # Composite models can keep both the head and tying configuration
+            # below the root. Check actual sharing by the fully qualified name.
+            if any(
+                f"{self.gptq_model.lm_head}.weight" in names
+                for names in find_tied_parameters(self.gptq_model.model)
+            ):
+                raise NotImplementedError(
+                    "quantization of `lm_head` layer with tied weights is not supported. "
+                    "Untie the model weights before quantization."
+                )
 
             lm_head_module = get_module(self.gptq_model.model, key=self.gptq_model.lm_head)
             if get_module(self.gptq_model.model, key=self.gptq_model.lm_head) is None:

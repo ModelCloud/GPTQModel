@@ -141,10 +141,12 @@ def test_hessian_accumulation_cpu_vs_gpu():
 @pytest.fixture(autouse=True)
 def reset_workspace_caches():
     gptq_impl._WORKSPACE_CACHE.clear()
+    gptq_impl._WORKSPACE_SLOTS.clear()
     gptq_impl._WORKSPACE_LOCKS.clear()
     gptq_impl._BF16_SUPPORT_CACHE.clear()
     yield
     gptq_impl._WORKSPACE_CACHE.clear()
+    gptq_impl._WORKSPACE_SLOTS.clear()
     gptq_impl._WORKSPACE_LOCKS.clear()
     gptq_impl._BF16_SUPPORT_CACHE.clear()
 

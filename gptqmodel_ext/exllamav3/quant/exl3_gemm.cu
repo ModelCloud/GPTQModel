@@ -106,10 +106,22 @@ int exl3_gemm
     block_dim = tr->block_dim;
     shape_idx = tr->shape_idx;
 
+    // On ROCm the tensor-core GEMM kernels are not implemented, so the kernel
+    // tables are populated with null entries (see exl3_kernel_map.cuh). Fail
+    // with an actionable message instead of launching a null pointer.
+    TORCH_CHECK(
+        kernel != nullptr,
+        "ExLlamaV3 tensor-core GEMM is not available in this build (ROCm/HIP); "
+        "use the reconstruct + hgemm path (torch_mode) instead."
+    );
+
     // Launch
     if (kernel_attr_set[device].find((void*) kernel) == kernel_attr_set[device].end())
     {
-        cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
+        // HIP only provides hipFuncSetAttribute(const void*, ...); the CUDA
+        // template overload that accepts a function pointer directly has no HIP
+        // equivalent, so cast to the void* form that both runtimes expose.
+        cudaFuncSetAttribute((const void*) kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, EXL3_GEMM_SMEM_MAX);
         kernel_attr_set[device].insert((void*) kernel);
         cuda_check(cudaPeekAtLastError());
     }

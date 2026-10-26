@@ -28,7 +28,7 @@ from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
 from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
-from ..quantization.config import FORMAT, METHOD, QuantizeConfig, resolve_quant_format
+from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
@@ -62,6 +62,7 @@ class _AWQLayerState:
     processed_subsets: Set[int] = field(default_factory=set)
     layer_module: Optional[torch.nn.Module] = None
     previous_weight_scale: Optional[float] = None
+    previous_weight_scale_source: Optional[Dict[str, NamedModule]] = None
     quantized: bool = False
     pending_modules: Set[str] = field(default_factory=set)
     lock: threading.Lock = field(default_factory=threading.Lock)
@@ -805,14 +806,19 @@ class AWQProcessor(LoopProcessor):
         source = batch_tensor
         if source.shape[0] == 1 and batch > 1:
             source = source.expand(batch, *source.shape[1:])
-        packed_rows = [source[batch_index, keep_mask[batch_index]] for batch_index in range(batch)]
-        return torch.cat(packed_rows, dim=0).unsqueeze(0)
+        rows, columns = torch.nonzero(keep_mask, as_tuple=True)
+        return source[rows, columns].unsqueeze(0)
 
     @staticmethod
     def _pack_square_token_blocks(batch_tensor: torch.Tensor, keep_mask: torch.Tensor) -> torch.Tensor:
         """Pack per-batch square token tensors into one block-diagonal tensor."""
 
-        lengths = [int(row.sum().item()) for row in keep_mask]
+        batch = keep_mask.shape[0]
+        if batch == 1:
+            lengths = [int(keep_mask[0].sum().item())]
+        else:
+            # One reduction and one host transfer instead of one per batch row.
+            lengths = keep_mask.sum(dim=1).tolist()
         total_kept = sum(lengths)
         fill_value = torch.finfo(batch_tensor.dtype).min if batch_tensor.is_floating_point() else 0
         packed = torch.full(
@@ -960,18 +966,37 @@ class AWQProcessor(LoopProcessor):
         if not previous_subset:
             return None
 
-        values: List[float] = []
+        values: List[torch.Tensor] = []
         for named_module in previous_subset.values():
             weight = getattr(named_module.module, "weight", None)
             if weight is None:
                 continue
             with torch.no_grad():
-                values.append(float(weight.detach().abs().mean().item()))
+                values.append(weight.detach().abs().mean())
 
         if not values:
             return None
 
-        return float(sum(values) / len(values))
+        if len({value.device for value in values}) != 1:
+            return float(sum(float(value.item()) for value in values) / len(values))
+        return float(sum(torch.stack(values).tolist()) / len(values))
+
+    def _previous_subset_scale(
+        self,
+        state: _AWQLayerState,
+        previous_subset: Optional[Dict[str, NamedModule]],
+    ) -> Optional[float]:
+        """Returns the cached previous-subset weight scale for one stage."""
+
+        if not previous_subset:
+            return None
+        if state.previous_weight_scale_source is not previous_subset:
+            state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
+            # The mapping is alive for the whole stage and is replaced by the
+            # next subset, so this reference does not extend module lifetimes
+            # beyond the stage. ``_finalize_quantized_layer`` drops it early.
+            state.previous_weight_scale_source = previous_subset
+        return state.previous_weight_scale
 
     def _layer_input_features(self, state: _AWQLayerState) -> Dict[str, torch.Tensor]:
         """Collapse cached per-batch inputs into one replay tensor per module.
@@ -1126,6 +1151,7 @@ class AWQProcessor(LoopProcessor):
         state.processed_subsets.clear()
         state.subset_total = None
         state.previous_weight_scale = None
+        state.previous_weight_scale_source = None
 
         task_names = self._feature_task_names or (fallback_task_names or set())
         with self.lock:
@@ -1614,15 +1640,27 @@ class AWQProcessor(LoopProcessor):
         for key, value in global_allowed_kwargs.items():
             module_kwargs.setdefault(key, value)
         module_kwargs = self._align_module_kwargs_to_input(inp, module_kwargs)
+        replay_batch_size = self._scale_search_replay_batch_size(inp)
+        prepared_forward = None
 
         if use_chunked_scale_search:
-            # Build the FP reference output one micro-batch at a time and move each
+            # Resolve the device placement and rotary scaffolding once. Both the FP
+            # reference and every candidate-scale replay reuse this prepared forward.
+            prepared_x, prepared_kwargs = self._prepare_module_forward(inp, module2inspect, module_kwargs)
+            prepared_forward = (prepared_x, prepared_kwargs)
+
+            # Build the FP reference output one replay batch at a time and move each
             # chunk back to CPU immediately so scale search does not keep the full
             # activation tensor resident on GPU.
             with ctx(torch.inference_mode()):
                 fp16_output = [
                     output.clip(torch.finfo(output.dtype).min, torch.finfo(output.dtype).max).detach().cpu()
-                    for output in self._iter_module_forward_outputs(inp, module2inspect, module_kwargs)
+                    for output in self._iter_prepared_forward_outputs(
+                        prepared_x,
+                        module2inspect,
+                        prepared_kwargs,
+                        batch_size=replay_batch_size,
+                    )
                 ]
         else:
             # Legacy path: run the full forward eagerly on the module device and keep
@@ -1634,7 +1672,15 @@ class AWQProcessor(LoopProcessor):
 
         # [STEP 4]: Compute loss
         best_scales, loss = self._compute_best_scale(
-            inp, w_mean, x_mean, module2inspect, layers, fp16_output, module_kwargs
+            inp,
+            w_mean,
+            x_mean,
+            module2inspect,
+            layers,
+            fp16_output,
+            module_kwargs,
+            replay_batch_size=replay_batch_size,
+            prepared_forward=prepared_forward,
         )
 
         return (
@@ -1699,35 +1745,146 @@ class AWQProcessor(LoopProcessor):
         w_all = w
         best_max_val_all = []
         device = w_all.device
-        # Pre-allocate scratch buffers so the inner clamp loop never allocates large temporaries.
-        scratch_clamp = torch.empty_like(w_all[:oc_batch_size])
-        scratch_quant = torch.empty_like(scratch_clamp)
+        n_group, group_w = w_all.shape[2], w_all.shape[3]
+        n_tokens = input_feat.shape[1]
+        steps = int(max_shrink * n_grid)
         input_feat = input_feat.to(device)
+
+        # Batch the shrink candidates so each grid step no longer launches its
+        # own clamp/quantize/error kernel chain. Candidate order and the
+        # first-minimum tie break below are identical to stepping through the
+        # shrink factors one at a time.
+        factors = torch.tensor(
+            [1 - i_s / n_grid for i_s in range(steps)],
+            dtype=torch.float32 if w_all.dtype in (torch.float16, torch.bfloat16) else w_all.dtype,
+            device=device,
+        )
+        elem_size = torch.empty((), dtype=torch.result_type(input_feat, w_all)).element_size()
+        # Three workspaces are capped independently at `budget`: the per-
+        # candidate clamped+quantized pair, the full-token error input
+        # `cur_out`, and each (cand, co, token, group, group_w) product slice.
+        # On CPU a large transient only evicts the L3-resident working set the
+        # sequential loop enjoyed, so the CPU default stays small; on GPU the
+        # larger chunk amortizes launches and feeds the wide memory bus.
+        mse_cfg = getattr(self.qcfg, "mse", None)
+        budget = MSEConfig.resolve_budget_bytes(
+            mse_cfg.clip_grid_budget if isinstance(mse_cfg, MSEConfig) else None,
+            device,
+        )
+        row_elems = oc_batch_size * n_group * group_w
+        out_elems = oc_batch_size * n_tokens * n_group
+        cand_chunk = max(
+            1,
+            min(
+                steps,
+                budget // max(2 * row_elems * elem_size, 1),
+                budget // max(out_elems * elem_size, 1),
+            ),
+        )
+        token_chunk = max(
+            1, min(n_tokens, budget // max(cand_chunk * row_elems * elem_size, 1))
+        )
+
+        # Pre-allocate scratch buffers so the inner loops never allocate large temporaries.
+        scratch_clamp = torch.empty(
+            (cand_chunk, oc_batch_size, 1, n_group, group_w), dtype=w_all.dtype, device=device
+        )
+        scratch_quant = torch.empty_like(scratch_clamp)
+        scratch_out = torch.empty(
+            (cand_chunk, oc_batch_size, n_tokens, n_group),
+            dtype=torch.result_type(input_feat, w_all),
+            device=device,
+        )
+        org_out = torch.empty_like(scratch_out[0])
+        scratch_prod = torch.empty(
+            (cand_chunk, oc_batch_size, token_chunk, n_group, group_w),
+            dtype=scratch_out.dtype,
+            device=device,
+        )
 
         for i_b in range(org_w_shape[0] // oc_batch_size):
             w = w_all[i_b * oc_batch_size: (i_b + 1) * oc_batch_size]
 
             org_max_val = w.abs().amax(dim=-1, keepdim=True)  # [co_batch, 1, n_group, 1]
 
-            best_max_val = org_max_val.clone()
-            min_errs = torch.ones_like(org_max_val) * 1e9
-            clamp_slice = scratch_clamp[: w.shape[0]]
-            quant_slice = scratch_quant[: w.shape[0]]
+            # Half/bfloat16 scalar multiplication computes in float32 and only
+            # rounds the result. Do not round the factors to the weight dtype.
+            cand_max_val = (
+                org_max_val.unsqueeze(0) * factors.view(-1, 1, 1, 1, 1)
+            ).to(w_all.dtype)
 
-            org_out = (input_feat * w).sum(dim=-1)  # [co_batch, n_token, n_group]
+            # Keep the pristine bound as the initial candidate. The previous loop
+            # compared against an FP16 `1e9` sentinel, which overflows to `+inf`, so
+            # an all-NaN/all-infinite grid retained `org_max_val`. Stacking the
+            # errors and selecting once preserves that behavior while replacing two
+            # `where` launches per grid step with one `argmin` per output batch.
+            err_chunks = [torch.full_like(org_max_val, float("inf")).unsqueeze(0)]
+            max_val_chunks = [org_max_val.unsqueeze(0)]
 
-            for i_s in range(int(max_shrink * n_grid)):
-                max_val = org_max_val * (1 - i_s / n_grid)
-                min_val = -max_val
-                torch.clamp(w, min_val, max_val, out=clamp_slice)
-                self._pseudo_quantize_tensor_into(clamp_slice, quant_slice)
-                cur_out = (input_feat * quant_slice).sum(dim=-1)
+            for t0 in range(0, n_tokens, token_chunk):
+                t1 = min(t0 + token_chunk, n_tokens)
+                prod = scratch_prod[0, :, : t1 - t0]
+                torch.mul(input_feat[:, t0:t1], w, out=prod)
+                torch.sum(prod, dim=-1, out=org_out[:, t0:t1])
 
-                # Evaluate the reconstruction error for the current clamp ratio and keep the best one.
-                err = (cur_out - org_out).pow(2).mean(dim=1).view(min_errs.shape)
-                cur_best_idx = err < min_errs
-                min_errs[cur_best_idx] = err[cur_best_idx]
-                best_max_val[cur_best_idx] = max_val[cur_best_idx]
+            for s0 in range(0, steps, cand_chunk):
+                tc = min(cand_chunk, steps - s0)
+                max_val = cand_max_val[s0:s0 + tc]  # [tc, co_batch, 1, n_group, 1]
+                clamp_slice = scratch_clamp[:tc]
+                quant_slice = scratch_quant[:tc]
+                torch.clamp(w.unsqueeze(0), -max_val, max_val, out=clamp_slice)
+                # `clamp(w, -max_val, max_val)` bounds every group by `max_val`, so the
+                # symmetric magnitude the quantizer needs is `min(|w|.amax(), max_val)`.
+                # `org_max_val` is `|w|.amax()` and `max_val` is it scaled by a factor in
+                # `[0.5, 1]`, so the minimum is `max_val` itself: passing it straight
+                # through drops a kernel and a buffer per grid step without changing a
+                # single value.
+                # Flatten the candidate axis into the batch axis: the per-row
+                # stats inside `_pseudo_quantize_tensor_into` then reduce over
+                # the same `group_size` (or whole-row) axis as the per-step
+                # calls did, and `abs_max` flattens in the same order.
+                self._pseudo_quantize_tensor_into(
+                    clamp_slice.reshape(-1, 1, n_group, group_w),
+                    quant_slice.reshape(-1, 1, n_group, group_w),
+                    abs_max=max_val,
+                )
+
+                # (input_feat * quant).sum(-1) per candidate, sliced over tokens
+                # so the product stays under the workspace cap. Slicing the
+                # token axis does not change any element's sum over `group_w`,
+                # and the mean below still reduces the same full token axis.
+                cur_out = scratch_out[:tc]
+                for t0 in range(0, n_tokens, token_chunk):
+                    t1 = min(t0 + token_chunk, n_tokens)
+                    torch.mul(
+                        input_feat[:, t0:t1],
+                        quant_slice,
+                        out=scratch_prod[:tc, :, : t1 - t0],
+                    )
+                    torch.sum(
+                        scratch_prod[:tc, :, : t1 - t0],
+                        dim=-1,
+                        out=cur_out[:, :, t0:t1],
+                    )
+
+                # `cur_out` is scratch, so the difference and square happen in place.
+                cur_out.sub_(org_out.unsqueeze(0)).pow_(2)
+                err_chunks.append(cur_out.mean(dim=2).view(tc, *org_max_val.shape))
+                max_val_chunks.append(max_val)
+
+            errs = torch.cat(err_chunks, dim=0)
+            max_vals = torch.cat(max_val_chunks, dim=0)
+
+            # `argmin` returns the first occurrence on ties, matching the old
+            # strict-`<` update. NaN candidates were never selected before, so map
+            # them to `+inf` and let the pristine-bound sentinel absorb an all-NaN
+            # grid.
+            best_index = errs.nan_to_num(nan=torch.inf).argmin(dim=0)
+            best_max_val = torch.gather(
+                max_vals,
+                dim=0,
+                index=best_index.unsqueeze(0),
+            ).squeeze(0)
             best_max_val_all.append(best_max_val)
 
         best_max_val = torch.cat(best_max_val_all, dim=0)
@@ -1744,7 +1901,6 @@ class AWQProcessor(LoopProcessor):
             assert org_w_shape[-1] % self.qcfg.group_size == 0, f"org_w_shape ({org_w_shape[-1]}) must be a multiple of group_size ({self.qcfg.group_size})!"
             w = w.reshape(-1, self.qcfg.group_size)
         assert w.dim() == 2
-        assert torch.isnan(w).sum() == 0
 
         # zero point quantization
         if not self.qcfg.sym:
@@ -1766,8 +1922,10 @@ class AWQProcessor(LoopProcessor):
             scales = max_val / max_int
             w = torch.clamp(torch.round(w / scales), min_int, max_int) * scales
 
-        assert torch.isnan(scales).sum() == 0
-        assert torch.isnan(w).sum() == 0
+        # A single reduction and host read covers both guards. NaN scales and
+        # NaN dequantized weights are independent failures, but each full-tensor
+        # scan previously synchronized the stream separately.
+        assert not bool(torch.isnan(scales).any() | torch.isnan(w).any())
 
         scales = scales.view(org_w_shape[0], -1)
 
@@ -1784,7 +1942,12 @@ class AWQProcessor(LoopProcessor):
         return w, scales, zeros
 
     @torch.inference_mode()
-    def _pseudo_quantize_tensor_into(self, src: torch.Tensor, dst: torch.Tensor) -> None:
+    def _pseudo_quantize_tensor_into(
+        self,
+        src: torch.Tensor,
+        dst: torch.Tensor,
+        abs_max: torch.Tensor = None,
+    ) -> None:
         """Writes pseudo-quantized values into a destination tensor without reallocating."""
 
         # Quantize `src` into `dst` without allocating a new tensor (mirrors pseudo_quantize_tensor)
@@ -1812,15 +1975,24 @@ class AWQProcessor(LoopProcessor):
             dst_view.sub_(zeros)
             dst_view.mul_(scales)
         else:
-            max_val = src_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5)
+            if abs_max is None:
+                max_val = src_view.abs().amax(dim=1, keepdim=True)
+            else:
+                # The clip search clamps the block by a bound it already knows, so
+                # the symmetric magnitude it needs is `min(|w|.amax(), bound)`. That
+                # skips the `abs()` plus reduction pair on every grid step.
+                max_val = abs_max.reshape(src_view.shape[0], 1)
+            max_val = max_val.clamp(min=1e-5)
             max_int = 2 ** (self.qcfg.bits - 1) - 1
-            min_int = -(2 ** (self.qcfg.bits - 1))
             scales = max_val / max_int
 
-            dst_view.copy_(src_view)
-            dst_view.div_(scales)
+            # Divide straight into the destination instead of copying first. The
+            # symmetric magnitude that produced `scales` bounds `src_view`, so
+            # `src_view / scales` cannot exceed `max_int` and the rounded value
+            # already sits inside the signed range: the clamp the asymmetric
+            # path needs (where `zeros` shifts the value) never changes one here.
+            torch.div(src_view, scales, out=dst_view)
             torch.round(dst_view, out=dst_view)
-            dst_view.clamp_(min_int, max_int)
             dst_view.mul_(scales)
 
 
@@ -1833,6 +2005,8 @@ class AWQProcessor(LoopProcessor):
         linears2scale: List[nn.Linear],
         fp16_output: torch.Tensor,
         kwargs: Dict={},
+        replay_batch_size: Optional[int] = None,
+        prepared_forward: Optional[Tuple[torch.Tensor, Dict]] = None,
     ):
         """
         Compute loss and select best scales
@@ -1845,16 +2019,43 @@ class AWQProcessor(LoopProcessor):
         """
         n_grid = 20
         history = []
-        best_ratio = -1
         best_scales = None
-        best_error = float("inf")
+        best_error = None
 
-        # Clone the original FP weights to CPU once so we can mutate/restore without load_state_dict overhead
-        orig_weights_cpu: Dict[nn.Linear, torch.Tensor] = {
-            # stash a contiguous FP32 master copy on CPU; avoids tying up GPU memory between ratios
-            fc: fc.weight.detach().to(torch.float32).cpu().contiguous()
-            for fc in linears2scale
-        }
+        # Stash a pristine master copy of every scaled linear once so the per-ratio
+        # quantize/restore cycle never reaches back to host memory. The master stays on
+        # the module device while the group fits the activation budget; larger groups
+        # fall back to a host copy to bound peak device memory.
+        master_bytes = sum(fc.weight.numel() * fc.weight.element_size() for fc in linears2scale)
+        master_to_host = master_bytes > self.max_chunk_memory
+        orig_weights: Dict[nn.Linear, torch.Tensor] = {}
+        for fc in linears2scale:
+            master = fc.weight.detach().to(dtype=fc.weight.dtype, copy=True)
+            if master_to_host:
+                master = master.to("cpu").contiguous()
+            orig_weights[fc] = master
+
+        def restore_weights():
+            for fc in linears2scale:
+                master = orig_weights[fc]
+                if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
+                    master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
+                fc.weight.copy_(master)
+
+        def apply_scaled_weights(scales_view: torch.Tensor) -> None:
+            """Restore the pristine master and apply the candidate scale in one pass.
+
+            `restore_weights` exists because `mul_` followed by `div_` is not an
+            exact identity in floating point, so every grid step has to start from
+            the untouched master. Forming the product from that master directly
+            keeps the guarantee and replaces the copy plus the multiply with a
+            single launch per linear.
+            """
+            for fc in linears2scale:
+                master = orig_weights[fc]
+                if master.device != fc.weight.device or master.dtype != fc.weight.dtype:
+                    master = master.to(device=fc.weight.device, dtype=fc.weight.dtype)
+                torch.mul(master, scales_view, out=fc.weight)
 
         try:
             device = next(module2inspect.parameters()).device
@@ -1874,6 +2075,23 @@ class AWQProcessor(LoopProcessor):
         # tensor-vs-tensor loss computation.
         use_chunked_scale_search = getattr(self.qcfg, "scale_search_chunked_activations", True)
 
+        # Everything except the candidate scale is invariant across the grid: the
+        # module scaffolding (kwargs device placement, position ids, rotary
+        # embeddings) and the FP reference activations. Resolve them once instead of
+        # rebuilding them on each of the `n_grid` iterations.
+        prepared_x = x
+        prepared_kwargs = kwargs
+        reference_chunks = None
+        if use_chunked_scale_search:
+            if prepared_forward is None:
+                prepared_x, prepared_kwargs = self._prepare_module_forward(x, module2inspect, kwargs)
+            else:
+                prepared_x, prepared_kwargs = prepared_forward
+            reference_chunks = [
+                chunk.to(device=device)
+                for chunk in self._iter_reference_output_chunks(x, fp16_output)
+            ]
+
         for ratio in range(n_grid):
             # create new scales
             ratio = ratio / n_grid
@@ -1886,15 +2104,20 @@ class AWQProcessor(LoopProcessor):
             scales = scales / (scales.max() * scales.min()).sqrt()
             scales_view = scales.view(1, -1).to(device)
 
-            # avoid scaling values that overflow
-            scales[torch.isinf(scales)] = 1
-            scales[torch.isnan(scales)] = 1
+            # Avoid scaling values that overflow. The in-place `nan_to_num_` replaces the
+            # two masked assignments (four kernels: two predicates plus two index writes)
+            # with one elementwise pass, and keeps them in place so `scales_view`, which
+            # aliases `scales` whenever the scales are already on the module device, still
+            # observes the fixups.
+            scales.nan_to_num_(nan=1.0, posinf=1.0, neginf=1.0)
 
             # Q(W * s)
             # Temporarily apply the candidate scale, quantize the in-flight weights without allocating,
-            # and rely on the CPU master copy to restore the original FP values after evaluation.
+            # and rely on the master copy to restore the original FP values after evaluation.
+            # `apply_scaled_weights` rebuilds the product from that master, so the
+            # restore the previous iteration needed is folded into this step.
+            apply_scaled_weights(scales_view)
             for fc in linears2scale:
-                fc.weight.mul_(scales_view)
                 self._pseudo_quantize_tensor_into(fc.weight, fc.weight)
                 fc.weight.div_(scales_view)
 
@@ -1903,19 +2126,41 @@ class AWQProcessor(LoopProcessor):
                 # Compare chunked reference outputs against chunked quantized outputs
                 # so reconstruction loss is accumulated without assembling the full
                 # output activation on GPU.
-                total_loss = 0.0
+                #
+                # The running sum stays on the device in float64 and is only
+                # materialized once per ratio. Reducing each micro-batch chunk
+                # with `.item()` stalls the stream after every chunk forward and
+                # leaves the GPU idle between them. Accumulating in float64 keeps
+                # the reduction bit-identical to the previous host-side sum.
+                sq_sum = None
                 total_elements = 0
                 for ref_chunk, int_w_output in zip(
-                    self._iter_reference_output_chunks(x, fp16_output),
-                    self._iter_module_forward_outputs(x, module2inspect, kwargs),
+                    reference_chunks,
+                    self._iter_prepared_forward_outputs(
+                        prepared_x,
+                        module2inspect,
+                        prepared_kwargs,
+                        batch_size=replay_batch_size,
+                    ),
                 ):
                     int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                     ref_chunk = ref_chunk.to(device=int_w_output.device, dtype=int_w_output.dtype)
                     diff = (ref_chunk - int_w_output).float()
-                    total_loss += diff.pow(2).sum().item()
+                    chunk_sq = diff.pow(2).sum().double()
+                    sq_sum = chunk_sq if sq_sum is None else sq_sum + chunk_sq
                     total_elements += diff.numel()
 
-                loss = total_loss / max(total_elements, 1)
+                if sq_sum is None:
+                    loss = torch.zeros((), dtype=torch.float64, device=device)
+                else:
+                    # A Python scalar denominator selects a CUDA division path
+                    # that rounds one ULP away from host IEEE division. A
+                    # float64 device denominator keeps the legacy loss exact.
+                    loss = sq_sum / torch.tensor(
+                        max(total_elements, 1),
+                        dtype=torch.float64,
+                        device=sq_sum.device,
+                    )
             else:
                 # Legacy eager scoring path: compute one dense quantized output tensor
                 # and evaluate loss against the dense FP reference tensor.
@@ -1923,26 +2168,40 @@ class AWQProcessor(LoopProcessor):
                 int_w_output = int_w_output.clip(torch.finfo(int_w_output.dtype).min, torch.finfo(int_w_output.dtype).max)
                 loss = self._compute_loss(fp16_output, int_w_output, device)
 
+            # Keep the whole grid on the device. Comparing a 0-D loss in Python
+            # forces a host synchronization after every ratio; instead, update
+            # the running minimum and its scale tensor with the same strict `<`
+            # predicate the host loop used, which also preserves the first
+            # minimum on ties. The scalar is read once after the grid.
             history.append(loss)
-            if loss < best_error:
-                best_error = loss
-                best_ratio = ratio
-                best_scales = scales.clone()
-            for fc in linears2scale:
-                fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
+            if best_error is None:
+                best_error = torch.full(
+                    (),
+                    float("inf"),
+                    dtype=loss.dtype,
+                    device=loss.device,
+                )
+                # The first candidate can alias the local scales tensor; every
+                # later replacement writes through `where` into that tensor.
+                best_scales = scales
+                improved = loss < best_error
+                torch.where(improved, loss, best_error, out=best_error)
+            else:
+                improved = loss < best_error
+                torch.where(improved, loss, best_error, out=best_error)
+                torch.where(improved, scales, best_scales, out=best_scales)
 
-        # Reset weights one final time so callers always see the pristine FP copy.
-        for fc in linears2scale:
-            fc.weight.copy_(orig_weights_cpu[fc].to(device=fc.weight.device, dtype=fc.weight.dtype))
-        orig_weights_cpu.clear()
+        # The last grid step leaves its quantized product in place, so reset once
+        # more to hand callers the pristine FP copy.
+        restore_weights()
+        orig_weights.clear()
 
-        if best_ratio == -1:
-            log.debug(history)
+        best_error_value = best_error.item()
+        if best_error_value == float("inf"):
+            log.debug([loss.item() for loss in history])
             raise Exception
 
-        assert torch.isnan(best_scales).sum() == 0, best_scales
-
-        return best_scales.detach().cpu(), best_error
+        return best_scales.detach().cpu(), best_error_value
 
     @torch.inference_mode()
     def _compute_loss(
@@ -1953,7 +2212,7 @@ class AWQProcessor(LoopProcessor):
     ):
         """Computes chunked mean-squared reconstruction loss under a memory cap."""
 
-        loss = 0.0
+        loss = None
         fp16_output_flat = fp16_output.view(-1)
         int_w_output_flat = int_w_output.view(-1)
         num_elements = fp16_output_flat.size(0)
@@ -1970,11 +2229,18 @@ class AWQProcessor(LoopProcessor):
 
         # Compute the loss for each chunk
         for fp16_chunk, int_w_chunk in zip(fp16_chunks, int_w_chunks):
-            chunk_loss = (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().item()
-            loss += chunk_loss
+            chunk_loss = (fp16_chunk.to(device) - int_w_chunk.to(device)).float().pow(2).sum().double()
+            loss = chunk_loss if loss is None else loss + chunk_loss
 
         # Normalize the loss by the total number of elements
-        loss /= num_elements
+        if loss is None:
+            loss = torch.zeros((), dtype=torch.float64, device=device)
+        # Match the chunked path and the old host division bit-for-bit.
+        loss = loss / torch.tensor(
+            num_elements,
+            dtype=torch.float64,
+            device=loss.device,
+        )
 
         return loss
 
@@ -1992,10 +2258,16 @@ class AWQProcessor(LoopProcessor):
         return torch.cat(outputs, dim=0)
 
     @torch.inference_mode()
-    def _iter_module_forward_outputs(
+    def _prepare_module_forward(
             self, x: torch.Tensor, module: torch.nn.Module, module_kwargs: Dict
     ):
-        """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
+        """Resolves the forward scaffolding that is invariant across candidate scales.
+
+        Device placement of ``module_kwargs``, batch promotion and the rotary
+        ``position_embeddings`` depend only on the module and the captured input,
+        never on the AWQ scale being evaluated. The chunked scale search resolves
+        them once and replays the result for every ratio in the grid.
+        """
 
         module_kwargs = dict(module_kwargs)
 
@@ -2080,15 +2352,63 @@ class AWQProcessor(LoopProcessor):
                 pos_values = pos_values.unsqueeze(0).expand(batch_dim, -1)
             module_kwargs["position_ids"] = pos_values
 
-        effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+        if target_device is not None and x.device != target_device:
+            x = x.to(target_device)
+
+        return x, module_kwargs
+
+    def _scale_search_replay_batch_size(self, x: torch.Tensor) -> Optional[int]:
+        """Rows per scale-search replay forward.
+
+        The capture batch size is tuned for activation capture and is often 1.
+        Replaying one capture batch at a time turns every candidate scale into a
+        series of tiny GEMMs.  Coalesce the captured batches up to the activation
+        budget already used by the chunked loss so peak memory stays bounded.
+        Returns ``0`` when the whole replay fits in one forward.
+        """
+
+        if x.dim() == 0:
+            return None
+        rows = int(x.shape[0])
+        if rows <= 1:
+            return None
+        hidden = int(x.shape[-1]) if x.dim() > 1 else 1
+        element_size = max(int(x.element_size()), 2)
+        # Input, forward output, and the CPU reference copy are resident together.
+        bytes_per_row = max(1, hidden) * element_size * 3
+        budget_rows = max(1, int(self.max_chunk_memory) // bytes_per_row)
+        if budget_rows >= rows:
+            return 0
+        return max(int(self._quant_batch_size or 1), budget_rows)
+
+    @torch.inference_mode()
+    def _iter_prepared_forward_outputs(
+            self,
+            x: torch.Tensor,
+            module: torch.nn.Module,
+            module_kwargs: Dict,
+            batch_size: Optional[int] = None,
+    ):
+        """Yields forward outputs chunk-by-chunk for an already-prepared forward.
+
+        ``x`` and ``module_kwargs`` must originate from
+        :meth:`_prepare_module_forward`, which guarantees they already live on the
+        module device.
+        """
+
+        effective_quant_batch_size = self._quant_batch_size if batch_size is None else batch_size
+        effective_quant_batch_size = (
+            effective_quant_batch_size
+            if effective_quant_batch_size and effective_quant_batch_size > 0
+            else None
+        )
 
         if (
             effective_quant_batch_size is None
             or x.dim() == 0
             or x.shape[0] <= effective_quant_batch_size
         ):
-            x_forward = x.to(target_device) if target_device is not None and x.device != target_device else x
-            module_output = module(x_forward, **module_kwargs)
+            module_output = module(x, **module_kwargs)
             if isinstance(module_output, tuple):
                 module_output = module_output[0]
             yield module_output
@@ -2110,22 +2430,45 @@ class AWQProcessor(LoopProcessor):
 
         batch_offset = 0
         for x_partial in torch.split(x, effective_quant_batch_size, dim=0):
-            x_forward = x_partial.to(target_device) if target_device is not None and x_partial.device != target_device else x_partial
             partial_kwargs = {
-                key: _slice_value(value, batch_offset, x_forward.shape[0])
+                key: _slice_value(value, batch_offset, x_partial.shape[0])
                 for key, value in module_kwargs.items()
             }
-            partial_output = module(x_forward, **partial_kwargs)
+            partial_output = module(x_partial, **partial_kwargs)
             if isinstance(partial_output, tuple):
                 partial_output = partial_output[0]
             yield partial_output
-            batch_offset += x_forward.shape[0]
+            batch_offset += x_partial.shape[0]
 
-    def _iter_reference_output_chunks(self, x: torch.Tensor, reference_output):
+    @torch.inference_mode()
+    def _iter_module_forward_outputs(
+            self,
+            x: torch.Tensor,
+            module: torch.nn.Module,
+            module_kwargs: Dict,
+            batch_size: Optional[int] = None,
+    ):
+        """Yields forward outputs chunk-by-chunk to reduce peak activation memory."""
+
+        x, prepared_kwargs = self._prepare_module_forward(x, module, module_kwargs)
+        yield from self._iter_prepared_forward_outputs(
+            x, module, prepared_kwargs, batch_size=batch_size
+        )
+
+    def _iter_reference_output_chunks(
+        self,
+        x: torch.Tensor,
+        reference_output,
+    ):
         """Normalizes reference outputs to the same chunking contract as forward outputs."""
 
         if isinstance(reference_output, torch.Tensor):
-            effective_quant_batch_size = self._quant_batch_size if self._quant_batch_size and self._quant_batch_size > 0 else None
+            effective_quant_batch_size = self._quant_batch_size
+            effective_quant_batch_size = (
+                effective_quant_batch_size
+                if effective_quant_batch_size and effective_quant_batch_size > 0
+                else None
+            )
             if (
                 effective_quant_batch_size is None
                 or x.dim() == 0
@@ -2397,7 +2740,12 @@ class AWQProcessor(LoopProcessor):
                 state.pending_modules.discard(module.name)
 
             if previous_subset:
-                state.previous_weight_scale = self._capture_previous_subset_scale(previous_subset)
+                # ``process`` runs once per module, so every worker receives the
+                # same previous-subset mapping. Recomputing its weight scale for
+                # each module turned one reduction per module into O(modules^2)
+                # reductions and device reads per layer. Cache by identity; the
+                # processed subset is immutable once handed to the next stage.
+                state.previous_weight_scale = self._previous_subset_scale(state, previous_subset)
 
             # Only gate on modules that were scheduled for subset processing to
             # avoid early quantization while parallel workers are still running.

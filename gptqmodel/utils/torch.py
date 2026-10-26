@@ -6,6 +6,7 @@
 import contextlib
 import importlib
 import os
+import sys
 import time
 from contextlib import contextmanager
 from enum import Enum
@@ -60,15 +61,34 @@ def timed_gc_collect() -> int:
     log.info(f"gc.collect() reclaimed {collected} objects in {duration:.3f}s")
     return collected
 
-# reset dynamo cache on each model load since during ci loop model inference may exhuast cache
-try:
-    torch._dynamo.reset()
-    # Increase the dynamo cache size limit, default of 8 is too low
-    if torch._dynamo.config.cache_size_limit < 128:
-        torch._dynamo.config.cache_size_limit = 128
-except BaseException:
-    # triton built from source maybe incompatible with _dynamo private api
-    pass
+def configure_dynamo_cache(*, ensure_import: bool = False) -> bool:
+    """
+    Raise dynamo's recompile cache limit to the project minimum (128).
+
+    `torch._dynamo` is imported lazily: pulling it in costs about a second of
+    process startup because it drags `torch._inductor` (and its cudagraph
+    machinery) along with it, and the cache limit only matters once something
+    actually compiles. Callers that are about to compile pass `ensure_import=True`
+    so the limit is in place before the first `torch.compile`.
+    """
+    dynamo = sys.modules.get("torch._dynamo")
+    if dynamo is None:
+        if not ensure_import:
+            return False
+        try:
+            import torch._dynamo as dynamo
+        except Exception:
+            # triton built from source maybe incompatible with _dynamo private api
+            return False
+
+    try:
+        # default of 8 is too low: ci loop model inference may exhaust the cache
+        if dynamo.config.cache_size_limit < 128:
+            dynamo.config.cache_size_limit = 128
+        return True
+    except Exception:
+        # triton built from source maybe incompatible with _dynamo private api
+        return False
 
 try:
     HAS_CUDA = torch.cuda.is_available()
@@ -174,6 +194,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
 
     if not TORCH_HAS_COMPILE:
         return module
+    configure_dynamo_cache(ensure_import=True)
     if HAS_MPS and not TORCH_GTE_28:
         if not torch._dynamo.config.suppress_errors:
             log.warn("To use compile() with MPS, you need to have torch version >= 2.8.0, "
@@ -343,6 +364,52 @@ def empty_cache_for_device(device: torch.device) -> bool:
         mlx.core.clear_cache()
         return True
     return False
+
+
+@lru_cache(maxsize=12)
+def resolve_memory_stats_callable(device_type: str) -> Optional[Callable[[torch.device], dict]]:
+    """Return the allocator-stats callable for `device_type`, or None when absent.
+
+    Mirrors ``resolve_empty_cache_callable``: allocator diagnostics should ask the
+    active accelerator, because ``torch.cuda`` only reports CUDA allocations and
+    stays empty on NPU/XPU/CPU-only builds.
+    """
+
+    try:
+        if device_type == "cuda" and HAS_CUDA:
+            candidate = torch.cuda.memory_stats
+        elif device_type == "xpu" and HAS_XPU:
+            candidate = torch.xpu.memory_stats
+        elif device_type == "npu" and HAS_NPU:
+            candidate = torch.npu.memory_stats
+        else:
+            candidate = None
+    except Exception:
+        candidate = None
+
+    if callable(candidate):
+        return candidate
+
+    return None
+
+
+def memory_stats_for_device(device: torch.device) -> dict:
+    """Return allocator statistics for `device`, or an empty mapping when unsupported.
+
+    Best-effort telemetry uses this instead of ``torch.cuda.memory_stats``. The
+    CUDA call reports nothing for a non-CUDA device, so accelerator memory log
+    rows silently read zero on NPU/XPU/CPU-only builds even while the device is
+    holding allocations.
+    """
+
+    fn = resolve_memory_stats_callable(device.type)
+    if fn is None:
+        return {}
+
+    try:
+        return fn(device)
+    except Exception:
+        return {}
 
 
 def torch_empty_cache_any(

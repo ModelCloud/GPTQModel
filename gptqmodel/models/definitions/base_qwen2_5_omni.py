@@ -8,7 +8,7 @@ from typing import Dict, Optional
 
 import torch
 from PIL import Image
-from transformers import AutoModelForTextToWaveform, AutoProcessor, ProcessorMixin
+from transformers import AutoModelForTextToWaveform, AutoProcessor, PreTrainedModel, ProcessorMixin
 
 from ...utils.audio import process_audio_info
 from ...utils.calibration import batched_conversations
@@ -74,12 +74,9 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     ATTENTION_MASKS_DTYPE = torch.long
     require_monkeypatch = True
 
-    INPUT_EMBEDDING_EXTRA_ARGS = {
-        "return_audio": False,
-    }
-
     loader = AutoModelForTextToWaveform
 
+    lm_head = "thinker.lm_head"
     pre_lm_head_norm_module = "thinker.model.norm"
 
     require_pkgs = ["audioread>=3.1.0", "librosa>=0.11.0", "av>=16.0.1"]
@@ -100,6 +97,28 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
     modality = [MODALITY.TEXT, MODALITY.IMAGE_TO_TEXT]
 
     require_load_processor = True
+
+    def before_model_load(self, model_local_path: str, load_quantized_model: bool):
+        from transformers import Qwen2_5OmniForConditionalGeneration
+
+        # The quantized loader discovers endpoints before constructing our
+        # wrapper. Supply the missing HF getters there as well as on the wrapper.
+        model_cls = Qwen2_5OmniForConditionalGeneration
+        if model_cls.get_input_embeddings is PreTrainedModel.get_input_embeddings:
+            model_cls.get_input_embeddings = lambda model: model.thinker.get_input_embeddings()
+        if model_cls.get_output_embeddings is PreTrainedModel.get_output_embeddings:
+            model_cls.get_output_embeddings = lambda model: model.thinker.lm_head
+
+    def get_input_embeddings(self):
+        return self.model.thinker.get_input_embeddings()
+
+    def get_output_embeddings(self):
+        return self.model.thinker.lm_head
+
+    def run_input_capture(self, example, use_cache, data_device):
+        # Calibration only needs the thinker's forward pass. The speech
+        # generation wrapper requires a talker even for text-only checkpoints.
+        return self.model.thinker(**example, use_cache=use_cache)
 
     def monkey_patch(self):
         talker = getattr(getattr(self, "model", None), "talker", None)
@@ -188,7 +207,8 @@ class BaseQwen2_5_OmniGPTQ(BaseQModel):
         self.model.thinker.model.rotary_emb = self.model.thinker.model.rotary_emb.to(CPU)
 
         for layer in self.model.thinker.model.layers:
-            layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
+            if hasattr(layer.self_attn, "rotary_emb"):
+                layer.self_attn.rotary_emb = layer.self_attn.rotary_emb.to(CPU)
 
     @staticmethod
     def process_vision_info(

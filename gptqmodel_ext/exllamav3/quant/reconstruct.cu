@@ -4,7 +4,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include "../util.h"
 #include "../util.cuh"
-#include "../ptx.cuh"
+#include "../frag.cuh"
 #include "exl3_dq.cuh"
 
 // TODO: Benchmark, profile, unit test
@@ -35,17 +35,19 @@ void reconstruct_kernel
     __syncthreads();
 
     // Dequant
-    register FragB frag[2];
+    FragB frag[2];
     dq_dispatch<K, cb>(s_packed[warp_id], lane_id * 8, frag[0], frag[1]);
 
     // Shuffle from tensor core layout to row major tile
 //    __shared__ half tile[16 * 8 * 16];
     __shared__ half2 tile[16][8][8];
 
-    half2 n0 = __shfl_down_sync(0xFFFFFFFF, frag[0][0], 4, 32);
-    half2 n1 = __shfl_down_sync(0xFFFFFFFF, frag[0][1], 4, 32);
-    half2 n2 = __shfl_down_sync(0xFFFFFFFF, frag[1][0], 4, 32);
-    half2 n3 = __shfl_down_sync(0xFFFFFFFF, frag[1][1], 4, 32);
+    // __activemask() is the active-lane set with the right width on both CUDA
+    // and HIP (a 32-bit literal fails HIP's 64-bit shuffle-mask static_assert).
+    half2 n0 = __shfl_down_sync(__activemask(), frag[0][0], 4, 32);
+    half2 n1 = __shfl_down_sync(__activemask(), frag[0][1], 4, 32);
+    half2 n2 = __shfl_down_sync(__activemask(), frag[1][0], 4, 32);
+    half2 n3 = __shfl_down_sync(__activemask(), frag[1][1], 4, 32);
     __syncwarp();
 
     if (!(lane_id & 4))
@@ -122,7 +124,10 @@ void reconstruct
     if (mcg) cbi += 8;
     else if (mul1) cbi += 16;
 
-    reconstruct_kernel_instances[cbi]<<<gridDim, blockDim, 0, stream>>>
+    // See pack.cu: an indexed instantiation is mis-parsed by HIPify, so bind it to
+    // a local identifier before the launch.
+    auto reconstruct_kernel = reconstruct_kernel_instances[cbi];
+    reconstruct_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (half*) unpacked.data_ptr(),
         (const uint16_t*) packed.data_ptr()

@@ -16,10 +16,24 @@ import torch
 import torch.nn as nn
 from models.model_test import ModelTest
 
+from gptqmodel.looper.named_module import NamedModule
 from gptqmodel.quantization import gptq as gptq_mod
-from gptqmodel.quantization.config import HessianConfig, QuantizeConfig
+from gptqmodel.quantization.config import (
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+)
+from gptqmodel.quantization.foem import FOEM
+from gptqmodel.quantization.gptaq import GPTAQ
 from gptqmodel.quantization.gptq import GPTQ
-from gptqmodel.quantization.quantizer import Quantizer
+from gptqmodel.quantization.qqq import QQQ
+from gptqmodel.quantization.quantizer import (
+    Quantizer,
+    _neutralize_dead_columns,
+    _replace_zero_scale,
+    quantize,
+)
 
 
 def _make_module(hidden_dim: int, device: torch.device) -> nn.Linear:
@@ -228,6 +242,32 @@ def test_embedding_quantization_is_group_exact_and_blocksize_independent():
     assert loss == pytest.approx(expected_loss)
 
 
+def test_embedding_quantization_keeps_diagonal_floor_on_device():
+    """Only the zero-scale probe and final loss may read a host scalar."""
+
+    class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __init__(self):
+            self.scalar_reads = 0
+
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            if func in (
+                torch.ops.aten._local_scalar_dense.default,
+                torch.ops.aten.item.default,
+                torch.ops.aten.is_nonzero.default,
+            ):
+                self.scalar_reads += 1
+            return func(*args, **(kwargs or {}))
+
+    gptq = _make_embedding_gptq(group_size=2)
+    gptq.add_batch(torch.tensor([[0, 1, 1, 3, 4, 4, 4]]), None)
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        gptq.quantize(blocksize=1)
+
+    assert recorder.scalar_reads == 2
+
+
 def test_embedding_desc_act_uses_frequency_ordered_groups():
     gptq = _make_embedding_gptq(group_size=2, desc_act=True)
     gptq.add_batch(torch.tensor([[0, 1, 1, 1, 3, 3, 4]]), None)
@@ -289,6 +329,742 @@ def test_two_bit_asymmetric_mse_search_optimizes_zero_point_orientation(monkeypa
     assert optimized.zero.item() == 1.0
     assert legacy.zero.item() == 2.0
     assert optimized_loss < legacy_loss
+
+
+def _legacy_find_params_range(x, sym):
+    """The pre-optimization range math, kept verbatim as the numeric oracle."""
+    tmp = torch.zeros(x.shape[0], device=x.device)
+    xmin = torch.minimum(x.min(1)[0], tmp)
+    xmax = torch.maximum(x.max(1)[0], tmp)
+
+    if sym:
+        xmax = torch.maximum(torch.abs(xmin), xmax)
+        tmp = xmin < 0
+        if torch.any(tmp):
+            xmin[tmp] = -xmax[tmp]
+    tmp = (xmin == 0) & (xmax == 0)
+    xmin[tmp] = -1
+    xmax[tmp] = +1
+    return xmin, xmax
+
+
+def _range_cases(dtype):
+    generator = torch.Generator().manual_seed(0)
+    cases = {"randn": torch.randn(48, 32, generator=generator)}
+    cases["all_zero"] = torch.zeros(48, 32)
+
+    mixed = torch.randn(48, 32, generator=generator)
+    mixed[::3] = 0.0
+    mixed[1::5] = -mixed[1::5].abs()
+    mixed[2::7] = mixed[2::7].abs()
+    mixed[3::11] = -0.0
+    cases["mixed_signs"] = mixed
+
+    wide = torch.randn(48, 32, generator=generator) * 1e4
+    wide[5] = 0.0
+    cases["wide"] = wide
+    return {name: tensor.to(dtype) for name, tensor in cases.items()}
+
+
+def _raw_bytes(tensor):
+    return tensor.detach().contiguous().view(torch.uint8)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("sym", [True, False])
+def test_find_params_range_math_stays_bit_exact_and_sync_free(dtype, sym):
+    """The min/max normalization must stay bit-identical to the legacy math.
+
+    It also must not fall back to boolean-mask indexing: ``xmin[mask] = ...``
+    forces a ``nonzero`` scan plus a device-to-host round trip on every call,
+    which is the dominant cost of the GPTQ block loop on accelerators.
+    """
+    dispatched = []
+
+    class _Recorder(torch.utils._python_dispatch.TorchDispatchMode):
+        def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+            dispatched.append(str(func))
+            return func(*args, **(kwargs or {}))
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, sym=sym, desc_act=False)
+
+    for name, weights in _range_cases(dtype).items():
+        quantizer = Quantizer(qcfg)
+        quantizer.configure(perchannel=True, bits=4, sym=sym)
+
+        dispatched.clear()
+        with _Recorder():
+            quantizer.find_params(weights, weight=True)
+
+        expected_xmin, expected_xmax = _legacy_find_params_range(weights.clone(), sym)
+        expected_scale = (expected_xmax - expected_xmin) / quantizer.maxq.cpu()
+        if sym:
+            expected_zero = torch.full_like(expected_scale, (quantizer.maxq.cpu() + 1) / 2)
+        else:
+            expected_zero = torch.round(-expected_xmin / expected_scale)
+
+        assert torch.equal(_raw_bytes(quantizer.scale.reshape(-1)), _raw_bytes(expected_scale)), name
+        assert torch.equal(_raw_bytes(quantizer.zero.reshape(-1)), _raw_bytes(expected_zero)), name
+
+        banned = ("aten.nonzero", "aten.index_put", "aten._local_scalar_dense", "aten.masked_scatter")
+        offenders = [entry for entry in dispatched if entry.startswith(banned)]
+        assert not offenders, (name, offenders)
+        if sym:
+            assert "aten.__and__.Tensor" not in dispatched, (name, dispatched)
+
+
+def _legacy_mse_quantize(x, scale, zero, maxq):
+    """The pre-optimization MSE candidate dequantization, kept as the oracle."""
+    zero_mask = scale == 0
+    safe_scale = torch.where(
+        zero_mask,
+        torch.full_like(scale, torch.finfo(scale.dtype).tiny),
+        scale,
+    )
+    undefined_zero = zero_mask & ~torch.isfinite(zero)
+    safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
+    quantized = torch.clamp(torch.round(x / safe_scale) + safe_zero, 0, maxq)
+    return safe_scale * (quantized - safe_zero)
+
+
+def _legacy_mse_range_search(x, *, bits, sym, mse, grid=100, maxshrink=0.8):
+    """The pre-optimization MSE search, kept verbatim as the numeric oracle."""
+    x = x.flatten(1)
+    maxq = 2**bits - 1
+    xmin, xmax = _legacy_find_params_range(x, sym)
+    scale = (xmax - xmin) / maxq
+    zero = torch.full_like(scale, (maxq + 1) / 2) if sym else torch.round(-xmin / scale)
+    best = torch.full([x.shape[0]], float("inf"), device=x.device)
+    search_adjacent_zero_points = maxq == 3 and not sym
+
+    for i in range(int(maxshrink * grid)):
+        p = 1 - i / grid
+        xmin1 = p * xmin
+        xmax1 = p * xmax
+        scale1 = (xmax1 - xmin1) / maxq
+        zero1 = torch.round(-xmin1 / scale1) if not sym else zero
+        zero_candidates = (zero1,)
+        if search_adjacent_zero_points:
+            ideal = -xmin1 / scale1
+            lower = torch.floor(ideal).clamp_(0, maxq)
+            upper = torch.ceil(ideal).clamp_(0, maxq)
+            zero_candidates = (zero1, torch.where(zero1 == lower, upper, lower))
+
+        for zero_candidate in zero_candidates:
+            candidate = _legacy_mse_quantize(x, scale1.unsqueeze(1), zero_candidate.unsqueeze(1), maxq)
+            candidate -= x
+            candidate.abs_()
+            candidate.pow_(mse)
+            err = torch.sum(candidate, 1)
+            better = err < best
+            if torch.any(better):
+                best[better] = err[better]
+                scale[better] = scale1[better]
+                zero[better] = zero_candidate[better]
+
+    return scale, zero
+
+
+def _mse_search_cases(dtype):
+    generator = torch.Generator().manual_seed(0)
+    cases = {"randn": torch.randn(32, 128, generator=generator)}
+    cases["all_zero"] = torch.zeros(32, 128)
+
+    mixed = torch.randn(32, 128, generator=generator)
+    mixed[::3] = 0.0
+    mixed[1::5] = -mixed[1::5].abs()
+    mixed[2::7] = mixed[2::7].abs()
+    mixed[3::11] = -0.0
+    cases["mixed_signs"] = mixed
+
+    wide = torch.randn(32, 128, generator=generator) * 1e4
+    wide[5] = 0.0
+    cases["wide"] = wide
+
+    # Rounding thresholds: values one representable step below, exactly on, and
+    # one step above the nearest half-step for each magnitude.
+    centers = torch.tensor([-2.5, -1.5, -0.5, 0.5, 1.5, 2.5], dtype=dtype)
+    ulps = torch.nextafter(centers, torch.full_like(centers, float("inf"))) - centers
+    thresholds = torch.empty(32, 128, dtype=dtype)
+    for row in range(32):
+        for col in range(128):
+            index = (row + col) % centers.numel()
+            thresholds[row, col] = centers[index] + (col % 3 - 1) * ulps[index]
+    thresholds[0, 0] = -0.0
+    cases["rounding_thresholds"] = thresholds
+
+    return {name: tensor.to(dtype) for name, tensor in cases.items()}
+
+
+class _DispatchRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self):
+        self.ops = []
+        self.bool_mask_index_puts = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        name = str(func)
+        self.ops.append(name)
+        if name.startswith("aten.index_put"):
+            indices = args[1] if len(args) > 1 else ()
+            if any(
+                isinstance(index, torch.Tensor) and index.dtype == torch.bool
+                for index in indices
+            ):
+                self.bool_mask_index_puts += 1
+        return func(*args, **(kwargs or {}))
+
+
+def _assert_sync_free(ops, context):
+    banned = ("aten.nonzero", "aten.index_put", "aten._local_scalar_dense", "aten.masked_scatter")
+    offenders = [entry for entry in ops if entry.startswith(banned)]
+    assert not offenders, (context, offenders)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("bits", [2, 4])
+@pytest.mark.parametrize("sym", [True, False])
+def test_mse_range_search_stays_bit_exact_and_sync_free(dtype, bits, sym):
+    """The device-side MSE selection must match the masked-write oracle exactly.
+
+    The replaced loop paid one ``torch.any`` host round trip and three
+    ``index_put_`` scans per grid step, plus two scalar reads inside the
+    quantizer.  Scale and zero-point selection are discrete decisions, so the
+    optimized path has to stay bitwise identical, not merely close.
+    """
+    qcfg = QuantizeConfig(bits=bits, group_size=128, sym=sym, mse=2.0)
+
+    for name, weights in _mse_search_cases(dtype).items():
+        quantizer = Quantizer(qcfg)
+        quantizer.configure(perchannel=True)
+
+        recorder = _DispatchRecorder()
+        with recorder:
+            quantizer.find_params(weights, weight=True)
+
+        expected_scale, expected_zero = _legacy_mse_range_search(
+            weights.clone(),
+            bits=bits,
+            sym=sym,
+            mse=2.0,
+        )
+        assert torch.equal(_raw_bytes(quantizer.scale.reshape(-1)), _raw_bytes(expected_scale)), (name, "scale")
+        assert torch.equal(_raw_bytes(quantizer.zero.reshape(-1)), _raw_bytes(expected_zero)), (name, "zero")
+        _assert_sync_free(recorder.ops, (name, "find_params"))
+
+        recorder = _DispatchRecorder()
+        with recorder:
+            actual = quantizer.quantize(weights)
+        expected = _legacy_mse_quantize(
+            weights,
+            quantizer.scale,
+            quantizer.zero,
+            2**bits - 1,
+        )
+        assert torch.equal(_raw_bytes(actual), _raw_bytes(expected)), (name, "quantize")
+        _assert_sync_free(recorder.ops, (name, "quantize"))
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16])
+@pytest.mark.parametrize("maxq", [-1, 3, 15])
+@pytest.mark.parametrize("requires_groupwise_processing", [False, True])
+def test_quantize_host_maxq_matches_tensor_bound(dtype, maxq, requires_groupwise_processing):
+    """A host ``maxq`` must remove scalar reads without changing any output bit."""
+    torch.manual_seed(0)
+    x = torch.randn(16, 32, dtype=dtype)
+    scale = torch.rand(16, 1, dtype=dtype) * 0.1
+    zero = torch.randn(16, 1, dtype=dtype) * 2.0
+    scale[0] = 0
+    zero[0] = float("nan")
+
+    expected = quantize(
+        x,
+        scale,
+        zero,
+        torch.tensor(maxq, dtype=torch.float32),
+        requires_groupwise_processing,
+    )
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        actual = quantize(x, scale, zero, maxq, requires_groupwise_processing)
+
+    assert torch.equal(_raw_bytes(actual), _raw_bytes(expected))
+    _assert_sync_free(recorder.ops, (maxq, requires_groupwise_processing))
+
+
+_DEAD_COLUMN_CASES = {
+    "none": [],
+    "partial": [1, 4],
+    "endpoints": [0, 7],
+    "all": list(range(8)),
+}
+
+
+@pytest.mark.parametrize("case", list(_DEAD_COLUMN_CASES))
+@pytest.mark.parametrize("strided", [False, True])
+def test_neutralize_dead_columns_matches_boolean_mask_oracle(case, strided):
+    """Device masking must stay bit-identical to the replaced boolean indexing.
+
+    ``H[dead, dead] = 1`` / ``W[:, dead] = 0`` scans the mask with ``nonzero``
+    and synchronizes with the host once per module.  The in-place masked-fill
+    form must produce exactly the same tensors while staying on the device.
+    """
+
+    generator = torch.Generator().manual_seed(7)
+    size = 8
+    hessian = torch.randn(size, size, generator=generator, dtype=torch.float64)
+    hessian = hessian @ hessian.mT
+    weight = torch.randn(5, size, generator=generator, dtype=torch.float64)
+    auxiliary = torch.randn(3, size, generator=generator, dtype=torch.float64)
+    dead_columns = _DEAD_COLUMN_CASES[case]
+
+    if strided:
+        hessian = torch.randn(size * 2, size * 2, generator=generator, dtype=torch.float64)[::2, ::2]
+        weight = torch.randn(5, size * 2, generator=generator, dtype=torch.float64)[:, ::2]
+        auxiliary = torch.randn(3, size * 2, generator=generator, dtype=torch.float64)[:, ::2]
+
+    mask = torch.zeros(size, dtype=torch.bool)
+    mask[dead_columns] = True
+    # A dead channel is defined by a zero Hessian diagonal, exactly as the
+    # production path observes it.
+    hessian.diagonal()[mask] = 0.0
+
+    expected_hessian = hessian.clone()
+    expected_weight = weight.clone()
+    expected_auxiliary = auxiliary.clone()
+    expected_hessian[mask, mask] = 1.0
+    expected_weight[:, mask] = 0.0
+    expected_auxiliary[:, mask] = 0.0
+
+    actual_hessian = hessian.clone()
+    actual_weight = weight.clone()
+    actual_auxiliary = auxiliary.clone()
+    recorder = _DispatchRecorder()
+    with recorder:
+        _neutralize_dead_columns(actual_hessian, actual_weight, actual_auxiliary)
+
+    assert torch.equal(actual_hessian, expected_hessian), case
+    assert torch.equal(actual_weight, expected_weight), case
+    assert torch.equal(actual_auxiliary, expected_auxiliary), case
+    _assert_sync_free(recorder.ops, (case, "neutralize_dead_columns"))
+
+
+def _dead_channel_task(kind):
+    """Build a tiny quantizer whose Hessian has one calibration-dead channel."""
+
+    torch.manual_seed(0)
+    if kind == "gptq":
+        linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+        task = GPTQ(
+            linear,
+            qcfg=QuantizeConfig(bits=4, group_size=4, sym=True, desc_act=False),
+        )
+        task.quantizer.configure(perchannel=True)
+        inputs = torch.randn(16, 8)
+        task.add_batch(inputs, linear(inputs))
+        task.finalize_hessian()
+    elif kind in ("gptaq", "foem"):
+        linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+        named = NamedModule(
+            linear,
+            name="proj",
+            full_name="layer.0.proj",
+            layer_index=0,
+        )
+        named.state["native_inp"] = []
+        if kind == "gptaq":
+            qcfg = QuantizeConfig(
+                bits=4,
+                group_size=4,
+                sym=True,
+                desc_act=False,
+                gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+            )
+            task = GPTAQ(named, qcfg=qcfg)
+        else:
+            qcfg = QuantizeConfig(
+                bits=4,
+                group_size=4,
+                sym=True,
+                desc_act=False,
+                foem=FOEMConfig(alpha=0, beta=0.2, device="cpu"),
+            )
+            task = FOEM(named, qcfg=qcfg)
+        task.quantizer.configure(perchannel=True)
+        task.H = torch.eye(task.columns, dtype=torch.float32)
+        task.nsamples = 1
+        if kind == "gptaq":
+            task.dXXT = torch.zeros(task.columns, task.columns)
+    else:
+        linear = nn.Linear(16, 8, bias=False, dtype=torch.float32).eval()
+        task = QQQ(linear)
+        task.quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=4)
+        task.add_batch(torch.randn(4, 8, 16), None)
+        task.materialize_hessian()
+
+    hessian = task.H
+    hessian.diagonal()[2] = 0.0
+    hessian[2, :] = 0.0
+    hessian[:, 2] = 0.0
+    return task
+
+
+@pytest.mark.parametrize("kind", ["gptq", "gptaq", "foem", "qqq"])
+def test_dead_channel_neutralization_stays_on_device(kind):
+    """No quantization pipeline may write dead channels through a boolean mask."""
+
+    task = _dead_channel_task(kind)
+
+    recorder = _DispatchRecorder()
+    with recorder:
+        task.quantize(blocksize=4 if kind != "qqq" else 8)
+
+    assert recorder.bool_mask_index_puts == 0, (kind, recorder.ops)
+    assert "aten.masked_fill_.Scalar" in recorder.ops, kind
+
+
+def test_qqq_quantize_has_no_redundant_device_sync(monkeypatch):
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    linear = nn.Linear(16, 8, bias=False, dtype=torch.float32, device="cuda")
+    task = QQQ(linear)
+    task.quantizer.configure(bits=4, perchannel=True, sym=True, groupsize=4)
+    task.add_batch(torch.randn(4, 8, 16, device="cuda"), None)
+    task.materialize_hessian()
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("QQQ quantization must not issue a redundant device sync")
+
+    monkeypatch.setattr(torch.cuda, "synchronize", fail_sync)
+
+    task.quantize(blocksize=8)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("requires_groupwise_processing", [False, True])
+def test_quantize_bypasses_zero_scale_without_nonfinite_output(
+    device, dtype, requires_groupwise_processing
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    target = torch.device(device)
+    if target.type == "cuda":
+        torch.cuda.set_device(0)
+
+    maxq = 7 if requires_groupwise_processing else 15
+    x = torch.tensor(
+        [
+            [8.0, 1.5, 0.5, -0.5, -1.5, -8.0, 0.0, -0.0],
+            [1.0, 0.0, -0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+    scale = torch.tensor(
+        [
+            [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+    zero = torch.tensor(
+        [
+            [0.0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            [float("nan"), 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0],
+        ],
+        dtype=dtype,
+        device=target,
+    )
+
+    actual = quantize(
+        x,
+        scale,
+        zero,
+        torch.tensor(maxq, device=target),
+        requires_groupwise_processing,
+    )
+
+    safe_scale = torch.where(
+        scale == 0,
+        torch.full_like(scale, torch.finfo(dtype).tiny),
+        scale,
+    )
+    undefined_zero = (scale == 0) & ~torch.isfinite(zero)
+    safe_zero = torch.where(undefined_zero, torch.zeros_like(zero), zero)
+    if requires_groupwise_processing:
+        expected = safe_scale * torch.clamp(
+            torch.round(x / safe_scale), -maxq, maxq
+        )
+    else:
+        expected = safe_scale * (
+            torch.clamp(torch.round(x / safe_scale) + safe_zero, 0, maxq)
+            - safe_zero
+        )
+
+    assert actual.dtype == dtype
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_replace_zero_scale_accepts_precomputed_mask(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    scale = torch.tensor(
+        [[0.0, 1.0, 0.0], [2.0, 0.0, 3.0]],
+        dtype=torch.float16,
+        device=device,
+    )
+    zero = torch.tensor(
+        [[float("nan"), 0.0, 1.0], [0.0, 1.0, 0.0]],
+        dtype=torch.float16,
+        device=device,
+    )
+
+    expected_scale, expected_zero = _replace_zero_scale(scale, zero)
+    actual_scale, actual_zero = _replace_zero_scale(
+        scale,
+        zero,
+        zero_mask=scale == 0,
+    )
+
+    torch.testing.assert_close(actual_scale, expected_scale, rtol=0, atol=0)
+    torch.testing.assert_close(actual_zero, expected_zero, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("act_group_aware", [False, True])
+def test_gptq_bypasses_zero_scale_and_logs_once(monkeypatch, act_group_aware):
+    torch.manual_seed(0)
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        act_group_aware=act_group_aware,
+    )
+    gptq = GPTQ(linear, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+
+    inputs = torch.randn(16, 8)
+    gptq.add_batch(inputs, linear(inputs))
+
+    original_find_params = gptq.quantizer.find_params
+
+    def find_params_with_zero_scale(x, weight=False):
+        original_find_params(x, weight=weight)
+        gptq.quantizer.scale[0, 0] = 0
+
+    monkeypatch.setattr(gptq.quantizer, "find_params", find_params_with_zero_scale)
+
+    errors = []
+    monkeypatch.setattr(
+        gptq_mod.log,
+        "error",
+        lambda message, *args, **kwargs: errors.append(message % args if args else message),
+    )
+
+    quantized, scale, zero, *_ = gptq.quantize(blocksize=4)
+
+    assert torch.isfinite(quantized).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert (scale != 0).all()
+    assert len(errors) == 1
+    assert "zero scale found and bypassed" in errors[0]
+
+
+@pytest.mark.parametrize("kind", ["gptaq", "foem"])
+def test_specialized_quantizers_sanitize_zero_scale_before_return(monkeypatch, kind):
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32)
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    if kind == "gptaq":
+        named.state["native_inp"] = []
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=True,
+            desc_act=False,
+            gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+        )
+        task = GPTAQ(named, qcfg=qcfg)
+    else:
+        qcfg = QuantizeConfig(
+            bits=4,
+            group_size=4,
+            sym=True,
+            desc_act=False,
+            foem=FOEMConfig(alpha=0, beta=0.2, device="cpu"),
+        )
+        task = FOEM(named, qcfg=qcfg)
+
+    task.quantizer.configure(perchannel=True)
+    task.H = torch.eye(task.columns, dtype=torch.float32)
+    task.nsamples = 1
+    if kind == "gptaq":
+        task.dXXT = torch.zeros_like(task.H)
+
+    original_find_params = task.quantizer.find_params
+
+    def find_params_with_zero_scale(x, weight=False):
+        original_find_params(x, weight=weight)
+        task.quantizer.scale[0, 0] = 0
+
+    monkeypatch.setattr(
+        task.quantizer,
+        "find_params",
+        find_params_with_zero_scale,
+    )
+
+    quantized, scale, zero, *_ = task.quantize(blocksize=4)
+
+    assert torch.isfinite(quantized).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert (scale != 0).all()
+
+
+def _normalized_tensor_error(actual: torch.Tensor, expected: torch.Tensor) -> float:
+    actual = actual.to(dtype=torch.float64)
+    return float(torch.linalg.vector_norm(actual - expected) / torch.linalg.vector_norm(expected))
+
+
+def test_gptaq_reports_token_samples_and_preserves_upstream_hessian():
+    torch.manual_seed(0)
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    inputs = [
+        torch.randn(2, 3, 8),
+        torch.randn(1, 5, 8),
+        torch.randn(4, 8),
+    ]
+    native_inputs = [
+        inp + 0.05 * torch.randn_like(inp)
+        for inp in inputs
+    ]
+    expected_native_inputs = [inp.clone() for inp in native_inputs]
+    named.state["native_inp"] = native_inputs
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+    )
+    task = GPTAQ(named, qcfg=qcfg)
+
+    for inp in inputs:
+        task.add_batch(inp, None)
+
+    assert task.nsamples == 15
+    assert task._gptaq_batch_request_count == 4
+    assert torch.isfinite(task.H).all()
+    assert torch.isfinite(task.dXXT).all()
+
+    hessian_oracle = torch.zeros((8, 8), dtype=torch.float64)
+    dxxT_oracle = torch.zeros((8, 8), dtype=torch.float64)
+    scale = 2.0 / task._gptaq_batch_request_count
+    for inp, native_inp in zip(inputs, expected_native_inputs):
+        rows = inp.reshape(-1, inp.shape[-1]).to(torch.float64)
+        native_rows = native_inp.reshape(-1, native_inp.shape[-1]).to(torch.float64)
+        hessian_oracle += scale * (rows.T @ rows)
+        dxxT_oracle += scale * ((native_rows - rows).T @ rows)
+
+    assert _normalized_tensor_error(task.H, hessian_oracle) <= 1e-6
+    assert _normalized_tensor_error(task.dXXT, dxxT_oracle) <= 1e-6
+
+
+def test_gptaq_loss_is_reported_per_token():
+    batch_request_count = 4
+    token_count = 15
+
+    generator = torch.Generator().manual_seed(0)
+    factor = torch.randn((8, 8), dtype=torch.float64, generator=generator)
+    hessian = factor @ factor.T + torch.eye(8, dtype=torch.float64)
+    hessian_ratio = token_count / batch_request_count
+    hessian_gptaq = hessian * hessian_ratio
+
+    inverse_factor_gptq = torch.linalg.cholesky(torch.linalg.inv(hessian), upper=True)
+    inverse_factor_gptaq = torch.linalg.cholesky(torch.linalg.inv(hessian_gptaq), upper=True)
+    assert torch.allclose(
+        inverse_factor_gptaq * math.sqrt(hessian_ratio),
+        inverse_factor_gptq,
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+    errors = torch.linspace(-0.5, 0.5, 8, dtype=torch.float64)
+    loss_sum_gptq = 0.5 * (errors.square() / inverse_factor_gptq.diagonal().square()).sum()
+    loss_sum_gptaq = 0.5 * (errors.square() / inverse_factor_gptaq.diagonal().square()).sum()
+    assert loss_sum_gptaq == pytest.approx(loss_sum_gptq * hessian_ratio)
+
+    actual = GPTAQ._token_normalized_avg_loss(loss_sum_gptaq.item(), batch_request_count, token_count)
+    expected = loss_sum_gptq.item() / token_count
+
+    assert actual == pytest.approx(expected)
+    with pytest.raises(ValueError, match="at least one calibration token"):
+        GPTAQ._token_normalized_avg_loss(loss_sum_gptaq.item(), batch_request_count, 0)
+
+
+def test_gptaq_quantize_uses_token_normalized_loss(monkeypatch):
+    linear = nn.Linear(8, 4, bias=False, dtype=torch.float32).eval()
+    named = NamedModule(
+        linear,
+        name="proj",
+        full_name="layer.0.proj",
+        layer_index=0,
+    )
+    named.state["native_inp"] = []
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=True,
+        desc_act=False,
+        gptaq=GPTAQConfig(alpha=0.25, device="cpu"),
+    )
+    task = GPTAQ(named, qcfg=qcfg)
+    task.quantizer.configure(perchannel=True)
+    task.H = torch.eye(task.columns, dtype=torch.float32)
+    task.dXXT = torch.zeros_like(task.H)
+    task.nsamples = 15
+    task._gptaq_batch_request_count = 4
+
+    calls = []
+
+    def capture_loss_arguments(loss_sum, batch_request_count, token_count):
+        calls.append((loss_sum, batch_request_count, token_count))
+        return 1.25
+
+    monkeypatch.setattr(
+        GPTAQ,
+        "_token_normalized_avg_loss",
+        staticmethod(capture_loss_arguments),
+    )
+
+    *_, avg_loss, _, nsamples = task.quantize(blocksize=4)
+
+    assert avg_loss == 1.25
+    assert nsamples == 15
+    assert len(calls) == 1
+    loss_sum, batch_request_count, token_count = calls[0]
+    assert math.isfinite(loss_sum)
+    assert batch_request_count == 4
+    assert token_count == 15
 
 
 class TestGPTQAddBatchCPU(ModelTest):
@@ -395,6 +1171,7 @@ class TestGPTQHessianChunking(ModelTest):
         elapsed = time.perf_counter() - start
         peak_alloc = torch.cuda.max_memory_allocated(device)
         gptq_mod._WORKSPACE_CACHE.clear()
+        gptq_mod._WORKSPACE_SLOTS.clear()
 
         per_batch = elapsed / measured if measured else 0.0
         activation_mb = (batch_size * seq_len * hidden_dim * 2) / (1024**2)

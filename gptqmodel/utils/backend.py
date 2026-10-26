@@ -21,8 +21,11 @@ class BACKEND(str, Enum):
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+    GPTQ_W4AFP8 = "gptq_w4afp8"  # INT4 GPTQ weights, token-scaled FP8 input on SM12x
+    GPTQ_W4A_NVFP4 = "gptq_w4a_nvfp4"  # INT4 GPTQ weights, NVFP4 input on SM12x
     GPTQ_BITBLAS = "gptq_bitblas"  # BitBLAS AOT-compiled GPTQ kernel
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
+    GPTQ_TORCH_CPU_AVX512 = "gptq_torch_cpu_avx512"  # CPU AVX512-BF16 GPTQ kernel ported from HF kernels
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -36,6 +39,7 @@ class BACKEND(str, Enum):
     AWQ_TORCH_INT8 = "awq_torch_int8"
     AWQ_TORCH_FUSED = "awq_torch_fused"
     AWQ_TORCH_ATEN = "awq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
+    AWQ_TORCH_CPU_AVX512 = "awq_torch_cpu_avx512"  # CPU AVX512-BF16 kernel shared with GPTQ
     AWQ_TORCH = "awq_torch"
     AWQ_BITBLAS = "awq_bitblas"
     AWQ_MACHETE = "awq_machete"
@@ -49,6 +53,10 @@ class BACKEND(str, Enum):
 
     # FP8 kernels
     FP8_TORCH = "fp8_torch"
+
+    # VPTQ kernels
+    VPTQ_TORCH = "vptq_torch"
+    VPTQ_CUDA = "vptq_cuda"
 
     # GGUF kernels / engines
     GGUF_TORCH = "gguf_torch"
@@ -134,6 +142,9 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.EXLLAMA_V3: BACKEND.EXL3_EXLLAMA_V3,
         BACKEND.TORCH: BACKEND.EXL3_TORCH,
     },
+    "vptq": {
+        BACKEND.TORCH: BACKEND.VPTQ_TORCH,
+    },
 }
 
 _PROFILE_BY_INDEX = {
@@ -174,6 +185,45 @@ def normalize_backend(
     if method is None:
         return resolved
     return _LEGACY_BACKEND_BY_METHOD.get(method, {}).get(resolved, resolved)
+
+
+def awq_gemm_pack_backend(
+    *,
+    device_type: str,
+    is_rocm: bool,
+    weight_only: bool,
+) -> BACKEND:
+    """Return the AWQ GEMM backend used to pack quantized weights.
+
+    The native AWQ GEMM extension is CUDA-only: its sources include
+    ``cusparse.h`` and CUDA-specific inline asm, so it cannot be built on
+    ROCm/XPU/NPU/CPU hosts.  Those hosts pack with the portable torch kernel
+    instead, which emits the identical AWQ GEMM layout for in-range codes.
+
+    Args:
+        device_type: Runtime type of the quantization device (``"cuda"``,
+            ``"xpu"``, ``"npu"``, ``"cpu"``, ...).
+        is_rocm: Whether the CUDA namespace is backed by the HIP runtime.
+        weight_only: Whether the quantization lifecycle is weight-only
+            (RTN->AWQ export), which always stays on the portable kernel.
+    """
+
+    if weight_only or is_rocm or device_type != "cuda":
+        return BACKEND.AWQ_TORCH
+    return BACKEND.AWQ_GEMM
+
+
+def backend_for_activation(activation_mode: Optional[str], backend: Optional[BACKEND]) -> Optional[BACKEND]:
+    """Bind a saved W4A policy to its matching kernel, including AUTO loads."""
+    if activation_mode is None:
+        return backend
+    expected = {
+        "w4afp8": BACKEND.GPTQ_W4AFP8,
+        "w4a_nvfp4": BACKEND.GPTQ_W4A_NVFP4,
+    }[activation_mode]
+    if backend in (None, BACKEND.AUTO, expected):
+        return expected
+    raise ValueError(f"Activation policy `{activation_mode}` requires backend `{expected.value}`, got `{backend}`.")
 
 
 def normalize_profile(profile: Optional[Union[str, int, PROFILE]]) -> PROFILE:

@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
+import json
 import os
 import threading
 from pathlib import Path
@@ -23,6 +26,7 @@ from .cpp import (
     default_jit_cuda_cflags,
     default_torch_ops_build_root,
 )
+from .env import env_flag
 
 
 _SUPPORTED_ROTATION_KERNEL_DTYPES = {
@@ -30,6 +34,9 @@ _SUPPORTED_ROTATION_KERNEL_DTYPES = {
     torch.bfloat16,
     torch.float32,
 }
+
+# Reverse lookup used to rebuild persisted launch-cache keys from their names.
+_ROTATION_AUTOTUNE_DTYPE_BY_NAME = {str(dtype): dtype for dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES}
 
 # Process-local cache for resolved fused launch configs. The steady-state
 # rotation path uses this to avoid sending autotune sentinels back into the
@@ -40,6 +47,27 @@ _ROTATION_LAUNCH_CONFIG_CACHE: dict[tuple[object, ...], tuple[int, int]] = {}
 # from multiple threads racing the same cold shape.
 _ROTATION_LAUNCH_CONFIG_CACHE_LOCK = threading.Lock()
 _ROTATION_AUTOTUNE_SERIALIZE_LOCK = threading.Lock()
+# The requested launch policy is derived from process-static environment
+# overrides, so resolving it once per lifecycle keeps the steady-state rotation
+# path free of repeated ``os.getenv`` calls. ``clear_*`` and the prewarm entry
+# point reset it so a benchmark can still switch policies between runs.
+_ROTATION_LAUNCH_POLICY_CACHE: Optional[tuple[int, int]] = None
+# Latched once the fused rotation extension has loaded successfully in this
+# process. A failed attempt is never latched so a later rebuild can retry.
+_ROTATION_EXTENSION_READY = False
+
+# Autotuning a cold rotation shape costs ~130ms of native benchmarking, and a
+# full lifecycle measures ~18 shapes, so the resolved launch configs are also
+# persisted per device/torch/HIP fingerprint. Bump the format whenever the
+# native candidate set or its scoring changes so stale picks are discarded.
+_ROTATION_AUTOTUNE_CACHE_FORMAT = 1
+_ROTATION_AUTOTUNE_CACHE_ENV = "GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE"
+_ROTATION_AUTOTUNE_DISK_LOCK = threading.Lock()
+# device index -> loaded flag, so the on-disk cache is read at most once.
+_ROTATION_AUTOTUNE_DISK_LOADED: set[int] = set()
+# Mirrors what the current process has written so the file can be rewritten
+# wholesale without re-reading it.
+_ROTATION_AUTOTUNE_DISK_ENTRIES: dict[tuple[object, ...], tuple[int, int]] = {}
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -91,12 +119,21 @@ def build_identity_rotation_buffers(
 def is_identity_rotation(theta: torch.Tensor, channel_scales: Optional[torch.Tensor]) -> bool:
     """Check whether a ParoQuant rotation reduces to a no-op."""
     if theta is None:
-        return True
-    if torch.count_nonzero(theta).item() != 0:
-        return False
+        return True if channel_scales is None else bool(torch.all(channel_scales == 1))
+
+    if not theta.is_cuda:
+        if torch.count_nonzero(theta).item() != 0:
+            return False
+        if channel_scales is None:
+            return True
+        return bool(torch.all(channel_scales == 1))
+
+    # Keep both predicates on the device and read the combined scalar once.
+    theta_is_identity = torch.count_nonzero(theta) == 0
     if channel_scales is None:
-        return True
-    return bool(torch.all(channel_scales == 1))
+        return bool(theta_is_identity)
+    scales_are_identity = torch.all(channel_scales == 1)
+    return bool(theta_is_identity & scales_are_identity)
 
 
 def apply_paroquant_rotation_reference(
@@ -145,6 +182,87 @@ def apply_paroquant_rotation_reference(
     return out.reshape(orig_shape)
 
 
+def apply_paroquant_rotation_vectorized(
+    x: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    scales: Optional[torch.Tensor] = None,
+    group_size: int = 128,
+) -> torch.Tensor:
+    """Apply the ParoQuant rotation without Python loops over groups.
+
+    This is the CPU inference implementation of
+    :func:`apply_paroquant_rotation_reference`.  It keeps the reference
+    arithmetic and per-rotation rounding contract, but moves the group loop
+    into batched gather/scatter operations.  The result is therefore suitable
+    for an exact A/B test against the reference path rather than being a
+    lower-precision approximation such as the composed rotation matrix.
+    """
+
+    orig_shape = x.shape
+    if x.dim() < 2:
+        raise ValueError(f"ParoQuant rotation expects rank >= 2, got shape {tuple(orig_shape)}.")
+
+    x2d = x.reshape(-1, orig_shape[-1])
+    hidden = x2d.shape[-1]
+    group_size = _normalize_group_size(group_size, hidden)
+    num_groups = hidden // group_size
+    half_group = group_size // 2
+
+    if scales is not None:
+        scale_tensor = scales.reshape(1, -1).to(device=x2d.device, dtype=x2d.dtype)
+        out = x2d * scale_tensor
+    else:
+        out = x2d.clone()
+
+    pairs = pairs.to(device=x2d.device, dtype=torch.int64)
+    theta = theta.to(device=x2d.device, dtype=torch.float32)
+    rows = x2d.shape[0]
+    out = out.reshape(rows, num_groups, group_size)
+
+    for rotation_index in range(pairs.shape[0]):
+        pair_row = pairs[rotation_index].reshape(num_groups, half_group, 2)
+        local_i = pair_row[..., 0]
+        local_j = pair_row[..., 1]
+        valid = (
+            (local_i >= 0)
+            & (local_j >= 0)
+            & (local_i < group_size)
+            & (local_j < group_size)
+        )
+        if not bool(valid.any()):
+            continue
+
+        # Gather padding slots from a harmless index, then restore their
+        # original values below. This keeps one vectorized update for layouts
+        # that use (-1, -1) padding.
+        safe_i = torch.where(valid, local_i, torch.zeros_like(local_i))
+        safe_j = torch.where(valid, local_j, torch.zeros_like(local_j))
+        gather_i = safe_i.view(1, num_groups, half_group).expand(rows, -1, -1)
+        gather_j = safe_j.view(1, num_groups, half_group).expand(rows, -1, -1)
+        xi = out.gather(2, gather_i)
+        xj = out.gather(2, gather_j)
+        angles = theta[rotation_index].reshape(num_groups, half_group)
+        cos_t = angles.cos().to(dtype=out.dtype).view(1, num_groups, half_group)
+        sin_t = angles.sin().to(dtype=out.dtype).view(1, num_groups, half_group)
+        valid_mask = valid.view(1, num_groups, half_group)
+
+        next_out = out.clone()
+        next_out.scatter_(
+            2,
+            gather_i,
+            torch.where(valid_mask, xi * cos_t + xj * sin_t, xi),
+        )
+        next_out.scatter_(
+            2,
+            gather_j,
+            torch.where(valid_mask, -xi * sin_t + xj * cos_t, xj),
+        )
+        out = next_out
+
+    return out.reshape(orig_shape)
+
+
 def _rotation_sources() -> list[str]:
     """Return the native extension sources for the fused CUDA rotation op.
 
@@ -167,11 +285,11 @@ def _rotation_kernel_ready(
 ) -> bool:
     """Check whether the fused CUDA rotation kernel can service this call."""
     return (
-        x.device.type == "cuda"
+        x.is_cuda
         and x.dtype in _SUPPORTED_ROTATION_KERNEL_DTYPES
-        and pairs.device.type == "cuda"
-        and theta.device.type == "cuda"
-        and (scales is None or scales.device.type == "cuda")
+        and pairs.is_cuda
+        and theta.is_cuda
+        and (scales is None or scales.is_cuda)
         and int(group_size) in {128}
         and int(theta.shape[0]) in {1, 8}
     )
@@ -203,7 +321,7 @@ def _rotation_extra_cuda_cflags() -> list[str]:
 _PAROQUANT_ROTATION_EXTENSION = TorchOpsJitExtension(
     name="gptqmodel_paroquant_rotation",
     namespace="gptqmodel_paroquant",
-    required_ops=("rotate", "launch_config", "clear_autotune_cache", "autotune_cache_size"),
+    required_ops=("rotate", "launch_config", "grad_theta", "clear_autotune_cache", "autotune_cache_size"),
     sources=_rotation_sources,
     build_root_env="GPTQMODEL_PAROQUANT_BUILD_ROOT",
     default_build_root=lambda: default_torch_ops_build_root("paroquant"),
@@ -226,6 +344,9 @@ def _extension_api():
 def clear_paroquant_rotation_extension_cache() -> None:
     """Delete cached ParoQuant rotation JIT artifacts before the next load attempt."""
 
+    global _ROTATION_EXTENSION_READY
+
+    _ROTATION_EXTENSION_READY = False
     clear_paroquant_rotation_autotune_cache()
     _PAROQUANT_ROTATION_EXTENSION.clear_cache()
 
@@ -233,8 +354,18 @@ def clear_paroquant_rotation_extension_cache() -> None:
 def clear_paroquant_rotation_autotune_cache() -> None:
     """Drop the native launch-plan cache used by fused rotation autotune."""
 
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    _ROTATION_LAUNCH_POLICY_CACHE = None
     with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
         _ROTATION_LAUNCH_CONFIG_CACHE.clear()
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        known_devices = sorted(_ROTATION_AUTOTUNE_DISK_LOADED)
+        _ROTATION_AUTOTUNE_DISK_LOADED.clear()
+        _ROTATION_AUTOTUNE_DISK_ENTRIES.clear()
+        for device_index in known_devices:
+            with contextlib.suppress(OSError):
+                _rotation_autotune_cache_path(device_index).unlink()
     clear_cache = _rotation_native_op_if_loaded("clear_autotune_cache")
     if clear_cache is not None:
         clear_cache()
@@ -243,7 +374,14 @@ def clear_paroquant_rotation_autotune_cache() -> None:
 def _load_rotation_extension() -> bool:
     """JIT-build and load the optional fused CUDA rotation extension once."""
 
-    return _extension_api().is_available("paroquant")
+    global _ROTATION_EXTENSION_READY
+
+    if _ROTATION_EXTENSION_READY:
+        return True
+    loaded = _extension_api().is_available("paroquant")
+    if loaded:
+        _ROTATION_EXTENSION_READY = True
+    return loaded
 
 
 def _rotation_env_int(name: str, allowed: set[int]) -> Optional[int]:
@@ -286,16 +424,39 @@ def _rotation_native_op_if_loaded(op_name: str):
 
 def _rotation_requested_launch() -> tuple[int, int]:
     """Resolve the requested fused launch policy from env overrides or autotune."""
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    cached = _ROTATION_LAUNCH_POLICY_CACHE
+    if cached is not None:
+        return cached
+
     cta_m_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_CTA_M", {4, 8, 16})
     row_pad_override = _rotation_env_int("GPTQMODEL_PAROQUANT_ROTATE_ROW_PAD", {0, 2})
     if cta_m_override is not None or row_pad_override is not None:
-        return (
+        resolved = (
             -1 if cta_m_override is None else int(cta_m_override),
             -1 if row_pad_override is None else int(row_pad_override),
         )
-    if _rotation_autotune_enabled():
-        return (-2, -2)
-    return (-1, -1)
+    elif _rotation_autotune_enabled():
+        resolved = (-2, -2)
+    else:
+        resolved = (-1, -1)
+    _ROTATION_LAUNCH_POLICY_CACHE = resolved
+    return resolved
+
+
+def _paroquant_rotation_op(op_name: str):
+    """Return a fused-rotation op handle without re-entering the shared loader.
+
+    ``TorchOpsJitExtension.op`` already memoizes handles, so an already loaded
+    namespace only needs that cheap lookup. Going through the shared loader is
+    reserved for the first call, which keeps the load contract (and the ability
+    for tests to swap the handle source) intact while dropping the per-call
+    ``load()`` re-validation from the steady-state rotation path.
+    """
+    if _PAROQUANT_ROTATION_EXTENSION._namespace_cache is not None:
+        return _PAROQUANT_ROTATION_EXTENSION.op(op_name)
+    return _extension_api().op("paroquant", op_name)
 
 
 def _rotation_autotune_cache_size() -> int:
@@ -305,7 +466,7 @@ def _rotation_autotune_cache_size() -> int:
         return int(cache_size())
     if not _load_rotation_extension():
         return 0
-    return int(_extension_api().op("paroquant", "autotune_cache_size")())
+    return int(_paroquant_rotation_op("autotune_cache_size")())
 
 
 def _run_rotation_op(
@@ -317,9 +478,15 @@ def _run_rotation_op(
     *,
     cta_m: int,
     row_pad: int,
+    reverse: bool = False,
 ) -> torch.Tensor:
-    """Execute the fused rotation op with one requested launch policy."""
-    return _extension_api().op("paroquant", "rotate")(
+    """Execute the fused rotation op with one requested launch policy.
+
+    ``reverse`` walks the rotation rows backward with negated thetas inside the
+    same kernel, which is the inverse transform the autograd backward needs when
+    only the input carries a gradient.
+    """
+    return _paroquant_rotation_op("rotate")(
         x,
         pairs,
         theta,
@@ -327,7 +494,283 @@ def _run_rotation_op(
         int(group_size),
         int(cta_m),
         int(row_pad),
+        int(reverse),
     )
+
+
+def _fused_grad_theta_op():
+    """Return the fused rotation-gradient op, or None when it cannot be used.
+
+    The autograd backward runs this once per rotation per layer, so the torch
+    formulation costs ~21 tiny kernel launches each. The native op folds the
+    four gathers, the elementwise math and the two batch reductions into a
+    single launch. Only float32 CUDA activations are supported; every other
+    case keeps the reference torch path.
+    """
+    try:
+        return _paroquant_rotation_op("grad_theta")
+    except Exception:
+        return None
+
+
+def _fused_grad_theta_ready(rotated: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused rotation-gradient op can service this pair."""
+    return (
+        rotated.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and rotated.is_cuda
+        and grad.is_cuda
+        and rotated.is_contiguous()
+        and grad.is_contiguous()
+        and rotated.shape == grad.shape
+    )
+
+
+def _fused_rotate_pair_op():
+    """Return the fused two-tensor rotation op, or None when it cannot be used.
+
+    The autograd backward rotates the saved activation and the incoming gradient
+    with the same pair/theta set, which costs two launches per rotation. Both
+    operands share a shape and differ only in storage, so the native op folds
+    them into a single launch. Unsupported dtypes/devices keep the two-call path.
+    """
+    try:
+        return _paroquant_rotation_op("rotate_pair")
+    except Exception:
+        return None
+
+
+def _fused_rotate_pair_ready(x: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused two-tensor rotation can service this pair."""
+    return (
+        x.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and x.is_cuda
+        and grad.is_cuda
+        and x.is_contiguous()
+        and grad.is_contiguous()
+        and x.shape == grad.shape
+    )
+
+
+def _apply_fused_rotation_pair(
+    x: torch.Tensor,
+    grad: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    group_size: int,
+    *,
+    op=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Rotate two equal-shaped tensors with one fused launch and a shared launch plan."""
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=None,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    if op is None:
+        op = _fused_rotate_pair_op()
+    if op is None:
+        raise RuntimeError("ParoQuant rotate_pair op is unavailable.")
+    return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
+
+
+def _fused_rotate_pair_grad_op():
+    """Return the fused backward-sweep op, or None when it cannot be used.
+
+    The autograd backward rotates the saved activation and the incoming gradient
+    in reverse order and measures the rotation gradient after every step, which
+    costs one two-tensor rotation plus one rotation-gradient launch per rotation
+    plus the host-side sin/cos and index staging. The native op keeps the running
+    rotated state in shared memory and returns the final pair together with the
+    whole rotation gradient, so the steady-state backward becomes two launches.
+    Unsupported dtypes/devices keep the reference torch path.
+    """
+    try:
+        return _paroquant_rotation_op("rotate_pair_grad")
+    except Exception:
+        return None
+
+
+def _fused_rotate_pair_grad_ready(x: torch.Tensor, grad: torch.Tensor) -> bool:
+    """Report whether the fused backward-sweep op can service this pair."""
+    return (
+        x.dtype == torch.float32
+        and grad.dtype == torch.float32
+        and x.is_cuda
+        and grad.is_cuda
+        and x.is_contiguous()
+        and grad.is_contiguous()
+        and x.shape == grad.shape
+    )
+
+
+def _apply_fused_rotation_pair_grad(
+    x: torch.Tensor,
+    grad: torch.Tensor,
+    pairs: torch.Tensor,
+    theta: torch.Tensor,
+    group_size: int,
+    *,
+    op=None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Run the whole backward rotation sweep plus its gradient in two launches."""
+    requested_cta_m, requested_row_pad = _rotation_requested_launch()
+    cta_m, row_pad = _resolve_rotation_launch(
+        x,
+        scales=None,
+        group_size=int(group_size),
+        krot=int(theta.shape[0]),
+        requested_cta_m=requested_cta_m,
+        requested_row_pad=requested_row_pad,
+    )
+    if op is None:
+        op = _fused_rotate_pair_grad_op()
+    if op is None:
+        raise RuntimeError("ParoQuant rotate_pair_grad op is unavailable.")
+    return tuple(op(x, grad, pairs, theta, int(group_size), int(cta_m), int(row_pad)))
+
+
+def _rotation_autotune_cache_enabled() -> bool:
+    return env_flag(_ROTATION_AUTOTUNE_CACHE_ENV, default=True)
+
+
+def _rotation_autotune_cache_dir() -> Path:
+    """Return the user cache root, matching the other GPTQModel caches."""
+    configured = os.getenv("GPTQMODEL_CACHE_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    xdg_cache_home = os.getenv("XDG_CACHE_HOME")
+    if xdg_cache_home:
+        return Path(xdg_cache_home).expanduser() / "gptqmodel"
+    return Path.home() / ".cache" / "gptqmodel"
+
+
+def _rotation_autotune_cache_identity(device_index: int) -> str:
+    """
+    Fingerprint the tuning environment.
+
+    Launch choices are measured on real hardware, so a cache written for one
+    device/driver/torch combination must never be reused for another.
+    """
+    parts = [f"format={_ROTATION_AUTOTUNE_CACHE_FORMAT}", f"torch={torch.__version__}"]
+    parts.append(f"hip={getattr(torch.version, 'hip', None) or 'none'}")
+    device_name = "unknown"
+    if torch.cuda.is_available():
+        try:
+            device_name = torch.cuda.get_device_name(device_index if device_index >= 0 else 0)
+        except Exception:
+            device_name = "unknown"
+    parts.append(f"device={device_name}")
+    return "|".join(parts)
+
+
+def _rotation_autotune_cache_path(device_index: int) -> Path:
+    identity = _rotation_autotune_cache_identity(device_index)
+    digest = hashlib.sha1(identity.encode("utf-8")).hexdigest()[:16]
+    return _rotation_autotune_cache_dir() / "paroquant" / "rotation_launch" / f"{digest}.json"
+
+
+def _ensure_rotation_autotune_cache_loaded(device_index: int) -> None:
+    """Seed the in-process launch cache from disk once per device."""
+    if not _rotation_autotune_cache_enabled():
+        return
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        if device_index in _ROTATION_AUTOTUNE_DISK_LOADED:
+            return
+        _ROTATION_AUTOTUNE_DISK_LOADED.add(device_index)
+        try:
+            raw = json.loads(_rotation_autotune_cache_path(device_index).read_text())
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict) or raw.get("format") != _ROTATION_AUTOTUNE_CACHE_FORMAT:
+            return
+        entries = raw.get("entries")
+        if not isinstance(entries, list):
+            return
+        with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
+            for entry in entries:
+                parsed = _rotation_autotune_entry_to_cache(entry)
+                if parsed is None:
+                    continue
+                cache_key, resolved = parsed
+                _ROTATION_LAUNCH_CONFIG_CACHE.setdefault(cache_key, resolved)
+                _ROTATION_AUTOTUNE_DISK_ENTRIES[cache_key] = resolved
+
+
+def _rotation_autotune_entry_to_cache(
+    entry: object,
+) -> Optional[tuple[tuple[object, ...], tuple[int, int]]]:
+    """Rebuild one ``(cache_key, resolved)`` pair from its serialized form."""
+    if not isinstance(entry, list) or len(entry) != 11:
+        return None
+    device_index, dtype_name, rows, hidden, group_size, krot, has_scale, req_cta_m, req_row_pad, cta_m, row_pad = entry
+    dtype = _ROTATION_AUTOTUNE_DTYPE_BY_NAME.get(str(dtype_name))
+    if dtype is None:
+        return None
+    cache_key = (
+        int(device_index),
+        dtype,
+        int(rows),
+        int(hidden),
+        int(group_size),
+        int(krot),
+        bool(has_scale),
+        int(req_cta_m),
+        int(req_row_pad),
+    )
+    return cache_key, (int(cta_m), int(row_pad))
+
+
+def _persist_rotation_autotune_entry(
+    cache_key: tuple[object, ...], resolved: tuple[int, int], device_index: int
+) -> None:
+    """Record one resolved launch config on disk for the next process."""
+    if not _rotation_autotune_cache_enabled():
+        return
+    with _ROTATION_AUTOTUNE_DISK_LOCK:
+        _ROTATION_AUTOTUNE_DISK_ENTRIES[cache_key] = resolved
+        path = _rotation_autotune_cache_path(device_index)
+        payload = {
+            "format": _ROTATION_AUTOTUNE_CACHE_FORMAT,
+            "identity": _rotation_autotune_cache_identity(device_index),
+            "entries": [
+                _rotation_autotune_entry_from_cache(key, value)
+                for key, value in _ROTATION_AUTOTUNE_DISK_ENTRIES.items()
+                if int(key[0]) == int(device_index)
+            ],
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(f".{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(payload))
+            os.replace(tmp_path, path)
+        except OSError:
+            return
+
+
+def _rotation_autotune_entry_from_cache(
+    cache_key: tuple[object, ...], resolved: tuple[int, int]
+) -> list[object]:
+    """Serialize one ``(cache_key, resolved)`` pair; dtypes become names."""
+    device, dtype, rows, hidden, group_size, krot, has_scale, req_cta_m, req_row_pad = cache_key
+    return [
+        int(device),
+        str(dtype),
+        int(rows),
+        int(hidden),
+        int(group_size),
+        int(krot),
+        int(bool(has_scale)),
+        int(req_cta_m),
+        int(req_row_pad),
+        int(resolved[0]),
+        int(resolved[1]),
+    ]
 
 
 def _rotation_launch_cache_key(
@@ -376,6 +819,10 @@ def _resolve_rotation_launch(
         requested_cta_m=requested_cta_m,
         requested_row_pad=requested_row_pad,
     )
+    device_index = int(cache_key[0])
+    # Seed from the previous process before measuring anything: a full cold
+    # lifecycle autotunes ~18 shapes at ~130ms each.
+    _ensure_rotation_autotune_cache_loaded(device_index)
     with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
         cached = _ROTATION_LAUNCH_CONFIG_CACHE.get(cache_key)
     if cached is not None:
@@ -398,6 +845,7 @@ def _resolve_rotation_launch(
         resolved = (int(cta_m), int(row_pad))
         with _ROTATION_LAUNCH_CONFIG_CACHE_LOCK:
             cached = _ROTATION_LAUNCH_CONFIG_CACHE.setdefault(cache_key, resolved)
+        _persist_rotation_autotune_entry(cache_key, cached, device_index)
         return cached
 
 
@@ -446,6 +894,8 @@ def _apply_fused_rotation(
     theta: torch.Tensor,
     scales: Optional[torch.Tensor],
     group_size: int,
+    *,
+    reverse: bool = False,
 ) -> torch.Tensor:
     """Run the fused rotation op with explicit overrides or native autotune sentinels."""
     requested_cta_m, requested_row_pad = _rotation_requested_launch()
@@ -465,6 +915,7 @@ def _apply_fused_rotation(
         group_size,
         cta_m=cta_m,
         row_pad=row_pad,
+        reverse=reverse,
     )
 
 
@@ -476,6 +927,11 @@ def prewarm_paroquant_rotation_extension(
     device: Optional[torch.device | str] = None,
 ) -> bool:
     """Eagerly build the fused rotation extension before timed quantization starts."""
+    global _ROTATION_LAUNCH_POLICY_CACHE
+
+    # A prewarm marks the start of a new lifecycle, so re-read the launch
+    # policy overrides instead of reusing the previous run's resolution.
+    _ROTATION_LAUNCH_POLICY_CACHE = None
     if not fused_rotation:
         return False
     if int(group_size) not in {128}:
@@ -546,42 +1002,122 @@ class _ParoQuantRotateTensorFunc(torch.autograd.Function):
 
         if ctx.needs_theta_grad:
             rotated = y.reshape(batch_rows, hidden)
-            grad_theta = torch.zeros_like(theta)
-            offsets = (
-                torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1) * group_size
+            # The fused native op keeps the running rotated pair in shared memory
+            # and accumulates every rotation's gradient in one pass, so the whole
+            # reverse sweep plus the rotation gradient costs two launches instead
+            # of a per-rotation rotation/gradient pair plus the host-side staging
+            # of the negated thetas, the sin/cos tables and the gather indices.
+            fused_pair_grad = (
+                _fused_rotate_pair_grad_op()
+                if _fused_rotate_pair_grad_ready(rotated, grad)
+                else None
             )
-
-            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
-                pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = theta.narrow(0, rot_idx, 1).neg()
-                rotated = _apply_fused_rotation(rotated, pair_row, neg_theta, None, group_size)
-                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
-
-                pair_view = pair_row.reshape(num_groups, group_size)
-                idx_i = (pair_view[:, 0::2] + offsets).reshape(-1)
-                idx_j = (pair_view[:, 1::2] + offsets).reshape(-1)
-
-                xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
-                xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
-                grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
-                grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
-
-                theta_view = theta.narrow(0, rot_idx, 1).reshape(num_groups, half_group)
-                sin_t = theta_view.sin()
-                cos_t = theta_view.cos()
-                grad_theta[rot_idx] = (
-                    (
-                        (grad_i * xj - grad_j * xi).sum(0) * cos_t
-                        - (grad_i * xi + grad_j * xj).sum(0) * sin_t
-                    )
-                    .reshape(-1)
-                    .to(theta.dtype)
+            if fused_pair_grad is not None:
+                rotated, grad, grad_theta = _apply_fused_rotation_pair_grad(
+                    rotated,
+                    grad,
+                    pairs,
+                    theta,
+                    group_size,
+                    op=fused_pair_grad,
                 )
+                grad_theta = grad_theta.reshape(theta.shape).to(theta.dtype)
+            else:
+                grad_theta = torch.zeros_like(theta)
+                offsets = (
+                    torch.arange(num_groups, device=pairs.device, dtype=torch.long).unsqueeze(1)
+                    * group_size
+                )
+
+                # The rotation set is fixed for the whole backward pass, so derive every
+                # per-rotation constant once instead of rebuilding it inside the loop:
+                # the negated thetas, their sin/cos, and the gather index pairs. This
+                # removes krot sin/cos/neg launches and krot strided-slice+add passes.
+                krot = pairs.shape[0]
+                neg_theta_all = theta.neg()
+                sin_all = theta.reshape(krot, num_groups, half_group).sin()
+                cos_all = theta.reshape(krot, num_groups, half_group).cos()
+                pair_view_all = pairs.reshape(krot, num_groups, group_size)
+                idx_i_all = (pair_view_all[:, :, 0::2] + offsets).reshape(krot, -1)
+                idx_j_all = (pair_view_all[:, :, 1::2] + offsets).reshape(krot, -1)
+
+                # The fused native op replaces the four gathers plus the elementwise
+                # and reduce ops of one rotation with a single launch. Fall back to
+                # the reference formulation for unsupported dtypes/devices.
+                fused_grad_theta = (
+                    _fused_grad_theta_op() if _fused_grad_theta_ready(rotated, grad) else None
+                )
+                fused_parts = [None] * krot if fused_grad_theta is not None else None
+                # The two backward rotations share a pair/theta set and shape, so the
+                # native two-tensor op can service both operands in one launch.
+                fused_rotate_pair = (
+                    _fused_rotate_pair_op() if _fused_rotate_pair_ready(rotated, grad) else None
+                )
+
+                for rot_idx in range(krot - 1, -1, -1):
+                    pair_row = pairs.narrow(0, rot_idx, 1)
+                    neg_theta = neg_theta_all.narrow(0, rot_idx, 1)
+                    if fused_rotate_pair is not None:
+                        rotated, grad = _apply_fused_rotation_pair(
+                            rotated,
+                            grad,
+                            pair_row,
+                            neg_theta,
+                            group_size,
+                            op=fused_rotate_pair,
+                        )
+                    else:
+                        rotated = _apply_fused_rotation(
+                            rotated, pair_row, neg_theta, None, group_size
+                        )
+                        grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
+
+                    idx_i = idx_i_all[rot_idx]
+                    idx_j = idx_j_all[rot_idx]
+
+                    if fused_grad_theta is not None:
+                        fused_parts[rot_idx] = fused_grad_theta(
+                            rotated,
+                            grad,
+                            idx_i,
+                            idx_j,
+                            sin_all[rot_idx].reshape(-1),
+                            cos_all[rot_idx].reshape(-1),
+                        )
+                        continue
+
+                    xi = rotated[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                    xj = rotated[:, idx_j].reshape(batch_rows, num_groups, half_group)
+                    grad_i = grad[:, idx_i].reshape(batch_rows, num_groups, half_group)
+                    grad_j = grad[:, idx_j].reshape(batch_rows, num_groups, half_group)
+
+                    sin_t = sin_all[rot_idx]
+                    cos_t = cos_all[rot_idx]
+                    grad_theta[rot_idx] = (
+                        (
+                            (grad_i * xj - grad_j * xi).sum(0) * cos_t
+                            - (grad_i * xi + grad_j * xj).sum(0) * sin_t
+                        )
+                        .reshape(-1)
+                        .to(theta.dtype)
+                    )
+
+                if fused_parts is not None:
+                    grad_theta = torch.stack(fused_parts, dim=0).reshape(theta.shape).to(theta.dtype)
         else:
-            for rot_idx in range(pairs.shape[0] - 1, -1, -1):
-                pair_row = pairs.narrow(0, rot_idx, 1)
-                neg_theta = theta.narrow(0, rot_idx, 1).neg()
-                grad = _apply_fused_rotation(grad, pair_row, neg_theta, None, group_size)
+            # Only the input carries a gradient, so the backward is the plain
+            # inverse transform. The inverse sweep is the forward sweep with the
+            # rotation rows walked backward and their thetas negated, which the
+            # native kernel performs in place: one launch instead of a host-side
+            # negate plus one launch per rotation.
+            grad = _apply_fused_rotation(
+                grad,
+                pairs,
+                theta,
+                None,
+                group_size,
+                reverse=True,
+            )
 
         if ctx.has_scale:
             scale_flat = scale_tensor.reshape(-1)
@@ -619,6 +1155,7 @@ __all__ = [
     "apply_paroquant_rotation",
     "apply_paroquant_rotation_autograd",
     "apply_paroquant_rotation_reference",
+    "apply_paroquant_rotation_vectorized",
     "_rotation_launch_config",
     "build_identity_rotation_buffers",
     "clear_paroquant_rotation_autotune_cache",

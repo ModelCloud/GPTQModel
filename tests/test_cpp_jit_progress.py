@@ -5,6 +5,7 @@ import time
 
 import pytest
 
+from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.cpp import (
     _COMPILE_PROGRESS_TOTAL_STEPS,
     _compile_progress_ratio,
@@ -42,6 +43,7 @@ def test_compile_progress_subtitle_reports_overrun_against_baseline():
 
 
 def test_default_jit_cuda_cflags_includes_nvcc_threads_by_default(monkeypatch):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.delenv("NVCC_THREADS", raising=False)
     flags = default_jit_cuda_cflags()
     assert "--threads" in flags
@@ -49,6 +51,7 @@ def test_default_jit_cuda_cflags_includes_nvcc_threads_by_default(monkeypatch):
 
 
 def test_default_jit_cuda_cflags_honors_nvcc_threads_override(monkeypatch):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setenv("NVCC_THREADS", "16")
     flags = default_jit_cuda_cflags()
     assert "--threads" in flags
@@ -56,6 +59,7 @@ def test_default_jit_cuda_cflags_honors_nvcc_threads_override(monkeypatch):
 
 
 def test_default_jit_cuda_cflags_explicit_nvcc_threads_takes_precedence(monkeypatch):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setenv("NVCC_THREADS", "8")
     flags = default_jit_cuda_cflags(nvcc_threads=16)
     assert "--threads" in flags

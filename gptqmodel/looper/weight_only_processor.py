@@ -45,6 +45,15 @@ from ..utils.module_locks import parent_module_lock
 log = setup_logger()
 
 
+def _mean_abs_error(reference: torch.Tensor, dequantized: torch.Tensor) -> float:
+    """Measure dequantization error on the dequantized tensor's device."""
+
+    compute_device = dequantized.device
+    dequantized = dequantized.detach().to(dtype=torch.float32)
+    reference = reference.detach().to(device=compute_device, dtype=torch.float32)
+    return (dequantized - reference).abs().mean().item()
+
+
 class WeightOnlyProcessor(LoopProcessor):
     """Process weight-only modules without entering activation-based quantization flows."""
 
@@ -246,13 +255,12 @@ class WeightOnlyProcessor(LoopProcessor):
                     source=f"{module_label} [module.pack_original]",
                 )
 
-            reference_weight = qmodule._weight_to_matrix(original_layer).detach().cpu().to(torch.float32)
+            reference_weight = qmodule._weight_to_matrix(original_layer).detach()
             dequant_weight = qmodule.dequantize_weight()
             # BNB exposes native [out, in] weights; FP8/GGUF expose [in, out].
             if active_qcfg.method != METHOD.BITSANDBYTES:
                 dequant_weight = dequant_weight.T
-            dequant_weight = dequant_weight.detach().cpu().to(torch.float32)
-            mean_abs_err = (dequant_weight - reference_weight).abs().mean().item()
+            mean_abs_err = _mean_abs_error(reference_weight, dequant_weight)
             self._update_logged_loss(module, f"{active_qcfg.method.value}: {mean_abs_err:.7f}")
             module.state.pop("tp_pad_info", None)
             module.state.pop("quant_source_module", None)

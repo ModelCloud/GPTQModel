@@ -6,171 +6,112 @@
 
 from __future__ import annotations
 
-import os
+import weakref
 
 import pytest
 import torch
-import torch.nn as nn
-from logbar import LogBar
-
-
-# Keep this CPU test isolated from optional BitBLAS/TVM import side effects.
-os.environ.setdefault("GPTQMODEL_DISABLE_BITBLAS", "1")
 
 from gptqmodel.models._const import DEVICE
-from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.qlinear.torch_int8 import TorchInt8Linear
-from gptqmodel.utils.torch import TORCH_HAS_FUSED_OPS
+from gptqmodel.nn_modules.qlinear.torch_int8 import Int8PackedModule, TorchInt8Linear, _write_int8_buffers
+from gptqmodel.quantization import FORMAT, METHOD
+from gptqmodel.utils.backend import BACKEND
+from gptqmodel.utils.importer import select_quant_linear
+from tests.test_torch_weight_storage import build_case, state_tensors
 
 
-log = LogBar.shared()
-deviation_cols = log.columns(
-    cols=[
-        {"label": "DType", "width": "fit"},
-        {"label": "DescAct", "width": "fit"},
-        {"label": "MaxAbsDiff", "width": "fit"},
-        {"label": "MeanAbsDiff", "width": "fit"},
-        {"label": "MaxRelDiff", "width": "fit"},
-    ],
-    padding=1,
-)
+@pytest.mark.parametrize("bits", [2, 4])
+def test_lower_bit_int8_construction_is_rejected(bits):
+    with pytest.raises(NotImplementedError, match="8-bit source weights"):
+        TorchInt8Linear(bits=bits, group_size=32, sym=True, desc_act=False,
+                        in_features=256, out_features=64)
 
 
-def _log_deviation_header_once() -> None:
-    if getattr(_log_deviation_header_once, "_printed", False):
-        return
-    log.info("\nTorchInt8 CPU Deviation vs Torch Baseline")
-    deviation_cols.info.header()
-    _log_deviation_header_once._printed = True
+@pytest.mark.parametrize("bits", [2, 4])
+@pytest.mark.parametrize("backend", [BACKEND.GPTQ_TORCH_INT8, BACKEND.TORCH_INT8])
+def test_lower_bit_int8_selection_is_rejected(bits, backend):
+    with pytest.raises(ValueError, match="8-bit source weights"):
+        select_quant_linear(bits=bits, group_size=32, desc_act=False, sym=True,
+                            device=DEVICE.CPU, backend=backend, format=FORMAT.GPTQ_V2,
+                            quant_method=METHOD.GPTQ, pack_dtype=torch.int32)
 
 
-def _has_int8_weight_mm() -> bool:
-    return hasattr(torch.ops.aten, "_weight_int8pack_mm")
+@pytest.mark.parametrize("bits", [2, 4])
+def test_requantization_writer_rejects_expansion_before_work(bits, monkeypatch):
+    module = torch.nn.Module()
+    module.bits = bits
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A rejected low-bit conversion must not requantize weights")
+
+    monkeypatch.setattr("gptqmodel.nn_modules.qlinear.torch_int8._requantize_to_int8", forbidden)
+    with pytest.raises(NotImplementedError, match="8-bit source weights"):
+        _write_int8_buffers(module, torch.zeros(32, 64), torch.float32)
+    assert list(module.buffers()) == []
 
 
-def _mock_gptq_linear(
-    bits: int,
-    group_size: int,
-    in_features: int,
-    out_features: int,
-) -> tuple[nn.Linear, torch.Tensor, torch.Tensor, torch.Tensor]:
-    maxq = (1 << (bits - 1)) - 1
-    weight = torch.randn((in_features, out_features), dtype=torch.float32)
-
-    reshaped = weight.view(in_features // group_size, group_size, out_features)
-    w_g = reshaped.permute(1, 0, 2).reshape(group_size, -1)
-
-    scales = torch.maximum(
-        w_g.abs().max(dim=0, keepdim=True).values,
-        torch.full((1, w_g.shape[1]), 1e-6, device=w_g.device),
-    )
-    scales = scales / maxq
-
-    q = torch.round(w_g / scales).clamp_(-maxq, maxq)
-    ref = (q * scales).to(dtype=torch.float16)
-
-    ref = ref.reshape(group_size, -1, out_features)
-    ref = ref.permute(1, 0, 2).reshape(in_features, out_features)
-
-    linear = nn.Linear(in_features, out_features, bias=False)
-    linear.weight.data = ref.t().contiguous()
-
-    scales = scales.reshape(-1, out_features).contiguous()
-    zeros = torch.zeros_like(scales, dtype=torch.int32)
-    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
-    return linear, scales, zeros, g_idx
+@pytest.mark.parametrize("entry", ["post_init", "transform_cpu", "forward"])
+def test_low_bit_runtime_entry_points_cannot_bypass_guard(entry, monkeypatch):
+    module = TorchInt8Linear(bits=8, group_size=32, sym=True, desc_act=False,
+                            in_features=256, out_features=64).eval()
+    module.bits = 4
+    monkeypatch.setattr(module, "dequantize_weight",
+                        lambda **kwargs: pytest.fail("Do not dequantize rejected source weights"))
+    with pytest.raises(NotImplementedError, match="8-bit source weights"):
+        if entry == "post_init":
+            module.post_init()
+        elif entry == "transform_cpu":
+            module.transform_cpu(torch.float32)
+        else:
+            module(torch.ones(1, 256))
+    assert not hasattr(module, "int8_weight_nk")
 
 
-def _copy_gptq_buffers(src: TorchLinear, dst: TorchInt8Linear) -> None:
-    dst.qweight.copy_(src.qweight)
-    dst.qzeros.copy_(src.qzeros)
-    dst.scales.copy_(src.scales)
-    dst.g_idx.copy_(src.g_idx)
-    dst.qzero_format(format=src.qzero_format())
-    if src.bias is not None and dst.bias is not None:
-        dst.bias.copy_(src.bias)
+@pytest.mark.parametrize("group_size", [-1, 16, 32, 64, 128])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16, torch.float32])
+def test_native_int8_codes_output_and_storage_oracle(group_size, dtype, monkeypatch):
+    source, weight = build_case(bits=8, group_size=group_size)
+    channel_scale = (weight.abs().amax(0) / 127).clamp_min(1e-10)
+    codes = (weight / channel_scale).round().clamp(-128, 127).to(torch.int8)
+    candidate = TorchInt8Linear(bits=8, group_size=group_size, sym=False, desc_act=True,
+                                in_features=source.in_features, out_features=source.out_features)
+    candidate.load_state_dict(source.state_dict())
+    references = []
+    original = candidate.dequantize_weight
 
+    def tracked(*args, **kwargs):
+        dense = original(*args, **kwargs)
+        references.append(weakref.ref(dense))
+        return dense
 
-@pytest.mark.skipif(
-    not TORCH_HAS_FUSED_OPS or not _has_int8_weight_mm(),
-    reason="Torch int8 fused op requires a recent PyTorch CPU build with aten::_weight_int8pack_mm.",
-)
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("desc_act", [False, True])
-def test_torch_int8_cpu_kernel_deviation_against_torch(dtype: torch.dtype, desc_act: bool):
-    torch.manual_seed(7)
-
-    bits = 4
-    group_size = 32
-    in_features = 256
-    out_features = 192
-
-    linear, scales, zeros, g_idx = _mock_gptq_linear(bits, group_size, in_features, out_features)
-    if desc_act:
-        groups = in_features // group_size
-        g_idx = (torch.arange(in_features, dtype=torch.int32) * 3) % groups
-
-    baseline = TorchLinear(
-        bits=bits,
-        group_size=group_size,
-        sym=True,
-        desc_act=desc_act,
-        in_features=in_features,
-        out_features=out_features,
-        pack_dtype=torch.int32,
-        bias=False,
-    )
-    candidate = TorchInt8Linear(
-        bits=bits,
-        group_size=group_size,
-        sym=True,
-        desc_act=desc_act,
-        in_features=in_features,
-        out_features=out_features,
-        pack_dtype=torch.int32,
-        bias=False,
-    )
-
-    baseline.optimize = lambda *args, **kwargs: None
-    candidate.optimize = lambda *args, **kwargs: None
-    baseline.pack_block(linear, scales.T, zeros.T, g_idx=g_idx)
-    _copy_gptq_buffers(src=baseline, dst=candidate)
-    baseline.post_init()
+    monkeypatch.setattr(candidate, "dequantize_weight", tracked)
     candidate.post_init()
-    assert getattr(candidate, "qweight", None) is None
-    assert getattr(candidate, "qzeros", None) is None
-    assert getattr(candidate, "scales", None) is None
-    assert getattr(candidate, "g_idx", None) is None
-    assert candidate.int8_weight_nk is not None
-    assert candidate.int8_channel_scale is not None
-    baseline.eval()
     candidate.eval()
+    assert all(reference() is None for reference in references)
+    torch.testing.assert_close(candidate.int8_weight_nk, codes.t(), rtol=0, atol=0)
+    torch.testing.assert_close(candidate.int8_channel_scale, channel_scale, rtol=0, atol=0)
+    assert all(not hasattr(candidate, name) for name in candidate.GPTQ_BUFFER_NAMES)
+    for current_dtype in (dtype, torch.bfloat16, torch.float32, dtype):
+        activation = torch.arange(7 * source.in_features).reshape(7, -1).remainder(9).sub(4).to(current_dtype) / 16
+        raw = (activation.float() @ codes.float()) * channel_scale.to(current_dtype).float()
+        with torch.inference_mode():
+            output = candidate(activation)
+        assert output.dtype == current_dtype
+        torch.testing.assert_close(output, raw.to(current_dtype), rtol=2e-3, atol=2e-3)
+        torch.testing.assert_close(candidate.int8_module.int8_channel_scale, channel_scale, rtol=0, atol=0)
+        allowed = {candidate.int8_weight_nk.data_ptr(), candidate.int8_channel_scale.data_ptr()}
+        assert all(tensor.untyped_storage().data_ptr() in allowed for tensor in state_tensors(candidate))
+        assert candidate.int8_weight_nk.untyped_storage().nbytes() == source.in_features * source.out_features
+        assert all(reference() is None for reference in references)
 
-    x = torch.randn((48, in_features), dtype=dtype, device="cpu")
-    with torch.inference_mode():
-        ref = baseline(x)
-        out = candidate(x)
 
-    diff = (out - ref).abs().to(torch.float32)
-    rel = diff / ref.abs().clamp_min(1e-6)
-    max_abs = float(diff.max().item())
-    mean_abs = float(diff.mean().item())
-    max_rel = float(rel.max().item())
-
-    _log_deviation_header_once()
-    deviation_cols.info(
-        str(dtype),
-        str(desc_act),
-        f"{max_abs:.6f}",
-        f"{mean_abs:.6f}",
-        f"{max_rel:.6f}",
-    )
-
-    # vLLM-style int4->float->int8 re-quantization introduces expected approximation noise.
-    assert max_abs <= 0.5
-    assert mean_abs <= 0.08
-    torch.testing.assert_close(out, ref, rtol=0.08, atol=0.5)
-    assert candidate.int8_module is not None
+def test_native_int8_scale_cast_does_not_destroy_canonical_precision():
+    weight = torch.arange(64, dtype=torch.int8).reshape(8, 8)
+    scales = torch.linspace(.010123, .080987, 8)
+    module = Int8PackedModule(weight, scales.clone())
+    module(torch.ones(1, 8, dtype=torch.bfloat16))
+    torch.testing.assert_close(module.int8_channel_scale, scales, rtol=0, atol=0)
+    torch.testing.assert_close(module(torch.ones(1, 8)), weight.float().sum(1)[None] * scales,
+                               rtol=1e-6, atol=1e-6)
 
 
 def test_torch_int8_kernel_is_cpu_only():
@@ -178,5 +119,8 @@ def test_torch_int8_kernel_is_cpu_only():
         TorchInt8Linear.validate_device(DEVICE.XPU)
 
 
-def test_torch_int8_supports_expected_bits():
-    assert TorchInt8Linear.SUPPORTS_BITS == [2, 4, 8]
+def test_torch_int8_supports_native_width_only():
+    assert TorchInt8Linear.SUPPORTS_BITS == [8]
+    supported, error = TorchInt8Linear.validate(bits=8, group_size=32, pack_dtype=torch.int32,
+                                               device=DEVICE.CPU, dynamic={".*": {"bits": 4}})
+    assert not supported and error is not None

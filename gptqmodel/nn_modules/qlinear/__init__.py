@@ -1,7 +1,8 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# AWQ reference: MIT Han Lab, MIT License, https://github.com/mit-han-lab/llm-awq
 import copy
 import math
 import os
@@ -275,6 +276,48 @@ class BaseQuantLinear(nn.Module):
                 device=device,
                 lora_A=getattr(self, "lora_A", None),
                 lora_B=getattr(self, "lora_B", None))
+
+    def _clear_runtime_weight_cache(self) -> None:
+        clear = getattr(self, "clear_weight_cache", None)
+        if callable(clear):
+            clear()
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        """Invalidate derived-weight caches after a state-dict load.
+
+        ``load_state_dict`` may copy into an existing buffer, which does not
+        replace the Python object. Cache keys catch versioned tensors, but an
+        inference tensor has no version counter, so clear unconditionally.
+        """
+
+        super()._load_from_state_dict(*args, **kwargs)
+        self._clear_runtime_weight_cache()
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        self._clear_runtime_weight_cache()
+        return result
+
+    # public/stable api exposed to external integrations (optimum, auto-round, ...)
+    def hf_pack(
+            self,
+            linear: nn.Module,
+            scales: t.Tensor,
+            zeros: Optional[t.Tensor] = None,
+            g_idx: Optional[t.Tensor] = None,
+            **kwargs,
+    ):
+        """Stable (`hf_`-prefixed) layer packing entry point.
+
+        Wraps :func:`gptqmodel.utils.packing.hf_pack_layer` so external
+        integrators never need to call the internal
+        ``pack``/``pack_block``/``pack_original`` implementations directly.
+        See that function for the full argument contract (``pack_impl``,
+        ``device``, ``post_init``, ...).
+        """
+        from ...utils.packing import hf_pack_layer
+
+        return hf_pack_layer(self, linear, scales, zeros, g_idx, **kwargs)
 
     def clear_autotune(self):
         self._autotune_complete = False
@@ -1396,6 +1439,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         if not t.cuda.is_available():
             raise RuntimeError("pack_gpu requires CUDA availability but none was detected.")
 
+        # Embeddings use a different (non-transposed) packing layout; keep them on
+        # the CPU packers so callers can fall back safely.
+        if isinstance(linear, nn.Embedding):
+            raise ValueError("pack_gpu does not support embedding layers")
+
         target_device = t.device(device) if device is not None else t.device("cuda")
         if target_device.type != "cuda":
             raise ValueError(f"pack_gpu expected a CUDA device, got `{target_device}`.")
@@ -1424,7 +1472,10 @@ class PackableQuantLinear(GPTQQuantLinear):
         # Align layout with CPU paths: expect [groups, out_features]
         scales_g = scales.T.contiguous()
         zeros_g = zeros.T.contiguous()
-        scale_zeros_g = zeros_g * scales_g
+        # Match the reference CPU packer (pack_block_cpu.cpp), which performs the
+        # quant math in float32 (`zeros.to(float) * scales.to(float)`). Keeping the
+        # same precision here is required for bit-exact qweight/qzeros output.
+        scale_zeros_g = zeros_g.to(t.float32) * scales_g.to(t.float32)
 
         scales_dev = scales_g.to(device=target_device)
         zeros_dev = zeros_g.to(device=target_device)
@@ -1445,13 +1496,14 @@ class PackableQuantLinear(GPTQQuantLinear):
 
         if bits in (2, 4, 8):
             pack_factor = word_bits // bits
-            shifts_pf64 = (
+            # 4-D shift grid for the fully batched packer: [1, bits, pack_factor, 1].
+            shifts_pf64_batched = (
                 t.arange(pack_factor, dtype=t.int64, device=target_device)
-                .view(1, pack_factor, 1)
+                .view(1, 1, pack_factor, 1)
                 * bits
             )
         elif bits == 3 or self.planar:
-            shifts_pf64 = None
+            shifts_pf64_batched = None
         else:
             raise NotImplementedError(f"Unsupported bits={bits}")
 
@@ -1463,15 +1515,6 @@ class PackableQuantLinear(GPTQQuantLinear):
         )
 
         range10 = t.arange(10, dtype=t.int64, device=target_device).view(-1, 1)
-
-        @t.inference_mode()
-        def _pack_rows_2_4_8(int32_blk_32xN: t.Tensor, dst: t.Tensor, dst_rows_base: int):
-            r64 = int32_blk_32xN.to(t.int64)
-            reshaped = r64.view(bits, pack_factor, -1)
-            packed64 = (reshaped << shifts_pf64).sum(dim=1, dtype=t.int64)
-            dst[dst_rows_base:dst_rows_base + bits] = (
-                (packed64 & mask_tensor).to(self.pack_dtype)
-            )
 
         @t.inference_mode()
         def _pack_rows_3_values(int32_blk_32xN: t.Tensor) -> t.Tensor:
@@ -1501,23 +1544,36 @@ class PackableQuantLinear(GPTQQuantLinear):
             sz_blk_T = scale_zeros_dev.index_select(0, gsel).T
             s_blk_T = scales_dev.index_select(0, gsel).T
 
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)
+            # float32 math to stay bit-exact with the CPU packer.
+            int_block = t.round((Wblk.to(t.float32) + sz_blk_T.to(t.float32)) / s_blk_T.to(t.float32))
             int_block.clamp_(0, self.maxq)
             int_block = int_block.to(t.int32).T.contiguous()
 
             groups32 = blk // word_bits
             base_group = (i0 // word_bits)
-            for g in range(groups32):
-                sub = int_block[g * word_bits:(g + 1) * word_bits]
-                dst_rows = (base_group + g) * rows_per_group
-                if bits in (2, 4, 8):
-                    _pack_rows_2_4_8(sub, qweight_dev, dst_rows)
-                elif bits == 3 and not self.planar:
-                    _pack_rows_3(sub, qweight_dev, dst_rows)
-                elif self.planar:
-                    qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
-                else:
-                    raise NotImplementedError(f"Unsupported bits={bits}")
+            if bits in (2, 4, 8):
+                # Fully batched pack for the common 2/4/8-bit widths: a single
+                # reshape/shift/sum/copy for the whole block replaces one tiny
+                # launch chain per 32-column group. ``word_bits == bits * pack_factor``,
+                # so the 4-D view groups each word's ``bits`` destination rows
+                # together exactly like the former per-group loop (bit-exact).
+                viewed = int_block.view(groups32, bits, pack_factor, out_features).to(t.int64)
+                packed = (viewed << shifts_pf64_batched).sum(dim=2, dtype=t.int64) & mask_tensor
+                row_lo = base_group * rows_per_group
+                row_hi = row_lo + groups32 * rows_per_group
+                qweight_dev[row_lo:row_hi].view(groups32, bits, out_features).copy_(
+                    packed.to(self.pack_dtype)
+                )
+            else:
+                for g in range(groups32):
+                    sub = int_block[g * word_bits:(g + 1) * word_bits]
+                    dst_rows = (base_group + g) * rows_per_group
+                    if bits == 3 and not self.planar:
+                        _pack_rows_3(sub, qweight_dev, dst_rows)
+                    elif self.planar:
+                        qweight_dev[dst_rows:dst_rows + bits] = planar_pack_rows(sub, bits).to(self.pack_dtype)
+                    else:
+                        raise NotImplementedError(f"Unsupported bits={bits}")
 
         zeros_int = zeros_dev.to(dtype=t.int64)
         if bits in (2, 4, 8):
@@ -1713,12 +1769,12 @@ class AWQuantLinear(PackedGroupedQuantLinear):
         if register_buffers:
             self.register_buffer(
                 "qweight",
-                t.zeros((in_features, out_features // (self.pack_dtype_bits // self.bits)), dtype=self.pack_dtype),
+                t.zeros((in_features, math.ceil(out_features * self.bits / self.pack_dtype_bits)), dtype=self.pack_dtype),
             )
             self.register_buffer(
                 "qzeros",
                 t.zeros(
-                    (in_features // self.group_size, out_features // (self.pack_dtype_bits // self.bits)),
+                    (in_features // self.group_size, math.ceil(out_features * self.bits / self.pack_dtype_bits)),
                     dtype=self.pack_dtype,
                 ),
             )

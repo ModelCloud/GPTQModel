@@ -14,7 +14,10 @@ import torch.nn.functional as F
 
 from gptqmodel.models.base import BaseQModel
 from gptqmodel.nn_modules.qlinear import PackableQuantLinear
-from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
+from gptqmodel.nn_modules.qlinear.gguf import (
+    GGUFTorchLinear,
+    _dequantize_gguf_tensor_numpy,
+)
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
@@ -657,6 +660,10 @@ def test_gguf_forward_requests_dequantized_weight_in_input_dtype(monkeypatch):
     dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
     case = _build_rtn_microbench_case(dtype, bits="q4_0")
     module = _build_rtn_gguf_module(case)
+    module.gguf_fused_cpu_max_rows = 0
+    module.gguf_fused_cuda_max_rows = 0
+    module.autotune_enabled = False
+    module.clear_autotune()
 
     observed: dict[str, torch.device | torch.dtype | None] = {"device": None, "dtype": None}
     original = GGUFTorchLinear.dequantize_weight
@@ -1661,7 +1668,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    def _fused(self, x_flat):
+    def _fused(self, x_flat, bias=None):
         calls["fused"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
@@ -1678,7 +1685,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cuda_batches():
 
 
 @pytest.mark.parametrize("bits", ["q4_k_m", "q5_k_m", "q6_k"])
-def test_gguf_cpu_fused_forward_matches_dense_baseline(bits: str):
+def test_gguf_cpu_fused_forward_matches_independent_oracle(bits: str):
     case = _build_rtn_microbench_case(torch.bfloat16, bits=bits)
     module = _build_rtn_gguf_module(case).cpu().eval()
     inputs = case["inputs"].detach().cpu().to(torch.bfloat16)
@@ -1687,12 +1694,23 @@ def test_gguf_cpu_fused_forward_matches_dense_baseline(bits: str):
     module.gguf_fused_cpu_min_matrix_elements = 0
     module.clear_weight_cache()
 
-    baseline = module._forward_dequant_matmul(inputs)
-    fused = module._forward_fused_k(inputs)
+    expected_weight = torch.from_numpy(
+        _dequantize_gguf_tensor_numpy(
+            module.qweight.detach().cpu().numpy(),
+            module.gguf_tensor_qtype,
+        )
+    )[:, : module.in_features]
+    expected = inputs.float() @ expected_weight.T + module.bias.float()
+    fused = module._forward_fused_k(inputs, bias=module.bias)
 
-    output_stats = _error_stats(baseline.to(torch.float32), fused.to(torch.float32))
-    assert output_stats["mae"] < 2e-4
-    assert output_stats["max"] < 3e-3
+    normalized_error = (fused.float() - expected).norm() / expected.norm().clamp_min(1e-12)
+    assert normalized_error < 2e-3
+    torch.testing.assert_close(
+        fused,
+        expected.to(torch.bfloat16),
+        rtol=2e-3,
+        atol=2e-3,
+    )
 
 
 def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
@@ -1711,7 +1729,7 @@ def test_gguf_forward_uses_fused_k_path_for_small_cpu_batches():
         calls["dense"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 
-    def _fused(self, x_flat):
+    def _fused(self, x_flat, bias=None):
         calls["fused"] += 1
         return torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=x_flat.dtype)
 

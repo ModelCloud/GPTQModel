@@ -48,6 +48,7 @@ from .gpt_bigcode import GptBigCodeQModel
 from .gpt_neo import GptNeoQModel
 from .gpt_neox import GPTNeoXQModel
 from .gptj import GptJQModel
+from .granitemoe import GraniteMoeQModel
 from .grinmoe import GrinMoeQModel
 from .hrm_text import HrmTextQModel
 from .hunyuan_v1_dense import HunYuanDenseV1QModel
@@ -87,6 +88,7 @@ from .nemotron_labs_diffusion import NemotronLabsDiffusionQModel
 from .nemotron_h_puzzle import NemotronHPuzzleQModel
 from .olmo3 import Olmo3QModel
 from .olmoe import OlmoeQModel
+from .openvla import OpenVLAQModel
 from .opt import OptQModel
 from .ouro import OuroQModel
 from .ovis import OvisQModel
@@ -98,6 +100,7 @@ from .phi3 import Phi3QModel
 from .qwen import QwenQModel
 from .qwen2 import Qwen2QModel
 from .qwen2_5_vl import Qwen2_5_VLQModel
+from .qwen2_audio import Qwen2AudioGPTQ
 from .qwen2_moe import Qwen2MoeQModel
 from .qwen2_vl import Qwen2VLQModel
 from .qwen3 import Qwen3QModel
@@ -106,6 +109,7 @@ from .qwen_drive import QwenDriveQModel
 from .qwen3_vl import Qwen3_VLQModel, Qwen3_VL_MoeQModel
 from .qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel
 from .rw import RwgQModel
+from .smolvlm import SmolVLMQModel
 from .solar_open import SolarOpenQModel
 from .solar_open2 import SolarOpen2QModel
 from .spark2_5 import Spark2_5QModel
@@ -116,6 +120,7 @@ from .xing4_0 import Xing4_0QModel
 from .xverse import XverseQModel
 from .falcon_h1 import FalconH1QModel
 from .falcon_mamba import FalconMambaQModel
+from .jamba import JambaQModel
 from .zamba import ZambaQModel
 from .zamba2 import Zamba2QModel
 from .zdtaichu5 import ZDTaichu5QModel
@@ -126,6 +131,7 @@ from .apertus import Apertus1p5QModel, Apertus1p5TextQModel, ApertusQModel
 from .axk2 import AXK2QModel
 from .klear import KlearQModel
 from .laguna import LagunaQModel
+from .llava import LlavaQModel
 from .llava_qwen2 import LlavaQwen2QModel
 from .nemotron_h import NemotronHQModel
 from .qwen3_omni_moe import Qwen3OmniMoeGPTQ

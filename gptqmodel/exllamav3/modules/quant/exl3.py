@@ -116,7 +116,13 @@ class LinearEXL3:
                 return ovr[self.key].forward(x, params, out_dtype)
 
         bsz = x.numel() // x.shape[-1]
-        torch_mode = params.get("reconstruct", bsz > 32)
+        # The small-batch tensor-core GEMM (`bc.run`) is NVIDIA-only. On ROCm the
+        # extension exports null kernel tables for it, so always take the
+        # reconstruct + hgemm (hipBLAS) path there.
+        if torch.version.hip is not None:
+            torch_mode = True
+        else:
+            torch_mode = params.get("reconstruct", bsz > 32)
 
         out_shape = x.shape[:-1] + (self.out_features,)
         x = x.view(-1, self.in_features)

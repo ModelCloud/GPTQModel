@@ -7,7 +7,16 @@
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 
-#define FULL_MASK 0xffffffff
+// HIP resolves `std::min` to a `__device__` overload, which cannot be used in a
+// constant expression at namespace scope (and makes the kernel traits look like
+// host variables). A plain constexpr helper works on both CUDA and HIP, since
+// constexpr functions are implicitly __host__ __device__ in CUDA.
+constexpr int fht_min(int a, int b) { return a < b ? a : b; }
+
+// The warp shuffles below use __activemask() rather than a hard-coded
+// 0xffffffff: HIP requires a 64-bit shuffle mask (a 32-bit literal fails a
+// static_assert), while CUDA wants the 32-bit active-lane mask. __activemask()
+// is the active-lane set with the right width on both.
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -62,7 +71,7 @@ struct Allreduce {
     template<typename T, typename Operator>
     static __device__ inline T run(T x, Operator &op) {
         constexpr int OFFSET = THREADS / 2;
-        x = op(x, __shfl_xor_sync(uint32_t(-1), x, OFFSET));
+        x = op(x, __shfl_xor_sync(__activemask(), x, OFFSET));
         return Allreduce<OFFSET>::run(x, op);
     }
 };
@@ -71,7 +80,7 @@ template<>
 struct Allreduce<2> {
 template<typename T, typename Operator>
 static __device__ inline T run(T x, Operator &op) {
-    x = op(x, __shfl_xor_sync(uint32_t(-1), x, 1));
+    x = op(x, __shfl_xor_sync(__activemask(), x, 1));
     return x;
 }
 };
@@ -116,7 +125,7 @@ __device__ __forceinline__ void hadamard_mult_warp(float x[kNChunks][kNItems]) {
         for (int c = 0; c < kNChunks; ++c) {
             #pragma unroll
             for (int i = 0; i < kNItems; ++i) {
-                float x_val_other = __shfl_xor_sync(FULL_MASK, x[c][i], lane_mask);
+                float x_val_other = __shfl_xor_sync(__activemask(), x[c][i], lane_mask);
                 x[c][i] = sign * x[c][i] + x_val_other;
             }
         }

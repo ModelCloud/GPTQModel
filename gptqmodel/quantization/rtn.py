@@ -6,12 +6,14 @@
 from __future__ import annotations
 
 import math
+import platform
+import sys
 import time
-from typing import Optional, Tuple
+from functools import lru_cache
 
 import torch
-import torch.nn as nn
 import transformers
+from torch import nn
 from torch.nn.modules.conv import _ConvNd
 
 from ..looper.named_module import NamedModule
@@ -20,8 +22,60 @@ from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gsq_scalar import gsq_enabled_for, refine_affine_scalar
 from .quantizer import HF_OPTIMUM, Quantizer
 
+_MLX_RTN_MIN_ELEMENTS = 256 * 1024
 
-def get_number_of_rows_and_cols(layer: nn.Module) -> Tuple[int, int]:
+
+@lru_cache(maxsize=1)
+def _mlx_rtn_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx_array_to_torch(value, device: torch.device) -> torch.Tensor:
+    return torch.from_dlpack(value).to(device=device).contiguous()
+
+
+def _quantize_rtn_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+    sym: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    import mlx.core as mx
+
+    from .mlx_rtn import quantize_rtn_weight_mlx
+
+    if weight.device.type == "mps":
+        torch.mps.synchronize()
+    result = quantize_rtn_weight_mlx(
+        mx.from_dlpack(weight.contiguous()),
+        bits=bits,
+        group_size=group_size,
+        sym=sym,
+    )
+    return tuple(_mlx_array_to_torch(value, weight.device) for value in result[:3])
+
+
+def _should_use_mlx_rtn_quantization(weight: torch.Tensor, qcfg: RTNConfig) -> bool:
+    return (
+        _mlx_rtn_quantization_available()
+        and weight.device.type in {"cpu", "mps"}
+        and weight.ndim == 2
+        and weight.numel() >= _MLX_RTN_MIN_ELEMENTS
+        and qcfg.smooth is None
+        and isinstance(qcfg.bits, int)
+        and 2 <= qcfg.bits <= 8
+        and (qcfg.group_size == -1 or qcfg.group_size > 0)
+    )
+
+
+def get_number_of_rows_and_cols(layer: nn.Module) -> tuple[int, int]:
     if isinstance(layer, NamedModule):
         layer = layer.module
 
@@ -84,7 +138,7 @@ class RTN:
             (nn.Linear, nn.Conv1d, nn.Conv2d, transformers.Conv1D),
         ), f"We supports only linear and convolutional layers. actual = `{module}`"
 
-    def clone_module(self, device: Optional[torch.device] = None) -> torch.Tensor:
+    def clone_module(self, device: torch.device | None = None) -> torch.Tensor:
         if device is None:
             device = self.module.weight.data.device
 
@@ -122,8 +176,10 @@ class RTN:
 
     @torch.inference_mode()
     def quantize(self):
-        maxq = 2 ** self.qcfg.bits - 1
-        effective_group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+        maxq = 2**self.qcfg.bits - 1
+        effective_group_size = (
+            self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
+        )
         smooth_method = self.qcfg.smooth
         mse_steps = 32
         mse_maxshrink = 0.8
@@ -134,43 +190,51 @@ class RTN:
         start_time = time.time()
         target_device = self.module.weight.device
         weights = self.clone_module(device=target_device)
-        quantized = torch.empty_like(weights)
-        scale_chunks = []
-        zero_chunks = []
+        if _should_use_mlx_rtn_quantization(weights, self.qcfg):
+            quantized, scale, zero = _quantize_rtn_weight_mlx_to_torch(
+                weights,
+                bits=self.qcfg.bits,
+                group_size=self.qcfg.group_size,
+                sym=self.qcfg.sym,
+            )
+        else:
+            quantized = torch.empty_like(weights)
+            scale_chunks = []
+            zero_chunks = []
 
-        for start in range(0, self.columns, effective_group_size):
-            end = min(start + effective_group_size, self.columns)
-            block = weights[:, start:end]
+            for start in range(0, self.columns, effective_group_size):
+                end = min(start + effective_group_size, self.columns)
+                block = weights[:, start:end]
 
-            if isinstance(smooth_method, SmoothMSE):
-                dequant, scale, zero = mse_optimal_quant(
-                    block,
-                    self.qcfg,
-                    maxq,
-                    steps=mse_steps,
-                    maxshrink=mse_maxshrink,
-                )
-            else:
-                block_mod, scale_factor = smooth_block(
-                    block,
-                    self._primary,
-                    group_size=effective_group_size,
-                )
-                self.quantizer.find_params(block_mod, weight=True)
-                dequant = self.quantizer.quantize(block_mod)
-                scale = self.quantizer.scale
-                zero = self.quantizer.zero
+                if isinstance(smooth_method, SmoothMSE):
+                    dequant, scale, zero = mse_optimal_quant(
+                        block,
+                        self.qcfg,
+                        maxq,
+                        steps=mse_steps,
+                        maxshrink=mse_maxshrink,
+                    )
+                else:
+                    block_mod, scale_factor = smooth_block(
+                        block,
+                        self._primary,
+                        group_size=effective_group_size,
+                    )
+                    self.quantizer.find_params(block_mod, weight=True)
+                    dequant = self.quantizer.quantize(block_mod)
+                    scale = self.quantizer.scale
+                    zero = self.quantizer.zero
 
-                if scale_factor is not None:
-                    scale = scale * scale_factor
-                    dequant = dequant * scale_factor
+                    if scale_factor is not None:
+                        scale = scale * scale_factor
+                        dequant = dequant * scale_factor
 
-            quantized[:, start:end] = dequant
-            scale_chunks.append(self._collapse_group_param(scale))
-            zero_chunks.append(self._collapse_group_param(zero))
+                quantized[:, start:end] = dequant
+                scale_chunks.append(self._collapse_group_param(scale))
+                zero_chunks.append(self._collapse_group_param(zero))
 
-        scale = torch.cat(scale_chunks, dim=1)
-        zero = torch.cat(zero_chunks, dim=1)
+            scale = torch.cat(scale_chunks, dim=1)
+            zero = torch.cat(zero_chunks, dim=1)
 
         if self._tp_pad_cols:
             valid_cols = self._original_columns
@@ -180,7 +244,10 @@ class RTN:
         else:
             valid_cols = self.columns
 
-        g_idx = torch.arange(valid_cols, device=quantized.device, dtype=torch.int32) // effective_group_size
+        g_idx = (
+            torch.arange(valid_cols, device=quantized.device, dtype=torch.int32)
+            // effective_group_size
+        )
 
         module_name = self._named_module.full_name if self._named_module is not None else self.name
         if gsq_enabled_for(self.qcfg.gsq, module_name):
@@ -201,11 +268,15 @@ class RTN:
             quantized = quantized.t()
 
         if quantized.shape != self.module.weight.shape:
-            quantized = quantized.reshape(self.module.weight.shape).to(self.module.weight.dtype)
+            quantized = quantized.reshape(self.module.weight.shape).to(
+                self.module.weight.dtype
+            )
         else:
             quantized = quantized.to(self.module.weight.dtype)
 
-        quantized = quantized.to(device=self.module.weight.data.device, non_blocking=False)
+        quantized = quantized.to(
+            device=self.module.weight.data.device, non_blocking=False
+        )
         mean_abs_err = (quantized - self.module.weight.data).abs().mean().item()
         duration = time.time() - start_time
         avg_loss = f"rtn: {mean_abs_err:.7f}"

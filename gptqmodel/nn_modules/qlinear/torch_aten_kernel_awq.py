@@ -83,6 +83,8 @@ class TorchAtenAwqLinear(AWQuantLinear):
         )
 
         self.linear_mode = None
+        self._cpu_transformed = False
+        self._cpu_transform_dtype = None
 
         if register_buffers:
             pack_cols = max(1, self.out_features // self.pack_factor)
@@ -129,21 +131,41 @@ class TorchAtenAwqLinear(AWQuantLinear):
 
         super().optimize()
 
-    def transform_cpu(self):
+    def _fused_input_dtype(self, x: torch.Tensor) -> bool:
+        if x.dtype not in (torch.float16, torch.bfloat16):
+            return False
+        if self._cpu_transform_dtype is not None:
+            return x.dtype == self._cpu_transform_dtype
+        return True
+
+    def transform_cpu(self, dtype: torch.dtype | None = None):
+        if self._cpu_transformed:
+            return
+
         iweight, izeros = unpack_awq(self.qweight, self.qzeros, self.bits)
         iweight, izeros = reverse_awq_order(iweight, izeros, self.bits)
         max_val = (1 << self.bits) - 1
         iweight = torch.bitwise_and(iweight, max_val).to(torch.uint8)
         izeros = torch.bitwise_and(izeros, max_val).reshape(self.scales.shape).to(torch.uint8)
 
-        self.scales = self.scales.to(torch.bfloat16).contiguous()
+        # The op requires the activation and scales/zero-points to share one
+        # dtype. Match the first fused activation instead of assuming the
+        # checkpoint's FP16 scale buffer also implies FP16 model activations.
+        target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
+        if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            target_dtype = torch.bfloat16
+        if self.scales.dtype != target_dtype:
+            self.scales = self.scales.to(target_dtype)
+        self.scales = self.scales.contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(iweight.t().int(), 1).contiguous()
         self.qzeros = _cpu_int4pack_zero_offsets(izeros, self.scales, self.bits).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
+        self._cpu_transform_dtype = target_dtype
+        self._cpu_transformed = True
 
-    def transform(self, device):
+    def transform(self, device, dtype: torch.dtype | None = None):
         if device == "cpu":
-            self.transform_cpu()
+            self.transform_cpu(dtype=dtype)
         else:
             raise NotImplementedError(
                 "TorchAtenAwqLinear only supports fused transforms on CPU devices."
@@ -163,17 +185,17 @@ class TorchAtenAwqLinear(AWQuantLinear):
         if x.device.type != "cpu":
             raise NotImplementedError
 
-        original_dtype = x.dtype
-        if original_dtype != torch.bfloat16:
-            x = x.to(torch.bfloat16)
+        if not self._fused_input_dtype(x):
+            raise RuntimeError(
+                f"{self.__class__.__name__} fused ATen int4pack requires activation dtype "
+                f"{self.scales_and_zeros.dtype}, got {x.dtype}."
+            )
         out = torch.ops.aten._weight_int4pack_mm_for_cpu(
             x,
             self.qweight,
             self.group_size,
             self.scales_and_zeros,
         )
-        if original_dtype != torch.bfloat16:
-            out = out.to(original_dtype)
         return out
 
     def forward(self, x: torch.Tensor):
@@ -185,13 +207,19 @@ class TorchAtenAwqLinear(AWQuantLinear):
             and self.linear_mode is None
             and _has_local_int4pack_cpu_ops()
             and x.device.type == "cpu"
+            and self._fused_input_dtype(x)
         ):
-            self.transform(x.device.type)
+            self.transform(x.device.type, dtype=x.dtype)
             self.linear_mode = "inference"
         elif self.linear_mode is None:
             self.linear_mode = "train"
 
         if self.linear_mode == "inference":
+            if not self._fused_input_dtype(x):
+                raise RuntimeError(
+                    f"{self.__class__.__name__} was transformed for {self.scales.dtype} "
+                    f"but received {x.dtype} activations. Keep one activation dtype per layer."
+                )
             out = self._fused_op_forward(x).reshape(out_shape)
         else:
             weight = self.awq_weight_dequantize(device=x.device, dtype=x.dtype)

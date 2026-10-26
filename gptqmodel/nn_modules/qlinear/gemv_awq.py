@@ -12,6 +12,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...quantization.awq.utils.packing_utils import pack_awq_columns
 from ...utils.awq import awq_gemmv2_forward, awq_gemv_forward
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
@@ -121,8 +122,6 @@ class AwqGEMVLinear(AWQuantLinear):
 
         self.split_k_iters = 8
 
-        self.bias = None
-
         if register_buffers:
             self.register_buffer(
                 "qweight",
@@ -147,6 +146,8 @@ class AwqGEMVLinear(AWQuantLinear):
 
             if bias:
                 self.register_buffer("bias", torch.zeros(out_features, dtype=torch.float16))
+            else:
+                self.bias = None
 
     def post_init(self):
         # if self.padded_infeatures != self.in_features:
@@ -224,50 +225,26 @@ class AwqGEMVLinear(AWQuantLinear):
         else:
             self.bias = None
 
-        intweight = []
-        for idx in range(self.in_features):
-            intweight.append(
-                torch.round(
-                    (linear.weight.data[:, idx] + scale_zeros[:, idx // self.group_size])
-                    / self.scales[:, idx // self.group_size]
-                ).to(torch.int)[:, None]
-            )
-        intweight = torch.cat(intweight, dim=1)
-        intweight = intweight.to(dtype=torch.int32)
-        qweight = torch.zeros(
-            (intweight.shape[0], intweight.shape[1] // 32 * self.bits),
-            dtype=torch.int32,
-            device=intweight.device,
-        )
-
-        for col in range(intweight.shape[1] // pack_num):
-            if self.bits == 4:
-                order_map = [0, 1, 2, 3, 4, 5, 6, 7]
-            else:
-                raise NotImplementedError("Only 4-bit are supported for now.")
-            for i in range(pack_num):
-                qweight_col = intweight[:, col * pack_num + order_map[i]]
-                qweight[:, col] |= qweight_col << (i * self.bits)
-        self.register_buffer("qweight", qweight)
+        # Gather each input column's group scale/zero in a single pass instead
+        # of launching one tiny kernel per input column.  The GEMV layout keeps
+        # scales as [out_features, groups], so the group index selects columns.
+        group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
+        intweight = torch.round(
+            (linear.weight.data + scale_zeros.index_select(1, group_index))
+            / self.scales.index_select(1, group_index)
+        ).to(torch.int32)
+        self.register_buffer("qweight", pack_awq_columns(intweight, self.bits))
 
         zeros = zeros.to(dtype=torch.int32)
-        qzeros = torch.zeros(
-            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size)),
+        # Pad the group axis up to the packed width so the vectorized packer
+        # reproduces the loop's out-of-range skips (those codes stay zero).
+        padded_zeros = torch.zeros(
+            (zeros.shape[0], calculate_zeros_width(linear.in_features, self.group_size) * pack_num),
             dtype=torch.int32,
             device=zeros.device,
         )
-
-        for col in range((zeros.shape[1] + pack_num - 1) // pack_num):
-            if self.bits == 4:
-                order_map = [0, 1, 2, 3, 4, 5, 6, 7]
-            else:
-                raise NotImplementedError("Only 4-bit are supported for now.")
-            for i in range(pack_num):
-                if col * pack_num + order_map[i] >= zeros.shape[1]:
-                    continue
-                qzero_col = zeros[:, col * pack_num + order_map[i]]
-                qzeros[:, col] |= qzero_col << (i * self.bits)
-        self.register_buffer("qzeros", qzeros)
+        padded_zeros[:, : zeros.shape[1]] = zeros
+        self.register_buffer("qzeros", pack_awq_columns(padded_zeros, self.bits))
 
     def extra_repr(self) -> str:
         return (

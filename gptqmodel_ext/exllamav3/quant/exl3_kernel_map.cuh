@@ -35,12 +35,27 @@ typedef void (*fp_exl3_gemm_kernel) (EXL3_GEMM_ARGS);
 
 #define EXL3_GEMM_NUM_SHAPES 4
 
+// The tensor-core GEMM kernels are written against NVIDIA inline PTX
+// (ldmatrix / mma.sync / cp.async) and have no ROCm implementation yet. On ROCm
+// we still emit the exported kernel tables so the extension links, but every
+// entry is null and `exl3_gemm` refuses to launch them with a clear error. The
+// EXL3 quantization lifecycle does not use these kernels (it goes through
+// `hgemm`/hipBLAS), so quantization runs at full speed on MI350X.
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+
+#define EXL3_GEMM_KERNEL_INSTANCES(_bits, _c_fp32, cb) \
+    nullptr, nullptr, nullptr, nullptr, nullptr
+
+#else
+
 #define EXL3_GEMM_KERNEL_INSTANCES(_bits, _c_fp32, cb) \
     nullptr, \
     exl3_gemm_kernel<_bits, _c_fp32, cb, EXL3_GEMM_SHAPE_1>, \
     exl3_gemm_kernel<_bits, _c_fp32, cb, EXL3_GEMM_SHAPE_2>, \
     exl3_gemm_kernel<_bits, _c_fp32, cb, EXL3_GEMM_SHAPE_3>, \
     exl3_gemm_kernel<_bits, _c_fp32, cb, EXL3_GEMM_SHAPE_4>
+
+#endif
 
 #define ALL_EXL3_KERNEL_EXTERNS(K) \
     extern fp_exl3_gemm_kernel tfp_exl3_gemm_kernel_fp32_b##K[]; \

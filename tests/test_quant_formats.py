@@ -47,7 +47,7 @@ class TestQuantization(ModelTest):
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, False, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ_V2, 4),
-            # (QUANT_METHOD.QQQ, BACKEND.AUTO, True, FORMAT.QQQ, 4),
+            # (QUANT_METHOD.QQQ, BACKEND.AUTO, False, FORMAT.QQQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TORCH, True, FORMAT.GPTQ, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.TRITON, True, FORMAT.GPTQ_V2, 4),
             # (QUANT_METHOD.GPTQ, BACKEND.EXLLAMA_V2, False, FORMAT.GPTQ, 4),
@@ -67,7 +67,7 @@ class TestQuantization(ModelTest):
             quantize_config = QuantizeConfig(
                 bits=bits,
                 group_size=128,
-                desc_act=True,
+                desc_act=False,
                 sym=sym,
                 format=format,
                 damp_percent=0.05,
@@ -129,4 +129,3 @@ class TestQuantization(ModelTest):
 
             del model
             torch_empty_cache()
-

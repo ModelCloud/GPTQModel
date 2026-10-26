@@ -1,5 +1,9 @@
 #pragma once
 
+// NVIDIA tensor-core GEMM inner loop (ldmatrix / mma.sync / cp.async). Compiled
+// out for HIP/ROCm; see exl3_kernel_map.cuh.
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+
 #include "../ptx.cuh"
 
 // Constants
@@ -608,3 +612,5 @@ void exl3_gemm_kernel_inner
         }
     }
 }
+
+#endif  // !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)

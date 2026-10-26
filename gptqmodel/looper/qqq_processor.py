@@ -4,25 +4,35 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import sys
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import DEVICE
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, QUANT_LOG_DAMP, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    QUANT_LOG_DAMP,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
 from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
-from ..quantization.config import METHOD, QuantizeConfig, resolve_quant_format
-from ..utils.fallback import normalize_fallback
+from ..quantization.config import METHOD, QuantizeConfig, _normalize_mse, resolve_quant_format
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
-from ..utils.logger import setup_logger, log_time_block
+from ..utils.fallback import normalize_fallback
+from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, move_to, pack_module
 from ..utils.torch import CPU
+
 
 log = setup_logger()
 
@@ -66,14 +76,18 @@ class QQQProcessor(LoopProcessor):
             raise ValueError("QQQ quantization requires QQQ or QQQ_TORCH backend")
 
     def _quant_linear_kernel(self):
-        if self.requested_backend == BACKEND.QQQ_TORCH:
+        if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
         if isinstance(device, DEVICE):
-            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device == DEVICE.NPU else (QQQLinear, BACKEND.QQQ)
+            if device in (DEVICE.CPU, DEVICE.NPU):
+                return QQQTorchLinear, BACKEND.QQQ_TORCH
+            return QQQLinear, BACKEND.QQQ
         if isinstance(device, torch.device):
-            return (QQQTorchLinear, BACKEND.QQQ_TORCH) if device.type == "npu" else (QQQLinear, BACKEND.QQQ)
-        if isinstance(device, str) and device.split(":")[0].lower() == "npu":
+            if device.type in ("cpu", "npu"):
+                return QQQTorchLinear, BACKEND.QQQ_TORCH
+            return QQQLinear, BACKEND.QQQ
+        if isinstance(device, str) and device.split(":")[0].lower() in ("cpu", "npu"):
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         return QQQLinear, BACKEND.QQQ
 
@@ -95,7 +109,9 @@ class QQQProcessor(LoopProcessor):
         if self.qcfg.dynamic is not None:
             qcfg_clone.bits = self.qcfg.dynamic_get(module.full_name, "bits", qcfg_clone.bits)
             qcfg_clone.sym = self.qcfg.dynamic_get(module.full_name, "sym", qcfg_clone.sym)
-            qcfg_clone.mse = self.qcfg.dynamic_get(module.full_name, "mse", qcfg_clone.mse)
+            qcfg_clone.mse = _normalize_mse(
+                self.qcfg.dynamic_get(module.full_name, "mse", None), base=qcfg_clone.mse,
+            )
 
             qcfg_clone.group_size = self.qcfg.dynamic_get(module.full_name, "group_size", qcfg_clone.group_size)
             desc_act_override = self.qcfg.dynamic_get(module.full_name, "desc_act", None)
@@ -114,9 +130,9 @@ class QQQProcessor(LoopProcessor):
         tmp.fallback = normalize_fallback(fallback, qcfg_clone.fallback)
         tmp.expected_nsamples = getattr(self, "total_calibration_tokens", None)
 
-        if self.qcfg.mse > 0.0:
+        if self.qcfg.mse.norm > 0.0:
             mse = True
-            norm = self.qcfg.mse
+            norm = self.qcfg.mse.norm
         else:
             mse = False
             norm = 100

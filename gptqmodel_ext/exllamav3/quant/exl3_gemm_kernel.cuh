@@ -1,6 +1,14 @@
 #pragma once
 
+// Always available: the kernel-table macros (which expand to null entries for
+// HIP/ROCm) and the dispatch entry points.
 #include "exl3_kernel_map.cuh"
+
+// NVIDIA tensor-core GEMM (see exl3_kernel_map.cuh). Compiled out for HIP/ROCm,
+// where the extension exports null kernel tables and the EXL3 quantization
+// lifecycle uses the reconstruct + hgemm path instead.
+#if !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)
+
 #include "hadamard_inner.cuh"
 #include "exl3_gemm_inner.cuh"
 
@@ -78,3 +86,5 @@ void exl3_gemm_kernel(EXL3_GEMM_ARGS)
         }
     }
 }
+
+#endif  // !defined(__HIP_PLATFORM_AMD__) && !defined(USE_ROCM)

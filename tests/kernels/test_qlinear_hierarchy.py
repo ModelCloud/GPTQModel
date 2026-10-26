@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
+from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 from gptqmodel.nn_modules.qlinear.torch_fused_awq import TorchFusedAwqLinear
 
 
@@ -36,7 +37,7 @@ def test_quant_linear_hierarchy_splits_grouped_and_weight_only_kernels():
 
 
 def test_awq_hybrid_kernels_do_not_inherit_gptq_only_base_state():
-    for cls in (TorchFusedAwqLinear, TorchAtenAwqLinear):
+    for cls in (TorchFusedAwqLinear, TorchAtenAwqLinear, TorchCpuAvx512AwqLinear):
         assert issubclass(cls, AWQuantLinear)
         assert not issubclass(cls, GPTQQuantLinear)
         assert not hasattr(cls, "qzero_format")

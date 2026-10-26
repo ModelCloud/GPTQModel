@@ -8,14 +8,37 @@
 
 #pragma once
 
+#if defined(__HIP_PLATFORM_AMD__) || defined(USE_ROCM)
+// ROCm/HIP toolchain. Torch hipifies the rotation.cu translation unit but
+// leaves this shared header in its CUDA spelling, so map the CUDA-only
+// includes and the CUDA bfloat16 spellings onto their HIP equivalents here.
+//
+// HIP has no <cuda.h> (the CUDA driver API header): this file only needs
+// cudaStream_t / cudaGetErrorString, which <hip/hip_runtime.h> provides.
+#include <hip/hip_bf16.h>
+#include <hip/hip_fp16.h>
+#include <hip/hip_runtime.h>
+
+using __nv_bfloat16 = __hip_bfloat16;
+using __nv_bfloat162 = __hip_bfloat162;
+
+// HIP only exposes the __float22bfloat162_rn(float2) spelling; CUDA also has
+// the two-float __floats2bfloat162_rn used below.
+static __device__ __forceinline__ __nv_bfloat162 __floats2bfloat162_rn(float lo, float hi) {
+  return __halves2bfloat162(__float2bfloat16(lo), __float2bfloat16(hi));
+}
+#else
 #include <cuda.h>
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#endif
 
 template <typename scalar_t> struct RotateAccess;
 
 template <> struct RotateAccess<float> {
+  __device__ static float to_float(float v) { return v; }
+
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(float *__restrict__ x_grp, const float *__restrict__ x,
                                     const float *__restrict__ scales, const int s, const int h,
@@ -77,6 +100,8 @@ template <> struct RotateAccess<float> {
 };
 
 template <typename HalfT, typename Half2T, typename Traits> struct RotateAccessHalf {
+  __device__ static float to_float(HalfT v) { return Traits::to_float(v); }
+
   template <int CTA_M, int ROW_STRIDE, int GROUP_SIZE, bool USE_SCALE>
   __device__ static void load_group(HalfT *__restrict__ x_grp, const HalfT *__restrict__ x,
                                     const HalfT *__restrict__ scales, const int s, const int h,
