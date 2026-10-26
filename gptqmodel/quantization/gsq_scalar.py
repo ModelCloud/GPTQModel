@@ -205,9 +205,20 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
             raise ValueError("non-finite GSQ gradient")
         optimizer.step()
         with torch.no_grad():
+            # Scale learning is performed in log space, but an otherwise valid
+            # optimizer step can still overflow exp() or the checkpoint dtype.
+            # Keep the best hard export seen so far instead of aborting the
+            # caller's GPTQ quantization on a bad optional refinement step.
+            if any(not bool(torch.isfinite(parameter).all()) for parameter in parameters):
+                history.append(best)
+                break
+            current_scales = base_scales * scale_delta.exp()
+            hard_scales = current_scales.to(scale_dtype).float()
+            if not bool(torch.isfinite(hard_scales).all()) or bool((hard_scales <= 0).any()):
+                history.append(best)
+                break
             chosen = logits.masked_fill(~valid, -torch.inf).argmax(-1, keepdim=True)
             hard_codes = codes.gather(-1, chosen).squeeze(-1)
-            hard_scales = (base_scales * scale_delta.exp()).to(scale_dtype).float()
             candidate = decode(hard_codes, hard_scales).to(weight.dtype)
             score = float(loss(exported(candidate, hard_scales)))
             if not torch.isfinite(torch.tensor(score)):

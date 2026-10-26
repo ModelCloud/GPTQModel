@@ -298,7 +298,7 @@ def test_torch_quant_linear_exposes_weight_metadata():
     assert ("cuda" in weight.device.type) == weight.is_cuda
 
 
-def test_cached_forward_matches_baseline():
+def test_retired_weight_cache_matches_baseline():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     module = _make_module(device)
 
@@ -307,13 +307,46 @@ def test_cached_forward_matches_baseline():
     module.enable_weight_cache(False)
     ref = module(x)
 
-    module.enable_weight_cache(True)
+    with pytest.warns(FutureWarning, match="Dense weight caching"):
+        module.enable_weight_cache(True)
     module.clear_weight_cache()
     cached = module(x)
 
     torch.testing.assert_close(ref, cached)
-    assert x.dtype in module._cached_weights
-    assert module._cached_weights[x.dtype].device.type == device.type
+    assert not module._cache_enabled
+    assert not hasattr(module, "_cached_weights")
+
+
+def test_forward_observes_weight_mutation_and_state_load_clears_metadata():
+    module = _make_module(torch.device("cpu"))
+    module.clear_weight_cache()
+    x = torch.randn(8, module.in_features, dtype=torch.float16)
+
+    first = module(x)
+    assert module._zeros_cache is not None
+
+    with torch.no_grad():
+        module.qweight.add_(1)
+    second = module(x)
+    assert not torch.equal(first, second)
+
+    module.load_state_dict(module.state_dict())
+    assert module._zeros_cache is None
+    assert module._g_idx_long_cache is None
+
+
+def test_repeated_forward_with_inference_tensors():
+    with torch.inference_mode():
+        module = _make_module(torch.device("cpu"))
+        module.clear_weight_cache()
+        x = torch.randn(8, module.in_features, dtype=torch.float16)
+
+        first = module(x)
+        second = module(x)
+
+    assert module.qweight.is_inference()
+    assert not hasattr(module, "_cached_weights")
+    torch.testing.assert_close(first, second, rtol=0, atol=0)
 
 
 def test_torch_empty_cache_syncs_before_releasing_allocator(monkeypatch):
@@ -331,33 +364,32 @@ def test_torch_empty_cache_syncs_before_releasing_allocator(monkeypatch):
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires at least 2 CUDA devices")
 def test_cross_device_forward_moves_weights_to_input_device():
     module = _make_module(torch.device("cuda:1"))
-    module.enable_weight_cache(True)
     module.clear_weight_cache()
 
     x = torch.randn(8, module.in_features, device=torch.device("cuda:0"), dtype=torch.float16)
     out = module(x)
 
     assert out.device == x.device
-    assert x.dtype in module._cached_weights
-    assert module._cached_weights[x.dtype].device == x.device
+    assert not hasattr(module, "_cached_weights")
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required for lookahead prefetch test")
-def test_lookahead_prefetch_single_step():
-    device = torch.device("cuda")
+def test_retired_lookahead_does_not_prefetch():
+    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     producer = _make_module(device)
     consumer = _make_module(device)
 
-    producer.enable_lookahead(True).set_lookahead_next(consumer)
-    consumer.enable_lookahead(True)
+    with pytest.warns(FutureWarning, match="Dense weight lookahead"):
+        producer.enable_lookahead(True).set_lookahead_next(consumer)
+        consumer.enable_lookahead(True)
 
     x = torch.randn(4, producer.in_features, device=device, dtype=torch.float16)
 
     producer(x)
-    assert torch.float16 in consumer._prefetched_weights
-
     consumer(x)
-    assert torch.float16 not in consumer._prefetched_weights
+    assert not hasattr(consumer, "_prefetched_weights")
+    assert producer._lookahead_next is None
+    assert not producer._lookahead_enabled
+    assert not consumer._lookahead_enabled
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="cuda required for g_idx offload test")
@@ -413,11 +445,8 @@ def test_configure_default_lookahead_chain():
             self.layers = nn.ModuleList([DummyLayer()])
 
     model = DummyModel()
-    for module in model.modules():
-        if isinstance(module, TorchLinear):
-            module.enable_lookahead(True)
-
-    configure_default_lookahead(model)
+    with pytest.warns(FutureWarning, match="Dense weight lookahead"):
+        configure_default_lookahead(model)
 
     layer = model.layers[0]
     q_proj = layer.self_attn.q_proj
@@ -428,16 +457,9 @@ def test_configure_default_lookahead_chain():
     up_proj = layer.mlp.up_proj
     down_proj = layer.mlp.down_proj
 
-    assert q_proj._lookahead_next == (gate_proj, up_proj, down_proj)
-    assert q_proj._lookahead_enabled
-
-    for module in (k_proj, v_proj, o_proj):
+    for module in (q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj):
         assert module._lookahead_next is None
         assert not module._lookahead_enabled
-
-    for module in (gate_proj, up_proj, down_proj):
-        assert module._lookahead_next is None
-        assert module._lookahead_enabled
 
 
 def test_cpu_dequant_parity_and_g_idx_cache_allocation():

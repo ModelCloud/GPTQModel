@@ -47,6 +47,8 @@ __all__ = [
     "dequantize_fp8",
     "dequantize_f8_e4m3",
     "dequantize_f4_e2m1",
+    "decode_e8m0_scale",
+    "quark_floatx_formats",
     "is_fp4_packed_dtype",
 ]
 
@@ -94,6 +96,58 @@ def available_float8_dtype_names() -> tuple[str, ...]:
 
 def available_float8_dtypes() -> tuple[torch.dtype, ...]:
     return _FLOAT8_DTYPES
+
+
+def decode_e8m0_scale(scale: torch.Tensor) -> torch.Tensor:
+    """Decode OCP MX E8M0 scale bytes to FP32 powers of two.
+
+    E8M0 is often serialized as uint8 rather than a PyTorch float8 dtype.
+    The all-ones byte represents NaN, not a very large finite scale.
+    """
+
+    e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+    if scale.dtype == torch.uint8:
+        encoded = scale
+    elif e8m0_dtype is not None and scale.dtype == e8m0_dtype:
+        encoded = scale.view(torch.uint8)
+    else:
+        raise TypeError(f"E8M0 scale must use uint8 or float8_e8m0fnu storage, got {scale.dtype}.")
+    exponent = encoded.to(torch.int32) - 127
+    decoded = torch.ldexp(torch.ones_like(encoded, dtype=torch.float32), exponent)
+    return torch.where(encoded == 255, torch.full_like(decoded, float("nan")), decoded)
+
+
+def quark_floatx_formats(config: dict) -> frozenset[str]:
+    """Read Quark's global and per-layer weight encoding declarations."""
+
+    if not isinstance(config, dict):
+        return frozenset()
+    formats: set[str] = set()
+
+    def visit(spec: object) -> None:
+        if not isinstance(spec, dict):
+            return
+        weight = spec.get("weight", spec)
+        if not isinstance(weight, dict):
+            return
+        value = str(weight.get("dtype") or weight.get("fmt") or "").lower()
+        scale = str(weight.get("scale_format") or weight.get("scale_fmt") or "").lower()
+        block = weight.get("block_size") or weight.get("weight_block_size")
+        group = weight.get("group_size")
+        is_mx = scale in {"e8m0", "ue8m0"} and (group == 32 or block in ([1, 32], (1, 32)))
+        if "fp4" in value:
+            formats.add("mxfp4" if is_mx else "nvfp4")
+        elif "fp8" in value or value in {"e4m3", "e5m2"}:
+            formats.add("mxfp8" if is_mx else "fp8")
+
+    visit(config)
+    visit(config.get("global_quant_config"))
+    for group_key in ("layer_quant_config", "layer_type_quant_config"):
+        groups = config.get(group_key)
+        if isinstance(groups, dict):
+            for group in groups.values():
+                visit(group)
+    return frozenset(formats)
 
 
 def available_float4_packed_dtype_names() -> tuple[str, ...]:

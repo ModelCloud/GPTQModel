@@ -9,28 +9,39 @@ import torch
 from gptqmodel.exllamav3.modules.quant.exl3_lib import quantize as implementation
 
 
-def test_workspace_orders_kernel_launches_with_events(monkeypatch):
+def test_workspace_is_private_per_stream(monkeypatch):
+    """Each stream owns its scratch so concurrent launches cannot overwrite it."""
     calls = []
-    stream = SimpleNamespace(wait_event=lambda event: calls.append("wait"))
-    monkeypatch.setattr(implementation, "_workspace_gates", {})
-    monkeypatch.setattr(implementation, "get_temp_buffers", lambda *args: (None, None))
+    allocated = []
+
+    def allocate(device, K):
+        allocated.append((device, K))
+        return (f"costs-{len(allocated)}", f"edges-{len(allocated)}")
+
+    monkeypatch.setattr(implementation, "_workspace_buffers", {})
+    monkeypatch.setattr(implementation, "_allocate_temp_buffers", allocate)
     monkeypatch.setattr(
         implementation,
         "ext",
-        SimpleNamespace(quantize_tiles=lambda *args: calls.append("kernel")),
-    )
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: stream)
-    monkeypatch.setattr(
-        torch.cuda,
-        "Event",
-        lambda: SimpleNamespace(record=lambda stream: calls.append("record")),
+        SimpleNamespace(quantize_tiles=lambda *args: calls.append(args)),
     )
     tiles = SimpleNamespace(device="cuda:0")
-    for _ in range(2):
-        implementation._quantize_tiles_with_workspace(
-            tiles, None, None, 4, False, False
-        )
-    assert calls == ["kernel", "record", "wait", "kernel", "record"]
+    stream_a = object()
+    stream_b = object()
+    current = {"stream": stream_a}
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda device: current["stream"])
+
+    implementation._quantize_tiles_with_workspace(tiles, None, None, 4, False, False)
+    implementation._quantize_tiles_with_workspace(tiles, None, None, 4, False, False)
+    current["stream"] = stream_b
+    implementation._quantize_tiles_with_workspace(tiles, None, None, 4, False, False)
+
+    # One buffer per stream, reused by every launch on that stream.
+    assert allocated == [(torch.device("cuda:0"), 4)] * 2
+    assert calls[0][3] is calls[1][3]
+    assert calls[0][4] is calls[1][4]
+    assert calls[2][3] is not calls[0][3]
+    assert calls[2][4] is not calls[0][4]
 
 
 @pytest.mark.parametrize("device", ["cuda:0", "cuda:1"])

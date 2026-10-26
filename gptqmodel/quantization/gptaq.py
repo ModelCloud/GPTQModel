@@ -18,9 +18,17 @@ from ..looper.named_module import NamedModule
 from ..quantization import QuantizeConfig
 from ..utils.torch import torch_sync
 from .gptq import GPTQ
+from .quantizer import _neutralize_dead_columns
 
 
 class GPTAQ(GPTQ):
+    """GPTAQ quantizer with GPTQ-compatible public sample and loss reporting.
+
+    GPTAQ's upstream Hessian recurrence is normalized by calibration requests.
+    Keep that internal normalization intact while exposing token counts and a
+    token-normalized average loss so logs remain comparable with GPTQ.
+    """
+
     def __init__(self, module: NamedModule, qcfg: Optional[QuantizeConfig] = None, region_timer=None):
         from ..looper.native_processor import NATIVE_INPUTS_STATE_KEY  # avoid import loop
 
@@ -28,6 +36,7 @@ class GPTAQ(GPTQ):
 
         self.H = None
         self.dXXT = None
+        self._gptaq_batch_request_count = 0
 
         self.native_inps = module.state.pop(NATIVE_INPUTS_STATE_KEY)
 
@@ -72,7 +81,7 @@ class GPTAQ(GPTQ):
             inp = inp.unsqueeze(0)
             native_inp = native_inp.unsqueeze(0)
 
-        batch_size = inp.shape[0]
+        batch_request_count = inp.shape[0]
 
         if isinstance(self.module, (nn.Linear, transformers.Conv1D)):
             if len(inp.shape) == 3:
@@ -100,15 +109,39 @@ class GPTAQ(GPTQ):
                                  device=inp.device)
             self.dXXT = self.H.clone()
         else:
-            self.H *= self.nsamples / (self.nsamples + batch_size)
-            self.dXXT *= self.nsamples / (self.nsamples + batch_size)
+            ratio = self._gptaq_batch_request_count / (
+                self._gptaq_batch_request_count + batch_request_count
+            )
+            self.H *= ratio
+            self.dXXT *= ratio
 
-        self.nsamples += batch_size
-        inp = math.sqrt(2 / self.nsamples) * inp.float()
+        self._gptaq_batch_request_count += batch_request_count
+        scale = math.sqrt(2 / self._gptaq_batch_request_count)
+        inp = scale * inp.float()
 
         self.H += inp.matmul(inp.t())
-        native_inp = math.sqrt(2 / self.nsamples) * native_inp
+        native_inp = scale * native_inp
         self.dXXT += (native_inp - inp).matmul(inp.t())
+        self.nsamples += inp.shape[1]
+
+    @staticmethod
+    def _token_normalized_avg_loss(loss_sum: float, batch_request_count: int, token_count: int) -> float:
+        """Convert GPTAQ's batch-normalized loss sum to GPTQ's token-normalized mean.
+
+        GPTAQ scales its Hessian by ``2 / batch_request_count`` while GPTQ uses
+        ``2 / token_count``. ``hessian_inverse`` returns the upper Cholesky
+        factor of the inverse Hessian, so that scale changes the stored
+        inverse-factor diagonal by its square root and the squared loss terms
+        by its inverse. Convert that one linear factor before the final token
+        average.
+        """
+
+        if token_count <= 0:
+            raise ValueError("GPTAQ loss normalization requires at least one calibration token.")
+
+        effective_batch_count = batch_request_count if batch_request_count > 0 else token_count
+        batch_to_token = effective_batch_count / token_count
+        return loss_sum * batch_to_token / token_count
 
     @torch.inference_mode()
     def quantize(
@@ -134,10 +167,7 @@ class GPTAQ(GPTQ):
 
         H = self.H
         del self.H
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
-        self.dXXT[:, dead] = 0
+        _neutralize_dead_columns(H, W, self.dXXT)
 
         # g_idx = []
         scale = []
@@ -222,7 +252,11 @@ class GPTAQ(GPTQ):
 
         torch_sync()
 
-        avg_loss = torch.sum(Losses).item() / self.nsamples
+        avg_loss = self._token_normalized_avg_loss(
+            torch.sum(Losses).item(),
+            self._gptaq_batch_request_count,
+            self.nsamples,
+        )
 
         if math.isnan(avg_loss):
             print("Losses sum item:", torch.sum(Losses).item())
@@ -233,11 +267,9 @@ class GPTAQ(GPTQ):
         group_size = self.qcfg.group_size if self.qcfg.group_size != -1 else self.columns
 
         if self.qcfg.static_groups and self.qcfg.desc_act:
-            g_idx = [perm[i] // group_size for i in range(self.columns)]
+            g_idx = (perm // group_size).to(dtype=torch.int32, device=Q.device)
         else:
-            g_idx = [i // group_size for i in range(self.columns)]
-
-        g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = torch.arange(self.columns, dtype=torch.int32, device=Q.device) // group_size
 
         if self.qcfg.desc_act:
             Q = Q[:, invperm]
@@ -259,6 +291,7 @@ class GPTAQ(GPTQ):
 
         scale = torch.cat(scale, dim=1)
         zero = torch.cat(zero, dim=1)
+        scale, zero = self._sanitize_scale_and_log(scale, zero)
 
         duration = time.time() - start
 

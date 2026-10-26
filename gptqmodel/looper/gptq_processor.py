@@ -4,8 +4,10 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+import math
 import threading
 import time
+from types import MethodType
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -28,6 +30,7 @@ from ..models.writer import (
     QUANT_LOG_NSAMPLES,
 )
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
+from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
 from ..quantization import FOEM, GPTAQ, GPTQ
 from ..quantization.config import (
     GPTAQConfig,
@@ -35,9 +38,19 @@ from ..quantization.config import (
     HessianConfig,
     METHOD,
     QuantizeConfig,
+    _normalize_mse,
     normalize_gsq_config,
     resolve_quant_format,
 )
+from ..quantization.activation_floatx import (
+    NVFP4ActivationHeadroom,
+    fp8_token_qdq,
+    normalize_nvfp4_recipe,
+    nvfp4_block_qdq,
+    nvfp4_global_scale,
+    nvfp4_uses_headroom,
+)
+from ..quantization.gptq import SharedHessianFactorCache
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
@@ -63,6 +76,47 @@ def snapshot_eora_reconstructed_weight(weight: torch.Tensor) -> torch.Tensor:
     return weight.detach().to(device=CPU, copy=True)
 
 
+def enable_w4afp8_replay(linear: torch.nn.Module) -> None:
+    """Apply input FP8 QDQ after the target GPTQ weight has been solved.
+
+    The instance is replaced by a packed qlinear during finalization. Its
+    original forward is left intact until then so Hessian capture sees the
+    unquantized input of the current target.
+    """
+    if not isinstance(linear, torch.nn.Linear):
+        raise NotImplementedError("W4AFP8 replay currently supports torch.nn.Linear targets only.")
+    if getattr(linear, "_w4afp8_replay_enabled", False):
+        return
+    original_forward = linear.forward
+
+    def quantized_input_forward(self, x):
+        # Version 2 replay installs a pre-hook before GPTQ Hessian capture.
+        # Applying another QDQ here would round the same input twice.
+        return original_forward(x if getattr(self, "_w4a_stream_replay_pre_hook", False) else fp8_token_qdq(x))
+
+    linear.forward = MethodType(quantized_input_forward, linear)
+    linear._w4afp8_replay_enabled = True
+
+
+def enable_w4a_nvfp4_replay(linear: torch.nn.Module, global_scale: float,
+                             recipe: str = "least_squares") -> None:
+    """Replay a solved target's input with calibrated NVFP4 block rounding."""
+    if not isinstance(linear, torch.nn.Linear):
+        raise NotImplementedError("W4A NVFP4 replay currently supports torch.nn.Linear targets only.")
+    if getattr(linear, "_w4a_nvfp4_replay_enabled", False):
+        return
+    original_forward = linear.forward
+
+    def quantized_input_forward(self, x):
+        return original_forward(
+            x if getattr(self, "_w4a_stream_replay_pre_hook", False)
+            else nvfp4_block_qdq(x, global_scale, recipe)
+        )
+
+    linear.forward = MethodType(quantized_input_forward, linear)
+    linear._w4a_nvfp4_replay_enabled = True
+
+
 def clone_gptq_config_for_module(
     qcfg: QuantizeConfig,
     module_full_name: str,
@@ -81,7 +135,9 @@ def clone_gptq_config_for_module(
     if qcfg.dynamic is not None:
         qcfg_clone.bits = qcfg.dynamic_get(module_full_name, "bits", qcfg_clone.bits)
         qcfg_clone.sym = qcfg.dynamic_get(module_full_name, "sym", qcfg_clone.sym)
-        qcfg_clone.mse = qcfg.dynamic_get(module_full_name, "mse", qcfg_clone.mse)
+        qcfg_clone.mse = _normalize_mse(
+            qcfg.dynamic_get(module_full_name, "mse", None), base=qcfg_clone.mse,
+        )
 
         qcfg_clone.group_size = qcfg.dynamic_get(module_full_name, "group_size", qcfg_clone.group_size)
         desc_act_override = qcfg.dynamic_get(module_full_name, "desc_act", None)
@@ -175,8 +231,126 @@ class GPTQProcessor(LoopProcessor):
         self._shared_input_plan_owner: Optional[Any] = None
         self._shared_input_plan_lock = threading.Lock()
         self._shared_input_leaders: Dict[str, str] = {}
+        self._shared_input_capture_generation = 0
         self.shared_input_dedup_count = 0
         self.shared_input_dedup_telemetry: Dict[str, Any] = {}
+        self._activation_amax: Dict[str, torch.Tensor] = {}
+        self._activation_headroom: Dict[str, NVFP4ActivationHeadroom] = {}
+        self._activation_global_scales: Dict[str, float] = {}
+        self._activation_headroom_probe = False
+
+    @staticmethod
+    def _activation_key(name: str, module: torch.nn.Module | None = None) -> str:
+        return (getattr(module, "_w4a_activation_key", None)
+                or getattr(module, "module_name", None) or name)
+
+    def _target_recipe(self, name: str, module: torch.nn.Module | None = None) -> Optional[str]:
+        """Resolve the effective NVFP4 recipe for one projection target.
+
+        A mixed stream may stage attention and MLP boundaries with different
+        recipes, so the top-level recipe is not authoritative. Return ``None``
+        for a target that carries an FP8 carrier and owns no NVFP4 scale.
+        """
+        if self.qcfg.activation_mode != "w4a_nvfp4":
+            return None
+        recipe = self.qcfg.activation_recipe
+        full_name = name
+        if "layers." not in full_name:
+            full_name = (getattr(module, "full_name", None)
+                         or getattr(module, "module_name", None) or name)
+        if ".mlp." in full_name:
+            mlp_fp8_layers = tuple(getattr(self.qcfg, "activation_mlp_fp8_layers", None) or ())
+            try:
+                layer_index = int(full_name.split(".")[2])
+            except (IndexError, ValueError):
+                layer_index = -1
+            mlp_mode, mlp_recipe = layer_mlp_policy(
+                layer_index, self.qcfg.activation_mode, recipe, mlp_fp8_layers
+            )
+            return mlp_recipe if mlp_mode == "w4a_nvfp4" else None
+        if ".self_attn." in full_name:
+            attention_mode = (getattr(self.qcfg, "activation_attention_mode", None)
+                              or self.qcfg.activation_mode)
+            if attention_mode != "w4a_nvfp4":
+                return None
+            attention_recipe = getattr(self.qcfg, "activation_attention_recipe", None)
+            if attention_recipe is None:
+                attention_recipe = recipe
+            return normalize_nvfp4_recipe(attention_recipe)
+        return recipe
+
+    def _record_activation_amax(self, name: str, inp: torch.Tensor,
+                                module: torch.nn.Module | None = None) -> None:
+        recipe = self._target_recipe(name, module)
+        if recipe is None or not torch.is_tensor(inp):
+            return
+        keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
+        if (
+            torch.is_tensor(keep_mask) and inp.ndim >= 3 and keep_mask.ndim == 2
+            and keep_mask.shape == inp.shape[:2]
+        ):
+            inp = inp[keep_mask.to(device=inp.device, dtype=torch.bool)]
+        if inp.numel() == 0:
+            return
+        key = self._activation_key(name, module)
+        if nvfp4_uses_headroom(recipe):
+            if self._activation_headroom_probe:
+                collector = self._activation_headroom.get(key)
+                if collector is None:
+                    raise RuntimeError(f"Missing NVFP4 headroom collector for `{key}`.")
+                collector.collect(inp)
+            return
+        # Keep the running maximum on the device. Reading it back per batch
+        # synchronized the calibration stream for every module and batch; the
+        # finiteness check moves to the single consumer read at quantization.
+        current = inp.detach().abs().amax()
+        with self.lock:
+            previous = self._activation_amax.get(key)
+            if previous is None:
+                self._activation_amax[key] = current
+            else:
+                if previous.device != current.device or previous.dtype != current.dtype:
+                    current = current.to(device=previous.device, dtype=previous.dtype)
+                torch.maximum(previous, current, out=previous)
+
+    def begin_activation_scale_probe(self, subset, layer=None) -> bool:
+        """Start the calibration-only pass required by NVIDIA headroom scales."""
+        del layer
+        self._activation_headroom_probe = False
+        for name, named in subset.items():
+            target = named.module if isinstance(named, NamedModule) else named
+            full_name = getattr(named, "full_name", None) or name
+            recipe = self._target_recipe(full_name, target)
+            if recipe is None or not nvfp4_uses_headroom(recipe):
+                continue
+            key = getattr(named, "full_name", None) or self._activation_key(name, target)
+            target._w4a_activation_key = key
+            self._activation_headroom[key] = NVFP4ActivationHeadroom()
+            target._w4a_headroom_probe = True
+            target._w4a_activation_global_scale = None
+            self._activation_headroom_probe = True
+        return self._activation_headroom_probe
+
+    def end_activation_scale_probe(self, subset, layer=None) -> None:
+        """Freeze the probed scale before the GPTQ Hessian capture pass."""
+        if not self._activation_headroom_probe:
+            return
+        for name, named in subset.items():
+            target = named.module if isinstance(named, NamedModule) else named
+            full_name = getattr(named, "full_name", None) or name
+            recipe = self._target_recipe(full_name, target)
+            if recipe is None or not nvfp4_uses_headroom(recipe):
+                continue
+            key = getattr(named, "full_name", None) or self._activation_key(name, target)
+            collector = self._activation_headroom.pop(key, None)
+            if collector is None:
+                raise RuntimeError(f"Missing NVFP4 headroom statistics for `{key}`.")
+            scale = float(nvfp4_global_scale(collector.compute_amax(), recipe=recipe))
+            self._activation_global_scales[key] = scale
+            target._w4a_activation_global_scale = scale
+            target._w4a_headroom_probe = False
+        del layer
+        self._activation_headroom_probe = False
 
     def set_calibration_dataset(self, calibration_dataset):
         """Rejects dataset replacement because GPTQ capture is fixed at construction."""
@@ -268,6 +442,13 @@ class GPTQProcessor(LoopProcessor):
 
         with self.lock:
             self._shared_input_leaders = {}
+            tasks = dict(self.tasks)
+        # A cache belongs to one capture cohort.  Never let a later layer or
+        # subset accidentally reuse artifacts from a prior cohort.
+        for name in subset_names:
+            task = tasks.get(name)
+            if type(task) is GPTQ:
+                task.clear_shared_hessian_cache()
 
         if is_lm_head_module or not self.qcfg.hessian.dedup_shared_inputs:
             return {}
@@ -278,7 +459,7 @@ class GPTQProcessor(LoopProcessor):
 
         leaders: Dict[str, str] = {}
         with self.lock:
-            tasks = dict(self.tasks)
+            self._shared_input_capture_generation += 1
         for group in plan.shared_groups:
             if not group.explicit:
                 continue
@@ -322,12 +503,24 @@ class GPTQProcessor(LoopProcessor):
             tasks = dict(self.tasks)
 
         adopted = 0
+        caches: Dict[str, SharedHessianFactorCache] = {}
         for follower, leader in leaders.items():
             follower_task = tasks.get(follower)
             leader_task = tasks.get(leader)
             if follower_task is None or leader_task is None:
                 continue
             follower_task.adopt_hessian_from(leader_task)
+            # Publish the factor cache only after the follower owns its Hessian copy.
+            cache = caches.get(leader)
+            if cache is None:
+                cache = SharedHessianFactorCache(
+                    self._shared_input_capture_generation,
+                    leader,
+                    leader=leader,
+                )
+                caches[leader] = cache
+                leader_task.attach_shared_hessian_cache(cache)
+            follower_task.attach_shared_hessian_cache(cache)
             adopted += 1
 
         with self.lock:
@@ -361,10 +554,13 @@ class GPTQProcessor(LoopProcessor):
     def pre_process_fwd_hook(self, name: str) -> Callable[[Module, Tuple[torch.Tensor, ...], torch.Tensor], None]:
         """Returns the forward hook that feeds captured batches into the GPTQ task."""
 
+        capture_nvfp4 = getattr(getattr(self, "qcfg", None), "activation_mode", None) == "w4a_nvfp4"
         if self.shared_input_leader(name) is not None:
             def skip(module, inp: Tuple[torch.Tensor, ...], out: torch.Tensor):
                 """Follower of a shared-input group: the leader collects this module's Hessian."""
 
+                if capture_nvfp4:
+                    self._record_activation_amax(name, inp[0], module)
                 del module, inp, out
             return skip
 
@@ -374,6 +570,11 @@ class GPTQProcessor(LoopProcessor):
             g = self.tasks[name]  # noqa: F821
             batch_idx = self.current_batch_index()
             inp_tensor = inp[0]
+            if capture_nvfp4:
+                self._record_activation_amax(name, inp_tensor, module)
+                if self._activation_headroom_probe:
+                    del inp, out
+                    return
             keep_mask = getattr(getattr(self, "_mask_tls", None), "value", None)
 
             if (
@@ -401,10 +602,15 @@ class GPTQProcessor(LoopProcessor):
                 out_tensor = out if torch.is_tensor(out) else None
                 # Keep per-sample boundaries here so batched calibration
                 # accumulates GPTQ stats with the same semantics as batch_size=1.
-                for sample_index, sample_keep in enumerate(keep_mask):
-                    if not bool(sample_keep.any().item()):
+                mask_tls = getattr(self, "_mask_tls", None)
+                sample_has_tokens = getattr(mask_tls, "sample_has_tokens", None)
+                if sample_has_tokens is None:
+                    sample_has_tokens = keep_mask.any(dim=1).tolist()
+                for sample_index, has_tokens in enumerate(sample_has_tokens):
+                    if not has_tokens:
                         continue
 
+                    sample_keep = keep_mask[sample_index]
                     input_keep = sample_keep.to(device=inp_tensor.device)
                     sample_inp = inp_tensor[
                         sample_index : sample_index + 1, input_keep, :
@@ -612,6 +818,37 @@ class GPTQProcessor(LoopProcessor):
 
         # single largest deallocation of vram happens here
         module.weight.data = wq
+        if self.qcfg.activation_mode == "w4afp8":
+            enable_w4afp8_replay(module.module)
+        elif self.qcfg.activation_mode == "w4a_nvfp4":
+            recipe = self._target_recipe(module.full_name, module.module)
+            if recipe is not None and nvfp4_uses_headroom(recipe):
+                try:
+                    scale = self._activation_global_scales.pop(module.full_name)
+                except KeyError as exc:
+                    raise RuntimeError(
+                        f"Missing calibrated NVFP4 headroom scale for `{module.full_name}`."
+                    ) from exc
+            else:
+                observed = self._activation_amax.get(
+                    module.full_name, self._activation_amax.get(module.name)
+                )
+                if observed is None:
+                    observed = 0.0
+                elif torch.is_tensor(observed):
+                    observed = float(observed.item())
+                    if not math.isfinite(observed):
+                        raise ValueError(
+                            f"NVFP4 calibration input for `{module.full_name}` "
+                            "contains NaN or infinity."
+                        )
+                scale = float(nvfp4_global_scale(
+                    observed, recipe=recipe or self.qcfg.activation_recipe or "least_squares"
+                ))
+            module.state["activation_global_scale"] = scale
+            enable_w4a_nvfp4_replay(
+                module.module, scale, recipe or self.qcfg.activation_recipe or "least_squares"
+            )
 
     # submodule_finalized is called in reverse after all next sequential processes are called
     def submodule_finalize(self, module: NamedModule, model: BaseQModel, **kwargs):
@@ -678,6 +915,8 @@ class GPTQProcessor(LoopProcessor):
 
         # pack module
         qmodule = model.model.get_submodule(module.full_name)
+        if self.qcfg.activation_mode == "w4a_nvfp4":
+            qmodule.activation_global_scale.fill_(module.state.pop("activation_global_scale"))
         qModules = (
             {module.full_name: qmodule}
             if isinstance(qmodule, (model.qlinear_kernel, TorchQuantEmbeddings))

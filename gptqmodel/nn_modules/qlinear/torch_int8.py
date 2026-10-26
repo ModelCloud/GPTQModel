@@ -22,6 +22,14 @@ INT8_WEIGHT_BUFFER_NAME = "int8_weight_nk"
 INT8_SCALE_BUFFER_NAME = "int8_channel_scale"
 
 
+def _require_native_int8(bits: int) -> None:
+    if bits != 8:
+        raise NotImplementedError(
+            "Torch INT8 requires 8-bit source weights; expanding lower-bit weights to persistent INT8 is disabled. "
+            "Use BACKEND.AUTO to select a packed kernel, or BACKEND.TORCH for a portable fallback."
+        )
+
+
 def _has_int8_mm_op() -> bool:
     return hasattr(torch.ops.aten, "_weight_int8pack_mm")
 
@@ -54,6 +62,7 @@ def _cached_int8_dequantize(module: nn.Module) -> Optional[torch.Tensor]:
 
 
 def _write_int8_buffers(module: nn.Module, float_weight: torch.Tensor, dtype: torch.dtype) -> None:
+    _require_native_int8(getattr(module, "bits", None))
     int8_weight_kn, channel_scale = _requantize_to_int8(float_weight.to(torch.float32))
 
     int8_weight_nk = int8_weight_kn.t().contiguous()
@@ -79,9 +88,8 @@ class Int8PackedModule(torch.nn.Module):
         self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scales, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.int8_channel_scale.dtype != x.dtype:
-            self.int8_channel_scale = self.int8_channel_scale.to(dtype=x.dtype)
-        return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, self.int8_channel_scale)
+        channel_scales = self.int8_channel_scale.to(dtype=x.dtype)
+        return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, channel_scales)
 
 
 class TorchInt8Linear(GPTQQuantLinear):
@@ -89,7 +97,7 @@ class TorchInt8Linear(GPTQQuantLinear):
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # Keep auto-selection unchanged; this kernel is enabled via explicit backend selection.
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 0, FORMAT.GPTQ_V2: 0}
-    SUPPORTS_BITS = [2, 4, 8]
+    SUPPORTS_BITS = [8]
     SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -106,6 +114,7 @@ class TorchInt8Linear(GPTQQuantLinear):
     SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
+    SUPPORTS_RAW_PACKING = False
 
     QUANT_TYPE = "torch_int8"
     GPTQ_BUFFER_NAMES = ("qzeros", "qweight", "g_idx", "scales")
@@ -148,9 +157,17 @@ class TorchInt8Linear(GPTQQuantLinear):
             return False, ImportError("aten::_weight_int8pack_mm is unavailable in this PyTorch build.")
         return True, None
 
+    @classmethod
+    def _validate(cls, bits=8, **kwargs):
+        try:
+            _require_native_int8(bits)
+        except NotImplementedError as error:
+            return False, error
+        return super()._validate(bits=bits, **kwargs)
+
     def post_init(self):
         super().post_init()
-        # One-time conversion: GPTQ packed storage (2/4/8-bit) -> int8 packed CPU kernel storage.
+        # One-time conversion: GPTQ 8-bit storage -> int8 packed CPU kernel storage.
         # Keep only int8 tensors after conversion to reduce memory footprint.
         self.transform_cpu(dtype=torch.float32)
         self._empty_gptq_only_weights()
@@ -243,7 +260,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         workers: int = 1,
     ):
         raise NotImplementedError(
-            "TorchInt8Linear is not packable. Load GPTQ int4 tensors and let post_init() convert to int8."
+            "TorchInt8Linear is not packable. Load GPTQ 8-bit tensors and let post_init() convert to int8."
         )
 
     def pack(
@@ -256,11 +273,11 @@ class TorchInt8Linear(GPTQQuantLinear):
         workers: int = 1,
     ):
         raise NotImplementedError(
-            "TorchInt8Linear is not packable. Load GPTQ int4 tensors and let post_init() convert to int8."
+            "TorchInt8Linear is not packable. Load GPTQ 8-bit tensors and let post_init() convert to int8."
         )
 
     def transform_cpu(self, dtype: torch.dtype):
-        # [K, N] from GPTQ packed tensors (2/4/8-bit).
+        _require_native_int8(self.bits)
         float_weight = self.dequantize_weight(num_itr=1).to(torch.float32)
         _write_int8_buffers(self, float_weight=float_weight, dtype=dtype)
 
@@ -270,6 +287,7 @@ class TorchInt8Linear(GPTQQuantLinear):
         self.transform_cpu(dtype)
 
     def forward(self, x: torch.Tensor):
+        _require_native_int8(self.bits)
         if self.training:
             raise NotImplementedError("TorchInt8Linear does not support training mode.")
         if self.int8_module is None:
@@ -310,19 +328,15 @@ class TorchInt8Linear(GPTQQuantLinear):
 
 
 def dequantize_model(model: PreTrainedModel):
-    from .torch_int8_awq import TorchInt8AwqLinear
-
-    supported_int8_qlinears = (TorchInt8Linear, TorchInt8AwqLinear)
-
     for name, module in model.named_modules():
-        if isinstance(module, BaseQuantLinear) and not isinstance(module, supported_int8_qlinears):
+        if isinstance(module, BaseQuantLinear) and not isinstance(module, TorchInt8Linear):
             raise ValueError(
-                "Only models loaded using TorchInt8Linear or TorchInt8AwqLinear are supported "
+                "Only models loaded using TorchInt8Linear are supported "
                 "for dequantization. Please load model using backend=BACKEND.GPTQ_TORCH_INT8 or "
-                "backend=BACKEND.AWQ_TORCH_INT8"
+                "use the dequantizer for the model's packed backend."
             )
 
-        if isinstance(module, supported_int8_qlinears):
+        if isinstance(module, TorchInt8Linear):
             new_module = nn.Linear(module.in_features, module.out_features, bias=module.bias is not None)
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
             if module.bias is not None:

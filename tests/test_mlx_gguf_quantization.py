@@ -1,0 +1,1743 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+
+"""Torch-oracle checks for Metal GGUF block packing."""
+
+import importlib.util
+import sys
+from itertools import pairwise
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
+
+if sys.platform != "darwin":
+    pytest.skip("Metal kernels require macOS", allow_module_level=True)
+
+mx = pytest.importorskip("mlx.core")
+torch = pytest.importorskip("torch")
+
+_source = Path(__file__).resolve().parents[1] / "gptqmodel/quantization/mlx_gguf.py"
+_spec = importlib.util.spec_from_file_location("gptqmodel_mlx_gguf_test", _source)
+native = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(native)
+
+from gptqmodel.nn_modules.qlinear import gguf as gguf_linear  # noqa: E402
+
+
+GGUF_PROCESSOR_QTYPES = (
+    ("q1_0", "Q1_0"),
+    ("q1_0_g128", "Q1_0_g128"),
+    ("q2_0", "Q2_0"),
+    ("q4_0", "Q4_0"),
+    ("q8_0", "Q8_0"),
+    ("q4_k", "Q4_K"),
+    ("q5_k", "Q5_K"),
+    ("q6_k", "Q6_K"),
+)
+
+
+def _torch_gguf_q4_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 32)
+    selected = blocks.gather(1, blocks.abs().argmax(dim=1, keepdim=True))
+    scale = selected / -8.0
+    reciprocal = torch.where(scale == 0, 0, 1.0 / scale)
+    # GGUF's Q4_0 reference multiplies in float64 after float32 scale
+    # selection and reciprocal calculation.
+    codes = torch.trunc(blocks.double() * reciprocal.double() + 8.5)
+    codes = codes.clamp(0, 15).to(torch.uint8)
+    payload = codes[:, :16] | (codes[:, 16:] << 4)
+    scale_bytes = scale.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate((scale_bytes, payload.numpy()), axis=1)
+    return packed.reshape(rows, columns // 32 * packed.shape[1])
+
+
+def _torch_gguf_q8_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 32)
+    scale = blocks.abs().amax(dim=1, keepdim=True) / 127.0
+    reciprocal = torch.where(scale == 0, 0, 1.0 / scale)
+    codes = torch.round(blocks * reciprocal).clamp(-128, 127).to(torch.int8)
+    scale_bytes = scale.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate((scale_bytes, codes.view(torch.uint8).numpy()), axis=1)
+    return packed.reshape(rows, columns // 32 * 34)
+
+
+def _torch_gguf_q1_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 128)
+    magnitudes = blocks.abs()
+    # The existing checkpoint packer accumulates eight float32 lanes before
+    # combining them in this order. A generic mean changes fp16 scale bytes
+    # for blocks whose true mean is near a rounding midpoint.
+    lanes = magnitudes[:, :8]
+    for offset in range(8, 128, 8):
+        lanes = lanes + magnitudes[:, offset : offset + 8]
+    total = ((lanes[:, 0] + lanes[:, 1]) + (lanes[:, 2] + lanes[:, 3])) + (
+        (lanes[:, 4] + lanes[:, 5]) + (lanes[:, 6] + lanes[:, 7])
+    )
+    scale = (total / 128.0).to(torch.float16)
+    scale_bytes = scale.numpy().view(np.uint8).reshape(-1, 2)
+    sign = (blocks >= 0).to(torch.uint8).reshape(-1, 16, 8)
+    powers = (1 << torch.arange(8, dtype=torch.int32)).reshape(1, 1, 8)
+    payload = (sign.to(torch.int32) * powers).sum(dim=2).to(torch.uint8)
+    packed = np.concatenate((scale_bytes, payload.numpy()), axis=1)
+    return packed.reshape(rows, columns // 128 * 18)
+
+
+def _torch_gguf_q2_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 64)
+    scale = blocks.abs().amax(dim=1, keepdim=True)
+    inverse = torch.where(scale == 0, 0, 1.0 / scale)
+    normalized = blocks * inverse
+    magnitude = normalized.abs()
+    whole = torch.floor(magnitude)
+    rounded = torch.sign(normalized) * (
+        whole + torch.floor(2 * (magnitude - whole))
+    )
+    codes = (rounded.to(torch.int8) + 1).clamp(0, 3).to(torch.uint8)
+    powers = (1 << (2 * torch.arange(4, dtype=torch.int32))).reshape(1, 1, 4)
+    payload = (
+        codes.reshape(-1, 16, 4).to(torch.int32) * powers
+    ).sum(dim=2).to(torch.uint8)
+    scale_bytes = scale.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate((scale_bytes, payload.numpy()), axis=1)
+    return packed.reshape(rows, columns // 64 * 18)
+
+
+def _torch_gguf_q4_k_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 8, 32)
+    minima = (-blocks.amin(dim=-1)).clamp(min=0)
+    scales = (blocks.amax(dim=-1) + minima) / 15.0
+    base = scales.amax(dim=-1, keepdim=True) / 63.0
+    min_base = minima.amax(dim=-1, keepdim=True) / 63.0
+    scale_codes = (
+        torch.where(base > 0, torch.round(scales / base), 0)
+        .clamp(0, 63)
+        .to(torch.uint8)
+    )
+    min_codes = (
+        torch.where(min_base > 0, torch.round(minima / min_base), 0)
+        .clamp(0, 63)
+        .to(torch.uint8)
+    )
+    steps = base * scale_codes.float()
+    biases = min_base * min_codes.float()
+    codes = torch.where(
+        steps[..., None] > 0,
+        torch.round((blocks + biases[..., None]) / steps[..., None]),
+        0,
+    ).clamp(0, 15).to(torch.uint8)
+    scale_bytes = base.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    min_bytes = min_base.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed_scales = torch.cat(
+        (
+            (scale_codes[:, :4] & 63) | ((scale_codes[:, 4:] & 48) << 2),
+            (min_codes[:, :4] & 63) | ((min_codes[:, 4:] & 48) << 2),
+            (scale_codes[:, 4:] & 15) | ((min_codes[:, 4:] & 15) << 4),
+        ),
+        dim=-1,
+    ).numpy()
+    payload = (codes[:, 0::2] | (codes[:, 1::2] << 4)).reshape(-1, 128).numpy()
+    packed = np.concatenate((scale_bytes, min_bytes, packed_scales, payload), axis=-1)
+    return packed.reshape(rows, columns // 256 * 144)
+
+
+def _torch_gguf_q5_k_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 8, 32)
+    minima = (-blocks.amin(dim=-1)).clamp(min=0)
+    scales = (blocks.amax(dim=-1) + minima) / 31.0
+    base = scales.amax(dim=-1, keepdim=True) / 63.0
+    min_base = minima.amax(dim=-1, keepdim=True) / 63.0
+    scale_codes = torch.where(
+        base > 0, torch.round(scales / base), 0
+    ).clamp(0, 63).to(torch.uint8)
+    min_codes = torch.where(
+        min_base > 0, torch.round(minima / min_base), 0
+    ).clamp(0, 63).to(torch.uint8)
+    steps = base * scale_codes.float()
+    biases = min_base * min_codes.float()
+    codes = torch.where(
+        steps[..., None] > 0,
+        torch.round((blocks + biases[..., None]) / steps[..., None]),
+        0,
+    ).clamp(0, 31).to(torch.uint8)
+    scale_bytes = base.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    min_bytes = min_base.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed_scales = torch.cat(
+        (
+            (scale_codes[:, :4] & 63) | ((scale_codes[:, 4:] & 48) << 2),
+            (min_codes[:, :4] & 63) | ((min_codes[:, 4:] & 48) << 2),
+            (scale_codes[:, 4:] & 15) | ((min_codes[:, 4:] & 15) << 4),
+        ), dim=-1,
+    ).numpy()
+    bit_positions = torch.arange(8, dtype=torch.uint8).reshape(1, 8, 1)
+    high = (((codes >> 4) & 1) << bit_positions).sum(dim=1).to(torch.uint8).numpy()
+    low = ((codes[:, 0::2] & 15) | ((codes[:, 1::2] & 15) << 4))
+    payload = low.reshape(-1, 128).numpy()
+    packed = np.concatenate(
+        (scale_bytes, min_bytes, packed_scales, high, payload), axis=-1
+    )
+    return packed.reshape(rows, columns // 256 * 176)
+
+
+def _torch_gguf_q6_k_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 16, 16)
+    scales = blocks.abs().amax(dim=-1) / 31.0
+    base = scales.amax(dim=-1, keepdim=True) / 127.0
+    scale_codes = torch.where(
+        base > 0, torch.round(scales / base), 0
+    ).clamp(0, 127).to(torch.uint8)
+    steps = base * scale_codes.float()
+    codes = torch.where(
+        steps[..., None] > 0,
+        torch.round(blocks / steps[..., None]),
+        0,
+    ).clamp(-32, 31).to(torch.int16)
+    raw = (codes + 32).to(torch.uint8).reshape(-1, 2, 4, 32)
+    low = torch.cat(
+        (
+            (raw[:, :, 0] & 15) | ((raw[:, :, 2] & 15) << 4),
+            (raw[:, :, 1] & 15) | ((raw[:, :, 3] & 15) << 4),
+        ), dim=-1,
+    ).reshape(-1, 128).numpy()
+    high = torch.zeros((raw.shape[0], 2, 32), dtype=torch.uint8)
+    for lane in range(4):
+        high |= ((raw[:, :, lane] >> 4) & 3) << (2 * lane)
+    scale_bytes = scale_codes.reshape(-1, 16).numpy()
+    base_bytes = base.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate(
+        (low, high.reshape(-1, 64).numpy(), scale_bytes, base_bytes), axis=-1
+    )
+    return packed.reshape(rows, columns // 256 * 210)
+
+
+def _torch_gguf_tq1_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 256)
+    scale = blocks.abs().amax(dim=-1, keepdim=True)
+    inverse = torch.where(scale == 0, 0, 1.0 / scale)
+    normalized = blocks * inverse
+    magnitude = normalized.abs()
+    whole = torch.floor(magnitude)
+    rounded = torch.sign(normalized) * (
+        whole + torch.floor(2 * (magnitude - whole))
+    )
+    codes = (rounded.to(torch.int8) + 1).to(torch.int32)
+    powers = torch.tensor([81, 27, 9, 3, 1], dtype=torch.int32)
+    first = (
+        codes[:, :160].reshape(-1, 5, 32) * powers.reshape(1, 5, 1)
+    ).sum(dim=1)
+    second = (
+        codes[:, 160:240].reshape(-1, 5, 16) * powers.reshape(1, 5, 1)
+    ).sum(dim=1)
+    last = (
+        codes[:, 240:].reshape(-1, 4, 4) * powers[:4].reshape(1, 4, 1)
+    ).sum(dim=1)
+    trits = torch.cat((first, second, last), dim=1)
+    payload = ((trits * 256 + 242) // 243).to(torch.uint8).numpy()
+    scale_bytes = scale.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate((payload, scale_bytes), axis=-1)
+    return packed.reshape(rows, columns // 256 * 54)
+
+
+def _torch_gguf_tq2_0_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 256)
+    scale = blocks.abs().amax(dim=-1, keepdim=True)
+    inverse = torch.where(scale == 0, 0, 1.0 / scale)
+    normalized = blocks * inverse
+    magnitude = normalized.abs()
+    whole = torch.floor(magnitude)
+    rounded = torch.sign(normalized) * (
+        whole + torch.floor(2 * (magnitude - whole))
+    )
+    codes = (rounded.to(torch.int8) + 1).to(torch.int32).reshape(-1, 2, 4, 32)
+    powers = (1 << (2 * torch.arange(4, dtype=torch.int32))).reshape(1, 1, 4, 1)
+    payload = (codes * powers).sum(dim=2).to(torch.uint8).reshape(-1, 64).numpy()
+    scale_bytes = scale.to(torch.float16).numpy().view(np.uint8).reshape(-1, 2)
+    packed = np.concatenate((payload, scale_bytes), axis=-1)
+    return packed.reshape(rows, columns // 256 * 66)
+
+
+def _torch_gguf_mxfp4_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 32)
+    maxima = blocks.abs().amax(dim=1)
+    exponents = torch.where(
+        maxima > 0, torch.floor(torch.log2(maxima)) + 125, 0
+    ).to(torch.int32).to(torch.uint8).to(torch.int32)
+    scale_bits = torch.where(
+        exponents < 2, 0x00200000 << exponents, (exponents - 1) << 23
+    ).to(torch.int32)
+    scales = scale_bits.view(torch.float32)
+    fp4 = torch.tensor(
+        [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12],
+        dtype=torch.float32,
+    )
+    codes = (scales[:, None, None] * fp4 - blocks[:, :, None]).abs().argmin(
+        dim=-1
+    ).to(torch.uint8)
+    payload = codes[:, :16] | (codes[:, 16:] << 4)
+    packed = torch.cat((exponents.to(torch.uint8)[:, None], payload), dim=1)
+    return packed.numpy().reshape(rows, columns // 32 * 17)
+
+
+def _torch_gguf_nvfp4_oracle(weight):
+    rows, columns = weight.shape
+    blocks = torch.from_numpy(weight).reshape(-1, 4, 16)
+    scale_source = (blocks.abs().amax(dim=-1) / 6.0).clamp(0.0, 448.0)
+    bits = scale_source.view(torch.int32)
+    source_exponent = ((bits >> 23) & 0xFF) - 127
+    exponent = source_exponent + 7
+
+    subnormal_mantissa = (scale_source * 512.0 + 0.5).to(torch.int32).clamp(0, 7)
+    subnormal = torch.where(
+        subnormal_mantissa >= 1, subnormal_mantissa, 0
+    )
+    mantissa = ((bits >> 20) & 7) + ((bits >> 19) & 1)
+    overflow = mantissa > 7
+    normal_mantissa = torch.where(overflow, 0, mantissa)
+    normal_exponent = exponent + overflow.to(torch.int32)
+    normal = torch.where(
+        normal_exponent >= 15,
+        0x7E,
+        (normal_exponent << 3) | normal_mantissa,
+    )
+    encoded = torch.where(
+        scale_source <= 0.0,
+        0,
+        torch.where(
+            exponent <= 0,
+            subnormal,
+            torch.where(exponent >= 15, 0x7E, normal),
+        ),
+    ).to(torch.uint8)
+
+    encoded_int = encoded.to(torch.int32)
+    decoded_exponent = (encoded_int >> 3) & 15
+    decoded_mantissa = (encoded_int & 7).to(torch.float32)
+    decoded = torch.where(
+        decoded_exponent == 0,
+        decoded_mantissa * (2.0**-10),
+        (1.0 + decoded_mantissa / 8.0)
+        * torch.pow(2.0, decoded_exponent.to(torch.float32) - 8.0),
+    )
+    decoded = torch.where((encoded == 0) | (encoded == 0x7F), 0.0, decoded)
+
+    codebook = torch.tensor(
+        [0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6, -8, -12],
+        dtype=torch.float32,
+    )
+    errors = (
+        decoded[..., None, None] * codebook - blocks[..., None]
+    ).abs()
+    codes = errors.argmin(dim=-1).to(torch.uint8)
+    payload = codes[..., :8] | (codes[..., 8:] << 4)
+    packed = torch.cat(
+        (encoded.reshape(-1, 4), payload.reshape(-1, 32)), dim=-1
+    )
+    return packed.numpy().reshape(rows, columns // 64 * 36)
+
+
+@pytest.mark.parametrize("rows,width", [(9, 32), (13, 256), (129, 512)])
+def test_gguf_mxfp4_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(118).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :32] = -0.0
+    weight[2, :32] = np.linspace(-8, 8, 32, dtype=np.float32)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_mxfp4_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(119).standard_normal((4, 256))).astype(
+        dtype
+    )
+    expected = _torch_gguf_mxfp4_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "MXFP4")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_mxfp4_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380004 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "MXFP4"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_mxfp4_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_mxfp4_packing_at_code_midpoints_and_saturation():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for sign in (-1, 1):
+        for low, high in [(0, 1), (1, 2), (2, 3), (3, 4), (4, 6), (6, 8)]:
+            midpoint = np.float32(sign * (low + high))
+            for direction in (-np.inf, None, np.inf):
+                value = (
+                    midpoint if direction is None
+                    else np.nextafter(midpoint, np.float32(direction))
+                )
+                row = np.full(32, value, dtype=np.float32)
+                row[0] = 15.0  # Select an e8m0 scale of two for the block.
+                rows.append(row)
+    for value in (0.0, -0.0, 15.0, -15.0):
+        rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "MXFP4"))
+
+
+def test_gguf_mxfp4_positive_and_negative_codes_share_magnitudes():
+    magnitudes = np.resize(
+        np.array([0, 2, 4, 6, 8, 12, 15], dtype=np.float32), 16
+    )
+    weight = np.concatenate((magnitudes, -magnitudes))[None, :]
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(packed, _torch_gguf_mxfp4_oracle(weight))
+
+    positive = packed[0, 1:] & 0x0F
+    negative = packed[0, 1:] >> 4
+    np.testing.assert_array_equal(
+        negative,
+        positive | np.where(positive == 0, 0, 8).astype(np.uint8),
+    )
+
+
+def test_gguf_mxfp4_packing_at_e8m0_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for power in range(-126, 128):
+        bits = np.float32(2.0**power).view(np.uint32)
+        for steps in (0, 1, 2, 5, 11, 22, 44, 45, 64):
+            value = np.array([bits - steps], dtype=np.uint32).view(np.float32)[0]
+            rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = _fallback_gguf_quantize(weight, "MXFP4")
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_mxfp4_packing_at_subnormal_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rows = []
+    for power in range(-149, -125):
+        bits = np.float32(2.0**power).view(np.uint32)
+        for steps in (0, 1, 2, 5, 11, 22, 44, 45, 64):
+            if bits > steps:
+                value = np.array([bits - steps], dtype=np.uint32).view(np.float32)[0]
+                rows.append(np.full(32, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    with np.errstate(over="ignore", invalid="ignore"):
+        expected = _fallback_gguf_quantize(weight, "MXFP4")
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_mxfp4_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(120).standard_normal((4, 256)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "MXFP4"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "MXFP4")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_mxfp4_packing_accepts_transposed_weights():
+    weight = np.random.default_rng(123).standard_normal((64, 5)).astype(np.float32)
+    transposed = mx.array(weight).T
+    actual = native.gguf_quantize_weight_mlx(transposed, "MXFP4")
+    expected = _torch_gguf_mxfp4_oracle(weight.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_mxfp4_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 32"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 31)), "MXFP4")
+
+
+@pytest.mark.parametrize("rows,width", [(9, 64), (13, 256), (129, 512)])
+def test_gguf_nvfp4_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(121).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :64] = -0.0
+    weight[2, :64] = np.linspace(-8, 8, 64, dtype=np.float32)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_nvfp4_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(122).standard_normal((4, 256))).astype(
+        dtype
+    )
+    expected = _torch_gguf_nvfp4_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "NVFP4")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_nvfp4_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380040 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "NVFP4"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_nvfp4_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_nvfp4_packing_at_code_midpoints_and_saturation():
+    rows = []
+    levels = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=np.float32)
+    for sign in (-1, 1):
+        for low, high in pairwise(levels):
+            midpoint = np.float32(sign * (low + high) / 2)
+            for direction in (-np.inf, None, np.inf):
+                value = (
+                    midpoint if direction is None
+                    else np.nextafter(midpoint, np.float32(direction))
+                )
+                group = np.full(16, value, dtype=np.float32)
+                group[0] = 6.0
+                rows.append(np.tile(group, 4))
+    for value in (0.0, -0.0, 2688.0, -2688.0, 1.0e10, -1.0e10):
+        rows.append(np.full(64, value, dtype=np.float32))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+def test_gguf_nvfp4_packing_matches_canonical_block_bytes():
+    levels = np.array([0, 0.5, 1, 1.5, 2, 3, 4, 6], dtype=np.float32)
+    group = np.concatenate((levels, -levels))
+    weight = np.tile(group, 4)[None, :]
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    payload = np.array(
+        [0x00, 0x91, 0xA2, 0xB3, 0xC4, 0xD5, 0xE6, 0xF7],
+        dtype=np.uint8,
+    )
+    expected = np.concatenate(
+        (np.full(4, 0x38, dtype=np.uint8), np.tile(payload, 4))
+    )[None, :]
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_nvfp4_packing_at_ue4m3_scale_boundaries():
+    scale_sources = []
+    for source_exponent in range(-7, 8):
+        for mantissa in range(8):
+            bits = np.uint32((source_exponent + 127) << 23 | mantissa << 20 | 1 << 19)
+            boundary = bits.view(np.float32)
+            scale_sources.extend(
+                np.nextafter(boundary, np.float32(direction))
+                for direction in (-np.inf, boundary, np.inf)
+            )
+    scale_sources.extend(
+        np.nextafter(np.float32((mantissa + 0.5) / 512.0), np.float32(direction))
+        for mantissa in range(8)
+        for direction in (-np.inf, np.float32((mantissa + 0.5) / 512.0), np.inf)
+    )
+    scale_sources.extend(
+        np.nextafter(np.float32(448.0), np.float32(direction))
+        for direction in (-np.inf, np.float32(448.0), np.inf)
+    )
+    rows = []
+    for scale_source in scale_sources:
+        group = np.zeros(16, dtype=np.float32)
+        group[0] = np.float32(scale_source * np.float32(6.0))
+        rows.append(np.tile(group, 4))
+    weight = np.stack(rows)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(actual, _torch_gguf_nvfp4_oracle(weight))
+
+
+def test_gguf_nvfp4_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy
+
+    weight = np.random.default_rng(124).standard_normal((4, 256)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "NVFP4"))
+    np.testing.assert_array_equal(packed, _torch_gguf_nvfp4_oracle(weight))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "NVFP4")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_nvfp4_packing_accepts_transposed_weights():
+    weight = np.random.default_rng(125).standard_normal((64, 5)).astype(np.float32)
+    transposed = mx.array(weight).T
+    actual = native.gguf_quantize_weight_mlx(transposed, "NVFP4")
+    expected = _torch_gguf_nvfp4_oracle(weight.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_nvfp4_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 64"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 63)), "NVFP4")
+
+
+@pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
+def test_gguf_tq2_0_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(115).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :256] = 2
+    weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0")
+    expected = _torch_gguf_tq2_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_tq2_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(116).standard_normal((4, 512))).astype(
+        dtype
+    )
+    expected = _torch_gguf_tq2_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "TQ2_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_tq2_0_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380022 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "TQ2_0"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_tq2_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_tq2_0_packing_at_float32_rounding_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    maxima = np.array([0.03, 1.0, 20.0], dtype=np.float32)
+    weight = np.zeros((18, 256), dtype=np.float32)
+    row = 0
+    for maximum in maxima:
+        reciprocal = np.float32(1.0) / maximum
+        for sign in (-1, 1):
+            threshold = np.float32(sign * 0.5 / np.float64(reciprocal))
+            for direction in (-np.inf, None, np.inf):
+                weight[row, 0] = maximum
+                value = (
+                    threshold if direction is None
+                    else np.nextafter(threshold, np.float32(direction))
+                )
+                weight[row, 1:] = value
+                row += 1
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_tq2_0_oracle(weight))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "TQ2_0"))
+
+
+def test_gguf_tq2_0_packing_at_fp16_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    midpoint = np.float32(1.0 + 2.0**-11)
+    overflow = np.float32(65520.0)
+    values = [
+        np.float32(0.0),
+        np.float32(-0.0),
+        np.nextafter(midpoint, np.float32(-np.inf)),
+        midpoint,
+        np.nextafter(midpoint, np.float32(np.inf)),
+        np.float32(2.0**-25),
+        np.nextafter(overflow, np.float32(-np.inf)),
+        overflow,
+        np.nextafter(overflow, np.float32(np.inf)),
+    ]
+    weight = np.repeat(np.asarray(values, dtype=np.float32)[:, None], 256, axis=1)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_tq2_0_oracle(weight))
+    with np.errstate(over="ignore"):
+        expected = _fallback_gguf_quantize(weight, "TQ2_0")
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_tq2_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(117).standard_normal((4, 512)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ2_0"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "TQ2_0"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "TQ2_0")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_tq2_0_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 256"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "TQ2_0")
+
+
+def test_gguf_tq2_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(118).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "TQ2_0")
+    expected = _torch_gguf_tq2_0_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
+def test_gguf_tq1_0_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(112).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :256] = 2
+    weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "TQ1_0")
+    expected = _torch_gguf_tq1_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_tq1_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(113).standard_normal((4, 512))).astype(
+        dtype
+    )
+    expected = _torch_gguf_tq1_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "TQ1_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_tq1_0_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380011 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "TQ1_0"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_tq1_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_tq1_0_packing_at_float32_rounding_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    maxima = np.array([0.03, 1.0, 20.0], dtype=np.float32)
+    weight = np.zeros((18, 256), dtype=np.float32)
+    row = 0
+    for maximum in maxima:
+        reciprocal = np.float32(1.0) / maximum
+        for sign in (-1, 1):
+            threshold = np.float32(sign * 0.5 / np.float64(reciprocal))
+            for direction in (-np.inf, None, np.inf):
+                weight[row, 0] = maximum
+                value = (
+                    threshold if direction is None
+                    else np.nextafter(threshold, np.float32(direction))
+                )
+                weight[row, 1:] = value
+                row += 1
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ1_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_tq1_0_oracle(weight))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "TQ1_0"))
+
+
+def test_gguf_tq1_0_packing_at_fp16_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    midpoint = np.float32(1.0 + 2.0**-11)
+    overflow = np.float32(65520.0)
+    values = [
+        np.float32(0.0),
+        np.float32(-0.0),
+        np.nextafter(midpoint, np.float32(-np.inf)),
+        midpoint,
+        np.nextafter(midpoint, np.float32(np.inf)),
+        np.float32(2.0**-25),
+        np.nextafter(overflow, np.float32(-np.inf)),
+        overflow,
+        np.nextafter(overflow, np.float32(np.inf)),
+    ]
+    weight = np.repeat(np.asarray(values, dtype=np.float32)[:, None], 256, axis=1)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ1_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_tq1_0_oracle(weight))
+    with np.errstate(over="ignore"):
+        expected = _fallback_gguf_quantize(weight, "TQ1_0")
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_tq1_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(114).standard_normal((4, 512)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "TQ1_0"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "TQ1_0"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "TQ1_0")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_tq1_0_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 256"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "TQ1_0")
+
+
+def test_gguf_tq1_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(117).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "TQ1_0")
+    expected = _torch_gguf_tq1_0_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
+def test_gguf_q6_k_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(108).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :256] = 2
+    weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K")
+    expected = _torch_gguf_q6_k_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q6_k_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(109).standard_normal((4, 512))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q6_k_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q6_K")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q6_k_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380027 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q6_K"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q6_k_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q6_k_packing_one_ulp_across_signed_code_thresholds():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    weight = np.zeros((183, 16, 16), dtype=np.float32)
+    weight[:, :, 0] = -1.0
+    weight[:, :, 1] = 1.0
+    step = np.float32(np.float32(1.0 / 31.0) / np.float32(127.0)) * np.float32(127.0)
+    for row, code in enumerate(range(-30, 31)):
+        threshold = np.float32((code + 0.5) * float(step))
+        weight[3 * row, :, 2] = np.nextafter(threshold, np.float32(-np.inf))
+        weight[3 * row + 1, :, 2] = threshold
+        weight[3 * row + 2, :, 2] = np.nextafter(threshold, np.float32(np.inf))
+    flat = weight.reshape(183, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q6_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q6_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q6_K"))
+
+
+def test_gguf_q6_k_packing_at_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rng = np.random.default_rng(111)
+    rows = 3 * 126
+    weight = np.zeros((rows, 16, 16), dtype=np.float32)
+    weight[:, 0, 0] = 2.0
+    weight[:, 0, 1] = -2.0
+    for group in range(1, 16):
+        code = np.repeat(rng.permutation(np.arange(1, 127)), 3)
+        threshold = (2.0 * (code + 0.5) / 127).astype(np.float32)
+        maximum = threshold.copy()
+        maximum[::3] = np.nextafter(
+            threshold[::3], np.float32(-np.inf)
+        )
+        maximum[2::3] = np.nextafter(
+            threshold[2::3], np.float32(np.inf)
+        )
+        weight[:, group, 0] = maximum
+        weight[:, group, 1] = -maximum
+        weight[:, group, 2:] = rng.uniform(-1, 1, (rows, 14)) * maximum[:, None]
+    flat = weight.reshape(rows, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q6_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q6_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q6_K"))
+
+
+def test_gguf_q6_k_packing_saturates_signed_codes():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    weight = np.zeros((1, 16, 16), dtype=np.float32)
+    weight[0, 0, :2] = [-2.0, 2.0]
+    small_maximum = np.float32(2.0 * 1.4 / 127.0)
+    weight[0, 1, :2] = [-small_maximum, small_maximum]
+    flat = weight.reshape(1, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q6_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q6_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q6_K"))
+
+
+def test_gguf_q6_k_packing_at_fp16_scale_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    midpoint = np.float32(1.0 + 2.0**-11)
+    overflow = np.float32(65520.0)
+    values = [
+        np.nextafter(midpoint, np.float32(-np.inf)),
+        midpoint,
+        np.nextafter(midpoint, np.float32(np.inf)),
+        np.float32(2.0**-25),
+        np.nextafter(overflow, np.float32(-np.inf)),
+        overflow,
+        np.nextafter(overflow, np.float32(np.inf)),
+    ]
+    # Q6_K stores max(abs(weight)) / (31 * 127) as its fp16 base scale.
+    magnitudes = np.asarray(values, dtype=np.float32) * np.float32(31 * 127)
+    weight = np.repeat(magnitudes[:, None], 256, axis=1)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q6_k_oracle(weight))
+    with np.errstate(over="ignore"):
+        expected = _fallback_gguf_quantize(weight, "Q6_K")
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_q6_k_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(110).standard_normal((4, 512)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "Q6_K"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "Q6_K")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_q6_k_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 256"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "Q6_K")
+
+
+def test_gguf_q6_k_packing_accepts_transposed_weights():
+    source = np.random.default_rng(111).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q6_K")
+    expected = _torch_gguf_q6_k_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("qtype", ["Q5_K", "q5_k_s", "q5_k_m"])
+@pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
+def test_gguf_q5_k_packing_matches_torch_oracle(qtype, rows, width):
+    weight = np.random.default_rng(104).standard_normal((rows, width)).astype(
+        np.float32
+    )
+    weight[0] = 0
+    weight[1, :256] = 2
+    weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), qtype)
+    expected = _torch_gguf_q5_k_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q5_k_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(105).standard_normal((4, 512))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q5_k_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q5_K")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q5_k_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380025 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q5_K"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q5_k_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q5_k_packing_one_ulp_across_each_code_threshold():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    weight = np.full((93, 8, 32), -1.0, dtype=np.float32)
+    weight[:, :, 1] = 1.0
+    weight[:, :, 3:] = 0.0
+    for code in range(31):
+        threshold = np.float32((code + 0.5) * (2.0 / 31.0) - 1.0)
+        weight[3 * code, :, 2] = np.nextafter(threshold, np.float32(-np.inf))
+        weight[3 * code + 1, :, 2] = threshold
+        weight[3 * code + 2, :, 2] = np.nextafter(threshold, np.float32(np.inf))
+    flat = weight.reshape(93, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q5_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q5_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q5_K"))
+
+
+def test_gguf_q5_k_packing_at_scale_and_minimum_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rng = np.random.default_rng(107)
+    rows = 256
+    weight = np.empty((rows, 8, 32), dtype=np.float32)
+    weight[:, 0, 0] = -1.0
+    weight[:, 0, 1] = 2.0
+    weight[:, 0, 2:] = rng.uniform(-1, 2, (rows, 30))
+    for group in range(1, 8):
+        scale_code = rng.integers(1, 63, rows)
+        min_code = rng.integers(1, 63, rows)
+        step = ((3.0 / 31.0) * (scale_code + 0.5) / 63).astype(np.float32)
+        minimum = ((min_code + 0.5) / 63).astype(np.float32)
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        step = np.nextafter(step, direction)
+        minimum = np.nextafter(minimum, direction)
+        high = np.float32(31) * step - minimum
+        weight[:, group, 0] = -minimum
+        weight[:, group, 1] = high
+        weight[:, group, 2:] = (
+            -minimum[:, None]
+            + rng.uniform(0, 1, (rows, 30)) * (high + minimum)[:, None]
+        ).astype(np.float32)
+    flat = weight.reshape(rows, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q5_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q5_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q5_K"))
+
+
+def test_gguf_q5_k_packing_at_fp16_scale_boundaries():
+    midpoint = np.float32(1.0 + 2.0**-11)
+    overflow = np.float32(65520.0)
+    values = [
+        np.nextafter(midpoint, np.float32(-np.inf)),
+        midpoint,
+        np.nextafter(midpoint, np.float32(np.inf)),
+        np.float32(2.0**-25),
+        np.nextafter(overflow, np.float32(-np.inf)),
+        overflow,
+        np.nextafter(overflow, np.float32(np.inf)),
+    ]
+    weight = np.repeat(np.asarray(values, dtype=np.float32)[:, None], 256, axis=1)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q5_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q5_k_oracle(weight))
+
+
+def test_gguf_q5_k_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(106).standard_normal((4, 512)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q5_K"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "Q5_K"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "Q5_K")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_q5_k_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 256"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "Q5_K")
+
+
+def test_gguf_q5_k_packing_accepts_transposed_weights():
+    source = np.random.default_rng(108).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q5_K")
+    expected = _torch_gguf_q5_k_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("qtype", ["Q4_K", "q4_k_s", "q4_k_m"])
+@pytest.mark.parametrize("rows,width", [(9, 256), (13, 512), (129, 1024)])
+def test_gguf_q4_k_packing_matches_torch_oracle(qtype, rows, width):
+    weight = np.random.default_rng(99).standard_normal((rows, width)).astype(np.float32)
+    weight[0] = 0
+    weight[1, :256] = 2
+    weight[2, :256] = np.linspace(-3, 3, 256, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), qtype)
+    expected = _torch_gguf_q4_k_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q4_k_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(100).standard_normal((4, 512))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q4_k_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q4_K")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q4_k_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380024 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q4_K"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q4_k_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q4_k_packing_at_rounding_boundaries():
+    rng = np.random.default_rng(101)
+    rows = 128
+    weight = rng.uniform(-1, 1, (rows, 8, 32)).astype(np.float32)
+    weight[:, :, 0] = -1.0
+    weight[:, :, 1] = 1.0
+    for group in range(8):
+        for column in range(2, 32):
+            code = rng.integers(1, 15, rows)
+            threshold = ((code + 0.5) * (2.0 / 15.0) - 1.0).astype(np.float32)
+            direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+                np.float32
+            )
+            weight[:, group, column] = np.where(
+                rng.integers(0, 3, rows) == 0,
+                np.nextafter(threshold, direction),
+                threshold,
+            )
+    flat = weight.reshape(rows, 256)
+    actual = native.gguf_quantize_weight_mlx(mx.array(flat), "Q4_K")
+    expected = _torch_gguf_q4_k_oracle(flat)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q4_k_packing_one_ulp_across_each_code_threshold():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    base = np.full((45, 8, 32), -1.0, dtype=np.float32)
+    base[:, :, 1] = 1.0
+    base[:, :, 3:] = 0.0
+    step = np.float32(np.float32(2.0 / 15.0) / np.float32(63.0)) * np.float32(63.0)
+    bias = np.float32(np.float32(1.0 / 63.0) * np.float32(63.0))
+    for code in range(15):
+        threshold = np.float32((code + 0.5) * float(step) - float(bias))
+        base[3 * code, :, 2] = np.nextafter(threshold, np.float32(-np.inf))
+        base[3 * code + 1, :, 2] = threshold
+        base[3 * code + 2, :, 2] = np.nextafter(threshold, np.float32(np.inf))
+
+    weight = base.reshape(45, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q4_k_oracle(weight))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(weight, "Q4_K"))
+
+
+def test_gguf_q4_k_packing_at_scale_and_minimum_boundaries():
+    from gptqmodel.nn_modules.qlinear.gguf import _fallback_gguf_quantize
+
+    rng = np.random.default_rng(103)
+    rows = 256
+    weight = np.empty((rows, 8, 32), dtype=np.float32)
+    weight[:, 0, 0] = -1
+    weight[:, 0, 1] = 2
+    weight[:, 0, 2:] = rng.uniform(-1, 2, (rows, 30))
+    for group in range(1, 8):
+        scale_code = rng.integers(1, 63, rows)
+        min_code = rng.integers(1, 63, rows)
+        step = (0.2 * (scale_code + 0.5) / 63).astype(np.float32)
+        minimum = ((min_code + 0.5) / 63).astype(np.float32)
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        step = np.nextafter(step, direction)
+        minimum = np.nextafter(minimum, direction)
+        high = np.float32(15) * step - minimum
+        weight[:, group, 0] = -minimum
+        weight[:, group, 1] = high
+        weight[:, group, 2:] = (
+            -minimum[:, None]
+            + rng.uniform(0, 1, (rows, 30)) * (high + minimum)[:, None]
+        ).astype(np.float32)
+
+    flat = weight.reshape(rows, 256)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(flat), "Q4_K"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q4_k_oracle(flat))
+    np.testing.assert_array_equal(actual, _fallback_gguf_quantize(flat, "Q4_K"))
+
+
+def test_gguf_q4_k_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _fallback_gguf_quantize,
+    )
+
+    weight = np.random.default_rng(102).standard_normal((4, 512)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_K"))
+    np.testing.assert_array_equal(packed, _fallback_gguf_quantize(weight, "Q4_K"))
+    decoded = _dequantize_gguf_tensor_numpy(packed, "Q4_K")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_q4_k_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 256"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128)), "Q4_K")
+
+
+def test_gguf_q4_k_packing_accepts_transposed_weights():
+    source = np.random.default_rng(103).standard_normal((256, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q4_K")
+    expected = _torch_gguf_q4_k_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("rows,width", [(13, 64), (13, 256), (257, 512)])
+def test_gguf_q2_0_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(95).standard_normal((rows, width)).astype(np.float32)
+    weight[0] = 0
+    weight[1, :64] = np.tile([-1.0, -0.5, 0.5, 1.0], 16)
+    weight[2, :64] = np.tile([-0.0, 0.0, 0.49, -0.49], 16)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q2_0")
+    expected = _torch_gguf_q2_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q2_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(96).standard_normal((8, 128))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q2_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q2_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q2_0_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380002 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q2_0"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q2_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q2_0_packing_at_float32_rounding_boundaries():
+    rng = np.random.default_rng(97)
+    rows = 128
+    maxima = rng.uniform(0.03, 20.0, rows).astype(np.float32)
+    weight = np.zeros((rows, 64), dtype=np.float32)
+    weight[:, 0] = np.where(rng.integers(0, 2, rows), maxima, -maxima)
+    inverse = np.float32(1.0) / maxima
+    for column in range(1, 64):
+        sign = np.where(rng.integers(0, 2, rows), 1, -1)
+        threshold = (sign * 0.5 / inverse.astype(np.float64)).astype(np.float32)
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        weight[:, column] = np.where(
+            rng.integers(0, 3, rows) == 0,
+            np.nextafter(threshold, direction),
+            threshold,
+        )
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q2_0")
+    expected = _torch_gguf_q2_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q2_0_packing_at_fp16_scale_boundaries():
+    midpoint = np.float32(1.0 + 2.0**-11)
+    overflow = np.float32(65520.0)
+    values = [
+        np.nextafter(midpoint, np.float32(-np.inf)),
+        midpoint,
+        np.nextafter(midpoint, np.float32(np.inf)),
+        np.float32(2.0**-25),
+        np.nextafter(overflow, np.float32(-np.inf)),
+        overflow,
+        np.nextafter(overflow, np.float32(np.inf)),
+    ]
+    weight = np.repeat(np.asarray(values, dtype=np.float32)[:, None], 64, axis=1)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q2_0")
+    expected = _torch_gguf_q2_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q2_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _quantize_gguf_tensor_numpy,
+    )
+
+    weight = np.random.default_rng(98).standard_normal((4, 128)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q2_0"))
+    expected = _quantize_gguf_tensor_numpy(weight, "Q2_0")
+    np.testing.assert_array_equal(packed, expected)
+    decoded = _dequantize_gguf_tensor_numpy(packed, "Q2_0")
+    assert decoded.shape == weight.shape
+    assert np.isfinite(decoded).all()
+
+
+def test_gguf_q2_0_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 64"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "Q2_0")
+
+
+def test_gguf_q2_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(99).standard_normal((64, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q2_0")
+    expected = _torch_gguf_q2_0_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("qtype", ["Q1_0", "Q1_0_g128"])
+@pytest.mark.parametrize("rows,width", [(13, 128), (13, 256), (257, 512)])
+def test_gguf_q1_0_packing_matches_torch_oracle(qtype, rows, width):
+    weight = np.random.default_rng(91).standard_normal((rows, width)).astype(np.float32)
+    weight[0] = 0
+    weight[1, :128] = np.where(np.arange(128) % 3 == 0, 1.0, -1.0)
+    weight[2, :128] = np.linspace(-2.0, 2.0, 128, dtype=np.float32)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), qtype)
+    expected = _torch_gguf_q1_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q1_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(92).standard_normal((8, 256))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q1_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q1_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("qtype", ["Q1_0", "Q1_0_g128"])
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q1_0_packing_qwen38_27b_shapes(qtype, dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380001 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, qtype))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q1_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q1_0_packing_at_sign_and_scale_boundaries():
+    midpoint = np.float32(1.0 + 2.0**-11)
+    below = np.nextafter(midpoint, np.float32(-np.inf))
+    above = np.nextafter(midpoint, np.float32(np.inf))
+    weight = np.zeros((8, 128), dtype=np.float32)
+    for row, value in enumerate((below, midpoint, above)):
+        weight[row] = value
+        weight[row + 3] = -value
+    weight[6, :8] = [0.0, -0.0, below, -below, midpoint, -midpoint, above, -above]
+    weight[7, :] = np.float32(2.0**-25)
+    for qtype in ("Q1_0", "Q1_0_g128"):
+        actual = native.gguf_quantize_weight_mlx(mx.array(weight), qtype)
+        expected = _torch_gguf_q1_0_oracle(weight)
+        np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q1_0_packing_at_fp16_range_boundaries():
+    thresholds = (np.float32(2.0**-25), np.float32(65520.0))
+    values = [np.float32(0.0)]
+    for threshold in thresholds:
+        values.extend(
+            [
+                np.nextafter(threshold, np.float32(-np.inf)),
+                threshold,
+                np.nextafter(threshold, np.float32(np.inf)),
+            ]
+        )
+    weight = np.repeat(np.asarray(values, dtype=np.float32)[:, None], 128, axis=1)
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q1_0"))
+    expected = _torch_gguf_q1_0_oracle(weight)
+    np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_q1_0_packing_at_irregular_scale_midpoints():
+    from gptqmodel.nn_modules.qlinear.gguf import _quantize_gguf_tensor_numpy
+
+    rng = np.random.default_rng(34)
+    rows = 256
+    half_values = np.linspace(0.25, 8.0, 2000, dtype=np.float16)
+    indices = rng.integers(0, 1999, rows)
+    midpoint = (
+        half_values[indices].astype(np.float32)
+        + half_values[indices + 1].astype(np.float32)
+    ) / 2
+    weight = (midpoint[:, None] * rng.uniform(0.94, 1.06, (rows, 128))).astype(
+        np.float32
+    )
+    weight[:, -1] = (
+        midpoint.astype(np.float64) * 128
+        - weight[:, :-1].astype(np.float64).sum(axis=1)
+    ).astype(np.float32)
+    weight *= rng.choice([-1, 1], size=(rows, 128)).astype(np.float32)
+
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q1_0"))
+    expected = _torch_gguf_q1_0_oracle(weight)
+    np.testing.assert_array_equal(actual, expected)
+    np.testing.assert_array_equal(actual, _quantize_gguf_tensor_numpy(weight, "Q1_0"))
+
+
+def test_gguf_q1_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _quantize_gguf_tensor_numpy,
+    )
+
+    weight = np.random.default_rng(93).standard_normal((4, 256)).astype(np.float32)
+    for qtype in ("Q1_0", "Q1_0_g128"):
+        packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), qtype))
+        expected = _quantize_gguf_tensor_numpy(weight, qtype)
+        np.testing.assert_array_equal(packed, expected)
+        decoded = _dequantize_gguf_tensor_numpy(packed, qtype)
+        assert decoded.shape == weight.shape
+        assert np.isfinite(decoded).all()
+
+
+def test_gguf_q1_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(94).standard_normal((128, 5)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = native.gguf_quantize_weight_mlx(weight, "Q1_0")
+    expected = _torch_gguf_q1_0_oracle(source.T.copy())
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q1_0_packing_validates_shape():
+    with pytest.raises(ValueError, match="divisible by 128"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "Q1_0")
+    with pytest.raises(ValueError, match="float16, bfloat16, or float32"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 128), dtype=mx.int32), "Q1_0")
+
+
+@pytest.mark.parametrize("rows,width", [(13, 32), (13, 256), (257, 512)])
+def test_gguf_q4_0_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(86).standard_normal((rows, width)).astype(np.float32)
+    weight[0] = 0
+    weight[1, :32] = 1
+    weight[2, :32] = np.arange(-16, 16, dtype=np.float32) / 8
+    weight[3, :32] = np.tile(
+        (np.arange(-8, 8, dtype=np.float32) + 0.5) * 0.25, 2
+    )
+    weight[3, 0] = -2.0
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0")
+    expected = _torch_gguf_q4_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q4_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(19).standard_normal((8, 64))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q4_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q4_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q4_0_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380040 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q4_0"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q4_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q4_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(480).standard_normal((64, 7)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q4_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q4_0_oracle(source.T.copy()))
+
+
+def test_gguf_q4_0_packing_at_float32_rounding_boundaries():
+    rng = np.random.default_rng(819)
+    rows = 64
+    maxima = rng.uniform(0.03, 20.0, rows).astype(np.float32)
+    signed_maxima = np.where(rng.integers(0, 2, rows), maxima, -maxima)
+    weight = np.zeros((rows, 32), dtype=np.float32)
+    weight[:, 0] = signed_maxima
+    reciprocal = np.float32(1.0) / (signed_maxima / np.float32(-8.0))
+    for column in range(1, 32):
+        code = rng.integers(2, 14, rows)
+        boundary = ((code - 8.5) / reciprocal.astype(np.float64)).astype(
+            np.float32
+        )
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        weight[:, column] = np.where(
+            rng.integers(0, 3, rows) == 0,
+            np.nextafter(boundary, direction),
+            boundary,
+        )
+
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0")
+    expected = _torch_gguf_q4_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q4_0_packing_preserves_zero_scale_sign():
+    weight = np.zeros((2, 32), dtype=np.float32)
+    weight[1, 0] = np.float32(-0.0)
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0")
+    expected = _torch_gguf_q4_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q4_0_packing_validates_format_and_shape():
+    with pytest.raises(ValueError, match="supports Q1_0.*Q4_0.*Q8_0"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 32)), "IQ4_XS")
+    with pytest.raises(ValueError, match="divisible by 32"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 33)), "Q4_0")
+    with pytest.raises(ValueError, match="nonzero input width"):
+        native.gguf_quantize_weight_mlx(mx.zeros((2, 0)), "Q4_0")
+
+
+def test_gguf_q4_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _quantize_gguf_tensor_numpy,
+    )
+
+    weight = np.random.default_rng(17).standard_normal((4, 128)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q4_0"))
+    expected = _quantize_gguf_tensor_numpy(weight, "Q4_0")
+    np.testing.assert_array_equal(packed, expected)
+    dequantized = _dequantize_gguf_tensor_numpy(packed, "Q4_0")
+    assert dequantized.shape == weight.shape
+    assert np.isfinite(dequantized).all()
+
+
+@pytest.mark.parametrize("rows,width", [(13, 32), (13, 256), (257, 512)])
+def test_gguf_q8_0_packing_matches_torch_oracle(rows, width):
+    weight = np.random.default_rng(87).standard_normal((rows, width)).astype(np.float32)
+    weight[0] = 0
+    weight[1, :32] = 1
+    weight[2, :32] = np.arange(-16, 16, dtype=np.float32) + 0.5
+    weight[2, 0] = -127.0
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q8_0")
+    expected = _torch_gguf_q8_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+def test_gguf_q8_0_packing_promotes_low_precision_inputs(dtype):
+    weight = mx.array(np.random.default_rng(20).standard_normal((8, 64))).astype(
+        dtype
+    )
+    expected = _torch_gguf_q8_0_oracle(np.asarray(weight.astype(mx.float32)))
+    actual = native.gguf_quantize_weight_mlx(weight, "Q8_0")
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("name,rows,width", QWEN38_27B_PROJECTIONS)
+def test_gguf_q8_0_packing_qwen38_27b_shapes(dtype, name, rows, width):
+    del name
+    source = np.random.default_rng(380080 + rows + width).standard_normal(
+        (1, width), dtype=np.float32
+    )
+    weight = mx.broadcast_to(mx.array(source).astype(dtype), (rows, width))
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q8_0"))
+    quantized_row = np.asarray(weight[0:1].astype(mx.float32))
+    expected_row = _torch_gguf_q8_0_oracle(quantized_row)
+    np.testing.assert_array_equal(actual, np.broadcast_to(expected_row, actual.shape))
+    mx.clear_cache()
+
+
+def test_gguf_q8_0_packing_accepts_transposed_weights():
+    source = np.random.default_rng(880).standard_normal((64, 7)).astype(np.float32)
+    weight = mx.array(source).T
+    actual = np.asarray(native.gguf_quantize_weight_mlx(weight, "Q8_0"))
+    np.testing.assert_array_equal(actual, _torch_gguf_q8_0_oracle(source.T.copy()))
+
+
+def test_gguf_q8_0_packing_at_float32_rounding_boundaries():
+    rng = np.random.default_rng(820)
+    rows = 64
+    maxima = rng.uniform(0.03, 20.0, rows).astype(np.float32)
+    signed_maxima = np.where(rng.integers(0, 2, rows), maxima, -maxima)
+    weight = np.zeros((rows, 32), dtype=np.float32)
+    weight[:, 0] = signed_maxima
+    weight[:, 1] = -signed_maxima
+    reciprocal = np.float32(1.0) / (maxima / np.float32(127.0))
+    for column in range(2, 32):
+        code = rng.integers(-120, 120, rows)
+        boundary = ((code + 0.5) / reciprocal.astype(np.float64)).astype(
+            np.float32
+        )
+        direction = np.where(rng.integers(0, 2, rows), np.inf, -np.inf).astype(
+            np.float32
+        )
+        weight[:, column] = np.where(
+            rng.integers(0, 3, rows) == 0,
+            np.nextafter(boundary, direction),
+            boundary,
+        )
+
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q8_0")
+    expected = _torch_gguf_q8_0_oracle(weight)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
+def test_gguf_q8_0_bytes_are_accepted_by_existing_runtime():
+    from gptqmodel.nn_modules.qlinear.gguf import (
+        _dequantize_gguf_tensor_numpy,
+        _quantize_gguf_tensor_numpy,
+    )
+
+    weight = np.random.default_rng(18).standard_normal((4, 128)).astype(np.float32)
+    packed = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "Q8_0"))
+    expected = _quantize_gguf_tensor_numpy(weight, "Q8_0")
+    np.testing.assert_array_equal(packed, expected)
+    dequantized = _dequantize_gguf_tensor_numpy(packed, "Q8_0")
+    assert dequantized.shape == weight.shape
+    assert np.isfinite(dequantized).all()
+
+
+@pytest.mark.parametrize("dtype", (torch.float16, torch.bfloat16), ids=("fp16", "bf16"))
+@pytest.mark.parametrize("bits,tensor_qtype", GGUF_PROCESSOR_QTYPES)
+def test_gguf_processor_uses_mlx_with_exact_serialized_bytes(
+    monkeypatch,
+    dtype,
+    bits,
+    tensor_qtype,
+):
+    torch.manual_seed(8238)
+    source = torch.randn((2, 256), dtype=torch.float32).to(dtype)
+    expected = gguf_linear._quantize_gguf_tensor_numpy(
+        source.float().numpy(),
+        tensor_qtype,
+    )
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=dtype)
+    linear.weight.data.copy_(source)
+    kernel = gguf_linear.GGUFTorchLinear(
+        bits=bits,
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    monkeypatch.setattr(gguf_linear, "_MLX_GGUF_MIN_ELEMENTS", 0)
+    monkeypatch.setattr(gguf_linear, "_mlx_quantization_available", lambda: True)
+
+    def reject_cpu_quantization(*args, **kwargs):
+        raise AssertionError("processor fell back to CPU GGUF quantization")
+
+    monkeypatch.setattr(gguf_linear, "_gguf_quantize", reject_cpu_quantization)
+    kernel.pack_original(linear, None, None)
+    np.testing.assert_array_equal(kernel.qweight.numpy(), expected)
+
+
+def test_gguf_processor_keeps_cpu_path_below_mlx_crossover(monkeypatch):
+    linear = torch.nn.Linear(256, 2, bias=False, dtype=torch.float16)
+    kernel = gguf_linear.GGUFTorchLinear(
+        bits="q4_k",
+        group_size=-1,
+        sym=True,
+        desc_act=False,
+        in_features=256,
+        out_features=2,
+        bias=False,
+        register_buffers=False,
+    )
+    monkeypatch.setattr(gguf_linear, "_mlx_quantization_available", lambda: True)
+
+    def reject_mlx_quantization(*args, **kwargs):
+        raise AssertionError("small processor weight used the slower MLX path")
+
+    monkeypatch.setattr(
+        gguf_linear,
+        "_gguf_quantize_weight_mlx_to_torch",
+        reject_mlx_quantization,
+    )
+    kernel.pack_original(linear, None, None)

@@ -5,24 +5,30 @@
 
 import copy
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import torch
 from torch.nn import Module
 
 from ..adapter.adapter import Lora
 from ..eora.eora import eora_compute_lora, eora_process_input, merge_eora_segments
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
-from ..models.writer import (PROCESS_LOG_FWD_TIME, PROCESS_LOG_LAYER, PROCESS_LOG_MODULE,
-                             PROCESS_LOG_NAME, PROCESS_LOG_TIME, PROCESS_USED_MEMORY)
+from ..models.writer import (
+    PROCESS_LOG_FWD_TIME,
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+)
 from ..quantization.config import QuantizeConfig
-from ..utils.logger import setup_logger
 from ..utils.device import get_device
+from ..utils.logger import setup_logger
 from ..utils.model import move_to
-from ..utils.torch import CPU, DEVICE_0, DEVICE_1, torch_streamCtx, torch_sync
-from ..utils.torch import HAS_CUDA, tf32_disable_guard, torch_streamCtx, torch_sync
+from ..utils.torch import CPU, DEVICE_0, DEVICE_1, memory_stats_for_device
+
 
 log = setup_logger()
 
@@ -105,7 +111,7 @@ class EoraProcessor(LoopProcessor):
         """Clones adapter config, applies rank overrides, and initializes accumulators."""
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             module.adapter_cfg = None # hack
             return
 
@@ -339,13 +345,11 @@ class EoraProcessor(LoopProcessor):
             self.durations.append(duration)
             self.module_names.append(f"layer-{module.layer_index}-{module.name}")
 
-        stats_0 = torch.cuda.memory_stats(DEVICE_0)
-        active_0 = stats_0.get("active_bytes.all.current", 0) / 1024 ** 2
+        stats_0 = memory_stats_for_device(DEVICE_0)
         peak_active_0 = stats_0.get("active_bytes.all.peak", 0) / 1024 ** 2
 
-        if torch.cuda.device_count() > 1:
-            stats_1 = torch.cuda.memory_stats(DEVICE_1)
-            active_1 = stats_1.get("active_bytes.all.current", 0) / 1024 ** 2
+        if DEVICE_1 != DEVICE_0:
+            stats_1 = memory_stats_for_device(DEVICE_1)
             peak_active_1 = stats_1.get("active_bytes.all.peak", 0) / 1024 ** 2
 
             max_memory = f"{peak_active_0:.2f}MB, {peak_active_1:.2f}MB"

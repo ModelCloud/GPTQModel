@@ -68,6 +68,10 @@ class WarmupTask:
     scope: WarmUpCtx = WarmUpCtx.DEVICE
 
 
+def _noop() -> None:
+    """Placeholder task used only to make a worker run its pending warmups."""
+
+
 # --------------------------- Backend availability helpers ---------------------------
 # We keep these helpers small and side-effect free—only feature checks—so we can
 # query once and rely on final results without redundant availability if-ladders.
@@ -830,6 +834,8 @@ class DeviceThreadPool:
         self._ordered_keys = sorted(self._locks.keys())
         self._rebuild_family_keys()
 
+        self._kick_worker_warmups()
+
         # GC diagnostics counters
         self._gc_passes = 0
         self._last_gc_ts: Optional[float] = None
@@ -882,6 +888,24 @@ class DeviceThreadPool:
             keys.sort()
 
         self._family_keys = fam_map
+
+    def _kick_worker_warmups(self) -> None:
+        """
+        Start accelerator warmups during pool construction instead of blocking
+        the first real task on them.
+
+        Workers run their warmup plan lazily, immediately before the first task
+        they execute. Enqueueing a no-op here means the one-time library setup
+        (BLAS handle creation, solver backends, ...) overlaps with whatever the
+        caller does next rather than delaying the first unit of real work.
+        """
+        if not self._worker_warmups:
+            return
+        for key in self._ordered_keys:
+            if self._devices_by_key[key].type not in ("cuda", "xpu", "npu", "mps"):
+                continue
+            for worker in self._worker_groups.get(key, ()):
+                worker.submit(_noop)
 
     def _resolve_device_key(self, device: DeviceLike | str) -> str:
         if isinstance(device, str):

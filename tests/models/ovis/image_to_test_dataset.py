@@ -13,6 +13,7 @@ from gptqmodel.models.definitions.deepseek_vl import DeepSeekVLQModel
 from gptqmodel.models.definitions.deepseek_vl_v2 import DeepSeekVLV2QModel
 from gptqmodel.models.definitions.diffusion_gemma import DiffusionGemmaQModel
 from gptqmodel.models.definitions.ernie4_5_vl_moe import Ernie4_5_VLMoeQModel
+from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ
 from gptqmodel.models.definitions.hunyuan_vl import HunYuanVLQModel
 from gptqmodel.models.definitions.inkling import InklingMMQModel
 from gptqmodel.models.definitions.intern_s2_preview import InternS2PreviewQModel
@@ -20,15 +21,18 @@ from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl import InternVLQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
+from gptqmodel.models.definitions.llava import LlavaQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
 from gptqmodel.models.definitions.minicpmv import MiniCPMVQModel
 from gptqmodel.models.definitions.minicpmv_4_6 import MiniCPMV4_6QModel
 from gptqmodel.models.definitions.muse_glimmer import MuseGlimmerQModel
+from gptqmodel.models.definitions.openvla import OpenVLAQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.ovis2 import Ovis2QModel
 from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
+from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
 
 
@@ -163,6 +167,20 @@ def format_hunyuan_ocr_dataset(image, assistant):
     ]
 
 
+def format_openvla_dataset(image, assistant):
+    # OpenVLA's calibration prompt is built by OpenVLAQModel from the sample's
+    # instruction text; reuse the caption as the instruction content.
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": image},
+                {"type": "text", "text": assistant},
+            ],
+        },
+    ]
+
+
 def format_qwen2_5_omni_dataset(image, assistant):
     return [
         {
@@ -215,11 +233,39 @@ def prepare_locateanything_dataset(n_sample: int = 20) -> list[list[dict]]:
     return prepare_dataset(format_locateanything_dataset, n_sample=n_sample)
 
 
+def prepare_openvla_dataset(n_sample: int = 20) -> list[list[dict]]:
+    return prepare_dataset(format_openvla_dataset, n_sample=n_sample)
+
+
 def prepare_hunyuan_ocr_dataset(n_sample: int = 20) -> list[list[dict]]:
     return prepare_dataset(format_hunyuan_ocr_dataset, n_sample=n_sample)
 
 
+def prepare_llava_dataset() -> list[list[dict]]:
+    from pathlib import Path
+
+    from PIL import Image
+
+    image_path = Path(__file__).with_name("10016.jpg")
+    with Image.open(image_path) as image:
+        calibration_image = image.convert("RGB")
+
+    return [[
+        {
+            "role": "user",
+            "content": [
+                {"type": "image", "image": calibration_image},
+                {"type": "text", "text": "Describe the objects and scene in this image."},
+            ],
+        },
+        {"role": "assistant", "content": "A mountain landscape at sunset."},
+    ]]
+
+
 def get_calib_dataset(model):
+    if isinstance(model, LlavaQModel):
+        return prepare_llava_dataset()
+
     if isinstance(model, Apertus1p5QModel):
         return prepare_dataset(format_apertus_v15_dataset, n_sample=20)
 
@@ -248,8 +294,10 @@ def get_calib_dataset(model):
         or isinstance(model, InternVLChatQModel)
         or isinstance(model, InklingMMQModel)
         or isinstance(model, Ernie4_5_VLMoeQModel)
+        or isinstance(model, Gemma3ForConditionalGenerationGPTQ)
         or isinstance(model, LFM2VLQModel)
         or isinstance(model, MuseGlimmerQModel)
+        or isinstance(model, SmolVLMQModel)
         or isinstance(model, ZDTaichu5QModel)
     ):
         return prepare_dataset(format_qwen2_vl_dataset, n_sample=20)
@@ -271,6 +319,9 @@ def get_calib_dataset(model):
 
     if isinstance(model, LocateAnythingQModel):
         return prepare_locateanything_dataset(n_sample=20)
+
+    if isinstance(model, OpenVLAQModel):
+        return prepare_openvla_dataset(n_sample=20)
 
     if isinstance(model, HunYuanVLQModel):
         return prepare_hunyuan_ocr_dataset(n_sample=20)

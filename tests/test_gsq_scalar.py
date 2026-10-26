@@ -102,6 +102,62 @@ def test_gsq_moves_integer_codes_when_reconstruction_improves():
     assert not torch.equal(result.weight, baseline)
 
 
+def test_gsq_scale_overflow_keeps_best_export():
+    baseline = torch.zeros((1, 4), dtype=torch.float16)
+    scales = torch.full((1, 1), 0.1, dtype=torch.float16)
+    zeros = torch.full_like(scales, 8)
+    groups = torch.zeros(4, dtype=torch.int32)
+    target = torch.tensor([[0.35, -0.15, 0.50, -0.20]], dtype=torch.float16)
+    result = refine_gptq_scalar(
+        baseline, scales, zeros, groups,
+        target=target, hessian=torch.eye(4), bits=4,
+        config=GSQConfig(
+            enabled=True, steps=2, candidates=4, learn_scales=True,
+            learning_rate=1e308,
+        ),
+    )
+    assert math.isfinite(result.after)
+    assert result.after <= result.before
+    torch.testing.assert_close(result.weight, baseline, rtol=0, atol=0)
+    torch.testing.assert_close(result.scales, scales, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_gsq_cuda_quantization_matches_independent_hessian_oracle():
+    torch.manual_seed(81)
+    device = torch.device("cuda")
+    layer = nn.Linear(32, 32, bias=False, dtype=torch.float16, device=device).eval()
+    target = layer.weight.detach().float().clone()
+    config = QuantizeConfig(
+        bits=4,
+        group_size=16,
+        gsq=GSQConfig(enabled=True, steps=3, candidates=5, learn_scales=True),
+    )
+    gptq = GPTQ(layer, qcfg=config)
+    gptq.quantizer.configure(perchannel=True)
+    activations = torch.randn(1, 64, 32, dtype=torch.float16, device=device)
+    gptq.add_batch(activations, None)
+    hessian = gptq.finalize_hessian().float().clone()
+    quantized, scales, zeros, groups, *_ = gptq.quantize(blocksize=32)
+    torch.cuda.synchronize(device)
+
+    assert quantized.device.type == "cuda"
+    assert gptq.gsq_diagnostics["after"] <= gptq.gsq_diagnostics["before"] + 1e-7
+    with torch.no_grad():
+        layer.weight.copy_(quantized)
+    packed = TorchLinear(
+        bits=4, group_size=16, sym=config.sym, desc_act=config.desc_act,
+        in_features=32, out_features=32, format=config.format,
+    )
+    packed.pack_original(layer.cpu(), scales.cpu(), zeros.cpu(), groups.cpu())
+    decoded = packed.dequantize_weight().T.float()
+    error = decoded - target.cpu()
+    hessian_cpu = hessian.cpu()
+    denominator = (target.cpu() @ hessian_cpu * target.cpu()).sum()
+    oracle = (error @ hessian_cpu * error).sum() / denominator
+    assert math.isclose(float(oracle), gptq.gsq_diagnostics["after"], rel_tol=2e-2, abs_tol=2e-4)
+
+
 @pytest.mark.parametrize("bits", [2, 3, 4, 5, 6, 7, 8])
 @pytest.mark.parametrize("desc_act,group_size", [(False, 16), (True, 16), (False, -1)])
 def test_gsq_gptq_pack_and_reconstruction(bits, desc_act, group_size):

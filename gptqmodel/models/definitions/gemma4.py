@@ -121,6 +121,33 @@ def _resolve_gemma4_language_model(model_def):
     return model_def.model.model
 
 
+def _disable_unused_gemma4_full_length_kv_store(model_def):
+    """Stop Gemma 4 from stashing full-length K/V that no layer will ever read.
+
+    Gemma 4 marks the last layer of each attention type before the KV-shared tail
+    with ``store_full_length_kv`` so shared layers can reuse its K/V through the
+    ``shared_kv_states`` dict. With ``num_kv_shared_layers == 0`` there is no shared
+    tail, yet the flag is still set on the last sliding and last full attention
+    layer. Cached replay keeps one captured ``shared_kv_states`` dict per
+    calibration batch, so every batch retains a full-length K/V copy of those
+    layers on the GPU: roughly ``calibration tokens * 2 * kv_dim * dtype bytes``
+    (~18 GiB for 1.2M tokens on gemma-4-31B-it), which OOMs the second-to-last
+    layer. Nothing consumes the stored K/V here, so disabling the store does not
+    change any computation. Variants with KV-shared layers are left untouched
+    because their shared layers read the stored K/V during replay.
+    """
+
+    text_config = model_def.model.config.get_text_config()
+    if getattr(text_config, "num_kv_shared_layers", 0):
+        return
+
+    language_model = _resolve_gemma4_language_model(model_def)
+    for layer in getattr(language_model, "layers", ()):
+        self_attn = getattr(layer, "self_attn", None)
+        if getattr(self_attn, "store_full_length_kv", False):
+            self_attn.store_full_length_kv = False
+
+
 def _patch_gemma4_per_layer_input_capture(model_def):
     """Capture projected per-layer inputs during calibration so later decoder replays can slice them by layer."""
 
@@ -186,6 +213,7 @@ class Gemma4TextQModel(LlamaQModel):
         return _prepare_gemma4_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):
+        _disable_unused_gemma4_full_length_kv_store(self)
         _patch_gemma4_per_layer_input_capture(self)
 
     def pre_quantize_generate_hook_end(self):
@@ -249,6 +277,7 @@ class Gemma4ForConditionalGenerationGPTQ(BaseQModel):
         return _prepare_gemma4_replay_kwargs(self, layer, layer_input, additional_inputs, target_device)
 
     def pre_quantize_generate_hook_start(self):
+        _disable_unused_gemma4_full_length_kv_store(self)
         _patch_gemma4_per_layer_input_capture(self)
 
     def pre_quantize_generate_hook_end(self):

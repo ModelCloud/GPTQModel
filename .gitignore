@@ -197,3 +197,8 @@ AGENTs.md
 .codex
 temp
 tmp
+
+# hipify-generated ROCm sources (produced locally from the CUDA sources)
+gptqmodel_ext/**/*_hip.*
+gptqmodel_ext/**/*.hip
+gptqmodel_ext/exllamav2/hip/

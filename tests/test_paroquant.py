@@ -50,6 +50,7 @@ from gptqmodel.utils.paroquant import (
     build_identity_rotation_buffers,
     clear_paroquant_rotation_autotune_cache,
     clear_paroquant_rotation_extension_cache,
+    is_identity_rotation,
     prewarm_paroquant_rotation_extension,
 )
 from gptqmodel.utils.paroquant_benchmark import make_paroquant_config
@@ -132,6 +133,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
                 "opt_fused_rotation": False,
                 "opt_gradient_checkpointing": False,
                 "opt_stage_cudagraph": False,
+                "opt_amp": False,
                 "opt_best_state_dtype": "fp16",
                 "opt_train_on_noisy_inputs": True,
                 "opt_scope": "compute_block",
@@ -169,6 +171,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.opt_fused_rotation is False
     assert cfg.opt_gradient_checkpointing is False
     assert cfg.opt_stage_cudagraph is False
+    assert cfg.opt_amp is False
     assert cfg.opt_best_state_dtype == "fp16"
     assert cfg.opt_train_on_noisy_inputs is True
     assert cfg.opt_scope == "compute_block"
@@ -180,6 +183,7 @@ def test_paroquant_quantize_config_from_external_payload_round_trips():
     assert cfg.to_dict()["meta"]["opt_fused_rotation"] is False
     assert cfg.to_dict()["meta"]["opt_gradient_checkpointing"] is False
     assert cfg.to_dict()["meta"]["opt_stage_cudagraph"] is False
+    assert cfg.to_dict()["meta"]["opt_amp"] is False
     assert cfg.to_dict()["meta"]["opt_best_state_dtype"] == "fp16"
     assert cfg.to_dict()["meta"]["opt_train_on_noisy_inputs"] is True
     assert cfg.to_dict()["meta"]["opt_scope"] == "compute_block"
@@ -245,6 +249,52 @@ def test_paroquant_quantize_config_rejects_invalid_best_state_dtype():
             group_size=128,
             opt_best_state_dtype="int8",
         )
+
+
+def test_paroquant_best_state_snapshot_batches_one_copy_per_dtype_group(monkeypatch):
+    """Guard the best-state snapshot so it stays one batched copy per dtype group."""
+    weight = torch.arange(12, dtype=torch.float32).view(3, 4)
+    bias = torch.linspace(-1.0, 1.0, steps=3, dtype=torch.float32)
+    index = torch.arange(6, dtype=torch.int32).view(2, 3)
+    mask = torch.tensor([[True, False, True], [False, True, False]])
+    live = {"weight": weight, "bias": bias, "index": index, "mask": mask}
+    model = SimpleNamespace(state_dict=lambda: dict(live))
+
+    batches = []
+    foreach_copy = torch._foreach_copy_
+
+    def counting_foreach_copy(destinations, sources):
+        batches.append([tuple(tensor.shape) for tensor in destinations])
+        return foreach_copy(destinations, sources)
+
+    monkeypatch.setattr(torch, "_foreach_copy_", counting_foreach_copy)
+
+    snapshot = paroquant_optimization._snapshot_model_state(model, target_dtype=torch.float16)
+
+    # One batch per (device, dtype) group: the float pair, the int buffer and the mask.
+    assert batches == [[(3, 4), (3,)], [(2, 3)], [(2, 3)]]
+    assert list(snapshot) == ["weight", "bias", "index", "mask"]
+    assert snapshot["weight"].dtype == torch.float16
+    assert snapshot["bias"].dtype == torch.float16
+    assert snapshot["index"].dtype == torch.int32
+    assert snapshot["mask"].dtype == torch.bool
+    assert torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert torch.equal(snapshot["bias"], bias.to(torch.float16))
+    assert torch.equal(snapshot["index"], index)
+    assert torch.equal(snapshot["mask"], mask)
+    assert all(not tensor.requires_grad for tensor in snapshot.values())
+
+    # A snapshot has to be immune to later in-place updates of the live state.
+    weight.zero_()
+    bias.add_(1.0)
+    assert not torch.equal(snapshot["weight"], weight.to(torch.float16))
+    assert not torch.equal(snapshot["bias"], bias.to(torch.float16))
+
+    # Without a target dtype the snapshot keeps every source dtype as-is.
+    plain = paroquant_optimization._snapshot_model_state(model)
+    assert plain["weight"].dtype == torch.float32
+    assert plain["index"].dtype == torch.int32
+    assert plain["mask"].dtype == torch.bool
 
 
 def test_paroquant_quantize_config_rejects_invalid_optimizer_hyperparameters():
@@ -404,14 +454,17 @@ def test_paroquant_fused_rotation_uses_forward_only_path_without_grad_inputs(mon
 
 
 @pytest.mark.parametrize(
-    ("device_type", "expected_use_amp"),
+    ("device_type", "is_rocm", "expected_use_amp"),
     [
-        ("cpu", False),
-        ("cuda", True),
+        ("cpu", False, False),
+        ("cuda", False, True),
+        ("cuda", True, False),
     ],
 )
-def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, device_type, expected_use_amp):
-    """Guard that the fast stage uses CUDA AMP for eval bookkeeping like reference."""
+def test_paroquant_fast_stage_matches_reference_amp_eval_flag(
+    monkeypatch, device_type, is_rocm, expected_use_amp
+):
+    """Guard that the fast stage resolves the auto AMP default per device/platform like reference."""
     calls = []
 
     class _DummyModel(torch.nn.Module):
@@ -427,6 +480,7 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
         calls.append(use_amp)
         return 0.0
 
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
     monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
 
     train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
@@ -443,6 +497,438 @@ def test_paroquant_fast_stage_matches_reference_amp_eval_flag(monkeypatch, devic
     assert train_loss == 0.0
     assert val_loss == 0.0
     assert calls == [expected_use_amp, expected_use_amp]
+
+
+@pytest.mark.parametrize(
+    ("is_rocm", "use_amp", "expected_use_amp"),
+    [
+        (False, None, True),
+        (False, False, False),
+        (False, True, True),
+        (True, None, False),
+        (True, False, False),
+        (True, True, True),
+    ],
+)
+def test_paroquant_fast_stage_honors_explicit_amp_override_on_cuda(
+    monkeypatch, is_rocm, use_amp, expected_use_amp
+):
+    """Guard that explicit `opt_amp` wins on CUDA and that `None` auto-skips AMP on ROCm."""
+    calls = []
+
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+    class _FakeTensor:
+        def __init__(self, kind: str):
+            self.device = SimpleNamespace(type=kind)
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        calls.append(use_amp)
+        return 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+
+    train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
+        model=_DummyModel(),
+        inputs_train=_FakeTensor("cuda"),
+        targets_train=_FakeTensor("cuda"),
+        inputs_val=_FakeTensor("cuda"),
+        targets_val=_FakeTensor("cuda"),
+        param_groups=[],
+        epochs=0,
+        batch_size=16,
+        use_amp=use_amp,
+    )
+
+    assert train_loss == 0.0
+    assert val_loss == 0.0
+    assert calls == [expected_use_amp, expected_use_amp]
+
+
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_gptqmodel"],
+)
+def test_paroquant_stage_skips_dead_pre_epoch_train_eval(monkeypatch, stage_runner_name):
+    """Guard that a stage never pays for a train-split eval the first epoch overwrites."""
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x @ self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 1)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0]], dtype=torch.float32),
+        torch.tensor([[2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0]], dtype=torch.float32),
+        torch.tensor([[0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    seen_splits = []
+
+    def fake_evaluate(_model, inputs, _targets, *, use_amp=False):
+        del use_amp
+        seen_splits.append("train" if inputs is train_inputs else "val")
+        return 0.0
+
+    monkeypatch.setattr(paroquant_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+
+    model = _TinyModel()
+    epochs = 2
+    getattr(paroquant_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    # The train split must not be evaluated before the loop: the first epoch
+    # assigns `last_train_loss` before anything reads it, so such a call is a
+    # full forward pass plus a device sync that no caller can observe.
+    # `_run_stage_gptqmodel` additionally seeds `best_val_loss` with a real
+    # validation pass, which is why the validation count is a lower bound.
+    assert "train" not in seen_splits
+    assert seen_splits.count("val") >= epochs
+
+
+def test_paroquant_fold_epoch_loss_matches_host_fp64_fold():
+    """The device-side fold must reproduce the host fp64 accumulation it replaces."""
+    losses = [
+        torch.tensor(0.1, dtype=torch.float32),
+        torch.tensor(1e-8, dtype=torch.float32),
+        torch.tensor(-3.5, dtype=torch.float32),
+        torch.tensor(12345.678, dtype=torch.float32),
+    ]
+
+    accumulator = paroquant_optimization._fold_epoch_loss(None, losses[0])
+    assert isinstance(accumulator, torch.Tensor)
+    assert accumulator.dtype == torch.float64
+    assert accumulator.item() == float(losses[0])
+
+    for loss in losses[1:]:
+        accumulator = paroquant_optimization._fold_epoch_loss(accumulator, loss)
+
+    # Same order, same IEEE-754 binary64 adds: the epoch total is bitwise equal
+    # to the per-step `float(loss.item())` host sum the fold removes.
+    assert accumulator.item() == sum(float(loss) for loss in losses)
+    assert accumulator.device.type == losses[0].device.type
+
+
+def test_paroquant_fold_epoch_loss_accumulates_in_place_without_touching_the_step_loss():
+    """Guard the per-step fold against paying a cast-plus-add kernel pair per step."""
+    accumulator = paroquant_optimization._fold_epoch_loss(None, torch.tensor(1.5, dtype=torch.float32))
+    assert accumulator.dtype == torch.float64
+    total_before = accumulator.item()
+
+    step_loss = torch.tensor(2.5, dtype=torch.float32)
+    returned = paroquant_optimization._fold_epoch_loss(accumulator, step_loss)
+
+    # In-place: the stage loop reassigns the fold result, so folding into the
+    # accumulator the loop already owns removes one kernel per optimizer step.
+    assert returned is accumulator
+    assert accumulator.item() == total_before + float(step_loss)
+    assert step_loss.item() == 2.5
+
+    # An fp64 step loss must not make the accumulator alias the live loss, which
+    # would let the next in-place fold write through to it.
+    fp64_step_loss = torch.tensor(1.25, dtype=torch.float64)
+    fp64_accumulator = paroquant_optimization._fold_epoch_loss(None, fp64_step_loss)
+    paroquant_optimization._fold_epoch_loss(fp64_accumulator, torch.tensor(1.0, dtype=torch.float64))
+    assert fp64_step_loss.item() == 1.25
+
+
+def test_paroquant_group_layer_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the grouped validation pass against a device sync per validation batch.
+
+    The pass folded each batch with ``float(loss.item())``, which drains the device
+    once per batch. The fold now stays on the device in fp64 and is read back once,
+    so a multi-batch pass costs a single sync for the same fp64 total.
+    """
+    processor = object.__new__(ParoQuantProcessor)
+    step_losses = [0.5, 1.5, 3.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_group_batch(layer, *, batch_index, input_batch, input_kwargs, attention_mask, position_ids):
+        del layer, batch_index, input_batch, input_kwargs, attention_mask, position_ids
+        return torch.zeros(2, 4)
+
+    def fake_prepare_group_target(target, *, device, dtype):
+        del target, device, dtype
+        return torch.zeros(2, 4)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_group_batch = fake_forward_group_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paroquant_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer(
+        torch.nn.Module(),
+        input_batches=[[torch.zeros(2, 4)] for _ in step_losses],
+        input_kwargs_batches=[{} for _ in step_losses],
+        target_batches=[torch.zeros(2, 4) for _ in step_losses],
+        position_ids=[None for _ in step_losses],
+        attention_masks=[None for _ in step_losses],
+        use_amp=False,
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
+def test_paroquant_streamed_group_evaluation_folds_batches_with_one_readback(monkeypatch):
+    """Guard the streamed grouped validation pass against a device sync per batch."""
+    processor = object.__new__(ParoQuantProcessor)
+    batches = [
+        paroquant_processor_module._ParoQuantReplayBatch(
+            inputs=[torch.zeros(2, 4)],
+            input_kwargs={},
+            target=torch.zeros(2, 6),
+            position_ids=None,
+            attention_mask=None,
+            row_count=2,
+        )
+        for _ in range(4)
+    ]
+    step_losses = [0.25, 0.5, 1.0, 2.0]
+    losses = iter([torch.tensor(value, dtype=torch.float32) for value in step_losses])
+
+    def fake_forward_replay_batch(layer, *, replay_batch, cache_kwargs):
+        del layer, replay_batch, cache_kwargs
+        return torch.zeros(2, 6)
+
+    def fake_prepare_group_target(target, *, device, dtype, cache=False):
+        del target, device, dtype, cache
+        return torch.zeros(2, 6)
+
+    def fake_smooth_l1_loss(preds, target):
+        del preds, target
+        return next(losses)
+
+    processor._forward_replay_batch = fake_forward_replay_batch
+    processor._prepare_group_target = fake_prepare_group_target
+    monkeypatch.setattr(paroquant_processor_module.F, "smooth_l1_loss", fake_smooth_l1_loss)
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def counting_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(torch.Tensor, "item", counting_item)
+
+    value = processor._evaluate_group_layer_streamed(
+        torch.nn.Module(),
+        replay_batches=batches,
+        use_amp=False,
+        target_device=torch.device("cpu"),
+    )
+
+    assert len(readbacks) == 1
+    assert value == sum(step_losses) / len(step_losses)
+
+
+def test_paroquant_backward_scalar_loss_reuses_one_seed_and_matches_tensor_backward():
+    """Guard the scalar backward against materialising a ones_like seed per step."""
+    paroquant_optimization._SCALAR_BACKWARD_SEEDS.clear()
+    x = torch.randn(4, 3, dtype=torch.float64, requires_grad=True)
+    reference = x.detach().clone().requires_grad_(True)
+
+    paroquant_optimization._backward_scalar_loss((x * 2.0).sum())
+    seed_key = (x.device, torch.float64, ())
+    seed = paroquant_optimization._SCALAR_BACKWARD_SEEDS[seed_key]
+    assert seed.shape == () and seed.dtype == torch.float64
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    # The second step reuses the very same tensor: that reuse is the saved fill.
+    paroquant_optimization._backward_scalar_loss((x * 3.0).sum())
+    assert paroquant_optimization._SCALAR_BACKWARD_SEEDS[seed_key] is seed
+    # The engine only reads the seed, so a reused seed must still be all ones.
+    assert torch.equal(seed, torch.ones((), dtype=torch.float64))
+
+    (reference * 2.0).sum().backward()
+    (reference * 3.0).sum().backward()
+    assert torch.equal(x.grad, reference.grad)
+
+
+def test_paroquant_backward_scalar_loss_keeps_the_tensor_backward_fallback():
+    """A loss the seed cache cannot serve must keep plain `Tensor.backward()` semantics."""
+    paroquant_optimization._SCALAR_BACKWARD_SEEDS.clear()
+
+    # Non-scalar losses raise exactly what `Tensor.backward()` raises.
+    vector = torch.randn(3, requires_grad=True) * 2.0
+    with pytest.raises(RuntimeError):
+        paroquant_optimization._backward_scalar_loss(vector)
+    assert not paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A loss that does not require grad keeps the eager error instead of a seed.
+    frozen = torch.tensor(1.0)
+    with pytest.raises(RuntimeError):
+        paroquant_optimization._backward_scalar_loss(frozen)
+    assert not paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A one-element non-0-dim output is still scalar enough for autograd.
+    x = torch.randn(2, dtype=torch.float64, requires_grad=True)
+    paroquant_optimization._backward_scalar_loss((x * 4.0).sum().reshape(1))
+    assert torch.equal(x.grad, torch.full_like(x, 4.0))
+    assert (x.device, torch.float64, (1,)) in paroquant_optimization._SCALAR_BACKWARD_SEEDS
+
+    # A duck-typed loss double keeps its own `backward` instead of the seed path.
+    class _StandIn:
+        def __init__(self):
+            self.calls = 0
+
+        def backward(self):
+            self.calls += 1
+
+    stand_in = _StandIn()
+    paroquant_optimization._backward_scalar_loss(stand_in)
+    assert stand_in.calls == 1
+
+
+@pytest.mark.parametrize(
+    "stage_runner_name",
+    ["_run_stage_gptqmodel_impl", "_run_stage_reference"],
+)
+def test_paroquant_stage_defers_train_loss_readback_to_epoch_end(monkeypatch, stage_runner_name):
+    """Guard that no optimizer step pays for a host readback of that step's loss.
+
+    `epoch_loss += float(loss.item())` synchronizes the stream once per
+    optimizer step, and ParoQuant runs one step per calibration batch on a
+    launch-bound stage, so the running total must stay on the device until the
+    epoch closes.
+    """
+
+    class _TinyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor([[1.0, 1.0]], dtype=torch.float32))
+
+        def forward(self, x):
+            return x * self.weight
+
+        def reset_masked_angles(self):
+            return None
+
+    class _FakeRows:
+        def __init__(self, rows: int):
+            self.device = SimpleNamespace(type="cpu")
+            self.shape = (rows, 2)
+
+    train_inputs = _FakeRows(rows=2)
+    train_targets = _FakeRows(rows=2)
+    val_inputs = _FakeRows(rows=1)
+    val_targets = _FakeRows(rows=1)
+    train_input_batches = [
+        torch.tensor([[1.0, 1.0]], dtype=torch.float32),
+        torch.tensor([[2.0, 2.0]], dtype=torch.float32),
+    ]
+    train_target_batches = [
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+        torch.tensor([[0.0, 0.0]], dtype=torch.float32),
+    ]
+
+    def fake_chunk_rows(rows, batch_size):
+        del batch_size
+        if rows is train_inputs:
+            return train_input_batches
+        if rows is train_targets:
+            return train_target_batches
+        raise AssertionError("unexpected rows object")
+
+    def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
+        del use_amp
+        return 0.0
+
+    step_losses = []
+    original_smooth_l1 = paroquant_optimization.F.smooth_l1_loss
+
+    def recording_smooth_l1(preds, targets):
+        loss = original_smooth_l1(preds, targets)
+        step_losses.append(loss)
+        return loss
+
+    readbacks = []
+    original_item = torch.Tensor.item
+
+    def recording_item(self):
+        readbacks.append(self)
+        return original_item(self)
+
+    monkeypatch.setattr(paroquant_optimization, "_chunk_rows", fake_chunk_rows)
+    monkeypatch.setattr(paroquant_optimization, "_evaluate_model", fake_evaluate)
+    monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", recording_smooth_l1)
+    monkeypatch.setattr(torch.Tensor, "item", recording_item)
+
+    model = _TinyModel()
+    epochs = 2
+    train_loss, _val_loss = getattr(paroquant_optimization, stage_runner_name)(
+        model=model,
+        inputs_train=train_inputs,
+        targets_train=train_targets,
+        inputs_val=val_inputs,
+        targets_val=val_targets,
+        param_groups=[{"params": [model.weight], "lr": 0.1}],
+        epochs=epochs,
+        batch_size=1,
+        optimizer_name="adamw",
+    )
+
+    assert len(step_losses) == epochs * len(train_input_batches)
+    # A step loss is a private per-batch value: reading it back forces a device
+    # sync that the epoch total makes redundant.
+    assert not any(readback is loss for readback in readbacks for loss in step_losses)
+
+    last_epoch_losses = step_losses[-len(train_input_batches) :]
+    expected = sum(float(loss.detach()) for loss in last_epoch_losses) / len(last_epoch_losses)
+    assert train_loss == expected
 
 
 def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
@@ -489,13 +975,21 @@ def test_paroquant_evaluate_model_keeps_loss_inside_cuda_autocast(monkeypatch):
     assert state["loss_saw_autocast"] is True
 
 
-def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
-    """Guard that the fast stage now mirrors upstream AMP training on CUDA."""
+@pytest.mark.parametrize(
+    ("is_rocm", "expect_amp"),
+    [
+        (False, True),
+        (True, False),
+    ],
+)
+def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch, is_rocm, expect_amp):
+    """Guard the fast-stage AMP default: historical CUDA AMP on, ROCm auto off."""
     state = {"autocast_active": False, "loss_saw_autocast": []}
     scaler_events = []
 
     @contextmanager
     def fake_autocast(device_type: str):
+        assert expect_amp, "ROCm auto default must not enable autocast"
         assert device_type == "cuda"
         previous = state["autocast_active"]
         state["autocast_active"] = True
@@ -562,7 +1056,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
         raise AssertionError("unexpected rows object")
 
     def fake_evaluate(_model, _inputs, _targets, *, use_amp=False):
-        assert use_amp is True
+        assert use_amp is expect_amp
         return 0.0
 
     original_loss = paroquant_optimization.F.smooth_l1_loss
@@ -576,6 +1070,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
     monkeypatch.setattr(paroquant_optimization.F, "smooth_l1_loss", wrapped_loss)
     monkeypatch.setattr(torch.amp, "autocast", fake_autocast)
     monkeypatch.setattr(torch.amp, "GradScaler", _FakeScaler)
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", is_rocm)
 
     model = _TinyModel()
     train_loss, val_loss = paroquant_optimization._run_stage_gptqmodel(
@@ -591,8 +1086,8 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
 
     assert train_loss >= 0.0
     assert val_loss == 0.0
-    assert state["loss_saw_autocast"] == [True, True]
-    assert scaler_events[0] == ("init", True)
+    assert state["loss_saw_autocast"] == [expect_amp, expect_amp]
+    assert scaler_events[0] == ("init", expect_amp)
     assert [event[0] for event in scaler_events[1:]] == [
         "scale",
         "backward",
@@ -603,7 +1098,7 @@ def test_paroquant_fast_stage_uses_cuda_amp_training(monkeypatch):
         "step",
         "update",
     ]
-    assert all(event[1] is True for event in scaler_events if event[0] != "backward")
+    assert all(event[1] is expect_amp for event in scaler_events if event[0] != "backward")
     assert all(event[1] >= 0.0 for event in scaler_events if event[0] == "backward")
 
 
@@ -743,6 +1238,650 @@ def test_paroquant_materialized_sym_scale_ste_matches_legacy_gradients():
     torch.testing.assert_close(scale.grad, legacy_scale.grad, atol=0, rtol=0)
 
 
+def _ste_boundary_grid(dtype: torch.dtype) -> torch.Tensor:
+    """Deterministic rounding/clamp boundary values for the straight-through estimators."""
+    finfo = torch.finfo(dtype)
+    values = [
+        -3.5,
+        -2.5,
+        -1.5,
+        -0.5,
+        -0.0,
+        0.0,
+        0.5,
+        1.5,
+        2.5,
+        3.5,
+        -0.5000001,
+        -0.4999999,
+        0.4999999,
+        0.5000001,
+        -1.5000001,
+        -1.4999999,
+        1.4999999,
+        1.5000001,
+        -2.0,
+        -1.0,
+        -0.25,
+        0.25,
+        1.0,
+        2.0,
+        1024.0,
+        -1024.0,
+        float(finfo.eps),
+        -float(finfo.eps),
+        float(finfo.tiny),
+        -float(finfo.tiny),
+        float(finfo.max),
+        -float(finfo.max),
+    ]
+    return torch.tensor(values, dtype=dtype)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_paroquant_ste_helpers_match_rounding_oracle(dtype):
+    """Guard the autograd-node STEs against the intended round/clamp arithmetic.
+
+    The oracle is the intended arithmetic (a plain ``round``/``clamp``) evaluated
+    independently of the helpers. The legacy ``(f(x) - x).detach() + x`` algebra is
+    deliberately *not* used as the oracle: ``f(x) - x`` cancels catastrophically
+    when ``|x|`` is large relative to the clamp bound, so the legacy form returns
+    wrong values (``clamp(3.4e38, 0, 15)`` evaluates to ``0`` in bfloat16 while the
+    intended result is ``15``). The detach form is still compared so the guards
+    record that the helpers are exact where the legacy algebra is exact and no
+    worse anywhere else.
+    """
+    values = _ste_boundary_grid(dtype)
+    upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+    actual_x = values.clone().requires_grad_(True)
+    legacy_x = values.clone().requires_grad_(True)
+    actual_round = paroquant_optimization._round_ste(actual_x)
+    legacy_round = (legacy_x.round() - legacy_x).detach() + legacy_x
+    assert torch.equal(actual_round.detach(), values.round())
+    assert torch.equal(actual_round.detach(), legacy_round.detach())
+    (actual_round_grad,) = torch.autograd.grad(actual_round, actual_x, grad_outputs=upstream)
+    (legacy_round_grad,) = torch.autograd.grad(legacy_round, legacy_x, grad_outputs=upstream)
+    assert torch.equal(actual_round_grad, legacy_round_grad)
+    assert torch.equal(actual_round_grad, upstream)
+
+    bounds = [
+        (0.0, 15.0),
+        (-7.0, 7.0),
+        (None, 7.0),
+        (-7.0, None),
+        (float(torch.finfo(dtype).tiny), float(torch.finfo(dtype).max)),
+    ]
+    for min_value, max_value in bounds:
+        if min_value is not None and max_value is not None:
+            endpoints = torch.tensor([min_value, max_value], dtype=dtype)
+            step = torch.nextafter(endpoints, torch.full_like(endpoints, float("inf")))
+            values = torch.cat((values, endpoints, step, -step))
+            upstream = torch.linspace(-1.5, 1.5, values.numel(), dtype=dtype).reshape_as(values)
+
+        actual_x = values.clone().requires_grad_(True)
+        legacy_x = values.clone().requires_grad_(True)
+        actual_clamp = paroquant_optimization._clamp_ste(actual_x, min_value, max_value)
+        legacy_clamp = (legacy_x.clamp(min_value, max_value) - legacy_x).detach() + legacy_x
+        oracle_clamp = values.clamp(min_value, max_value)
+        assert torch.equal(actual_clamp.detach(), oracle_clamp)
+        (actual_clamp_grad,) = torch.autograd.grad(actual_clamp, actual_x, grad_outputs=upstream)
+        (legacy_clamp_grad,) = torch.autograd.grad(legacy_clamp, legacy_x, grad_outputs=upstream)
+        assert torch.equal(actual_clamp_grad, legacy_clamp_grad)
+        assert torch.equal(actual_clamp_grad, upstream)
+
+    # Regression guard for the defect the autograd-node form removes: the legacy
+    # detach algebra cancels catastrophically once |x| dominates the clamp bound.
+    large = torch.tensor([float(torch.finfo(dtype).max)], dtype=dtype)
+    legacy_large = (large.clamp(0.0, 15.0) - large).detach() + large
+    expected_large = torch.full_like(large, 15.0)
+    assert torch.equal(paroquant_optimization._clamp_ste(large.clone(), 0.0, 15.0), expected_large)
+    assert not torch.equal(legacy_large, expected_large)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant STE launch accounting requires CUDA.")
+def test_paroquant_ste_helpers_emit_fewer_kernels_than_detach_algebra():
+    """Guard the launch-count win that motivates the autograd-node STEs."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    base = torch.randn(4096, 512, device=device)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _detach_algebra() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = (value.round() - value).detach() + value
+        clamped = (rounded.clamp(0.0, 15.0) - rounded).detach() + rounded
+        (clamped * clamped).sum().backward()
+
+    def _autograd_node() -> None:
+        value = base.clone().requires_grad_(True)
+        rounded = paroquant_optimization._round_ste(value)
+        clamped = paroquant_optimization._clamp_ste(rounded, 0.0, 15.0)
+        (clamped * clamped).sum().backward()
+
+    assert _kernel_count(_autograd_node) < _kernel_count(_detach_algebra)
+
+
+def test_paroquant_transformed_weight_folds_channel_scales_into_rotation():
+    """Guard that the transform is still defined as ``rotate(weight * channel_scales)``.
+
+    ``transformed_weight`` hands the channel scales to the rotation instead of
+    materializing a scaled copy of the full weight first. The reference rotation
+    applies a per-column scale to its input, so both spellings have to agree on
+    the value and on every parameter gradient.
+    """
+    torch.manual_seed(0)
+    weight = torch.randn((16, 8), dtype=torch.float32)
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=8,
+        group_size=8,
+        krot=3,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    model = _ParoQuantOptimLinear(
+        weight,
+        None,
+        bits=4,
+        group_size=8,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    with torch.no_grad():
+        model.theta.uniform_(-0.2, 0.2)
+        model.channel_scales_opt.uniform_(0.8, 1.2)
+
+    channel_scales = model._safe_channel_scales(use_ste=True)
+    expected = _apply_rotation(
+        model.weight * channel_scales,
+        model.pairs,
+        model.theta,
+        scales=None,
+        group_size=8,
+        fused_rotation=False,
+    )
+    actual = model.transformed_weight(use_ste=True, channel_scales=channel_scales)
+
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused rotation requires CUDA.")
+def test_paroquant_transformed_weight_fused_scale_fold_matches_premultiplied_path():
+    """Guard the fused path against the pre-multiplied formulation it replaces.
+
+    The fused rotation kernel already multiplies each loaded element by its
+    channel scale, so feeding it the raw weight is the same arithmetic as
+    scaling the full weight first and rotating with unit scales. The two forms
+    have to agree bitwise on the forward value and on the weight, angle, and
+    channel-scale gradients, otherwise the launch the fold removes is not free.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for out_features, in_features in ((896, 896), (128, 896), (896, 4864)):
+        weight = torch.randn((out_features, in_features), dtype=torch.float32) * 0.02
+        pairs, theta_mask = build_random_rotation_buffers(
+            in_features=in_features,
+            group_size=128,
+            krot=8,
+            pair_ratio=0.5,
+            seed=0,
+            device=device,
+        )
+        model = _ParoQuantOptimLinear(
+            weight,
+            None,
+            bits=4,
+            group_size=128,
+            quantizer_sym=True,
+            pairs=pairs,
+            theta_mask=theta_mask,
+            fused_rotation=True,
+        )
+        with torch.no_grad():
+            model.theta.uniform_(-0.2, 0.2)
+            model.channel_scales_opt.uniform_(0.8, 1.2)
+
+        actual = model.transformed_weight(use_ste=True)
+        actual_grads = torch.autograd.grad(
+            actual.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        premultiplied_scales = model._safe_channel_scales(use_ste=True)
+        expected = paroquant_optimization.apply_paroquant_rotation_autograd(
+            model.weight * premultiplied_scales,
+            model.pairs,
+            model.theta,
+            scales=None,
+            group_size=128,
+        )
+        expected_grads = torch.autograd.grad(
+            expected.pow(2).sum(),
+            [model.weight, model.theta, model.channel_scales_opt],
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+
+
+def test_paroquant_fused_affine_ste_dispatch_gates():
+    """Guard the conditions under which the fused asymmetric STE engages."""
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    def _dispatch(w, s, z):
+        return paroquant_optimization._affine_quant_dequant_ste_fused(
+            w,
+            s,
+            z,
+            bits=4,
+            group_size=8,
+        )
+
+    # The fused node is a CUDA fast path; CPU tensors keep the eager reference.
+    assert _dispatch(weight, scale, zero_point) is None
+
+    if not torch.cuda.is_available():
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+
+    assert _dispatch(weight, scale, zero_point) is not None
+    # Non-float32 qparams would change the reference rounding, so they fall back.
+    assert _dispatch(weight, scale.half(), zero_point.half()) is None
+    # Only the per-group (groups, 1) qparam layout reproduces the reference sums.
+    assert _dispatch(weight, scale.reshape(-1), zero_point) is None
+    assert _dispatch(weight, scale, zero_point.reshape(1, -1)) is None
+    # A detached graph has nothing to fuse for.
+    assert _dispatch(weight.detach(), scale.detach(), zero_point.detach()) is None
+    # A value-only call has no graph to fuse either, but with Triton it still
+    # takes the fused forward instead of the composed reference's ten launches.
+    with torch.no_grad():
+        value_only = _dispatch(weight, scale, zero_point)
+    if paroquant_optimization._get_triton_affine_kernels() is None:
+        assert value_only is None
+    else:
+        assert value_only is not None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused affine STE requires CUDA.")
+def test_paroquant_fused_affine_ste_matches_composed_reference():
+    """Guard the fused asymmetric STE against the composed reference graph.
+
+    The oracle is the composed graph spelled out in this test (the same algebra
+    the reference branch of ``pseudo_quantize_dequant`` evaluates) driven through
+    autograd. The forward value and the weight, scale, and zero-point gradients
+    all have to agree bitwise, and the zero-point gradient has to stay an
+    explicit zero so the optimizer still sees the parameter.
+    """
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+            quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+            quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        actual_weight = weight.clone().requires_grad_(True)
+        actual_scale = scale.clone().requires_grad_(True)
+        actual_zero_point = zero_point.clone().requires_grad_(True)
+        actual = paroquant_optimization.pseudo_quantize_dequant(
+            actual_weight,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=actual_scale,
+            zero_point_float=actual_zero_point,
+            use_ste=True,
+        )
+        assert "AffineQuantDequant" in type(actual.grad_fn).__name__
+        actual_grads = torch.autograd.grad(
+            actual,
+            [actual_weight, actual_scale, actual_zero_point],
+            grad_outputs=upstream,
+        )
+
+        assert torch.equal(actual, expected)
+        for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+            assert torch.equal(actual_grad, expected_grad)
+        assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant fused affine STE launch accounting requires CUDA.")
+def test_paroquant_fused_affine_ste_emits_fewer_kernels_than_composed_reference():
+    """Guard the launch-count win that motivates the fused asymmetric STE."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _fused() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        out = paroquant_optimization.pseudo_quantize_dequant(
+            w,
+            bits=bits,
+            group_size=group_size,
+            sym=False,
+            scale=s,
+            zero_point_float=z,
+            use_ste=True,
+        )
+        out.sum().backward()
+
+    def _composed() -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        view = w.reshape(-1, group_size)
+        bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+        round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+        quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+        quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+        ((quant - round_zero) * bounded).sum().backward()
+
+    assert _kernel_count(_fused) < _kernel_count(_composed)
+
+
+def _paroquant_triton_affine_ste():
+    """Return the Triton affine STE module, or skip when Triton is not installed."""
+    return pytest.importorskip("gptqmodel.quantization.paroquant.modules.triton.affine_ste")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_matches_composed_reference():
+    """Guard both Triton affine STE nodes against the composed reference graph.
+
+    The fused forward runs in one kernel, so every floating point step has to
+    keep the reference rounding: round-to-nearest division, round-half-to-even
+    quantization, and the reference clamp order. The oracle is the composed
+    graph spelled out here, and the forward value plus the weight, scale, and
+    zero-point gradients all have to agree bitwise for the Triton backward and
+    for the hybrid node that keeps the torch elementwise backward.
+    """
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((128, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        upstream = torch.randn(shape, device=device, dtype=torch.float32)
+
+        def _composed(w, s, z, group_size=group_size, qmin=qmin, qmax=qmax):
+            view = w.reshape(-1, group_size)
+            bounded = paroquant_optimization._clamp_ste(s, min_value=1e-5, max_value=1e5)
+            round_zero = paroquant_optimization._clamp_ste(-paroquant_optimization._round_ste(z), qmin, qmax)
+            quant = paroquant_optimization._round_ste(view / bounded) + round_zero
+            quant = paroquant_optimization._clamp_ste(quant, qmin, qmax)
+            return ((quant - round_zero) * bounded).reshape_as(w)
+
+        expected_weight = weight.clone().requires_grad_(True)
+        expected_scale = scale.clone().requires_grad_(True)
+        expected_zero_point = zero_point.clone().requires_grad_(True)
+        expected = _composed(expected_weight, expected_scale, expected_zero_point)
+        expected_grads = torch.autograd.grad(
+            expected,
+            [expected_weight, expected_scale, expected_zero_point],
+            grad_outputs=upstream,
+        )
+
+        for node in (triton_ste._AffineQuantDequantTritonSTE, triton_ste._AffineQuantDequantHybridSTE):
+            actual_weight = weight.clone().requires_grad_(True)
+            actual_scale = scale.clone().requires_grad_(True)
+            actual_zero_point = zero_point.clone().requires_grad_(True)
+            actual = node.apply(actual_weight, actual_scale, actual_zero_point, qmin, qmax, group_size)
+            actual_grads = torch.autograd.grad(
+                actual,
+                [actual_weight, actual_scale, actual_zero_point],
+                grad_outputs=upstream,
+            )
+
+            assert torch.equal(actual, expected), (shape, node.__name__)
+            for actual_grad, expected_grad in zip(actual_grads, expected_grads):
+                assert torch.equal(actual_grad, expected_grad), (shape, node.__name__)
+            assert torch.equal(actual_grads[2], torch.zeros_like(zero_point))
+
+
+def test_paroquant_triton_affine_ste_dispatch_and_kill_switch():
+    """Guard the availability probe, the kill switch, and the routed node."""
+    triton_ste = _paroquant_triton_affine_ste()
+    weight = torch.randn(16, 8, dtype=torch.float32, requires_grad=True)
+    scale = torch.rand(16, 1, dtype=torch.float32, requires_grad=True)
+    zero_point = torch.randn(16, 1, dtype=torch.float32, requires_grad=True)
+
+    if not torch.cuda.is_available():
+        # The kernels are CUDA-only; a host without a GPU must still report
+        # availability consistently with the dispatch helper.
+        assert triton_ste.affine_quant_dequant_ste_available() in (True, False)
+        return
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    weight = weight.detach().to(device).requires_grad_(True)
+    scale = scale.detach().to(device).requires_grad_(True)
+    zero_point = zero_point.detach().to(device).requires_grad_(True)
+    enabled = triton_ste._AFFINE_STE_TRITON_ENABLED
+    try:
+        triton_ste._AFFINE_STE_TRITON_ENABLED = False
+        assert not triton_ste.affine_quant_dequant_ste_available()
+        assert (
+            triton_ste.affine_quant_dequant_ste(weight, scale, zero_point, qmin=0, qmax=15, group_size=8) is None
+        )
+        # The optimization entry point falls back to the torch fused node.
+        fallback = paroquant_optimization.pseudo_quantize_dequant(
+            weight,
+            bits=4,
+            group_size=8,
+            sym=False,
+            scale=scale,
+            zero_point_float=zero_point,
+            use_ste=True,
+        )
+        assert "_AffineQuantDequantSTEBackward" in type(fallback.grad_fn).__name__
+    finally:
+        triton_ste._AFFINE_STE_TRITON_ENABLED = enabled
+
+    routed = paroquant_optimization.pseudo_quantize_dequant(
+        weight,
+        bits=4,
+        group_size=8,
+        sym=False,
+        scale=scale,
+        zero_point_float=zero_point,
+        use_ste=True,
+    )
+    assert "AffineQuantDequant" in type(routed.grad_fn).__name__
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_emits_fewer_kernels_than_torch_fused():
+    """Guard the launch-count win that motivates the fused Triton kernels."""
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    shape = (896, 896)
+    bits, group_size = 4, 128
+    qmin, qmax = 0, 2**bits - 1
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _run(node) -> None:
+        w = (weight.clone() * 0.02).requires_grad_(True)
+        s = (scale.clone() + 1e-3).requires_grad_(True)
+        z = (zero_point.clone() * 0.3).requires_grad_(True)
+        node.apply(w, s, z, qmin, qmax, group_size).sum().backward()
+
+    torch_count = _kernel_count(lambda: _run(paroquant_optimization._AffineQuantDequantSTE))
+    triton_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantTritonSTE))
+    hybrid_count = _kernel_count(lambda: _run(triton_ste._AffineQuantDequantHybridSTE))
+
+    assert triton_count < torch_count
+    assert hybrid_count < torch_count
+    assert triton_count <= hybrid_count
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant Triton affine STE requires CUDA.")
+def test_paroquant_triton_affine_ste_value_only_forward():
+    """Guard the value-only Triton forward used by the no-grad replay evaluations.
+
+    The calibration loop evaluates the replayed model under ``torch.no_grad()``
+    once per epoch, so those calls have no graph to fuse but still pay the
+    composed reference's ten launches each. They take the fused forward instead,
+    and the value has to stay bitwise identical.
+    """
+    triton_ste = _paroquant_triton_affine_ste()
+    if not triton_ste.affine_quant_dequant_ste_available():
+        pytest.skip("Triton affine STE kernels are unavailable on this host.")
+
+    device = torch.device("cuda", torch.cuda.current_device())
+    torch.manual_seed(0)
+    for shape, bits, group_size in (
+        ((896, 896), 4, 128),
+        ((896, 4864), 4, 128),
+        ((4864, 896), 3, 128),
+    ):
+        qmin, qmax = 0, 2**bits - 1
+        groups = shape[0] * shape[1] // group_size
+        weight = torch.randn(shape, device=device, dtype=torch.float32) * 0.02
+        scale = torch.rand(groups, 1, device=device, dtype=torch.float32) * 0.01 + 1e-3
+        zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32) * 0.3
+        with torch.no_grad():
+            expected = paroquant_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+            actual = triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=qmin,
+                qmax=qmax,
+                group_size=group_size,
+            )
+        assert actual is not None
+        assert torch.equal(actual, expected)
+
+    shape, bits, group_size = (896, 4864), 4, 128
+    groups = shape[0] * shape[1] // group_size
+    weight = torch.randn(shape, device=device, dtype=torch.float32)
+    scale = torch.rand(groups, 1, device=device, dtype=torch.float32)
+    zero_point = torch.randn(groups, 1, device=device, dtype=torch.float32)
+
+    def _kernel_count(step) -> int:
+        step()
+        torch.cuda.synchronize()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CUDA]) as prof:
+            step()
+            torch.cuda.synchronize()
+        return sum(1 for event in prof.events() if event.device_type.name == "CUDA")
+
+    def _value_only() -> None:
+        with torch.no_grad():
+            triton_ste.affine_quant_dequant_ste_forward(
+                weight,
+                scale,
+                zero_point,
+                qmin=0,
+                qmax=2**bits - 1,
+                group_size=group_size,
+            )
+
+    def _composed() -> None:
+        with torch.no_grad():
+            paroquant_optimization.pseudo_quantize_dequant(
+                weight,
+                bits=bits,
+                group_size=group_size,
+                sym=False,
+                scale=scale,
+                zero_point_float=zero_point,
+                use_ste=False,
+            )
+
+    assert _kernel_count(_value_only) < _kernel_count(_composed)
+
+
 def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     """Guard that only large CUDA training-time quant calls route into the compiled helper."""
     class _FakeWeight:
@@ -796,6 +1935,48 @@ def test_paroquant_large_train_quant_compile_dispatch(monkeypatch):
     )
 
 
+def test_paroquant_large_train_quant_compile_falls_back_on_failure(monkeypatch):
+    """A rejected compiled call must degrade to eager instead of aborting the lifecycle."""
+    class _FakeWeight:
+        def __init__(self, numel: int, device_type: str = "cuda"):
+            self._numel = numel
+            self.device = SimpleNamespace(type=device_type)
+
+        def numel(self) -> int:
+            return self._numel
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("simulated dynamo failure")
+
+    monkeypatch.setattr(paroquant_optimization, "_PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL", 16)
+    monkeypatch.setattr(paroquant_optimization, "_LARGE_TRAIN_QUANT_COMPILE_DISABLED", False)
+    monkeypatch.setattr(paroquant_optimization, "env_flag", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(paroquant_optimization, "_get_large_train_quant_compile", lambda: _boom)
+    monkeypatch.setattr(paroquant_optimization, "pseudo_quantize_dequant", lambda *_args, **_kwargs: "eager")
+
+    with pytest.warns(UserWarning):
+        assert (
+            paroquant_optimization._maybe_compile_large_train_quant(
+                _FakeWeight(32),
+                bits=4,
+                group_size=8,
+                sym=True,
+            )
+            == "eager"
+        )
+    assert paroquant_optimization._LARGE_TRAIN_QUANT_COMPILE_DISABLED is True
+    # The rest of the process must skip the compiled path entirely.
+    assert (
+        paroquant_optimization._maybe_compile_large_train_quant(
+            _FakeWeight(32),
+            bits=4,
+            group_size=8,
+            sym=True,
+        )
+        == "eager"
+    )
+
+
 def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
     """Guard that CUDA-graph replay only activates for real CUDA tensor stages."""
     class _DummyModel(torch.nn.Module):
@@ -817,6 +1998,37 @@ def test_paroquant_stage_cudagraph_gate_requires_real_cuda_tensor(monkeypatch):
 
     assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=real_cpu_rows, batch_size=64) is False
     assert paroquant_optimization._should_use_paroquant_stage_cudagraph(model, inputs_train=fake_cuda_rows, batch_size=64) is False
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="ParoQuant ROCm capture gate needs a real CUDA tensor.")
+def test_paroquant_stage_cudagraph_gate_skips_rocm_capture(monkeypatch):
+    """Guard that ROCm hosts never capture: hipBLASLt deadlocks instead of raising."""
+    class _DummyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones((2, 4), dtype=torch.float32))
+            self.fused_rotation = True
+
+    model = _DummyModel()
+    rows = torch.ones((2048, 4), dtype=torch.float32, device="cuda")
+
+    # Everything the gate asks for is satisfied here, so the ROCm flag is the
+    # only thing that can decide the result.
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", False)
+    assert (
+        paroquant_optimization._should_use_paroquant_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+        )
+        is True
+    )
+
+    monkeypatch.setattr(paroquant_optimization, "IS_ROCM", True)
+    assert (
+        paroquant_optimization._should_use_paroquant_stage_cudagraph(
+            model, inputs_train=rows, batch_size=64, stage_cudagraph=True
+        )
+        is False
+    )
 
 
 def test_paroquant_stage_cudagraph_falls_back_to_eager_on_runtime_error(monkeypatch):
@@ -1141,6 +2353,63 @@ def test_paroquant_identity_rotation_buffers_preserve_input():
     torch.testing.assert_close(rotated, x, atol=0, rtol=0)
 
 
+class _ScalarReadRecorder(torch.utils._python_dispatch.TorchDispatchMode):
+    def __init__(self) -> None:
+        self.scalar_reads = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        if str(func).startswith("aten._local_scalar_dense"):
+            self.scalar_reads += 1
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize(
+    ("theta", "channel_scales", "expected"),
+    [
+        (None, None, True),
+        (None, "ones", True),
+        (None, "nonidentity", False),
+        ("zeros", None, True),
+        ("zeros", "ones", True),
+        ("zeros", "nonidentity", False),
+        ("nonzero", None, False),
+        ("nonzero", "ones", False),
+        ("nonzero", "nonidentity", False),
+    ],
+)
+def test_paroquant_identity_predicate_matches_reference_and_reads_once(
+    device, theta, channel_scales, expected
+):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is not available")
+
+    theta_tensor = None
+    if theta is not None:
+        theta_tensor = torch.zeros(8, device=device, dtype=torch.float32)
+        if theta == "nonzero":
+            theta_tensor[3] = 0.25
+
+    scales_tensor = None
+    if channel_scales is not None:
+        scales_tensor = torch.ones(16, device=device, dtype=torch.float16)
+        if channel_scales == "nonidentity":
+            scales_tensor[7] = 1.5
+
+    recorder = _ScalarReadRecorder()
+    with recorder:
+        actual = is_identity_rotation(theta_tensor, scales_tensor)
+
+    assert actual is expected
+    if theta is None and channel_scales is None:
+        expected_reads = 0
+    elif device == "cpu" and theta == "zeros" and channel_scales is not None:
+        expected_reads = 2
+    else:
+        expected_reads = 1
+    assert recorder.scalar_reads == expected_reads
+
+
 def test_paroquant_module_default_rotation_buffers_are_identity():
     """Guard fresh runtime modules against invalid all-zero pair buffers."""
     module = ParoLinear(
@@ -1408,10 +2677,10 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
         calls["launch"] += 1
         return (16, 2)
 
-    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
         del pairs, theta, scales, group_size
         calls["rotate"] += 1
-        calls["configs"].append((cta_m, row_pad))
+        calls["configs"].append((cta_m, row_pad, int(reverse)))
         return x.clone()
 
     def fake_op(name):
@@ -1435,7 +2704,7 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
     assert torch.equal(second, x)
     assert calls["launch"] == 1
     assert calls["rotate"] == 2
-    assert calls["configs"] == [(16, 2), (16, 2)]
+    assert calls["configs"] == [(16, 2, 0), (16, 2, 0)]
 
     clear_paroquant_rotation_autotune_cache()
     third = apply_paroquant_rotation(x, pairs, theta, scales=scales, group_size=128)
@@ -1443,7 +2712,7 @@ def test_paroquant_rotation_helper_reuses_resolved_autotune_launch(monkeypatch):
     assert torch.equal(third, x)
     assert calls["launch"] == 2
     assert calls["rotate"] == 3
-    assert calls["configs"][-1] == (16, 2)
+    assert calls["configs"][-1] == (16, 2, 0)
 
 
 def test_paroquant_processor_prewarm_runtime_runs_once(monkeypatch):
@@ -2638,6 +3907,178 @@ def test_paroquant_processor_group_adamw_uses_merged_groups(monkeypatch):
         "amsgrad": False,
     }
     assert calls == [([expected_param_group], expected_kwargs)]
+
+
+def test_paroquant_stage_merges_identical_optimizer_param_groups():
+    """Guard the live stage path against paying one AdamW call per one-tensor group."""
+    channel_scales = torch.nn.Parameter(torch.randn(4))
+    theta = torch.nn.Parameter(torch.randn(4))
+    weight = torch.nn.Parameter(torch.randn(4))
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [channel_scales], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [theta], "lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+            {"params": [weight], "lr": 1e-5, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [channel_scales, theta]
+    assert groups[1]["params"] == [weight]
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"lr": 0.051},
+        {"weight_decay": 0.02},
+        {"betas": (0.9, 0.96)},
+        {"eps": 1e-9},
+        {"amsgrad": True},
+        {"momentum": 0.5},
+        {"dampening": 0.1},
+        {"nesterov": True},
+    ],
+)
+def test_paroquant_stage_group_merge_requires_identical_hyperparameters(override):
+    """Guard the merge from folding groups AdamW would update with different scalars."""
+    first = torch.nn.Parameter(torch.randn(4))
+    second = torch.nn.Parameter(torch.randn(4))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [first], **base},
+            {"params": [second], **{**base, **override}},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [first]
+    assert groups[1]["params"] == [second]
+
+
+def test_paroquant_stage_group_merge_keeps_distinct_device_dtype_signatures_apart():
+    """Guard the merge from changing how many fused calls a mixed-dtype group list makes."""
+    fp32_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float32))
+    fp16_param = torch.nn.Parameter(torch.randn(4, dtype=torch.float16))
+    base = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+
+    groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [
+            {"params": [fp32_param], **base},
+            {"params": [fp16_param], **base},
+        ]
+    )
+
+    assert len(groups) == 2
+    assert groups[0]["params"] == [fp32_param]
+    assert groups[1]["params"] == [fp16_param]
+
+
+def test_paroquant_merged_group_adamw_step_is_bitwise_identical():
+    """Guard that folding identical groups leaves every parameter update bitwise unchanged."""
+    torch.manual_seed(7)
+    optimizer_kwargs = {"lr": 0.05, "weight_decay": 0.01, "betas": (0.9, 0.95), "eps": 1e-10}
+    initial = [torch.randn(16) for _ in range(2)]
+    grads = [torch.randn(16) * 1e-3 for _ in range(2)]
+
+    split_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    merged_params = [torch.nn.Parameter(seed.clone()) for seed in initial]
+    split_optimizer = torch.optim.AdamW([{"params": [param], **optimizer_kwargs} for param in split_params])
+    merged_groups = paroquant_optimization._normalize_optimizer_param_groups(
+        [{"params": [param], **optimizer_kwargs} for param in merged_params]
+    )
+    assert len(merged_groups) == 1
+    merged_optimizer = torch.optim.AdamW(merged_groups)
+
+    for _ in range(3):
+        for param, grad in zip(split_params, grads):
+            param.grad = grad.clone()
+        for param, grad in zip(merged_params, grads):
+            param.grad = grad.clone()
+        split_optimizer.step()
+        merged_optimizer.step()
+
+    for split_param, merged_param in zip(split_params, merged_params):
+        assert torch.equal(split_param, merged_param)
+
+
+def test_paroquant_stage_angle_reset_skips_fill_for_fully_packed_layout(monkeypatch):
+    """Guard the per-step angle reset against launching a no-op fill on packed layouts."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    # The default ParoQuant layout packs `pair_ratio * group_size` pairs exactly,
+    # so every rotation row is fully populated and no angle slot is a dummy.
+    assert torch.count_nonzero(theta_mask).item() == 0
+
+    model = _ParoQuantOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is False
+
+    fills = []
+    real_masked_fill = torch.Tensor.masked_fill_
+
+    def counting_masked_fill(self, *args, **kwargs):
+        fills.append(tuple(self.shape))
+        return real_masked_fill(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "masked_fill_", counting_masked_fill)
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert fills == []
+    assert torch.equal(model.theta, torch.ones_like(model.theta))
+
+
+def test_paroquant_stage_angle_reset_masks_padded_pairs():
+    """Guard the padded-pair reset that keeps dummy angles at zero during optimization."""
+    pairs, theta_mask = build_random_rotation_buffers(
+        in_features=256,
+        group_size=128,
+        krot=4,
+        pair_ratio=0.5,
+        seed=1,
+        device=torch.device("cpu"),
+    )
+    theta_mask = theta_mask.clone()
+    theta_mask[0, 0] = True
+    theta_mask[2, 5] = True
+
+    model = _ParoQuantOptimLinear(
+        torch.randn(8, 256),
+        None,
+        bits=4,
+        group_size=128,
+        quantizer_sym=True,
+        pairs=pairs,
+        theta_mask=theta_mask,
+        fused_rotation=False,
+    )
+    assert model._theta_mask_active is True
+
+    with torch.no_grad():
+        model.theta.fill_(1.0)
+    model.reset_masked_angles()
+
+    assert torch.equal(model.theta[theta_mask], torch.zeros_like(model.theta[theta_mask]))
+    assert torch.equal(model.theta[~theta_mask], torch.ones_like(model.theta[~theta_mask]))
 
 
 def test_paroquant_processor_group_adamw_falls_back_when_fused_cuda_is_unsupported(monkeypatch):
@@ -4568,7 +6009,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
         calls["load_count"] = calls.get("load_count", 0) + 1
         return True
 
-    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad):
+    def fake_rotate(x, pairs, theta, scales, group_size, cta_m, row_pad, reverse=0):
         calls["x_dtype"] = x.dtype
         calls["pairs_device"] = pairs.device.type
         calls["theta_dtype"] = theta.dtype
@@ -4576,6 +6017,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
         calls["group_size"] = group_size
         calls["cta_m"] = cta_m
         calls["row_pad"] = row_pad
+        calls["reverse"] = int(reverse)
         return x.clone()
 
     monkeypatch.setattr(paroquant_utils_module, "_load_rotation_extension", spy_load_rotation_extension)
@@ -4602,6 +6044,7 @@ def test_paroquant_rotation_helper_dispatches_fused_kernel_for_bf16(monkeypatch)
     assert calls["group_size"] == 128
     assert calls["cta_m"] == 8
     assert calls["row_pad"] == 2
+    assert calls["reverse"] == 0
     assert actual.dtype == torch.bfloat16
     assert torch.equal(actual, x)
 
@@ -4669,6 +6112,171 @@ def test_paroquant_rotation_fused_bf16_uses_fp16_workspace_contract():
     assert actual_fp16_workspace.max().item() < bf16_fp16_workspace.max().item()
     assert actual_fp32.mean().item() <= bf16_fp32.mean().item()
     assert actual_fp32.max().item() <= bf16_fp32.max().item()
+
+
+def test_paroquant_rotation_backward_folds_frozen_theta_sweep_into_one_reverse_launch(monkeypatch):
+    """Guard the frozen-theta backward against one rotation launch per rotation row."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant reverse rotation sweep.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=29,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(5)
+    x = torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    x.requires_grad_(True)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    grad_out = (
+        torch.randn((6, in_features), generator=generator, dtype=torch.float32).to(device="cuda")
+    )
+
+    real_rotate = paroquant_utils_module._paroquant_rotation_op("rotate")
+    rotate_calls = []
+
+    def counting_rotate(*args):
+        rotate_calls.append(int(args[-1]))
+        return real_rotate(*args)
+
+    monkeypatch.setattr(paroquant_utils_module, "_rotation_requested_launch", lambda: (8, 2))
+    monkeypatch.setattr(
+        paroquant_utils_module._PAROQUANT_ROTATION_EXTENSION,
+        "op",
+        lambda name: counting_rotate if name == "rotate" else None,
+    )
+
+    # `theta` never requires grad here, so the backward only needs the inverse
+    # transform of the incoming gradient.
+    assert theta.requires_grad is False
+    rotated = paroquant_utils_module.apply_paroquant_rotation_autograd(
+        x,
+        pairs,
+        theta,
+        group_size=group_size,
+    )
+    rotated.backward(grad_out)
+
+    # One forward sweep plus one fused reverse sweep, and the reverse sweep has to
+    # be the single-launch spelling.
+    assert rotate_calls == [0, 1]
+
+    # The fused reverse sweep has to be bit-equal to the per-rotation loop it
+    # replaced, which is the formulation every earlier release produced.
+    neg_theta_all = theta.neg()
+    looped = grad_out
+    for rot_idx in range(pairs.shape[0] - 1, -1, -1):
+        looped = paroquant_utils_module._apply_fused_rotation(
+            looped,
+            pairs.narrow(0, rot_idx, 1),
+            neg_theta_all.narrow(0, rot_idx, 1),
+            None,
+            group_size,
+        )
+    assert torch.equal(x.grad, looped)
+
+    reference = apply_paroquant_rotation_reference(
+        grad_out,
+        pairs.flip(0),
+        -theta.flip(0),
+        scales=None,
+        group_size=group_size,
+    )
+    assert torch.allclose(x.grad, reference, atol=1e-6, rtol=1e-5)
+
+
+def test_paroquant_pair_grad_reduce_folds_tiles_in_ascending_order():
+    """Guard the cross-tile rotation-gradient reduce against a re-associated sum.
+
+    The reduce walks the tile axis in fixed-size load batches so the strided
+    loads overlap instead of costing one memory round trip each. That is only
+    legal while every add still runs in ascending tile order, so the batched
+    fold has to stay bit-equal to folding the per-tile rotation gradients one at
+    a time with plain fp32 adds.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA is required to validate the ParoQuant rotation-gradient reduce.")
+
+    assert (
+        prewarm_paroquant_rotation_extension(
+            fused_rotation=True,
+            group_size=128,
+            krot=8,
+            device="cuda",
+        )
+        is True
+    )
+
+    in_features = 128
+    group_size = 128
+    krot = 8
+    cta_m = 4
+    pairs, _mask = build_random_rotation_buffers(
+        in_features=in_features,
+        group_size=group_size,
+        krot=krot,
+        pair_ratio=0.5,
+        seed=31,
+        device=torch.device("cuda"),
+    )
+    generator = torch.Generator(device="cpu")
+    generator.manual_seed(7)
+    theta = torch.empty((krot, in_features // 2), dtype=torch.float32)
+    theta.uniform_(-0.25, 0.25, generator=generator)
+    theta = theta.to(device="cuda")
+    pair_grad = paroquant_utils_module._paroquant_rotation_op("rotate_pair_grad")
+
+    def run(x_rows, grad_rows):
+        _x, _grad, grad_theta = pair_grad(
+            x_rows.contiguous(),
+            grad_rows.contiguous(),
+            pairs,
+            theta,
+            group_size,
+            cta_m,
+            0,
+        )
+        return grad_theta
+
+    # 4 tiles only ever hits the scalar tail; 48 tiles runs one wide batch, one
+    # narrow batch and no tail, so every reduce path is covered.
+    for row_tiles in (4, 48):
+        rows = row_tiles * cta_m
+        x = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+        grad = torch.randn((rows, in_features), generator=generator, dtype=torch.float32).to(
+            device="cuda"
+        )
+
+        fused = run(x, grad)
+        assert fused.shape == (krot, in_features // 2)
+
+        reference = None
+        for tile in range(row_tiles):
+            tile_slice = slice(tile * cta_m, (tile + 1) * cta_m)
+            tile_grad = run(x[tile_slice], grad[tile_slice])
+            reference = tile_grad if reference is None else reference + tile_grad
+        assert torch.equal(fused, reference)
 
 
 def test_paroquant_rotation_cache_preserves_bf16(monkeypatch):
@@ -4968,3 +6576,36 @@ def test_paroquant_reference_quantizer_exports_affine_qzeros():
 
     midpoint = 2 ** (4 - 1)
     assert not torch.all(result.q_zeros == midpoint)
+
+
+def test_rotation_autotune_entry_serialization_round_trip():
+    """A persisted launch entry must rebuild the exact in-process cache key."""
+    utils = paroquant_utils_module
+    key = (0, torch.float32, 896, 4864, 128, 8, True, -2, -2)
+
+    serialized = utils._rotation_autotune_entry_from_cache(key, (4, 0))
+    assert serialized == [0, "torch.float32", 896, 4864, 128, 8, 1, -2, -2, 4, 0]
+    assert utils._rotation_autotune_entry_to_cache(serialized) == (key, (4, 0))
+
+    # Malformed or unknown-dtype entries are skipped instead of raising.
+    assert utils._rotation_autotune_entry_to_cache("not-a-list") is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.float32", 1]) is None
+    assert utils._rotation_autotune_entry_to_cache([0, "torch.uint8", 8, 896, 128, 8, 1, -2, -2, 4, 0]) is None
+
+
+def test_rotation_autotune_disk_cache_writes_and_honours_kill_switch(tmp_path, monkeypatch):
+    """Writes land under the configured cache dir and can be disabled."""
+    utils = paroquant_utils_module
+    monkeypatch.setenv("GPTQMODEL_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", raising=False)
+
+    key = (0, torch.float32, 8, 896, 128, 8, True, -2, -2)
+    utils._persist_rotation_autotune_entry(key, (4, 0), 0)
+    path = utils._rotation_autotune_cache_path(0)
+    assert path.exists()
+    assert str(path).startswith(str(tmp_path))
+
+    monkeypatch.setenv("GPTQMODEL_PAROQUANT_AUTOTUNE_CACHE", "0")
+    assert utils._rotation_autotune_cache_enabled() is False
+    utils._persist_rotation_autotune_entry((0, torch.float32, 64, 896, 128, 8, True, -2, -2), (4, 0), 1)
+    assert not utils._rotation_autotune_cache_path(1).exists()

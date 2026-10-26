@@ -8,13 +8,14 @@ import json
 import os
 from types import SimpleNamespace
 
+import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
-from transformers import AutoConfig
+from transformers import AutoConfig, LlamaConfig, LlamaForCausalLM
 
 from gptqmodel.models.auto import check_and_get_model_definition
-from gptqmodel.models.writer import ModelWriter
+from gptqmodel.models.writer import ModelWriter, _merge_prefix_tensors_into_state_dict
 from gptqmodel.quantization.config import FORMAT, METHOD
 from gptqmodel.utils.model import TensorSource
 
@@ -586,6 +587,145 @@ def test_merge_prefixed_tensors_with_multiple_shards(tmp_path, monkeypatch):
     with open(save_dir / "model.safetensors.index.json", "r", encoding="utf-8") as handle:
         index_data = json.load(handle)
     assert index_data["weight_map"]["mtp.fc.weight"] == "model-00001-of-00002.safetensors"
+
+
+def _write_index(path, weight_map):
+    with open(path / "model.safetensors.index.json", "w", encoding="utf-8") as handle:
+        json.dump({"weight_map": weight_map}, handle)
+
+
+@pytest.mark.parametrize("failure", ["missing-shard", "unreadable-shard", "missing-tensor"])
+def test_merge_prefixed_tensors_rejects_incomplete_declared_tensors(tmp_path, failure):
+    save_file({"mtp.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    if failure == "unreadable-shard":
+        (tmp_path / "second.safetensors").write_bytes(b"truncated")
+    elif failure == "missing-tensor":
+        save_file({"model.weight": torch.ones(2)}, str(tmp_path / "second.safetensors"))
+    _write_index(tmp_path, {"mtp.a": "first.safetensors", "mtp.b": "second.safetensors"})
+    state_dict = {}
+
+    with pytest.raises(ValueError, match=r"missing from or unreadable in \['second.safetensors'\], e.g. \['mtp.b'\]"):
+        _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert state_dict == {}
+
+
+def test_merge_prefixed_tensors_keeps_undeclared_prefix_optional(tmp_path):
+    save_file({"model.weight": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    _write_index(tmp_path, {"model.weight": "first.safetensors", "model.bias": "absent.safetensors"})
+    state_dict = {}
+
+    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert state_dict == {}
+
+
+def test_merge_prefixed_tensors_checks_whole_dotted_prefixes(tmp_path):
+    save_file({"model.layers.61.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    _write_index(
+        tmp_path,
+        {
+            "model.layers.61.a": "first.safetensors",
+            "model.layers.61.b": "second.safetensors",
+            "model.layers.610.c": "second.safetensors",
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"1 tensors .* e\.g\. \['model\.layers\.61\.b'\]"):
+        _merge_prefix_tensors_into_state_dict(["model.layers.61"], str(tmp_path), {})
+
+
+def test_merge_prefixed_tensors_without_a_readable_index_scans_shards(tmp_path):
+    save_file({"mtp.a": torch.ones(2)}, str(tmp_path / "first.safetensors"))
+    (tmp_path / "model.safetensors.index.json").write_text("{", encoding="utf-8")
+    state_dict = {}
+
+    _merge_prefix_tensors_into_state_dict(["mtp"], str(tmp_path), state_dict)
+    assert list(state_dict) == ["mtp.a"]
+
+
+@pytest.mark.parametrize("failure", ["missing-shard", "unreadable-shard", "missing-tensor"])
+def test_save_quantized_preserves_checkpoint_when_declared_tensor_is_unavailable(tmp_path, failure):
+    source_dir = tmp_path / "source"
+    save_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    save_file({"mtp.a": torch.ones(4)}, str(source_dir / "aux.safetensors"))
+    _write_index(source_dir, {"mtp.a": "aux.safetensors"})
+
+    writer = _build_writer_with_out_of_model_file(str(source_dir), [{"prefixes": ["mtp"]}])
+    writer.model = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=32,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+        )
+    )
+    writer.turtle_model = None
+
+    # The first save shards the model and cleans up obsolete shard names on
+    # every later save through the real Hugging Face save_pretrained() call.
+    writer.save_quantized(str(save_dir), max_shard_size=512)
+    original_shards = sorted(path.name for path in save_dir.glob("model-*.safetensors"))
+    assert len(original_shards) > 1
+
+    original_files = {path.name: path.read_bytes() for path in save_dir.iterdir()}
+    writer.quant_log = [{}]
+    if failure == "missing-shard":
+        (source_dir / "aux.safetensors").unlink()
+    elif failure == "unreadable-shard":
+        (source_dir / "aux.safetensors").write_bytes(b"truncated")
+    else:
+        save_file({"model.weight": torch.ones(4)}, str(source_dir / "aux.safetensors"))
+
+    with pytest.raises(ValueError, match=r"mtp\.a"):
+        writer.save_quantized(str(save_dir), max_shard_size=512)
+
+    assert {path.name: path.read_bytes() for path in save_dir.iterdir()} == original_files
+    new_save_dir = tmp_path / "new-save"
+    with pytest.raises(ValueError, match=r"mtp\.a"):
+        writer.save_quantized(str(new_save_dir), max_shard_size=512)
+    assert not new_save_dir.exists()
+
+    save_file({"mtp.a": torch.ones(4)}, str(source_dir / "aux.safetensors"))
+    writer.save_quantized(str(save_dir), max_shard_size=512)
+    index = json.loads((save_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    with safe_open(save_dir / index["weight_map"]["mtp.a"], framework="pt", device="cpu") as handle:
+        torch.testing.assert_close(handle.get_tensor("mtp.a"), torch.ones(4))
+
+
+def test_save_quantized_retains_auxiliary_tensors_when_overwriting_source(tmp_path):
+    source_dir = tmp_path / "source"
+    save_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    auxiliary_tensor = torch.arange(4, dtype=torch.float32)
+    save_file({"mtp.a": auxiliary_tensor}, str(source_dir / "aux.safetensors"))
+    _write_index(source_dir, {"mtp.a": "aux.safetensors"})
+    writer = _build_writer_with_out_of_model_file(str(source_dir), [{"prefixes": ["mtp"]}])
+    writer.model = LlamaForCausalLM(
+        LlamaConfig(
+            vocab_size=32,
+            hidden_size=8,
+            intermediate_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+        )
+    )
+    writer.turtle_model = None
+    writer.save_quantized(str(save_dir), max_shard_size=512)
+    assert len(list(save_dir.glob("model-*.safetensors"))) > 1
+
+    writer.model_local_path = str(save_dir)
+    writer.save_quantized(str(save_dir), max_shard_size=512)
+
+    expected_tensors = {**writer.model.state_dict(), "mtp.a": auxiliary_tensor}
+    index = json.loads((save_dir / "model.safetensors.index.json").read_text(encoding="utf-8"))
+    assert set(index["weight_map"]) == set(expected_tensors)
+    for filename in set(index["weight_map"].values()):
+        with safe_open(save_dir / filename, framework="pt", device="cpu") as handle:
+            for name in handle.keys():
+                torch.testing.assert_close(handle.get_tensor(name), expected_tensors[name], rtol=0, atol=0)
 
 
 def test_copy_existing_file(tmp_path, monkeypatch):

@@ -2,19 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import math
 
 import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from gptqmodel.quantization.dtype import dequantize_f4_e2m1
+from gptqmodel.quantization.dtype import decode_e8m0_scale, dequantize_f4_e2m1
 from gptqmodel.utils.model_dequant import (
     convert_awq_file,
     convert_bitsandbytes_shard,
     convert_compressed_pack_file,
     convert_gptq_file,
     convert_nvfp4_shard,
+    convert_mx_shard,
     dequantize_model,
     detect_format,
     finalize_for_save,
@@ -33,6 +35,330 @@ def _write_index(model_dir, shard_name: str, keys: list[str]) -> None:
         json.dumps({"weight_map": weight_map}),
         encoding="utf-8",
     )
+
+
+@pytest.mark.parametrize(
+    "storage_dtype",
+    [torch.uint8, *([torch.float8_e8m0fnu] if hasattr(torch, "float8_e8m0fnu") else [])],
+)
+def test_e8m0_scale_matches_independent_oracle_for_every_encoding(storage_dtype):
+    encoded = torch.arange(256, dtype=torch.uint8)
+    stored = encoded if storage_dtype == torch.uint8 else encoded.view(storage_dtype)
+
+    decoded = decode_e8m0_scale(stored)
+
+    oracle = torch.tensor([math.ldexp(1.0, code - 127) for code in range(255)], dtype=torch.float32)
+    torch.testing.assert_close(decoded[:255], oracle, rtol=0, atol=0)
+    assert torch.isnan(decoded[255])
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_mxfp8_dequantizes_e8m0_blocks(fp8_dtype, tmp_path):
+    weight = torch.ones((2, 64), dtype=torch.float32).to(fp8_dtype)
+    weight[1] = 2
+    scale = torch.tensor([[127, 128], [129, 127]], dtype=torch.uint8)
+    path = tmp_path / "mx.safetensors"
+    save_file({"linear.weight": weight, "linear.weight_scale": scale}, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        result = convert_mx_shard(reader, torch.bfloat16)
+
+    expected = torch.tensor([[1.0] * 32 + [2.0] * 32, [8.0] * 32 + [2.0] * 32], dtype=torch.bfloat16)
+    assert set(result) == {"linear.weight"}
+    torch.testing.assert_close(result["linear.weight"], expected)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_mxfp8_float32_matches_torch_oracle_across_blocks(fp8_dtype, tmp_path):
+    unscaled = torch.tensor([-6.0, -1.5, -0.5, 0.0, 0.5, 1.0, 3.0, 6.0] * 8)
+    weight = unscaled.repeat(2, 1).to(fp8_dtype)
+    encoded_scale = torch.tensor([[117, 137], [129, 126]], dtype=torch.uint8)
+    global_scale = torch.tensor(0.3, dtype=torch.float32)
+    path = tmp_path / "fp8_oracle.safetensors"
+    save_file({
+        "linear.weight": weight,
+        "linear.weight_scale": encoded_scale,
+        "linear.weight_scale_2": global_scale,
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        actual = convert_mx_shard(reader, torch.float32)["linear.weight"]
+
+    scale = torch.tensor([
+        [math.ldexp(1.0, -10), math.ldexp(1.0, 10)],
+        [math.ldexp(1.0, 2), math.ldexp(1.0, -1)],
+    ], dtype=torch.float64).repeat_interleave(32, dim=1)
+    oracle = (weight.to(torch.float64) * scale * global_scale.to(torch.float64)).to(torch.float32)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_mxfp8_every_code_matches_torch_oracle(fp8_dtype, tmp_path):
+    weight = torch.arange(256, dtype=torch.uint8).view(fp8_dtype).reshape(4, 64)
+    encoded_scale = torch.tensor([
+        [117, 127], [128, 137], [126, 129], [127, 117],
+    ], dtype=torch.uint8)
+    path = tmp_path / "fp8_all_codes.safetensors"
+    save_file({"linear.weight": weight, "linear.weight_scale": encoded_scale}, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        actual = convert_mx_shard(reader, torch.float32)["linear.weight"]
+
+    scale = torch.tensor([
+        [math.ldexp(1.0, -10), 1.0], [2.0, math.ldexp(1.0, 10)],
+        [0.5, 4.0], [1.0, math.ldexp(1.0, -10)],
+    ], dtype=torch.float64).repeat_interleave(32, dim=1)
+    oracle = (weight.to(torch.float64) * scale).to(torch.float32)
+    torch.testing.assert_close(actual, oracle, rtol=0, atol=0, equal_nan=True)
+
+
+@pytest.mark.parametrize("fp8_dtype", [torch.float8_e4m3fn, torch.float8_e5m2])
+def test_mxfp8_clips_padded_primary_and_secondary_scale_grids(fp8_dtype, tmp_path):
+    weight = torch.tensor([-1.5, 0.5, 2.0, 4.0] * 16, dtype=torch.float32).repeat(2, 1).to(fp8_dtype)
+    scale = torch.full((4, 4), 255, dtype=torch.uint8)
+    scale[:2, :2] = torch.tensor([[127, 128], [129, 126]], dtype=torch.uint8)
+    scale_2 = torch.full((4, 4), 99.0)
+    scale_2[:2, :2] = torch.tensor([[0.3, 1.25], [0.5, 0.7]])
+    path = tmp_path / "fp8_padded.safetensors"
+    save_file({
+        "linear.weight": weight,
+        "linear.weight_scale": scale,
+        "linear.weight_scale_2": scale_2,
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        actual = convert_mx_shard(reader, torch.float32)["linear.weight"]
+
+    primary = torch.tensor([[1.0, 2.0], [4.0, 0.5]], dtype=torch.float64)
+    factors = (primary * scale_2[:2, :2].to(torch.float64)).repeat_interleave(32, dim=1)
+    oracle = (weight.to(torch.float64) * factors).to(torch.float32)
+    torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=1e-6)
+
+
+def test_mxfp4_float32_matches_independent_codebook_oracle(tmp_path):
+    codebook = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0,
+                -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+    packed = torch.tensor(
+        [code | ((15 - code) << 4) for code in range(16)] * 2,
+        dtype=torch.uint8,
+    ).repeat(2, 1)
+    encoded_scale = torch.tensor([[117, 137, 255], [129, 126, 255]], dtype=torch.uint8)
+    global_scale = torch.tensor(0.7, dtype=torch.float32)
+    path = tmp_path / "fp4_oracle.safetensors"
+    save_file({
+        "linear.weight": packed,
+        "linear.weight_scale": encoded_scale,
+        "linear.weight_scale_2": global_scale,
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        actual = convert_mx_shard(reader, torch.float32)["linear.weight"]
+
+    unscaled = torch.tensor(
+        [value for code in range(16) for value in (codebook[code], codebook[15 - code])] * 2,
+        dtype=torch.float64,
+    ).repeat(2, 1)
+    scale = torch.tensor([
+        [math.ldexp(1.0, -10), math.ldexp(1.0, 10)],
+        [math.ldexp(1.0, 2), math.ldexp(1.0, -1)],
+    ], dtype=torch.float64).repeat_interleave(32, dim=1)
+    oracle = (unscaled * scale * global_scale.to(torch.float64)).to(torch.float32)
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, oracle, rtol=1e-6, atol=1e-6)
+
+
+def test_mxfp4_nan_scale_marks_entire_block_nan(tmp_path):
+    packed = torch.zeros((1, 16), dtype=torch.uint8)
+    path = tmp_path / "nan_scale.safetensors"
+    save_file({
+        "linear.weight": packed,
+        "linear.weight_scale": torch.tensor([[255]], dtype=torch.uint8),
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        actual = convert_mx_shard(reader, torch.float32)["linear.weight"]
+
+    assert torch.isnan(actual).all()
+
+
+def test_mxfp4_dequantizes_packed_nibbles_and_expert_dimension(tmp_path):
+    packed = torch.full((2, 2, 16), 0x21, dtype=torch.uint8)
+    scale = torch.tensor([[[127], [128]], [[129], [126]]], dtype=torch.uint8)
+    path = tmp_path / "mx_experts.safetensors"
+    save_file({"experts.weight": packed, "experts.weight_scale": scale}, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        result = convert_mx_shard(reader, torch.bfloat16)
+
+    expected = torch.tensor([0.5, 1.0] * 16, dtype=torch.bfloat16)
+    torch.testing.assert_close(result["experts.weight"][0, 0], expected)
+    torch.testing.assert_close(result["experts.weight"][0, 1], expected * 2)
+    torch.testing.assert_close(result["experts.weight"][1, 0], expected * 4)
+    torch.testing.assert_close(result["experts.weight"][1, 1], expected * 0.5)
+
+
+@pytest.mark.parametrize("secondary_layout", ["padded", "global"])
+def test_mxfp4_clips_padded_expert_scale_grid(tmp_path, secondary_layout):
+    packed = torch.full((2, 2, 16), 0x21, dtype=torch.uint8)
+    scale = torch.full((3, 3, 2), 255, dtype=torch.uint8)
+    scale[:2, :2, 0] = torch.tensor([[127, 128], [129, 126]], dtype=torch.uint8)
+    if secondary_layout == "padded":
+        scale_2 = torch.full((3, 3, 2), 99.0)
+        scale_2[:2, :2, 0] = torch.tensor([[1.0, 0.5], [1.0, 2.0]])
+        factors = ((1.0, 1.0), (4.0, 1.0))
+    else:
+        scale_2 = torch.tensor([[[2.0]]])
+        factors = ((2.0, 4.0), (8.0, 1.0))
+    path = tmp_path / "padded_experts.safetensors"
+    save_file({
+        "experts.weight": packed,
+        "experts.weight_scale": scale,
+        "experts.weight_scale_2": scale_2,
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        result = convert_mx_shard(reader, torch.bfloat16)
+
+    # Independent E2M1 oracle for packed 0x21 (low nibble first), then E8M0 and global scales.
+    unscaled = torch.tensor([0.5, 1.0] * 16, dtype=torch.float32)
+    expected = torch.stack([torch.stack([unscaled * factor for factor in row]) for row in factors])
+    torch.testing.assert_close(result["experts.weight"], expected.to(torch.bfloat16), rtol=0, atol=0)
+
+
+def test_mxfp4_accepts_quark_sibling_scale_convention(tmp_path):
+    path = tmp_path / "mx_sibling.safetensors"
+    save_file({
+        "expert.weight": torch.full((1, 16), 0x21, dtype=torch.int8),
+        "expert.scale": torch.tensor([[128]], dtype=torch.uint8),
+    }, str(path))
+
+    with safe_open(path, framework="pt", device="cpu") as reader:
+        result = convert_mx_shard(reader, torch.bfloat16)
+
+    assert set(result) == {"expert.weight"}
+    torch.testing.assert_close(result["expert.weight"][0], torch.tensor([1.0, 2.0] * 16, dtype=torch.bfloat16))
+
+
+def test_auto_dequantizes_mixed_mx_with_cross_shard_scales(tmp_path):
+    model_dir = tmp_path / "mixed_mx"
+    output_dir = tmp_path / "dense"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "architectures": ["TestModel"],
+        "quantization_config": {"format": "mixed-mxfp4-mxfp8"},
+    }), encoding="utf-8")
+    weight_shard = "model-00001-of-00002.safetensors"
+    scale_shard = "model-00002-of-00002.safetensors"
+    save_file({
+        "fp4.weight": torch.full((1, 16), 0x21, dtype=torch.uint8),
+        "fp8.weight": torch.ones((1, 32), dtype=torch.float32).to(torch.float8_e4m3fn),
+    }, str(model_dir / weight_shard))
+    save_file({
+        "fp4.weight_scale": torch.tensor([[128]], dtype=torch.uint8),
+        "fp8.weight_scale": torch.tensor([[129]], dtype=torch.uint8),
+    }, str(model_dir / scale_shard))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "fp4.weight": weight_shard, "fp8.weight": weight_shard,
+        "fp4.weight_scale": scale_shard, "fp8.weight_scale": scale_shard,
+    }}), encoding="utf-8")
+
+    assert detect_format(model_dir, json.loads((model_dir / "config.json").read_text())) == "mixed-mx"
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / weight_shard, framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {"fp4.weight", "fp8.weight"}
+        torch.testing.assert_close(
+            reader.get_tensor("fp4.weight")[0],
+            torch.tensor([1.0, 2.0] * 16, dtype=torch.bfloat16),
+        )
+        torch.testing.assert_close(
+            reader.get_tensor("fp8.weight"),
+            torch.full((1, 32), 4.0, dtype=torch.bfloat16),
+        )
+    assert not (output_dir / scale_shard).exists()
+
+
+@pytest.mark.parametrize("format_label,scale,expected_value", [
+    ("fp8", torch.tensor(0.5, dtype=torch.float32), 1.0),
+    ("nvfp8", torch.tensor([[128]], dtype=torch.uint8), 4.0),
+])
+def test_auto_dequantizes_direct_scale_fp8_labels(tmp_path, format_label, scale, expected_value):
+    model_dir = tmp_path / format_label
+    output_dir = tmp_path / f"{format_label}_dense"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text(json.dumps({
+        "architectures": ["TestModel"],
+        "quantization_config": {"format": format_label},
+    }), encoding="utf-8")
+    weight = torch.full((1, 32), 2.0, dtype=torch.float32).to(torch.float8_e5m2)
+    save_file({"linear.weight": weight, "linear.weight_scale": scale}, str(model_dir / "model.safetensors"))
+
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+
+    with safe_open(output_dir / "model.safetensors", framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {"linear.weight"}
+        torch.testing.assert_close(
+            reader.get_tensor("linear.weight"),
+            torch.full((1, 32), expected_value, dtype=torch.bfloat16),
+        )
+
+
+def test_quark_metadata_auto_detects_mxfp4_with_plain_fp8_override(tmp_path):
+    model_dir = tmp_path / "quark_mixed"
+    output_dir = tmp_path / "quark_dense"
+    model_dir.mkdir()
+    config = {"quantization_config": {
+        "quant_method": "quark_online",
+        "global_quant_config": {"weight": {
+            "dtype": "fp4", "group_size": 32, "scale_format": "e8m0",
+        }},
+        "layer_quant_config": {"*attn*": {"weight": {
+            "dtype": "fp8_e4m3", "qscheme": "per_channel", "scale_format": "float",
+        }}},
+    }}
+    (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+    save_file({
+        "mlp.weight": torch.full((1, 16), 0x21, dtype=torch.uint8),
+        "mlp.weight_scale": torch.tensor([[128]], dtype=torch.uint8),
+        "attn.weight": torch.full((1, 32), 2.0, dtype=torch.float32).to(torch.float8_e4m3fn),
+        "attn.weight_scale": torch.tensor([0.5], dtype=torch.float32),
+    }, str(model_dir / "model.safetensors"))
+
+    assert detect_format(model_dir, config) == "mxfp4"
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+    with safe_open(output_dir / "model.safetensors", framework="pt", device="cpu") as reader:
+        assert set(reader.keys()) == {"mlp.weight", "attn.weight"}
+        torch.testing.assert_close(
+            reader.get_tensor("mlp.weight")[0],
+            torch.tensor([1.0, 2.0] * 16, dtype=torch.bfloat16),
+        )
+        torch.testing.assert_close(
+            reader.get_tensor("attn.weight"),
+            torch.ones((1, 32), dtype=torch.bfloat16),
+        )
+
+
+def test_auto_detects_e8m0_scale_before_weight_shard_without_config(tmp_path):
+    model_dir = tmp_path / "scale_first"
+    output_dir = tmp_path / "scale_first_dense"
+    model_dir.mkdir()
+    first = "model-00001-of-00002.safetensors"
+    second = "model-00002-of-00002.safetensors"
+    save_file({"linear.weight_scale": torch.tensor([[128]], dtype=torch.uint8)}, str(model_dir / first))
+    save_file({"linear.weight": torch.full((1, 16), 0x21, dtype=torch.uint8)}, str(model_dir / second))
+    (model_dir / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {
+        "linear.weight_scale": first, "linear.weight": second,
+    }}), encoding="utf-8")
+
+    assert detect_format(model_dir, {}) == "mxfp4"
+    dequantize_model(model_dir, output_dir, target_dtype=torch.bfloat16, device="cpu")
+    assert not (output_dir / first).exists()
+    with safe_open(output_dir / second, framework="pt", device="cpu") as reader:
+        torch.testing.assert_close(
+            reader.get_tensor("linear.weight")[0],
+            torch.tensor([1.0, 2.0] * 16, dtype=torch.bfloat16),
+        )
 
 
 def test_finalize_for_save_keeps_non_4d_tensors_contiguous():

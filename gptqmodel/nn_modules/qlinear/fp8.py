@@ -3,6 +3,9 @@
 
 from __future__ import annotations
 
+import platform
+import sys
+from functools import lru_cache
 from typing import Optional, Tuple
 
 import torch
@@ -25,8 +28,53 @@ from ...quantization.dtype import (
     device_supports_native_fp8,
 )
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
+from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
+
+
+log = setup_logger()
+
+_MLX_FP8_MIN_ELEMENTS = 60 * 1024 * 1024
+_MLX_FP8_FORMATS = {
+    "float8_e4m3fn",
+    "float8_e5m2",
+    "float8_e4m3fnuz",
+    "float8_e5m2fnuz",
+}
+
+
+@lru_cache(maxsize=1)
+def _mlx_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _quantize_fp8_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    *,
+    format: str,
+    weight_scale_method: str,
+    weight_block_size: Optional[Tuple[int, int]],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    import mlx.core as mx
+
+    from ...quantization.mlx_fp8 import quantize_fp8_weight_mlx
+
+    codes, scale_inv = quantize_fp8_weight_mlx(
+        mx.from_dlpack(weight),
+        format=format,
+        weight_scale_method=weight_scale_method,
+        weight_block_size=weight_block_size,
+    )
+    qweight = torch.from_dlpack(codes).cpu().contiguous().view(_fp8_dtype_from_name(format))
+    return qweight, torch.from_dlpack(scale_inv).cpu().contiguous()
 
 
 def _fp8_dtype_from_name(fmt: str) -> torch.dtype:
@@ -181,6 +229,8 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             **kwargs,
         )
 
+        self._compiled_forward = None
+
         if register_buffers:
             self._allocate_buffers(bias=bias)
 
@@ -296,13 +346,25 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             weight,
             smooth=smooth,
             group_size=self.smooth_block_size(),
-        )
-        qweight, weight_scale_inv = quantize_fp8_weight(
-            weight,
-            format=self.fp8_format,
-            weight_scale_method=self.weight_scale_method,
-            weight_block_size=self.weight_block_size,
-        )
+        ).contiguous()
+        if (
+            self.fp8_format in _MLX_FP8_FORMATS
+            and _mlx_quantization_available()
+            and weight.numel() >= _MLX_FP8_MIN_ELEMENTS
+        ):
+            qweight, weight_scale_inv = _quantize_fp8_weight_mlx_to_torch(
+                weight,
+                format=self.fp8_format,
+                weight_scale_method=self.weight_scale_method,
+                weight_block_size=self.weight_block_size,
+            )
+        else:
+            qweight, weight_scale_inv = quantize_fp8_weight(
+                weight,
+                format=self.fp8_format,
+                weight_scale_method=self.weight_scale_method,
+                weight_block_size=self.weight_block_size,
+            )
 
         if "weight" in self._buffers:
             self.weight = qweight
@@ -324,6 +386,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.bias = None
 
         self._scaled_mm_hard_disabled = False
+        self._invalidate_compiled()
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
         target_device = self.weight.device if device is None else torch.device(device)
@@ -424,6 +487,46 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
         return torch.matmul(x_flat, weight)
 
+    def optimize(
+        self,
+        backend: str = "inductor",
+        mode: Optional[str] = None,
+        fullgraph: bool = False,
+    ) -> "TorchFP8Linear":
+        """Compile the CPU dequant+matmul path after the caller explicitly opts in."""
+
+        if self.optimized:
+            return self
+        if not TORCH_HAS_COMPILE or self.weight.device.type != "cpu":
+            return self
+
+        compiled = torch_compile(
+            self._forward_dequant_matmul,
+            backend=backend,
+            mode=mode,
+            fullgraph=fullgraph,
+        )
+        if compiled is self._forward_dequant_matmul:
+            return self
+
+        self._compiled_forward = compiled
+        self.optimized = True
+        log.info.once("Optimize: `TorchFP8Linear` CPU compilation triggered.")
+        return self
+
+    def _invalidate_compiled(self) -> None:
+        self._compiled_forward = None
+        self.optimized = False
+
+    def _apply(self, fn, recurse=True):
+        result = super()._apply(fn, recurse=recurse)
+        self._invalidate_compiled()
+        return result
+
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        self._invalidate_compiled()
+
     def _forward_scaled_mm(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.weight if self.weight.device == x_flat.device else self.weight.to(device=x_flat.device)
         x_q, scale_a = self._quantize_input_for_scaled_mm(x_flat)
@@ -445,6 +548,15 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
                 output = self._forward_scaled_mm(x_flat)
             except Exception:
                 self._scaled_mm_hard_disabled = True
+                output = self._forward_dequant_matmul(x_flat)
+        elif self._compiled_forward is not None:
+            try:
+                output = self._compiled_forward(x_flat)
+            except Exception as exc:
+                log.warn.once(
+                    f"FP8 compiled CPU forward failed; falling back to eager: {exc}"
+                )
+                self._invalidate_compiled()
                 output = self._forward_dequant_matmul(x_flat)
         else:
             output = self._forward_dequant_matmul(x_flat)

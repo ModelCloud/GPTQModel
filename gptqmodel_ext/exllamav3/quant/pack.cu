@@ -84,7 +84,13 @@ void pack_trellis
     dim3 blockDim(128);
     dim3 gridDim(rows, cols);
 
-    pack_trellis_kernel_instances[K - 1]<<<gridDim, blockDim, 0, stream>>>
+    // Bind the selected instantiation to a local before launching. Torch's HIPify
+    // rewrites `<<<...>>>` launches by scanning backwards for the kernel name and
+    // mis-parses an indexed expression such as `instances[K - 1]`, emitting broken
+    // `hipLaunchKernelGGL(...)` code. A plain identifier is rewritten correctly and
+    // the CUDA build is unchanged.
+    auto pack_trellis_kernel = pack_trellis_kernel_instances[K - 1];
+    pack_trellis_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (uint16_t*) packed.data_ptr(),
         (const uint16_t*) unpacked.data_ptr()
@@ -165,7 +171,9 @@ void unpack_trellis
     dim3 blockDim(128);
     dim3 gridDim(cols, rows);
 
-    unpack_trellis_kernel_instances[K - 1]<<<gridDim, blockDim, 0, stream>>>
+    // See pack_trellis: an indexed instantiation is mis-parsed by HIPify.
+    auto unpack_trellis_kernel = unpack_trellis_kernel_instances[K - 1];
+    unpack_trellis_kernel<<<gridDim, blockDim, 0, stream>>>
     (
         (uint16_t*) unpacked.data_ptr(),
         (const uint16_t*) packed.data_ptr()

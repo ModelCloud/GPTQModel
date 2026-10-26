@@ -56,6 +56,7 @@ from ..quantization.config import (
     _normalize_fp8_weight_scale_method,
     _normalize_quant_bits,
     dynamic_get,
+    dynamic_matching_pattern,
     quant_bits_width,
     resolve_quant_format,
 )
@@ -68,6 +69,7 @@ from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
+from .packing import _auto_pack_impl
 from .torch import HAS_CUDA, torch_empty_cache
 
 
@@ -1063,6 +1065,8 @@ def pack_module(
             effective_impl = "block"
         elif effective_impl in {"original", "pack_original"}:
             effective_impl = "original"
+        elif effective_impl in {"auto", "default"}:
+            effective_impl = _auto_pack_impl(module=module, linear=layer)
         elif effective_impl == "gpu":
             if not HAS_CUDA:
                 log.warning("pack_module: GPU packing requested but CUDA is unavailable; falling back to original pack.")
@@ -1099,7 +1103,7 @@ def pack_module(
                         g_idx=q_g_idx,
                         device=target_device,
                     )
-                except ValueError:
+                except (ValueError, NotImplementedError):
                     module.pack_original(linear=layer, scales=q_scales, zeros=q_zeros, g_idx=q_g_idx)
             elif effective_impl == "block":
                 try:
@@ -1444,6 +1448,18 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
+    if quantize_config is not None and quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+        from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream
+
+        install_w4a_llama_stream(
+            model, quantize_config.activation_mode, quantize_config.activation_recipe,
+            global_scales=quantize_config.activation_global_scales,
+            attention_mode=quantize_config.activation_attention_mode,
+            attention_recipe=quantize_config.activation_attention_recipe,
+            mlp_fp8_layers=quantize_config.activation_mlp_fp8_layers,
+            fused_norms=bool(quantize_config.rotation),
+        )
+
     torch_empty_cache()
 
     return model
@@ -1582,6 +1598,252 @@ def get_moe_layer_modules(layer_modules: List, num_experts: int) -> List:
                 new_inside_layer_modules[-1].append(n)
 
     return new_inside_layer_modules
+
+
+# Marker separating the routed-expert container from the expert index, e.g.
+# `model.layers.0.mlp.experts.3.down_proj`. Shared experts (`shared_experts`)
+# are not part of the fused group and do not contain this marker.
+FUSED_EXPERT_GROUP_MARKER = ".experts."
+
+# Dense projections that inference engines merge into one module: fused module
+# suffix -> the GPT-QModel module suffixes it is built from.
+FUSED_PROJECTION_UNITS = {
+    "gate_up_proj": ("gate_proj", "up_proj"),
+    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+}
+
+# `dynamic` fields that inference engines read when they resolve the single
+# config of a fused module. Every other field only affects GPT-QModel's
+# quantization step and is baked into the saved weights, so it may legitimately
+# differ between the modules of one fused module.
+FUSED_UNIT_ENGINE_FIELDS = ("bits", "group_size", "desc_act", "sym")
+
+
+def fused_expert_group_name(module_name: str) -> Optional[str]:
+    """Return the fused routed-expert group that `module_name` belongs to.
+
+    Inference engines (vLLM, SGLang) fuse every routed expert of one layer into
+    a single module (`<prefix>.experts`) with one precision and one
+    quantization config, so `<prefix>.experts.<expert_id>.<projection>` modules
+    must be quantized as a unit. Returns `None` for modules outside such a
+    group, including shared experts and already fused expert containers.
+    """
+
+    if not module_name:
+        return None
+
+    marker_index = module_name.find(FUSED_EXPERT_GROUP_MARKER)
+    if marker_index <= 0:
+        return None
+
+    expert_id, separator, _ = module_name[marker_index + len(FUSED_EXPERT_GROUP_MARKER):].partition(".")
+    if not expert_id or not separator:
+        return None
+
+    return module_name[:marker_index + len(FUSED_EXPERT_GROUP_MARKER) - 1]
+
+
+def fused_expert_group_members(module_names) -> Dict[str, List[str]]:
+    """Group `module_names` by the fused routed-expert group they belong to."""
+
+    groups: Dict[str, List[str]] = {}
+    for module_name in module_names:
+        group = fused_expert_group_name(module_name)
+        if group is not None:
+            groups.setdefault(group, []).append(module_name)
+    return groups
+
+
+def fused_unit_members(module_names) -> Dict[str, List[str]]:
+    """Map every engine-fused module to the GPT-QModel modules it merges.
+
+    Inference engines (vLLM, SGLang) merge the routed experts of one decoder
+    layer into one module (`<prefix>.experts`) and the dense `gate_proj`/`up_proj`
+    and `q_proj`/`k_proj`/`v_proj` shards into `gate_up_proj`/`qkv_proj`. They
+    resolve one `dynamic` override per merged module from the *fused* name, so
+    the modules that are merged must resolve the same engine-visible config.
+    Modules without a fused partner are not reported.
+    """
+
+    names = set(module_names)
+    units: Dict[str, List[str]] = {}
+    for group, members in fused_expert_group_members(module_names).items():
+        units[group] = list(members)
+
+    for module_name in module_names:
+        if fused_expert_group_name(module_name) is not None:
+            # Routed experts are covered by their fused group above.
+            continue
+        prefix, separator, suffix = module_name.rpartition(".")
+        if not separator:
+            continue
+        for fused_suffix, shard_suffixes in FUSED_PROJECTION_UNITS.items():
+            if suffix not in shard_suffixes:
+                continue
+            members = [
+                f"{prefix}.{shard_suffix}"
+                for shard_suffix in shard_suffixes
+                if f"{prefix}.{shard_suffix}" in names
+            ]
+            if len(members) > 1:
+                units.setdefault(f"{prefix}.{fused_suffix}", members)
+    return units
+
+
+def fused_unit_engine_config(override, qcfg) -> tuple:
+    """Return the config an inference engine resolves for one fused module.
+
+    Engines read `bits`, `group_size`, `desc_act` and `sym` from the `dynamic`
+    override and honor `-:` exclusions; the remaining fields only affect
+    GPT-QModel's quantization step and are baked into the saved weights.
+    """
+
+    if override is False:
+        return ("excluded",)
+    if not isinstance(override, dict):
+        override = {}
+    return tuple(
+        (field, override.get(field, getattr(qcfg, field, None)))
+        for field in FUSED_UNIT_ENGINE_FIELDS
+    )
+
+
+@dataclass(frozen=True)
+class FusedUnitDynamicConflict:
+    """One fused module whose `dynamic` config the inference engines cannot honor."""
+
+    unit: str
+    engine_config: tuple
+    member_configs: Tuple[Tuple[str, tuple], ...]
+
+    def suggested_pattern(self) -> str:
+        """Return a `dynamic` pattern that covers the fused module and its shards.
+
+        The engines match the fused module name while GPT-QModel matches the
+        unfused shards, so a rule must cover both. Routed experts live below
+        their container, so one prefix pattern is enough; dense shards are
+        siblings of the fused module and need an alternation.
+        """
+
+        nested = all(member.startswith(f"{self.unit}.") for member, _ in self.member_configs)
+        if nested:
+            return rf"{pcre.escape(self.unit)}(\.|$)"
+
+        prefix, separator, fused_suffix = self.unit.rpartition(".")
+        shards = [member.rsplit(".", 1)[-1] for member, _ in self.member_configs]
+        alternation = "|".join(pcre.escape(name) for name in [*shards, fused_suffix])
+        if not separator:
+            return f"({alternation})$"
+        return rf"{pcre.escape(prefix)}\.({alternation})$"
+
+
+def fused_unit_dynamic_conflicts(module_names, qcfg) -> List[FusedUnitDynamicConflict]:
+    """Report fused modules whose `dynamic` config the engines cannot honor.
+
+    Inference engines resolve one `dynamic` override per fused module from the
+    fused module name only, so a rule that matches just part of a fused module
+    makes the engine disagree with the checkpoint GPT-QModel saves: the engine
+    loads float shards into a quantized module (or quantized shards into a
+    float module) and the model fails to load (issue #1455).
+    """
+
+    if qcfg is None or not getattr(qcfg, "dynamic", None):
+        return []
+
+    conflicts = []
+    for unit, members in sorted(fused_unit_members(module_names).items()):
+        engine_config = fused_unit_engine_config(qcfg.dynamic_get(unit, default=None), qcfg)
+        member_configs = tuple(
+            (member, fused_unit_engine_config(qcfg.dynamic_get(member, default=None), qcfg))
+            for member in members
+        )
+        if all(config == engine_config for _, config in member_configs):
+            continue
+        conflicts.append(
+            FusedUnitDynamicConflict(
+                unit=unit,
+                engine_config=engine_config,
+                member_configs=member_configs,
+            )
+        )
+    return conflicts
+
+
+def _blamed_dynamic_patterns(dynamic, conflicts) -> List[str]:
+    """Return the `dynamic` rules responsible for the fused-module conflicts."""
+
+    blamed = set()
+    for conflict in conflicts:
+        member_names = [member for member, _ in conflict.member_configs]
+        unit_pattern = dynamic_matching_pattern(dynamic, conflict.unit)
+        for member, config in conflict.member_configs:
+            if config == conflict.engine_config:
+                continue
+            pattern = dynamic_matching_pattern(dynamic, member)
+            if pattern is not None:
+                blamed.add(pattern)
+        if unit_pattern is not None:
+            # A rule on the fused name only matters when it does not cover every
+            # shard of the fused module.
+            raw = unit_pattern[2:] if unit_pattern.startswith(("-:", "+:")) else unit_pattern
+            compiled = pcre.compile(raw)
+            if not all(compiled.match(member) for member in member_names):
+                blamed.add(unit_pattern)
+
+    order = {pattern: index for index, pattern in enumerate(dynamic.keys())}
+    return sorted(blamed, key=lambda pattern: order.get(pattern, len(order)))
+
+
+def warn_fused_unit_dynamic_conflicts(
+    module_names,
+    qcfg,
+    *,
+    max_rules: int = 3,
+) -> List[FusedUnitDynamicConflict]:
+    """Warn when `dynamic` gives fused modules a config the engines cannot honor.
+
+    Returns the detected conflicts so callers and tests can inspect them.
+    """
+
+    conflicts = fused_unit_dynamic_conflicts(module_names, qcfg)
+    if not conflicts:
+        return conflicts
+
+    dynamic = qcfg.dynamic
+    blamed = _blamed_dynamic_patterns(dynamic, conflicts)
+    if blamed:
+        rules = ", ".join(f"`{pattern}`" for pattern in blamed[:max_rules])
+        if len(blamed) > max_rules:
+            rules += f" (+{len(blamed) - max_rules} more)"
+    else:
+        rules = "a per-module `dynamic` rule"
+
+    example = conflicts[0]
+
+    log.warn(
+        f"Dynamic: {rules} may prevent the saved checkpoint from loading in vLLM/SGLang: "
+        f"fused modules such as `{example.unit}` resolve a different config than their shards, and those "
+        "engines read `dynamic` from the fused name only. Match the fused name too, e.g. "
+        f"`+:{example.suggested_pattern()}` or `-:` to skip it."
+    )
+    return conflicts
+
+
+def fused_unit_check_module_names(model, layers_node) -> List[str]:
+    """Return the module names to check for fused-module `dynamic` conflicts.
+
+    Only the decoder layers are quantized, so modules outside them (vision
+    towers, projectors, ...) cannot make the saved checkpoint disagree with the
+    fused inference engines. Module names are read without materializing or
+    type-filtering them, so the check also works on loaded quantized models.
+    """
+
+    names = [name for name, _ in model.named_modules() if name]
+    _, layer_names = get_layers_with_prefixes(model, layers_node)
+    prefixes = tuple(f"{layer_name}." for layer_name in layer_names if layer_name)
+    if not prefixes:
+        return names
+    return [name for name in names if name.startswith(prefixes)]
 
 
 def check_to_quantized(config):

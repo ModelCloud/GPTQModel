@@ -18,6 +18,7 @@ from ..nn_modules.hooked_linear import STOP_FORWARD_EXCEPTION, StopForward
 from ..quantization.config import QuantizeEmbed
 from ..utils.ctx import ctx
 from ..utils.device import get_device
+from ..utils.linalg_warmup import await_torch_linear_prewarm
 from ..utils.logger import setup_logger
 from ..utils.looper_helpers import device_ctx, select_forward_devices
 from ..utils.model import get_module, get_module_by_name_prefix, move_to, nested_move_to
@@ -33,6 +34,14 @@ _VISION_INPUT_KEYS = frozenset(("pixel_values", "images"))
 
 def _has_vision_inputs(example: Dict[str, Any]) -> bool:
     return any(key in example for key in _VISION_INPUT_KEYS)
+
+
+def _forward_dtype(model: torch.nn.Module) -> Optional[torch.dtype]:
+    """Best-effort dtype the capture forward will run in, for the `linear` prewarm join."""
+    try:
+        return next(model.parameters()).dtype
+    except (StopIteration, AttributeError, TypeError):
+        return None
 
 
 class StageInputsCapture:
@@ -78,7 +87,12 @@ class StageInputsCapture:
         embedding_device = get_device(embedding)
         return fallback if embedding_device == META else embedding_device
 
-    def _first_layer_has_deferred_floatx_source(self, layer: torch.nn.Module) -> bool:
+    def _first_layer_has_deferred_floatx_source(
+        self,
+        layer: torch.nn.Module,
+        *,
+        module_path: Optional[str] = None,
+    ) -> bool:
         """Whether input capture must not materialize a packed floatx layer.
 
         The first decoder layer is only used as a pre-forward hook during input
@@ -98,7 +112,7 @@ class StageInputsCapture:
         if not callable(get_tensors) or not callable(decoder_format):
             return False
 
-        for submodule in layer.modules():
+        for submodule_name, submodule in layer.named_modules():
             if not hasattr(submodule, "weight"):
                 continue
             checkpoint_tensors = get_tensors(
@@ -107,9 +121,13 @@ class StageInputsCapture:
                 recurse=False,
             )
             weight = checkpoint_tensors.get("weight") if isinstance(checkpoint_tensors, dict) else None
+            module_name = None
+            if module_path is not None:
+                module_name = ".".join(part for part in (module_path, submodule_name) if part)
             if isinstance(weight, torch.Tensor) and decoder_format(
                 weight=weight,
                 checkpoint_tensors=checkpoint_tensors,
+                module_name=module_name,
             ) is not None:
                 return True
         return False
@@ -184,7 +202,7 @@ class StageInputsCapture:
         # materialize / move.to CPU for initial input capture and for first layer to minimize VRAM usage, inputs will be stored on CPU
         # and to mimic behavior of offload_to_disk=False for offload_to_disk=True
         # Use calibration_data_device to specify device for calibration data (or "balanced" for round-robin across GPUs)
-        if self._first_layer_has_deferred_floatx_source(layers[0]):
+        if self._first_layer_has_deferred_floatx_source(layers[0], module_path=module_path):
             self.logger.info(
                 "Floatx input capture: keeping first decoder layer lazy; its pre-hook runs before packed weights are used."
             )
@@ -322,6 +340,15 @@ class StageInputsCapture:
         handle = layers[0].register_forward_pre_hook(store_input_hook, with_kwargs=True)
 
         self.gptq_model.pre_quantize_generate_hook_start()
+
+        # The first `linear` of the capture forward pays a one-time accelerator-library
+        # init unless the background prewarm kicked at load time already completed it.
+        # All CPU-bound setup is done here, so joining now costs only the prewarm's
+        # remaining tail; racing it instead would pay the init a second time inline.
+        await_torch_linear_prewarm(
+            self.gptq_model.quantize_config.device,
+            _forward_dtype(self.gptq_model.model),
+        )
 
         try:
             for batch_index, example in enumerate(calibration_data, start=1):

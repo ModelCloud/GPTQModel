@@ -1,7 +1,9 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
+# Marlin format: IST-DASLab contributors, MIT, https://github.com/IST-DASLab/marlin
+# BitBLAS format: Microsoft Research contributors, Apache-2.0, https://github.com/microsoft/BitBLAS
 
 from __future__ import annotations
 
@@ -10,6 +12,8 @@ import json
 import os
 import shutil
 import time
+import weakref
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from itertools import chain
 from typing import Dict, List, Optional, Union
@@ -32,7 +36,8 @@ from packaging.version import InvalidVersion, Version
 from transformers import AutoConfig, PretrainedConfig
 from transformers.utils import is_flash_attn_2_available
 
-from ..adapter.adapter import Adapter
+from ..adapter.adapter import Adapter, normalize_adapter
+from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from ..nn_modules.qlinear import BaseQuantLinear
@@ -45,11 +50,14 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     AutoModuleDecoderConfig,
     BaseQuantizeConfig,
+    configure_dynamic_override_cache_for_model,
+    dynamic_override_cache_stats,
+    log_dynamic_override_cache_stats,
     resolve_quant_format,
 )
-from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4
+from ..quantization.dtype import device_supports_dtype, device_supports_native_fp4, quark_floatx_formats
 from ..utils import internal_gguf
-from ..utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
+from ..utils.backend import BACKEND, PROFILE, backend_for_activation, normalize_backend, normalize_profile
 from ..utils.exllamav3 import replace_exllamav3_placeholders
 from ..utils.hf import (
     INTERNAL_HF_GGUF_FILE_KWARG,
@@ -114,6 +122,44 @@ _EXTERNAL_BACKEND_FORMATS = {
 }
 
 
+def _auto_select_mlx_backend(backend, device, config, qcfg, quant_method, format_code, adapter):
+    """Select MLX when its Metal runtime can use the checkpoint directly."""
+    if backend != BACKEND.AUTO or adapter is not None or qcfg.dynamic or qcfg.rotation:
+        return backend
+    if quant_method == METHOD.GGUF and getattr(getattr(qcfg, "runtime_bits", None), "name", None) not in {
+            "q1_0", "q1_0_g128", "q2_0", "q4_0", "q8_0", "q4_k", "q4_k_s", "q4_k_m",
+            "q5_k", "q5_k_s", "q5_k_m", "q6_k"}:
+        return backend
+    if quant_method == METHOD.BITSANDBYTES:
+        # CPU bitsandbytes is faster for token decode on this host; explicit
+        # backend=MLX remains available for larger batches.
+        return backend
+    if selector_device_family(device) != DEVICE.MPS:
+        return backend
+    if quant_method == METHOD.EXL3:
+        # The existing EXL3 Torch cache is faster for token decode on M5 Ultra.
+        return backend
+    try:
+        from mlx_lm.utils import _get_classes
+
+        select_quant_linear(
+            bits=qcfg.bits,
+            group_size=qcfg.group_size,
+            desc_act=qcfg.desc_act,
+            sym=qcfg.sym,
+            backend=BACKEND.MLX,
+            format=format_code,
+            quant_method=quant_method,
+            device=DEVICE.MPS,
+            pack_dtype=qcfg.pack_dtype,
+        )
+        _get_classes(config.to_dict())
+    except (ImportError, ValueError, NotImplementedError):
+        return backend
+    log.info("Loader: selected MLX Metal for Apple Silicon inference")
+    return BACKEND.MLX
+
+
 def native_floatx_source_format(
     config: PretrainedConfig,
     *,
@@ -125,6 +171,11 @@ def native_floatx_source_format(
     ``hf_quant_config.json`` sidecar for this metadata.  The latter is needed
     for older FP8 exports whose model config has no ``quantization_config``.
     """
+
+    from ..utils.mimo import is_mimo_mixed_source
+
+    if is_mimo_mixed_source(config):
+        return "mimo_mixed"
 
     payloads = []
     quantization_config = getattr(config, "quantization_config", None)
@@ -155,8 +206,25 @@ def native_floatx_source_format(
             if isinstance(value, str):
                 algorithms.append(value.lower())
 
-    # Test FP4 first because its name may otherwise be caught by generic
-    # float-format matching in future ModelOpt spellings.
+        groups = payload.get("config_groups")
+        if isinstance(groups, dict):
+            algorithms.extend(
+                str(group.get("format", "")).lower()
+                for group in groups.values()
+                if isinstance(group, dict)
+            )
+        algorithms.extend(quark_floatx_formats(payload))
+
+    if any("mxfp4" in algorithm for algorithm in algorithms) and any(
+        "mxfp8" in algorithm for algorithm in algorithms
+    ):
+        return "mixed-mx"
+    if any("mxfp4" in algorithm for algorithm in algorithms):
+        return "mxfp4"
+    if any("mxfp8" in algorithm for algorithm in algorithms):
+        return "mxfp8"
+    if any("nvfp8" in algorithm for algorithm in algorithms):
+        return "nvfp8"
     if any("fp4" in algorithm for algorithm in algorithms):
         return "nvfp4"
     if any("fp8" in algorithm for algorithm in algorithms):
@@ -170,29 +238,49 @@ def configure_native_floatx_source_quantization(
     *,
     device: Union[DEVICE, torch.device, str],
     model_local_path: Optional[str] = None,
+    model_dtype: torch.dtype = torch.bfloat16,
 ) -> Optional[str]:
-    """Configure a native FP8/NVFP4 source for checkpoint-backed W4A16 quantization.
+    """Configure floatx checkpoint sources for module-local W4A16 quantization.
 
     The shell model remains on ``meta`` while the looper asks the lazy
     checkpoint reader for one linear module at a time.  That module is decoded
-    into BF16 only for the duration of its GPTQ/AWQ pass, rather than expanding
-    every source weight to BF16 at model load.
+    into FP16/BF16 only for the duration of its GPTQ/AWQ pass, rather than expanding
+    every source weight to FP16/BF16 at model load.
     """
 
     source_format = native_floatx_source_format(config, model_local_path=model_local_path)
     if source_format is None or quantize_config.method not in (METHOD.GPTQ, METHOD.AWQ):
         return None
 
+    preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
+    decode_dtype = torch.bfloat16
+    if source_format == "mimo_mixed":
+        if quantize_config.method == METHOD.AWQ:
+            raise ValueError("MiMo mixed-source AWQ quantization is not supported; use GPTQ.")
+        if model_dtype not in (torch.float16, torch.bfloat16):
+            raise ValueError(
+                "MiMo mixed-source GPTQ quantization requires dtype=torch.float16 or dtype=torch.bfloat16; "
+                f"got {model_dtype}. FP32 is supported for direct/offline source decoding only."
+            )
+        decode_dtype = model_dtype
+        for preprocessor in preprocessors:
+            if isinstance(preprocessor, AutoModuleDecoderConfig) and preprocessor.target_dtype != model_dtype:
+                raise ValueError(
+                    "MiMo mixed-source AutoModuleDecoderConfig.target_dtype "
+                    f"({preprocessor.target_dtype}) must match the model dtype ({model_dtype})."
+                )
+
+    decode_dtype_name = "BF16" if decode_dtype == torch.bfloat16 else "FP16"
     target_device = device.to_torch_device() if isinstance(device, DEVICE) else torch.device(device)
-    if not device_supports_dtype(target_device, torch.bfloat16, require_validation=True):
+    if not device_supports_dtype(target_device, decode_dtype, require_validation=True):
         raise EnvironmentError(
-            "Native FP8/NVFP4 source quantization requires validated BF16 linear support on the "
+            f"Floatx source quantization requires validated {decode_dtype_name} linear support on the "
             f"quantization device. Device `{target_device}` does not provide it."
         )
 
     # GPTQ's Hessian is part of the quantization mathematics, not a property
     # of the packed source weight.  Preserve the normal FP32 collection path
-    # even when the source forward view is FP8/NVFP4.
+    # even when the source forward view is floatx.
     hessian = getattr(quantize_config, "hessian", None)
     if hessian is not None and getattr(hessian, "staging_dtype", torch.float32) != torch.float32:
         log.warning(
@@ -213,12 +301,17 @@ def configure_native_floatx_source_quantization(
             native_dtype is not None
             and device_supports_dtype(target_device, native_dtype, require_validation=True)
         )
-    else:
+    elif source_format == "nvfp4":
         native_dtype_name = "float4_e2m1fn_x2"
         native_dtype_supported = device_supports_native_fp4(
             target_device,
             require_validation=True,
         )
+    else:
+        # MX block scales need a format-specific GEMM kernel.  The auto
+        # decoder can still feed quantization from dense module-local FP16/BF16.
+        # MiMo's mixed packing and TP-local QKV scales require dense decoding.
+        native_dtype_name = source_format
 
     # This is deliberately transient runtime state: it is not part of the
     # exported W4 config.  A per-module check still guards mixed/odd shards,
@@ -226,7 +319,7 @@ def configure_native_floatx_source_quantization(
     quantize_config._native_floatx_forward_plan = {
         "source_format": source_format,
         "device": str(target_device),
-        "bf16_validated": True,
+        "bf16_validated": decode_dtype == torch.bfloat16,
         "native_dtype": native_dtype_name,
         "native_validated": native_dtype_supported,
         "mode": "native" if native_dtype_supported else "decode",
@@ -242,15 +335,15 @@ def configure_native_floatx_source_quantization(
         )
     else:
         log.warning(
-            "Loader: native %s forward is unavailable on %s; using decoded BF16 for Hessian collection. "
+            "Loader: native %s forward is unavailable on %s; using decoded %s for Hessian collection. "
             "Quantization remains supported, but calibration may be slower.",
             source_format.upper(),
             target_device,
+            decode_dtype_name,
         )
 
-    preprocessors = list(getattr(quantize_config, "preprocessors", None) or [])
     if not any(isinstance(preprocessor, AutoModuleDecoderConfig) for preprocessor in preprocessors):
-        preprocessors.append(AutoModuleDecoderConfig(target_dtype=torch.bfloat16))
+        preprocessors.append(AutoModuleDecoderConfig(target_dtype=decode_dtype))
         quantize_config.preprocessors = preprocessors
 
     # Direct HF loading coerces packed floatx weights into the shell dtype and
@@ -264,8 +357,9 @@ def configure_native_floatx_source_quantization(
         quantize_config.offload_to_disk = True
 
     log.info(
-        "Loader: detected native %s source; automatically enabled BF16 auto_module_decoder for %s.",
+        "Loader: detected native %s source; automatically enabled %s auto_module_decoder for %s.",
         source_format.upper(),
+        decode_dtype_name,
         quantize_config.method.value.upper(),
     )
     return source_format
@@ -938,6 +1032,10 @@ def ModelLoader(cls):
         normalize_hf_config_compat(config, trust_remote_code=trust_remote_code)
         prepare_remote_model_init_compat(model_local_path, config)
 
+        from ..utils.mimo import is_mimo_mixed_source
+
+        mimo_source = is_mimo_mixed_source(config)
+
         atten_impl = model_init_kwargs.get("attn_implementation", None)
 
         if atten_impl is not None and atten_impl != "auto":
@@ -950,9 +1048,12 @@ def ModelLoader(cls):
         if cls.require_dtype:
             dtype = cls.require_dtype
         elif dtype is None or dtype == "auto" or not isinstance(dtype, torch.dtype):
+            dtype_device = selector_device_family(resolved_device)
+            if mimo_source and isinstance(quantize_config, BaseQuantizeConfig) and quantize_config.device is not None:
+                dtype_device = selector_device_family(normalize_device(quantize_config.device))
             dtype = auto_dtype(
                 config=config,
-                device=selector_device_family(resolved_device),
+                device=dtype_device,
                 quant_inference=False,
             )
 
@@ -973,6 +1074,7 @@ def ModelLoader(cls):
                 quantize_config,
                 device=requested_quant_device,
                 model_local_path=model_local_path,
+                model_dtype=dtype,
             )
 
         tokenizer = load_hf_tokenizer(
@@ -1127,6 +1229,11 @@ def ModelLoader(cls):
                 except RuntimeError as exc:
                     if not _is_meta_shell_build_error(exc):
                         raise
+                    if mimo_source:
+                        raise RuntimeError(
+                            "MiMo mixed sources require a checkpoint-backed shell; "
+                            "direct HF loading cannot preserve their packed layout."
+                        ) from exc
 
                     log.warn(
                         "Loader: meta-device shell build failed for `%s`; falling back to direct CPU load without turtle_model: %s",
@@ -1158,7 +1265,7 @@ def ModelLoader(cls):
                     _maybe_print_module_tree(model=model)
                     turtle_model = LazyTurtle.maybe_create(
                         model_local_path=model_local_path,
-                        config=model.config,
+                        config=config if mimo_source else model.config,
                         model_init_kwargs=shell_model_init_kwargs,
                         module_tree=copy.deepcopy(getattr(cls, "module_tree", None)),
                         hf_conversion_map_reversed=copy.deepcopy(
@@ -1218,6 +1325,11 @@ def ModelLoader(cls):
         )
         _set_paged_attention_safe_cuda_graphs(instance.model)
 
+        if quantize_config.dynamic:
+            log_dynamic_override_cache_stats(
+                instance._dynamic_cache_stats_before, dynamic=quantize_config.dynamic,
+            )
+
         timer = getattr(instance, "quant_region_timer", None)
         if timer is not None:
             source_label = getattr(instance, "model_local_path", None) or str(pretrained_model_id_or_path)
@@ -1234,9 +1346,12 @@ def ModelLoader(cls):
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
-            adapter: Optional[Adapter] = None,
+            adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ):
 
@@ -1369,17 +1484,39 @@ def ModelLoader(cls):
             )
         else:
             qcfg = QuantizeConfig.from_pretrained(model_local_path, **cached_file_kwargs, **kwargs_without_internal)
+
+        if adapter is None:
+            if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
+                raise ValueError(
+                    "Loader: remote adapter options require an explicit `adapter=` argument; "
+                    "checkpoint metadata cannot authorize remote adapter downloads."
+                )
+            if qcfg.adapter is not None and qcfg.adapter.path not in (None, ""):
+                qcfg.adapter.path = resolve_checkpoint_adapter_path(qcfg.adapter.path, model_local_path)
+        else:
+            qcfg.adapter = normalize_adapter(adapter)
+            configure_explicit_remote_adapter(
+                qcfg.adapter,
+                allow_remote=allow_remote_adapter,
+                revision=adapter_revision,
+                sha256=adapter_sha256,
+            )
+
         export_quant_method = qcfg.export_quant_method()
         format_code = resolve_quant_format(qcfg.format, qcfg.method)
         backend = normalize_backend(backend, quant_method=export_quant_method)
+        backend = backend_for_activation(qcfg.activation_mode, backend)
+        backend = _auto_select_mlx_backend(
+            backend, device, config, qcfg, export_quant_method, format_code, adapter
+        )
 
         if (
             native_gguf_qspec is not None
             and native_gguf_qspec.tensor_qtype == internal_gguf.GGMLQuantizationType.Q1_0
-            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON}
+            and backend not in {BACKEND.AUTO, BACKEND.GGUF_TORCH, BACKEND.GGUF_TRITON, BACKEND.MLX}
         ):
             raise ValueError(
-                "Native Q1_0 GGUF checkpoints support BACKEND.AUTO, BACKEND.GGUF_TORCH, or BACKEND.GGUF_TRITON. "
+                "Native Q1_0 GGUF checkpoints support AUTO, GGUF_TORCH, GGUF_TRITON, or MLX. "
                 f"Actual backend: `{backend}`."
             )
         elif (
@@ -1388,15 +1525,15 @@ def ModelLoader(cls):
         ):
             if backend == BACKEND.AUTO:
                 backend = BACKEND.GGUF_TORCH
-            elif backend != BACKEND.GGUF_TORCH:
+            elif backend not in (BACKEND.GGUF_TORCH, BACKEND.MLX):
                 raise ValueError(
-                    "Native Q2_0 GGUF checkpoints currently require BACKEND.GGUF_TORCH. "
+                    "Native Q2_0 GGUF checkpoints require GGUF_TORCH or MLX. "
                     f"Actual backend: `{backend}`."
                 )
 
         if format_code == FORMAT.EXL3:
-            if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH):
-                raise TypeError("FORMAT.EXL3 requires BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, or BACKEND.EXL3_TORCH.")
+            if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH, BACKEND.MLX):
+                raise TypeError("FORMAT.EXL3 requires AUTO, EXL3_EXLLAMA_V3, EXL3_TORCH, or MLX backend.")
             if backend == BACKEND.AUTO:
                 if torch.cuda.is_available() and selector_device_family(device) in (DEVICE.CUDA, DEVICE.ROCM):
                     backend = BACKEND.EXL3_EXLLAMA_V3
@@ -1408,9 +1545,10 @@ def ModelLoader(cls):
                 if selector_device_family(device) not in (DEVICE.CUDA, DEVICE.ROCM):
                     raise ValueError("EXL3 CUDA loading requires a CUDA/HIP device.")
         elif format_code == FORMAT.BITSANDBYTES:
-            if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES):
-                raise TypeError("FORMAT.BITSANDBYTES requires BACKEND.AUTO or BACKEND.BITSANDBYTES.")
-            backend = BACKEND.BITSANDBYTES
+            if backend not in (BACKEND.AUTO, BACKEND.BITSANDBYTES, BACKEND.MLX):
+                raise TypeError("FORMAT.BITSANDBYTES requires AUTO, BITSANDBYTES, or MLX backend.")
+            if backend == BACKEND.AUTO:
+                backend = BACKEND.BITSANDBYTES
 
         if export_quant_method == METHOD.AWQ and format_code in [FORMAT.GEMV_FAST, FORMAT.LLM_AWQ]:
             # GEMV_FAST and LLM_AWQ only supports torch.float16
@@ -1418,10 +1556,6 @@ def ModelLoader(cls):
             dtype = torch.float16
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
-
-        # inject adapter into qcfg
-        if adapter is not None:
-            qcfg.adapter = adapter
 
         qcfg.calculate_bits_per_weight()
 
@@ -1488,14 +1622,18 @@ def ModelLoader(cls):
             return instance
 
         if format_code == FORMAT.MARLIN:
-            # format marlin requires marlin kernel
+            # CUDA requires the matching Marlin kernel; MLX transcodes AWQ/GPTQ
+            # source packing into the native Metal layout during model loading.
             expected_marlin_backend = BACKEND.AWQ_MARLIN if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_MARLIN
             expected_marlin_backends = [expected_marlin_backend]
-            if backend not in expected_marlin_backends and backend != BACKEND.AUTO:
+            if backend == BACKEND.MLX:
+                pass
+            elif backend not in expected_marlin_backends and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
                 )
-            backend = expected_marlin_backend
+            else:
+                backend = expected_marlin_backend
 
         # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
         # check for marlin compat for cuda device only
@@ -1507,13 +1645,17 @@ def ModelLoader(cls):
         #         )
 
         if format_code == FORMAT.BITBLAS:
-            # format bitblas requires bitblas kernel
+            # CUDA requires BitBLAS; MLX transcodes the portable AWQ/GPTQ
+            # checkpoint tensors without importing the CUDA runtime.
             expected_backend = BACKEND.AWQ_BITBLAS if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_BITBLAS
-            if backend != expected_backend and backend != BACKEND.AUTO:
+            if backend == BACKEND.MLX:
+                pass
+            elif backend != expected_backend and backend != BACKEND.AUTO:
                 raise TypeError(
                     f"FORMAT.BITBLAS requires BACKEND.AUTO or BACKEND.{expected_backend.name}: actual = `{backend}`."
                 )
-            backend = expected_backend
+            else:
+                backend = expected_backend
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
@@ -1628,6 +1770,7 @@ def ModelLoader(cls):
             if native_gguf_qspec is not None:
                 gguf_tensor_key_mapping = _build_gguf_tensor_key_mapping(model, config)
 
+            dynamic_cache_stats_before = dynamic_override_cache_stats(qcfg.dynamic) if qcfg.dynamic else None
             effective_module_tree = cls._resolve_effective_module_tree(model, qcfg)
             if effective_module_tree is None:
                 raise ValueError(
@@ -1636,6 +1779,19 @@ def ModelLoader(cls):
 
             with cls._module_tree_context(effective_module_tree):
                 extract_layers_node = cls.extract_layers_node()
+                if qcfg.dynamic:
+                    planning_layer_modules = cls.full_layer_modules(
+                        model_config=config,
+                        is_awq_quantize=qcfg.method == METHOD.AWQ,
+                        include_capture_only=True,
+                    )
+                    configure_dynamic_override_cache_for_model(
+                        model, qcfg,
+                        layer_modules=planning_layer_modules,
+                        layer_prefixes=extract_layers_node,
+                    )
+                    model._gptqmodel_dynamic_cache_prepared_for = weakref.ref(qcfg)
+                    model._gptqmodel_dynamic_cache_stats_before = dynamic_cache_stats_before
                 # Get the first layer to determine layer type
                 layers, _ = get_layers_with_prefixes(model, extract_layers_node)
 
@@ -1683,16 +1839,23 @@ def ModelLoader(cls):
                 backend = normalize_backend(backend, quant_method=qcfg.method)
                 if backend == BACKEND.AUTO:
                     backend = BACKEND.GPTQ_TORCH
-                if backend not in (BACKEND.GPTQ_TORCH, BACKEND.GPTQ_TRITON):
+                if backend not in (
+                    BACKEND.GPTQ_TORCH,
+                    BACKEND.GPTQ_TRITON,
+                    BACKEND.GPTQ_W4AFP8,
+                    BACKEND.GPTQ_W4A_NVFP4,
+                ):
                     raise NotImplementedError(
-                        f"`rotation` is only supported with `gptq_torch` or `gptq_triton` backend, got `{backend}`."
+                        "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                        f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
                     )
 
             if format_code == FORMAT.EXL3:
                 if not isinstance(qcfg.tensor_storage, dict) or not qcfg.tensor_storage:
                     raise ValueError("EXL3 checkpoints require `quantization_config.tensor_storage` metadata.")
 
-                exl3_module_cls = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
+                exl3_module_cls = (ExllamaV3TorchLinear if backend in (BACKEND.EXL3_TORCH, BACKEND.MLX)
+                                   else ExllamaV3Linear)
                 replace_exllamav3_placeholders(
                     model=model,
                     module_names=list(qcfg.tensor_storage.keys()),
@@ -1898,7 +2061,7 @@ def ModelLoader(cls):
             return device_map
 
         log.info(f"Loader: device = {device}")
-        if True:
+        if explicit_device_map is None:
             layers, _ = get_layers_with_prefixes(model, extract_layers_node)
             num_gpus = _layerwise_device_count(device)
             device_map = build_layerwise_device_map(model, device, layers, ignore_modules, num_gpus)
@@ -2025,7 +2188,8 @@ def ModelLoader(cls):
             model = simple_dispatch_model(model, dispatch_device_map)
 
         if format_code == FORMAT.EXL3:
-            qlinear_kernel = ExllamaV3TorchLinear if backend == BACKEND.EXL3_TORCH else ExllamaV3Linear
+            qlinear_kernel = (ExllamaV3TorchLinear if backend in (BACKEND.EXL3_TORCH, BACKEND.MLX)
+                              else ExllamaV3Linear)
         else:
             qlinear_kernel = select_quant_linear(
                 bits=qcfg.runtime_bits,
@@ -2071,16 +2235,16 @@ def ModelLoader(cls):
                 )
 
             with tempfile.TemporaryDirectory() as temp_dir:
-                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, model, qcfg.to_dict(), cls.lm_head)
+                mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_local_path, model, qcfg.to_dict(), cls.lm_head)
+                if (mlx_config.pop("_gptqmodel_group16_runtime", False)
+                        or mlx_config.pop("_gptqmodel_custom_mlx_runtime", False)):
+                    model = mlx_weights
+                else:
+                    save_model(temp_dir, mlx_weights, donate_model=True)
+                    save_config(mlx_config, config_path=temp_dir + "/config.json")
+                    tokenizer.save_pretrained(temp_dir)
 
-                save_model(temp_dir, mlx_weights, donate_model=True)
-                save_config(mlx_config, config_path=temp_dir + "/config.json")
-                tokenizer.save_pretrained(temp_dir)
-
-                model, _ = load(temp_dir)
-
-                cls.generate = lambda _, **kwargs: mlx_generate(model=model, tokenizer=tokenizer, **kwargs)
-
+                    model, _ = load(temp_dir)
 
         instance = cls(
             model,
@@ -2093,8 +2257,12 @@ def ModelLoader(cls):
             model_local_path=model_local_path,
             effective_module_tree=effective_module_tree,
         )
+        if backend == BACKEND.MLX:
+            instance._runtime_generate = partial(mlx_generate, tokenizer=tokenizer)
         _setup_rotation_online_had(instance.model, qcfg.rotation)
         _set_paged_attention_safe_cuda_graphs(instance.model)
+        if qcfg.dynamic:
+            log_dynamic_override_cache_stats(instance._dynamic_cache_stats_before, dynamic=qcfg.dynamic)
         return instance
 
     cls.from_quantized = from_quantized

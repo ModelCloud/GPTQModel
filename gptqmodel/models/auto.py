@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 # ruff: noqa: I001
@@ -53,6 +53,7 @@ from ..nn_modules.qlinear.torch import TorchLinear  # noqa: E402
 from ..quantization import METHOD, QUANT_CONFIG_FILENAME, QuantizeConfig  # noqa: E402
 from ..utils import BACKEND, PROFILE  # noqa: E402
 from ..utils.backend import normalize_backend, normalize_profile  # noqa: E402
+from ..utils.env import env_flag  # noqa: E402
 from ..utils.hf import (  # noqa: E402
     get_hf_gguf_load_kwargs,
     normalize_model_id_or_path_for_hf_gguf,
@@ -61,8 +62,13 @@ from ..utils.hf import (  # noqa: E402
     resolve_trust_remote_code,
 )
 from ..utils.hub import list_repo_files  # noqa: E402
-from ..utils.model import find_modules  # noqa: E402
+from ..utils.linalg_warmup import (  # noqa: E402
+    kick_torch_linear_prewarm,
+    kick_torch_quantize_prewarm,
+)
+from ..utils.model import auto_dtype, find_modules  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
+from ._const import DEVICE  # noqa: E402
 from .base import BaseQModel  # noqa: E402
 from .loader import native_floatx_source_format  # noqa: E402
 from .definitions.afmoe import AfMoeQModel  # noqa: E402
@@ -117,6 +123,7 @@ from .definitions.gpt_neo import GptNeoQModel  # noqa: E402
 from .definitions.gpt_neox import GPTNeoXQModel  # noqa: E402
 from .definitions.gpt_oss import GPTOSSGPTQ  # noqa: E402
 from .definitions.gptj import GptJQModel  # noqa: E402
+from .definitions.granitemoe import GraniteMoeQModel
 from .definitions.granitemoehybrid import GraniteMoeHybridQModel
 from .definitions.grinmoe import GrinMoeQModel  # noqa: E402
 from .definitions.hrm_text import HrmTextQModel  # noqa: E402
@@ -133,6 +140,7 @@ from .definitions.intern_s2_preview import InternS2PreviewQModel  # noqa: E402
 from .definitions.interns1 import InternS1QModel  # noqa: E402
 from .definitions.internvl import InternVLQModel  # noqa: E402
 from .definitions.internvl_chat import InternVLChatQModel  # noqa: E402
+from .definitions.jamba import JambaQModel  # noqa: E402
 from .definitions.k2_horizon import K2HorizonQModel  # noqa: E402
 from .definitions.klear import KlearQModel  # noqa: E402
 from .definitions.kimi_k25 import KimiK25QModel  # noqa: E402
@@ -142,6 +150,7 @@ from .definitions.lfm2_moe import LFM2MoeQModel  # noqa: E402
 from .definitions.lfm2_vl import LFM2VLQModel  # noqa: E402
 from .definitions.llada2 import LLaDA2MoeQModel
 from .definitions.llama import LlamaQModel  # noqa: E402
+from .definitions.llava import LlavaQModel  # noqa: E402
 from .definitions.llama4 import Llama4QModel, Llama4TextQModel  # noqa: E402
 from .definitions.llava_qwen2 import LlavaQwen2QModel  # noqa: E402
 from .definitions.longcat_flash import LongCatFlashQModel  # noqa: E402
@@ -171,6 +180,7 @@ from .definitions.nemotron_h_puzzle import NemotronHPuzzleQModel  # noqa: E402
 from .definitions.nemotron_omni import NemotronOmniQModel  # noqa: E402
 from .definitions.olmo3 import Olmo3QModel  # noqa: E402
 from .definitions.olmoe import OlmoeQModel  # noqa: E402
+from .definitions.openvla import OpenVLAQModel  # noqa: E402
 from .definitions.opt import OptQModel  # noqa: E402
 from .definitions.ouro import OuroQModel  # noqa: E402
 from .definitions.ovis import OvisQModel  # noqa: E402
@@ -186,6 +196,7 @@ from .definitions.qwen import QwenQModel  # noqa: E402
 from .definitions.qwen2 import Qwen2QModel  # noqa: E402
 from .definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from .definitions.qwen2_5_vl import Qwen2_5_VLQModel  # noqa: E402
+from .definitions.qwen2_audio import Qwen2AudioGPTQ  # noqa: E402
 from .definitions.qwen2_moe import Qwen2MoeQModel  # noqa: E402
 from .definitions.qwen2_vl import Qwen2VLQModel  # noqa: E402
 from .definitions.qwen3 import Qwen3QModel  # noqa: E402
@@ -198,6 +209,7 @@ from .definitions.qwen4_exp import Qwen4ExpQModel, Qwen4ExpTextQModel  # noqa: E
 from .definitions.rw import RwgQModel  # noqa: E402
 from .definitions.solar_open import SolarOpenQModel  # noqa: E402
 from .definitions.solar_open2 import SolarOpen2QModel  # noqa: E402
+from .definitions.smolvlm import SmolVLMQModel  # noqa: E402
 from .definitions.spark2_5 import Spark2_5QModel  # noqa: E402
 from .definitions.starcoder2 import Starcoder2QModel  # noqa: E402
 from .definitions.telechat2 import TeleChat2QModel
@@ -244,6 +256,7 @@ MODEL_MAP = {
     "gpt2": GPT2QModel,
     "llama": LlamaQModel,
     "smollm3": LlamaQModel,  # llama-compatible quantization module tree
+    "smolvlm": SmolVLMQModel,
     "llama4": Llama4QModel,
     "llama4_text": Llama4TextQModel,
     "opt": OptQModel,
@@ -282,6 +295,7 @@ MODEL_MAP = {
     "hunyuan_v1_moe": HunYuanMoEV1QModel,
     "hunyuan_vl": HunYuanVLQModel,
     "hy_v3": HYV3QModel,
+    "jamba": JambaQModel,
     "k2_horizon": K2HorizonQModel,
     "qwen": QwenQModel,
     "mistral": LlamaQModel, # 100% llama clone
@@ -332,6 +346,7 @@ MODEL_MAP = {
     "qwen2_5_vl": Qwen2_5_VLQModel,
     "qwen2_5_vl_text": Qwen2_5_VLQModel,
     "qwen2_5_omni": Qwen2_5_OmniGPTQ,
+    "qwen2_audio": Qwen2AudioGPTQ,
     "qwen3_omni_moe": Qwen3OmniMoeGPTQ,
     "qwen3_vl": Qwen3_VLQModel,
     "qwen3_vl_moe": Qwen3_VL_MoeQModel,
@@ -357,12 +372,14 @@ MODEL_MAP = {
     "marin": Qwen3QModel,
     "mage_vl": MageVLQModel,
     "granite": LlamaQModel, # 100% llama clone
+    "granitemoe": GraniteMoeQModel,
     "granitemoehybrid": GraniteMoeHybridQModel,
     "mobilellm": MobileLLMQModel,
     "hymba": HymbaQModel,
     "olmo2": LlamaQModel, # 100% llama clone
     "olmo3": Olmo3QModel,
     "olmoe": OlmoeQModel,
+    "openvla": OpenVLAQModel,
     "ouro": OuroQModel,
     "ovis": OvisQModel,
     "ovis2": Ovis2QModel,
@@ -389,6 +406,7 @@ MODEL_MAP = {
     "gpt_oss": GPTOSSGPTQ,
     "longcat_flash": LongCatFlashQModel,
     "locateanything": LocateAnythingQModel,
+    "llava": LlavaQModel,
     "llava_qwen2": LlavaQwen2QModel,
     "nemotron_h": NemotronHQModel,
     "nemotron_h_puzzle": NemotronHPuzzleQModel,
@@ -473,6 +491,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.AWQ,
         METHOD.PARO,
         METHOD.QQQ,
+        METHOD.VPTQ,
         METHOD.EXL3,
     ):
         return True
@@ -486,6 +505,7 @@ def _is_supported_quantization_config(config: AutoConfig) -> bool:
         METHOD.AWQ,
         METHOD.PARO,
         METHOD.QQQ,
+        METHOD.VPTQ,
         METHOD.EXL3,
     ):
         return True
@@ -551,6 +571,97 @@ def check_and_get_model_definition(model_dir, trust_remote_code=False, **config_
     return MODEL_MAP[model_type]
 
 
+def _explicit_prewarm_dtype(kwargs) -> Optional[torch.dtype]:
+    """
+    Return the dtype the caller pinned explicitly, if any.
+
+    Only real `torch.dtype` values count: the loader's own dtype resolution ignores
+    string dtypes, so treating one as a decision here would warm the wrong dtype.
+    """
+    for key in ("dtype", "torch_dtype"):
+        value = kwargs.get(key)
+        if isinstance(value, torch.dtype):
+            return value
+    return None
+
+
+def _config_prewarm_dtype(model_cfg, target: torch.device) -> Optional[torch.dtype]:
+    """Mirror the loader's own dtype resolution so the prewarm warms the dtype the model will use."""
+    try:
+        family = DEVICE(target.type)
+        return auto_dtype(config=model_cfg, device=family, quant_inference=False)
+    except Exception as exc:
+        log.debug(f"linear prewarm dtype unresolved for {model_cfg}: {exc}")
+        return None
+
+
+def _resolve_prewarm_device(device, device_map) -> Optional[torch.device]:
+    candidates = []
+    if device is not None:
+        candidates.append(device)
+    if isinstance(device_map, str):
+        candidates.append(device_map)
+    elif isinstance(device_map, dict):
+        candidates.extend(device_map.values())
+    if not candidates:
+        # No explicit placement: the loader auto-selects the first accelerator.
+        return torch.device("cuda")
+    for candidate in candidates:
+        if isinstance(candidate, int):
+            candidate = f"cuda:{candidate}"
+        try:
+            resolved = torch.device(candidate)
+        except (RuntimeError, TypeError, ValueError):
+            continue
+        if resolved.type in ("cuda", "xpu", "npu"):
+            return resolved
+    return None
+
+
+def _kick_quantize_prewarms(device, device_map, kwargs, model_cfg=None) -> None:
+    """
+    Hide the one-time accelerator library and kernel inits behind the model load.
+
+    The first `linear` forward of the quantization pass otherwise pays the full
+    one-time library init inline (measured ~1.2 s on ROCm), and the first launch
+    of each distinct quantization kernel otherwise pays an accelerator module
+    load inline (measured 1.5 s of a 2.25 s cold pass on MI350X). Starting both
+    on background threads while the CPU-bound model load is still running moves
+    that cost off the critical path of the quantization pass.
+
+    Without `model_cfg` only an explicitly pinned dtype is warmed: the config that
+    decides the default dtype has not been read yet, and guessing a dtype would
+    spend the init on a warmup the first forward cannot use.
+    """
+    target = _resolve_prewarm_device(device, device_map)
+    if target is None:
+        return
+    dtype = _explicit_prewarm_dtype(kwargs)
+    if dtype is None and model_cfg is not None:
+        dtype = _config_prewarm_dtype(model_cfg, target)
+    if dtype is None:
+        return
+    kick_torch_linear_prewarm(target, dtype)
+    kick_torch_quantize_prewarm(target, dtype)
+
+
+def _prebuild_device_thread_pool() -> None:
+    """
+    Build the device thread pool before the quantization loop starts.
+
+    Pool construction kicks the one-time accelerator warmups on its workers (see
+    `DeviceThreadPool._kick_worker_warmups`). Building the pool at load time lets
+    those warmups overlap with the (CPU-bound) model load instead of serializing
+    in front of the first quantization task.
+    """
+    if not env_flag("GPTQMODEL_POOL_PREWARM", default=True):
+        return
+
+    from .. import get_device_thread_pool
+
+    get_device_thread_pool()
+
+
 class GPTQModel:
     def __init__(self):
         raise EnvironmentError(
@@ -558,6 +669,17 @@ class GPTQModel:
             "use `from_pretrained()` to load a pretrained model and prepare for quantization via `.quantize()`.\n"
             "use `from_quantized()` for inference with a post-quantized model."
         )
+
+    @staticmethod
+    def quantize_mlx(model_id_or_path: str, output_path: str, method: str = "gptq", **kwargs):
+        """Quantize a dense model directly in MLX and save an MLX-LM checkpoint.
+
+        This Apple silicon path uses a fused Metal GPTQ update or MLX-LM's
+        native AWQ implementation. It does not load a Torch model.
+        """
+        from ..quantization.mlx_native import quantize_mlx
+
+        return quantize_mlx(model_id_or_path, output_path, method=method, **kwargs)
 
     @classmethod
     def load(
@@ -569,8 +691,15 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ):
+        if quantize_config is not None:
+            _kick_quantize_prewarms(device, device_map, kwargs)
+            _prebuild_device_thread_pool()
+
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             kwargs,
@@ -635,9 +764,14 @@ class GPTQModel:
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
+                allow_remote_adapter=allow_remote_adapter,
+                adapter_revision=adapter_revision,
+                adapter_sha256=adapter_sha256,
                 **kwargs,
             )
         else:
+            if allow_remote_adapter or adapter_revision is not None or adapter_sha256 is not None:
+                raise ValueError("Remote adapter options are only valid when loading a quantized checkpoint.")
             m = cls.from_pretrained(
                 model_id_or_path=model_id_or_path,
                 quantize_config=quantize_config,
@@ -667,6 +801,14 @@ class GPTQModel:
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if quantize_config is not None:
+            _kick_quantize_prewarms(
+                model_init_kwargs.get("device"),
+                model_init_kwargs.get("device_map"),
+                model_init_kwargs,
+            )
+            _prebuild_device_thread_pool()
+
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
             model_id_or_path,
             model_init_kwargs,
@@ -702,6 +844,14 @@ class GPTQModel:
                            "`from_pretrained` with `quantize_config`.")
             return cls.from_quantized(model_id_or_path, trust_remote_code=trust_remote_code)
 
+        if quantize_config is not None:
+            _kick_quantize_prewarms(
+                model_init_kwargs.get("device"),
+                model_init_kwargs.get("device_map"),
+                model_init_kwargs,
+                config,
+            )
+
         if quantize_config and quantize_config.dynamic:
             log.warn(
                 "GPT-QModel's per-module `dynamic` quantization feature is fully supported in latest vLLM and SGLang but not yet available in hf transformers.")
@@ -731,6 +881,9 @@ class GPTQModel:
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
+            allow_remote_adapter: bool = False,
+            adapter_revision: Optional[str] = None,
+            adapter_sha256: Optional[str] = None,
             **kwargs,
     ) -> BaseQModel:
         model_id_or_path = normalize_model_id_or_path_for_hf_gguf(
@@ -765,6 +918,9 @@ class GPTQModel:
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,
             adapter=adapter,
+            allow_remote_adapter=allow_remote_adapter,
+            adapter_revision=adapter_revision,
+            adapter_sha256=adapter_sha256,
             **kwargs,
         )
 
@@ -808,7 +964,7 @@ class GPTQModel:
                 raise ValueError(
                     "MLX not installed. Please install via `pip install gptqmodel[mlx] --no-build-isolation`.")
 
-            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(model_id_or_path, gptq_model, gptq_config,
+            mlx_weights, mlx_config = convert_gptq_to_mlx_weights(gptq_model.model_local_path or model_id_or_path, gptq_model, gptq_config,
                                                                   gptq_model.lm_head)
 
             save_model(target_path, mlx_weights, donate_model=True)

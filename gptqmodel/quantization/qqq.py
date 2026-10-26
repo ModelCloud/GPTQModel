@@ -4,8 +4,11 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import math
+import platform
+import sys
 import threading
 import time
+from functools import lru_cache
 from typing import Dict, Optional
 
 import torch
@@ -14,18 +17,88 @@ from torch import nn
 
 from .. import QuantizeConfig
 from ..looper.named_module import NamedModule
-from ..quantization.config import FallbackStrategy, SmoothMSE
-from ..quantization.quantizer import HF_OPTIMUM
+from ..quantization.config import FallbackStrategy, MSEConfig, SmoothMSE
+from ..quantization.quantizer import HF_OPTIMUM, _mse_shrink_grid, _neutralize_dead_columns
 from ..utils import setup_logger
 from ..utils.device import get_device
+from ..utils.env import env_flag
 from .fallback_smooth import mse_optimal_quant, smooth_block
-from .gptq import get_number_of_rows_and_cols
+from .gptq import _uniform_column_group, get_number_of_rows_and_cols
 from .npu_linalg import npu_inverse_cholesky_factor
 
 
 DEBUG = False
 
 log = setup_logger()
+
+_MLX_QQQ_MIN_ELEMENTS = 4_194_304
+
+
+@lru_cache(maxsize=1)
+def _mlx_qqq_quantization_available() -> bool:
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    try:
+        import mlx.core  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _mlx_array_to_torch(value, device: torch.device) -> torch.Tensor:
+    return torch.from_dlpack(value).to(device=device).contiguous()
+
+
+def _qqq_quantize_weight_mlx_to_torch(
+    weight: torch.Tensor,
+    inverse_hessian: torch.Tensor,
+    *,
+    group_size: int,
+):
+    import mlx.core as mx
+
+    from .mlx_qqq import qqq_quantize_weight_mlx_with_loss
+
+    if weight.device.type == "mps":
+        torch.mps.synchronize()
+    result = qqq_quantize_weight_mlx_with_loss(
+        mx.from_dlpack(weight.contiguous()),
+        mx.from_dlpack(inverse_hessian.contiguous()),
+        group_size=group_size,
+    )
+    return tuple(
+        None if value is None else _mlx_array_to_torch(value, weight.device)
+        for value in result
+    )
+
+
+def _should_use_mlx_qqq_quantization(
+    weight: torch.Tensor,
+    inverse_hessian: Optional[torch.Tensor],
+    quantizer,
+    *,
+    group_size: int,
+    static_groups: bool,
+    blocksize: int,
+) -> bool:
+    expected_maxq = 7 if group_size == -1 else 15
+    return (
+        not DEBUG
+        and inverse_hessian is not None
+        and _mlx_qqq_quantization_available()
+        and weight.device.type in {"cpu", "mps"}
+        and inverse_hessian.device == weight.device
+        and weight.numel() >= _MLX_QQQ_MIN_ELEMENTS
+        and blocksize == 128
+        and group_size in {-1, 128}
+        and (group_size == -1 or weight.shape[1] % group_size == 0)
+        and not static_groups
+        and bool(quantizer.sym)
+        and not bool(quantizer.mse)
+        and int(quantizer.groupsize) == group_size
+        and quantizer._maxq_value == expected_maxq
+    )
+
 
 def quantize(x, scale, zero, maxq, sym, groupsize):
     if maxq < 0:
@@ -39,11 +112,19 @@ def quantize(x, scale, zero, maxq, sym, groupsize):
 
 
 class Quantizer(nn.Module):
-    def __init__(self, shape=1):
+    def __init__(self, qcfg: Optional[QuantizeConfig] = None, shape=1):
         super(Quantizer, self).__init__()
+        self.qcfg = qcfg
         self.register_buffer("maxq", torch.tensor(0))
+        # Host mirror of the ``maxq`` buffer. ``configure()`` is the only writer,
+        # so the block loop avoids a device-to-host scalar read per column.
+        self._maxq_value = 0
         self.register_buffer("scale", torch.zeros(shape))
         self.register_buffer("zero", torch.zeros(shape))
+        # Host mirror of ``ready()``. ``find_params`` is the only writer of the
+        # scale buffer, so callers in the quantization loop can avoid a
+        # device-to-host reduction before every quantize call.
+        self._params_ready = False
 
     def configure(
             self,
@@ -70,10 +151,12 @@ class Quantizer(nn.Module):
         self.maxshrink = maxshrink
         if trits:
             self.maxq = torch.tensor(-1)
+        self._maxq_value = int(self.maxq)
 
     def find_params(self, x, weight=False):
         dev = x.device
-        self.maxq = self.maxq.to(dev)
+        if self.maxq.device != dev:
+            self.maxq = self.maxq.to(dev)
 
         shape = x.shape
         if self.perchannel:
@@ -96,21 +179,19 @@ class Quantizer(nn.Module):
 
         if self.sym:
             xmax = torch.maximum(torch.abs(xmin), xmax)
-            tmp = xmin < 0
-            if torch.any(tmp):
-                xmin[tmp] = -xmax[tmp]
-        tmp = (xmin == 0) & (xmax == 0)
-        xmin[tmp] = -1
-        xmax[tmp] = +1
+            xmin = torch.where(xmin < 0, -xmax, xmin)
+        both_zero = (xmin == 0) & (xmax == 0)
+        xmin = torch.where(both_zero, xmin - 1, xmin)
+        xmax = torch.where(both_zero, xmax + 1, xmax)
 
-        if self.maxq < 0:
+        if self._maxq_value < 0:
             self.scale = xmax
             self.zero = xmin
         else:
             if self.groupsize != -1 or not self.sym:
                 self.scale = (xmax - xmin) / self.maxq
                 if self.sym:
-                    self.zero = torch.full_like(self.scale, (self.maxq + 1) / 2)
+                    self.zero = torch.full_like(self.scale, (self._maxq_value + 1) / 2)
                 else:
                     self.zero = torch.round(-xmin / self.scale)
             else:
@@ -118,34 +199,45 @@ class Quantizer(nn.Module):
                 self.zero = torch.zeros_like(self.scale)
 
         if self.mse:
-            best = torch.full([x.shape[0]], float("inf"), device=dev)
-            for i in range(int(self.maxshrink * self.grid)):
-                p = 1 - i / self.grid
-                xmin1 = p * xmin
-                xmax1 = p * xmax
+            steps = int(self.maxshrink * self.grid)
+            if steps > 0:
+                groupwise = self.groupsize == -1 and self.sym
+                # ``1 - i/grid`` in host float, rounded to ``xmin``'s dtype,
+                # reproduces the values the per-step loop got from ``p * xmin``.
+                p = torch.tensor(
+                    [1 - i / self.grid for i in range(steps)],
+                    dtype=xmin.dtype,
+                    device=dev,
+                ).unsqueeze(1)
+                xmin1 = p * xmin.unsqueeze(0)
+                xmax1 = p * xmax.unsqueeze(0)
                 scale1 = (
                     (xmax1 - xmin1) / self.maxq
-                    if (self.groupsize != -1 or not self.sym)
+                    if not groupwise
                     else xmax1 / self.maxq
                 )
-                zero1 = torch.round(-xmin1 / scale1) if not self.sym else self.zero
-                q = quantize(
-                    x,
-                    scale1.unsqueeze(1),
-                    zero1.unsqueeze(1),
-                    self.maxq,
-                    self.sym,
-                    self.groupsize,
+                zero1 = (
+                    torch.round(-xmin1 / scale1)
+                    if not self.sym
+                    else self.zero.unsqueeze(0).expand(steps, x.shape[0])
                 )
-                q -= x
-                q.abs_()
-                q.pow_(self.norm)
-                err = torch.sum(q, 1)
-                tmp = err < best
-                if torch.any(tmp):
-                    best[tmp] = err[tmp]
-                    self.scale[tmp] = scale1[tmp]
-                    self.zero[tmp] = zero1[tmp]
+                self.scale, self.zero = _mse_shrink_grid(
+                    x,
+                    scale1,
+                    zero1,
+                    float(self.norm),
+                    maxq_value=self._maxq_value,
+                    groupwise=groupwise,
+                    # QQQ's ``quantize`` never guarded zero scales; keep that.
+                    guard_zero_scale=False,
+                    scale=self.scale,
+                    zero=self.zero,
+                    grid_budget=(
+                        self.qcfg.mse.grid_budget
+                        if isinstance(getattr(self.qcfg, "mse", None), MSEConfig)
+                        else None
+                    ),
+                )
         if not self.perchannel:
             if weight:
                 tmp = shape[0]
@@ -153,6 +245,8 @@ class Quantizer(nn.Module):
                 tmp = shape[1] if len(shape) != 3 else shape[2]
             self.scale = self.scale.repeat(tmp)
             self.zero = self.zero.repeat(tmp)
+
+        self._params_ready = True
 
         if weight:
             shape = [-1] + [1] * (len(shape) - 1)
@@ -172,7 +266,7 @@ class Quantizer(nn.Module):
     def quantize(self, x):
         if self.ready():
             return quantize(
-                x, self.scale, self.zero, self.maxq, self.sym, self.groupsize
+                x, self.scale, self.zero, self._maxq_value, self.sym, self.groupsize
             )
         return x
 
@@ -180,7 +274,7 @@ class Quantizer(nn.Module):
         return self.maxq > 0
 
     def ready(self):
-        return torch.all(self.scale != 0)
+        return self._params_ready
 
 
 class QQQ:
@@ -236,7 +330,7 @@ class QQQ:
 
         self.nsamples = 0
 
-        self.quantizer = Quantizer()
+        self.quantizer = Quantizer(qcfg=self.qcfg)
 
         # fwd counter
         self.fwd_counter = 0
@@ -403,7 +497,7 @@ class QQQ:
 
         scale_extra = None
         if group_size != self.columns:
-            quantizer_extra = Quantizer()
+            quantizer_extra = Quantizer(qcfg=self.qcfg)
             quantizer_extra.configure(
                 bits=8,
                 perchannel=True,
@@ -503,7 +597,17 @@ class QQQ:
             blocksize=128,
     ):
         start = time.time()
-        from ..utils.fallback import resolve_fallback_strategy, resolve_threshold, should_use_fallback
+        if self.qcfg.desc_act:
+            raise ValueError(
+                "QQQ quantization does not support `desc_act=True`; "
+                "use `desc_act=False`."
+            )
+
+        from ..utils.fallback import (
+            resolve_fallback_strategy,
+            resolve_threshold,
+            should_use_fallback,
+        )
 
         resolved_strategy = resolve_fallback_strategy(self.fallback)
 
@@ -536,9 +640,7 @@ class QQQ:
 
         H = self.H
         del self.H
-        dead = torch.diag(H) == 0
-        H[dead, dead] = 1
-        W[:, dead] = 0
+        _neutralize_dead_columns(H, W)
 
         g_idx = []
         scale = []
@@ -560,9 +662,6 @@ class QQQ:
             W = W[:, perm]
             H = H[perm][:, perm]
             invperm = torch.argsort(perm)
-
-        Losses = torch.zeros_like(W)
-        Q = torch.zeros_like(W)
 
         damp = percdamp * torch.mean(torch.diag(H))
         diag = torch.arange(self.columns, device=H.device)
@@ -601,74 +700,198 @@ class QQQ:
             else:
                 raise
 
-        for i1 in range(0, self.columns, blocksize):
-            i2 = min(i1 + blocksize, self.columns)
-            count = i2 - i1
+        use_mlx = _should_use_mlx_qqq_quantization(
+            W,
+            Hinv,
+            self.quantizer,
+            group_size=groupsize,
+            static_groups=static_groups,
+            blocksize=blocksize,
+        )
+        scale_extra = None
+        if use_mlx:
+            Q, mlx_scale, mlx_zero, _, mlx_loss = (
+                _qqq_quantize_weight_mlx_to_torch(
+                    W,
+                    Hinv,
+                    group_size=groupsize,
+                )
+            )
+            scale.append(mlx_scale)
+            zero.append(mlx_zero)
+            loss_sum = float(mlx_loss.item())
+        else:
+            Losses = torch.zeros_like(W)
+            Q = torch.zeros_like(W)
 
-            W1 = W[:, i1:i2].clone()
-            Q1 = torch.zeros_like(W1)
-            Err1 = torch.zeros_like(W1)
-            Losses1 = torch.zeros_like(W1)
-            Hinv1 = Hinv[i1:i2, i1:i2]
+            # The eager path issues one tiny launch per column. On CUDA the
+            # shared GPTQ block-update kernel folds the whole 128-column block
+            # into a single launch; it implements the asymmetric `zero` form,
+            # so it is only used for grouped weights.
+            fused_block_update = None
+            if (
+                Hinv is not None
+                and W.device.type == "cuda"
+                and blocksize == 128
+                and groupsize != -1
+                and type(self.quantizer) is Quantizer
+                and not self.qcfg.mock_quantization
+                and not env_flag("GPTQMODEL_DISABLE_GPTQ_CUDA")
+            ):
+                from .gptq_cuda import block_update_available, gptq_block_update
 
-            for i in range(count):
-                w = W1[:, i]
-                d = Hinv1[i, i]
+                if block_update_available():
+                    fused_block_update = gptq_block_update
 
-                if groupsize != -1:
-                    if not static_groups:
-                        if (i1 + i) % groupsize == 0:
-                            self.quantizer.find_params(
-                                W[:, (i1 + i): (i1 + i + groupsize)], weight=True
-                            )
+            for i1 in range(0, self.columns, blocksize):
+                i2 = min(i1 + blocksize, self.columns)
+                count = i2 - i1
 
-                        if ((i1 + i) // groupsize) - now_idx == -1:
-                            scale.append(self.quantizer.scale)
-                            zero.append(self.quantizer.zero)
-                            now_idx += 1
+                W1 = W[:, i1:i2].clone()
+                # ``Q`` is written through the block view and ``Losses`` through its
+                # block slice; both are fully overwritten per block, so no staging
+                # copy or zero-fill is required.
+                Q1 = Q[:, i1:i2]
+                Err1 = torch.empty_like(W1)
+                Losses1 = Losses[:, i1:i2]
+                Hinv1 = Hinv[i1:i2, i1:i2]
+
+                if fused_block_update is not None and count == 128:
+                    # Group parameters depend on W, which the eager column loop
+                    # leaves untouched until the block finishes, so every group
+                    # boundary inside the block can be resolved before launch.
+                    uniform_group = i1 // groupsize == (i2 - 1) // groupsize and (
+                        not static_groups or not actorder
+                    )
+                    if uniform_group:
+                        # Every column of this block resolves to the same
+                        # quantizer group, so the per-column bookkeeping
+                        # collapses to one lookup and a constant group index.
+                        if not static_groups:
+                            if i1 % groupsize == 0:
+                                self.quantizer.find_params(
+                                    W[:, i1: i1 + groupsize], weight=True
+                                )
+
+                            if (i1 // groupsize) - now_idx == -1:
+                                scale.append(self.quantizer.scale)
+                                zero.append(self.quantizer.zero)
+                                now_idx += 1
+                        else:
+                            self.quantizer = groups[i1 // groupsize]
+
+                        block_scale = self.quantizer.scale.flatten().unsqueeze(0)
+                        block_zero = self.quantizer.zero.flatten().unsqueeze(0)
+                        column_group = _uniform_column_group(count, W.device)
                     else:
-                        idx = i1 + i
-                        if actorder:
-                            idx = perm[idx]
-                        self.quantizer = groups[idx // groupsize]
+                        block_scales = []
+                        block_zeros = []
+                        column_groups = []
+                        parameter_indices = {}
+                        for i in range(count):
+                            column = i1 + i
+                            if not static_groups:
+                                if column % groupsize == 0:
+                                    self.quantizer.find_params(
+                                        W[:, column: column + groupsize], weight=True
+                                    )
 
-                q = quantize(
-                    w.unsqueeze(1),
-                    self.quantizer.scale,
-                    self.quantizer.zero,
-                    self.quantizer.maxq,
-                    self.quantizer.sym,
-                    self.quantizer.groupsize,
-                ).flatten()
-                Q1[:, i] = q
-                Losses1[:, i] = (w - q) ** 2 / d ** 2
+                                if (column // groupsize) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = column
+                                if actorder:
+                                    idx = perm[idx]
+                                self.quantizer = groups[idx // groupsize]
 
-                err1 = (w - q) / d
-                W1[:, i:] -= err1.unsqueeze(1).matmul(Hinv1[i, i:].unsqueeze(0))
-                Err1[:, i] = err1
+                            key = id(self.quantizer.scale)
+                            group_index = parameter_indices.get(key)
+                            if group_index is None:
+                                group_index = len(block_scales)
+                                parameter_indices[key] = group_index
+                                block_scales.append(self.quantizer.scale.flatten())
+                                block_zeros.append(self.quantizer.zero.flatten())
+                            column_groups.append(group_index)
 
-            Q[:, i1:i2] = Q1
-            Losses[:, i1:i2] = Losses1 / 2
+                        block_scale = torch.stack(block_scales)
+                        block_zero = torch.stack(block_zeros)
+                        column_group = torch.tensor(
+                            column_groups, device=W.device, dtype=torch.int32
+                        )
+                    fused_block_update(
+                        W1,
+                        Hinv1,
+                        block_scale,
+                        block_zero,
+                        column_group,
+                        Q1,
+                        Err1,
+                        Losses1,
+                        self.quantizer._maxq_value,
+                    )
+                else:
+                    for i in range(count):
+                        w = W1[:, i]
+                        d = Hinv1[i, i]
 
-            W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+                        if groupsize != -1:
+                            if not static_groups:
+                                if (i1 + i) % groupsize == 0:
+                                    self.quantizer.find_params(
+                                        W[:, (i1 + i): (i1 + i + groupsize)], weight=True
+                                    )
 
-            if DEBUG:
-                self.layer.weight.data[:, :i2] = Q[:, :i2]
-                self.layer.weight.data[:, i2:] = W[:, i2:]
-                print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
-                print(torch.sum(Losses))
+                                if ((i1 + i) // groupsize) - now_idx == -1:
+                                    scale.append(self.quantizer.scale)
+                                    zero.append(self.quantizer.zero)
+                                    now_idx += 1
+                            else:
+                                idx = i1 + i
+                                if actorder:
+                                    idx = perm[idx]
+                                self.quantizer = groups[idx // groupsize]
 
-        torch.cuda.synchronize()
+                        q = quantize(
+                            w.unsqueeze(1),
+                            self.quantizer.scale,
+                            self.quantizer.zero,
+                            self.quantizer._maxq_value,
+                            self.quantizer.sym,
+                            self.quantizer.groupsize,
+                        ).flatten()
+                        Q1[:, i] = q
+                        Losses1[:, i] = (w - q) ** 2 / d ** 2
+
+                        err1 = (w - q) / d
+                        W1[:, i:] -= err1.unsqueeze(1).matmul(
+                            Hinv1[i, i:].unsqueeze(0)
+                        )
+                        Err1[:, i] = err1
+
+                Losses1.div_(2)
+
+                W[:, i2:] -= Err1.matmul(Hinv[i1:i2, i2:])
+
+                if DEBUG:
+                    self.layer.weight.data[:, :i2] = Q[:, :i2]
+                    self.layer.weight.data[:, i2:] = W[:, i2:]
+                    print(torch.sum((self.layer(self.inp1) - self.out1) ** 2))
+                    print(torch.sum(Losses))
+            loss_sum = torch.sum(Losses).item()
+            del Losses
+
         print("time %.2f" % (time.time() - tick))
-        print("error", torch.sum(Losses).item())
+        print("error", loss_sum)
 
         if Hinv is not None:
             del Hinv
             if self.nsamples != 0:
-                avg_loss = torch.sum(Losses).item() / self.nsamples
+                avg_loss = loss_sum / self.nsamples
 
                 if math.isnan(avg_loss):
-                    print("Losses sum item:", torch.sum(Losses).item())
+                    print("Losses sum item:", loss_sum)
                     if fallback_configured:
                         log.info(f"Quantization: Failed due to `NaN` loss for `{self.name}`, use mock quantization retry for `{self.name}`")
                         self.qcfg.mock_quantization = True
@@ -684,14 +907,11 @@ class QQQ:
         else:
             avg_loss = f"{resolved_strategy.value} fallback" if fallback_configured else 999999999
 
-        del Losses
-
         groupsize = groupsize if groupsize != -1 else self.columns
         if static_groups and actorder:
-            g_idx = [perm[i] // groupsize for i in range(self.columns)]
+            g_idx = (perm // groupsize).to(dtype=torch.int32, device=Q.device)
         else:
-            g_idx = [i // groupsize for i in range(self.columns)]
-        g_idx = torch.tensor(g_idx, dtype=torch.int32, device=Q.device)
+            g_idx = torch.arange(self.columns, dtype=torch.int32, device=Q.device) // groupsize
         if actorder:
             Q = Q[:, invperm]
             g_idx = g_idx[invperm]
@@ -724,9 +944,8 @@ class QQQ:
         Q = Q.to(device=self.layer.weight.data.device, non_blocking=False)
 
         # post int8 quant
-        scale_extra = None
-        if groupsize != self.columns:
-            quantizer_extra = Quantizer()
+        if scale_extra is None and groupsize != self.columns:
+            quantizer_extra = Quantizer(qcfg=self.qcfg)
             quantizer_extra.configure(
                 bits=8,
                 perchannel=True,

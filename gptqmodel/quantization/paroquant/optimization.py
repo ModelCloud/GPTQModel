@@ -19,10 +19,11 @@ from __future__ import annotations
 
 import math
 import random
+import warnings
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable, Literal, Optional, Sequence
+from typing import Iterable, Literal, Optional, Sequence, cast
 
 import torch
 import torch.nn.functional as F
@@ -35,6 +36,7 @@ from ...utils.paroquant import (
     apply_paroquant_rotation_autograd,
     build_identity_rotation_buffers,
 )
+from ...utils.rocm import IS_ROCM
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 
 
@@ -44,6 +46,9 @@ _PAROQUANT_OPTIMIZERS: tuple[str, ...] = ("adamw", "adam", "sgd")
 # Best-state snapshots are a separate memory policy from the always-fp32 live optimization path.
 _PAROQUANT_BEST_STATE_DTYPES: tuple[str, ...] = ("fp16", "bf16", "fp32")
 _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL = 8_000_000
+# Set once if the optional compiled accelerator is rejected at call time so the
+# rest of the process runs the eager reference path instead of aborting.
+_LARGE_TRAIN_QUANT_COMPILE_DISABLED = False
 
 
 def _normalize_opt_impl(name: str, *, field: str) -> str:
@@ -115,23 +120,11 @@ def _resolve_best_state_snapshot_dtype(
     return torch.float32
 
 
-def _snapshot_state_tensor(
-    tensor: torch.Tensor,
-    *,
-    target_device: Optional[torch.device] = None,
-    target_dtype: Optional[torch.dtype] = None,
-) -> torch.Tensor:
-    """Clone a state tensor, optionally moving it and casting floating tensors for compact snapshots."""
-    snapshot = tensor.detach()
-    cast_dtype = target_dtype if target_dtype is not None and snapshot.is_floating_point() else None
-    needs_move = target_device is not None and snapshot.device != target_device
-    needs_cast = cast_dtype is not None and snapshot.dtype != cast_dtype
-    if needs_move or needs_cast:
-        snapshot = snapshot.to(
-            device=target_device if target_device is not None else snapshot.device,
-            dtype=cast_dtype if cast_dtype is not None else snapshot.dtype,
-        )
-    return snapshot.clone()
+def _snapshot_state_dtype(tensor: torch.Tensor, target_dtype: Optional[torch.dtype]) -> torch.dtype:
+    """Resolve the snapshot dtype for one state tensor: floats compress, others pass through."""
+    if target_dtype is not None and tensor.is_floating_point():
+        return target_dtype
+    return tensor.dtype
 
 
 def _snapshot_model_state(
@@ -140,11 +133,35 @@ def _snapshot_model_state(
     target_device: Optional[torch.device] = None,
     target_dtype: Optional[torch.dtype] = None,
 ) -> dict[str, torch.Tensor]:
-    """Capture a model state dict with optional float-only dtype compression for best-state snapshots."""
-    return {
-        key: _snapshot_state_tensor(tensor, target_device=target_device, target_dtype=target_dtype)
-        for key, tensor in model.state_dict().items()
-    }
+    """Capture a model state dict with optional float-only dtype compression for best-state snapshots.
+
+    Every entry is a fresh tensor, so later in-place updates of the live state
+    cannot leak into the snapshot. The copies are batched per (device, dtype)
+    group through ``torch._foreach_copy_``, which costs one launch per group
+    instead of one cast plus one clone per tensor.
+    """
+    state = model.state_dict()
+    if not state:
+        return {}
+    keys = list(state)
+    sources = [state[key] for key in keys]
+    snapshots = [
+        torch.empty(
+            tuple(source.shape),
+            dtype=_snapshot_state_dtype(source, target_dtype),
+            device=target_device if target_device is not None else source.device,
+        )
+        for source in sources
+    ]
+    groups: dict[tuple[torch.device, torch.dtype, torch.dtype], list[int]] = {}
+    for index, (source, snapshot) in enumerate(zip(sources, snapshots)):
+        groups.setdefault((snapshot.device, snapshot.dtype, source.dtype), []).append(index)
+    for indices in groups.values():
+        torch._foreach_copy_(
+            [snapshots[index] for index in indices],
+            [sources[index] for index in indices],
+        )
+    return dict(zip(keys, snapshots))
 
 
 def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
@@ -154,9 +171,45 @@ def _quantizer_sym_for_impl(sym: bool, quantizer_impl: str) -> bool:
     return bool(sym)
 
 
+class _RoundSTE(torch.autograd.Function):
+    """Round with a straight-through gradient of exactly one.
+
+    This is the autograd-node form of ``(x.round() - x).detach() + x``. Folding the
+    detach algebra into the node keeps the forward at a single ``round`` kernel and
+    makes the backward a pure pass-through. The detach formulation pays the
+    subtract and add kernels in the forward plus an accumulation kernel in the
+    backward, and ParoQuant runs one optimizer step per calibration batch per
+    module, so every one of those launches sits on the launch-bound critical path.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor) -> torch.Tensor:
+        return x.round()
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
+        return grad_output
+
+
+class _ClampSTE(torch.autograd.Function):
+    """Clamp with a straight-through gradient of exactly one.
+
+    This is the autograd-node form of ``(x.clamp(min, max) - x).detach() + x``: the
+    forward value is the plain clamp and the backward is a pure pass-through.
+    """
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, min_value, max_value) -> torch.Tensor:
+        return x.clamp(min_value, max_value)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        return grad_output, None, None
+
+
 def _round_ste(x: torch.Tensor) -> torch.Tensor:
     """Apply a straight-through round so gradients flow through quantization."""
-    return (x.round() - x).detach() + x
+    return _RoundSTE.apply(x)
 
 
 def _checkpointed_forward(function, *args: torch.Tensor, enabled: bool = False) -> torch.Tensor:
@@ -172,7 +225,243 @@ def _clamp_ste(
     max_value: float | int | None = None,
 ) -> torch.Tensor:
     """Clamp with a straight-through estimator to stabilize learned qparams."""
-    return (x.clamp(min_value, max_value) - x).detach() + x
+    return _ClampSTE.apply(x, min_value, max_value)
+
+
+class _AffineQuantDequantSTE(torch.autograd.Function):
+    """Fused asymmetric pseudo-quantize/dequantize with straight-through gradients.
+
+    The affine branch of ``pseudo_quantize_dequant`` is the branch ParoQuant
+    actually runs: ``_quantizer_sym_for_impl`` returns ``False`` for the default
+    ``reference`` quantizer implementation, so the composed reference graph
+    (``clamp`` -> ``neg`` -> ``round`` -> ``clamp`` -> ``div`` -> ``round`` ->
+    ``add`` -> ``clamp`` -> ``sub`` -> ``mul`` plus three STE nodes) is what every
+    calibration optimizer step evaluates. Composing it out of a dozen autograd
+    nodes costs fifteen backward kernels per call for what is a per-group
+    elementwise transform, and the group stage runs thousands of those calls.
+
+    Fusing the transform into a single node keeps the forward value and every
+    parameter gradient bitwise identical to the composed graph while collapsing
+    the backward to the kernels the algebra actually needs. With ``s`` the
+    bounded scale, ``rzp`` the rounded zero point, ``d = w / s`` the scaled
+    weight and ``q`` the integer codes, the composed graph's straight-through
+    gradients are::
+
+        grad_w     = (grad_out * s) / s
+        grad_scale = sum(grad_out * (q - rzp)) + sum(grad_out * s * (-d / s))
+        grad_zp    = 0
+
+    ``grad_zero_point_float`` is exactly zero in the composed graph as well: the
+    rounded zero point enters the output once additively (through ``q``) and once
+    subtractively (through ``q - rzp``), and both straight-through paths cancel
+    elementwise. The fused node returns that explicit zero tensor instead of
+    ``None`` so the optimizer still sees a (zero) gradient for the parameter and
+    keeps its weight-decay behavior.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        weight: torch.Tensor,
+        scale: torch.Tensor,
+        zero_point_float: torch.Tensor,
+        qmin: int,
+        qmax: int,
+        group_size: int,
+    ) -> torch.Tensor:
+        view = weight.reshape(-1, group_size)
+        bounded_scale = scale.clamp(min=1e-5, max=1e5)
+        round_zero_point = (-zero_point_float).round().clamp(qmin, qmax)
+        scaled = view / bounded_scale
+        quant = (scaled.round() + round_zero_point).clamp(qmin, qmax)
+        centered = quant - round_zero_point
+        ctx.save_for_backward(scaled, bounded_scale, centered)
+        ctx.group_size = group_size
+        ctx.zero_point_shape = zero_point_float.shape
+        return (centered * bounded_scale).reshape_as(weight)
+
+    @staticmethod
+    def backward(ctx, grad_output: torch.Tensor):
+        scaled, bounded_scale, centered = ctx.saved_tensors
+        grad_view = grad_output.reshape(-1, ctx.group_size)
+        grad_scaled = grad_view * bounded_scale
+        grad_weight = grad_scaled / bounded_scale
+        grad_scale = (grad_view * centered).sum(dim=1, keepdim=True) + (grad_scaled * (-scaled / bounded_scale)).sum(
+            dim=1, keepdim=True
+        )
+        grad_zero_point = grad_scale.new_zeros(ctx.zero_point_shape)
+        return grad_weight.reshape_as(grad_output), grad_scale, grad_zero_point, None, None, None
+
+
+@lru_cache(maxsize=1)
+def _get_triton_affine_kernels():
+    """Import the Triton affine-STE kernels lazily, or ``None`` when unusable.
+
+    Importing Triton costs hundreds of milliseconds and is only worthwhile on the
+    training-time affine path, so the import is deferred until the first fused
+    call and cached for the process.
+    """
+    try:
+        from gptqmodel.quantization.paroquant.modules.triton import affine_ste
+    except Exception:
+        return None
+    if not affine_ste.affine_quant_dequant_ste_available():
+        return None
+    return affine_ste
+
+
+@lru_cache(maxsize=1)
+def _get_triton_sym_kernels():
+    """Import the Triton symmetric-STE kernels lazily, or ``None`` when unusable.
+
+    Importing Triton costs hundreds of milliseconds and is only worthwhile on the
+    training-time symmetric path, so the import is deferred until the first fused
+    call and cached for the process.
+    """
+    try:
+        from gptqmodel.quantization.paroquant.modules.triton import sym_ste
+    except Exception:
+        return None
+    if not sym_ste.sym_quant_dequant_ste_available():
+        return None
+    return sym_ste
+
+
+def _affine_quant_dequant_ste_fused(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    zero_point_float: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+) -> Optional[torch.Tensor]:
+    """Route the asymmetric STE path through the fused node when it is provably equivalent.
+
+    The fused node reproduces the composed reference graph bit for bit, but only
+    under the shapes and dtypes that graph is spelled for: float32 CUDA tensors,
+    per-group ``(groups, 1)`` qparams, and an enabled autograd graph with at
+    least one differentiable input. Everything else keeps the eager reference so
+    no caller silently changes semantics.
+
+    On hosts with Triton the same arithmetic runs in one kernel per direction
+    instead of twenty launches. ``torch.compile`` keeps the pure-torch node: the
+    compiled large-tensor path already fuses this region, and Inductor is the
+    only tracer that has to agree with the graph.
+
+    Value-only callers -- the calibration loop evaluates the replayed model under
+    ``torch.no_grad()`` -- have no graph to fuse, but they still pay the composed
+    graph's ten launches per call. Those calls take the fused Triton forward
+    without its autograd node; the value is the same either way, and without
+    Triton the eager reference is already as cheap as the torch node's forward.
+    """
+    if weight.device.type != "cuda" or weight.dtype != torch.float32:
+        return None
+    if scale.dtype != torch.float32 or zero_point_float.dtype != torch.float32:
+        return None
+    numel = weight.numel()
+    if numel == 0 or numel % group_size != 0:
+        return None
+    groups = numel // group_size
+    if tuple(scale.shape) != (groups, 1) or tuple(zero_point_float.shape) != (groups, 1):
+        return None
+    grad_enabled = torch.is_grad_enabled()
+    differentiable = weight.requires_grad or scale.requires_grad or zero_point_float.requires_grad
+    if not grad_enabled or not differentiable:
+        if grad_enabled or torch.compiler.is_compiling():
+            return None
+        kernels = _get_triton_affine_kernels()
+        if kernels is None:
+            return None
+        return kernels.affine_quant_dequant_ste_forward(
+            weight,
+            scale,
+            zero_point_float,
+            qmin=0,
+            qmax=2**bits - 1,
+            group_size=group_size,
+        )
+    if not torch.compiler.is_compiling():
+        kernels = _get_triton_affine_kernels()
+        if kernels is not None:
+            fused = kernels.affine_quant_dequant_ste(
+                weight,
+                scale,
+                zero_point_float,
+                qmin=0,
+                qmax=2**bits - 1,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
+    return _AffineQuantDequantSTE.apply(weight, scale, zero_point_float, 0, 2**bits - 1, group_size)
+
+
+def _sym_quant_dequant_ste_fused(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+    *,
+    bits: int,
+    group_size: int,
+) -> Optional[torch.Tensor]:
+    """Route the symmetric STE path through the fused node when it is provably equivalent.
+
+    The fused node reproduces the composed reference graph bit for bit, but only
+    under the shapes and dtypes that graph is spelled for: float32 CUDA tensors,
+    a contiguous per-group ``(groups, 1)`` scale, and an enabled autograd graph
+    with at least one differentiable input. Everything else keeps the eager
+    reference so no caller silently changes semantics.
+
+    On hosts with Triton the same arithmetic runs in one kernel per direction
+    instead of fifteen launches. ``torch.compile`` keeps the pure-torch graph:
+    the compiled large-tensor path already fuses this region, and Inductor is the
+    only tracer that has to agree with the graph.
+
+    Value-only callers -- the calibration loop evaluates the replayed model under
+    ``torch.no_grad()`` -- have no graph to fuse, but they still pay the composed
+    graph's five launches per call. Those calls take the fused Triton forward
+    without its autograd node; the value is the same either way, and without
+    Triton the eager reference is already as cheap as the torch node's forward.
+    """
+    if weight.device.type != "cuda" or weight.dtype != torch.float32:
+        return None
+    if scale.dtype != torch.float32 or not scale.is_contiguous():
+        return None
+    numel = weight.numel()
+    if numel == 0 or numel % group_size != 0:
+        return None
+    groups = numel // group_size
+    if tuple(scale.shape) != (groups, 1):
+        return None
+    qmin = -(2 ** (bits - 1))
+    qmax = 2 ** (bits - 1) - 1
+    grad_enabled = torch.is_grad_enabled()
+    differentiable = weight.requires_grad or scale.requires_grad
+    if not grad_enabled or not differentiable:
+        if grad_enabled or torch.compiler.is_compiling():
+            return None
+        kernels = _get_triton_sym_kernels()
+        if kernels is None:
+            return None
+        return kernels.sym_quant_dequant_ste_forward(
+            weight,
+            scale,
+            qmin=qmin,
+            qmax=qmax,
+            group_size=group_size,
+        )
+    if not torch.compiler.is_compiling():
+        kernels = _get_triton_sym_kernels()
+        if kernels is not None:
+            fused = kernels.sym_quant_dequant_ste(
+                weight,
+                scale,
+                qmin=qmin,
+                qmax=qmax,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
+    return None
 
 
 def _normalize_group_size(group_size: int, in_features: int) -> int:
@@ -770,6 +1059,14 @@ def pseudo_quantize_dequant(
         if scale is None:
             scale = weight_view.abs().amax(dim=1, keepdim=True).clamp(min=1e-5) / qmax
         if use_ste:
+            fused = _sym_quant_dequant_ste_fused(
+                weight,
+                scale,
+                bits=bits,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             quant = _clamp_ste(_round_ste(weight_view / scale), qmin, qmax)
             dequant = quant * scale
@@ -783,6 +1080,15 @@ def pseudo_quantize_dequant(
         if scale is None or zero_point_float is None:
             scale, zero_point_float = _calc_affine_qparams(weight, group_size=group_size, bits=bits)
         if use_ste:
+            fused = _affine_quant_dequant_ste_fused(
+                weight,
+                scale,
+                zero_point_float,
+                bits=bits,
+                group_size=group_size,
+            )
+            if fused is not None:
+                return fused
             scale = _clamp_ste(scale, min_value=1e-5, max_value=1e5)
             round_zero_point = _clamp_ste(-_round_ste(zero_point_float), qmin, qmax)
             quant = _round_ste(weight_view / scale) + round_zero_point
@@ -804,7 +1110,14 @@ def _get_large_train_quant_compile():
     if compile_fn is None:
         return None
     try:
-        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True)
+        # `dynamic=True` builds one shape-generic graph instead of a specialized
+        # graph per layer shape. Transformer layers come in many distinct shapes,
+        # and under `fullgraph=True` every new shape is a Dynamo recompilation, so
+        # a handful of large layers is enough to exhaust the recompile limit and
+        # hard-fail the entire quantization lifecycle. The compiled region here is
+        # elementwise, so the dynamic graph is numerically identical to the
+        # specialized one.
+        return compile_fn(pseudo_quantize_dequant, mode="default", fullgraph=True, dynamic=True)
     except Exception:
         return None
 
@@ -820,8 +1133,11 @@ def _maybe_compile_large_train_quant(
     use_ste: bool = True,
 ) -> torch.Tensor:
     """Compile only large training-time quant calls where the compile tax amortizes."""
+    global _LARGE_TRAIN_QUANT_COMPILE_DISABLED
+
     should_compile = (
         bool(use_ste)
+        and not _LARGE_TRAIN_QUANT_COMPILE_DISABLED
         and weight.device.type == "cuda"
         and weight.numel() >= _PAROQUANT_LARGE_TRAIN_QUANT_COMPILE_MIN_NUMEL
         and env_flag("GPTQMODEL_PAROQUANT_OPT_LARGE_TRAIN_QUANT_COMPILE", default=True)
@@ -829,15 +1145,27 @@ def _maybe_compile_large_train_quant(
     if should_compile:
         compiled = _get_large_train_quant_compile()
         if compiled is not None:
-            return compiled(
-                weight,
-                bits=bits,
-                group_size=group_size,
-                sym=sym,
-                scale=scale,
-                zero_point_float=zero_point_float,
-                use_ste=use_ste,
-            )
+            try:
+                return compiled(
+                    weight,
+                    bits=bits,
+                    group_size=group_size,
+                    sym=sym,
+                    scale=scale,
+                    zero_point_float=zero_point_float,
+                    use_ste=use_ste,
+                )
+            except Exception as exc:
+                # The compiled path is an optional accelerator on top of a
+                # default-on optimization. If Dynamo rejects this call, degrade to
+                # the eager reference for the rest of the process rather than
+                # aborting the quantization lifecycle.
+                _LARGE_TRAIN_QUANT_COMPILE_DISABLED = True
+                warnings.warn(
+                    "ParoQuant: disabling the compiled large-train quant path after "
+                    f"{type(exc).__name__}; falling back to the eager path. Reason: {exc}",
+                    stacklevel=2,
+                )
     return pseudo_quantize_dequant(
         weight,
         bits=bits,
@@ -881,6 +1209,12 @@ class _ParoQuantOptimLinear(nn.Module):
             )
         self.register_buffer("pairs", pairs)
         self.register_buffer("theta_mask", theta_mask)
+        # ``reset_masked_angles`` runs once per optimizer step, and the fill is
+        # only observable when the padded-pair layout actually reserved a dummy
+        # angle slot. The mask is structural, so deciding that once here keeps
+        # the per-step path launch-free for the fully-packed layouts that every
+        # default ParoQuant configuration produces.
+        self._theta_mask_active = bool(theta_mask.any().item())
         self.weight = nn.Parameter(weight.clone())
         self.bias = None if bias is None else nn.Parameter(bias.clone())
         self.theta = nn.Parameter(torch.zeros((pairs.shape[0], weight.shape[1] // 2), device=weight.device, dtype=weight.dtype))
@@ -905,23 +1239,40 @@ class _ParoQuantOptimLinear(nn.Module):
             )
         return scales.clamp(min=self.scale_clamp_min, max=self.scale_clamp_max)
 
-    def transformed_weight(self, *, use_ste: bool = True) -> torch.Tensor:
+    def transformed_weight(
+        self,
+        *,
+        use_ste: bool = True,
+        channel_scales: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         """Project the learnable weight into ParoQuant's transformed domain."""
         # Keep training-time scale updates differentiable while preventing
         # near-zero / exploding channel scales from destabilizing the transform.
-        scaled_weight = self.weight * self._safe_channel_scales(use_ste=use_ste)
+        # `channel_scales` is a pure function of `channel_scales_opt`, so callers
+        # that need it more than once per step can evaluate it once and hand the
+        # same tensor down instead of rebuilding the STE clamp every time.
+        if channel_scales is None:
+            channel_scales = self._safe_channel_scales(use_ste=use_ste)
+        # Hand the channel scales to the fused rotation instead of materializing a
+        # scaled copy of the full weight first. The fused kernel already applies a
+        # per-column scale while loading each group into shared memory, so
+        # ``rotate(weight * scales)`` and ``rotate(weight, scales=scales)`` are the
+        # same arithmetic with one full-weight multiply and one full-weight
+        # intermediate removed from every optimization step. The fused backward
+        # derives ``grad_scale`` from the already un-rotated gradient, so the
+        # parameter gradients are identical to the pre-multiplied formulation.
         return _apply_rotation(
-            scaled_weight,
+            self.weight,
             self.pairs,
             self.theta,
-            scales=None,
+            scales=channel_scales,
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
 
-    def quantized_transformed_weight(self) -> torch.Tensor:
+    def quantized_transformed_weight(self, *, channel_scales: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Pseudo-quantize the transformed weight using current learned qparams."""
-        transformed = self.transformed_weight(use_ste=True)
+        transformed = self.transformed_weight(use_ste=True, channel_scales=channel_scales)
         if self.quantizer is None:
             return _maybe_compile_large_train_quant(
                 transformed,
@@ -933,7 +1284,8 @@ class _ParoQuantOptimLinear(nn.Module):
 
     def pseudo_weight(self) -> torch.Tensor:
         """Map the transformed-domain quantized weight back to runtime input space."""
-        quantized = self.quantized_transformed_weight()
+        channel_scales = self._safe_channel_scales(use_ste=True)
+        quantized = self.quantized_transformed_weight(channel_scales=channel_scales)
         quantized = _apply_inverse_rotation(
             quantized,
             self.pairs,
@@ -941,7 +1293,6 @@ class _ParoQuantOptimLinear(nn.Module):
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
-        channel_scales = self._safe_channel_scales(use_ste=True)
         return quantized / channel_scales
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -953,7 +1304,8 @@ class _ParoQuantOptimLinear(nn.Module):
         # Rotate the minibatch instead of reconstructing full pseudo-weights on
         # every step. This preserves the runtime contract while shrinking the
         # per-step rotation work from weight-sized tensors to batch-sized ones.
-        runtime_scales = self._safe_channel_scales(use_ste=True).reciprocal()
+        channel_scales = self._safe_channel_scales(use_ste=True)
+        runtime_scales = channel_scales.reciprocal()
         rotated_inputs = _apply_rotation(
             x_2d,
             self.pairs,
@@ -962,13 +1314,19 @@ class _ParoQuantOptimLinear(nn.Module):
             group_size=self.group_size,
             fused_rotation=self.fused_rotation,
         )
-        outputs = F.linear(rotated_inputs, self.quantized_transformed_weight(), self.bias)
+        outputs = F.linear(
+            rotated_inputs,
+            self.quantized_transformed_weight(channel_scales=channel_scales),
+            self.bias,
+        )
         if x.dim() > 2:
             return outputs.view(*original_shape[:-1], outputs.shape[-1])
         return outputs
 
     def reset_masked_angles(self) -> None:
         """Force dummy padded pairs to stay at zero angle during optimization."""
+        if not self._theta_mask_active:
+            return
         with torch.no_grad():
             self.theta.masked_fill_(self.theta_mask, 0)
 
@@ -1102,6 +1460,83 @@ def _evaluate_model(
         return float(loss.item())
 
 
+def _fold_epoch_loss(
+    accumulator: Optional[torch.Tensor],
+    loss: torch.Tensor,
+) -> torch.Tensor:
+    """Fold one optimizer-step loss into the running epoch total without a device sync.
+
+    ``epoch_loss += float(loss.item())`` reads the loss back to the host on every
+    optimizer step, and a scalar read on CUDA synchronizes the stream. ParoQuant
+    runs one optimizer step per calibration batch and every stage is launch-bound,
+    so that sync costs more than the kernels it waits on and stops the host from
+    running ahead of the device. Keeping the running total on the device as an
+    fp64 scalar and reading it once per epoch removes the per-step sync.
+
+    The accumulation is fp64 over the exact fp32 step losses, folded in the same
+    order the host used to fold them, so the epoch mean that reaches the result
+    metadata is bitwise identical to the per-step host sum it replaces.
+
+    The fold itself is in-place once the accumulator exists: ``accumulator + step``
+    materializes the fp32-to-fp64 cast and the add as two kernels per optimizer
+    step, while ``add_`` promotes the incoming step loss to the accumulator's
+    dtype inside a single kernel. The accumulator is private to the stage loop and
+    the first fold allocates with ``copy=True`` so it can never alias the live
+    loss, which makes the in-place write invisible to every caller.
+    """
+    step_loss = loss.detach()
+    if accumulator is None:
+        return step_loss.to(torch.float64, copy=True)
+    accumulator.add_(step_loss)
+    return accumulator
+
+
+_SCALAR_BACKWARD_SEEDS: dict[tuple[object, ...], torch.Tensor] = {}
+
+
+def _scalar_backward_seed(loss: torch.Tensor) -> Optional[torch.Tensor]:
+    """Return a reusable unit seed for a one-element loss backward, or ``None``.
+
+    ``torch.autograd.backward`` seeds an implicit-gradient call with
+    ``torch.ones_like`` of the output, so every optimizer step spends one fill
+    launch on a single element before any real gradient work starts. ParoQuant
+    runs one optimizer step per calibration batch over two stages per layer and
+    every stage is launch-bound on MI350X, so that seed is worth caching.
+
+    The seed is only ever read: the engine hands it to the first backward node as
+    ``grad_output``, and no backward in this pipeline writes into its incoming
+    gradient. One tensor per (device, dtype, shape) therefore serves every step,
+    and keying the cache on those three keeps a stage that switches device or
+    dtype from reusing a seed of the wrong kind.
+
+    Anything that is not a real tensor -- a duck-typed scaler double, for
+    instance -- is left to its own ``backward``.
+    """
+    if not isinstance(loss, torch.Tensor) or not loss.requires_grad or loss.numel() != 1:
+        return None
+    key = (loss.device, loss.dtype, tuple(loss.shape))
+    seed = _SCALAR_BACKWARD_SEEDS.get(key)
+    if seed is None:
+        seed = torch.ones_like(loss)
+        _SCALAR_BACKWARD_SEEDS[key] = seed
+    return seed
+
+
+def _backward_scalar_loss(loss: torch.Tensor) -> None:
+    """Run the backward of a one-element loss without materialising a fresh seed.
+
+    ``loss.backward()`` stays the fallback for every case the cache cannot serve
+    -- non-scalar losses, frozen graphs, or a loss that does not require grad --
+    so the call site keeps the exact semantics of the call it replaces while the
+    steady state saves one fill launch per optimizer step.
+    """
+    seed = _scalar_backward_seed(loss)
+    if seed is None:
+        loss.backward()
+        return
+    torch.autograd.backward(loss, seed)
+
+
 def _normalize_optimizer_param_groups(
     param_groups: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -1124,7 +1559,57 @@ def _normalize_optimizer_param_groups(
                 "nesterov": bool(param_group.get("nesterov", False)),
             }
         )
-    return normalized_groups
+    return _merge_identical_optimizer_param_groups(normalized_groups)
+
+
+def _merge_identical_optimizer_param_groups(
+    normalized_groups: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Fold param groups that agree on every hyperparameter into one group.
+
+    ``torch.optim.AdamW`` runs the fused CUDA step once per ``(device, dtype)``
+    grouping of the tensor list it is handed, and each of those calls is
+    surrounded by a per-call ``_foreach_add_``/``_foreach_sub_`` on the step
+    counters. Those three launches are per *call*, not per tensor, so ParoQuant's
+    rotation stage -- which splits ``channel_scales_opt`` and ``theta`` into two
+    groups that carry byte-identical hyperparameters because both train at
+    ``rotation_lr`` -- pays three extra launches on every optimizer step for two
+    one-tensor lists that one grouped call would already process independently.
+    ParoQuant runs one optimizer step per calibration batch per stage, and both
+    stages are launch-bound, so the split is pure launch overhead.
+
+    The fold is only applied when the groups agree on every value AdamW reads
+    (``lr``, ``weight_decay``, ``betas``, ``eps``, ``amsgrad`` and the SGD
+    fields) *and* on the exact set of ``(device, dtype)`` pairs their tensors
+    resolve to. AdamW derives each tensor's update from its own group scalars
+    and never mixes values across tensors in a list, so merging identical-scalar
+    groups leaves every parameter update bitwise unchanged; keeping the device
+    and dtype signature in the key means the number of fused calls, and their
+    grouping, is unchanged for groups that would not have shared one.
+    """
+    merged: list[dict[str, object]] = []
+    merged_index: dict[tuple[object, ...], int] = {}
+    for group in normalized_groups:
+        params = cast("list[nn.Parameter]", group["params"])
+        key = (
+            group["lr"],
+            group["weight_decay"],
+            group["betas"],
+            group["eps"],
+            group["amsgrad"],
+            group["momentum"],
+            group["dampening"],
+            group["nesterov"],
+            tuple(sorted({(param.device.type, str(param.dtype)) for param in params})),
+        )
+        index = merged_index.get(key)
+        if index is None:
+            merged_index[key] = len(merged)
+            merged.append(group)
+            continue
+        existing = cast("list[nn.Parameter]", merged[index]["params"])
+        merged[index]["params"] = [*existing, *params]
+    return merged
 
 
 def _optimizer_param_groups_support_fused(
@@ -1224,6 +1709,19 @@ def build_paroquant_optimizer(
     raise AssertionError(f"Unhandled ParoQuant optimizer `{normalized_name}`.")
 
 
+def _resolve_stage_use_amp(inputs_train: torch.Tensor, use_amp: Optional[bool]) -> bool:
+    """Resolve the requested AMP mode against the stage device.
+
+    ``None`` means auto: ROCm hosts skip AMP because the autocast overhead was
+    measured slower (and no more accurate) than the plain path on MI355X
+    (gfx950), while other CUDA hosts keep the historical AMP default.
+    """
+    on_cuda = getattr(getattr(inputs_train, "device", None), "type", None) == "cuda"
+    if use_amp is None:
+        return on_cuda and not IS_ROCM
+    return bool(use_amp) and on_cuda
+
+
 def _run_stage_gptqmodel_impl(
     *,
     model: nn.Module,
@@ -1237,11 +1735,12 @@ def _run_stage_gptqmodel_impl(
     optimizer_name: str,
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     """Run one optimization stage with validation-based best-state selection."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
-    use_amp = inputs_train.device.type == "cuda"
+    use_amp = _resolve_stage_use_amp(inputs_train, use_amp)
     if epochs <= 0 or not normalized_groups:
         train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
@@ -1262,10 +1761,13 @@ def _run_stage_gptqmodel_impl(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+    # The first epoch assigns `last_train_loss` before anything reads it, so
+    # seeding it with an evaluation only buys a full forward pass plus a device
+    # sync that no caller can observe.
+    last_train_loss = 0.0
 
     for _epoch in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
@@ -1274,7 +1776,7 @@ def _run_stage_gptqmodel_impl(
             with autocast_ctx:
                 preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
-            scaler.scale(loss).backward()
+            _backward_scalar_loss(scaler.scale(loss))
             scaler.step(optimizer)
             scaler.update()
             global_step += 1
@@ -1286,10 +1788,10 @@ def _run_stage_gptqmodel_impl(
                 )
 
             model.reset_masked_angles()
-            epoch_loss += float(loss.item())
+            epoch_loss = _fold_epoch_loss(epoch_loss, loss)
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1307,10 +1809,22 @@ def _should_use_paroquant_stage_cudagraph(
     batch_size: int,
     stage_cudagraph: Optional[bool] = None,
 ) -> bool:
-    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing."""
+    """Use CUDA graphs only for real CUDA tensor stages where launch overhead is worth amortizing.
+
+    ROCm hosts are excluded unconditionally. The captured train step runs a
+    hipBLASLt GEMM, and hipBLASLt rejects work issued while a stream is
+    capturing ("operation not permitted when stream is capturing"). That raise
+    lands inside the shared cuBLASLt handle pool, where it deadlocks on the
+    pool mutex instead of surfacing as an exception, so the eager fallback in
+    ``_run_stage_gptqmodel`` never gets a chance to run and the whole
+    quantization hangs. There is no eager/ROCm path to fall back to from a
+    deadlock, so the capture is skipped before it starts.
+    """
     if stage_cudagraph is None:
         stage_cudagraph = env_flag("GPTQMODEL_PAROQUANT_OPT_STAGE_CUDAGRAPH", default=True)
     if not bool(stage_cudagraph):
+        return False
+    if IS_ROCM:
         return False
     if not isinstance(inputs_train, torch.Tensor):
         return False
@@ -1356,7 +1870,8 @@ def _run_stage_gptqmodel_cudagraph(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = float("inf")
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=False)
+    # Overwritten by the first epoch before any read; see `_run_stage_gptqmodel_impl`.
+    last_train_loss = 0.0
 
     static_input = torch.empty(
         (batch_size, inputs_train.shape[1]),
@@ -1380,7 +1895,7 @@ def _run_stage_gptqmodel_cudagraph(
             optimizer.zero_grad(set_to_none=True)
             preds = model(static_input)
             loss = F.smooth_l1_loss(preds, static_target)
-            loss.backward()
+            _backward_scalar_loss(loss)
             optimizer.step()
             model.reset_masked_angles()
             del preds, loss
@@ -1398,7 +1913,7 @@ def _run_stage_gptqmodel_cudagraph(
         model.reset_masked_angles()
 
     for _epoch in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
 
         for input_batch, target_batch in zip(_chunk_rows(inputs_train, batch_size), _chunk_rows(targets_train, batch_size)):
@@ -1414,20 +1929,19 @@ def _run_stage_gptqmodel_cudagraph(
                 static_input.copy_(input_batch)
                 static_target.copy_(target_batch)
                 graph.replay()
-                loss_value = float(static_loss.item())
+                epoch_loss = _fold_epoch_loss(epoch_loss, static_loss)
             else:
                 optimizer.zero_grad(set_to_none=True)
                 preds = model(input_batch)
                 loss = F.smooth_l1_loss(preds, target_batch)
-                loss.backward()
+                _backward_scalar_loss(loss)
                 optimizer.step()
                 model.reset_masked_angles()
-                loss_value = float(loss.item())
+                epoch_loss = _fold_epoch_loss(epoch_loss, loss)
 
-            epoch_loss += loss_value
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=False)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1452,8 +1966,13 @@ def _run_stage_gptqmodel(
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
-    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager."""
+    """Run the fast stage, preferring CUDA-graph replay on fused CUDA paths and falling back to eager.
+
+    ``use_amp=None`` keeps the historical CUDA-only AMP default. The captured
+    CUDA-graph path itself always replays in fp32.
+    """
     if not _should_use_paroquant_stage_cudagraph(
         model,
         inputs_train=inputs_train,
@@ -1472,6 +1991,7 @@ def _run_stage_gptqmodel(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
     initial_state = {key: tensor.detach().clone() for key, tensor in model.state_dict().items()}
@@ -1505,6 +2025,7 @@ def _run_stage_gptqmodel(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
 
@@ -1521,11 +2042,12 @@ def _run_stage_reference(
     optimizer_name: str,
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     """Official-parity stage runner: AMP + GradScaler + cosine LR update."""
     normalized_groups = _normalize_optimizer_param_groups(param_groups)
 
-    use_amp = inputs_train.device.type == "cuda"
+    use_amp = _resolve_stage_use_amp(inputs_train, use_amp)
     if epochs <= 0 or not normalized_groups:
         train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
@@ -1546,10 +2068,11 @@ def _run_stage_reference(
 
     best_state = _snapshot_model_state(model, target_dtype=best_state_snapshot_dtype)
     best_val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
-    last_train_loss = _evaluate_model(model, inputs_train, targets_train, use_amp=use_amp)
+    # Overwritten by the first epoch before any read; see `_run_stage_gptqmodel_impl`.
+    last_train_loss = 0.0
 
     for _ in range(epochs):
-        epoch_loss = 0.0
+        epoch_loss: Optional[torch.Tensor] = None
         batch_count = 0
         optimizer.zero_grad(set_to_none=True)
 
@@ -1558,7 +2081,7 @@ def _run_stage_reference(
             with autocast_ctx:
                 preds = _checkpointed_forward(model, input_batch, enabled=gradient_checkpointing)
                 loss = F.smooth_l1_loss(preds, target_batch)
-            scaler.scale(loss).backward()
+            _backward_scalar_loss(scaler.scale(loss))
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -1572,10 +2095,10 @@ def _run_stage_reference(
                 )
 
             model.reset_masked_angles()
-            epoch_loss += float(loss.item())
+            epoch_loss = _fold_epoch_loss(epoch_loss, loss)
             batch_count += 1
 
-        last_train_loss = epoch_loss / max(1, batch_count)
+        last_train_loss = 0.0 if epoch_loss is None else float(epoch_loss.item()) / max(1, batch_count)
         val_loss = _evaluate_model(model, inputs_val, targets_val, use_amp=use_amp)
         if val_loss < best_val_loss:
             best_val_loss = val_loss
@@ -1601,6 +2124,7 @@ def _run_stage(
     optimizer_name: str = "adamw",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
 ) -> tuple[float, float]:
     impl = _normalize_opt_impl(stage_impl, field="stage_impl")
     with _activate_stage_params(model, param_groups):
@@ -1617,6 +2141,7 @@ def _run_stage(
                 optimizer_name=optimizer_name,
                 gradient_checkpointing=gradient_checkpointing,
                 best_state_dtype=best_state_dtype,
+                use_amp=use_amp,
             )
         return _run_stage_gptqmodel(
             model=model,
@@ -1631,6 +2156,7 @@ def _run_stage(
             optimizer_name=optimizer_name,
             gradient_checkpointing=gradient_checkpointing,
             best_state_dtype=best_state_dtype,
+            use_amp=use_amp,
         )
 
 
@@ -1739,6 +2265,7 @@ def optimize_paroquant_linear(
     quantizer_impl: Literal["fast", "reference"] = "fast",
     gradient_checkpointing: bool = False,
     best_state_dtype: Optional[str | torch.dtype] = "fp32",
+    use_amp: Optional[bool] = None,
     scale_clamp_min: float = PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT,
     scale_clamp_max: float = PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT,
 ) -> ParoQuantOptimizationResult:
@@ -1851,6 +2378,7 @@ def optimize_paroquant_linear(
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
         best_state_dtype=best_state_dtype,
+        use_amp=use_amp,
     )
 
     model.init_quantizer()
@@ -1891,6 +2419,7 @@ def optimize_paroquant_linear(
         optimizer_name=normalized_optimizer_name,
         gradient_checkpointing=gradient_checkpointing,
         best_state_dtype=best_state_dtype,
+        use_amp=use_amp,
     )
 
     return _result_from_model(

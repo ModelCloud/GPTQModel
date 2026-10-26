@@ -6,6 +6,7 @@
 
 import math
 import os
+import warnings
 from collections.abc import Iterable
 from typing import Optional
 
@@ -20,7 +21,9 @@ from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 from ...utils.torch import torch_compile
+from ._runtime_cache import tensor_cache_key
 
 
 try:
@@ -32,7 +35,28 @@ except Exception:  # pragma: no cover - optional dependency
     _TRITON_DEQUANT_AVAILABLE = False
 
 
+try:
+    from ..triton_utils.gptq_gemm import MAX_IN_FEATURES as _ROCM_GEMM_MAX_IN_FEATURES
+    from ..triton_utils.gptq_gemm import SMALL_M_MAX as _ROCM_GEMM_SMALL_M_MAX
+except Exception:  # pragma: no cover - optional dependency
+    _ROCM_GEMM_SMALL_M_MAX = 0
+    _ROCM_GEMM_MAX_IN_FEATURES = 0
+
+
 log = setup_logger()
+
+
+_ROCM_ARCH_CACHE: dict[int, str] = {}
+
+
+def _rocm_arch_name(device: torch.device) -> str:
+    """Cache the device architecture string; ``get_device_properties`` is not free."""
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    arch = _ROCM_ARCH_CACHE.get(index)
+    if arch is None:
+        arch = getattr(torch.cuda.get_device_properties(index), "gcnArchName", "")
+        _ROCM_ARCH_CACHE[index] = arch
+    return arch
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -177,8 +201,7 @@ class TorchLinear(PackableQuantLinear):
         self._zeros_cache = None
         self._zeros_cache_state = None
         self._stream_dequant_streams = {}
-        self._stream_workspace = {}
-        self._cache_enabled = bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0")))
+        self._cache_enabled = False
         triton_flag = os.environ.get("GPTQ_TORCH_TRITON_DEQUANT")
         if triton_flag is None:
             self._triton_dequant_enabled = _TRITON_DEQUANT_AVAILABLE
@@ -186,13 +209,15 @@ class TorchLinear(PackableQuantLinear):
             self._triton_dequant_enabled = (
                 triton_flag not in {"0", "false", "False"}
             ) and _TRITON_DEQUANT_AVAILABLE
-        self._cached_weights = {}
-        self._lookahead_enabled = bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0")))
+        self._lookahead_enabled = False
+        self._rocm_gemv_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMV", "1")))
+        self._rocm_gemm_enabled = bool(int(os.environ.get("GPTQ_TORCH_ROCM_GEMM", "1")))
         self._lookahead_next = None
-        self._prefetched_weights = {}
-        self._prefetch_events = {}
-        self._prefetch_streams = {}
         self._weight_metadata = _LinearWeightMetadata(self)
+        if bool(int(os.environ.get("GPTQ_TORCH_CACHE_WEIGHTS", "0"))):
+            self.enable_weight_cache(True)
+        if bool(int(os.environ.get("GPTQ_TORCH_LOOKAHEAD", "0"))):
+            self.enable_lookahead(True)
 
         # if self.group_size != self.in_features:
         #     self.padded_infeatures = self.in_features + (-self.in_features % self.group_size)
@@ -214,9 +239,7 @@ class TorchLinear(PackableQuantLinear):
 
         # torch benefits the most from torch.compile, enable it by default
         self.optimize()
-        self._stream_reset_cache()
         self.clear_weight_cache()
-        self._reset_prefetch_state()
 
     @property
     def weight(self):
@@ -297,6 +320,7 @@ class TorchLinear(PackableQuantLinear):
                     self.qzero_format(format=1)
                     self._stream_reset_cache()
 
+        self.clear_weight_cache()
         return super().train(mode=mode)
 
     def forward(self, x: torch.Tensor):
@@ -310,31 +334,47 @@ class TorchLinear(PackableQuantLinear):
 
     def _forward(self, x, out_shape):
         x = self._apply_rotation_to_input(x)
-        cached = self._maybe_get_cached_weights(x)
-        if cached is not None:
-            out = torch.matmul(x, cached).reshape(out_shape)
-            if self.bias is not None:
-                out.add_(self.bias)
-        elif self._should_use_streaming(x):
+        if self._should_use_streaming(x):
             out = self._forward_streaming(x, out_shape)
         else:
             out = self._forward_eager(x, out_shape)
 
-        self._maybe_schedule_lookahead(x.dtype)
         return out
 
     def _forward_eager(self, x: torch.Tensor, out_shape):
+        if self._can_use_rocm_gemv(x):
+            from ..triton_utils.gptq_gemv import gptq_gemv
+
+            out = gptq_gemv(
+                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
+            ).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
+        if self._can_use_rocm_gemm(x):
+            from ..triton_utils.gptq_gemm import gptq_gemm
+
+            out = gptq_gemm(
+                x, self.qweight, self.scales, self.qzeros, self.g_idx, bits=self.bits
+            ).reshape(out_shape)
+            if self.bias is not None:
+                out.add_(self.bias)
+            if self.adapter:
+                out = self.adapter.apply(x=x, out=out)
+            return out
+
         num_itr = self.g_idx.shape[0] // x.shape[-1]
-        weights = self._consume_prefetched_weights(x.dtype, device=x.device)
-        if weights is None:
-            weights = self.dequantize_weight(num_itr=num_itr)
+        weights = self.dequantize_weight(num_itr=num_itr)
         if weights.device != x.device or weights.dtype != x.dtype:
             # Quantized modules can be staged on a different accelerator than the
             # caller tensor during multi-device kernel validation; matmul still
             # needs both operands on the same device and dtype.
             weights = weights.to(device=x.device, dtype=x.dtype)
-        self._update_cached_weights(weights)
         out = torch.matmul(x, weights).reshape(out_shape)
+        del weights
         if self.bias is not None:
             bias = self.bias
             if bias.device != out.device or bias.dtype != out.dtype:
@@ -346,6 +386,43 @@ class TorchLinear(PackableQuantLinear):
 
         return out
 
+    def _can_use_rocm_gemv(self, x: torch.Tensor) -> bool:
+        return (
+            self._rocm_gemv_enabled
+            and x.shape == (1, self.in_features)
+            and self._can_use_rocm_fused(x)
+        )
+
+    def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
+        return (
+            self._rocm_gemm_enabled
+            and 2 <= x.shape[0] <= _ROCM_GEMM_SMALL_M_MAX
+            and x.shape[1] == self.in_features
+            and self.in_features <= _ROCM_GEMM_MAX_IN_FEATURES
+            and self._can_use_rocm_fused(x)
+        )
+
+    def _can_use_rocm_fused(self, x: torch.Tensor) -> bool:
+        """Preconditions shared by the fused ROCm GPTQ GEMV / small-M GEMM kernels."""
+        return (
+            IS_ROCM
+            and self._triton_dequant_enabled
+            and self._can_use_triton_dequant()
+            and self.bits in (2, 4, 8)
+            and self.pack_dtype == torch.int32
+            and self.qzero_format() == 2
+            and self.in_features >= 32
+            and self.in_features % 32 == 0
+            and self.out_features >= 32
+            and self.out_features % 32 == 0
+            and self.g_idx.numel() == self.in_features
+            and x.is_contiguous()
+            and not x.requires_grad
+            and self.scales.dtype == x.dtype
+            and self.qweight.device == x.device
+            and _rocm_arch_name(x.device).startswith("gfx950")
+        )
+
     def _forward_streaming(self, x: torch.Tensor, out_shape):
         tile = max(64, min(self._stream_tile_cols, self.out_features))
         total_tiles = math.ceil(self.out_features / tile)
@@ -355,14 +432,21 @@ class TorchLinear(PackableQuantLinear):
         buffers = self._stream_get_workspace(device=device, dtype=x.dtype, tile=tile)
         widths = [0 for _ in range(self._stream_double_buffers)]
 
+        compute_stream = torch.cuda.current_stream(device=device)
         stream_dequant = self._stream_get_dequant_stream(device)
         zeros = self._stream_decode_qzeros()
         g_idx = self._stream_g_idx_long()
+        stream_dequant.wait_stream(compute_stream)
+        for tensor in (*buffers, zeros, g_idx, self.qweight, self.scales, self.wf_unsqueeze_neg_one):
+            tensor.record_stream(stream_dequant)
+        consumed = [None for _ in buffers]
 
         def schedule(tile_idx: int, buffer_idx: int):
             start = tile_idx * tile
             end = min(start + tile, self.out_features)
             with torch.cuda.stream(stream_dequant):
+                if consumed[buffer_idx] is not None:
+                    stream_dequant.wait_event(consumed[buffer_idx])
                 widths[buffer_idx] = self._stream_dequantize_tile(
                     buffer=buffers[buffer_idx],
                     zeros=zeros,
@@ -373,7 +457,6 @@ class TorchLinear(PackableQuantLinear):
                 )
 
         schedule(0, 0)
-        compute_stream = torch.cuda.current_stream()
 
         for tile_idx in range(total_tiles):
             buffer_idx = tile_idx % self._stream_double_buffers
@@ -391,12 +474,15 @@ class TorchLinear(PackableQuantLinear):
                 alpha=1.0,
                 out=out_slice,
             )
+            consumed[buffer_idx] = torch.cuda.Event()
+            consumed[buffer_idx].record(compute_stream)
 
             next_tile = tile_idx + 1
             if next_tile < total_tiles:
                 next_buffer_idx = next_tile % self._stream_double_buffers
                 schedule(next_tile, next_buffer_idx)
 
+        buffers.clear()
         out = out.reshape(out_shape)
 
         if self.bias is not None:
@@ -406,35 +492,6 @@ class TorchLinear(PackableQuantLinear):
             out = self.adapter.apply(x=x, out=out)
 
         return out
-
-    def _maybe_get_cached_weights(self, x: torch.Tensor):
-        if not self._cache_enabled or self.training:
-            return None
-        cached = self._cached_weights.get(x.dtype)
-        if cached is not None:
-            if cached.device != x.device:
-                self._cached_weights.pop(x.dtype, None)
-            else:
-                return cached
-        return None
-
-    def _update_cached_weights(self, weights: torch.Tensor):
-        if not self._cache_enabled or self.training:
-            return
-        self._cached_weights[weights.dtype] = weights.detach()
-
-    def _consume_prefetched_weights(self, dtype: torch.dtype, device: torch.device = None):
-        if not self._lookahead_enabled or self.training:
-            return None
-        tensor = self._prefetched_weights.pop(dtype, None)
-        if tensor is None:
-            return None
-        event = self._prefetch_events.pop(dtype, None)
-        if device is not None and tensor.device != device:
-            return None
-        if event is not None and HAS_CUDA and tensor.device.type == "cuda":
-            torch.cuda.current_stream(device=tensor.device).wait_event(event)
-        return tensor
 
     def _stream_dequantize_tile(
         self,
@@ -464,7 +521,7 @@ class TorchLinear(PackableQuantLinear):
         return width
 
     def _stream_decode_qzeros(self):
-        cache_state = (self.qzeros.data_ptr(), self.qzeros.device, self.scales.shape)
+        cache_state = (tensor_cache_key(self.qzeros), self.scales.shape)
         if self._zeros_cache is not None and self._zeros_cache_state == cache_state:
             return self._zeros_cache
 
@@ -486,7 +543,8 @@ class TorchLinear(PackableQuantLinear):
             else:
                 target_device = self.g_idx.device
 
-        if self._g_idx_long_cache is not None and self._g_idx_long_cache.device == target_device:
+        cache_state = (tensor_cache_key(self.g_idx), target_device)
+        if self._g_idx_long_cache is not None and self._g_idx_long_cache_state == cache_state:
             return self._g_idx_long_cache
 
         if self.g_idx.device == target_device:
@@ -499,7 +557,7 @@ class TorchLinear(PackableQuantLinear):
                 non_blocking=non_blocking,
             )
 
-        self._g_idx_long_cache_state = (target_device.type, target_device.index)
+        self._g_idx_long_cache_state = cache_state
         return self._g_idx_long_cache
 
     def _stream_reset_cache(self):
@@ -507,7 +565,6 @@ class TorchLinear(PackableQuantLinear):
         self._zeros_cache_state = None
         self._g_idx_long_cache = None
         self._g_idx_long_cache_state = None
-        self._stream_workspace.clear()
 
     def _maybe_offload_g_idx_to_cpu(self):
         if self.training or self.g_idx is None:
@@ -518,6 +575,8 @@ class TorchLinear(PackableQuantLinear):
         if self._triton_dequant_enabled and self._can_use_triton_dequant():
             return
         self.g_idx = self.g_idx.to(device="cpu")
+        if self._g_idx_long_cache is not None:
+            self._g_idx_long_cache_state = (tensor_cache_key(self.g_idx), self._g_idx_long_cache.device)
 
     def _device_cache_key(self, device: torch.device) -> int:
         if device.index is not None:
@@ -538,15 +597,10 @@ class TorchLinear(PackableQuantLinear):
         dtype: torch.dtype,
         tile: int,
     ) -> list[torch.Tensor]:
-        key = (self._device_cache_key(device), dtype, tile, self.in_features)
-        workspace = self._stream_workspace.get(key)
-        if workspace is None:
-            workspace = [
-                torch.empty((self.in_features, tile), dtype=dtype, device=device)
-                for _ in range(self._stream_double_buffers)
-            ]
-            self._stream_workspace[key] = workspace
-        return workspace
+        return [
+            torch.empty((self.in_features, tile), dtype=dtype, device=device)
+            for _ in range(self._stream_double_buffers)
+        ]
 
     def _should_use_streaming(self, x: torch.Tensor) -> bool:
         if not self._streaming_enabled:
@@ -558,6 +612,8 @@ class TorchLinear(PackableQuantLinear):
         if x.device.type != "cuda":
             return False
         if not HAS_CUDA:
+            return False
+        if any(tensor.device != x.device for tensor in (self.qweight, self.qzeros, self.scales)):
             return False
         # Torch kernels with num_itr > 1 already tiled differently.
         if self.g_idx.shape[0] // x.shape[-1] != 1:
@@ -572,89 +628,45 @@ class TorchLinear(PackableQuantLinear):
         return self
 
     def enable_weight_cache(self, enabled: bool = True):
-        self._cache_enabled = enabled
-        if not enabled:
-            self.clear_weight_cache()
+        """Compatibility shim: dense inference weight caching is no longer supported."""
+        self._cache_enabled = False
+        self.clear_weight_cache()
+        if enabled:
+            warnings.warn(
+                "Dense weight caching is no longer supported; weights remain quantized between forwards.",
+                FutureWarning,
+                stacklevel=2,
+            )
         return self
 
     def clear_weight_cache(self):
-        self._cached_weights.clear()
+        """Invalidate permitted zero-point and group-index metadata caches."""
+        self._stream_reset_cache()
 
     def enable_lookahead(self, enabled: bool = True):
-        self._lookahead_enabled = enabled
-        if not enabled:
-            self._reset_prefetch_state()
+        """Compatibility shim: speculative dense-weight prefetching is disabled."""
+        self._lookahead_enabled = False
+        if enabled:
+            warnings.warn(
+                "Dense weight lookahead is no longer supported; dequantization is local to each forward.",
+                FutureWarning,
+                stacklevel=2,
+            )
         return self
 
     def set_lookahead_next(self, module: "TorchLinear"):
-        if module is None:
-            self._lookahead_next = None
-            self._reset_prefetch_state()
-            return self
-
-        if isinstance(module, TorchLinear):
-            self._lookahead_next = module
+        """Accept legacy lookahead configuration without retaining target modules."""
+        if module is None or isinstance(module, TorchLinear):
             return self
 
         if isinstance(module, Iterable):
             targets = tuple(m for m in module if m is not None)
-            if not targets:
-                self._lookahead_next = None
-                self._reset_prefetch_state()
-                return self
             for target in targets:
                 if not isinstance(target, TorchLinear):
                     raise TypeError("lookahead targets must be TorchLinear modules or None")
-            self._lookahead_next = targets
             return self
 
         raise TypeError("lookahead target must be TorchLinear, iterable of TorchLinear, or None")
-
-    def _reset_prefetch_state(self):
-        for event in self._prefetch_events.values():
-            if hasattr(event, "destroy"):
-                event.destroy()
-        self._prefetch_events.clear()
-        self._prefetched_weights.clear()
-
-    def _maybe_schedule_lookahead(self, dtype: torch.dtype):
-        if not self._lookahead_enabled or self.training:
-            return
-        next_module = self._lookahead_next
-        if next_module is None:
-            return
-        if self.qweight.device.type != "cuda":
-            return
-        if isinstance(next_module, tuple):
-            for module in next_module:
-                module._prefetch(dtype)
-        else:
-            next_module._prefetch(dtype)
-
-    def _prefetch(self, dtype: torch.dtype):
-        if not self._lookahead_enabled or self.training:
-            return
-        if dtype in self._prefetched_weights:
-            return
-        device = self.list_buffers()[0].device
-        if device.type != "cuda":
-            return
-        stream = self._prefetch_get_stream(device)
-        with torch.cuda.stream(stream):
-            num_itr = max(1, self.g_idx.shape[0] // self.in_features)
-            weights = self.dequantize_weight(num_itr=num_itr).to(dtype)
-        event = torch.cuda.Event(enable_timing=False)
-        event.record(stream)
-        self._prefetched_weights[dtype] = weights
-        self._prefetch_events[dtype] = event
-
-    def _prefetch_get_stream(self, device: torch.device) -> torch.cuda.Stream:
-        key = self._device_cache_key(device)
-        stream = self._prefetch_streams.get(key)
-        if stream is None:
-            stream = torch.cuda.Stream(device=device)
-            self._prefetch_streams[key] = stream
-        return stream
 
     # clear gptq only weights: useful in de-quantization
     def _empty_gptq_only_weights(self):
@@ -748,9 +760,15 @@ def dequantize_model(model: PreTrainedModel):
 
         if isinstance(module, TorchLinear):
             # Create a new Linear layer with dequantized weights
-            new_module = nn.Linear(module.in_features, module.out_features)
+            new_module = nn.Linear(
+                module.in_features, module.out_features,
+                bias=module.bias is not None,
+            )
             new_module.weight = nn.Parameter(module.dequantize_weight().T.detach().to("cpu", torch.float16))
-            new_module.bias = torch.nn.Parameter(module.bias)
+            new_module.bias = (
+                nn.Parameter(module.bias.detach().to("cpu", torch.float16))
+                if module.bias is not None else None
+            )
 
             # Replace the module in the model
             parent = model

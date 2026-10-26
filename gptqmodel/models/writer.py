@@ -22,6 +22,7 @@ from transformers.models.auto.tokenization_auto import get_tokenizer_config
 
 from ..adapter.adapter import HF_ADAPTER_FILE_NAME, HF_ADAPTER_WEIGHT_KEY_PREFIX, Lora
 from ..adapter.peft import LoraConfig
+from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization.config import (
     FORMAT,
     META_FIELD_ACT_GROUP_AWARE,
@@ -39,7 +40,6 @@ from ..quantization.config import (
     MIN_VERSION_WITH_V2,
     resolve_quant_format,
 )
-from ..nn_modules.qlinear import BaseQuantLinear
 from ..utils.backend import BACKEND
 from ..utils.exllamav3 import build_exllamav3_tensor_storage
 from ..utils.hf import (
@@ -232,20 +232,20 @@ def _module_name(model, target_module) -> Optional[str]:
     return next((name for name, module in model.named_modules() if module is target_module), None)
 
 
-def _save_embedding_replacement_safetensors(
+def _save_module_replacement_safetensors(
     model,
     turtle_model,
-    embedding_prefixes: List[str],
+    replacement_prefixes: List[str],
     *,
     save_dir: str,
     metadata: Dict[str, str],
 ) -> tuple[List[str], Dict[str, str], int, List[str]]:
-    """Rewrite only checkpoint shards containing replaced embedding modules."""
+    """Rewrite only checkpoint shards containing replaced modules."""
     if turtle_model is None or not hasattr(turtle_model, "_weight_map") or not hasattr(turtle_model, "model_local_path"):
-        raise ValueError("Embedding replacement save requires a LazyTurtle checkpoint source.")
-    prefixes = sorted({prefix for prefix in embedding_prefixes if isinstance(prefix, str) and prefix})
+        raise ValueError("Module replacement save requires a LazyTurtle checkpoint source.")
+    prefixes = sorted({prefix for prefix in replacement_prefixes if isinstance(prefix, str) and prefix})
     if not prefixes:
-        raise ValueError("Embedding replacement save requires at least one embedding prefix.")
+        raise ValueError("Module replacement save requires at least one module prefix.")
 
     config = getattr(model, "config", None)
     tie_word_embeddings = bool(getattr(config, "tie_word_embeddings", False))
@@ -272,9 +272,10 @@ def _save_embedding_replacement_safetensors(
     ):
         prefixes = sorted({*prefixes, output_prefix})
 
-    index_path = os.path.join(save_dir, "model.safetensors.index.json")
+    index_name = getattr(turtle_model, "_index_filename", "model.safetensors.index.json")
+    index_path = os.path.join(save_dir, index_name) if index_name else None
     existing_weight_map = {}
-    if os.path.exists(index_path):
+    if index_path and os.path.exists(index_path):
         with open(index_path, "r", encoding="utf-8") as handle:
             existing_weight_map = json.load(handle).get("weight_map", {})
 
@@ -315,11 +316,11 @@ def _save_embedding_replacement_safetensors(
         if not matched_shards and tie_word_embeddings and prefix == output_prefix:
             matched_shards = tied_input_shards
         if not matched_shards:
-            raise ValueError(f"Could not find checkpoint tensor for embedding module `{prefix}`.")
+            raise ValueError(f"Could not find checkpoint tensor for module `{prefix}`.")
         try:
             module = model.get_submodule(prefix)
         except AttributeError as exc:
-            raise ValueError(f"Embedding replacement module `{prefix}` is not present in the model tree.") from exc
+            raise ValueError(f"Module replacement module `{prefix}` is not present in the model tree.") from exc
         replacements = replacements_by_shard.setdefault(matched_shards[0], {})
         drop_by_shard.setdefault(matched_shards[0], set())
         for relative_name, tensor in module.state_dict().items():
@@ -330,7 +331,7 @@ def _save_embedding_replacement_safetensors(
     total_size_bytes = 0
     for shard_name, dropped_names in drop_by_shard.items():
         if not shard_name.endswith(".safetensors"):
-            raise NotImplementedError("Embedding-only replacement save currently supports safetensors checkpoints only.")
+            raise NotImplementedError("Module replacement save currently supports safetensors checkpoints only.")
         source_path = os.path.join(turtle_model.model_local_path, shard_name)
         target_path = os.path.join(save_dir, shard_name)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
@@ -356,7 +357,7 @@ def _copy_missing_checkpoint_files(source_dir: str, save_dir: str) -> List[str]:
     if source_root == save_root:
         return []
     if os.path.commonpath([source_root, save_root]) == source_root:
-        raise ValueError("Embedding-only save destination must not be nested inside its checkpoint source.")
+        raise ValueError("Module replacement save destination must not be nested inside its checkpoint source.")
     copied = []
     for root, dirnames, filenames in os.walk(source_root):
         dirnames.sort()
@@ -398,6 +399,25 @@ def _cleanup_saved_weight_files(
 
 
 
+def _read_safetensors_weight_map(model_local_path: str) -> Optional[Dict[str, str]]:
+    index_path = join(model_local_path, "model.safetensors.index.json")
+    if not os.path.exists(index_path):
+        return None
+    try:
+        with open(index_path, "r", encoding="utf-8") as handle:
+            weight_map = json.load(handle).get("weight_map", {})
+    except Exception as exc:
+        log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+        return None
+    if not isinstance(weight_map, dict):
+        return None
+    return {
+        name: filename
+        for name, filename in weight_map.items()
+        if isinstance(filename, str) and filename.endswith(".safetensors")
+    }
+
+
 def _resolve_out_of_model_source_files(
     model_local_path: str,
     source_files: Optional[List[str]] = None,
@@ -405,28 +425,58 @@ def _resolve_out_of_model_source_files(
     if source_files:
         return sorted(dict.fromkeys(source_files))
 
-    index_path = join(model_local_path, "model.safetensors.index.json")
-    if os.path.exists(index_path):
-        try:
-            with open(index_path, "r", encoding="utf-8") as handle:
-                index_data = json.load(handle)
-            weight_map = index_data.get("weight_map", {})
-            if isinstance(weight_map, dict):
-                return sorted(
-                    {
-                        filename
-                        for filename in weight_map.values()
-                        if isinstance(filename, str) and filename.endswith(".safetensors")
-                    }
-                )
-        except Exception as exc:
-            log.warn(f"Model: Failed to inspect original safetensors index at '{index_path}': {exc}")
+    weight_map = _read_safetensors_weight_map(model_local_path)
+    if weight_map is not None:
+        return sorted(set(weight_map.values()))
 
     return sorted(
         filename
         for filename in os.listdir(model_local_path)
         if filename.endswith(".safetensors") and isfile(join(model_local_path, filename))
     )
+
+
+def _load_native_w4a_for_save(model: torch.nn.Module, checkpoint: str, *, activation_mode: str) -> None:
+    """Load native checkpoint tensors exactly into a CPU serialization shell.
+
+    Generic CPU GPTQ linears do not declare NVFP4 calibration buffers. Register
+    those buffers for NVFP4 before loading. Both W4A modes assign tensors rather
+    than casting checkpoint values to the shell's FP16 dtype, which can change
+    or overflow BF16 tensors. Runtime weight caches and producer buffers remain
+    absent from the native checkpoint.
+    """
+    if activation_mode == "w4a_nvfp4":
+        for module in model.modules():
+            if isinstance(module, BaseQuantLinear):
+                module.register_buffer("activation_global_scale_bits", torch.ones((), dtype=torch.float32).view(torch.int32))
+    if checkpoint.endswith(".index.json"):
+        with open(checkpoint, encoding="utf-8") as handle:
+            index = json.load(handle)
+        files = [join(os.path.dirname(checkpoint), name) for name in sorted(set(index["weight_map"].values()))]
+    elif checkpoint.endswith(".safetensors"):
+        files = [checkpoint]
+    else:
+        raise ValueError("W4A export requires a safetensors file or shard index")
+    expected, seen = set(model.state_dict()), set()
+    for path in files:
+        with safe_open(path, framework="pt", device="cpu") as handle:
+            values = {name: handle.get_tensor(name) for name in handle.keys()}
+        if seen.intersection(values):
+            raise ValueError("Duplicate native W4A tensor across checkpoint shards")
+        result = model.load_state_dict(values, strict=False, assign=True)
+        if result.unexpected_keys:
+            raise ValueError(f"Unrecognized native W4A tensors: {result.unexpected_keys}")
+        seen.update(values)
+    model.tie_weights()
+    # A tied tensor can legitimately be omitted from safetensors. Every other
+    # parameter/buffer must have been loaded, including the calibration bits.
+    state = model.state_dict()
+    def storage_key(value):
+        return value.data_ptr(), value.dtype, tuple(value.shape)
+    restored_storage = {storage_key(state[name]) for name in seen}
+    missing = sorted(name for name in expected - seen if storage_key(state[name]) not in restored_storage)
+    if missing:
+        raise ValueError(f"Missing native W4A checkpoint tensors: {missing}")
 
 
 def _load_tensors_by_prefixes(
@@ -453,6 +503,16 @@ def _load_tensors_by_prefixes(
                 f"Model: Failed to read tensors from {source_file_name} while scanning for prefixes "
                 f"{prefixes}: {exc}"
             )
+    # Prefixes absent from the index stay optional, but tensors the index declares
+    # must not be silently dropped when their shard is missing or unreadable.
+    weight_map = None if source_files else _read_safetensors_weight_map(model_local_path)
+    missing = sorted(name for name in weight_map or {} if name.startswith(tuple(prefixes)) and name not in tensors)
+    if missing:
+        shards = sorted({weight_map[name] for name in missing})
+        raise ValueError(
+            f"Model: {len(missing)} tensors with prefixes {prefixes} declared in the safetensors index of "
+            f"`{model_local_path}` are missing from or unreadable in {shards}, e.g. {missing[:3]}."
+        )
     return tensors
 
 
@@ -733,19 +793,19 @@ def ModelWriter(cls):
             max_shard_size: Optional[Union[int, str]] = DEFAULT_MAX_SHARD_SIZE,
             meta_quantizer: Optional[str] = None,
     ):
-        """Save an embedding-only quantized model as a complete checkpoint."""
+        """Save a module-replacement quantized model as a complete checkpoint."""
         del max_shard_size
         if not self.quantized:
             raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
         prefixes = sorted({
-            prefix for prefix in getattr(self, "_embedding_replacement_prefixes", set())
+            prefix for prefix in getattr(self, "_module_replacement_prefixes", set())
             if isinstance(prefix, str) and prefix
         })
         if not prefixes:
-            raise ValueError("Embedding-only save requires quantized embedding replacement prefixes.")
-        checkpoint_source = self.turtle_model or getattr(self, "_embedding_replacement_source", None)
+            raise ValueError("Module replacement save requires quantized module replacement prefixes.")
+        checkpoint_source = self.turtle_model or getattr(self, "_module_replacement_source", None)
         if checkpoint_source is None or not hasattr(checkpoint_source, "_weight_map") or not hasattr(checkpoint_source, "model_local_path"):
-            raise ValueError("Embedding-only save requires a LazyTurtle checkpoint source.")
+            raise ValueError("Module replacement save requires a LazyTurtle checkpoint source.")
 
         os.makedirs(save_dir, exist_ok=True)
         _copy_missing_checkpoint_files(checkpoint_source.model_local_path, save_dir)
@@ -761,15 +821,16 @@ def ModelWriter(cls):
 
         metadata = {} if safetensors_metadata is None else {str(k): str(v) for k, v in safetensors_metadata.items()}
         metadata["format"] = "pt"
-        rewritten_files, tensor_to_filename, _total_size, removed_names = _save_embedding_replacement_safetensors(
+        rewritten_files, tensor_to_filename, _total_size, removed_names = _save_module_replacement_safetensors(
             self.model,
             checkpoint_source,
             prefixes,
             save_dir=save_dir,
             metadata=metadata,
         )
-        index_path = join(save_dir, "model.safetensors.index.json")
-        if os.path.exists(index_path):
+        index_name = getattr(checkpoint_source, "_index_filename", "model.safetensors.index.json")
+        index_path = join(save_dir, index_name) if index_name else None
+        if index_path and os.path.exists(index_path):
             with open(index_path, "r", encoding="utf-8") as handle:
                 index = json.load(handle)
             weight_map = index.setdefault("weight_map", {})
@@ -784,7 +845,7 @@ def ModelWriter(cls):
             with open(index_path, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps(index, indent=2, sort_keys=True) + "\n")
         elif len(rewritten_files) > 1:
-            log.warn("Embedding save: no safetensors index found in `%s`; updated shards only.", save_dir)
+            log.warn("Module replacement save: no safetensors index found in `%s`; updated shards only.", save_dir)
 
         serialized_config = copy.deepcopy(self.quantize_config)
         serialized_config.save_pretrained(save_dir)
@@ -799,7 +860,7 @@ def ModelWriter(cls):
         if runtime_config is not None and hasattr(runtime_config, "tie_word_embeddings"):
             model_config["tie_word_embeddings"] = bool(runtime_config.tie_word_embeddings)
         with open(config_path, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(model_config, indent=2, sort_keys=True) + "\n")
+            handle.write(json.dumps(model_config, indent=2) + "\n")
 
         if self.trust_remote_code:
             copy_py_files(save_dir, model_id_or_path=self.model_local_path)
@@ -820,6 +881,16 @@ def ModelWriter(cls):
             split_by: Optional[str] = None,
     ):
         """save quantized model and configs to local disk"""
+        if not self.quantized:
+            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
+
+        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
+            getattr(self, "out_of_model_tensors", None)
+        )
+        out_of_model_state_dict: Dict[str, TensorSource] = {}
+        if prefix_entries:
+            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, out_of_model_state_dict)
+
         os.makedirs(save_dir, exist_ok=True)
 
         if self.quant_log:
@@ -827,7 +898,8 @@ def ModelWriter(cls):
                 w = csv.writer(file)
                 w.writerow([PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES, QUANT_LOG_DAMP, PROCESS_LOG_TIME])
                 w.writerows([[entry.get(PROCESS_LOG_LAYER), entry.get(PROCESS_LOG_MODULE), entry.get(QUANT_LOG_LOSS),
-                              entry.get(QUANT_LOG_DAMP), entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
+                              entry.get(QUANT_LOG_NSAMPLES), entry.get(QUANT_LOG_DAMP),
+                              entry.get(PROCESS_LOG_TIME)] for entry in self.quant_log])
 
         pre_quantized_size_mb = get_model_files_size(self.model_local_path)
         pre_quantized_size_gb = pre_quantized_size_mb / 1024
@@ -878,7 +950,7 @@ def ModelWriter(cls):
 
         self.quantize_config.meta_set(
             key=META_FIELD_MSE,
-            value=getattr(self.quantize_config, "mse", None)
+            value=getattr(getattr(self.quantize_config, "mse", None), "norm", None)
         )
 
         self.quantize_config.meta_set(
@@ -916,9 +988,6 @@ def ModelWriter(cls):
         config = copy.deepcopy(self.model.config)
 
         quantize_config = copy.deepcopy(self.quantize_config)
-
-        if not self.quantized:
-            raise ValueError("Save aborted as model is not quantized. Please call `quantize()` first.")
 
         quant_method = getattr(quantize_config, "method", getattr(quantize_config, "quant_method", None))
         runtime_format = resolve_quant_format(quantize_config.format, quant_method)
@@ -983,6 +1052,20 @@ def ModelWriter(cls):
         # Save `quantize_config.json`
         quantize_config.save_pretrained(save_dir)
 
+        if quantize_config.dynamic:
+            # Transformers sorts nested keys, but dynamic rules use first-match order.
+            quant_config_path = os.path.join(save_dir, "quantize_config.json")
+            with open(quant_config_path, "r", encoding="utf-8") as handle:
+                saved_quant_config = json.load(handle)
+            config_path = os.path.join(save_dir, "config.json")
+            with open(config_path, "r", encoding="utf-8") as handle:
+                saved_config = json.load(handle)
+            saved_config["quantization_config"]["dynamic"] = (
+                saved_quant_config["dynamic"]
+            )
+            with open(config_path, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(saved_config, indent=2) + "\n")
+
         def debug_saved_config(path):
             # List all files in the directory
             files = os.listdir(path)
@@ -1003,9 +1086,6 @@ def ModelWriter(cls):
 
         debug_saved_config(save_dir)
 
-        # Save processor related config files. For example: preprocessor_config.json, chat_template.json
-        if hasattr(self,"processor") and isinstance(self.processor, ProcessorMixin):
-            self.processor.save_pretrained(save_dir)
         # --- end config save block ---
 
         # Due to shell/turtle state, we need to sync the modules from turtle to shell
@@ -1025,11 +1105,8 @@ def ModelWriter(cls):
 
         offload_root = self.quantize_config.offload_to_disk_path if getattr(self.quantize_config, "offload_to_disk", False) else None
         state_dict = get_state_dict_for_save(self.model, offload_root=offload_root)
-        copy_tensor_files, prefix_entries = _normalize_out_of_model_tensors_entries(
-            getattr(self, "out_of_model_tensors", None)
-        )
-        if prefix_entries:
-            _merge_prefix_tensors_into_state_dict(prefix_entries, self.model_local_path, state_dict)
+        state_dict.update(out_of_model_state_dict)
+        out_of_model_state_dict.clear()
 
         model_base_name = "model"
         model_save_name = model_base_name + ".safetensors"
@@ -1170,6 +1247,14 @@ def ModelWriter(cls):
         if self.tokenizer:
             self.tokenizer.save_pretrained(save_dir)
 
+        # Save the processor *after* the tokenizer. `processor.save_pretrained()` re-saves its
+        # tokenizer and then writes the processor-level `chat_template.jinja`; saving in the
+        # reverse order lets a text-only tokenizer template clobber the audio/vision-aware
+        # processor template (e.g. Qwen2-Audio), breaking multimodal chat rendering on reload.
+        if hasattr(self, "processor") and isinstance(self.processor, ProcessorMixin):
+            self.processor.save_pretrained(save_dir)
+
+        if self.tokenizer:
             # Use source model's tokenizer_class for cross-version compatibility
             # (transformers 5.0 save_pretrained writes "TokenizersBackend" which older versions can't load)
             source_tokenizer_config = get_tokenizer_config(self.model_local_path)
@@ -1235,15 +1320,18 @@ def ModelWriter(cls):
                 device=DEVICE.CPU,
             )
 
-        load_checkpoint_in_model_then_tie_weights(
-            model,
-            dtype=torch.float16,
-            # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
-            checkpoint=self.checkpoint_file_name,
-            # device_map=device_map,
-            # offload_state_dict=True,
-            # offload_buffers=True,
-        )
+        if qcfg.activation_mode in {"w4afp8", "w4a_nvfp4"}:
+            _load_native_w4a_for_save(model, self.checkpoint_file_name, activation_mode=qcfg.activation_mode)
+        else:
+            load_checkpoint_in_model_then_tie_weights(
+                model,
+                dtype=torch.float16,
+                # This is very hacky but works due to https://github.com/huggingface/accelerate/blob/bd72a5f1a80d5146554458823f8aeda0a9db5297/src/accelerate/utils/modeling.py#L292
+                checkpoint=self.checkpoint_file_name,
+                # device_map=device_map,
+                # offload_state_dict=True,
+                # offload_buffers=True,
+            )
         torch_empty_cache()
         return model
 

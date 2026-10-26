@@ -20,16 +20,16 @@ class Qwen3QModel(LlamaQModel):
         "layers",
         "#",
         {
-            "input_layernorm": ("input_layernorm:!",),
+            "input_layernorm": ("input_layernorm:!:norm",),
             "self_attn": (
-                "q_norm:!",
-                "k_norm:!",
+                "q_norm:!:norm",
+                "k_norm:!:norm",
                 "q_proj:0:in=x",
                 "k_proj:0:in=x",
                 "v_proj:0:in=x",
                 "o_proj:1",
             ),
-            "post_attention_layernorm": ("post_attention_layernorm:!",),
+            "post_attention_layernorm": ("post_attention_layernorm:!:norm",),
             "mlp": ("gate_proj:0:in=x", "up_proj:0:in=x", "down_proj:1"),
         },
     ]

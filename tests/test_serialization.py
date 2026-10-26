@@ -127,7 +127,7 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(meta["offload_to_disk"], cfg.offload_to_disk)
         self.assertEqual(meta["offload_to_disk_path"], cfg.offload_to_disk_path)
         self.assertEqual(meta["pack_impl"], cfg.pack_impl)
-        self.assertEqual(meta["mse"], cfg.mse)
+        self.assertEqual(meta["mse"], cfg.mse.norm)
         self.assertEqual(meta["mock_quantization"], cfg.mock_quantization)
         self.assertEqual(meta["act_group_aware"], cfg.act_group_aware)
         self.assertEqual(meta["hessian"]["chunk_size"], cfg.hessian.chunk_size)

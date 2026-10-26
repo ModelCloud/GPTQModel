@@ -297,6 +297,58 @@ def _fallback_quantize(
     return dequant
 
 
+@pytest.mark.parametrize(
+    "strategy",
+    [
+        FallbackStrategy.MIDPOINT,
+        FallbackStrategy.MEAN,
+        FallbackStrategy.MEDIAN,
+        FallbackStrategy.STDCLIP,
+    ],
+)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_fallback_sanitizes_zero_scale_before_low_precision_division(
+        monkeypatch, strategy, dtype
+):
+    weights = torch.tensor(
+        [
+            [0.0] * 8,
+            [1.0] * 8,
+            [-1.0] * 8,
+            [0.5] * 8,
+        ],
+        dtype=dtype,
+    )
+    module = nn.Linear(weights.shape[1], weights.shape[0], bias=False).to(dtype)
+    with torch.no_grad():
+        module.weight.copy_(weights)
+
+    qcfg = QuantizeConfig(
+        bits=4,
+        group_size=4,
+        sym=False,
+        fallback=Fallback(strategy=strategy),
+        offload_to_disk=False,
+    )
+    gptq = GPTQ(module=module, qcfg=qcfg)
+    gptq.quantizer.configure(perchannel=True)
+
+    def clone_preserving_dtype(self, copy=True, device=None):
+        return self.module.weight.data.to(copy=copy, device=device)
+
+    monkeypatch.setattr(GPTQ, "clone_module", clone_preserving_dtype)
+
+    quantized, scale, zero, *_ = gptq._fallback_quantize(
+        strategy, blocksize=4, target_device=torch.device("cpu")
+    )
+
+    assert quantized.dtype == dtype
+    assert torch.isfinite(quantized).all()
+    assert torch.isfinite(scale).all()
+    assert torch.isfinite(zero).all()
+    assert (scale != 0).all()
+
+
 def _scenarios():
     torch.manual_seed(0)
     base = torch.randn(8, 32)
@@ -719,6 +771,23 @@ def test_should_use_fallback_parses_numeric_and_percent():
 
     assert should_use_fallback("10%", observed_samples=8, expected_total_samples=90)
     assert should_use_fallback("10%", observed_samples=10, expected_total_samples=200)
+
+
+@pytest.mark.parametrize("threshold", ["0.5%%", "nonsense", "%", "1x", "   "])
+def test_should_use_fallback_rejects_malformed_threshold(threshold):
+    with pytest.raises(ValueError, match="Invalid fallback threshold"):
+        should_use_fallback(threshold, observed_samples=0, expected_total_samples=100)
+
+
+@pytest.mark.parametrize("threshold", [None, False, 0, 0.0, "", "0"])
+def test_should_use_fallback_keeps_disabled_thresholds(threshold):
+    assert not should_use_fallback(threshold, observed_samples=0, expected_total_samples=100)
+
+
+@pytest.mark.parametrize("threshold", [" 10 ", "1e1", "10 %", " 10 % "])
+def test_should_use_fallback_accepts_padded_and_exponent_thresholds(threshold):
+    assert should_use_fallback(threshold, observed_samples=9, expected_total_samples=100)
+    assert not should_use_fallback(threshold, observed_samples=11, expected_total_samples=100)
 
 
 def test_gptq_fallback_threshold_triggers_rtn_when_samples_below_percent():

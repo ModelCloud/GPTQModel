@@ -298,7 +298,13 @@ class ForwardExecutor:
                 )
 
                 if not preserve_module_devices:
-                    rehome_module_to_device(module, cur_layer_device, move_parameters=True, move_buffers=True)
+                    rehome_module_to_device(
+                        module,
+                        cur_layer_device,
+                        move_parameters=True,
+                        move_buffers=True,
+                        root_module=getattr(self.looper.gptq_model, "model", None),
+                    )
 
                 with self._moe_forward_context(
                     module=module,
@@ -461,6 +467,7 @@ class ForwardExecutor:
                 module,
                 devices,
                 progress_callback=progress_cb,
+                root_module=getattr(self.looper.gptq_model, "model", None),
             )
         finally:
             if replica_pb is not None:

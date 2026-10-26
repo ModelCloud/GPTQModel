@@ -17,6 +17,7 @@ from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGP
 from gptqmodel.models.definitions.mixtral import MixtralQModel
 from gptqmodel.models.definitions.ovis import OvisQModel
 from gptqmodel.models.definitions.qwen2_5_vl import Qwen2_5_VLQModel
+from gptqmodel.models.definitions.qwen2_audio import Qwen2AudioGPTQ
 from gptqmodel.models.definitions.qwen2_vl import Qwen2VLQModel
 from gptqmodel.models.definitions.qwen3_5_moe_text import Qwen3_5_MoeTextQModel
 from gptqmodel.utils import structure as structure_module
@@ -86,6 +87,12 @@ class _Qwen2_5_VLDummyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.config = SimpleNamespace(model_type="qwen2_5_vl")
+
+
+class _Qwen2AudioDummyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="qwen2_audio")
 
 
 class _Qwen3_5_MoeTextDummyModel(nn.Module):
@@ -420,6 +427,15 @@ def _qwen2_vl_weight_renamings():
     ]
 
 
+def _qwen2_audio_weight_renamings():
+    return [
+        _WeightRenamingStub(r"^language_model.model", "model.language_model"),
+        _WeightRenamingStub(r"^language_model.lm_head", "lm_head"),
+        _WeightRenamingStub(r"^audio_tower", "model.audio_tower"),
+        _WeightRenamingStub(r"^multi_modal_projector", "model.multi_modal_projector"),
+    ]
+
+
 def _renaming_pairs(renamings) -> list[tuple[str, str]]:
     assert renamings is not None
     return [(entry.source_patterns[0], entry.target_patterns[0]) for entry in renamings]
@@ -528,6 +544,28 @@ def _assert_qwen2_vl_alias_resolution(turtle: LazyTurtle) -> None:
             "weight",
         )
         == "visual.blocks.0.attn.weight"
+    )
+
+
+def _assert_qwen2_audio_alias_resolution(turtle: LazyTurtle) -> None:
+    assert turtle._resolve_checkpoint_module_path("model.language_model") == "language_model.model"
+    assert turtle._resolve_checkpoint_module_path("model.audio_tower") == "audio_tower"
+    assert turtle._resolve_checkpoint_module_path("model.multi_modal_projector") == "multi_modal_projector"
+    assert turtle._resolve_checkpoint_module_path("lm_head") == "language_model.lm_head"
+
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.language_model.layers.0.self_attn",
+            "q_proj.weight",
+        )
+        == "language_model.model.layers.0.self_attn.q_proj.weight"
+    )
+    assert (
+        turtle._resolve_checkpoint_tensor_name(
+            "model.audio_tower.layers.0",
+            "fc1.weight",
+        )
+        == "audio_tower.layers.0.fc1.weight"
     )
 
 
@@ -876,6 +914,34 @@ def test_lazy_turtle_uses_transformers_checkpoint_conversion_mapping_for_qwen2_5
 
     assert observed_model_types == ["qwen2_5_vl"]
     _assert_qwen2_vl_alias_resolution(turtle)
+
+
+def test_lazy_turtle_uses_transformers_checkpoint_conversion_mapping_for_qwen2_audio(tmp_path, monkeypatch):
+    observed_model_types: list[str] = []
+
+    def _get_checkpoint_conversion_mapping(model_type: str):
+        observed_model_types.append(model_type)
+        if model_type == "qwen2_audio":
+            return _qwen2_audio_weight_renamings()
+        return None
+
+    conversion_mapping_module = SimpleNamespace(get_checkpoint_conversion_mapping=_get_checkpoint_conversion_mapping)
+    monkeypatch.setattr(structure_module, "import_module", lambda name: conversion_mapping_module)
+
+    turtle = _build_lazy_turtle(
+        tmp_path,
+        {
+            "language_model.model.layers.0.self_attn.q_proj.weight": torch.zeros(2, 2),
+            "audio_tower.layers.0.fc1.weight": torch.zeros(2, 2),
+            "multi_modal_projector.linear.weight": torch.zeros(2, 2),
+            "language_model.lm_head.weight": torch.zeros(2, 2),
+        },
+        module_tree=Qwen2AudioGPTQ.module_tree,
+        target_model=_Qwen2AudioDummyModel(),
+    )
+
+    assert observed_model_types == ["qwen2_audio"]
+    _assert_qwen2_audio_alias_resolution(turtle)
 
 
 def test_lazy_turtle_matches_bare_deepseek_v4_rules_with_model_prefix_shell_paths(tmp_path):

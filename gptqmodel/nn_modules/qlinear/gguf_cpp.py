@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import ctypes
 import os
+import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -15,7 +17,7 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization.config import FORMAT, METHOD
 from ...utils.backend import BACKEND
-from .gguf import GGUFTorchLinear
+from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
 
 try:
@@ -85,6 +87,15 @@ class _GGMLMatmulPlan:
             pass
 
 
+# Upstream enum ggml_type values for constants llama-cpp-python does not export
+# (kept in sync with ggml/include/ggml.h; Q8_1=9, TQ1_0=34, TQ2_0=35).
+_GGML_TYPE_ID_FALLBACK = {
+    "Q8_1": 9,
+    "TQ1_0": 34,
+    "TQ2_0": 35,
+}
+
+
 class _GGMLBridge:
     GGML_METADATA_BYTES = 1 << 20
 
@@ -107,15 +118,28 @@ class _GGMLBridge:
 
         self.ggml_type_f32 = int(_llama_cpp_lib.GGML_TYPE_F32)
         self.ggml_type_f16 = int(_llama_cpp_lib.GGML_TYPE_F16)
-        self.ggml_qtypes = {
-            "Q4_0": int(_llama_cpp_lib.GGML_TYPE_Q4_0),
-            "Q8_0": int(_llama_cpp_lib.GGML_TYPE_Q8_0),
-            "Q4_K": int(_llama_cpp_lib.GGML_TYPE_Q4_K),
-            "Q5_K": int(_llama_cpp_lib.GGML_TYPE_Q5_K),
-            "Q6_K": int(_llama_cpp_lib.GGML_TYPE_Q6_K),
-        }
+        self.ggml_qtypes = {}
+        for name in (
+            "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
+            "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "Q8_K",
+            "IQ2_XXS", "IQ2_XS", "IQ3_XXS", "IQ1_S", "IQ4_NL", "IQ3_S",
+            "IQ2_S", "IQ4_XS", "I8", "I16", "I32", "I64", "F64", "IQ1_M",
+            "BF16", "TQ1_0", "TQ2_0", "MXFP4", "NVFP4", "Q1_0", "Q2_0",
+        ):
+            value = getattr(_llama_cpp_lib, f"GGML_TYPE_{name}", None)
+            if value is None:
+                value = _GGML_TYPE_ID_FALLBACK.get(name)
+            if value is not None:
+                self.ggml_qtypes[name] = int(value)
+        # PRISM's Q1_0_g128 shares the upstream Q1_0 sign-only layout.
+        if "Q1_0" in self.ggml_qtypes:
+            self.ggml_qtypes["Q1_0_g128"] = self.ggml_qtypes["Q1_0"]
         self._cpu_backend: Optional[int] = None
+        self._cpu_backend_lock = threading.RLock()
         self._cuda_backends: Dict[int, int] = {}
+        self._quantize_initialized: set[int] = set()
+        self._quantize_init_lock = threading.Lock()
+        self._dequantize_fns: Dict[str, object] = {}
 
     def _bind(self, lib, name: str, argtypes, restype) -> None:
         fn = getattr(lib, name)
@@ -156,9 +180,161 @@ class _GGMLBridge:
         self._bind(self._ggml_base, "ggml_backend_synchronize", [ctypes.c_void_p], None)
         self._bind(self._ggml_cpu, "ggml_backend_cpu_init", [], ctypes.c_void_p)
         self._bind(self._ggml_cpu, "ggml_backend_cpu_set_n_threads", [ctypes.c_void_p, ctypes.c_int], None)
+        # Native ggml quantize/dequantize entry points (public ggml API).
+        self._bind(self._ggml_base, "ggml_is_quantized", [ctypes.c_int], ctypes.c_bool)
+        self._bind(self._ggml_base, "ggml_blck_size", [ctypes.c_int], ctypes.c_int64)
+        self._bind(self._ggml_base, "ggml_row_size", [ctypes.c_int, ctypes.c_int64], ctypes.c_size_t)
+        self._bind(self._ggml_base, "ggml_quantize_init", [ctypes.c_int], None)
+        self._bind(self._ggml_base, "ggml_quantize_requires_imatrix", [ctypes.c_int], ctypes.c_bool)
+        self._bind(
+            self._ggml_base,
+            "ggml_quantize_chunk",
+            [
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_int64,
+                ctypes.c_void_p,
+            ],
+            ctypes.c_size_t,
+        )
         if self._ggml_cuda is not None:
             self._bind(self._ggml_cuda, "ggml_backend_cuda_init", [ctypes.c_int], ctypes.c_void_p)
             self._bind(self._ggml_cuda, "ggml_backend_cuda_get_device_count", [], ctypes.c_int)
+
+    # Types ggml_quantize_chunk can produce: the switch in ggml.c covers every
+    # IQ/K/microscaling type plus Q1_0/Q2_0/Q4_*/Q5_*/Q8_0/F16/BF16. Q8_1 and
+    # Q8_K are inference-only upstream (no quantizer case) and calling them
+    # aborts the process via GGML_ASSERT, so they are excluded explicitly.
+    _GGML_QUANTIZABLE_QTYPES = frozenset({
+        "Q1_0", "Q2_0", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "MXFP4", "NVFP4",
+        "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K", "TQ1_0", "TQ2_0",
+        "IQ2_XXS", "IQ2_XS", "IQ3_XXS", "IQ3_S", "IQ2_S", "IQ1_S", "IQ1_M",
+        "IQ4_NL", "IQ4_XS",
+    })
+
+    def quantize_chunk(self, weight: np.ndarray, gguf_tensor_qtype: str) -> np.ndarray:
+        """Quantize a 2D fp32 matrix into ggml-packed rows via `ggml_quantize_chunk`."""
+
+        if gguf_tensor_qtype not in self._GGML_QUANTIZABLE_QTYPES:
+            raise NotImplementedError(f"ggml has no quantizer for `{gguf_tensor_qtype}`.")
+        type_id = self.ggml_qtypes.get(gguf_tensor_qtype)
+        if type_id is None or not self._ggml_base.ggml_is_quantized(type_id):
+            raise NotImplementedError(f"ggml does not support quantizing `{gguf_tensor_qtype}`.")
+        w = np.ascontiguousarray(weight, dtype=np.float32)
+        if w.ndim != 2:
+            raise ValueError(f"ggml quantize expects a 2D matrix, got shape {w.shape}.")
+        nrows, ncols = w.shape
+        blck = int(self._ggml_base.ggml_blck_size(type_id))
+        if blck > 1 and ncols % blck != 0:
+            raise ValueError(
+                f"GGUF `{gguf_tensor_qtype}` requires columns divisible by {blck}, got {ncols}."
+            )
+        row_size = int(self._ggml_base.ggml_row_size(type_id, ncols))
+        dst = np.empty((nrows, row_size), dtype=np.uint8)
+
+        imatrix = None
+        imatrix_ptr = None
+        if self._ggml_base.ggml_quantize_requires_imatrix(type_id):
+            # Importance-matrix formats accept a uniform matrix as a valid
+            # (non activation-aware) fallback.
+            imatrix = np.ones(ncols, dtype=np.float32)
+            imatrix_ptr = imatrix.ctypes.data_as(ctypes.c_void_p)
+
+        with self._quantize_init_lock:
+            if type_id not in self._quantize_initialized:
+                self._ggml_base.ggml_quantize_init(type_id)
+                self._quantize_initialized.add(type_id)
+
+        result = self._ggml_base.ggml_quantize_chunk(
+            type_id,
+            w.ctypes.data_as(ctypes.c_void_p),
+            dst.ctypes.data_as(ctypes.c_void_p),
+            0,
+            nrows,
+            ncols,
+            imatrix_ptr,
+        )
+        if result != dst.nbytes:
+            raise RuntimeError(
+                f"ggml_quantize_chunk({gguf_tensor_qtype}) produced {result} bytes, expected {dst.nbytes}."
+            )
+        return dst
+
+    _GGML_DEQUANT_FN_NAMES = {
+        "Q4_0": "dequantize_row_q4_0",
+        "Q4_1": "dequantize_row_q4_1",
+        "Q5_0": "dequantize_row_q5_0",
+        "Q5_1": "dequantize_row_q5_1",
+        "Q8_0": "dequantize_row_q8_0",
+        "Q8_1": "dequantize_row_q8_1",
+        "Q2_K": "dequantize_row_q2_K",
+        "Q3_K": "dequantize_row_q3_K",
+        "Q4_K": "dequantize_row_q4_K",
+        "Q5_K": "dequantize_row_q5_K",
+        "Q6_K": "dequantize_row_q6_K",
+        "Q8_K": "dequantize_row_q8_K",
+        "IQ2_XXS": "dequantize_row_iq2_xxs",
+        "IQ2_XS": "dequantize_row_iq2_xs",
+        "IQ3_XXS": "dequantize_row_iq3_xxs",
+        "IQ1_S": "dequantize_row_iq1_s",
+        "IQ4_NL": "dequantize_row_iq4_nl",
+        "IQ3_S": "dequantize_row_iq3_s",
+        "IQ2_S": "dequantize_row_iq2_s",
+        "IQ4_XS": "dequantize_row_iq4_xs",
+        "IQ1_M": "dequantize_row_iq1_m",
+        "TQ1_0": "dequantize_row_tq1_0",
+        "TQ2_0": "dequantize_row_tq2_0",
+        "MXFP4": "dequantize_row_mxfp4",
+        "NVFP4": "dequantize_row_nvfp4",
+        "Q1_0": "dequantize_row_q1_0",
+        "Q1_0_g128": "dequantize_row_q1_0",
+        "Q2_0": "dequantize_row_q2_0",
+    }
+
+    def dequantize_rows(
+        self,
+        data: np.ndarray,
+        gguf_tensor_qtype: str,
+        out_shape: Tuple[int, ...],
+    ) -> np.ndarray:
+        """Dequantize packed ggml rows via the native `dequantize_row_*` kernels."""
+
+        info = _GGUF_TYPE_INFO.get(gguf_tensor_qtype)
+        if info is None:
+            raise NotImplementedError(f"Unknown GGUF tensor type `{gguf_tensor_qtype}`.")
+        raw = np.ascontiguousarray(data, dtype=np.uint8)
+        if raw.ndim == 0 or raw.shape[-1] % info["type_size"]:
+            raise ValueError("GGML dequantization requires complete packed rows.")
+        expected_shape = (*raw.shape[:-1], raw.shape[-1] // info["type_size"] * info["block_size"])
+        if tuple(out_shape) != expected_shape:
+            raise ValueError(f"GGML dequantized shape must be {expected_shape}, got {out_shape}.")
+
+        fn = self._dequantize_fns.get(gguf_tensor_qtype)
+        if fn is None:
+            name = self._GGML_DEQUANT_FN_NAMES.get(gguf_tensor_qtype)
+            if name is None:
+                raise NotImplementedError(
+                    f"ggml has no dequantize_row kernel for `{gguf_tensor_qtype}`."
+                )
+            fn = getattr(self._ggml_base, name, None)
+            if fn is None:
+                raise NotImplementedError(
+                    f"ggml shared library lacks `{name}` for `{gguf_tensor_qtype}`."
+                )
+            fn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+            fn.restype = None
+            self._dequantize_fns[gguf_tensor_qtype] = fn
+
+        output = np.empty(out_shape, dtype=np.float32)
+        fn(
+            raw.ctypes.data_as(ctypes.c_void_p),
+            output.ctypes.data_as(ctypes.c_void_p),
+            int(output.size),
+        )
+        return output
 
     @staticmethod
     def _cpu_threads() -> int:
@@ -192,13 +368,14 @@ class _GGMLBridge:
         return True, None
 
     def _get_cpu_backend(self) -> int:
-        if self._cpu_backend is None:
-            backend = self._ggml_cpu.ggml_backend_cpu_init()
-            if not backend:
-                raise RuntimeError("GGUFCppKernel failed to initialize GGML CPU backend.")
-            self._ggml_cpu.ggml_backend_cpu_set_n_threads(backend, self._cpu_threads())
-            self._cpu_backend = backend
-        return self._cpu_backend
+        with self._cpu_backend_lock:
+            if self._cpu_backend is None:
+                backend = self._ggml_cpu.ggml_backend_cpu_init()
+                if not backend:
+                    raise RuntimeError("GGUFCppKernel failed to initialize GGML CPU backend.")
+                self._ggml_cpu.ggml_backend_cpu_set_n_threads(backend, self._cpu_threads())
+                self._cpu_backend = backend
+            return self._cpu_backend
 
     def _get_cuda_backend(self, device_index: int) -> int:
         if self._ggml_cuda is None:
@@ -497,6 +674,11 @@ class _GGMLBridge:
         )
         return output
 
+    # Q8_1 and Q8_K are KV-cache/auxiliary types upstream with no vec_dot
+    # kernel for an F32 source, and ggml_mul_mat dereferences the missing
+    # pointer instead of erroring, so they must never reach graph compute.
+    _GGML_MATMUL_UNSUPPORTED = frozenset({"Q8_1", "Q8_K"})
+
     def quantized_matmul_cpu(
         self,
         *,
@@ -508,16 +690,34 @@ class _GGMLBridge:
     ) -> torch.Tensor:
         if x.device.type != "cpu":
             raise RuntimeError("GGUFCppKernel only supports CPU input tensors.")
+        if gguf_tensor_qtype in self._GGML_MATMUL_UNSUPPORTED:
+            raise NotImplementedError(
+                f"ggml CPU matmul does not support `{gguf_tensor_qtype}` weights."
+            )
+        info = _GGUF_TYPE_INFO.get(gguf_tensor_qtype)
+        if info is None or gguf_tensor_qtype not in self.ggml_qtypes:
+            raise NotImplementedError(f"ggml CPU matmul does not support `{gguf_tensor_qtype}` weights.")
+        if padded_in_features <= 0 or padded_in_features % info["block_size"] or out_features <= 0:
+            raise ValueError("GGML matmul requires positive dimensions and complete weight blocks.")
+        expected_shape = (out_features, padded_in_features // info["block_size"] * info["type_size"])
+        if qweight.dtype != torch.uint8 or tuple(qweight.shape) != expected_shape:
+            raise ValueError(f"GGML matmul requires packed uint8 weights of shape {expected_shape}.")
+        if x.ndim != 2 or not 0 < x.shape[-1] <= padded_in_features:
+            raise ValueError("GGML matmul input must be a 2D matrix within the padded weight width.")
+        if x.shape[0] == 0:
+            return torch.empty((0, out_features), device=x.device, dtype=torch.float32)
 
-        return self._run_quantized_matmul(
-            backend=self._get_cpu_backend(),
-            qweight_cpu=self._normalize_qweight_cpu(qweight),
-            x_cpu=self._normalize_input_cpu(x, padded_in_features),
-            gguf_tensor_qtype=gguf_tensor_qtype,
-            padded_in_features=padded_in_features,
-            out_features=out_features,
-            kernel_name="GGUFCppKernel",
-        )
+        # ggml's CPU backend owns mutable graph scratch shared by all callers.
+        with self._cpu_backend_lock:
+            return self._run_quantized_matmul(
+                backend=self._get_cpu_backend(),
+                qweight_cpu=self._normalize_qweight_cpu(qweight),
+                x_cpu=self._normalize_input_cpu(x, padded_in_features),
+                gguf_tensor_qtype=gguf_tensor_qtype,
+                padded_in_features=padded_in_features,
+                out_features=out_features,
+                kernel_name="GGUFCppKernel",
+            )
 
     def quantized_matmul_cuda(
         self,
@@ -557,20 +757,22 @@ class _GGMLBridge:
 
 
 _GGML_BRIDGE: Optional[_GGMLBridge] = None
+_GGML_BRIDGE_LOCK = threading.Lock()
 
 
 def _get_ggml_bridge() -> _GGMLBridge:
     global _GGML_BRIDGE
-    if _GGML_BRIDGE is None:
-        _GGML_BRIDGE = _GGMLBridge()
-    return _GGML_BRIDGE
+    with _GGML_BRIDGE_LOCK:
+        if _GGML_BRIDGE is None:
+            _GGML_BRIDGE = _GGMLBridge()
+        return _GGML_BRIDGE
 
 
 class GGUFCppKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CPU]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 25}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True
@@ -620,6 +822,7 @@ class GGUFCppKernel(GGUFTorchLinear):
             register_buffers=register_buffers,
             **kwargs,
         )
+        self._gguf_cpu_autotune_cache: Dict[tuple, bool] = {}
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -628,7 +831,52 @@ class GGUFCppKernel(GGUFTorchLinear):
         except Exception as exc:
             return False, exc
 
+    def _forward_ggml_cpu(self, x_flat: torch.Tensor) -> torch.Tensor:
+        return _get_ggml_bridge().quantized_matmul_cpu(
+            qweight=self.qweight,
+            x=x_flat,
+            gguf_tensor_qtype=self.gguf_tensor_qtype,
+            padded_in_features=self.padded_in_features,
+            out_features=self.out_features,
+        )
+
+    def _forward_torch_cpu(self, x_flat: torch.Tensor) -> torch.Tensor:
+        if self._should_use_fused_k_forward(x_flat):
+            return self._forward_fused_k(x_flat)
+        return self._forward_dequant_matmul(x_flat)
+
+    def _use_ggml_cpu_matmul(self, x_flat: torch.Tensor) -> bool:
+        if self.gguf_tensor_qtype in _GGMLBridge._GGML_MATMUL_UNSUPPORTED:
+            return False
+        override = os.environ.get("GPTQMODEL_GGUF_CPP_NATIVE_MATMUL")
+        if override is not None:
+            return override.strip().lower() not in {"0", "false", "off"}
+
+        key = (x_flat.shape[0], x_flat.dtype, self.gguf_tensor_qtype)
+        cached = self._gguf_cpu_autotune_cache.get(key)
+        if cached is None:
+            try:
+                ggml_time = self._benchmark_forward_runner(
+                    lambda: self._forward_ggml_cpu(x_flat), device=x_flat.device
+                )
+                torch_time = self._benchmark_forward_runner(
+                    lambda: self._forward_torch_cpu(x_flat), device=x_flat.device
+                )
+                cached = ggml_time <= torch_time
+            except Exception:
+                # Any benchmark failure (including qtypes ggml cannot matmul)
+                # falls back to the always-correct torch path.
+                cached = False
+            self._gguf_cpu_autotune_cache[key] = cached
+        return cached
+
+    def clear_autotune(self):
+        super().clear_autotune()
+        self._gguf_cpu_autotune_cache = {}
+
     def forward(self, x: torch.Tensor):
+        if x.ndim == 0 or x.shape[-1] != self.in_features:
+            raise ValueError(f"Expected input with last dimension {self.in_features}, got {tuple(x.shape)}.")
         original_shape = x.shape[:-1] + (self.out_features,)
         x_flat = x.reshape(-1, x.shape[-1])
         if x_flat.device.type != "cpu":
@@ -637,13 +885,10 @@ class GGUFCppKernel(GGUFTorchLinear):
                 "Load GGUF models on CPU or use BACKEND.GGUF_CPP_CUDA or BACKEND.GGUF_TORCH for CUDA inference."
             )
 
-        output = _get_ggml_bridge().quantized_matmul_cpu(
-            qweight=self.qweight,
-            x=x_flat,
-            gguf_tensor_qtype=self.gguf_tensor_qtype,
-            padded_in_features=self.padded_in_features,
-            out_features=self.out_features,
-        )
+        if self._use_ggml_cpu_matmul(x_flat):
+            output = self._forward_ggml_cpu(x_flat)
+        else:
+            output = self._forward_torch_cpu(x_flat)
         if output.dtype != x_flat.dtype:
             output = output.to(dtype=x_flat.dtype)
 
@@ -662,7 +907,7 @@ class GGUFCudaKernel(GGUFTorchLinear):
     SUPPORTS_BACKENDS = [BACKEND.GGUF_CPP_CUDA]
     SUPPORTS_METHODS = [METHOD.GGUF]
     SUPPORTS_FORMATS = {FORMAT.GGUF: 35}
-    SUPPORTS_BITS = [4, 5, 6, 8]
+    SUPPORTS_BITS = [1, 2, 3, 4, 5, 6, 8]
     SUPPORTS_SHARDS = True
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = True

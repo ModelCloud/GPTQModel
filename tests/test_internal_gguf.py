@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2026 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+# GGUF format: ggml-org/llama.cpp, MIT, https://github.com/ggml-org/llama.cpp
+
 import struct
 from types import SimpleNamespace
 
@@ -15,6 +19,7 @@ def test_internal_gguf_types_match_current_upstream_assignments():
     assert int(internal_gguf.GGMLQuantizationType.Q2_0) == 42
     assert internal_gguf.GGMLQuantizationType.Q1_0_g128 is internal_gguf.GGMLQuantizationType.Q1_0
 
+    assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.Q8_1] == (32, 36)
     assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.NVFP4] == (64, 36)
     assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.Q1_0] == (128, 18)
     assert internal_gguf.GGML_QUANT_SIZES[internal_gguf.GGMLQuantizationType.Q2_0] == (64, 18)
@@ -228,6 +233,23 @@ def test_internal_gguf_reader_uses_current_nvfp4_storage_size(tmp_path):
     assert tensor.n_bytes == 36
     np.testing.assert_array_equal(tensor.data, packed)
     assert internal_gguf.dequantize(tensor.data, tensor.tensor_type).shape == (64,)
+
+
+def test_internal_gguf_reader_uses_current_q8_1_storage_size(tmp_path):
+    packed = np.arange(36, dtype=np.uint8)
+    path = _write_minimal_gguf_tensor(
+        tmp_path,
+        tensor_type=internal_gguf.GGMLQuantizationType.Q8_1,
+        shape=(32,),
+        data=packed.tobytes(),
+    )
+
+    tensor = internal_gguf.GGUFReader(path).tensors[0]
+
+    assert tensor.tensor_type == internal_gguf.GGMLQuantizationType.Q8_1
+    assert tensor.n_elements == 32
+    assert tensor.n_bytes == 36
+    np.testing.assert_array_equal(tensor.data, packed)
 
 
 @pytest.mark.parametrize(

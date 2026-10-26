@@ -14,7 +14,10 @@ __device__ inline uint64_cu warp_reduce_sum(uint64_cu v)
 {
     for (int offset = 32 >> 1; offset > 0; offset >>= 1)
     {
-        uint64_cu other_v = __shfl_down_sync(0xffffffff, v, offset);
+        // HIP requires a 64-bit shuffle mask (a 32-bit literal fails a
+        // static_assert); CUDA wants the 32-bit active-lane mask.
+        // __activemask() is the active-lane set with the right width on both.
+        uint64_cu other_v = __shfl_down_sync(__activemask(), v, offset);
         v += other_v;
     }
     return v;
