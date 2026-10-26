@@ -84,6 +84,31 @@ class TestExtensionConfig(unittest.TestCase):
         assert payload["name"] == lora
         assert payload["rank"] == 128
 
+    def test_to_dict_does_not_mutate_dynamic_adapter_overrides(self):
+        qconfig = QuantizeConfig(
+            bits=4,
+            group_size=128,
+            adapter=Lora(rank=8),
+            dynamic={
+                "model.layers.0.self_attn.q_proj": {
+                    "bits": 8,
+                    "adapter": {"rank": 16},
+                }
+            },
+        )
+        expected_dynamic = {
+            "model.layers.0.self_attn.q_proj": {
+                "bits": 8,
+                "adapter": {"rank": 16},
+            }
+        }
+
+        payload = qconfig.to_dict()
+
+        assert payload["dynamic"] == {"model.layers.0.self_attn.q_proj": {"bits": 8}}
+        assert qconfig.dynamic == expected_dynamic
+        assert qconfig.extract_adapter_rank_patterns() == {"model.layers.0.self_attn.q_proj": 16}
+
     def test_extension_embed(self):
         bits = 4
         rank = 2

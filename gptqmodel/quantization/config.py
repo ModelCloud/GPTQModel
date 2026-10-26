@@ -4382,10 +4382,12 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         dynamic = out["dynamic"]
         if dynamic:
+            dynamic = copy.deepcopy(dynamic)
             for _, v in dynamic.items():
                 v.pop("adapter", None)
                 if "bits" in v:
                     v["bits"] = serialize_quant_bits(v["bits"])
+            out["dynamic"] = dynamic
 
         out = {k: v for k, v in out.items() if v is not None and (v not in [None, {}])}
         dict_scale_dtype_to_str(out)
