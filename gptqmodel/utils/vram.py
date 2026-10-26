@@ -103,10 +103,15 @@ def get_non_persistent_buffers(module: nn.Module, recurse: bool = False):
             Whether or not to go look in every submodule or just return the direct non persistent buffers.
     """
 
-    non_persistent_buffers_set = module._non_persistent_buffers_set
+    non_persistent_buffers_set = set(module._non_persistent_buffers_set)
     if recurse:
-        for _, m in module.named_modules():
-            non_persistent_buffers_set |= m._non_persistent_buffers_set
+        for name, submodule in module.named_modules():
+            if submodule is module:
+                continue
+            prefix = f"{name}." if name else ""
+            non_persistent_buffers_set.update(
+                f"{prefix}{buffer_name}" for buffer_name in submodule._non_persistent_buffers_set
+            )
 
     return non_persistent_buffers_set
 
