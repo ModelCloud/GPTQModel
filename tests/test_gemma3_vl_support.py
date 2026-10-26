@@ -3,12 +3,17 @@
 
 from types import SimpleNamespace
 
+import torch
 from torch import nn
+from safetensors import safe_open
+from safetensors.torch import save_file
+from transformers import BatchEncoding
 
 from gptqmodel.models import auto
 from gptqmodel.models.definitions import gemma3 as gemma3_def
 from gptqmodel.models.definitions.gemma3 import Gemma3ForConditionalGenerationGPTQ, Gemma3QModel
-from gptqmodel.utils.model import MODALITY
+from gptqmodel.models.writer import _convert_checkpoint_state_dict_keys
+from gptqmodel.utils.model import MODALITY, TensorSource, _remap_safetensors_checkpoint_keys
 
 
 class _FakeProcessor:
@@ -122,6 +127,114 @@ def test_gemma3_vl_prepare_dataset_honors_batch_size(monkeypatch):
 
     assert len(prepared) == 1
     assert [len(conversations) for conversations, _ in processor.template_calls] == [2]
+
+
+def test_gemma3_vl_prepare_dataset_accepts_pretokenized_text_without_processor(monkeypatch):
+    rows = [
+        BatchEncoding({"input_ids": list(range(12)), "attention_mask": [0] + [1] * 11}),
+        BatchEncoding({"input_ids": list(range(13)), "attention_mask": [0] + [1] * 12}),
+    ]
+    model = _vl_qmodel()
+
+    def fail_load_processor(self):
+        raise AssertionError("Pre-tokenized text calibration must not use the multimodal processor")
+
+    monkeypatch.setattr(Gemma3ForConditionalGenerationGPTQ, "load_processor", fail_load_processor)
+
+    prepared = model.prepare_dataset(rows, batch_size=1)
+
+    assert len(prepared) == 2
+    assert [row["input_ids"].shape for row in prepared] == [(1, 12), (1, 13)]
+    assert prepared[0]["input_ids"].tolist() == [list(range(12))]
+    assert prepared[1]["input_ids"].tolist() == [list(range(13))]
+
+
+def test_gemma3_checkpoint_keys_are_saved_in_huggingface_layout():
+    convert = Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save
+
+    assert convert("model.language_model.layers.0.self_attn.q_proj.qweight") == (
+        "language_model.model.layers.0.self_attn.q_proj.qweight"
+    )
+    assert convert("model.language_model.model.norm.weight") == "language_model.model.norm.weight"
+    assert convert("model.vision_tower.encoder.layers.0.self_attn.q_proj.weight") == (
+        "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"
+    )
+    assert convert("model.vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight") == (
+        "vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"
+    )
+    assert convert("model.multi_modal_projector.mm_input_projection_weight") == (
+        "multi_modal_projector.mm_input_projection_weight"
+    )
+
+
+def test_checkpoint_key_conversion_updates_tensor_source_names():
+    source = TensorSource(
+        name="model.vision_tower.encoder.layers.0.self_attn.q_proj.weight",
+        torch_dtype=torch.float16,
+        shape=(2, 2),
+        source=torch.zeros((2, 2), dtype=torch.float16),
+    )
+
+    converted = _convert_checkpoint_state_dict_keys(
+        {source.name: source},
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_save,
+    )
+
+    assert list(converted) == ["vision_tower.vision_model.encoder.layers.0.self_attn.q_proj.weight"]
+    assert source.name == list(converted)[0]
+
+
+def test_gemma3_checkpoint_load_remaps_huggingface_names_for_transformers5(tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    save_file({"vision_tower.vision_model.encoder.weight": torch.ones((2, 2))}, str(checkpoint))
+
+    converted_path = _remap_safetensors_checkpoint_keys(
+        checkpoint,
+        Gemma3ForConditionalGenerationGPTQ.checkpoint_key_for_load,
+    )
+    try:
+        assert converted_path is not None
+        with safe_open(converted_path, framework="pt", device="cpu") as checkpoint_file:
+            assert list(checkpoint_file.keys()) == ["model.vision_tower.encoder.weight"]
+            assert torch.equal(checkpoint_file.get_tensor("model.vision_tower.encoder.weight"), torch.ones((2, 2)))
+    finally:
+        if converted_path:
+            import os
+            os.unlink(converted_path)
+
+
+def test_gemma3_save_config_excludes_unquantized_multimodal_modules():
+    quantize_config = SimpleNamespace(dynamic={r"+:model.language_model.layers.*": {"bits": 4}})
+
+    Gemma3ForConditionalGenerationGPTQ.prepare_quantize_config_for_save(None, quantize_config)
+
+    assert quantize_config.dynamic == {
+        r"+:model.language_model.layers.*": {"bits": 4},
+        r"-:vision_tower\..*": {},
+        r"-:multi_modal_projector\..*": {},
+    }
+
+
+def test_gemma3_save_copies_legacy_processor_assets(tmp_path):
+    import os
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "preprocessor_config.json").write_text("{}")
+    (source / "processor_config.json").write_text("{}")
+    (source / "tokenizer_config.json").write_text("{}")
+    (source / "tokenizer.model").write_bytes(b"unused")
+
+    model = SimpleNamespace(model_local_path=str(source))
+    Gemma3ForConditionalGenerationGPTQ.copy_checkpoint_auxiliary_files_for_save(model, str(target))
+
+    assert (target / "preprocessor_config.json").read_text() == "{}"
+    assert (target / "processor_config.json").read_text() == "{}"
+    assert (target / "tokenizer_config.json").read_text() == "{}"
+    assert not os.path.exists(target / "tokenizer.model")
+    assert not os.path.exists(target / "chat_template.json")
 
 
 def test_gemma3_vl_calibration_dataset_resolves_to_image_conversations(monkeypatch):

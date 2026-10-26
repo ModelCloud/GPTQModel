@@ -13,6 +13,7 @@ import operator
 import os
 import shutil
 import struct
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -2260,7 +2261,7 @@ def _checkpoint_tensor_keys(
 
 
 def validate_checkpoint_qweights(
-    model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT,
+    model: nn.Module, checkpoint: str | os.PathLike, format: FORMAT, key_converter=None,
 ) -> None:
     if format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
         return
@@ -2273,7 +2274,10 @@ def validate_checkpoint_qweights(
     module_keys = collections.defaultdict(set)
     for name, module in model.named_modules(remove_duplicate=False):
         if isinstance(module, GPTQQuantLinear):
-            module_keys[id(module)].add(f"{name}.qweight" if name else "qweight")
+            tensor_name = f"{name}.qweight" if name else "qweight"
+            module_keys[id(module)].add(tensor_name)
+            if callable(key_converter):
+                module_keys[id(module)].add(key_converter(tensor_name))
     missing = sorted(
         min(keys) for keys in module_keys.values() if not keys & checkpoint_keys
     )
@@ -2307,12 +2311,72 @@ def _tie_weights_after_checkpoint_load(model, checkpoint: str | os.PathLike | No
 
 
 # Call tied_weights() after load_checkpoint_in_model() to have the weights tied correctly.
+def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_converter) -> Optional[str]:
+    checkpoint = os.fspath(checkpoint)
+    if not os.path.isfile(checkpoint) or not checkpoint.endswith(".safetensors"):
+        return None
+
+    with open(checkpoint, "rb") as source:
+        header_size_bytes = source.read(8)
+        if len(header_size_bytes) != 8:
+            return None
+        header_size = struct.unpack("<Q", header_size_bytes)[0]
+        header = json.loads(source.read(header_size))
+        data_offset = 8 + header_size
+
+    converted_header = {}
+    changed = False
+    for name, tensor_info in header.items():
+        if name == "__metadata__":
+            converted_header[name] = tensor_info
+            continue
+        converted_name = key_converter(name)
+        if converted_name in converted_header:
+            raise ValueError(f"Checkpoint key conversion produced duplicate tensor name: {converted_name}")
+        converted_header[converted_name] = tensor_info
+        changed |= converted_name != name
+
+    if not changed:
+        return None
+
+    encoded_header = json.dumps(converted_header, separators=(",", ":")).encode("utf-8")
+    encoded_header += b" " * ((-len(encoded_header)) % 8)
+    descriptor, converted_path = tempfile.mkstemp(prefix="gptqmodel-key-remap-", suffix=".safetensors")
+    try:
+        with os.fdopen(descriptor, "wb") as target, open(checkpoint, "rb") as source:
+            target.write(struct.pack("<Q", len(encoded_header)))
+            target.write(encoded_header)
+            source.seek(data_offset)
+            shutil.copyfileobj(source, target, length=32 * 1024 * 1024)
+    except BaseException:
+        try:
+            os.unlink(converted_path)
+        except OSError:
+            # Best-effort cleanup: do not mask the original exception if temp file removal fails.
+            pass
+        raise
+    return converted_path
+
+
 def load_checkpoint_in_model_then_tie_weights(model, *args, **kwargs):
     checkpoint = kwargs.get("checkpoint")
     if checkpoint is None and args:
         checkpoint = args[0]
-    accelerate.load_checkpoint_in_model(model, *args, **kwargs)
-    _tie_weights_after_checkpoint_load(model, checkpoint)
+    key_converter = kwargs.pop("key_converter", None)
+    converted_checkpoint = None
+    if callable(key_converter) and checkpoint is not None:
+        converted_checkpoint = _remap_safetensors_checkpoint_keys(checkpoint, key_converter)
+        if converted_checkpoint is not None:
+            kwargs["checkpoint"] = converted_checkpoint
+    try:
+        accelerate.load_checkpoint_in_model(model, *args, **kwargs)
+        _tie_weights_after_checkpoint_load(model, kwargs.get("checkpoint", checkpoint))
+    finally:
+        if converted_checkpoint is not None:
+            try:
+                os.unlink(converted_checkpoint)
+            except OSError:
+                pass
 
 
 # 32MB read/write i/o buffer
