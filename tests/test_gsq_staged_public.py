@@ -101,29 +101,39 @@ def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch):
     assert isinstance(resumed.model.layers[0].self_attn.q_proj, TorchLinear)
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
-        torch.testing.assert_close(resumed(ids, use_cache=False).logits,
-                                   original(ids, use_cache=False).logits, rtol=0, atol=0)
+        torch.testing.assert_close(
+            resumed(ids, use_cache=False).logits, original(ids, use_cache=False).logits, rtol=0, atol=0
+        )
 
 
-@pytest.mark.parametrize("change", ["documents", "model", "prefix"])
+@pytest.mark.parametrize("change", ["documents", "positions", "model", "prefix"])
 def test_staged_llama_rejects_checkpoint_for_different_inputs(tmp_path, change):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.looper.gsq_training_model import quantize_llama_gsq_model
 
     torch.manual_seed(17)
-    config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
-                         num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
+    config = LlamaConfig(
+        vocab_size=128,
+        hidden_size=64,
+        intermediate_size=128,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        num_hidden_layers=1,
+    )
     config._attn_implementation = "sdpa"
     original = LlamaForCausalLM(config).half().eval()
     candidate = copy.deepcopy(original)
     documents = [{"input_ids": list(range(1, 17))}]
+    if change == "positions":
+        documents[0]["position_ids"] = list(range(16))
     checkpoint = tmp_path / "checkpoints"
-    quantize_llama_gsq_model(original, documents, bits=3, group_size=32,
-                             checkpoint_directory=checkpoint)
+    quantize_llama_gsq_model(original, documents, bits=3, group_size=32, checkpoint_directory=checkpoint)
 
     if change == "documents":
         candidate_documents = [{"input_ids": list(range(2, 18))}]
+    elif change == "positions":
+        candidate_documents = [{"input_ids": list(range(1, 17)), "position_ids": list(range(7, 23))}]
     elif change == "model":
         candidate_documents = documents
         with torch.no_grad():
@@ -134,8 +144,9 @@ def test_staged_llama_rejects_checkpoint_for_different_inputs(tmp_path, change):
             candidate.model.embed_tokens.weight[0, 0] += 0.25
 
     with pytest.raises(ValueError, match="does not match this run"):
-        quantize_llama_gsq_model(candidate, candidate_documents, bits=3, group_size=32,
-                                 checkpoint_directory=checkpoint)
+        quantize_llama_gsq_model(
+            candidate, candidate_documents, bits=3, group_size=32, checkpoint_directory=checkpoint
+        )
 
 
 def test_staged_llama_checkpoint_load_rejects_untrusted_pickle(tmp_path):

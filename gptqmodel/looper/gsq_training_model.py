@@ -12,18 +12,28 @@ from .gsq_training_capture import capture_llama_gsq_inputs, quantize_llama_gsq_c
 
 
 def _checkpoint_documents_digest(documents):
-    """Identify the exact token documents consumed by staged capture."""
+    """Identify the token documents and explicit metadata consumed by staged capture."""
     digest = hashlib.sha256()
-    digest.update(len(documents).to_bytes(8, 'little'))
+    digest.update(len(documents).to_bytes(8, "little"))
     for document in documents:
-        if not isinstance(document, dict) or 'input_ids' not in document:
-            raise ValueError('GSQ checkpointing requires documents with input_ids')
-        ids = torch.as_tensor(document['input_ids'], device='cpu')
+        if not isinstance(document, dict) or "input_ids" not in document:
+            raise ValueError("GSQ checkpointing requires documents with input_ids")
+        ids = torch.as_tensor(document["input_ids"], device="cpu")
         if ids.ndim != 1 or ids.dtype not in (torch.int32, torch.int64):
-            raise ValueError('GSQ checkpointing requires rank-1 integer input_ids')
+            raise ValueError("GSQ checkpointing requires rank-1 integer input_ids")
         ids = ids.to(torch.int64).contiguous()
-        digest.update(ids.numel().to_bytes(8, 'little'))
+        digest.update(ids.numel().to_bytes(8, "little"))
         digest.update(ids.numpy().tobytes())
+        for name in ("attention_mask", "position_ids"):
+            digest.update(name.encode("ascii"))
+            if name not in document:
+                digest.update(b"\x00")
+                continue
+            digest.update(b"\x01")
+            value = torch.as_tensor(document[name], device="cpu").detach().contiguous()
+            digest.update(str(value.dtype).encode("ascii"))
+            digest.update(repr(tuple(value.shape)).encode("ascii"))
+            digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
 
 
