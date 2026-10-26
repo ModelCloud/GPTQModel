@@ -2352,6 +2352,7 @@ def _remap_safetensors_checkpoint_keys(checkpoint: str | os.PathLike, key_conver
         try:
             os.unlink(converted_path)
         except OSError:
+            # Best-effort cleanup: do not mask the original exception if temp file removal fails.
             pass
         raise
     return converted_path
