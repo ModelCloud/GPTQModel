@@ -120,9 +120,9 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     and validation documents are captured separately at every block. Completed
     blocks and diagnostics remain available if a later block fails. When a
     checkpoint directory is supplied, completed packed blocks are saved there
-    atomically and replayed on a later call with the same run configuration.
-    Only load checkpoints created by a trusted local run: they contain pickled
-    PyTorch modules.
+    atomically and replayed on a later call with the same model, documents and
+    run configuration. Checkpoints contain tensor state and use weights-only
+    loading.
     """
     from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
