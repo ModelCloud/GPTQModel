@@ -100,7 +100,7 @@ def qqq_calibration_moments(inputs, *, teacher_inputs=None):
 
 
 def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment,
-                     channel_scales=None, config=None):
+                     channel_scales=None, config=None, _factor=None, _row_start=0):
     """Fit fixed-scale stored nibbles; return (best_codes, before, after, history).
 
     This lower-level optimizer returns codes, not fake-quantized weights. The
@@ -125,8 +125,35 @@ def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment
     if not all(t.is_floating_point() and torch.isfinite(t).all() for t in (target, hessian, cross_moment)):
         raise ValueError("QQQ GSQ teacher and calibration must be finite floating tensors")
     count = min(config.candidates, 16)
-    if codes.numel() * count * 4 > config.max_candidate_bytes:
-        raise ValueError("QQQ GSQ decoded candidates exceed max_candidate_bytes")
+    bytes_per_row = width * count * 4
+    if bytes_per_row > config.max_candidate_bytes:
+        raise ValueError("QQQ GSQ candidate bank for one output row exceeds max_candidate_bytes")
+    rows_per_chunk = max(1, config.max_candidate_bytes // bytes_per_row)
+    if codes.shape[0] > rows_per_chunk:
+        with torch.inference_mode(False), torch.enable_grad():
+            if _factor is None:
+                _factor = _metric_factor(hessian.detach())
+            results = []
+            normalizers = []
+            for start in range(0, codes.shape[0], rows_per_chunk):
+                end = min(start + rows_per_chunk, codes.shape[0])
+                part = refine_qqq_codes(
+                    codes[start:end], scales[start:end], target=target[start:end],
+                    group_size=group_size, hessian=hessian, cross_moment=cross_moment,
+                    channel_scales=None if channel_scales is None else channel_scales[start:end],
+                    config=config, _factor=_factor, _row_start=_row_start + start,
+                )
+                energy = float((target[start:end].float() @ _factor).square().sum())
+                normalizers.append(energy if energy > torch.finfo(torch.float32).eps else 1.0)
+                results.append(part)
+            total = sum(normalizers)
+            return (
+                torch.cat([part[0] for part in results]),
+                sum(part[1] * norm for part, norm in zip(results, normalizers)) / total,
+                sum(part[2] * norm for part, norm in zip(results, normalizers)) / total,
+                [sum(part[3][step] * norm for part, norm in zip(results, normalizers)) / total
+                 for step in range(config.steps + 1)],
+            )
     with torch.inference_mode(False), torch.enable_grad():
         baseline = codes.detach().clone()
         teacher = target.detach().float().clone()
@@ -138,7 +165,7 @@ def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment
                                         in_features=width, channel_scales=fixed_channel)
 
         base_weight = decode(baseline)
-        factor = _metric_factor(hessian.detach())
+        factor = _factor if _factor is not None else _metric_factor(hessian.detach())
         cross = cross_moment.detach().float()
         correction = teacher @ cross
         asymmetric_error_term(torch.zeros_like(teacher), teacher, cross)
@@ -166,7 +193,7 @@ def refine_qqq_codes(codes, scales, *, target, group_size, hessian, cross_moment
         values = decode(candidates).detach()
         logits = (-0.5 * (candidate_logical - logical.unsqueeze(-1)).square()).requires_grad_()
         optimizer = torch.optim.Adam([logits], lr=config.learning_rate)
-        rng = torch.Generator(device=codes.device).manual_seed(config.seed)
+        rng = torch.Generator(device=codes.device).manual_seed(config.seed + _row_start)
         before = float(loss(base_weight))
         if not torch.isfinite(torch.tensor(before)):
             raise ValueError("non-finite QQQ GSQ baseline objective")

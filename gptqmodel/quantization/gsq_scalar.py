@@ -264,7 +264,7 @@ def _refine_rows(weight, scales, zeros, target, group, factor, bits, choices, co
 def refine_affine_scalar(
     weight, scales, zeros, g_idx, *, target, bits, config=None,
     hessian=None, inputs=None, packing="gptq", scale_dtype=torch.float16,
-    cross_moment=None, cross_alpha=1.0,
+    cross_moment=None, cross_alpha=1.0, _metric=None, _row_start=0,
 ):
     """Refine [out,in] weights and [out,groups] scales on their actual grid.
 
@@ -309,8 +309,47 @@ def refine_affine_scalar(
                                or not torch.isfinite(inputs).all()):
         raise ValueError("scalar GSQ inputs must be finite nonempty [tokens,in]")
     count = min(2**bits, config.candidates)
-    if count * weight.numel() * 4 > config.max_candidate_bytes:
-        raise ValueError("scalar GSQ decoded candidates exceed max_candidate_bytes")
+    bytes_per_row = count * k * 4
+    if bytes_per_row > config.max_candidate_bytes:
+        raise ValueError("scalar GSQ candidate bank for one output row exceeds max_candidate_bytes")
+    rows_per_chunk = max(1, config.max_candidate_bytes // bytes_per_row)
+    if n > rows_per_chunk:
+        with torch.inference_mode(False), torch.enable_grad():
+            if _metric is None:
+                if hessian is not None:
+                    h = hessian.detach().to(device=weight.device, dtype=torch.float32).clone()
+                    _metric = (None, h.sqrt()) if h.ndim == 1 else (_metric_factor(h), None)
+                elif inputs is not None:
+                    _metric = (inputs.detach().to(device=weight.device, dtype=torch.float32).T.contiguous().clone(), None)
+                else:
+                    _metric = (None, None)
+            results = []
+            normalizers = []
+            factor, diagonal = _metric
+            for start in range(0, n, rows_per_chunk):
+                end = min(start + rows_per_chunk, n)
+                part = refine_affine_scalar(
+                    weight[start:end], scales[start:end], zeros[start:end], g_idx,
+                    target=target[start:end], bits=bits, config=config, hessian=hessian,
+                    inputs=inputs, packing=packing, scale_dtype=scale_dtype,
+                    cross_moment=cross_moment, cross_alpha=cross_alpha,
+                    _metric=_metric, _row_start=_row_start + start,
+                )
+                teacher = target[start:end].float()
+                projected = teacher * diagonal if diagonal is not None else (
+                    teacher if factor is None else teacher @ factor)
+                energy = float(projected.square().sum())
+                normalizers.append(energy if energy > torch.finfo(torch.float32).eps else 1.0)
+                results.append(part)
+            total = sum(normalizers)
+            return ScalarGSQResult(
+                torch.cat([part.weight for part in results]),
+                torch.cat([part.scales for part in results]), zeros.detach().clone(), g_idx.detach().clone(),
+                sum(part.before * norm for part, norm in zip(results, normalizers)) / total,
+                sum(part.after * norm for part, norm in zip(results, normalizers)) / total,
+                [sum(part.history[step] * norm for part, norm in zip(results, normalizers)) / total
+                 for step in range(config.steps + 1)],
+            )
 
     with torch.inference_mode(False), torch.enable_grad():
         teacher = target.detach().float().clone()
@@ -320,7 +359,9 @@ def refine_affine_scalar(
         baseline = weight.detach().clone()
         factor = None
         diagonal = None
-        if hessian is not None:
+        if _metric is not None:
+            factor, diagonal = _metric
+        elif hessian is not None:
             h = hessian.detach().to(device=weight.device, dtype=torch.float32).clone()
             if h.ndim == 1:
                 diagonal = h.sqrt()
@@ -399,7 +440,7 @@ def refine_affine_scalar(
         scale_delta = torch.zeros_like(base_scales, requires_grad=config.learn_scales)
         parameters = [logits] + ([scale_delta] if config.learn_scales else [])
         optimizer = torch.optim.Adam(parameters, lr=config.learning_rate)
-        rng = torch.Generator(device=weight.device).manual_seed(config.seed)
+        rng = torch.Generator(device=weight.device).manual_seed(config.seed + _row_start)
         before = float(loss(exported(baseline, base_scales)))
         if not torch.isfinite(torch.tensor(before)):
             raise ValueError("non-finite scalar GSQ baseline objective")

@@ -92,7 +92,8 @@ def fp8_decoded_candidates(weight, scale_inv, *, method='row', block_size=None, 
 
 
 def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, hessian=None,
-                      method='row', block_size=None):
+                      method='row', block_size=None, _scale_grid=None, _features=None,
+                      _row_start=0):
     """Fit finite FP8 payload choices with frozen inverse scales and a hard guard.
 
     Optional input activations or their PSD Gram matrix define output
@@ -103,7 +104,7 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, he
 
     config = normalize_gsq_config(config)
     if config is None or not config.enabled:
-        return dict(weight=weight.clone(), scale_inv=scale_inv.clone(), before=None, after=None, history=[])
+        return {'weight': weight.clone(), 'scale_inv': scale_inv.clone(), 'before': None, 'after': None, 'history': []}
     if config.learn_scales:
         raise ValueError('FP8 GSQ scale learning is not implemented')
     if weight.ndim != 2 or min(weight.shape) == 0:
@@ -124,14 +125,63 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, he
         if not torch.allclose(hessian, hessian.T, rtol=1e-5, atol=1e-7):
             raise ValueError('FP8 GSQ Hessian must be symmetric')
     count = min(config.candidates, 256)
-    if count * weight.numel() * 4 > config.max_candidate_bytes:
-        raise ValueError('FP8 GSQ decoded candidates exceed max_candidate_bytes')
+    bytes_per_row = count * weight.shape[1] * 4
+    if bytes_per_row > config.max_candidate_bytes:
+        raise ValueError('FP8 GSQ candidate bank for one output row exceeds max_candidate_bytes')
+    rows_per_chunk = max(1, config.max_candidate_bytes // bytes_per_row)
+    if weight.shape[0] > rows_per_chunk:
+        with torch.inference_mode(False), torch.enable_grad():
+            if _scale_grid is None:
+                _scale_grid = fp8_inverse_scale_grid(weight, scale_inv, method=method, block_size=block_size)
+            if _features is None:
+                if hessian is not None:
+                    from .gsq_scalar import _metric_factor
+
+                    metric = hessian.detach().float().clone()
+                    if not torch.isfinite(metric).all():
+                        raise ValueError('FP8 GSQ Hessian overflows FP32')
+                    _features = _metric_factor(metric)
+                elif inputs is not None:
+                    _features = inputs.detach().float().T.contiguous().clone()
+            results = []
+            normalizers = []
+            for start in range(0, weight.shape[0], rows_per_chunk):
+                end = min(start + rows_per_chunk, weight.shape[0])
+                part = refine_fp8_weight(
+                    weight[start:end], scale_inv, target=target[start:end], config=config,
+                    inputs=inputs, hessian=hessian, method=method, block_size=block_size,
+                    _scale_grid=_scale_grid[start:end], _features=_features,
+                    _row_start=_row_start + start,
+                )
+                teacher = target[start:end].float()
+                projected = teacher if _features is None else teacher @ _features
+                energy = float(projected.square().sum())
+                normalizers.append(energy if energy > torch.finfo(torch.float32).eps else 1.0)
+                results.append(part)
+            total = sum(normalizers)
+            before = sum(part['before'] * norm for part, norm in zip(results, normalizers)) / total
+            return {
+                'weight': torch.cat([part['weight'] for part in results]), 'scale_inv': scale_inv.clone(),
+                'before': before,
+                'after': sum(part['after'] * norm for part, norm in zip(results, normalizers)) / total,
+                'history': ([before] if before == 0 else [
+                    sum(part['history'][min(step, len(part['history']) - 1)] * norm
+                        for part, norm in zip(results, normalizers)) / total
+                    for step in range(config.steps + 1)]),
+            }
     with torch.inference_mode(False), torch.enable_grad():
-        payloads, values = fp8_decoded_candidates(weight.detach().clone(), scale_inv.detach().clone(),
-                                                 method=method, block_size=block_size, count=count)
+        if _scale_grid is None:
+            payloads, values = fp8_decoded_candidates(weight.detach().clone(), scale_inv.detach().clone(),
+                                                     method=method, block_size=block_size, count=count)
+        else:
+            payloads, normalized = fp8_payload_candidates(weight.detach().clone(), count=count)
+            values = normalized / _scale_grid.unsqueeze(0)
+            if not torch.isfinite(values).all():
+                raise ValueError('FP8 GSQ decoded candidates overflow FP32')
         teacher = target.detach().float().clone()
-        features = None if inputs is None else inputs.detach().float().T.contiguous().clone()
-        if hessian is not None:
+        features = _features if _features is not None else (
+            None if inputs is None else inputs.detach().float().T.contiguous().clone())
+        if hessian is not None and _features is None:
             from .gsq_scalar import _metric_factor
 
             metric = hessian.detach().float().clone()
@@ -156,13 +206,13 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, he
         best, best_payload = before, payloads[0].clone()
         history = [before]
         if before == 0:
-            return dict(weight=best_payload.view(weight.dtype), scale_inv=scale_inv.clone(),
-                        before=before, after=best, history=history)
+            return {'weight': best_payload.view(weight.dtype), 'scale_inv': scale_inv.clone(),
+                        'before': before, 'after': best, 'history': history}
         offsets = torch.tensor([0] + [((i+1)//2)*(-1 if i % 2 else 1) for i in range(1, count)],
                                device=weight.device, dtype=torch.float32)
         logits = (-.5 * offsets.square())[:, None, None].expand_as(values).clone().requires_grad_()
         optimizer = torch.optim.Adam([logits], lr=config.learning_rate)
-        rng = torch.Generator(device=weight.device).manual_seed(config.seed)
+        rng = torch.Generator(device=weight.device).manual_seed(config.seed + _row_start)
         for step in range(config.steps):
             tau = config.temperature_start * (config.temperature_end/config.temperature_start) ** (
                 step/max(config.steps-1, 1))
@@ -187,5 +237,5 @@ def refine_fp8_weight(weight, scale_inv, *, target, config=None, inputs=None, he
                     best = score
                     best_payload = payloads.gather(0, selected).squeeze(0).clone()
                 history.append(best)
-        return dict(weight=best_payload.view(weight.dtype), scale_inv=scale_inv.clone(),
-                    before=before, after=best, history=history)
+        return {'weight': best_payload.view(weight.dtype), 'scale_inv': scale_inv.clone(),
+                    'before': before, 'after': best, 'history': history}

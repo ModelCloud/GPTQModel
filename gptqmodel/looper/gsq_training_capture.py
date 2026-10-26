@@ -6,7 +6,9 @@
 import copy
 import shutil
 from pathlib import Path
+
 import torch
+
 from ..nn_modules.hooked_linear import HookedLinear
 
 
@@ -351,6 +353,7 @@ def capture_llama_gsq_inputs(
                 try:
                     model(input_ids=ids, use_cache=False, **kwargs)
                 except CaptureComplete:
+                    # The pre-hook stops this forward pass once the input is captured.
                     pass
                 if len(captured) != count+1:
                     raise RuntimeError('Selected Llama decoder was not captured exactly once')

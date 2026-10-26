@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
+
 NM_DATASET = Path("/monster/data/model/dataset/nm-calibration/llm.parquet")
 SOURCE_ROWS = 10_000
 SOURCE_SHA256 = "26122fd822e64d2fc704b0fe84af7a2df8a24a4455d347e16a6b5a7484f5cbef"
@@ -26,6 +27,8 @@ GPTQ_SEQUENCES = 512
 
 
 def _complete_documents(texts, tokenizer, *, count, sequence_length):
+    if count < 1:
+        raise ValueError("GSQ document count must be positive")
     tokenized = [tokenizer(text, return_tensors=None)["input_ids"] for text in texts]
     tokenized = [tokens for tokens in tokenized if tokens]
     if not tokenized:
@@ -39,6 +42,7 @@ def _complete_documents(texts, tokenizer, *, count, sequence_length):
             del buffer[:sequence_length]
             if len(documents) == count:
                 return documents
+    return documents
 
 
 def split_documents(texts, tokenizer, *, sequence_length=SEQUENCE_LENGTH,
