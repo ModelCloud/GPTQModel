@@ -80,7 +80,6 @@ def _restore_packed_layer(layer, state_dict, *, names, bits, group_size, device)
         linear = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
                              in_features=source.in_features, out_features=source.out_features,
                              bias=source.bias is not None, backend=BACKEND.TORCH)
-        linear = linear.to(dtype=source.weight.dtype)
         parent, leaf = name.rsplit('.', 1)
         setattr(packed.get_submodule(parent), leaf, linear)
     packed.load_state_dict(state_dict, strict=True)

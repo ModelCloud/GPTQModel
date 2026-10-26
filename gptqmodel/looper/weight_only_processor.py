@@ -221,14 +221,20 @@ class WeightOnlyProcessor(LoopProcessor):
             with log_time_block("module.pack_original", logger=log, module_name=module_label):
                 with parent_module_lock(parent_key):
                     qmodule = qmodules[module.full_name]
-                    qmodule.pack_original(
-                        linear=original_layer,
-                        scales=None,
-                        zeros=None,
-                        g_idx=None,
-                        smooth=active_qcfg.smooth,
-                    )
-                    if active_qcfg.method == METHOD.FP8:
+                    calibrated_fp8 = module.state.pop("gsq_fp8_result", None)
+                    if calibrated_fp8 is not None:
+                        if active_qcfg.method != METHOD.FP8:
+                            raise ValueError("Calibrated FP8 payload requires an FP8 module")
+                        qmodule.pack_calibrated(original_layer, calibrated_fp8["weight"], calibrated_fp8["scale_inv"])
+                    else:
+                        qmodule.pack_original(
+                            linear=original_layer,
+                            scales=None,
+                            zeros=None,
+                            g_idx=None,
+                            smooth=active_qcfg.smooth,
+                        )
+                    if active_qcfg.method == METHOD.FP8 and calibrated_fp8 is None:
                         from ..quantization.gsq_fp8 import refine_fp8_weight
                         from ..quantization.gsq_scalar import gsq_enabled_for
 
@@ -255,7 +261,9 @@ class WeightOnlyProcessor(LoopProcessor):
                     source=f"{module_label} [module.pack_original]",
                 )
 
-            reference_weight = qmodule._weight_to_matrix(original_layer).detach()
+            reference_weight = module.state.pop("fp8_reference_weight", None)
+            if reference_weight is None:
+                reference_weight = qmodule._weight_to_matrix(original_layer).detach()
             dequant_weight = qmodule.dequantize_weight()
             # BNB exposes native [out, in] weights; FP8/GGUF expose [in, out].
             if active_qcfg.method != METHOD.BITSANDBYTES:

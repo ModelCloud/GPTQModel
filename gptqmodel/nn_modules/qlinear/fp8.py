@@ -388,6 +388,37 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self._scaled_mm_hard_disabled = False
         self._invalidate_compiled()
 
+    @torch.inference_mode()
+    def pack_calibrated(self, linear: nn.Module, weight: torch.Tensor, scale_inv: torch.Tensor):
+        """Install an already fitted FP8 payload without recomputing its scales."""
+        if weight.shape != (self.out_features, self.in_features) or weight.dtype != self.fp8_dtype:
+            raise ValueError("Calibrated FP8 weight does not match packed storage geometry or dtype")
+        if scale_inv.shape != self._scale_shape() or scale_inv.dtype != torch.float32:
+            raise ValueError("Calibrated FP8 scale does not match packed storage geometry or dtype")
+        if not torch.isfinite(scale_inv).all() or (scale_inv <= 0).any():
+            raise ValueError("Calibrated FP8 inverse scales must be finite and positive")
+
+        packed_weight = weight.detach().to(device="cpu").contiguous()
+        packed_scale = scale_inv.detach().to(device="cpu").contiguous()
+        if "weight" in self._buffers:
+            self.weight = packed_weight
+        else:
+            self.register_buffer("weight", packed_weight)
+        if "weight_scale_inv" in self._buffers:
+            self.weight_scale_inv = packed_scale
+        else:
+            self.register_buffer("weight_scale_inv", packed_scale)
+        if linear.bias is not None:
+            bias = linear.bias.detach().to(device="cpu", dtype=torch.float16)
+            if "bias" in self._buffers:
+                self.bias = bias
+            else:
+                self.register_buffer("bias", bias)
+        else:
+            self.bias = None
+        self._scaled_mm_hard_disabled = False
+        self._invalidate_compiled()
+
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
         target_device = self.weight.device if device is None else torch.device(device)
         target_dtype = torch.float32 if dtype is None else dtype

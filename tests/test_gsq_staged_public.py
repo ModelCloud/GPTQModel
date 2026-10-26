@@ -68,7 +68,8 @@ def test_staged_llama_uses_separate_gptq_train_and_validation_documents(tmp_path
     assert not list((tmp_path / "capture" / "layer-00").glob("gsq-*-*"))
 
 
-def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch, dtype):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.looper import gsq_training_model as staged
@@ -78,7 +79,7 @@ def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch):
     config = LlamaConfig(vocab_size=128, hidden_size=64, intermediate_size=128,
                          num_attention_heads=4, num_key_value_heads=4, num_hidden_layers=1)
     config._attn_implementation = "sdpa"
-    original = LlamaForCausalLM(config).half().eval()
+    original = LlamaForCausalLM(config).to(dtype=dtype).eval()
     resumed = copy.deepcopy(original)
     documents = [{"input_ids": list(range(1, 17))}]
     checkpoint = tmp_path / "checkpoints"
@@ -99,6 +100,11 @@ def test_staged_llama_resumes_identical_packed_block(tmp_path, monkeypatch):
     assert second["blocks"][0]["layer_index"] == first["blocks"][0]["layer_index"]
     assert set(second["blocks"][0]["stages"]) == set(first["blocks"][0]["stages"])
     assert isinstance(resumed.model.layers[0].self_attn.q_proj, TorchLinear)
+    for name, expected in payload["state_dict"].items():
+        if name.endswith((".scales", ".bias")):
+            actual = resumed.model.layers[0].state_dict()[name]
+            assert actual.dtype == expected.dtype
+            assert torch.equal(actual, expected)
     ids = torch.tensor([[1, 2, 3]])
     with torch.no_grad():
         torch.testing.assert_close(
