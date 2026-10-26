@@ -51,6 +51,7 @@ class QQQProcessor(LoopProcessor):
         require_fwd: bool = True,
         calculate_w_wq_diff: bool = False,
         calibration_concat_separator: Optional[str] = None,
+        backend: Optional[BACKEND] = BACKEND.AUTO,
     ):
         """Initializes QQQ processing and optional weight-delta tracking."""
 
@@ -68,9 +69,14 @@ class QQQProcessor(LoopProcessor):
 
         self.calculate_w_wq_diff = calculate_w_wq_diff
         self.avg_losses = []
+        from ..utils.backend import normalize_backend
+
+        self.requested_backend = normalize_backend(backend, quant_method=self.qcfg.method)
+        if self.requested_backend not in (None, BACKEND.AUTO, BACKEND.QQQ, BACKEND.QQQ_TORCH):
+            raise ValueError("QQQ quantization requires QQQ or QQQ_TORCH backend")
 
     def _quant_linear_kernel(self):
-        if sys.platform == "darwin":
+        if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
         if isinstance(device, DEVICE):
@@ -182,6 +188,8 @@ class QQQProcessor(LoopProcessor):
         q = qqq[module.name]
         try:
             wq, q_scales, q_zeros, q_g_idx, duration, avg_loss, damp_percent, q_scales_extra, nsamples = q.quantize()
+            if getattr(q, "gsq_diagnostics", None) is not None:
+                module.state["gsq_diagnostics"] = q.gsq_diagnostics
         finally:
             q.free()
 

@@ -186,7 +186,6 @@ class QQQLinear(GroupedQuantLinear):
                 torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int),
                 persistent=False,
             )
-
         # Quantization builds this module with `register_buffers=False`, so the
         # bias attribute must be initialized outside the buffer preallocation
         # block or `pack()` cannot tell whether a bias is expected.
@@ -424,8 +423,28 @@ class QQQLinear(GroupedQuantLinear):
                     torch.tensor([], dtype=torch.float16),
                 )
             self.register_buffer("s_channel", packed_s_channel)
+            self.register_buffer("s_group", torch.empty(0, dtype=torch.float16, device=packed_s_channel.device))
+        # Quantization constructs QQQLinear with register_buffers=False. Its
+        # packed instance still needs the nonpersistent runtime scratch buffers
+        # that a checkpoint-loaded instance receives in __init__.
+        if not hasattr(self, "workspace"):
+            self.register_buffer(
+                "workspace",
+                torch.zeros(self.out_features // 128 * 16, dtype=torch.int32, device=packed_weight.device),
+                persistent=False,
+            )
+        if not hasattr(self, "reduce_buffer"):
+            self.register_buffer(
+                "reduce_buffer",
+                torch.zeros((self.max_par * 16 * 4, self.out_features), dtype=torch.int, device=packed_weight.device),
+                persistent=False,
+            )
         if linear.bias is not None:
-            self.register_buffer("bias", linear.bias.detach().to(dtype=torch.float16))
+            bias = linear.bias.detach().to(device=packed_weight.device, dtype=torch.float16)
+            if "bias" in self._buffers:
+                self.bias.copy_(bias)
+            else:
+                self.register_buffer("bias", bias)
         elif not hasattr(self, "bias"):
             self.bias = None
 

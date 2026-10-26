@@ -53,7 +53,7 @@ Older releases and development notes: [changelog archive](docs/changelog/archive
 
 ## A unified quantization platform
 
-GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, and FOEM across supported hardware and runtime integrations.
+GPT-QModel provides a consistent API for calibration, quantization, quality evaluation, model conversion, and accelerated inference. It supports GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, EoRA, GAR, FOEM, and opt-in GSQ refinement for compatible scalar methods across supported hardware and runtime integrations.
 
 Its method, format, backend, and kernel layers are modular: method-specific controls remain available where needed, while implementations share the same model lifecycle. This architecture supports mixed and model-specific quantization workflows today and provides a clear integration path for additional methods, formats, kernels, and accelerators.
 
@@ -97,8 +97,11 @@ Every quantization method shares a common lifecycle—calibrate, quantize, valid
 | Rotation                  | ✅          | x | x | x | x             |  
 | GPTAQ                     | ✅          | ✅ | ✅ | ✅ | ✅             |
 | FOEM                      | ✅          | ✅ | ✅ | ✅ | ✅             |
+| GSQ (GPTQ, AWQ, RTN, QQQ, FP8, ParoQuant) | ✅ | Existing format† | Existing format† | Existing format† | Existing format† |
 
 `GGUF`, `FP8`, `EXL3`, `ParoQuant`, and `VPTQ` are currently native GPT-QModel quantization/runtime paths. SGLang loading is limited to `METHOD.GPTQ` with `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, or `FORMAT.MARLIN`, and `METHOD.AWQ` with `FORMAT.GEMM` or `FORMAT.MARLIN`.
+
+† GSQ runs during quantization and saves an existing method format. Each external runtime or training integration supports only the formats it already accepts; GSQ does not add a new runtime format.
 
 SGLang accepts the common engine aliases `tensor_parallel_size` → `tp_size`, `gpu_memory_utilization` → `mem_fraction_static`, `max_model_len` → `context_length`, `seed` → `random_seed`, and `enforce_eager` → `disable_cuda_graph`. An explicit legal `dtype` is preserved; deprecated `torch_dtype` is normalized to SGLang's string dtype names. AWQ `FORMAT.GEMV_FAST` and `FORMAT.LLM_AWQ` still require `torch.float16`, but those formats are not in SGLang's supported-format list.
 
@@ -110,8 +113,8 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | --- | --- | --- |
 | `METHOD.GPTQ` CPU | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2` | `BACKEND.GPTQ_TORCH_CPU_AVX512` |
 | `METHOD.AWQ` CPU | `FORMAT.GEMM` | `BACKEND.AWQ_TORCH_CPU_AVX512` |
-| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
-| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
+| `METHOD.GPTQ` | `FORMAT.GPTQ`, `FORMAT.GPTQ_V2`, `FORMAT.GPTQ_P`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GPTQ`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_MACHETE`, `BACKEND.GPTQ_MARLIN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_V2`: `BACKEND.GPTQ_TORCH_ATEN`, `BACKEND.GPTQ_EXLLAMA_V2`, `BACKEND.GPTQ_TORCH_FUSED`, `BACKEND.GPTQ_TRITON`, `BACKEND.GPTQ_BITBLAS`, `BACKEND.GPTQ_TORCH`, `BACKEND.GPTQ_TORCH_INT8`<br>`FORMAT.GPTQ_P`: `BACKEND.GPTQ_TORCH`<br>`FORMAT.MARLIN`: `BACKEND.GPTQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.GPTQ_BITBLAS` |
+| `METHOD.AWQ` | `FORMAT.GEMM`, `FORMAT.GEMV`, `FORMAT.GEMV_FAST`, `FORMAT.LLM_AWQ`, `FORMAT.MARLIN`, `FORMAT.BITBLAS` | `FORMAT.GEMM`: `BACKEND.AWQ_TORCH_ATEN`, `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`, `BACKEND.AWQ_EXLLAMA_V2`, `BACKEND.AWQ_GEMM`, `BACKEND.AWQ_GEMM_TRITON`, `BACKEND.AWQ_TORCH_FUSED`, `BACKEND.AWQ_TORCH`, `BACKEND.AWQ_TORCH_INT8`, `BACKEND.AWQ_BITBLAS`<br>`FORMAT.GEMV`: `BACKEND.AWQ_GEMV`<br>`FORMAT.GEMV_FAST`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.LLM_AWQ`: `BACKEND.AWQ_GEMV_FAST`<br>`FORMAT.MARLIN`: `BACKEND.AWQ_MACHETE`, `BACKEND.AWQ_MARLIN`<br>`FORMAT.BITBLAS`: `BACKEND.AWQ_BITBLAS` |
 | `METHOD.PARO` | `FORMAT.PAROQUANT` | `BACKEND.PAROQUANT_CUDA`, `BACKEND.PAROQUANT_TRITON` |
 | `METHOD.QQQ` | `FORMAT.QQQ` | `BACKEND.QQQ`, `BACKEND.QQQ_TORCH` |
 | `METHOD.VPTQ` | `FORMAT.VPTQ` | `BACKEND.VPTQ_CUDA`, `BACKEND.VPTQ_TORCH` |
@@ -145,6 +148,8 @@ columns at a time and never retains a dense dequantized weight;
 
 `BACKEND.VLLM`, `BACKEND.SGLANG`, and `BACKEND.MLX` are external runtime backends and are not part of the native kernel matrix above.
 
+GSQ is an opt-in scalar refinement for supported `METHOD.GPTQ`, `METHOD.AWQ`, `METHOD.QQQ`, `METHOD.FP8`, `METHOD.PARO`, and `METHOD.RTN` paths. Staged block training currently supports dense Llama GPTQ and AWQ export. Each path retains its method's existing checkpoint format; method-specific GSQ constraints are described below.
+
 Marlin uses `GPTQMODEL_MARLIN_USE_FP32` (default: enabled) to control fp32 accumulation.
 
 On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hipBLASLt
@@ -157,7 +162,8 @@ quantization phase and the previous backend is restored afterwards. Set
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
 * ✨ Stable `hf_` [packing/repacking API](docs/hf_packing_api.md) for layer-wise kernel feasibility, packing, and repacking used by external integrators such as AutoRound.
 * 🚀 [vLLM](https://github.com/vllm-project/vllm) and [SGLang](https://github.com/sgl-project/sglang) inference integration for quantized models. SGLang supports GPTQ `FORMAT.GPTQ`/`FORMAT.GPTQ_V2`/`FORMAT.MARLIN` and AWQ `FORMAT.GEMM`/`FORMAT.MARLIN`.
-* ✨ GPTQ, AWQ, ParoQuant, QQQ, VPTQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for compatible GPTQ, AWQ, RTN, QQQ, FP8, and ParoQuant paths.
+* ✨ GPTQ, AWQ, ParoQuant, QQQ, VPTQ, GGUF, FP8, EXL3, GPTAQ, and FOEM quantization support, plus opt-in GSQ refinement for compatible GPTQ, AWQ, RTN, QQQ, FP8, and ParoQuant paths.
 * ✨ All current GGUF quantized tensor types are supported end to end for CPU quantization and inference: every `Q*_0`/`Q*_1`, `Q2_K`-`Q8_K`, `IQ1_S`-`IQ4_XS`, `TQ1_0`/`TQ2_0`, `MXFP4`, `NVFP4`, `Q1_0`, `Q2_0`, and the `Q1_0_g128` sign-only variant. Install the bindings with `pip install gptqmodel[gguf]` (`gguf>=0.19.0`, `llama-cpp-python>=0.3.36`). CPU inference uses llama.cpp's native SIMD kernels (`BACKEND.GGUF_CPP_CPU`) with a per-shape autotuned Torch fallback. Native ggml dot kernels also quantize activations, so outputs can differ from weight-only Torch inference; set `GPTQMODEL_GGUF_CPP_NATIVE_MATMUL=0` to keep the Torch path. `Q8_1`/`Q8_K` always use Torch, including when native execution is forced, since upstream ggml exposes no matmul for them. CPU dequantization reconstructs weights in FP32 before casting to FP16/BF16. See the [GGUF compatibility notes](docs/prism-bonsai-gguf.md).
 * 🚀 Routing-aware MoE quantization controls for extreme activation bias via `Moe.Routing` and/or `FailSafe`.
 * 🚀 Data Parallelism for 80%+ quantization speed reduction with Multi-GPU.
@@ -1071,6 +1077,38 @@ FOEM (First-order error matters) adds first-order error compensation for GPTQ-st
 # FOEM default hyperparameters are alpha=0.0 and beta=0.2
 quant_config = QuantizeConfig(bits=4, group_size=128, foem=FOEMConfig(alpha=0.0, beta=0.2, device="auto"))
 ```
+
+#### Using GSQ scalar refinement and staged training
+
+[GSQ by Dadgarnia et al. at IST-DASLab](https://arxiv.org/abs/2604.18556) motivates two opt-in paths. `GSQConfig` refines compatible scalar code assignments against a method-specific local reconstruction objective and retains the initializer unless hard stored codes improve that objective. `GSQTrainingConfig` trains dense Llama decoder blocks in stages and exports through existing GPTQ or AWQ checkpoint formats.
+
+The staged path trains query and key projections separately, value and output jointly against attention output, then the MLP projections against the decoder block output. Each packed block is installed before capturing the next block's inputs. It trains assignments and scales with Lion and temperature/logit-scale schedules. The public recipe does not yet include the paper's final 2-bit scale-only pass or its full calibration and epoch schedule unless those settings are supplied. The paper's reported quality gains do not transfer automatically to either option.
+
+```py
+from gptqmodel.quantization import GSQConfig, QuantizeConfig
+
+quant_config = QuantizeConfig(
+    bits=4,
+    group_size=128,
+    gsq=GSQConfig(enabled=True, steps=100, candidates=16, learn_scales=False),
+)
+```
+
+For GPTQ, local GSQ applies to calibrated linear layers in scalar GPTQ, GPTQ_V2, and GPTQ_P formats; `modules=(r"q_proj$",)` can restrict it by module name. It supports 2–8 bits and all GPTQ group sizes. The same `gsq=GSQConfig(...)` option also has native adapters for AWQ 4-bit GEMM/GEMV, RTN scalar GPTQ/AWQ export, QQQ 4-bit, FP8 E4M3/E5M2, and ParoQuant 4-bit module optimization. FP8 can additionally collect calibration statistics with `gsq_calibration=True`; its default local mode is weight-only. These adapters keep each method's native scales, zero points, packing, and format constraints. `max_candidate_bytes` bounds the code-candidate bank per output-row chunk (64 MiB by default); the optimizer and temporary tensors need additional memory. Refinement increases quantization time. `learn_scales=True` is available only where the method supports tuning stored scales. Measure downstream quality on your target workload before using it broadly.
+
+```py
+from gptqmodel.quantization import AWQConfig, FORMAT, GPTQConfig, GSQTrainingConfig
+
+training = GSQTrainingConfig(enabled=True, epochs=20, qk_steps=2000)
+gptq_config = GPTQConfig(bits=4, group_size=128, format=FORMAT.GPTQ_V2,
+                         act_group_aware=False, offload_to_disk=False,
+                         gsq_training=training)
+awq_config = AWQConfig(bits=4, group_size=128, format=FORMAT.GEMM,
+                       gsq_training={"enabled": True, "epochs": 20, "qk_steps": 2000})
+```
+
+Staged training currently requires a fully materialized, eval-mode dense Llama model on one CPU or CUDA device with eager attention. It trains all seven projections in every decoder block, without dynamic skipping, activation ordering, rotation, adapters, or disk offload. GPTQ accepts symmetric 2-, 3-, and 4-bit scalar export; AWQ accepts 4-bit GEMM export and uses AWQ's scaled weights, integer zero points, and packer. The configuration is saved with the checkpoint. Reduce `epochs` and `qk_steps` for a quick functional check; use matched calibration and evaluation data before comparing quality.
+
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
@@ -1095,6 +1133,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * VPTQ: Microsoft, main-authors Yifei Liu et al., arXiv:2409.17066. [Official implementation](https://github.com/microsoft/VPTQ)
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
+* GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training above are adaptations of this work.
 
 ## Citations 📖
 
@@ -1117,6 +1156,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   journal={arXiv preprint arXiv:2210.17323},
   year={2022}
   
+}
+
+# GSQ
+@article{dadgarnia2026gsq,
+  title={GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
+  author={Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2604.18556},
+  year={2026}
 }
 
 # AWQ

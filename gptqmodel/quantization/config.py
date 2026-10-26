@@ -1,5 +1,5 @@
-# SPDX-FileCopyrightText: 2024-2025 ModelCloud.ai
-# SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
+# SPDX-FileCopyrightText: 2024-2026 ModelCloud.ai
+# SPDX-FileCopyrightText: 2024-2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
@@ -26,6 +26,7 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from .gsq_training_config import GSQTrainingConfig
 from ..utils.vptq import vptq_index_bits
 
 
@@ -4475,6 +4476,53 @@ class QuantizeConfig(BaseQuantizeConfig, metaclass=QuantizeConfigMeta):
 
 
 @dataclass
+class GSQConfig:
+    """Optional Gumbel-Softmax refinement of an existing scalar GPTQ grid."""
+
+    enabled: bool = False
+    steps: int = 100
+    candidates: int = 33
+    seed: int = 7
+    learning_rate: float = 0.1
+    temperature_start: float = 1.0
+    temperature_end: float = 0.1
+    max_candidate_bytes: int = 64 * 1024**2
+    learn_scales: bool = False
+    modules: Optional[Tuple[str, ...]] = None
+
+    def __post_init__(self):
+        if not isinstance(self.enabled, bool) or not isinstance(self.learn_scales, bool):
+            raise TypeError("GSQConfig: enabled and learn_scales must be boolean")
+        for name, minimum in (("steps", 1), ("candidates", 2), ("seed", 0), ("max_candidate_bytes", 1)):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"GSQConfig: {name} must be an integer >= {minimum}")
+        for name in ("learning_rate", "temperature_start", "temperature_end"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"GSQConfig: {name} must be finite and positive")
+        if self.modules is not None:
+            if not isinstance(self.modules, (tuple, list)) or not self.modules:
+                raise ValueError("GSQConfig: modules must be a nonempty sequence of regular expressions")
+            for pattern in self.modules:
+                if not isinstance(pattern, str) or not pattern:
+                    raise ValueError("GSQConfig: module patterns must be nonempty strings")
+                pcre.compile(pattern)
+            self.modules = tuple(self.modules)
+
+
+def normalize_gsq_config(value) -> Optional[GSQConfig]:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return GSQConfig(**value)
+    if not isinstance(value, GSQConfig):
+        raise TypeError("gsq must be a GSQConfig, dictionary or None")
+    value.__post_init__()
+    return value
+
+
+@dataclass
 class GPTQConfig(PreProcessorConfig):
     damp_percent: Optional[float] = field(default=None)
     damp_auto_increment: Optional[float] = field(default=None)
@@ -4482,6 +4530,8 @@ class GPTQConfig(PreProcessorConfig):
     static_groups: bool = field(default=False)
     gptaq: Optional[GPTAQConfig] = field(default=None)
     foem: Optional[FOEMConfig] = field(default=None)
+    gsq: Optional[GSQConfig] = field(default=None)
+    gsq_training: Optional[GSQTrainingConfig] = field(default=None)
     mock_quantization: bool = field(
         default=False,
         metadata={"help": "Skip heavy computations for fast model loading validation"},
@@ -4514,6 +4564,12 @@ class GPTQConfig(PreProcessorConfig):
         self.hessian = _normalize_hessian(self.hessian)
         self.gptaq = _normalize_gptaq(self.gptaq)
         self.foem = _normalize_foem(self.foem)
+        self.gsq = normalize_gsq_config(self.gsq)
+        if isinstance(self.gsq_training, dict):
+            self.gsq_training = GSQTrainingConfig(**self.gsq_training)
+        elif self.gsq_training is not None and not isinstance(self.gsq_training, GSQTrainingConfig):
+            raise TypeError("GPTQConfig: gsq_training must be GSQTrainingConfig, a dictionary or None")
+        self.validate_gsq()
 
         if act_group_aware_user_value is None:
             self.act_group_aware = self.method == METHOD.GPTQ
@@ -4523,6 +4579,31 @@ class GPTQConfig(PreProcessorConfig):
         self._resolve_activation_ordering(desc_act_user_value, act_group_aware_user_value)
         if self.act_group_aware and self.desc_act:
             raise ValueError("QuantizeConfig:: `act_group_aware` == `True` requires `desc_act` == `False`.")
+
+    def validate_gsq(self) -> None:
+        if self.method == METHOD.QQQ:
+            if self.gsq_training is not None and self.gsq_training.enabled:
+                raise ValueError("QQQConfig: staged GSQ is unsupported for QQQ packing")
+            if self.gsq is not None and self.gsq.enabled:
+                if self.format != FORMAT.QQQ or self.gsq.learn_scales:
+                    raise ValueError("QQQConfig: GSQ requires QQQ export with fixed scales")
+            return
+        if self.gsq_training is not None and self.gsq_training.enabled:
+            if self.gsq_training.initializer not in ("gptq", "rtn"):
+                raise ValueError("GPTQConfig: staged GSQ requires a GPTQ or RTN initializer")
+            if self.gsq is not None and self.gsq.enabled:
+                raise ValueError("GPTQConfig: choose staged gsq_training or per-linear gsq")
+            if self.mock_quantization or self.gptaq is not None or self.foem is not None:
+                raise ValueError("GPTQConfig: staged GSQ requires plain GPTQ")
+            if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+                raise ValueError("GPTQConfig: staged GSQ requires a GPTQ checkpoint format")
+        if self.gsq is not None and self.gsq.enabled:
+            if self.mock_quantization:
+                raise ValueError("GPTQConfig: GSQ is incompatible with mock quantization")
+            if self.gptaq is not None or self.foem is not None:
+                raise ValueError("GPTQConfig: GSQ currently supports plain GPTQ only")
+            if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GPTQ_P):
+                raise ValueError("GPTQConfig: GSQ requires a GPTQ scalar checkpoint format")
 
     def _resolve_activation_ordering(
         self,
@@ -4576,12 +4657,18 @@ class GPTQConfig(PreProcessorConfig):
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
+        if self.gsq_training is not None:
+            out["gsq_training"] = self.gsq_training.to_dict()
 
 
 @dataclass
 class AWQConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.AWQ)
     format: FORMAT = field(default=FORMAT.GEMM)
+    gsq: Optional[GSQConfig] = field(default=None)
+    gsq_training: Optional[GSQTrainingConfig] = field(default=None)
     scale_search_chunked_activations: bool = field(
         default=True,
         metadata={
@@ -4607,11 +4694,34 @@ class AWQConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.GEMM}`")
             self.format = FORMAT.GEMM
         super().__post_init__()
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled:
+            if self.format not in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                raise ValueError("AWQConfig: GSQ requires GEMM or GEMV packing")
+            if self.bits != 4:
+                raise ValueError("AWQConfig: GSQ AWQ adapters require 4 bits")
+            if self.format != FORMAT.GEMM and self.group_size not in (-1, 32, 64, 128):
+                raise ValueError("AWQConfig: GSQ GEMV requires group size -1, 32, 64, or 128")
+        if isinstance(self.gsq_training, dict):
+            self.gsq_training = GSQTrainingConfig(**({"initializer": "awq"} | self.gsq_training))
+        elif self.gsq_training is not None and not isinstance(self.gsq_training, GSQTrainingConfig):
+            raise TypeError("AWQConfig: gsq_training must be GSQTrainingConfig, a dictionary or None")
+        if self.gsq_training is not None and self.gsq_training.enabled:
+            if self.gsq_training.initializer != "awq":
+                raise ValueError("AWQConfig: staged GSQ requires an AWQ initializer")
+            if self.bits != 4 or self.format != FORMAT.GEMM:
+                raise ValueError("AWQConfig: staged GSQ requires W4 GEMM export")
+            if self.gsq is not None and self.gsq.enabled:
+                raise ValueError("AWQConfig: choose staged gsq_training or per-linear gsq")
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["zero_point"] = not self.sym
         out["version"] = self.format
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
+        if self.gsq_training is not None:
+            out["gsq_training"] = self.gsq_training.to_dict()
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
@@ -4622,6 +4732,7 @@ class AWQConfig(PreProcessorConfig):
 class ParoConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.PARO)
     format: FORMAT = field(default=FORMAT.PAROQUANT)
+    gsq: Optional[GSQConfig] = field(default=None)
     krot: int = field(default=8)
     opt_rotation_epochs: int = field(default=10)
     opt_finetune_epochs: int = field(default=10)
@@ -4675,6 +4786,10 @@ class ParoConfig(PreProcessorConfig):
             log.info(f"QuantizeConfig: Auto fix `format` to `{FORMAT.PAROQUANT}`")
             self.format = FORMAT.PAROQUANT
         super().__post_init__()
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled:
+            if self.bits != 4 or self.opt_scope != "module" or self.opt_train_on_noisy_inputs:
+                raise ValueError("ParoConfig: GSQ requires 4-bit module optimization with clean calibration inputs")
         self.krot = int(self.krot)
         if self.krot <= 0:
             raise ValueError("ParoConfig: `krot` must be a positive integer.")
@@ -4808,6 +4923,8 @@ class ParoConfig(PreProcessorConfig):
         out["zero_point"] = not self.sym
         out["krot"] = self.krot
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
 
 
 @dataclass
@@ -5078,6 +5195,8 @@ class VPTQConfig(GPTQConfig):
 
 @dataclass
 class FP8Config(PreProcessorConfig):
+    gsq: Optional[GSQConfig] = field(default=None)
+    gsq_calibration: bool = field(default=False)
     bits: int = field(default=8, metadata={"choices": [8]})
     method: METHOD = field(default=METHOD.FP8)
     format: Optional[str] = field(default="float8_e4m3fn")
@@ -5115,6 +5234,14 @@ class FP8Config(PreProcessorConfig):
         self.desc_act = False
         self.sym = True
 
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled and self.gsq.learn_scales:
+            raise ValueError("FP8Config: GSQ currently requires fixed inverse scales")
+        if not isinstance(self.gsq_calibration, bool):
+            raise TypeError("FP8Config: gsq_calibration must be boolean")
+        if self.gsq_calibration and (self.gsq is None or not self.gsq.enabled):
+            raise ValueError("FP8Config: gsq_calibration requires enabled GSQ")
+
         self.format = _normalize_fp8_fmt(self.format)
         block_size = _normalize_fp8_weight_block_size(self.weight_block_size)
         self.weight_scale_method = _normalize_fp8_weight_scale_method(
@@ -5123,6 +5250,7 @@ class FP8Config(PreProcessorConfig):
         )
         self.weight_block_size = list(block_size) if block_size is not None else None
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(self.weight_scale_semantics)
+        self._validate_gsq()
 
         if self.dynamic is not None:
             self.dynamic = {
@@ -5176,14 +5304,23 @@ class FP8Config(PreProcessorConfig):
             "weight_scale_semantics": self.weight_scale_semantics,
         }
 
+    def _validate_gsq(self) -> None:
+        if self.gsq is not None and self.gsq.enabled and self.format == "float8_e8m0fnu":
+            raise ValueError("FP8Config: GSQ requires finite E4M3/E5M2 weight storage")
+        if self.gsq_calibration and self.weight_scale_method == "tensor":
+            raise ValueError("FP8Config: calibrated GSQ requires row or block weight scales")
+
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
+        out["gsq_calibration"] = self.gsq_calibration
         out["weight_scale_method"] = self.weight_scale_method
         out["weight_block_size"] = self.weight_block_size
         out["weight_scale_semantics"] = self.weight_scale_semantics
 
     def uses_weight_only_lifecycle(self) -> bool:
-        return True
+        return not self.gsq_calibration
 
 @dataclass
 class BitsAndBytesConfig(PreProcessorConfig):
@@ -5469,6 +5606,7 @@ class EXL3Config(BaseQuantizeConfig):
 class RTNConfig(PreProcessorConfig):
     method: METHOD = field(default=METHOD.GPTQ)
     format: FORMAT = field(default=FORMAT.GPTQ)
+    gsq: Optional[GSQConfig] = field(default=None)
 
     def allowed_quant_methods(self) -> Tuple[METHOD, ...]:
         return (METHOD.GPTQ,)
@@ -5481,10 +5619,19 @@ class RTNConfig(PreProcessorConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        self.gsq = normalize_gsq_config(self.gsq)
+        if self.gsq is not None and self.gsq.enabled:
+            if self.format not in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.GEMM, FORMAT.GEMV,
+                                   FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+                raise ValueError("RTNConfig: GSQ requires scalar GPTQ or AWQ export")
+            if self.format in (FORMAT.GEMM, FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ) and self.bits != 4:
+                raise ValueError("RTNConfig: AWQ GSQ requires 4 bits")
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["sym"] = self.sym
         out[FORMAT_FIELD_CODE] = self.format
+        if self.gsq is not None:
+            out["gsq"] = asdict(self.gsq)
 
     def _update_meta_payload(self, meta_payload: Dict[str, Any]) -> None:
         super()._update_meta_payload(meta_payload)
