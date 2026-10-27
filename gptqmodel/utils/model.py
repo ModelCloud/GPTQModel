@@ -1391,6 +1391,7 @@ def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: Quantize
 
 def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     """Refresh the writable CPU snapshot after Marlin changes its packed layout."""
+    # Resident weights have no Accelerate snapshot to refresh.
     if not module.qweight.is_meta:
         module.post_init()
         return
@@ -1398,6 +1399,7 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
     from accelerate.hooks import AlignDevicesHook, SequentialHook
     from accelerate.utils import PrefixedDataset
 
+    # An offload hook may be wrapped by other hooks, but it must own this layer.
     attached = getattr(module, "_hf_hook", None)
     hooks = attached.hooks if isinstance(attached, SequentialHook) else (attached,)
     offload_hooks = [
@@ -1408,6 +1410,7 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
             "CPU-offloaded Marlin requires a layer-level Accelerate offload hook."
         )
     hook = offload_hooks[0]
+    # CPU offload can keep layer entries in a shared dictionary under a prefix.
     weights_map = hook.weights_map
     if isinstance(weights_map, PrefixedDataset) and isinstance(
         weights_map.dataset, dict
@@ -1420,6 +1423,7 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
             "CPU-offloaded Marlin requires a writable in-memory weights map."
         )
 
+    # Save the original offloaded names before post_init changes tensor layouts.
     names = [
         name
         for name, tensor in module.named_parameters(recurse=False)
@@ -1436,6 +1440,7 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
             f"CPU-offloaded Marlin is missing weights map entries: {missing}."
         )
 
+    # Materialize the saved tensors, repack them, then return the layer to meta.
     updated = {}
     hook.pre_forward(module)
     try:
@@ -1449,6 +1454,7 @@ def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
             updated[f"{prefix}{name}"] = tensor.detach().to("cpu").clone()
     finally:
         hook.post_forward(module, None)
+    # Publish the packed snapshot only after post_forward has offloaded the layer.
     storage.update(updated)
 
 
