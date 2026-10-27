@@ -727,8 +727,11 @@ def _materialize_offloaded_module(
     active = hook
     if hook.place_submodules:
         weights_map = hook.weights_map
-        prefix = getattr(weights_map, "prefix", None)
-        dataset = getattr(weights_map, "dataset", None)
+        if isinstance(weights_map, dict):
+            prefix, dataset = "", weights_map
+        else:
+            prefix = getattr(weights_map, "prefix", None)
+            dataset = getattr(weights_map, "dataset", None)
         if isinstance(prefix, str) and dataset is not None:
             active = copy.copy(hook)
             active.weights_map = PrefixedDataset(dataset, f"{prefix}{key_prefix}")

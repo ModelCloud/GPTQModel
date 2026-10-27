@@ -1394,10 +1394,18 @@ def test_runtime_buffer_offload_detach_restores_weight_device(device):
     torch.testing.assert_close(layer(input), expected)
 
 
-def test_gptqmodel_post_init_handles_hook_on_ancestor_module(monkeypatch, tmp_path):
+@pytest.mark.parametrize("weights_map_kind", ["disk", "dict"])
+@pytest.mark.parametrize("post_init_caller", ["gptqmodel", "hf"])
+def test_post_init_handles_hook_on_ancestor_module(
+    monkeypatch, tmp_path, weights_map_kind, post_init_caller
+):
     """``place_submodules=True`` hooks own descendants' weights too."""
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module
-    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset, offload_state_dict
+    from accelerate.utils import (
+        OffloadedWeightsLoader,
+        PrefixedDataset,
+        offload_state_dict,
+    )
 
     _stub_marlin_runtime(monkeypatch)
 
@@ -1423,15 +1431,21 @@ def test_gptqmodel_post_init_handles_hook_on_ancestor_module(monkeypatch, tmp_pa
 
     block = model.model.layers[0]
     prefix = "model.layers.0."
-    state = {f"{prefix}{key}": value for key, value in block.state_dict().items()}
-    offload_state_dict(str(tmp_path), state)
+    if weights_map_kind == "disk":
+        state = {f"{prefix}{key}": value for key, value in block.state_dict().items()}
+        offload_state_dict(str(tmp_path), state)
+        weights_map = PrefixedDataset(
+            OffloadedWeightsLoader(save_folder=str(tmp_path)), prefix
+        )
+    else:
+        weights_map = {key: value for key, value in block.state_dict().items()}
     add_hook_to_module(
         block,
         AlignDevicesHook(
             execution_device=torch.device("cpu"),
             offload=True,
             place_submodules=True,
-            weights_map=PrefixedDataset(OffloadedWeightsLoader(save_folder=str(tmp_path)), prefix),
+            weights_map=weights_map,
             offload_buffers=False,
         ),
     )
@@ -1439,7 +1453,12 @@ def test_gptqmodel_post_init_handles_hook_on_ancestor_module(monkeypatch, tmp_pa
         if isinstance(layer, BaseQuantLinear):
             assert layer.qweight.is_meta
 
-    gptqmodel_post_init(model, use_act_order=False)
+    if post_init_caller == "gptqmodel":
+        gptqmodel_post_init(model, use_act_order=False)
+    else:
+        from gptqmodel.utils.packing import hf_post_init
+
+        hf_post_init(model)
 
     hook = _offload_hook(block)
     assert hook is not None
