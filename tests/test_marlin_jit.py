@@ -1227,6 +1227,36 @@ def test_gptqmodel_post_init_refreshes_offloaded_marlin_weights(monkeypatch, tmp
 
 
 @pytest.mark.parametrize("desc_act", [False, True])
+def test_offloaded_marlin_runtime_buffers_are_scoped_to_forward(monkeypatch, tmp_path, desc_act):
+    """Non-persistent post-init buffers must not accumulate on the execution device."""
+    _stub_marlin_runtime(monkeypatch)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "apply_gptq_marlin_linear",
+        lambda input, **kwargs: input.new_zeros((*input.shape[:-1], kwargs["output_size_per_partition"])),
+    )
+
+    model = _MarlinLayers(desc_act)
+    pytest.importorskip("accelerate").dispatch_model(
+        model,
+        device_map={"model.layers.0": "disk", "model.layers.1": "cpu"},
+        offload_dir=str(tmp_path),
+    )
+    gptqmodel_post_init(model, use_act_order=desc_act)
+
+    layer = model.model.layers[0]
+    for name in ("workspace", "g_idx_sort_indices"):
+        assert getattr(layer, name).numel() == 0
+
+    output = layer(torch.zeros((1, layer.in_features), dtype=torch.float16))
+
+    assert output.shape == (1, layer.out_features)
+    assert layer.qweight.is_meta
+    for name in ("workspace", "g_idx_sort_indices"):
+        assert getattr(layer, name).numel() == 0
+
+
+@pytest.mark.parametrize("desc_act", [False, True])
 def test_hf_post_init_refreshes_offloaded_marlin_weights(monkeypatch, tmp_path, desc_act):
     from gptqmodel.utils.packing import hf_post_init
 

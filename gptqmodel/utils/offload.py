@@ -18,7 +18,9 @@ import torch
 from accelerate import disk_offload
 from accelerate.hooks import (
     AlignDevicesHook,
+    ModelHook,
     SequentialHook,
+    add_hook_to_module,
     remove_hook_from_module,
     remove_hook_from_submodules,
 )
@@ -433,6 +435,82 @@ class OffloadIndex:
         self._targets = targets
 
 
+class _RuntimeBufferOffloadHook(ModelHook):
+    """Keep post-init runtime buffers off the execution device between calls.
+
+    Accelerate deliberately excludes non-persistent buffers from its offload
+    hook. That is correct for small scratch state, but kernels such as W4AFP8
+    and Marlin also use non-persistent buffers for weight-sized caches and
+    permutations. Keep a CPU copy as the source of truth and materialize it
+    only for the short interval in which the layer executes.
+    """
+
+    def __init__(self, execution_device: torch.device, names: Iterable[str]):
+        self.execution_device = torch.device(execution_device)
+        self.names = tuple(names)
+        self._cpu_buffers: Dict[str, torch.Tensor] = {}
+
+    @staticmethod
+    def _clear(module: nn.Module, name: str, tensor: torch.Tensor) -> None:
+        # Keep a correctly typed zero-sized placeholder without retaining the
+        # cache allocation on the execution device.
+        module._buffers[name] = tensor.new_empty(0)
+
+    def init_hook(self, module: nn.Module) -> nn.Module:
+        for name in self.names:
+            tensor = module._buffers.get(name)
+            if tensor is None or tensor.is_meta:
+                continue
+            self._cpu_buffers[name] = tensor.detach().to("cpu").clone()
+            self._clear(module, name, tensor)
+        return module
+
+    def pre_forward(self, module: nn.Module, *args, **kwargs):
+        for name, source in self._cpu_buffers.items():
+            module._buffers[name] = source.to(self.execution_device).clone()
+        return args, kwargs
+
+    def post_forward(self, module: nn.Module, output):
+        for name in self._cpu_buffers:
+            tensor = module._buffers.get(name)
+            if tensor is None or tensor.is_meta or tensor.numel() == 0:
+                continue
+            self._cpu_buffers[name] = tensor.detach().to("cpu").clone()
+            self._clear(module, name, tensor)
+        return output
+
+    def detach_hook(self, module: nn.Module) -> nn.Module:
+        # Removing the offload hook must leave the module runnable without
+        # requiring another post_init() call.
+        for name, tensor in self._cpu_buffers.items():
+            module._buffers[name] = tensor
+        return module
+
+
+def _install_runtime_buffer_offload_hook(
+    module: nn.Module, execution_device: torch.device
+) -> None:
+    names = tuple(
+        name
+        for name in module._non_persistent_buffers_set
+        if module._buffers.get(name) is not None
+    )
+    if not names or getattr(module, "_gptqmodel_runtime_offload_hook", None) is not None:
+        return
+
+    runtime_hook = _RuntimeBufferOffloadHook(execution_device, names)
+    existing = getattr(module, "_hf_hook", None)
+    if existing is None:
+        add_hook_to_module(module, runtime_hook)
+    elif isinstance(existing, SequentialHook):
+        existing.hooks = (*existing.hooks, runtime_hook)
+        runtime_hook.init_hook(module)
+    else:
+        module._hf_hook = SequentialHook(existing, runtime_hook)
+        runtime_hook.init_hook(module)
+    module._gptqmodel_runtime_offload_hook = runtime_hook
+
+
 def offloaded_execution_device(
     module: nn.Module,
     root: Optional[nn.Module] = None,
@@ -695,6 +773,7 @@ def post_init_offloaded_layer(
     # ``active.weights_map`` already carries ``key_prefix`` when the hook covered
     # an ancestor, so only the map's own prefix may be applied here.
     _refresh_weights_map(module, active, snapshot)
+    _install_runtime_buffer_offload_hook(module, hook.execution_device)
     return True
 
 
