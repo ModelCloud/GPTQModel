@@ -881,16 +881,22 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             return [[((hidden, kwargs, None), hidden.numel())] for hidden, kwargs in source]
         from .gsq_batching import llama_stage_batches
 
-        lazy_stage_batches = source_offloaded or (
-            hasattr(source, 'iter_hidden_batches') and hasattr(source, 'iter_batches')
-        )
+        # Materializing every staged microbatch up front costs one padded
+        # hidden state, plus one T x T additive mask per microbatch when eager
+        # attention is in use. At paper scale (4096 documents of 4096 tokens)
+        # that is ~192 GB held simultaneously, which overruns device memory
+        # when the capture lives on the GPU and host memory when it is
+        # offloaded. Index the source one optimizer batch at a time instead:
+        # collate_llama_documents sees the identical chunk, so every loss and
+        # recorded metric is unchanged, while peak staging drops to a single
+        # optimizer batch.
         return llama_stage_batches(
             source,
             batch_size=batch_size,
             microbatch_size=microbatch_size,
             device=device,
             implicit_causal=attention_implementation == 'sdpa',
-            lazy=lazy_stage_batches,
+            lazy=True,
         )
     staged_batches = prepare_stage_batches(batches)
     validation_stage_batches = prepare_stage_batches(validation_batches) if validation_batches else None
