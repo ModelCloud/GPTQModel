@@ -76,6 +76,11 @@ def _pick_device(cls):
     if DEVICE.CPU in devices:
         return DEVICE.CPU
     if DEVICE.CUDA in devices and HAS_CUDA:
+        minimum_capability = getattr(cls, "MIN_COMPUTE_CAPABILITY", None)
+        if minimum_capability is not None:
+            capability = torch.cuda.get_device_capability(0)
+            if capability < tuple(minimum_capability):
+                return None
         return DEVICE.CUDA
     if DEVICE.ROCM in devices and IS_ROCM:
         return DEVICE.ROCM
@@ -84,6 +89,17 @@ def _pick_device(cls):
     if DEVICE.MPS in devices and HAS_MPS:
         return DEVICE.MPS
     return None
+
+
+def test_pick_device_skips_cuda_below_kernel_minimum_capability(monkeypatch):
+    class CudaKernel:
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+        MIN_COMPUTE_CAPABILITY = (12, 1)
+
+    monkeypatch.setattr("tests.kernels.test_selection.HAS_CUDA", True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (8, 9))
+
+    assert _pick_device(CudaKernel) is None
 
 
 def _pick_group_size(cls):
