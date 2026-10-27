@@ -110,7 +110,7 @@ class TestMarinAwqModuleTree(ModelTest):
 
 
 class TestQwen2ModuleTree(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
+    NATIVE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
 
     def test_qwen2_module_tree(self):
         config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
@@ -124,8 +124,8 @@ class TestQwen2ModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "k_norm"))
-        self.assertIn("q_proj:0", Qwen2QModel.module_tree[3]["self_attn"])
-        self.assertIn("o_proj:1", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("q_proj:0:q:in=x", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("o_proj:1:o", Qwen2QModel.module_tree[3]["self_attn"])
 
 
 class TestQwen2MoeModuleTree(ModelTest):

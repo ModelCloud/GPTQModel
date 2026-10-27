@@ -11,10 +11,9 @@ class Spark2_5QModel(BaseQModel):
 
     require_trust_remote_code = True
 
-    # The tags are verified by the Spark decoder's real forward path.  The
-    # fused QKV projection and the MLP gate/up projections consume the same
-    # activation tensor as their tagged sibling group.
-    shared_input_verified_model_types = frozenset({"spark2_5"})
+    # Keep shared-input dedup disabled until a tiny real-forward regression
+    # case covers the remote Spark decoder implementation.
+    shared_input_verified_model_types = frozenset()
 
     pre_lm_head_norm_module = "model.norm"
 
