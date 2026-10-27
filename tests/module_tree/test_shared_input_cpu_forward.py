@@ -9,6 +9,8 @@ every quantizable module of every decoder layer, and asserts the plan derived fr
 definition matches the activations actually observed.
 """
 
+from copy import deepcopy
+from functools import lru_cache
 from types import SimpleNamespace
 
 import pytest
@@ -22,6 +24,7 @@ from gptqmodel.models.shared_input import build_shared_input_plan, probe_shared_
 
 QC = SimpleNamespace(dynamic=None)
 VOCAB = 64
+SPARK_MODEL_ID = "XHToken/Spark-X2.5-4B"
 
 _DENSE = {
     "hidden_size": 32,
@@ -54,6 +57,28 @@ def _linear_attn_cfg(name):
     )
 
 
+@lru_cache(maxsize=1)
+def _load_spark_config():
+    return transformers.AutoConfig.from_pretrained(SPARK_MODEL_ID, trust_remote_code=True)
+
+
+def _spark_cfg():
+    # Use the published remote config/model code, but shrink it to a tiny CPU fixture.
+    cfg = deepcopy(_load_spark_config())
+    cfg.vocab_size = VOCAB
+    cfg.hidden_size = 32
+    cfg.intermediate_size = 48
+    cfg.num_hidden_layers = 2
+    cfg.num_attention_heads = 2
+    cfg.num_key_value_heads = 1
+    cfg.head_dim = 16
+    cfg.max_position_embeddings = 32
+    cfg.sliding_window = 4
+    cfg.layer_types = ["full_attention", "sliding_attention"]
+    cfg.pad_token_id = 0
+    return cfg
+
+
 # name -> (config factory, expected shared (leader, follower) pairs that must be verified in layer 0)
 _DENSE_PAIRS = [
     ("self_attn.q_proj", "self_attn.k_proj"),
@@ -67,6 +92,7 @@ CASES = {
         _DENSE_PAIRS,
     ),
     "qwen2": (lambda: _cfg("Qwen2Config"), _DENSE_PAIRS),
+    "spark2_5": (_spark_cfg, [("mlp.gate_proj", "mlp.up_proj")]),
     "qwen3": (lambda: _cfg("Qwen3Config"), _DENSE_PAIRS),
     "mistral": (lambda: _cfg("MistralConfig"), _DENSE_PAIRS),
     "gemma": (lambda: _cfg("GemmaConfig", head_dim=16), _DENSE_PAIRS),
@@ -197,7 +223,11 @@ def _build(name):
     torch.manual_seed(0)
     cfg = factory()
     qmodel_cls = MODEL_MAP[cfg.model_type]
-    model = transformers.AutoModelForCausalLM.from_config(cfg).eval()
+    if name == "spark2_5":
+        qmodel_cls.before_model_load(qmodel_cls, SPARK_MODEL_ID, False)
+        model = transformers.AutoModelForCausalLM.from_config(cfg, trust_remote_code=True).eval()
+    else:
+        model = transformers.AutoModelForCausalLM.from_config(cfg).eval()
     convert_model(model, cleanup_original=False)
     layers = model
     for part in qmodel_cls.extract_layers_node()[0].split("."):
@@ -385,3 +415,4 @@ def test_moe_unrouted_expert_is_reported_unverified():
     routed = [m for m in plan.modules if m.startswith("mlp.experts.") and report.call_counts[m]]
     assert len(routed) == 3  # exactly one expert (gate/up/down) ran for the single token
     assert len(report.unverified) == 3 * 2  # 3 idle experts x (gate/up group, down group)
+

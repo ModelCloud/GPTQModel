@@ -124,8 +124,8 @@ class TestQwen2ModuleTree(ModelTest):
         self.assertTrue(hasattr(decoder_layer.self_attn, "o_proj"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "q_norm"))
         self.assertFalse(hasattr(decoder_layer.self_attn, "k_norm"))
-        self.assertIn("q_proj:0", Qwen2QModel.module_tree[3]["self_attn"])
-        self.assertIn("o_proj:1", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("q_proj:0:q:in=x", Qwen2QModel.module_tree[3]["self_attn"])
+        self.assertIn("o_proj:1:o", Qwen2QModel.module_tree[3]["self_attn"])
 
 
 class TestQwen2MoeModuleTree(ModelTest):
