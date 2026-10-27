@@ -526,7 +526,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              assignment_lr=2e-4, scale_lr=1e-4, weight_decay=1., betas=(.9, .95),
                              temperature=(2., .5), multiplier=(10., 50.), warmup_steps=0,
                              min_lr=0., decay='linear', optimizer='lion',
-                             validation_batches=None, restore_best=False,
+                             validation_batches=None, restore_best=None,
                              fp32_tail_epochs=0, validation_start_epoch=0,
                              export_weights=True,
                              reuse_best_hard_weights=False,
@@ -544,6 +544,13 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     """
     if not quantizers or not batches or isinstance(epochs, bool) or not isinstance(epochs, int) or epochs < 1:
         raise ValueError('GSQ stage fitting requires quantizers, batches and positive epochs')
+    if restore_best is None:
+        # Auto: the held-out guard is free whenever the caller already captured
+        # validation batches, so select the best epoch instead of blindly keeping
+        # the last one. Callers without held-out data keep the previous contract.
+        restore_best = bool(validation_batches)
+    elif not isinstance(restore_best, bool):
+        raise TypeError('GSQ restore_best must be a boolean or None for automatic selection')
     if restore_best and not validation_batches:
         raise ValueError('GSQ restore_best requires nonempty held-out validation batches')
     if (isinstance(fp32_tail_epochs, bool) or not isinstance(fp32_tail_epochs, int)
@@ -815,6 +822,11 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
                 inputs, kwargs, mask = batch
                 return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
                                                  teacher_weights=teacher, output_mask=mask)
+            if training.get('restore_best') is True and not validation_stage_batches:
+                raise ValueError(
+                    'Staged GSQ restore_best=True requires held-out validation batches for every '
+                    'reconstruction stage; supply validation_documents, leave restore_best unset '
+                    'for automatic selection, or disable restore_best')
             result = fit_reconstruction_stage(quantizers, stage_batches, objective,
                                               epochs=epochs, seed=seed,
                                               validation_batches=validation_stage_batches, **training)
