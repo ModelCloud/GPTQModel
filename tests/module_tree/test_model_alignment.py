@@ -110,7 +110,7 @@ class TestMarinAwqModuleTree(ModelTest):
 
 
 class TestQwen2ModuleTree(ModelTest):
-    NATIVE_MODEL_ID = "Qwen/Qwen2.5-0.5B-Instruct"
+    NATIVE_MODEL_ID = "/monster/data/model/Qwen2.5-0.5B-Instruct"
 
     def test_qwen2_module_tree(self):
         config = AutoConfig.from_pretrained(self.NATIVE_MODEL_ID, trust_remote_code=False)
