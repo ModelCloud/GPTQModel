@@ -36,8 +36,15 @@ mirror_checkpoints() {
         --exclude='model/' "$output/" "$mirror/"
 }
 arm() {
-    local bits=$1 visible=$2 result
+    local bits=$1 visible=$2 result attempt
     mkdir -p "$output/w${bits}gsq"
+    attempt=$(date -u +%Y%m%dT%H%M%SZ)
+    if [[ -f "$output/w${bits}gsq/run.log" ]]; then
+        mv "$output/w${bits}gsq/run.log" "$output/w${bits}gsq/run-$attempt.log"
+    fi
+    if [[ -f "$output/w${bits}gsq/exit-code.txt" ]]; then
+        mv "$output/w${bits}gsq/exit-code.txt" "$output/w${bits}gsq/exit-code-$attempt.txt"
+    fi
     result=0
     ROCR_VISIBLE_DEVICES="$visible" "$python" -m torch.distributed.run \
         --standalone --nproc-per-node=4 scripts/gsq_paper/run_arm.py \

@@ -397,7 +397,8 @@ GSQ_PYTHON=/monster/venvs/venv-py3.14t-gil0/bin/python \
 The driver sets this checkout's `PYTHONPATH` and uses `ROCR_VISIBLE_DEVICES`
 0–3 for W2 and 4–7 for W3. A lock prevents two drivers from owning the same
 output root. `status.txt`, `driver.pid`, `arm-supervisors.pid`, and each arm's
-`run.log`/`exit-code.txt` expose progress. During training, checkpoint/log
+`run.log`/`exit-code.txt` expose progress; restarts archive earlier arm logs and
+exit codes with a timestamp. During training, checkpoint/log
 mirroring runs every 30 seconds and excludes temporary files, capture caches,
 the lock, and incomplete model exports. Completed models are mirrored after
 both training arms succeed; final RCO/NLL outputs are mirrored on completion.
