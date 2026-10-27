@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import struct
+import tempfile
 from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 import accelerate
@@ -499,7 +500,16 @@ def _install_runtime_buffer_offload_hook(
         for name in module._non_persistent_buffers_set
         if module._buffers.get(name) is not None
     )
-    if not names or getattr(module, "_gptqmodel_runtime_offload_hook", None) is not None:
+    runtime_hook = getattr(module, "_gptqmodel_runtime_offload_hook", None)
+    if runtime_hook is not None:
+        # post_init may replace non-persistent buffers on a later call. Drop
+        # the old snapshot before capturing the newly initialized buffers.
+        runtime_hook.execution_device = torch.device(execution_device)
+        runtime_hook.names = names
+        runtime_hook._cpu_buffers.clear()
+        runtime_hook.init_hook(module)
+        return
+    if not names:
         return
 
     runtime_hook = _RuntimeBufferOffloadHook(execution_device, names)
@@ -562,21 +572,32 @@ def _offload_map_targets(weights_map):
 
 
 def _persist_offload_index(folder: str, entries: Mapping[str, dict]) -> None:
-    """Best-effort update of ``folder/index.json`` so a refresh survives a reload."""
+    """Atomically update ``folder/index.json`` so a refresh survives a reload."""
     index_path = os.path.join(folder, "index.json")
+    current = {}
+    if os.path.isfile(index_path):
+        with open(index_path, encoding="utf-8") as fp:
+            current = json.load(fp)
+    current.update(entries)
+
+    temporary_path = None
     try:
-        current = {}
-        if os.path.isfile(index_path):
-            with open(index_path, encoding="utf-8") as fp:
-                current = json.load(fp)
-        current.update(entries)
-        with open(index_path, "w", encoding="utf-8") as fp:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=folder,
+            prefix=".index.",
+            suffix=".tmp",
+            delete=False,
+        ) as fp:
+            temporary_path = fp.name
             json.dump(current, fp, indent=2)
-    except OSError:  # pragma: no cover - read-only offload folder
-        log.warn.once(
-            "Offload: could not persist refreshed weight metadata; "
-            "offloaded layers will need a reload of the checkpoint."
-        )
+            fp.flush()
+            os.fsync(fp.fileno())
+        os.replace(temporary_path, index_path)
+    finally:
+        if temporary_path is not None and os.path.exists(temporary_path):
+            os.unlink(temporary_path)
 
 
 def _refresh_weights_map(

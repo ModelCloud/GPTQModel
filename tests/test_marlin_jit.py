@@ -1358,6 +1358,40 @@ def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatc
         hook.post_forward(model.model.layers[0], None)
 
 
+def test_disk_index_write_failure_preserves_previous_index(monkeypatch, tmp_path):
+    """A failed metadata commit must fail post-init without truncating index.json."""
+    import json
+
+    from gptqmodel.utils import offload
+
+    _stub_marlin_runtime(monkeypatch)
+    model = _MarlinLayers(desc_act=False)
+    offload_dir = tmp_path / "offload"
+    pytest.importorskip("accelerate").dispatch_model(
+        model,
+        device_map={"model.layers.0": "disk", "model.layers.1": "cpu"},
+        offload_dir=str(offload_dir),
+    )
+    index_path = offload_dir / "index.json"
+    original = index_path.read_bytes()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            offload.os,
+            "replace",
+            lambda *args: (_ for _ in ()).throw(OSError("index read-only")),
+        )
+        with pytest.raises(OSError, match="index read-only"):
+            gptqmodel_post_init(model, use_act_order=False)
+
+    assert index_path.read_bytes() == original
+    assert json.loads(index_path.read_text())["model.layers.0.qweight"]["shape"] == [
+        32,
+        128,
+    ]
+    assert not list(offload_dir.glob(".index.*.tmp"))
+
+
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_runtime_buffer_offload_detach_restores_weight_device(device):
     from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_module
@@ -1392,6 +1426,46 @@ def test_runtime_buffer_offload_detach_restores_weight_device(device):
         input, weights["weight"].to(device), weights["bias"].to(device)
     ) + torch.ones(4, device=device)
     torch.testing.assert_close(layer(input), expected)
+
+
+def test_runtime_buffer_offload_refreshes_on_reinitialization():
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+
+    from gptqmodel.utils.offload import run_post_init
+
+    class BufferedLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = nn.Parameter(torch.ones(1), requires_grad=False)
+            self.register_buffer("workspace", torch.empty(0), persistent=False)
+            self.init_count = 0
+
+        def post_init(self):
+            self.init_count += 1
+            self.workspace = torch.full((1,), float(self.init_count))
+
+        def forward(self, value):
+            return value * self.weight + self.workspace
+
+    layer = BufferedLayer()
+    weights = {"weight": layer.weight.detach().clone()}
+    add_hook_to_module(
+        layer,
+        AlignDevicesHook(
+            execution_device=torch.device("cpu"), offload=True, weights_map=weights
+        ),
+    )
+    for count in (1, 2):
+        assert run_post_init(layer)
+        assert layer.weight.is_meta
+        assert layer.workspace.numel() == 0
+        assert torch.equal(layer(torch.ones(1)), torch.tensor([count + 1.0]))
+        assert layer.weight.is_meta
+        assert layer.workspace.numel() == 0
+        assert torch.equal(
+            layer._gptqmodel_runtime_offload_hook._cpu_buffers["workspace"],
+            torch.tensor([float(count)]),
+        )
 
 
 @pytest.mark.parametrize("weights_map_kind", ["disk", "dict"])
