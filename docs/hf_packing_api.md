@@ -17,7 +17,7 @@ Anything without the `hf_` prefix (for example `pack_module`,
 | `hf_check_best_packing_format(...)` | Which packing format has the fastest feasible kernel? |
 | `hf_pack_layer(module, linear, scales, zeros, g_idx, ...)` | Pack one layer into an already-created quantized kernel. |
 | `module.hf_pack(linear, scales, zeros, g_idx, ...)` | Method-level wrapper around `hf_pack_layer` for callers holding a kernel instance. |
-| `hf_post_init(module)` | Run layer-level `post_init()` on a quantized layer or every quantized child of a container. |
+| `hf_post_init(module)` | Run layer-level `post_init()` on a quantized layer or every quantized child of a container, including layers accelerate has offloaded. |
 | `hf_repack_layer(module, backend, ...)` | Repack an already-quantized layer for another kernel. |
 
 ## Checking feasibility and picking a format
@@ -116,6 +116,35 @@ from gptqmodel.utils.packing import hf_repack_layer
 
 marlin_module = hf_repack_layer(gptq_module, backend="marlin", device="cuda:0")
 ```
+
+### Post-initializing offloaded layers
+
+`transformers` dispatches the model with accelerate *before* the quantizer runs
+`post_init()`. For a dict `device_map` that places layers on `cpu`/`disk`, the
+packed tensors are on the meta device at that point and accelerate has already
+recorded a pre-init snapshot in the layer's `weights_map`. Kernels that resize
+or repack their buffers in `post_init()` (Marlin clears `g_idx`/`qzeros` and
+rewrites `qweight`/`scales`) would otherwise leave a stale snapshot, and the
+first forward fails with a shape error such as:
+
+```text
+ValueError: Trying to set a tensor of shape torch.Size([4096]) in "g_idx"
+(which has shape torch.Size([0])), this looks incorrect.
+```
+
+`gptqmodel_post_init`, `hf_post_init` and `hf_repack_layer` therefore
+materialize an offloaded layer for the duration of its `post_init()`, then
+refresh the accelerate offload map and the on-disk `index.json` with the
+resulting packed tensors before restoring the meta placeholders. Only packed
+storage is written; no dense or dequantized copy is retained. This happens
+automatically — no extra call is needed — and applies to both `cpu` and `disk`
+entries in a dict `device_map`, including hooks attached to an ancestor module.
+
+If the offload map has no writable place to store a refreshed tensor — for
+example a `safetensors` index that points straight at the checkpoint, or an
+entry for a tensor the layer no longer owns — the call raises instead of
+returning stale weights, because continuing would fail on the next forward or
+silently compute with pre-`post_init` data.
 
 Kernels whose `post_init()` needs arguments (ExllamaV2 scratch space) are
 repacked with `post_init=False` and initialized through `hf_post_init`:

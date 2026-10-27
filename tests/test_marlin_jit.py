@@ -3,19 +3,23 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from shutil import copy2, which
 
 import pytest
 import torch
+from torch import nn
 
 import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.nn_modules.qlinear.marlin_awq as marlin_awq_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
+from gptqmodel.nn_modules.qlinear import BaseQuantLinear
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils import cpp as cpp_module
 from gptqmodel.utils.marlin_scalar_type import scalar_types
+from gptqmodel.utils.model import gptqmodel_post_init
 
 
 class _FakeLoader:
@@ -1078,6 +1082,462 @@ def test_awq_marlin_quant_linear_registers_nonpersistent_runtime_state(monkeypat
     assert runtime_names <= module._buffers.keys()
     assert runtime_names <= module._non_persistent_buffers_set
     assert runtime_names.isdisjoint(module.state_dict())
+
+
+def _stub_marlin_runtime(monkeypatch):
+    """Keep Marlin's packing math but stub the CUDA-only runtime pieces."""
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_import_exception", None)
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_validate_runtime_device",
+        lambda *args, **kwargs: (8, 0),
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_available", lambda dtype: True)
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_runtime_error", lambda dtype: "")
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_make_workspace_new",
+        lambda device: torch.zeros(1, dtype=torch.int32, device=device),
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "gptq_marlin_repack",
+        # Deterministic, shape-changing "repack": the point is that the shape
+        # differs from the pre-post_init layout, as it does on real hardware.
+        lambda b_q_weight, perm, size_k, size_n, num_bits, dtype=None: b_q_weight.reshape(
+            size_k // 16, size_n * 16 // (32 // num_bits)
+        ).contiguous(),
+    )
+    monkeypatch.setattr(
+        marlin_qlinear_module,
+        "marlin_permute_scales",
+        lambda scales, size_k, size_n, group_size: scales,
+    )
+    monkeypatch.setattr(marlin_qlinear_module, "marlin_permute_bias", lambda bias: bias)
+
+
+def _make_marlin_layer(desc_act: bool) -> marlin_qlinear_module.MarlinLinear:
+    layer = marlin_qlinear_module.MarlinLinear(
+        bits=4,
+        group_size=128,
+        desc_act=desc_act,
+        sym=True,
+        in_features=256,
+        out_features=128,
+        bias=True,
+        dtype=torch.float16,
+    )
+    generator = torch.Generator().manual_seed(1499)
+    layer.qweight.copy_(
+        torch.randint(-2**31, 2**31 - 1, layer.qweight.shape, dtype=torch.int32, generator=generator)
+    )
+    layer.scales.copy_(torch.randn(layer.scales.shape, generator=generator))
+    layer.bias.copy_(torch.randn(layer.bias.shape, generator=generator))
+    layer.qzeros.zero_()
+    layer.g_idx.copy_(torch.arange(layer.in_features, dtype=torch.int32) // layer.group_size)
+    return layer
+
+
+class _MarlinLayers(nn.Module):
+    def __init__(self, desc_act: bool, count: int = 2):
+        super().__init__()
+        self.model = nn.Module()
+        self.model.layers = nn.ModuleList(
+            [_make_marlin_layer(desc_act) for _ in range(count)]
+        )
+
+
+def _reference_post_init(module: nn.Module) -> dict[str, dict[str, torch.Tensor]]:
+    """post_init an equivalent, never-dispatched model to build the expected tensors."""
+    reference = copy.deepcopy(module)
+    for submodule in reference.modules():
+        if isinstance(submodule, BaseQuantLinear):
+            submodule.post_init()
+    return {
+        name: {
+            key: value.detach().clone()
+            for key, value in submodule.state_dict().items()
+        }
+        for name, submodule in reference.named_modules()
+        if isinstance(submodule, BaseQuantLinear)
+    }
+
+
+def _offload_hook(module: nn.Module):
+    hooks = getattr(getattr(module, "_hf_hook", None), "hooks", None)
+    for hook in hooks if hooks is not None else [getattr(module, "_hf_hook", None)]:
+        if getattr(hook, "offload", False):
+            return hook
+    return None
+
+
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_gptqmodel_post_init_refreshes_offloaded_marlin_weights(monkeypatch, tmp_path, desc_act):
+    """Issue #1499: a dict device_map offloads layers before Marlin's post_init.
+
+    ``dispatch_model`` snapshots ``g_idx``/``qweight``/``qzeros``/``scales`` on
+    the meta device, then Marlin resizes and repacks them.  Without refreshing
+    accelerate's weights map the first ``pre_forward`` fails on the shape check.
+    """
+    _stub_marlin_runtime(monkeypatch)
+
+    model = _MarlinLayers(desc_act)
+    expected = _reference_post_init(model)
+    accelerate_dispatch_model = pytest.importorskip("accelerate").dispatch_model
+    accelerate_dispatch_model(
+        model,
+        device_map={"model.layers.0": "cpu", "model.layers.1": "disk"},
+        offload_dir=str(tmp_path),
+    )
+
+    layer0, layer1 = model.model.layers
+    assert not layer0.qweight.is_meta
+    assert layer1.qweight.is_meta
+
+    gptqmodel_post_init(model, use_act_order=desc_act)
+
+    hook = _offload_hook(layer1)
+    assert hook is not None and hook.offload
+    # post_init must leave the offloaded layer on meta; only the packed tensors
+    # behind the hook may be materialized, and only on demand.
+    assert layer1.qweight.is_meta
+
+    hook.pre_forward(layer1)
+    try:
+        for name in ("qweight", "scales", "qzeros", "g_idx", "bias"):
+            actual = getattr(layer1, name)
+            assert actual is not None
+            want = expected["model.layers.1"][name]
+            assert actual.shape == want.shape, (name, actual.shape, want.shape)
+            assert torch.equal(actual, want), name
+            assert actual.dtype == want.dtype
+    finally:
+        hook.post_forward(layer1, None)
+    assert layer1.qweight.is_meta
+
+    for name, want in expected["model.layers.0"].items():
+        actual = layer0.state_dict()[name]
+        assert actual.shape == want.shape
+        assert torch.equal(actual, want), name
+
+    # Refreshed offload storage holds packed quantized tensors only.
+    for name, tensor in layer1.named_parameters():
+        if not tensor.is_meta:
+            raise AssertionError(f"{name} stayed materialized after post_forward")
+
+
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_hf_post_init_refreshes_offloaded_marlin_weights(monkeypatch, tmp_path, desc_act):
+    from gptqmodel.utils.packing import hf_post_init
+
+    _stub_marlin_runtime(monkeypatch)
+
+    model = _MarlinLayers(desc_act)
+    expected = _reference_post_init(model)
+    accelerate_dispatch_model = pytest.importorskip("accelerate").dispatch_model
+    accelerate_dispatch_model(
+        model,
+        device_map={"model.layers.0": "cpu", "model.layers.1": "disk"},
+        offload_dir=str(tmp_path),
+    )
+
+    hf_post_init(model)
+
+    hook = _offload_hook(model.model.layers[1])
+    assert hook is not None
+    hook.pre_forward(model.model.layers[1])
+    try:
+        for name, want in expected["model.layers.1"].items():
+            actual = model.model.layers[1].state_dict()[name]
+            assert actual.shape == want.shape
+            assert torch.equal(actual, want), name
+    finally:
+        hook.post_forward(model.model.layers[1], None)
+
+
+def test_hf_post_init_offloaded_single_layer_matches_reference(monkeypatch):
+    from gptqmodel.utils.packing import hf_post_init
+
+    _stub_marlin_runtime(monkeypatch)
+
+    layer = _make_marlin_layer(desc_act=False)
+    expected = copy.deepcopy(layer)
+    expected.post_init()
+
+    hf_post_init(layer)
+
+    for name, want in expected.state_dict().items():
+        actual = layer.state_dict()[name]
+        assert actual.shape == want.shape
+        assert torch.equal(actual, want), name
+
+
+def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatch, tmp_path):
+    """The refreshed packed shapes must reach ``index.json``, not just memory."""
+    import json
+
+    _stub_marlin_runtime(monkeypatch)
+
+    class SingleLayer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList(
+                [_make_marlin_layer(desc_act=False), nn.LogSigmoid()]
+            )
+
+    model = SingleLayer()
+    offload_dir = tmp_path / "offload"
+    pytest.importorskip("accelerate").dispatch_model(
+        model,
+        device_map={"model.layers.0": "disk", "model.layers.1": "cpu"},
+        offload_dir=str(offload_dir),
+    )
+
+    index_path = offload_dir / "index.json"
+    before = json.loads(index_path.read_text())["model.layers.0.qweight"]["shape"]
+    assert before == [32, 128]  # pre-post_init GPTQ layout
+
+    gptqmodel_post_init(model, use_act_order=False)
+
+    index = json.loads(index_path.read_text())
+    assert index["model.layers.0.qweight"]["shape"] == [16, 256]  # Marlin layout
+    assert index["model.layers.0.g_idx"]["shape"] == [0]
+    assert index["model.layers.0.qzeros"]["shape"] == [0]
+    assert index["model.layers.0.qweight"]["dtype"] == "int32"
+
+    hook = _offload_hook(model.model.layers[0])
+    assert hook is not None
+    hook.pre_forward(model.model.layers[0])
+    try:
+        assert model.model.layers[0].qweight.shape == (16, 256)
+        assert model.model.layers[0].g_idx.numel() == 0
+        assert model.model.layers[0].qzeros.numel() == 0
+    finally:
+        hook.post_forward(model.model.layers[0], None)
+
+
+def test_gptqmodel_post_init_handles_hook_on_ancestor_module(monkeypatch, tmp_path):
+    """``place_submodules=True`` hooks own descendants' weights too."""
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset, offload_state_dict
+
+    _stub_marlin_runtime(monkeypatch)
+
+    class Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = _make_marlin_layer(desc_act=False)
+            self.k = _make_marlin_layer(desc_act=False)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = Attn()
+
+    class Model(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = nn.Module()
+            self.model.layers = nn.ModuleList([Block()])
+
+    model = Model()
+    expected = _reference_post_init(model)
+
+    block = model.model.layers[0]
+    prefix = "model.layers.0."
+    state = {f"{prefix}{key}": value for key, value in block.state_dict().items()}
+    offload_state_dict(str(tmp_path), state)
+    add_hook_to_module(
+        block,
+        AlignDevicesHook(
+            execution_device=torch.device("cpu"),
+            offload=True,
+            place_submodules=True,
+            weights_map=PrefixedDataset(OffloadedWeightsLoader(save_folder=str(tmp_path)), prefix),
+            offload_buffers=False,
+        ),
+    )
+    for layer in block.modules():
+        if isinstance(layer, BaseQuantLinear):
+            assert layer.qweight.is_meta
+
+    gptqmodel_post_init(model, use_act_order=False)
+
+    hook = _offload_hook(block)
+    assert hook is not None
+    hook.pre_forward(block)
+    try:
+        for name, want in expected.items():
+            for key in ("qweight", "scales", "g_idx", "qzeros"):
+                actual = getattr(model.get_submodule(name), key)
+                assert actual.shape == want[key].shape, (name, key)
+                assert torch.equal(actual, want[key]), (name, key)
+    finally:
+        hook.post_forward(block, None)
+
+
+def test_materialize_offloaded_module_scopes_ancestor_hook(monkeypatch, tmp_path):
+    """Ancestor hooks must load one layer, not the whole subtree, per post_init."""
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset, offload_state_dict
+
+    from gptqmodel.utils.offload import _materialize_offloaded_module
+
+    _stub_marlin_runtime(monkeypatch)
+
+    class Attn(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.q = _make_marlin_layer(desc_act=False)
+            self.k = _make_marlin_layer(desc_act=False)
+
+    class Block(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.self_attn = Attn()
+
+    block = Block()
+    prefix = "blk."
+    offload_state_dict(str(tmp_path), {f"{prefix}{k}": v for k, v in block.state_dict().items()})
+    add_hook_to_module(
+        block,
+        AlignDevicesHook(
+            execution_device=torch.device("cpu"),
+            offload=True,
+            place_submodules=True,
+            weights_map=PrefixedDataset(OffloadedWeightsLoader(save_folder=str(tmp_path)), prefix),
+            offload_buffers=False,
+        ),
+    )
+
+    target = block.self_attn.q
+    sibling = block.self_attn.k
+    assert target.qweight.is_meta and sibling.qweight.is_meta
+
+    with _materialize_offloaded_module(target, block._hf_hook, key_prefix="self_attn.q.") as active:
+        assert active.place_submodules is False
+        assert not target.qweight.is_meta
+        # The sibling stayed on meta: only the target layer was loaded.
+        assert sibling.qweight.is_meta
+    assert target.qweight.is_meta and sibling.qweight.is_meta
+
+
+def test_post_init_offloaded_layer_returns_false_without_offload_hook(monkeypatch):
+    from gptqmodel.utils.offload import post_init_offloaded_layer
+
+    _stub_marlin_runtime(monkeypatch)
+
+    layer = _make_marlin_layer(desc_act=False)
+    before = layer.qweight.shape
+
+    assert post_init_offloaded_layer(layer) is False
+    # The caller still owns post_init(); nothing was rewritten behind its back.
+    assert layer.qweight.shape == before
+
+
+def test_offload_index_is_built_once_and_maps_nested_layers(monkeypatch, tmp_path):
+    """A shared index keeps ``post_init`` linear instead of rescanning per layer."""
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+    from accelerate.utils import OffloadedWeightsLoader, PrefixedDataset, offload_state_dict
+
+    from gptqmodel.utils.offload import OffloadIndex
+
+    _stub_marlin_runtime(monkeypatch)
+
+    block = nn.Module()
+    block.q = _make_marlin_layer(desc_act=False)
+    block.k = _make_marlin_layer(desc_act=False)
+
+    offload_state_dict(str(tmp_path), block.state_dict())
+    add_hook_to_module(
+        block,
+        AlignDevicesHook(
+            execution_device=torch.device("cpu"),
+            offload=True,
+            place_submodules=True,
+            weights_map=PrefixedDataset(OffloadedWeightsLoader(save_folder=str(tmp_path)), ""),
+            offload_buffers=False,
+        ),
+    )
+
+    index = OffloadIndex(block)
+    assert index._targets is None
+    for name in ("q", "k"):
+        owner, hook, key_prefix = index.lookup(getattr(block, name))
+        assert owner is block and hook.offload
+        # Keys inside one hook-owned prefix are relative to that owner.
+        assert key_prefix == f"{name}."
+    # The nested containers are covered too, so a walk is not needed per layer.
+    assert index.lookup(block.q)[0] is block
+    built = index._targets
+    index.lookup(block.q)
+    assert index._targets is built
+
+
+def test_refresh_weights_map_reports_missing_offload_entry():
+    """A map without the layer's tensors must fail loudly instead of reusing stale data."""
+    from types import SimpleNamespace
+
+    from gptqmodel.utils.offload import _refresh_weights_map
+
+    layer = nn.Linear(2, 2)
+    hook = SimpleNamespace(weights_map={"unrelated.weight": torch.zeros(1)})
+
+    with pytest.raises(RuntimeError, match="has no entry for `weight`"):
+        _refresh_weights_map(layer, hook, {"weight": layer.weight})
+
+
+def test_refresh_weights_map_reports_read_only_checkpoint_index():
+    """A checkpoint-backed index must not pin refreshed tensors in memory."""
+    from types import SimpleNamespace
+
+    from gptqmodel.utils.offload import _refresh_weights_map
+
+    layer = nn.Linear(2, 2)
+    loader = SimpleNamespace(
+        state_dict={},
+        index={
+            "weight": {
+                "safetensors_file": "/ckpt/model.safetensors",
+                "weight_name": "weight",
+                "dtype": "float16",
+            }
+        },
+        save_folder=None,
+    )
+    hook = SimpleNamespace(weights_map=SimpleNamespace(prefix="", dataset=loader))
+
+    with pytest.raises(RuntimeError, match="read-only checkpoint entry"):
+        _refresh_weights_map(layer, hook, {"weight": layer.weight})
+
+
+def test_refresh_weights_map_overrides_checkpoint_entry_in_state_dict():
+    """An in-memory side table takes priority over a read-only checkpoint entry."""
+    from types import SimpleNamespace
+
+    from gptqmodel.utils.offload import _refresh_weights_map
+
+    layer = nn.Linear(2, 2)
+    loader = SimpleNamespace(
+        state_dict={"weight": torch.zeros(2, 2)},
+        index={
+            "weight": {
+                "safetensors_file": "/ckpt/model.safetensors",
+                "weight_name": "weight",
+                "dtype": "float16",
+            }
+        },
+        save_folder=None,
+    )
+    hook = SimpleNamespace(weights_map=SimpleNamespace(prefix="", dataset=loader))
+    replacement = torch.ones(4, 3, dtype=torch.int32)
+
+    _refresh_weights_map(layer, hook, {"weight": replacement})
+
+    assert torch.equal(loader.state_dict["weight"], replacement)
+    # The checkpoint entry itself is never modified.
+    assert loader.index["weight"]["safetensors_file"] == "/ckpt/model.safetensors"
 
 
 def test_marlin_quant_linear_forward_promotes_bias_to_input_dtype(monkeypatch):

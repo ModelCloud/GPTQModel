@@ -70,6 +70,7 @@ from .hub import hf_hub_download, model_info
 from .importer import select_quant_linear, validate_quant_linear
 from .logger import log_time_block, setup_logger
 from .model_dequant import _correct_gptq_v1_qzeros, _revert_gptq_v1_qzeros_correction
+from .offload import OffloadIndex, offloaded_execution_device, run_post_init
 from .packing import _auto_pack_impl
 from .torch import HAS_CUDA, torch_empty_cache
 
@@ -1395,16 +1396,23 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     """
     fixed_bytes = {}
     model_uses_exllamav2 = False
+    offload_index = OffloadIndex(model)
 
     for name, submodule in model.named_modules():
         if isinstance(submodule, ExllamaV2Linear):
             model_uses_exllamav2 = True
-            device = submodule.qweight.device
+            # Offloaded layers hold meta placeholders; size their scratch space
+            # for the device the hook will execute on.
+            device = offloaded_execution_device(
+                submodule, root=model, offload_index=offload_index
+            ) or submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed()
             fixed_bytes[device] = max(scratch_fixed, fixed_bytes.get(device, 0))
         elif isinstance(submodule, AwqExllamaV2Linear):
             model_uses_exllamav2 = True
-            device = submodule.qweight.device
+            device = offloaded_execution_device(
+                submodule, root=model, offload_index=offload_index
+            ) or submodule.qweight.device
             scratch_fixed = submodule.scratch_space_fixed(
                 max_input_len=max_input_length or 2048,
                 max_batch_size=int(os.getenv("AWQ_BATCH_SIZE", 1))
@@ -1444,10 +1452,17 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
     # The buffers need to have been initialized first before calling make_q4.
     for _, submodule in model.named_modules():
         if isinstance(submodule, (ExllamaV2Linear, AwqExllamaV2Linear)):
-            device = submodule.qweight.device
-            submodule.post_init(scratch_space=model.device_tensors[device])
+            device = offloaded_execution_device(
+                submodule, root=model, offload_index=offload_index
+            ) or submodule.qweight.device
+            run_post_init(
+                submodule,
+                root=model,
+                offload_index=offload_index,
+                scratch_space=model.device_tensors[device],
+            )
         elif isinstance(submodule, BaseQuantLinear):
-            submodule.post_init()
+            run_post_init(submodule, root=model, offload_index=offload_index)
 
     if quantize_config is not None and quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
         from ..nn_modules.qlinear.w4a_llama_stream import install_w4a_llama_stream

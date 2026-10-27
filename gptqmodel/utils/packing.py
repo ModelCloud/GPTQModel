@@ -30,6 +30,7 @@ from .importer import (
     validate_quant_linear,
 )
 from .logger import setup_logger
+from .offload import OffloadIndex, run_post_init
 
 
 log = setup_logger()
@@ -663,7 +664,7 @@ def hf_pack_layer(
                     )
 
     if post_init:
-        module.post_init(**(post_init_kwargs or {}))
+        run_post_init(module, **(post_init_kwargs or {}))
 
     return module
 
@@ -694,12 +695,13 @@ def hf_post_init(module: nn.Module, **post_init_kwargs) -> nn.Module:
         raise TypeError(f"hf_post_init: `module` must be an nn.Module, got `{type(module).__name__}`.")
 
     if isinstance(module, BaseQuantLinear):
-        module.post_init(**post_init_kwargs)
+        run_post_init(module, **post_init_kwargs)
         return module
 
+    offload_index = OffloadIndex(module)
     for submodule in module.modules():
         if isinstance(submodule, BaseQuantLinear):
-            submodule.post_init(**post_init_kwargs)
+            run_post_init(submodule, root=module, offload_index=offload_index, **post_init_kwargs)
     return module
 
 
@@ -946,6 +948,6 @@ def hf_repack_layer(
         target.to(target_device)
 
     if post_init:
-        target.post_init(**(post_init_kwargs or {}))
+        run_post_init(target, **(post_init_kwargs or {}))
 
     return target
