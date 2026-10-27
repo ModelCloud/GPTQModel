@@ -1109,6 +1109,8 @@ awq_config = AWQConfig(bits=4, group_size=128, format=FORMAT.GEMM,
 
 Staged training currently requires a fully materialized, eval-mode dense Llama model on one CPU or CUDA device with eager attention. It trains all seven projections in every decoder block, without dynamic skipping, activation ordering, rotation, adapters, or disk offload. GPTQ accepts symmetric 2-, 3-, and 4-bit scalar export; AWQ accepts 4-bit GEMM export and uses AWQ's scaled weights, integer zero points, and packer. The configuration is saved with the checkpoint. Reduce `epochs` and `qk_steps` for a quick functional check; use matched calibration and evaluation data before comparing quality.
 
+Non-uniform per-block bit allocation at an exact bits-per-parameter budget — the paper's 2.37 and 2.62 bpp Llama rows — is available through `gptqmodel/quantization/rco.py`, a port of [IST-DASLab's RCO](https://arxiv.org/abs/2605.00649) by Helcig and Alistarh. `scripts/gsq_paper/rco_allocate.py` searches a width assignment and `scripts/gsq_paper/rco_materialize.py` exports it as a mixed-width checkpoint; see [docs/experiments/gsq-paper-reproduction.md](docs/experiments/gsq-paper-reproduction.md) for usage and measured results.
+
 ### Migrating from AutoGPTQ and AutoAWQ 🔄
 
 GPT-QModel supports GPTQ and AWQ workflows that integrate with HF Transformers, Optimum, and PEFT. Existing inference integrations can generally be retained; verify configuration compatibility when migrating.
@@ -1134,6 +1136,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 * Norm Tweaking: Liang Li, Qingyuan Li, Bo Zhang, and Xiangxiang Chu, [paper](https://arxiv.org/abs/2309.02784)
 * FOEM: Zheng, Xingyu and Qin, Haotong and Li, Yuye and Chu, Haoran and Wang, Jiakai and Guo, Jinyang and Magno, Michele and Liu, Xianglong [Paper](https://ojs.aaai.org/index.php/AAAI/article/view/40123)
 * GSQ: [IST-DASLab's GSQ paper](https://arxiv.org/abs/2604.18556) and [reference implementation](https://github.com/IST-DASLab/GSQ), by Alireza Dadgarnia, Soroush Tabesh, Mahdi Nikdan, Michael Helcig, Eldar Kurtić, Max Kleinegger, and Dan Alistarh. The optional local refinement and staged Llama training above are adaptations of this work.
+* RCO: [IST-DASLab's RCO paper](https://arxiv.org/abs/2605.00649) and [reference implementation](https://github.com/IST-DASLab/RCO), by Michael Helcig and Dan Alistarh. `gptqmodel/quantization/rco.py` and the `scripts/gsq_paper/rco_*.py` drivers are a port of this work.
 
 ## Citations 📖
 
@@ -1163,6 +1166,14 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
   title={GSQ: Highly-Accurate Low-Precision Scalar Quantization for LLMs via Gumbel-Softmax Sampling},
   author={Dadgarnia, Alireza and Tabesh, Soroush and Nikdan, Mahdi and Helcig, Michael and Kurti{\'c}, Eldar and Kleinegger, Max and Alistarh, Dan},
   journal={arXiv preprint arXiv:2604.18556},
+  year={2026}
+}
+
+# RCO
+@misc{helcig2026rco,
+  title={Model Compression with Exact Budget Constraints via Riemannian Manifolds},
+  author={Helcig, Michael and Alistarh, Dan},
+  journal={arXiv preprint arXiv:2605.00649},
   year={2026}
 }
 
