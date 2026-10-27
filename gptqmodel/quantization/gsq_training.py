@@ -26,11 +26,18 @@ def sampling_schedule(step, total_steps, *, temperature=(2., .5), multiplier=(10
     return tuple(pair[0] + (pair[1]-pair[0])*fraction for pair in (temperature, multiplier))
 
 
-def relaxed_scalar_weights(logits, scales, candidates, group_index, *, uniform, temperature, multiplier, initial=None):
+def relaxed_scalar_weights(logits, scales, candidates, group_index, *, uniform, temperature, multiplier,
+                           initial=None, contiguous_group_size=None):
     """Differentiable author-form scalar relaxation with explicit random draws.
 
     Explicit draws permit matched-noise gradient comparisons without disturbing
     global RNG state. Candidates have [choices,out,in] geometry; scales [out,group].
+
+    ``contiguous_group_size`` enables the segment-sum scale gradient. Supply it
+    only when ``group_index`` is exactly ``arange(in)//contiguous_group_size``
+    and that size divides ``in``; otherwise the scatter-add path runs. Both
+    paths sum the same terms, but the scatter-add collides on every element of
+    a contiguous map and costs more than a third of stage CUDA time.
     """
     if not math.isfinite(temperature) or temperature <= 0 or not math.isfinite(multiplier) or multiplier <= 0:
         raise ValueError('GSQ temperature and multiplier must be finite and positive')
@@ -38,15 +45,29 @@ def relaxed_scalar_weights(logits, scales, candidates, group_index, *, uniform, 
         raise ValueError('GSQ logits, candidates and uniform draws must have identical shapes')
     if not torch.isfinite(uniform).all() or (uniform < 0).any() or (uniform > 1).any():
         raise ValueError('GSQ uniform draws must be finite in [0,1]')
+    if contiguous_group_size is not None:
+        columns = logits.shape[-1]
+        if (isinstance(contiguous_group_size, bool) or not isinstance(contiguous_group_size, int)
+                or contiguous_group_size <= 0 or columns % contiguous_group_size
+                or group_index.numel() != columns
+                or scales.shape != (logits.shape[-2], columns//contiguous_group_size)):
+            raise ValueError('GSQ contiguous group size must evenly tile the input columns')
+        if not torch.equal(
+            group_index,
+            torch.arange(columns, device=group_index.device, dtype=group_index.dtype)
+            //contiguous_group_size,
+        ):
+            raise ValueError('GSQ contiguous group size requires an arange group map')
     return _ScalarRelaxation.apply(logits, scales, candidates, group_index, uniform,
-                                   temperature, multiplier, initial)
+                                   temperature, multiplier, initial, contiguous_group_size)
 
 
 class _ScalarRelaxation(torch.autograd.Function):
     """Explicit author-order first derivative; draws are owned by the caller."""
 
     @staticmethod
-    def forward(ctx, logits, scales, candidates, group_index, uniform, temperature, multiplier, initial):
+    def forward(ctx, logits, scales, candidates, group_index, uniform, temperature, multiplier,
+                initial, contiguous_group_size=None):
         noise = -torch.log(-torch.log(uniform + 1e-8) + 1e-8)
         if initial is None:
             noise = noise.to(candidates.dtype)
@@ -59,20 +80,29 @@ class _ScalarRelaxation(torch.autograd.Function):
             expected = initial+expected
         ctx.save_for_backward(probability, candidates, group_index, scales, expected)
         ctx.temperature, ctx.multiplier, ctx.logit_dtype = temperature, multiplier, logits.dtype
+        ctx.contiguous_group_size = contiguous_group_size
         return expected*scales[:, group_index].to(expected.dtype)
 
     @staticmethod
     def backward(ctx, grad_output):
         probability, candidates, groups, scales, expected = ctx.saved_tensors
-        scale_gradient = torch.zeros_like(scales)
-        scale_gradient.scatter_add_(1, groups.unsqueeze(0).expand_as(expected),
-                                    (grad_output*expected).to(scales.dtype))
+        contribution = (grad_output*expected).to(scales.dtype)
+        if ctx.contiguous_group_size is None:
+            scale_gradient = torch.zeros_like(scales)
+            scale_gradient.scatter_add_(1, groups.unsqueeze(0).expand_as(expected), contribution)
+        else:
+            # A contiguous group map makes scatter_add_ a collision-heavy
+            # segment sum. Reshape so the reduction is one contiguous kernel.
+            scale_gradient = contribution.view(
+                contribution.shape[0], scales.shape[1], ctx.contiguous_group_size,
+            ).sum(-1)
         output_gradient = grad_output*scales[:, groups].to(expected.dtype)
         categorical_gradient = output_gradient.unsqueeze(0)*candidates
         dot = (categorical_gradient*probability).sum(0, keepdim=True)
         logit_gradient = probability*(categorical_gradient-dot)
         logit_gradient = logit_gradient*ctx.multiplier/ctx.temperature
-        return logit_gradient.to(ctx.logit_dtype), scale_gradient, None, None, None, None, None, None
+        return (logit_gradient.to(ctx.logit_dtype), scale_gradient,
+                None, None, None, None, None, None, None)
 
 
 class GSQLion(torch.optim.Optimizer):
@@ -246,9 +276,16 @@ class GSQScalarTrainingModule(torch.nn.Module):
         if self.initial is not None:
             candidates = torch.arange(-2, 3, device=candidates.device, dtype=candidates.dtype)[:, None, None]
             candidates = candidates.expand_as(self.candidates)
+        # group_index is built as arange(columns)//group_size, so the scale
+        # gradient can reduce as a segment sum instead of a colliding scatter.
+        contiguous = (
+            self.group_size
+            if self.group_index.shape[0] == self.candidates.shape[-1]
+            and self.group_index.shape[0] % self.group_size == 0 else None
+        )
         return relaxed_scalar_weights(masked, self.scales, candidates, self.group_index,
                                       uniform=uniform, temperature=temperature, multiplier=multiplier,
-                                      initial=self.initial)
+                                      initial=self.initial, contiguous_group_size=contiguous)
 
     @torch.no_grad()
     def hard_weight(self):
