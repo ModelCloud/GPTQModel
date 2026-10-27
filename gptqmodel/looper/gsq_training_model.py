@@ -152,7 +152,16 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     capture_directory = None if capture_directory is None else Path(capture_directory)
     checkpoint_directory = None if checkpoint_directory is None else Path(checkpoint_directory)
     effective = gsq.to_dict()
-    if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
+    if isinstance(bits, dict):
+        if not bits:
+            raise ValueError('Per-layer staged quantization requires a nonempty width map')
+        if any(isinstance(value, bool) or not isinstance(value, int) or value not in (2, 3, 4)
+               for value in bits.values()):
+            raise ValueError('Staged model quantization supports W2/W3/W4')
+        if any(isinstance(key, bool) or not isinstance(key, int) or not 0 <= key < len(model.model.layers)
+               for key in bits):
+            raise ValueError('Per-layer staged quantization requires decoder layer indices')
+    elif isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
         raise ValueError('Staged model quantization supports W2/W3/W4')
     if isinstance(group_size, bool) or not isinstance(group_size, int) or group_size <= 0:
         raise ValueError('Staged model quantization requires a positive contiguous group size')
@@ -182,7 +191,11 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 raise ValueError(f'Layer {index} {name} is already quantized or unsupported')
             if module.in_features % group_size:
                 raise ValueError('Staged model quantization requires complete contiguous groups')
-    run = dict(state='running', gsq_training=effective, bits=bits, group_size=group_size,
+    run = dict(state='running', gsq_training=effective,
+               bits=bits if not isinstance(bits, dict) else dict(bits),
+               layer_bits=({index: bits if not isinstance(bits, dict) else bits[index] for index in indices}
+                           if isinstance(bits, dict) else {index: bits for index in indices}),
+               group_size=group_size,
                layer_indices=indices, device=str(device), blocks=[],
                training_documents=len(documents),
                initialization_documents=len(initialization_documents) if initialization_documents is not None else len(documents),
@@ -226,7 +239,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                         or not isinstance(saved.get('record'), dict)):
                     raise ValueError(f'GSQ block checkpoint does not match this run: {checkpoint}')
                 packed = _restore_packed_layer(
-                    layers[index], saved['state_dict'], names=names, bits=bits,
+                    layers[index], saved['state_dict'], names=names, bits=run['layer_bits'][index],
                     group_size=group_size, device=device)
                 from ..nn_modules.qlinear.torch import TorchLinear
 
@@ -262,7 +275,9 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                         val_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'validation'
                     validation_cache = capture_llama_gsq_inputs(
                         model, validation_documents, layer_index=index, **val_options)
-                packed, result = quantize_llama_gsq_capture(layers[index], cache, bits=bits, group_size=group_size,
+                packed, result = quantize_llama_gsq_capture(layers[index], cache,
+                                                           bits=run['layer_bits'][index],
+                                                           group_size=group_size,
                                                            gsq=gsq, pack=True, device=device,
                                                            initialization_cache=initialization_cache,
                                                            validation_cache=validation_cache)
@@ -301,6 +316,43 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     return run
 
 
+def dynamic_layer_bits(quantize_config):
+    """Resolve a `dynamic` map into ``{decoder_layer_index: bits}`` or ``None``.
+
+    A budget-constrained bit-allocation search produces one width per decoder
+    block. Accept exactly that shape: entries must name whole blocks under
+    ``model.layers.<n>`` and may only set ``bits``. Anything else (a different
+    module, or a non-width override such as ``group_size``/``sym``) is refused
+    rather than silently ignored, because staged GSQ trains one scalar grid per
+    block.
+    """
+    import re
+
+    dynamic = getattr(quantize_config, 'dynamic', None)
+    if not dynamic:
+        return None
+    pattern = re.compile(r'^model\.layers\.(\d+)$')
+    resolved = {}
+    for module_name, overrides in dynamic.items():
+        match = pattern.match(module_name)
+        if match is None:
+            raise ValueError(
+                'Staged GSQ accepts per-layer bit allocation only as `model.layers.<n>` entries; '
+                f'got {module_name!r}')
+        if not isinstance(overrides, dict) or set(overrides)-{'bits'}:
+            raise ValueError(
+                'Staged GSQ per-layer allocation may only override `bits`; '
+                f'got {module_name!r} -> {overrides!r}')
+        bits = overrides.get('bits')
+        if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
+            raise ValueError(f'Staged GSQ per-layer allocation requires W2/W3/W4; got {module_name!r} -> {bits!r}')
+        index = int(match.group(1))
+        if resolved.get(index, bits) != bits:
+            raise ValueError(f'Staged GSQ per-layer allocation repeats layer {index} with different widths')
+        resolved[index] = bits
+    return resolved or None
+
+
 def prepare_llama_gsq_export(model, run):
     """Finalize a complete staged model without creating a wrapper or writing files.
 
@@ -319,9 +371,30 @@ def prepare_llama_gsq_export(model, run):
     if any(not isinstance(layer.get_submodule(name), TorchLinear)
            for layer in model.model.layers for name in names):
         raise ValueError('Uniform staged export requires all seven packed projections in every layer')
-    qcfg = GPTQConfig(bits=run['bits'], group_size=run['group_size'], sym=True, desc_act=False,
-                       act_group_aware=False, format=FORMAT.GPTQ_V2, offload_to_disk=False,
-                       device=str(next(model.parameters()).device))
+    layer_bits = dict(run.get('layer_bits') or {})
+    widths = set(layer_bits.values())
+    uniform = None if not layer_bits else (next(iter(widths)) if len(widths) == 1 else None)
+    if len(widths) > 1 and not layer_bits:
+        raise ValueError('Mixed staged export requires per-layer bit widths')
+    qcfg = GPTQConfig(bits=uniform if uniform is not None else
+                      (run['bits'] if not isinstance(run['bits'], dict) else min(widths)),
+                      group_size=run['group_size'], sym=True, desc_act=False,
+                      act_group_aware=False, format=FORMAT.GPTQ_V2, offload_to_disk=False,
+                      device=str(next(model.parameters()).device))
+    if len(widths) > 1:
+        # Load-time module construction resolves per-module bits from `dynamic`
+        # (utils/model.py), so a non-uniform export must publish the assignment
+        # there or every layer would be rebuilt at the top-level width.
+        base = run['bits'] if not isinstance(run['bits'], dict) else min(widths)
+        qcfg.bits = base
+        qcfg.dynamic = {
+            f'model.layers.{index}.{name}': {'bits': int(width)}
+            for index, width in sorted(layer_bits.items())
+            for name in ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+                         'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
+            if int(width) != base
+        } or None
+        qcfg.meta['gsq_layer_bits'] = {str(k): int(v) for k, v in sorted(layer_bits.items())}
     qcfg.meta['gsq_training'] = run['gsq_training']
     qcfg.meta['gsq_training_recipe'] = 'experimental_staged_llama_v1'
     model.half()
@@ -397,7 +470,11 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
         raise ValueError('Public staged GSQ requires symmetric W2/W3/W4 without activation ordering')
     if any(value is not None for value in unsupported.values()):
         raise ValueError('Unsupported additional public quantization options for staged GSQ')
-    for name in ('dynamic', 'rotation', 'adapter', 'gptaq', 'foem', 'mock_quantization',
+    # Non-uniform per-layer bit allocation (e.g. an RCO search result) is the
+    # only dynamic override this path can honor: it changes widths alone, and
+    # the staged exporter publishes the same assignment back as `dynamic`.
+    layer_bits = dynamic_layer_bits(qcfg)
+    for name in ('rotation', 'adapter', 'gptaq', 'foem', 'mock_quantization',
                  'static_groups', 'adjacent_model', 'adaptive_clipping', 'lm_head', 'preprocessors',
                  'smoother', 'offload_to_disk'):
         if getattr(qcfg, name, None):
@@ -421,6 +498,13 @@ def quantize_llama_gsq_public(wrapper, *, calibration, tokenizer, backend,
         calibration_data_min_length=calibration_data_min_length,
         calibration_concat_separator=calibration_concat_separator)
     staged = qcfg.gsq_training
-    run = quantize_llama_gsq_prepared(wrapper, prepared, gsq=staged)
+    if layer_bits is None:
+        run = quantize_llama_gsq_prepared(wrapper, prepared, gsq=staged)
+    else:
+        documents = staged_documents_from_prepared(prepared)
+        run = quantize_llama_gsq_model(wrapper.model, documents,
+                                       bits=layer_bits,
+                                       group_size=qcfg.group_size, gsq=staged)
+        finalize_llama_gsq_wrapper(wrapper, run)
     wrapper.quantize_config.gsq_training = staged
     return {'gsq_training': run['blocks']}

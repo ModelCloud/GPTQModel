@@ -148,3 +148,69 @@ information.
 * **Paper results are for Llama 3.1 8B/70B.** A 1B model has less redundancy
   to recover, so absolute gaps are not comparable; only the direction and the
   relative ordering of bit widths are.
+
+## Non-uniform bit allocation (RCO)
+
+The paper's 2.37 and 2.62 bits-per-parameter Llama rows are non-uniform
+assignments produced with RCO (arXiv 2604.18556 Sec. 4.2 and Table 1, citing
+Helcig & Alistarh, arXiv 2605.00649). `gptqmodel/quantization/rco.py` is a
+port of that method; its tangent projection, retraction and momentum transport
+match the `IST-DASLab/RCO` reference numerically (`alpha` difference 0.0 at
+tolerance 0.05 and 1e-6), and its knapsack rounder is bit-identical to the
+reference solver at 16 and 112 groups.
+
+Because a staged GSQ checkpoint stores one width per decoder block, the search
+runs at block granularity. That keeps the budget it enforces equal to the
+budget a checkpoint can actually express; a per-projection search would have to
+be reduced to per-block widths afterwards, which moves the achieved budget.
+
+```bash
+python scripts/gsq_paper/rco_allocate.py --model meta-llama/Llama-3.2-1B-Instruct \
+    --corpus /models/datasets/gsq-bench/fineweb-paper \
+    --out /workspace/rco-2375 --target-bits 2.375 \
+    --arms '/workspace/w{bits}gsq4096/ckpt' --layers 16 --steps 200
+python scripts/gsq_paper/rco_materialize.py --model meta-llama/Llama-3.2-1B-Instruct \
+    --assignment /workspace/rco-2375/assignment.json \
+    --arms '/workspace/w{bits}gsq4096/ckpt' --out /workspace/rco-2375/model
+```
+
+Both budgets are hit exactly, with the constraint held to floating-point noise
+across all 200 steps:
+
+| Target | W3 blocks | W2 blocks | Achieved bpp | max drift |
+| --- | --- | --- | --- | --- |
+| 2.375 | 6 | 10 | 2.3750 | 9.5e-7 |
+| 2.625 | 10 | 6 | 2.6250 | 9.5e-7 |
+
+### Measured result: the allocation does not beat a uniform mix
+
+Held-out NLL on all 128 validation sequences (524,160 tokens), scoring the
+materialized checkpoints. `linear` is the NLL a uniform mix of the measured W2
+and W3 endpoints would give at the same budget.
+
+| Arm | bpp | NLL | PPL | linear | excess vs linear |
+| --- | --- | --- | --- | --- | --- |
+| dense | 16 | 2.9034 | 18.24 | — | — |
+| W2 GSQ | 2.0 | 5.8078 | 332.9 | — | — |
+| **RCO 2.375** | 2.375 | **5.1571** | 173.7 | 5.0681 | **+0.0890** |
+| **RCO 2.625** | 2.625 | **4.6308** | 102.6 | 4.5749 | **+0.0559** |
+| W3 GSQ | 3.0 | 3.8352 | 46.3 | — | — |
+
+RCO lands between the two uniform arms, which shows the search is choosing
+widths that work, but it is **worse than the interpolation it should beat** at
+both budgets, and it is nowhere near the paper's claim that a 2.37 bpp
+assignment scores close to W3 (69.44 vs 72.32 average).
+
+The paper's gain comes from a model with real per-layer sensitivity structure
+to exploit: Llama 3.1 8B/70B, where attention and MLP layers differ markedly in
+how much they degrade. Llama 3.2 1B does not offer that, and its 16 blocks are
+near-uniformly sensitive, so any 6-of-16 assignment behaves like a uniform mix
+of the endpoints and the optimizer has almost nothing to find. This is the
+same limitation already recorded above: a 1B model has less redundancy to
+recover, so only the direction and the ordering of bit widths transfer, not the
+magnitude.
+
+Two things remain untested and would be the next steps: a wider option set than
+{W2, W3} (the paper searches more widths, which gives the optimizer more room
+to differentiate blocks), and a larger model where per-layer sensitivity is
+actually heterogeneous.

@@ -114,6 +114,68 @@ class GSQLion(torch.optim.Optimizer):
         return loss
 
 
+LLAMA_STAGED_PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
+                            'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
+
+
+def resolve_projection_bits(bits, projections=LLAMA_STAGED_PROJECTIONS):
+    """Normalize a uniform width or per-projection width map to ``{projection: bits}``.
+
+    Non-uniform bit allocation (the output of a budget-constrained search such
+    as RCO) is only actionable if a single block can be exported at different
+    widths per projection, so this accepts either a single width applied to all
+    seven Llama projections or an explicit mapping. Every requested projection
+    must be known and every width must be on the staged scalar grid.
+    """
+    if isinstance(bits, dict):
+        unknown = set(bits)-set(projections)
+        if unknown:
+            raise ValueError(f'Unsupported staged GSQ projections for per-projection bits: {sorted(unknown)}')
+        resolved = {}
+        for name in projections:
+            value = bits.get(name)
+            if value is None:
+                raise ValueError(f'Per-projection bits must cover {name}')
+            if isinstance(value, bool) or not isinstance(value, int) or value not in (2, 3, 4):
+                raise ValueError('Staged scalar GSQ supports W2/W3/W4 per projection')
+            resolved[name] = value
+        return resolved
+    if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
+        raise ValueError('Staged model quantization supports W2/W3/W4')
+    return {name: bits for name in projections}
+
+
+def projection_bits_for_budget(param_counts, targets, *, low=2, high=3):
+    """Greedy per-projection widths that hit a target average bit width exactly.
+
+    ``targets`` are fractional budgets such as the paper's 2.37 and 2.62 bits
+    per parameter. Everything starts at ``low`` and projections are promoted to
+    ``high`` largest-first until the parameter-weighted average reaches the
+    target. With equal-width projections this reproduces the paper's ``16 *
+    (target - 2)`` promoted layers exactly.
+    """
+    if not param_counts:
+        raise ValueError('A budget schedule requires nonempty parameter counts')
+    total = sum(param_counts.values())
+    if total <= 0:
+        raise ValueError('A budget schedule requires positive parameter counts')
+    plan = {}
+    for target in targets:
+        if not (low <= target <= high):
+            raise ValueError(f'Target {target} is outside the W{low}/W{high} interpolation range')
+        remaining = (target-low)*total
+        widths = {name: low for name in param_counts}
+        for name, count in sorted(param_counts.items(), key=lambda item: (-item[1], item[0])):
+            if count > remaining:
+                # This block is too large for what is left; a smaller block may
+                # still fit, so keep scanning instead of abandoning the budget.
+                continue
+            widths[name] = high
+            remaining -= count
+        plan[target] = widths
+    return plan
+
+
 def scalar_training_candidates(weight, scales, group_size, *, bits, std=.01, strength=6., noise):
     """Prepare the pinned author's W2 or W3/W4 initialization with explicit noise.
 
@@ -765,26 +827,28 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
     if set(initializers) != set(names) or not batches:
         raise ValueError('Llama GSQ requires all seven projection initializers and nonempty batches')
+    width = resolve_projection_bits(bits, names)
     initializers = dict(initializers)
     initialization_batches = batches if initialization_batches is None else initialization_batches
     fitted = copy.deepcopy(layer).eval()
     records = {}
 
     def quantizer(name):
+        nbits = width[name]
         if affine_initializers:
             codes, scales, zeros = initializers[name]
             weight = codes.to(scales.dtype)
         else:
             weight, scales = initializers[name]
-        count = 4 if bits == 2 else 5
+        count = 4 if nbits == 2 else 5
         rng = torch.Generator(device=weight.device).manual_seed(seed)
         noise = torch.randn((count, *weight.shape), dtype=weight.dtype, device=weight.device, generator=rng)
         if affine_initializers:
             from .gsq_training_affine import GSQAffineTrainingModule
 
-            return GSQAffineTrainingModule(codes, scales, zeros, group_size, bits=bits, noise=noise,
+            return GSQAffineTrainingModule(codes, scales, zeros, group_size, bits=nbits, noise=noise,
                                            logits_dtype=torch.float32 if name in names[:2] else weight.dtype)
-        return GSQScalarTrainingModule(weight, scales, group_size, bits=bits, noise=noise,
+        return GSQScalarTrainingModule(weight, scales, group_size, bits=nbits, noise=noise,
                                        logits_dtype=torch.float32 if name in names[:2] else weight.dtype)
 
     def run(stage_name, stage, selected, stage_batches, teacher=None, validation_stage_batches=None):
@@ -910,7 +974,9 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         teacher=dense_attention, validation_stage_batches=validation_stage_batches)
     mlp_metadata = None
     if reinitialize_mlp:
-        refreshed, mlp_metadata = initialize_llama_gptq(fitted, initialization_batches, bits=bits, group_size=group_size,
+        refreshed, mlp_metadata = initialize_llama_gptq(fitted, initialization_batches,
+                                                       bits={name: width[name] for name in names[4:]},
+                                                       group_size=group_size,
                                                        damp_percent=qk_damp_percent, projections=names[4:],
                                                        initializer=initializer)
         initializers.update(refreshed)
@@ -936,7 +1002,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
     from .config import GPTQConfig
     from .gptq import GPTQ
 
-    if bits not in (2, 3, 4) or not batches:
+    if not batches:
         raise ValueError('Staged Llama GPTQ requires W2/W3/W4 and calibration batches')
     if initializer not in ('gptq', 'rtn'):
         raise ValueError('Unknown staged GPTQ initializer')
@@ -948,15 +1014,30 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
         if not projections or not set(projections).issubset(names):
             raise ValueError('Unsupported Llama GPTQ projection subset')
         names = tuple(projections)
+    if isinstance(bits, dict):
+        unknown = set(bits)-set(names)
+        if unknown:
+            raise ValueError(f'Unsupported projections for per-projection bits: {sorted(unknown)}')
+        width = {}
+        for name in names:
+            value = bits.get(name)
+            if isinstance(value, bool) or not isinstance(value, int) or value not in (2, 3, 4):
+                raise ValueError('Staged Llama GPTQ requires W2/W3/W4 for every projection')
+            width[name] = value
+    else:
+        if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
+            raise ValueError('Staged Llama GPTQ requires W2/W3/W4 and calibration batches')
+        width = {name: bits for name in names}
     if initializer == 'rtn':
         from .config import RTNConfig
         from .rtn import RTN
 
         initializers, metadata = {}, {}
         for name in names:
+            nbits = width[name]
             module = working.get_submodule(name)
             config = RTNConfig(
-                bits=bits,
+                bits=nbits,
                 group_size=group_size,
                 sym=True,
                 desc_act=False,
@@ -964,7 +1045,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
             )
             quantizer = RTN(module, config)
             weight, scales, zeros, groups, _, loss, damp, samples = quantizer.quantize()
-            if not torch.all(zeros == 2**(bits - 1)):
+            if not torch.all(zeros == 2**(nbits - 1)):
                 raise ValueError('RTN initializer zero point does not match the signed GSQ grid')
             expected = torch.arange(weight.shape[1], device=groups.device) // group_size
             if not torch.equal(groups, expected.to(groups.dtype)):
@@ -974,10 +1055,11 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
         return initializers, metadata
     try:
         for name in names:
+            nbits = width[name]
             module = working.get_submodule(name)
             if initializer != 'gptq':
                 raise ValueError('The public staged path currently requires a GPTQ initializer')
-            config = GPTQConfig(bits=bits, group_size=group_size, sym=True, desc_act=False,
+            config = GPTQConfig(bits=nbits, group_size=group_size, sym=True, desc_act=False,
                                 damp_percent=damp_percent, gsq=None, act_group_aware=False,
                                 offload_to_disk=False)
             task = GPTQ(module, config)
@@ -1028,7 +1110,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
         initializers, metadata = {}, {}
         for name, task in tasks.items():
             weight, scales, zeros, groups, _, loss, damp, samples = task.quantize()
-            if not torch.all(zeros == 2**(bits-1)):
+            if not torch.all(zeros == 2**(width[name]-1)):
                 raise ValueError('GPTQ initializer zero point does not match the signed GSQ grid')
             expected = torch.arange(weight.shape[1], device=groups.device)//group_size
             if not torch.equal(groups, expected.to(groups.dtype)):
@@ -1116,7 +1198,8 @@ def pack_llama_staged_block(fitted, records, *, bits, group_size):
 
     This is a block export helper, not a complete checkpoint writer. Scale
     storage rounding is the existing TorchLinear contract and must be included
-    in downstream replay/evaluation.
+    in downstream replay/evaluation. ``bits`` is a uniform width or a
+    per-projection width map, so one block can mix widths.
     """
     import copy
 
@@ -1126,7 +1209,9 @@ def pack_llama_staged_block(fitted, records, *, bits, group_size):
     exported = copy.deepcopy(fitted).cpu()
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
+    width = resolve_projection_bits(bits, names)
     for name in names:
+        nbits = width[name]
         stage = name if name in records else ('attention' if name.startswith('self_attn.') else 'mlp')
         key = 'weight' if stage == name else name+'.weight'
         scales = records[stage]['scales'][key].detach().cpu()
@@ -1134,10 +1219,10 @@ def pack_llama_staged_block(fitted, records, *, bits, group_size):
             raise ValueError('Staged GPTQ export requires finite nonzero learned scales')
         linear = exported.get_submodule(name)
         groups = torch.arange(linear.in_features, dtype=torch.int32)//group_size
-        packed = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
+        packed = TorchLinear(bits=nbits, group_size=group_size, sym=True, desc_act=False,
                              in_features=linear.in_features, out_features=linear.out_features,
                              bias=linear.bias is not None, backend=BACKEND.TORCH)
-        packed.pack_original(linear, scales, torch.full_like(scales, 2**(bits-1)), groups)
+        packed.pack_original(linear, scales, torch.full_like(scales, 2**(nbits-1)), groups)
         parent, leaf = name.rsplit('.', 1)
         setattr(exported.get_submodule(parent), leaf, packed)
     return exported
@@ -1162,17 +1247,17 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
     if not isinstance(gsq, GSQTrainingConfig):
         raise TypeError('Staged GSQ requires GSQTrainingConfig, a dictionary or None')
     effective = gsq.to_dict()
-    if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
-        raise ValueError('Staged scalar GSQ supports W2/W3/W4')
+    width = resolve_projection_bits(bits)
     if isinstance(group_size, bool) or not isinstance(group_size, int) or group_size <= 0:
         raise ValueError('Staged scalar GSQ requires a positive contiguous group size')
     if not isinstance(pack, bool):
         raise TypeError('pack must be boolean')
     initialization_batches = batches if initialization_batches is None else initialization_batches
-    initializers, metadata = initialize_llama_gptq(layer, initialization_batches, bits=bits, group_size=group_size,
-                                                  damp_percent=gsq.damp_percent, initializer=gsq.initializer)
+    initializers, metadata = initialize_llama_gptq(layer, initialization_batches, bits=width,
+                                                   group_size=group_size,
+                                                   damp_percent=gsq.damp_percent, initializer=gsq.initializer)
     if gsq.enabled:
-        fitted, records = fit_llama_stages(layer, initializers, batches, bits=bits, group_size=group_size,
+        fitted, records = fit_llama_stages(layer, initializers, batches, bits=width, group_size=group_size,
                                            initialization_batches=initialization_batches,
                                            validation_batches=validation_batches,
                                            **gsq.training_kwargs())
@@ -1182,7 +1267,8 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
             for name, (weight, _) in initializers.items():
                 fitted.get_submodule(name).weight.copy_(weight)
         records = {name: {'scales': {'weight': scales}} for name, (_, scales) in initializers.items()}
-    exported = pack_llama_staged_block(fitted, records, bits=bits, group_size=group_size) if pack else fitted
+    exported = pack_llama_staged_block(fitted, records, bits=width, group_size=group_size) if pack else fitted
     return exported, dict(gsq_training=effective, bits=bits, group_size=group_size,
+                          projection_bits=width,
                           packed=pack, deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
                           initializers=initializers, initializer_metadata=metadata, stages=records)
