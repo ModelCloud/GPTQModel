@@ -624,18 +624,14 @@ def _refresh_weights_map(
         if index is not None and key in index:
             if folder is None:
                 # Transformers can point an index entry straight at a checkpoint
-                # file and keep no writable side table. Never write into the
-                # checkpoint; ``OffloadedWeightsLoader`` reads ``state_dict``
-                # first, so an empty one would silently pin the whole layer in
-                # memory instead of on disk.
-                if not state_dict:
-                    raise RuntimeError(
-                        f"Cannot refresh offloaded weights for {type(module).__name__}: "
-                        f"accelerate's weights map has a read-only checkpoint entry "
-                        f"for `{name}` and no offload folder to rewrite it in."
-                    )
-                state_dict[key] = packed
-                continue
+                # file. A different in-memory entry does not make this disk
+                # entry writable: adding ``key`` to ``state_dict`` would retain
+                # the refreshed weight in CPU memory between forwards.
+                raise RuntimeError(
+                    f"Cannot refresh offloaded weights for {type(module).__name__}: "
+                    f"accelerate's weights map has a read-only checkpoint entry "
+                    f"for `{name}` and no offload folder to rewrite it in."
+                )
             os.makedirs(folder, exist_ok=True)
             if packed.numel() == 0:
                 # NumPy cannot memory-map an empty file. Safetensors can store

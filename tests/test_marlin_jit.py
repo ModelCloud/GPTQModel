@@ -1584,15 +1584,17 @@ def test_refresh_weights_map_reports_missing_offload_entry():
         _refresh_weights_map(layer, hook, {"weight": layer.weight})
 
 
-def test_refresh_weights_map_reports_read_only_checkpoint_index():
+@pytest.mark.parametrize("with_unrelated_entry", [False, True])
+def test_refresh_weights_map_reports_read_only_checkpoint_index(with_unrelated_entry):
     """A checkpoint-backed index must not pin refreshed tensors in memory."""
     from types import SimpleNamespace
 
     from gptqmodel.utils.offload import _refresh_weights_map
 
     layer = nn.Linear(2, 2)
+    state_dict = {"unrelated.weight": torch.ones(1)} if with_unrelated_entry else {}
     loader = SimpleNamespace(
-        state_dict={},
+        state_dict=state_dict,
         index={
             "weight": {
                 "safetensors_file": "/ckpt/model.safetensors",
@@ -1606,6 +1608,9 @@ def test_refresh_weights_map_reports_read_only_checkpoint_index():
 
     with pytest.raises(RuntimeError, match="read-only checkpoint entry"):
         _refresh_weights_map(layer, hook, {"weight": layer.weight})
+
+    assert "weight" not in state_dict
+    assert set(state_dict) == ({"unrelated.weight"} if with_unrelated_entry else set())
 
 
 def test_refresh_weights_map_overrides_checkpoint_entry_in_state_dict():
