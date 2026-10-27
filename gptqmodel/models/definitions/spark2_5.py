@@ -11,9 +11,8 @@ class Spark2_5QModel(BaseQModel):
 
     require_trust_remote_code = True
 
-    # Keep shared-input dedup disabled until a tiny real-forward regression
-    # case covers the remote Spark decoder implementation.
-    shared_input_verified_model_types = frozenset()
+    # Verified by the tiny real-forward case for XHToken/Spark-X2.5-4B.
+    shared_input_verified_model_types = frozenset({"spark2_5"})
 
     pre_lm_head_norm_module = "model.norm"
 
@@ -100,3 +99,4 @@ class Spark2_5QModel(BaseQModel):
 
 
 __all__ = ["Spark2_5QModel"]
+
