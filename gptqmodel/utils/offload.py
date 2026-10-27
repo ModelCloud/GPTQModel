@@ -482,8 +482,12 @@ class _RuntimeBufferOffloadHook(ModelHook):
     def detach_hook(self, module: nn.Module) -> nn.Module:
         # Removing the offload hook must leave the module runnable without
         # requiring another post_init() call.
+        weight_device = next(
+            (parameter.device for parameter in module.parameters(recurse=False) if not parameter.is_meta),
+            self.execution_device,
+        )
         for name, tensor in self._cpu_buffers.items():
-            module._buffers[name] = tensor
+            module._buffers[name] = tensor.to(weight_device)
         return module
 
 
@@ -633,6 +637,20 @@ def _refresh_weights_map(
                 state_dict[key] = packed
                 continue
             os.makedirs(folder, exist_ok=True)
+            if packed.numel() == 0:
+                # NumPy cannot memory-map an empty file. Safetensors can store
+                # zero-element tensors, and Accelerate's loader reads them from
+                # the file named by this index entry on every subsequent load.
+                path = os.path.abspath(os.path.join(folder, f"{key}.safetensors"))
+                safetensors_save_file({key: packed}, path)
+                index[key] = {
+                    "dtype": str(packed.dtype).removeprefix("torch."),
+                    "shape": list(packed.shape),
+                    "safetensors_file": path,
+                    "weight_name": key,
+                }
+                persisted[key] = index[key]
+                continue
             # Rewriting the entry replaces the memory-mapped/checkpoint-backed
             # stale reference with packed storage in the offload folder.
             # ``offload_weight`` updates ``index`` in place and returns it, so

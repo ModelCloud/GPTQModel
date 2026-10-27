@@ -1248,12 +1248,12 @@ def test_offloaded_marlin_runtime_buffers_are_scoped_to_forward(monkeypatch, tmp
     for name in ("workspace", "g_idx_sort_indices"):
         assert getattr(layer, name).numel() == 0
 
-    output = layer(torch.zeros((1, layer.in_features), dtype=torch.float16))
-
-    assert output.shape == (1, layer.out_features)
-    assert layer.qweight.is_meta
-    for name in ("workspace", "g_idx_sort_indices"):
-        assert getattr(layer, name).numel() == 0
+    for _ in range(2):
+        output = layer(torch.zeros((1, layer.in_features), dtype=torch.float16))
+        assert output.shape == (1, layer.out_features)
+        assert layer.qweight.is_meta
+        for name in ("workspace", "g_idx_sort_indices"):
+            assert getattr(layer, name).numel() == 0
 
 
 @pytest.mark.parametrize("desc_act", [False, True])
@@ -1302,7 +1302,8 @@ def test_hf_post_init_offloaded_single_layer_matches_reference(monkeypatch):
         assert torch.equal(actual, want), name
 
 
-def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatch, tmp_path):
+@pytest.mark.parametrize("desc_act", [False, True])
+def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatch, tmp_path, desc_act):
     """The refreshed packed shapes must reach ``index.json``, not just memory."""
     import json
 
@@ -1313,7 +1314,7 @@ def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatc
             super().__init__()
             self.model = nn.Module()
             self.model.layers = nn.ModuleList(
-                [_make_marlin_layer(desc_act=False), nn.LogSigmoid()]
+                [_make_marlin_layer(desc_act=desc_act), nn.LogSigmoid()]
             )
 
     model = SingleLayer()
@@ -1328,23 +1329,69 @@ def test_gptqmodel_post_init_refreshes_disk_index_for_offloaded_layer(monkeypatc
     before = json.loads(index_path.read_text())["model.layers.0.qweight"]["shape"]
     assert before == [32, 128]  # pre-post_init GPTQ layout
 
-    gptqmodel_post_init(model, use_act_order=False)
+    gptqmodel_post_init(model, use_act_order=desc_act)
 
     index = json.loads(index_path.read_text())
     assert index["model.layers.0.qweight"]["shape"] == [16, 256]  # Marlin layout
-    assert index["model.layers.0.g_idx"]["shape"] == [0]
+    assert index["model.layers.0.g_idx"]["shape"] == ([256] if desc_act else [0])
     assert index["model.layers.0.qzeros"]["shape"] == [0]
     assert index["model.layers.0.qweight"]["dtype"] == "int32"
+    empty_names = ("qzeros",) if desc_act else ("g_idx", "qzeros")
+    for name in empty_names:
+        entry = index[f"model.layers.0.{name}"]
+        assert entry["safetensors_file"].endswith(f"model.layers.0.{name}.safetensors")
+
+    from accelerate.utils import OffloadedWeightsLoader
+
+    reloaded = OffloadedWeightsLoader(save_folder=str(offload_dir))
+    for name in empty_names:
+        assert reloaded[f"model.layers.0.{name}"].numel() == 0
 
     hook = _offload_hook(model.model.layers[0])
     assert hook is not None
     hook.pre_forward(model.model.layers[0])
     try:
         assert model.model.layers[0].qweight.shape == (16, 256)
-        assert model.model.layers[0].g_idx.numel() == 0
+        assert model.model.layers[0].g_idx.numel() == (256 if desc_act else 0)
         assert model.model.layers[0].qzeros.numel() == 0
     finally:
         hook.post_forward(model.model.layers[0], None)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_runtime_buffer_offload_detach_restores_weight_device(device):
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module, remove_hook_from_module
+
+    from gptqmodel.utils.offload import _install_runtime_buffer_offload_hook
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA is unavailable")
+
+    class BufferedLinear(nn.Linear):
+        def forward(self, x):
+            assert self.workspace.device == self.weight.device
+            return super().forward(x) + self.workspace
+
+    layer = BufferedLinear(4, 4).to(device)
+    layer.register_buffer("workspace", torch.ones(4, device=device), persistent=False)
+    weights = {name: tensor.detach().cpu().clone() for name, tensor in layer.state_dict().items()}
+    add_hook_to_module(
+        layer,
+        AlignDevicesHook(execution_device=torch.device(device), offload=True, weights_map=weights),
+    )
+    _install_runtime_buffer_offload_hook(layer, torch.device(device))
+    assert layer.weight.is_meta and layer.workspace.numel() == 0
+
+    remove_hook_from_module(layer)
+
+    assert layer.weight.device == torch.device(device)
+    assert layer.workspace.device == layer.weight.device
+    assert torch.equal(layer.workspace, torch.ones(4, device=device))
+    input = torch.arange(4, device=device, dtype=layer.weight.dtype).reshape(1, 4)
+    expected = torch.nn.functional.linear(
+        input, weights["weight"].to(device), weights["bias"].to(device)
+    ) + torch.ones(4, device=device)
+    torch.testing.assert_close(layer(input), expected)
 
 
 def test_gptqmodel_post_init_handles_hook_on_ancestor_module(monkeypatch, tmp_path):
