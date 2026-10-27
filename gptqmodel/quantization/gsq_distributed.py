@@ -280,13 +280,13 @@ class GSQDistributed:
                 tensors.append(value.detach().resolve_conj().resolve_neg())
                 return 'tensor', index, shape, dtype
             if value is None or isinstance(value, (bool, int, float, str, bytes)):
-                return 'value', value
+                return 'value', value, None, None
             if isinstance(value, dict):
                 if any(key is not None and not isinstance(key, (bool, int, float, str, bytes)) for key in value):
                     raise TypeError('GSQ primary_call dict keys must be primitives')
-                return 'dict', [(key, describe(item)) for key, item in value.items()]
+                return 'dict', [(key, describe(item)) for key, item in value.items()], None, None
             if isinstance(value, (list, tuple)):
-                return 'tuple' if isinstance(value, tuple) else 'list', [describe(item) for item in value]
+                return 'tuple' if isinstance(value, tuple) else 'list', [describe(item) for item in value], None, None
             raise TypeError(f'Unsupported GSQ primary_call result type: {type(value).__name__}')
 
         envelope = None
@@ -301,19 +301,19 @@ class GSQDistributed:
             raise RuntimeError(f'GSQ distributed primary_call failed on rank 0: {description}')
 
         def restore(node):
-            kind = node[0]
+            kind, payload, shape, dtype = node
             if kind == 'value':
-                return node[1]
+                return payload
             if kind == 'tensor':
-                _, index, shape, dtype = node
+                index = payload
                 if self.is_primary:
                     tensors[index] = tensors[index].to(self.device).contiguous()
                 else:
                     tensors.append(torch.empty(shape, dtype=dtype, device=self.device))
                 return tensors[index]
             if kind == 'dict':
-                return {key: restore(item) for key, item in node[1]}
-            values = [restore(item) for item in node[1]]
+                return {key: restore(item) for key, item in payload}
+            values = [restore(item) for item in payload]
             return tuple(values) if kind == 'tuple' else values
 
         result, error = None, None
