@@ -48,6 +48,18 @@ def documents(corpus, split, count):
     return [{'input_ids': dataset[index]['input_ids']} for index in range(count)]
 
 
+def load_assignment(path):
+    """Read a per-block width map produced by ``rco_allocate.py``."""
+    payload = json.loads(Path(path).read_text())
+    layer_bits = payload.get('layer_bits')
+    if not layer_bits:
+        raise ValueError(f'{path} has no layer_bits map')
+    bits = {int(index): int(width) for index, width in layer_bits.items()}
+    if sorted(bits) != sorted(torch.arange(len(bits)).tolist()):
+        raise ValueError(f'{path} does not assign every block from 0: {sorted(bits)}')
+    return bits
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -55,7 +67,10 @@ def parse_args():
     parser.add_argument('--model', required=True, help='tokenizer/model path or hub id')
     parser.add_argument('--corpus', required=True, help='root produced by build_corpus.py')
     parser.add_argument('--out', required=True)
-    parser.add_argument('--bits', type=int, default=3)
+    parser.add_argument('--bits', type=int, default=3,
+                        help='uniform width, ignored when --assignment is given')
+    parser.add_argument('--assignment', default=None,
+                        help='RCO assignment.json: one width per decoder block')
     parser.add_argument('--group-size', type=int, default=128)
     parser.add_argument('--train-seqs', type=int, default=4096)
     parser.add_argument('--gptq-seqs', type=int, default=512)
@@ -85,6 +100,7 @@ def main():
     out = Path(args.out)
     (out / 'logs').mkdir(parents=True, exist_ok=True)
 
+    bits = load_assignment(args.assignment) if args.assignment else args.bits
     config = GPTQConfig(bits=args.bits, group_size=args.group_size, sym=True,
                         desc_act=False, act_group_aware=False, format=FORMAT.GPTQ_V2,
                         device=DEVICE.CUDA, offload_to_disk=False)
@@ -115,7 +131,7 @@ def main():
         wrapper.model, train if staged else gptq,
         initialization_documents=gptq if staged else None,
         validation_documents=validation if staged else None,
-        bits=args.bits, group_size=args.group_size, gsq=recipe,
+        bits=bits, group_size=args.group_size, gsq=recipe,
         offload_capture=(args.capture != 'gpu'),
         capture_directory=(str(out / 'capture') if args.capture == 'disk' else None),
         checkpoint_directory=(str(out / 'ckpt') if args.resume else None),
@@ -161,7 +177,7 @@ def main():
 
     result = {
         'variant': args.variant,
-        'bits': args.bits,
+        'bits': bits if isinstance(bits, int) else dict(sorted(bits.items())),
         'seed': args.seed,
         'restore_best': args.restore_best,
         'model': args.model,
@@ -182,7 +198,7 @@ def main():
         'eval': evaluation,
     }
     (out / 'results.json').write_text(json.dumps(result, indent=2, default=str))
-    print(json.dumps({'variant': args.variant, 'bits': args.bits,
+    print(json.dumps({'variant': args.variant, 'bits': result['bits'],
                       'quantize_seconds': result['quantize_seconds'],
                       'eval': evaluation}, indent=2, default=str))
 

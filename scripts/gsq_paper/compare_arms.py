@@ -26,27 +26,66 @@ from datasets import load_from_disk
 from gptqmodel import BACKEND, GPTQModel
 
 
-def score(model_path, documents, backend, dtype):
+def _score_range(model_path, ids_by_document, device, backend, dtype):
+    """Score one shard of the documents on one device."""
+    # Pin placement explicitly. With every card visible, auto-placement may
+    # split the model across devices, and a sharded forward then fails on the
+    # first embedding lookup.
     model = GPTQModel.load(model_path, backend=getattr(BACKEND, backend),
-                           dtype=dtype, attn_implementation='sdpa')
-    model.model.to('cuda:0').eval()
+                           dtype=dtype, attn_implementation='sdpa',
+                           device_map={'': device})
+    model.model.to(device).eval()
     per_document, total, tokens = [], 0.0, 0
     with torch.inference_mode():
-        for ids in documents:
+        for index in ids_by_document:
+            ids = torch.tensor([ids_by_document[index]], device=device)
             output = model.model(input_ids=ids, labels=ids)
             counted = ids.numel() - 1
-            per_document.append(float(output.loss))
+            per_document.append((index, float(output.loss)))
             total += float(output.loss) * counted
             tokens += counted
     del model
-    torch.cuda.empty_cache()
+    if device.startswith('cuda'):
+        torch.cuda.empty_cache()
+    return per_document, total, tokens
+
+
+def score(model_path, ids_by_document, backend, dtype, devices=None):
+    """Score every document, sharded across ``devices`` when more than one.
+
+    Sharding is document-level, so each device sees whole sequences and the
+    pooled NLL is identical to a single-device pass.
+    """
+    if not devices:
+        devices = ['cuda:0']
+    if len(devices) == 1:
+        per_document, total, tokens = _score_range(
+            model_path, ids_by_document, devices[0], backend, dtype)
+    else:
+        import multiprocessing as mp
+        shards = {device: {} for device in devices}
+        for position, index in enumerate(sorted(ids_by_document)):
+            shards[devices[position % len(devices)]][index] = ids_by_document[index]
+        context = mp.get_context('spawn')
+        with context.Pool(len(devices)) as pool:
+            outputs = pool.starmap(
+                _score_range,
+                [(model_path, shards[device], device, backend, dtype)
+                 for device in devices])
+        per_document, total, tokens = [], 0.0, 0
+        for documents, shard_total, shard_tokens in outputs:
+            per_document.extend(documents)
+            total += shard_total
+            tokens += shard_tokens
+        per_document.sort()
+    losses = [loss for _, loss in per_document]
     nll = total / tokens
     return {
         'nll': nll,
         'ppl': float(torch.tensor(nll).exp()),
         'tokens': tokens,
-        'per_document': per_document,
-        'mean_per_document': sum(per_document) / len(per_document),
+        'per_document': losses,
+        'mean_per_document': sum(losses) / len(losses),
     }
 
 
@@ -61,6 +100,8 @@ def parse_args():
     parser.add_argument('--dense', default=None,
                         help='optional unquantized reference model')
     parser.add_argument('--n', type=int, default=128, help='validation documents to score')
+    parser.add_argument('--devices', default='cuda:0',
+                        help='comma-separated devices for document-sharded scoring')
     parser.add_argument('--backend', default='TORCH')
     parser.add_argument('--dtype', default='bfloat16')
     parser.add_argument('--out', default='')
@@ -73,8 +114,8 @@ def main():
     dataset = load_from_disk(str(Path(args.corpus) / 'validation'))
     if args.n > len(dataset):
         raise ValueError(f'validation holds {len(dataset)} sequences, {args.n} requested')
-    documents = [torch.tensor([dataset[index]['input_ids']], device='cuda:0')
-                 for index in range(args.n)]
+    ids_by_document = {index: dataset[index]['input_ids'] for index in range(args.n)}
+    devices = [device for device in args.devices.split(',') if device]
     dtype = getattr(torch, args.dtype)
 
     labels = args.labels or [Path(path).parent.name for path in args.models]
@@ -83,11 +124,11 @@ def main():
 
     results = {}
     if args.dense:
-        dense = score(args.dense, documents, args.backend, dtype)
+        dense = score(args.dense, ids_by_document, args.backend, dtype, devices)
         results[args.dense] = dense
         print(f'{"dense":<24} nll={dense["nll"]:.5f} ppl={dense["ppl"]:.3f}', flush=True)
     for label, model_path in zip(labels, args.models):
-        result = score(model_path, documents, args.backend, dtype)
+        result = score(model_path, ids_by_document, args.backend, dtype, devices)
         results[model_path] = result
         print(f'{label:<24} nll={result["nll"]:.5f} ppl={result["ppl"]:.3f}', flush=True)
 
@@ -107,8 +148,8 @@ def main():
         Path(args.per_doc_out).write_text(json.dumps(
             {label: results[path]['per_document']
              for label, path in zip(labels, args.models)}, indent=2))
-    print(f'\nscored {len(documents)} validation documents '
-          f'({sum(document.numel() - 1 for document in documents)} tokens)')
+    scored_tokens = sum(len(ids) - 1 for ids in ids_by_document.values())
+    print(f'\nscored {len(ids_by_document)} validation documents ({scored_tokens} tokens)')
 
 
 if __name__ == '__main__':
