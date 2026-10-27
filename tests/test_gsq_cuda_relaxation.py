@@ -286,3 +286,44 @@ def test_cuda_and_eager_staged_llama_agree_after_packed_training(tmp_path, monke
         fused_stage = fused_run["blocks"][0]["stages"][stage]
         for metric in ("hard_loss_after", "validation_hard_loss_after"):
             assert fused_stage[metric] == pytest.approx(eager_stage[metric], rel=.01, abs=1e-5)
+
+
+def test_fused_backend_prefers_hip_when_torch_reports_rocm():
+    """On ROCm the fused path must bind HIPRTC, not NVRTC/PTX."""
+    if not torch.cuda.is_available():
+        pytest.skip("GPU device required")
+    if torch.version.hip is None:
+        pytest.skip("ROCm build required")
+    from gptqmodel.quantization import gsq_cuda_relaxation as fast_module
+
+    fast_module._FAILED.discard(torch.cuda.current_device())
+    backend = fast_module._functions(torch.cuda.current_device())
+    if backend is None:
+        pytest.skip(f"fused backend unavailable: {sorted(fast_module._FAILED)}")
+    assert backend.kind == "hip"
+    # MI350X waves are 64 lanes wide; the reduction is written against warpSize.
+    assert backend.warp_size == torch.cuda.get_device_properties(
+        torch.cuda.current_device()).warp_size
+
+
+def test_hip_escape_hatch_forces_eager_path(monkeypatch):
+    """The HIP-only switch must disable the fused path without disabling CUDA."""
+    if not torch.cuda.is_available():
+        pytest.skip("GPU device required")
+    if torch.version.hip is None:
+        pytest.skip("ROCm build required")
+    from gptqmodel.quantization import gsq_cuda_relaxation as fast_module
+
+    device = torch.cuda.current_device()
+    fast_module._FAILED.discard(device)
+    monkeypatch.setenv("GPTQMODEL_GSQ_DISABLE_HIP_RELAXATION", "1")
+    monkeypatch.delenv("GPTQMODEL_GSQ_DISABLE_CUDA_RELAXATION", raising=False)
+    logits = torch.zeros((5, 2, 32), device="cuda", dtype=torch.bfloat16)
+    scales = torch.ones((2, 1), device="cuda", dtype=torch.float32)
+    initial = torch.zeros((2, 32), device="cuda", dtype=torch.float32)
+    valid = torch.ones_like(logits, dtype=torch.bool)
+    uniform = torch.full_like(logits, .5)
+    assert cuda_relaxed_scalar_weights(
+        logits, scales, initial, valid, uniform, 32, 1., 1.) is None
+    fast_module._MODULES.clear()
+    fast_module._FAILED.clear()
