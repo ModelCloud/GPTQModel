@@ -79,5 +79,5 @@ def test_pack_gpu_raises_on_misaligned_qzeros():
 
     assert isinstance(packed_module, TorchLinear)
     assert packed_module.qweight.shape == torch.Size([16, 16])
-    assert packed_module.qzeros.shape == torch.Size([16, 0])
+    assert packed_module.qzeros.shape == torch.Size([16, 1])
     assert packed_module.scales.shape == torch.Size([16, 1])
