@@ -34,6 +34,7 @@ class CachedLlamaStageBatches:
             if len(original) != len(paths):
                 raise ValueError('GSQ attention cache lost microbatch alignment')
             return [((hidden, kwargs, mask,
+                      path.to(self.device) if isinstance(path, torch.Tensor) else
                       torch.load(path, map_location=self.device, weights_only=True)), count)
                     for ((hidden, kwargs, mask), count), path in zip(original, paths)]
         return self.from_cpu(index, self.load_cpu(index))
@@ -41,6 +42,8 @@ class CachedLlamaStageBatches:
     def load_cpu(self, index):
         if self.mode != 'mlp':
             raise ValueError('Only cached MLP batches support CPU prefetch')
+        if isinstance(self.files[index], (torch.Tensor, tuple)):
+            return self.files[index]
         return torch.load(self.files[index], map_location='cpu', weights_only=True)
 
     def from_cpu(self, index, packed):
@@ -72,7 +75,8 @@ def iter_gsq_training_batches(batches, order):
     order = list(order)
     if not order:
         return
-    if not isinstance(batches, CachedLlamaStageBatches) or batches.mode != 'mlp' or len(order) < 2:
+    if (not isinstance(batches, CachedLlamaStageBatches) or batches.mode != 'mlp' or len(order) < 2
+            or isinstance(batches.files[order[0]], (torch.Tensor, tuple))):
         for index in order:
             yield index, batches[index]
         return

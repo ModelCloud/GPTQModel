@@ -24,18 +24,22 @@ and the packed model under ``<out>/model``.
 
 import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
 import torch
 from datasets import load_from_disk
 
+# Direct script execution must use this checkout, including isolated worktrees.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.looper.gsq_training_model import (
     finalize_llama_gsq_wrapper,
     quantize_llama_gsq_model,
 )
-from gptqmodel.models._const import DEVICE
 from gptqmodel.quantization import FORMAT, GPTQConfig, GSQTrainingConfig
 
 ZERO_SHOT_TASKS = ['arc_easy', 'arc_challenge', 'hellaswag', 'winogrande', 'piqa']
@@ -71,6 +75,17 @@ def parse_args():
                         help='uniform width, ignored when --assignment is given')
     parser.add_argument('--assignment', default=None,
                         help='RCO assignment.json: one width per decoder block')
+    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--distributed', action='store_true',
+                        help='run with torchrun; batch-size remains the global batch')
+    parser.add_argument('--target-cache', choices=['none', 'cpu', 'device'], default='none',
+                        help='retain exact fixed stage targets in host or device memory')
+    parser.add_argument('--activation-checkpointing', action='store_true',
+                        help='recompute student activations during backward')
+    parser.add_argument('--reuse-capture', action='store_true',
+                        help='advance captures one packed block instead of replaying the whole prefix')
+    parser.add_argument('--resume-prefix-from', default=None,
+                        help='explicitly import compatible completed blocks from another ckpt directory')
     parser.add_argument('--group-size', type=int, default=128)
     parser.add_argument('--train-seqs', type=int, default=4096)
     parser.add_argument('--gptq-seqs', type=int, default=512)
@@ -97,16 +112,35 @@ def parse_args():
 
 def main():
     args = parse_args()
+    distributed = None
+    device = torch.device(args.device)
+    if args.distributed:
+        import torch.distributed as dist
+
+        from gptqmodel.quantization.gsq_distributed import GSQDistributed
+
+        if int(os.environ.get('WORLD_SIZE', '1')) < 2:
+            raise ValueError('--distributed requires torchrun with at least two processes')
+        device = torch.device('cuda', int(os.environ['LOCAL_RANK']))
+        torch.cuda.set_device(device)
+        dist.init_process_group(backend='nccl', device_id=device)
+        distributed = GSQDistributed(device=device)
+        if args.batch_size % distributed.world_size or args.microbatch > args.batch_size // distributed.world_size:
+            raise ValueError('--batch-size must divide world size and --microbatch must fit the local batch')
+    elif int(os.environ.get('WORLD_SIZE', '1')) > 1:
+        raise ValueError('A torchrun launch requires --distributed')
+    elif device.type == 'cuda':
+        torch.cuda.set_device(device)
     out = Path(args.out)
     (out / 'logs').mkdir(parents=True, exist_ok=True)
 
     bits = load_assignment(args.assignment) if args.assignment else args.bits
     config = GPTQConfig(bits=args.bits, group_size=args.group_size, sym=True,
                         desc_act=False, act_group_aware=False, format=FORMAT.GPTQ_V2,
-                        device=DEVICE.CUDA, offload_to_disk=False)
+                        device=device, offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                              attn_implementation='sdpa')
-    wrapper.model.to('cuda:0')
+    wrapper.model.to(device)
 
     train = documents(args.corpus, 'train', args.train_seqs)
     gptq = documents(args.corpus, 'gptq', args.gptq_seqs)
@@ -135,8 +169,14 @@ def main():
         offload_capture=(args.capture != 'gpu'),
         capture_directory=(str(out / 'capture') if args.capture == 'disk' else None),
         checkpoint_directory=(str(out / 'ckpt') if args.resume else None),
+        distributed=distributed, target_cache=args.target_cache,
+        activation_checkpointing=args.activation_checkpointing,
+        reuse_capture=args.reuse_capture,
+        resume_prefix_directory=args.resume_prefix_from,
         layer_indices=list(range(args.layers)))
     quantize_seconds = time.monotonic() - started
+    if distributed is not None and not distributed.is_primary:
+        return
 
     per_layer = []
     for block in run['blocks']:
@@ -148,8 +188,8 @@ def main():
                 'val_before': stage.get('validation_hard_loss_before'),
                 'val_hist': [epoch.get('hard_loss')
                              for epoch in (stage.get('validation_history') or [])],
-                'best_epoch': stage.get('best_epoch'),
-                'epochs': len(stage.get('history') or []),
+                'best_epoch': stage.get('best_validation_epoch'),
+                'updates': len(stage.get('history') or []),
             }
         per_layer.append(record)
 
@@ -169,7 +209,7 @@ def main():
         raw = evaluate(
             model_or_id_or_path=str(model_dir), tasks=ZERO_SHOT_TASKS, backend=BACKEND.TORCH,
             batch_size=16, apply_chat_template=False,
-            model_args={'dtype': 'bfloat16', 'attn_implementation': 'sdpa', 'device': 'cuda:0'},
+            model_args={'dtype': 'bfloat16', 'attn_implementation': 'sdpa', 'device': str(device)},
             gen_kwargs='do_sample=false,temperature=0.0,top_p=1.0,top_k=50',
             suite_kwargs=suite)
         evaluation = get_eval_task_results(raw)
@@ -181,7 +221,12 @@ def main():
         'seed': args.seed,
         'restore_best': args.restore_best,
         'model': args.model,
-        'device': torch.cuda.get_device_name(0),
+        'device': torch.cuda.get_device_name(device),
+        'world_size': 1 if distributed is None else distributed.world_size,
+        'target_cache': args.target_cache,
+        'activation_checkpointing': args.activation_checkpointing,
+        'reuse_capture': args.reuse_capture,
+        'resume_prefix_from': args.resume_prefix_from,
         'deterministic': torch.are_deterministic_algorithms_enabled(),
         'torch': torch.__version__,
         'rocm': torch.version.rocm,
@@ -204,4 +249,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    finally:
+        if torch.distributed.is_initialized():
+            torch.distributed.destroy_process_group()
