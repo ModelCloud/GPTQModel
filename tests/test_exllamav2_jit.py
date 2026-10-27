@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+import pytest
 
 import gptqmodel.nn_modules.qlinear.exllamav2 as exllamav2_module
 import gptqmodel.utils.exllamav2 as exllamav2_utils
+from gptqmodel.nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
 from gptqmodel.utils import cpp as cpp_module
+from gptqmodel.utils.offload import post_init_offloaded_layer
 
 
 def _build_module() -> exllamav2_module.ExllamaV2Linear:
@@ -19,6 +22,40 @@ def _build_module() -> exllamav2_module.ExllamaV2Linear:
         bias=False,
         register_buffers=True,
     )
+
+
+@pytest.mark.parametrize("layer_type", [exllamav2_module.ExllamaV2Linear, AwqExllamaV2Linear])
+@pytest.mark.parametrize("storage", ["cpu", "disk"])
+def test_exllamav2_rejects_weight_offload_before_creating_native_handle(
+    monkeypatch, tmp_path, layer_type, storage
+):
+    from accelerate import disk_offload
+    from accelerate.hooks import AlignDevicesHook, add_hook_to_module
+
+    # Construct the real layer without requiring CUDA for this offload guard.
+    monkeypatch.setattr(layer_type, "validate_once", classmethod(lambda cls: (True, None)))
+    layer = layer_type(
+        bits=4, group_size=128, desc_act=False, sym=True,
+        in_features=128, out_features=128, bias=False, register_buffers=True,
+    )
+    if storage == "disk":
+        disk_offload(layer, str(tmp_path), execution_device=torch.device("cpu"), offload_buffers=True)
+    else:
+        weights = {name: tensor.detach().clone() for name, tensor in layer.state_dict().items()}
+        add_hook_to_module(
+            layer,
+            AlignDevicesHook(
+                execution_device=torch.device("cpu"), offload=True,
+                offload_buffers=True, weights_map=weights,
+            ),
+        )
+
+    assert layer.qweight.is_meta
+    with pytest.raises(RuntimeError, match="cannot use CPU or disk weight offload"):
+        post_init_offloaded_layer(layer, scratch_space=object())
+    assert layer.qweight.is_meta
+    assert getattr(layer, "q_handle", None) is None
+    assert getattr(layer, "q_tensors", None) is None
 
 
 def test_exllamav2_make_q_matrix_uses_jit_op(monkeypatch):

@@ -782,6 +782,21 @@ def post_init_offloaded_layer(
         # refresh, so the plain call is both correct and cheaper.
         return False
 
+    # ExLlamaV2's native QMatrix stores raw pointers into the loaded tensors.
+    # Its integer handle has no matching destroy operation, so neither dropping
+    # Python references nor rebuilding it on each forward can safely offload
+    # those tensors. Reject the configuration before post_init creates a handle.
+    from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
+    from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+
+    if isinstance(module, (ExllamaV2Linear, AwqExllamaV2Linear)):
+        raise RuntimeError(
+            f"{type(module).__name__} cannot use CPU or disk weight offload: "
+            "its native ExLlamaV2 matrix handle retains pointers to the loaded "
+            "weights. Keep this layer on its execution device or select a "
+            "backend that supports offloaded weights."
+        )
+
     snapshot: Dict[str, torch.Tensor] = {}
     with _materialize_offloaded_module(module, hook, key_prefix=key_prefix) as active:
         module.post_init(**post_init_kwargs)
