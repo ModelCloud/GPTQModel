@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.1, 2026-10-27.
+**Status:** design discussion, revision 0.2, 2026-10-27.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -15,10 +15,17 @@ Vision, language, audio, projectors, memory modules, and draft models can have
 different recipes and lifecycles. Their calibration inputs and execution state
 still depend on the assembled model.
 
-The proposed direction is one coordinated, phased quantization run with
-dependency-ordered fitting, candidate replay, and optional selective refinement.
-The executor can remain serial. Components own weights and revisions; execution
-regions and explicit state dependencies determine scheduling.
+The proposed direction is one coordinated run over **method-owned lifecycle
+programs**. The coordinator respects dependencies between model regions; each
+method declares its own observations, transformations, optimization stages,
+artifacts, and installation boundaries. Candidate replay and selective
+refinement are composition policies when applicable, not mandatory steps for
+every quantizer. The outer executor can remain serial.
+
+Read the companion [method lifecycle inventory](quantization-method-lifecycles.md)
+for the source audit behind this revision. The design must accommodate every
+current method route and admit future methods without adding another hardcoded
+method branch to a universal layer loop.
 
 Backward compatibility is **not a requirement and should not constrain this
 design**. Compatibility shims and preservation of the legacy lifecycle are
@@ -46,6 +53,11 @@ At GPTQModel commit
 - Current Qwen3.5-MoE inherits the multimodal calibration base, although its
   quantization tree remains language-scoped. The issue's older inheritance
   diagnosis must not be treated as the current implementation. [Definition][gptq-qwen]
+- Method lifecycles already differ substantially: weight-only conversion,
+  grouped AWQ capture, ParoQuant optimization, staged GSQ training, specialized
+  VPTQ/EXL3 payloads, and native MLX execution. `METHOD` is not sufficient to
+  identify a lifecycle: RTN has a separate configuration, and FP8 has both
+  weight-only and calibrated routes. [Lifecycle audit](quantization-method-lifecycles.md)
 
 The design must support all of the following independently:
 
@@ -96,9 +108,10 @@ BF16 model. Source precision and native numerical behavior must be recorded.
    summary, not a global quantized boolean.
 3. **Dependencies determine scheduling.** Python containment, modality labels,
    and module traversal order do not define numerical execution order.
-4. **The source is immutable.** Refits start from an identified source or an
-   explicitly retained optimization master, never silently from a previous
-   quantized approximation.
+4. **Source lineage is immutable.** Each stage identifies its source, derived
+   teacher, quantized initializer, or optimization master. A quantized initializer
+   is valid when the method declares it; it must never masquerade as the original
+   source. A refit identifies its source policy explicitly.
 5. **Reference and candidate execution state are isolated.** A cache produced by
    one cannot be substituted into the other without changing the experiment.
 6. **Candidate replay uses deployment semantics.** Native cache precision,
@@ -106,7 +119,16 @@ BF16 model. Source precision and native numerical behavior must be recorded.
 7. **A recipe is a capability-checked operation.** Unsupported operators,
    cross-boundary writes, and unresolved aliases fail during planning.
 8. **Results retain provenance.** Every fitted region records its source,
-   calibration scenario, dependency revisions, and algorithm settings.
+   applicable data/observation roles, dependency revisions, and algorithm settings.
+9. **Methods own their lifecycle.** Required optimization, deferred group work,
+   fallback branches, and native-backend operations are explicit programs. The
+   coordinator does not impose a GPTQ-shaped capture/solve/replay/pack sequence.
+10. **Requirements are conditional and precise.** A weight-only operation does
+    not require calibration data or a teacher forward. An activation-only or
+    norm-only operation does not require rewriting packed weights.
+11. **Installation preserves the fitted result.** An already-fitted payload is
+    not silently requantized by a generic finalizer. Quantization fused with
+    encoding is itself a declared numerical stage.
 
 ## 4. Core objects and ownership
 
@@ -114,11 +136,12 @@ BF16 model. Source precision and native numerical behavior must be recorded.
 | --- | --- |
 | `ModelComposition` | Component registry, parameter aliases, architecture adapter, and assembled revision. |
 | `Component` | Stable public identity, owned parameter/buffer references, per-operator representations, recipes, and revision history. |
-| `Region` | An executable capture/fit/replay boundary with complete inputs, outputs, state effects, and algorithm capabilities. |
+| `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
 | `StateResource` | KV, recurrent state, convolution history, retrieval indices, token history, or another execution resource with explicit producers and consumers. |
-| `CalibrationSuite` | Prepared inputs, routes, scenario traces, weighting, and coverage requirements. |
-| `QuantizationPlan` | Immutable resolved selection, parameter writes, sources, dependencies, recipes, budgets, and validation policy. |
-| `QuantizationRun` | Phase progress, staged candidate revisions, checkpoints, observations, and evaluation results. |
+| `DataRequirements` / data suites | Method-declared calibration, training, selection, and validation roles. `CalibrationSuite` supplies prepared inputs, routes, traces, weighting, and coverage when observations are needed. |
+| `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
+| `QuantizationPlan` | Immutable resolved selection, writes, sources, dependency graph, compiled lifecycle programs, budgets, and validation policy. |
+| `QuantizationRun` | Program/stage progress, staged candidate revisions, checkpoints, observations, and evaluation results. |
 
 ```mermaid
 flowchart TD
@@ -129,8 +152,9 @@ flowchart TD
     C --> P[Resolved quantization plan]
     R --> P
     S --> P
-    D[Calibration scenarios] --> P
-    P --> E[Serial executor]
+    D[Required data roles and scenarios] --> P
+    L[Method and modifier lifecycle programs] --> P
+    P --> E[Serial outer executor]
     E --> T[Staged component revisions]
     T --> V[Composition validation]
     V --> M[Published artifact manifest]
@@ -146,11 +170,12 @@ nested inside a vision module must not be selected twice. Shared/tied parameters
 require one representation and one declared ownership group. Incompatible recipes
 must fail before mutation; explicit untying is a separate structural operation.
 
-A region is the scheduling and replay unit. It might be a transformer block, a
-projector, or an adapter-defined computation. A reconstruction region can span
-components when the plan's write scope permits it. Evaluation scope may be wider
-than fitting scope: a KV producer can be fitted locally and evaluated through
-many consumers.
+A region might be a transformer block, a projector, or an adapter-defined
+computation. A lifecycle stage is the schedulable unit: it may cover one region,
+wait for a group, or perform a declared operation across regions. Reconstruction
+can span components when the plan's write scope permits it. Evaluation scope may
+be wider than fitting scope: a KV producer can be fitted locally and evaluated
+through many consumers.
 
 ## 5. Discovery and execution dependencies
 
@@ -225,7 +250,7 @@ model.requantize(
 
 | Operation | Proposed meaning |
 | --- | --- |
-| `quantize(target=...)` | Fit selected dense weights; reject already-packed weights within the resolved write selection. |
+| `quantize(target=...)` | Execute the selected method program for dense weights; reject already-packed weights within the resolved write selection. Data is required only when the resolved program requires it. |
 | `requantize(target=..., weights=...)` | Replace selected packed representations using an identified source. |
 | `repack(target=..., format=...)` | Convert storage layout without changing quantized numerical values, where supported. |
 | `save(...)` | Persist the complete current composition. Validation status is recorded. |
@@ -263,18 +288,49 @@ The preview distinguishes `modify`, `execute`, `observe`, `preserve`, and
 neighboring projections, including AWQ-style coupling. No undeclared write is
 permitted simply because an algorithm normally performs it.
 
+The sketch above is an activation-calibrated GPTQ example. A data-free operation
+can instead be as small as:
+
+```python
+model.quantize(target="vision.encoder", recipe=RTN(bits=8))
+```
+
+The resolved method/backend must support that target. No forward is needed just
+to satisfy a common lifecycle interface. Optional task evaluation can request
+data separately. The plan vocabulary also needs explicit operations for adapter
+generation, activation calibration, norm tuning, structural transforms, and
+precision allocation. They cannot all be aliases for fitting dense weights.
+
+The preview exposes method-required training stages independently of optional
+composition refinement. For example, disabling `refinement` does not remove
+ParoQuant optimization or any stage required by a selected GSQ training recipe.
+
 ## 7. Reference, candidate, and calibration state
 
 The source snapshot describes available weights, configuration, native numerical
-formats, and required preprocessing. The reference executes that identified
-behavior. The candidate contains the staged quantization changes.
+formats, and required preprocessing. A reference role executes an identified
+behavior derived from that source or another explicitly frozen revision. The
+candidate contains staged changes. Methods declare whether they require a
+reference at all and the precise stage at which each teacher is frozen.
 
 | Input to the process | Origin |
 | --- | --- |
-| Weights being fitted | Immutable source, or an explicitly retained optimization master. |
-| Initial fitting activations | Current candidate upstream regions, according to the schedule. |
-| Reconstruction targets | The declared reference objective. |
+| Weights being fitted | Declared source/derived weight role, quantized initializer, or retained optimization master. |
+| Fitting observations, when required | Candidate, native, clean, or other method-declared stream, with aligned sample/position identity. Progressive calibrated recipes normally consume current candidate upstream inputs. |
+| Reconstruction targets, when required | The declared reference role and objective, frozen at an identified lifecycle boundary. |
 | Candidate state | Candidate execution under its own revisions and numerical profile. |
+
+There is no universal rule to reset every teacher to the raw model. Staged AWQ
+GSQ freezes a scaled, pre-clipping teacher. ParoQuant can require separate clean
+and noisy streams for grouped optimization. Staged GSQ retains original teacher
+roles while initializing trainable candidates from quantized projections. These
+roles must remain distinguishable in provenance and cache keys.
+
+Source immutability protects lineage; it does not prohibit a method's declared
+reparameterization or derived teacher. A candidate-dependent teacher also needs
+an explicit frozen revision and refresh policy, never a live alias to mutating
+candidate state. The paired execution diagram applies when the objective calls
+for a reference, not to every weight-only operation.
 
 ```mermaid
 sequenceDiagram
@@ -309,67 +365,94 @@ continuation decode, chunked/streaming execution, cache restoration, and draftin
 or verification. Fixed-token traces align reference and candidate measurements;
 generation-based evaluation separately tests behavioral divergence.
 
-Dataset mixtures, context-length buckets, preprocessing, modality alignment, and
-observation weighting are explicit. Count valid observations and expert coverage.
+When observations are required, dataset mixtures, context-length buckets,
+preprocessing, modality alignment, and observation weighting are explicit.
+Count valid observations and expert coverage.
 Do not force artificial routing to fill missing statistics without declaring an
 algorithm-specific policy. Empty observations require an explicit fallback,
 preserved representation, or failure.
 
 Caches are bounded and can be streamed to CPU/disk or recomputed. No phase assumes
 all Hessians, all activations, or two complete models fit in device memory.
+Training, initialization, selection, and final acceptance data have distinct
+roles; the program declares which roles may share samples. A forward-only
+calibration API cannot implicitly stand in for an optimizer's training contract.
 
 ## 8. Proposed phased schedule
 
+Two orders interact: the composition's data/state dependencies and each method's
+own stage/artifact dependencies. The planner combines them. A method may require
+native capture before a producer changes, candidate capture afterward, several
+internal training stages, or no capture. "Upstream first" is a useful policy for
+candidate-conditioned fitting, not a universal ordering rule for every stage.
+
 ```mermaid
 flowchart TD
-    A[Resolve scopes, sources, dependencies, and budgets] --> B[Reference baseline and scenario coverage]
-    B --> C[Fit next ready region from source weights]
-    C --> D[Replay updated producer and regenerate dependent state]
-    D --> E{More regions in initial pass?}
+    A[Resolve scopes, capabilities, sources, and budgets] --> B[Compile method programs and required data roles]
+    B --> C[Execute next ready lifecycle stage]
+    C --> D[Record artifacts and effects at declared boundary]
+    D --> E{Pending required stages?}
     E -->|Yes| C
-    E -->|No| F[Replay and evaluate assembled candidate]
+    E -->|No| F[Validate composition under declared profile]
     F --> G{Meets declared quality criteria?}
-    G -->|Yes| H[Final held-out validation]
+    G -->|Yes| H[Final acceptance checks]
     G -->|No| I{Refinement enabled and budget remains?}
-    I -->|Yes| J[Refine permitted regions and invalidate affected state]
-    J --> F
+    I -->|Yes| J[Compile permitted refinement programs and invalidate affected state]
+    J --> C
     I -->|No| K[Keep best candidate and report unmet criteria]
     H --> L{Validation passes?}
-    L -->|Yes| M[Publish validated composition]
+    L -->|Yes| M[Publish composition with explicit validation coverage]
     L -->|No| K
 ```
 
-### Phase A: Freeze and characterize
+### Phase A: Resolve, freeze, and compile
 
-Freeze source and reference identities, resolve the calibration scenarios, and
-establish baseline measurements. Check operator capabilities, shared ownership,
-state contracts, preprocessing, and observation coverage before mutation.
-Reference outputs can be generated lazily at chosen boundaries. This phase does
-not collect and retain every Hessian in the model.
+Freeze source identities and resolve reference roles, input data, and baseline
+measurements required by the selected programs and validation policy. Check
+operator capabilities, shared ownership, state contracts, preprocessing, effects,
+and observation requirements before mutation. Resolve method/modifier/backend
+combinations rather than checking a method name alone.
 
-### Phase B: Initial fitting
+Compile stage dependencies and resource budgets. Derived teachers are frozen at
+their declared stages, which can be later than this phase. Source reference
+outputs can be generated lazily. This phase does not collect every Hessian or
+require a dataset/model forward for data-free conversion.
 
-Fit regions in data/state dependency order. Each region starts from its declared
-source weights and receives current candidate upstream inputs. Replay updated
-producers before fitting their consumers. Preserve algorithm-specific
-true-sequential processing inside a region.
+### Phase B: Execute required method programs
 
-Independent branches may belong to one phase while executing serially. A future
-parallel executor may overlap jobs only when read/write sets, state isolation,
-dependency versions, and memory budgets permit it. A job cannot consume a
-partially updated producer.
+Execute ready stages in the combined dependency graph. For methods that accept
+progressive candidate inputs, finish the required producer revision and rebuild
+its state before capturing consumers. Native/clean captures use their declared
+snapshot independently. A weight-only program can directly quantize/encode and
+install. AWQ waits for required feature groups; ParoQuant and GSQ execute their
+intrinsic optimization programs, including any recapture or reinitialization.
 
-### Phase C: Assembled candidate replay
+Maintain algorithm-specific true-sequential processing without making it the
+only permitted execution model. Publish a stage result to dependents only at a
+declared stable artifact boundary. Intermediate optimizer states are private
+unless the method explicitly exports a frozen revision for another stage.
 
-Execute the complete candidate on the calibration scenarios with independent
-candidate state. Measure composition-level errors in addition to local fitting
-loss. Reference indices, reference KV, or reference recurrent state must not be
-substituted into the final candidate path merely to improve its score.
+Independent branches may share a phase while executing serially. A future
+parallel executor may overlap stages only when effects, versioned reads, state
+isolation, and resource budgets permit it. A stage may itself use a declared
+distributed/native optimizer even with a serial outer scheduler.
+
+### Phase C: Validate the assembled candidate
+
+Structural/representation checks always apply. Task evaluation and paired replay
+apply when selected by the validation profile or required by a method. Data-free
+conversion must be usable with structural validation only, recorded as task
+quality **not evaluated**. If task-quality thresholds are requested, their data
+and execution requirements must be satisfied; they cannot silently be skipped.
+
+For task-validated multimodal runs, execute the complete candidate on declared
+scenarios with independent candidate state. Measure composition-level errors in
+addition to local fitting loss. Reference indices, KV, or recurrent state must
+not be substituted into the deployment candidate path merely to improve its score.
 
 Observe task quality, boundary reconstruction, long-sequence state behavior,
 sparse selection, and routing where relevant. Selection/routing differences are
-diagnostics, not automatically failures: the task-level acceptance criteria
-remain authoritative.
+diagnostics; the declared task acceptance criteria remain authoritative.
 
 ### Phase D: Optional selective refinement
 
@@ -378,18 +461,24 @@ refitting on refreshed candidate inputs, or a declared region reconstruction
 algorithm. Cross-component fitting requires a write scope containing all changed
 parameters. Shared producers can have a wider evaluation scope than write scope.
 
-After any change, regenerate affected state and evaluate again. Bound passes and
-resource use; retain the best candidate on a separate selection set. Reserve a
+This phase is additional composition repair. Disabling it does not disable
+training stages intrinsic to a chosen method. Every intervention compiles into
+the same lifecycle/effect contracts and may have a different program from the
+initial conversion.
+
+After any relevant change, regenerate affected state and evaluate again. Bound
+passes and resource use; retain the best candidate on a separate selection set. Reserve a
 held-out set for final acceptance. Alternating updates have no assumed convergence
 or monotonic improvement guarantee.
 
 ### Phase E: Validate and publish
 
-Publish an assembled revision after final validation. Intermediate component
-results remain durable checkpoints with explicit provisional status. An unmet
-quality criterion produces a report and a retained candidate, not a false
-validated-success result. Saving an unvalidated candidate is allowed only with
-its status made explicit.
+Publish an assembled revision with validation dimensions and coverage recorded:
+structural integrity, numerical/codec checks, and task quality as applicable.
+Intermediate results remain durable checkpoints with explicit provisional status.
+An unmet requested quality criterion produces a report and retained candidate,
+not a false success. A structural-only artifact must not be labeled task-validated.
+Saving a provisional candidate is allowed with its status explicit.
 
 ## 9. Model-specific scheduling sketches
 
@@ -413,8 +502,9 @@ flowchart LR
     B1 -.-> NT[Region state for next step]
 ```
 
-Select only the branches present in the architecture. Complete selected upstream
-branches before capturing shared-backbone inputs. Preserve the full residual
+Select only the branches present in the architecture. For progressive
+candidate-conditioned fitting, complete selected upstream branches before
+capturing shared-backbone inputs. Preserve the full residual
 representation at region boundaries. Recurrent transitions are temporal edges;
 they are replayed over a declared trace rather than treated as an ordinary
 acyclic layer chain.
@@ -446,10 +536,11 @@ The DeepSeek configuration explicitly names KV sources, index sources, and a
 candidate source. Adapters should use this structure to express dependencies.
 [Configuration][deepseek-config]
 
-At each shared-memory boundary, finalize the selected producer transformations,
-regenerate memory with candidate numerical semantics, and fit dependent
-consumers. A later producer change invalidates derived memory and evaluations
-across its dependent consumers, including nonadjacent layers.
+At each shared-memory boundary used for candidate-conditioned observations,
+finish the required producer revision, regenerate memory with candidate numerical
+semantics, and fit dependent consumers. A later producer change invalidates
+derived memory and evaluations across its dependent consumers, including
+nonadjacent layers.
 
 The draft model should be evaluated against the finalized main candidate,
 including acceptance and throughput measurements when supported. DSpark's
@@ -461,13 +552,20 @@ particular quantization schedule will be optimal. [Report][deepseek-report]
 | Strategy | Benefit | Limitation | Proposed role |
 | --- | --- | --- | --- |
 | Independent fitting against one source snapshot | Simple isolation and parallelism. | Downstream fits do not observe upstream quantization effects. | Experimental baseline. |
-| One progressive dependency-ordered pass | Consumers observe updated upstream computation. | Local objectives may miss composition-level or temporal errors. | Initial fitting default. |
-| Progressive fitting plus candidate replay and selective refinement | Measures interactions and targets repair work. | Additional replay cost; refinement algorithm and stopping policy need validation. | Proposed coordinated workflow. |
+| One progressive dependency-ordered pass | Consumers observe updated upstream computation. | Local objectives may miss composition-level or temporal errors; a method's native-capture requirements still apply. | Default for compatible candidate-conditioned fitting stages. |
+| Method programs with progressive fitting, candidate replay, and selective refinement | Preserves algorithm lifecycles while measuring interactions and targeting repair work. | Additional replay cost; refinement algorithm and stopping policy need validation. | Proposed task-validated composition workflow. |
+| Independent weight-only conversion | No activation dependency between separately owned weights. | Does not measure composition task quality by itself. | Valid data-free route; add task evaluation explicitly. |
 | Joint end-to-end optimization of all selected weights | Can optimize a shared downstream objective. | Memory/compute cost, differentiability issues, and no guaranteed superiority. | Optional research/plugin path. |
 
 Simultaneously installing independently fitted results does not make their
 optimization joint. Alternating vision layer zero and language layer zero is not
 a meaningful schedule merely because both are transformers.
+
+Coordinating both components in one plan means their stage reads, writes,
+teachers, and invalidations are resolved together. It does not require running
+their optimizers at the same time or freezing all calibration statistics before
+any quantization. A shared objective, coupled scale transform, or actual feedback
+path can require a joint region; modality labels alone cannot.
 
 For an illustrative linear layer, ordinary local reconstruction has the form
 `min ||(W_source - W_quantized) X_candidate||^2`. A cross-region objective instead
@@ -511,8 +609,12 @@ objective declarations. They cannot inherit the assumptions of local GPTQ.
 
 Cache identity includes source/candidate revision, actual producer dependencies,
 region/boundary identity, dataset and preprocessing fingerprints, scenario and
-positions, numerical profile, adapter version, and relevant execution settings.
-Hashes of a component name or model path alone are insufficient.
+positions, numerical profile, adapter version, lifecycle stage/iteration,
+reference/observation role, objective, validity masks/weighting, and relevant
+execution settings. Hashes of a component name or model path alone are
+insufficient. Identical module inputs do not establish interchangeable GPTQ,
+GPTAQ, FOEM, or reconstruction statistics. Deduplication requires a matching
+statistic schema and observation contract as well as matching lineage.
 
 Changing a producer invalidates transitive derived activations/state and affected
 validation results. Independent caches remain reusable. A state checkpoint can
@@ -524,21 +626,28 @@ Persistent representation and job progress are separate:
 
 ```text
 Per-operator representation: Dense(dtype) | Packed(codec, metadata)
-Region job: planned -> fitting -> replaying -> staged | failed
-Run: preparing -> fitting -> evaluating -> refining -> validated | unmet | failed
-Artifact: provisional | validated
+Other installed resources: activation scales, runtime transforms, adapters, norms
+Method output: TypedArtifact(schema, version, payload, provenance)
+Stage progress: pending -> ready -> running -> completed | failed | cancelled
+Run: planned -> executing -> validating -> accepted | unmet | failed | cancelled
+Validation dimensions: structural, numerical/codec, task quality and coverage
 ```
 
 Use immutable staged tensor artifacts and private runtime overlays. Completed
-regions/components can be checkpointed without publishing the entire composition
-as validated. Failed work leaves earlier published revisions intact. A coupled
-transformation commits all affected parameter changes together.
+method boundaries can be checkpointed when that program supports continuation,
+without publishing the entire composition as validated. Failed work leaves
+earlier published revisions intact. A coupled transformation commits all affected
+parameters, auxiliary resources, and alias changes together.
 
 The initial executor can use an exclusive mutation lease. Resume checks the plan,
 source weights, dependency revisions, prepared data, numerical profile, algorithm
-continuation, RNG, and supported device/runtime identity. Mismatches fail with a
-specific reason rather than silently replaying incompatible statistics. Exact
-cross-device reproducibility and relaxed resume are separate open questions.
+and stage-schema versions, continuation/optimizer state, RNG, and supported
+device/runtime identity. Mismatches fail with a specific reason rather than
+silently replaying incompatible statistics. Resume is a capability of a resolved
+program, not an automatic promise for every algorithm. A method may support only
+completed-group or completed-block checkpoints. Quiesce workers and collectives
+before checkpointing; otherwise restart from the last declared durable boundary.
+Exact cross-device reproducibility and relaxed resume are separate open questions.
 
 An immutable source does not require a full dense runtime copy. Materialize only
 the working region and stream from checkpoint-backed storage. Inference weights
@@ -552,7 +661,9 @@ The native artifact manifest describes the complete composition:
 - Schema, architecture, adapter, source, and assembled revision identities.
 - Components, canonical parameters, aliases, and shared ownership groups.
 - Per-operator dense or packed representations and codec metadata.
-- Resolved recipes and source/dependency provenance for fitted regions.
+- Runtime transforms, activation scales, adapters, and structural changes.
+- Resolved method/variant/modifier programs and source/dependency/teacher
+  provenance for fitted regions; training-only continuation is stored separately.
 - Numerical profiles and required runtime capabilities.
 - Validation status, scenario coverage, and relevant reports.
 - Model configuration, tokenizer, processor, and required inference assets.
@@ -570,23 +681,139 @@ unrepresentable mixtures; a single global quantization config is not authoritati
 
 | Boundary | Responsibility |
 | --- | --- |
-| Architecture adapter | Discovery, bindings, region boundaries, execution modes, state effects, and replay equivalence. |
-| Planner | Resolve scopes, sources, recipes, dependencies, write sets, capabilities, and budgets. |
-| Executor | Scheduling, state contexts, materialization, devices, cleanup, and transaction boundaries. |
-| Algorithm plugin | Observation requirements, declared transforms, fitting objective, numerical results, and continuation state. |
-| Weight codec | Pack/unpack and lossless layout conversion where supported. |
+| Architecture adapter | Discovery, bindings, region boundaries, setup/restoration stages, execution modes, state/alias effects, and replay equivalence. |
+| Planner | Resolve scopes and method programs; combine architecture and lifecycle dependencies, effects, capabilities, and budgets. |
+| Executor | Execute ready stages, isolate state contexts, grant resources, manage artifact lifetime, and enforce durable/transaction boundaries. |
+| Method/operation plugin | Declare a versioned lifecycle program, observation/reference roles, transformations, objectives, outputs, fallback branches, and continuation capabilities. |
+| Modifier plugin | Compose compatible stages through typed inputs/outputs and explicit effects; it cannot silently intercept arbitrary callbacks. |
+| Representation codec | Encode/decode artifacts and convert layout where supported. Numerical quantization fused with encoding is explicitly a method stage. |
 | Runtime backend | Execute supported packed operators under the declared numerical profile. |
 | Artifact store | Immutable objects, manifests, checkpoints, integrity, and publication. |
+
+### 12.1 Method descriptors and compilation
+
+A versioned method descriptor identifies its algorithm and variants independently
+of file format. It advertises supported region/operator contracts, source/result
+representations, modifiers, numerical profiles, backends, and available lifecycle
+capabilities. Capability checks resolve the whole combination, including options
+that change data requirements or stage structure.
+
+Compilation is side-effect free. It binds region/parameter handles, source roles,
+data requirements, effects, and resource limits into a `LifecycleProgram` before
+numerical execution. It must explain unmet requirements rather than silently
+falling back to an unrelated method. A declared numerical fallback is different:
+it is a visible program branch whose chosen path enters the result provenance.
+
+The program is a dependency graph with declared bounded loops and conditional
+branches. Stage names and artifact schemas are namespaced and extensible; they
+are not a closed enum of `capture`, `fit`, and `pack`. Existing numerical code can
+execute inside a stage. The design does not require translating optimizer math
+into a universal graph language.
+
+Architecture preparation and restoration also compile into the graph. For
+example, reattaching a decoder alias after an encoder module is replaced is an
+installation dependency, not an untracked root-level `after_quantize` side
+effect. Cancellation must restore temporary capture hooks/runtime modes even
+when no numerical stage completes.
+
+```mermaid
+flowchart TD
+    A[Architecture regions and state graph] --> P[Plan compiler]
+    M[Method descriptor and resolved options] --> L[Method lifecycle compiler]
+    X[Compatible modifiers and auxiliary operations] --> L
+    L --> P
+    D[Sources, data roles, and resource budgets] --> P
+    P --> G[Combined versioned stage and artifact graph]
+    G --> E[Execute ready stage with declared resources]
+    E --> O[Typed outputs and explicit effects]
+    O --> B{Declared durable or install boundary?}
+    B -->|Yes| C[Validate and commit atomic group]
+    B -->|No| N[Retain private working artifacts]
+    C --> G
+    N --> G
+```
+
+The executor dispatches registered stage implementations by contract, not an
+`if method == ...` chain. A future method may introduce new stages and artifact
+schemas. If it needs a new execution capability, that capability receives an
+explicit versioned extension; an opaque callback cannot bypass scope, lineage,
+resource, or publication rules.
+
+### 12.2 What a stage must declare
+
+The following is a contract sketch, not a finalized Python API or implemented
+serialization schema.
+
+| Declaration | Required meaning |
+| --- | --- |
+| Identity and implementation | Stable stage ID, implementation/schema version, resolved method options, and numerical signature. |
+| Inputs | Typed/versioned artifacts and exact resource reads; distinguish raw source, transformed source, clean/native observations, candidate observations, and quantized initializers. |
+| Outputs | Typed artifact schemas with provenance and consumers; outputs need not be scalar scales/zeros/group indices. |
+| Observation contract | Whether a forward/backward is needed; route, sample alignment, masks, weighting, coverage, sufficient statistics, and full-context requirements. None is a valid requirement. |
+| Reference/objective contract | Teacher derivation and freeze point, objective scope, differentiation scope, optimizer/master roles, and target-refresh policy. |
+| Effects | Parameter/buffer/alias/runtime-state reads and writes, structural changes, invalidation closure, and atomic installation group. |
+| Dependencies/control flow | Required predecessor artifacts, capture-completion barriers, bounded repeats/iterations, conditional fallback, and any permitted subprogram expansion. |
+| Execution resources | Framework, device/memory/offload needs, autograd/inference mode, RNG, distributed participants/collectives, and stream ownership. |
+| Lifetime | When temporary teachers, statistics, uncorrected weights, optimizer state, and native resources can be released or recomputed. |
+| Completion and validation | Output invariants, stable candidate revision boundary, replay semantics where needed, and codec/runtime checks. |
+| Continuation/failure | Supported checkpoint boundaries and versioned state, restart semantics, cancellation points, quiescence/cleanup, and retry safety. |
+
+These contracts need parameter handles and staged writes that the coordinator can
+check. Conformance tests must detect misdeclared effects. They do not constitute
+a sandbox for untrusted arbitrary plugin code.
+
+A data-dependent branch may select among predeclared legal fallbacks. A global
+search such as precision allocation may emit a new resolved plan within a
+declared search space and budget. Capability/ownership validation runs again
+before installing it. No optimizer may expand its write scope dynamically merely
+because a larger fit would improve loss.
+
+### 12.3 Artifacts, modifier composition, and finalization
+
+Scalar quantization parameters, VPTQ codebooks/indices, EXL3 trellis payloads,
+FP8 bytes/scales, rotation metadata, LoRA factors, activation scales, and norm
+deltas are distinct artifact schemas. Each declares its codec/runtime consumers.
+A temporary reconstructed weight can serve fitting replay without becoming the
+authoritative export payload or a persistent dense inference cache.
+
+Method stages may fuse fitting and encoding, as in direct weight-only packing.
+Other stages produce an exact encoded result, as in calibrated FP8 or EXL3.
+Installation validates and installs that result. It must not repeat a lossy fit
+through an assumed scalar intermediate. For methods that use pseudo weights
+during fitting, declare how that replay relates to the packed runtime and verify
+the deployment path separately.
+
+Compose modifiers by matching declared input/output contracts and effects. EoRA
+consumes a source residual and the **uncorrected** quantized base; its corrected
+temporary replay weight must not be packed as the base and then corrected again
+by the saved adapter. AWQ/GSQ needs the teacher frozen between scaling and
+clipping. GPTAQ/FOEM needs native observations before candidate perturbation.
+These are dependencies, not optional ordering hints.
+
+Release an artifact after its final declared consumer and successful publication
+or checkpoint requirements. A global reverse-finalizer list is insufficient for
+future programs with branching consumers. Recompute/offload policies must fit
+the budget; unavailable necessary artifacts cause a planning/runtime error, not
+silent use of a different teacher or approximation.
+
+Autograd mode belongs to the stage. Wrapping the entire run in Torch inference
+mode would break optimizers; requiring Torch hooks would exclude native MLX.
+Likewise, serial scheduling does not forbid a stage's declared multi-device
+training. Framework adapters must isolate their state and satisfy the same
+effects, artifact, and cleanup contracts.
 
 Existing algorithms and kernels are reuse candidates. The new orchestration
 should not be a wrapper around the old global lifecycle. A one-component text
 model uses exactly the same contracts as a composite model.
 
-The first implementation, if approved later, should establish dependency-aware
-fitting, explicit state handling, assembled replay, and mixed persistence before
-adding new reconstruction mathematics. Mandatory whole-model QAT, a universal
-graph compiler, speculative auto-detection of arbitrary remote-code semantics,
-and parallel execution are outside that initial scope.
+The first implementation, if approved later, should prove that these different
+existing lifecycle families fit the contract before treating a text-only GPTQ
+demo as architectural validation. Establish explicit state handling, mixed
+persistence, and applicable assembled replay before adding new reconstruction
+mathematics. Mandatory whole-model QAT, a universal tensor-graph compiler,
+speculative auto-detection of arbitrary remote-code semantics, and concurrent
+outer scheduling are outside that initial scope. Existing methods' required
+training/native execution remains part of the design's scope.
 
 ## 13. Validation and experiment plan
 
@@ -605,6 +832,24 @@ The following are proposed acceptance criteria and experiments.
 | V8 | Persistence | Mixed dense/packed recipes and native source formats round-trip without requiring original weights for inference. |
 | V9 | Coverage | Missing modality paths or observations trigger the declared policy; excluded and unsupported operators appear in reports. |
 | V10 | Numerical semantics | Local fitting, packed execution, and state formats are checked against independent applicable oracles before any implementation is accepted. |
+| V11 | Lifecycle inventory | Every concrete config route in the companion audit, including ordinary/calibrated FP8, RTN, staged GSQ, and native MLX, has a descriptor/conformance case or an explicit unsupported capability. Method/modifier combinations are checked separately. |
+| V12 | Data-free execution | A supported weight-only route succeeds without tokenizer, dataset preparation, activation capture, or teacher forward; structural-only validation reports task quality as not evaluated. |
+| V13 | Group barriers and scope | AWQ/ParoQuant do not fit before their required captures complete; coupled scale/structural changes commit only within the resolved write group. |
+| V14 | Teacher roles and statistics | AWQ freezes its scaled pre-clipping teacher; native/clean/candidate observations remain distinct and aligned; incompatible statistics cannot be deduplicated. |
+| V15 | Required optimization | Staged GSQ preserves Q/K -> V/O -> MLP dependencies, its selected initializer/reinitialization policy, and original teacher roles. Turning off composition refinement leaves method-required training intact. |
+| V16 | Representation fidelity | Calibrated FP8/EXL3 install their exact fitted payloads; VPTQ retains its codebooks/indices; no generic scalar pack step changes the result. |
+| V17 | Modifier artifact lifetime | EoRA receives the uncorrected base and residual before cleanup, and saved base-plus-adapter applies the correction once, including specialized method handoffs. |
+| V18 | Auxiliary operations | Activation calibration and norm tuning respect distinct write scopes on packed models; adapter generation and endpoint replacement preserve unselected payloads and aliases. |
+| V19 | Execution resources | Native framework paths need no Torch hooks; training stages receive autograd; declared distributed operations quiesce and propagate failure before continuation/publication. |
+| V20 | Continuation contracts | Each supported combination resumes only at its declared boundaries; unsupported resume granularity fails preflight and partial optimizer/capture state is not mistaken for a durable result. |
+| V21 | Global allocation | A precision-search result is capability/ownership checked before installation; its search budget, candidate lineage, and resolved allocation are recorded. |
+| V22 | Future-method admission | A synthetic plugin adds a custom observation type, bounded optimization loop, derived teacher, and non-scalar artifact without edits to coordinator method dispatch. Undeclared effects and unsupported capabilities fail visibly. |
+
+The inventory is a maintained coverage checklist, not proof that the current
+repository already supports all those combinations. Migrating every kernel at
+once is unnecessary, but a proposed contract that cannot express an existing
+method family is incomplete. Conformance should validate semantics rather than
+merely checking that stage names appear in a graph.
 
 For schedule comparisons, hold calibration data, source, intended precision,
 grouping, exclusions, and evaluation scenarios fixed. Compare independent fitting,
@@ -630,17 +875,21 @@ proposed defaults, not final design approval.
 | ID | Proposed position | Question to resolve |
 | --- | --- | --- |
 | D1 | Component ownership with region scheduling. | How much region structure can be declared rather than coded per adapter? |
-| D2 | Progressive initial fitting plus assembled replay. | Which quality/resource criteria justify refinement? |
+| D2 | Method programs with progressive candidate-conditioned fitting where legal. | Which observations must precede mutation, and which quality/resource criteria justify composition refinement? |
 | D3 | Explicit state resources and isolated execution contexts. | Where is snapshotting preferable to prefix recomputation, and how are ambient globals adapted? |
-| D4 | Immutable source and separate reference/candidate behavior. | How should APIs distinguish native packed sources, higher-precision sources, and retained optimization masters? |
+| D4 | Immutable lineage with explicit stage-specific teacher/initializer roles. | How should APIs distinguish raw/derived references, native packed sources, candidate initializers, and retained optimization masters? |
 | D5 | Explicit shared parameter groups. | What is the smallest useful public selection and conflict-reporting vocabulary? |
-| D6 | Bounded optional refinement plugins. | Which initial objective and region boundaries improve quality at practical cost? |
-| D7 | Checkpoint components; publish validated composition revisions. | What atomicity is required for cross-component transforms and live model replacement? |
-| D8 | Serial executor first. | What read/write and memory contracts must exist now to allow later safe concurrency? |
+| D6 | Bounded optional composition refinement, separate from required method optimization. | Which additional objectives and regions improve quality at practical cost? |
+| D7 | Checkpoint declared durable method boundaries; publish explicit validation coverage. | What atomicity is required for cross-component transforms and live model replacement? |
+| D8 | Serial outer executor first, with stage-specific native/distributed resources. | What effects and memory contracts must exist now to allow later safe concurrency? |
 | D9 | Native mixed-representation manifest. | Which external export formats can represent which mixtures? |
 | D10 | Scenario-aware calibration with explicit weighting. | What coverage requirements are feasible for sparse experts, rare modalities, and long contexts? |
 | D11 | Actual candidate routing during final replay. | When should indexers, routers, and residual gates be preserved at source precision or refined? |
 | D12 | No backward-compatibility constraint. | Which numerical implementations can be reused without importing global orchestration assumptions? |
+| D13 | Versioned method-owned lifecycle programs. | What is the smallest graph/control-flow contract that expresses every audited route without opaque orchestration bypasses? |
+| D14 | Typed artifacts and producer/consumer lifetime. | Which schemas can be shared, and which require method-specific representations or exact-payload installation? |
+| D15 | Capability checks for complete method/modifier/backend combinations. | Which combinations are admitted first, and what evidence is required for each continuation guarantee? |
+| D16 | Required data roles and explicit validation profiles. | Which task-quality checks should convenience APIs default to when callers supply no evaluation data? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -654,19 +903,25 @@ revisions should update the current proposal and decision register together;
 superseded choices should not remain presented as current defaults.
 
 Before implementation, agree on ownership/write semantics, reference and state
-contracts, the first supported adapters, artifact boundaries, and a budgeted
-experiment plan. A later implementation proposal can stage work as follows:
+contracts, lifecycle/typed-artifact contracts, the first supported combinations
+and adapters, and a budgeted experiment plan. A later implementation proposal
+can stage work as follows:
 
-1. One-component text adapter using the new plan/state contracts.
-2. Vision + projector + language discovery, incremental fitting, and persistence.
-3. Recurrent/shared-memory replay with failure and invalidation checks.
-4. Controlled schedule comparisons and optional reconstruction experiments.
+1. Contract examples for every audited lifecycle family, including data-free,
+   deferred grouped, optimization-based, auxiliary, and framework-native routes.
+2. Conformance harness plus one-component adapters proving distinct lifecycles;
+   enumerate supported combinations and explicit gaps rather than claiming
+   universal support from a GPTQ-only demonstration.
+3. Vision + projector + language discovery, incremental operations, and persistence.
+4. Recurrent/shared-memory replay with failure and invalidation checks.
+5. Controlled schedule comparisons and optional reconstruction experiments.
 
 These are discussion gates, not an approved execution checklist or timeline.
 
 | Revision | Change |
 | --- | --- |
 | 0.1, 2026-10-27 | Initial clean-sheet proposal covering independent targets, phased coordination, explicit state, source/candidate separation, and open design questions. |
+| 0.2, 2026-10-27 | Audit all current method configurations and auxiliary routes; replace the universal fitting loop with method-owned lifecycle programs, stage-specific references/data, typed artifacts, conditional replay, and explicit future-method/continuation contracts. |
 
 ## Sources
 
