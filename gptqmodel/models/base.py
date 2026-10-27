@@ -12,6 +12,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from functools import partial
 from itertools import count
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Type, Union
 
@@ -1626,6 +1627,7 @@ class BaseQModel(nn.Module):
                     calibration=calibration,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
+                    calibration_data_min_length=calibration_data_min_length,
                     batch_size=batch_size,
                     backend=backend,
                     adapter_calibration_dataset=adapter_calibration_dataset,
@@ -1898,6 +1900,7 @@ class BaseQModel(nn.Module):
         calibration,
         calibration_concat_size: Optional[int],
         calibration_sort: Optional[str],
+        calibration_data_min_length: int,
         batch_size: int,
         backend: Optional[BACKEND],
         adapter_calibration_dataset,
@@ -1911,12 +1914,16 @@ class BaseQModel(nn.Module):
         from ..looper.module_preprocessor import ModulePreProcessor
 
         needs_lora = isinstance(self.quantize_config.adapter, Lora)
+        prepare_dataset_func = partial(
+            self.prepare_dataset,
+            calibration_data_min_length=calibration_data_min_length,
+        )
 
         args = {
             "tokenizer": self.tokenizer,
             "qcfg": self.quantize_config,
             "calibration": calibration,
-            "prepare_dataset_func": self.prepare_dataset,
+            "prepare_dataset_func": prepare_dataset_func,
             "calibration_concat_size": calibration_concat_size,
             "calibration_sort": calibration_sort,
             "calibration_concat_separator": calibration_concat_separator,
@@ -1944,7 +1951,7 @@ class BaseQModel(nn.Module):
                 "tokenizer": self.tokenizer,
                 "qcfg": self.quantize_config,
                 "calibration": calibration,
-                "prepare_dataset_func": self.prepare_dataset,
+                "prepare_dataset_func": prepare_dataset_func,
                 "calibration_concat_size": calibration_concat_size,
                 "calibration_sort": calibration_sort,
                 "calibration_concat_separator": calibration_concat_separator,
@@ -2037,7 +2044,7 @@ class BaseQModel(nn.Module):
                     tokenizer=self.tokenizer,
                     qcfg=self.quantize_config,
                     calibration=adapter_calibration_dataset if adapter_calibration_dataset is not None else calibration,
-                    prepare_dataset_func=self.prepare_dataset,
+                    prepare_dataset_func=prepare_dataset_func,
                     calibration_concat_size=calibration_concat_size,
                     calibration_sort=calibration_sort,
                     calibration_concat_separator=calibration_concat_separator,

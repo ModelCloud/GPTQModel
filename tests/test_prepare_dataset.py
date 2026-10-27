@@ -4,11 +4,13 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.quantization import METHOD
 from gptqmodel.utils.calibration import batched_conversations, normalize_chat_calibration_sample
 from gptqmodel.utils.data import collate_data
 
@@ -221,6 +223,60 @@ def test_prepare_dataset_collapses_causal_attention_mask():
     assert len(batches) == 1
     assert batches[0]["input_ids"].tolist() == [[97, 98, 99]]
     assert batches[0]["attention_mask"].int().tolist() == [[1, 1, 1]]
+
+
+def test_quantize_with_calibration_honors_calibration_data_min_length(monkeypatch):
+    from gptqmodel.looper import gptq_processor, module_looper
+
+    qmodel = _make_qmodel()
+    qmodel.quantize_config = SimpleNamespace(
+        adapter=None,
+        method=METHOD.GPTQ,
+        preprocessors=None,
+        gc_mode=None,
+        activation_mode=None,
+        offload_to_disk=False,
+        fallback=None,
+    )
+    prepared_datasets = []
+
+    class _StubProcessor:
+        def __init__(self, **kwargs):
+            self.calibration_dataset = kwargs["prepare_dataset_func"](
+                calibration_dataset=kwargs["calibration"],
+                calibration_dataset_concat_size=kwargs["calibration_concat_size"],
+                calibration_dataset_sort=kwargs["calibration_sort"],
+                batch_size=kwargs["batch_size"],
+                calibration_concat_separator=kwargs["calibration_concat_separator"],
+            )
+            prepared_datasets.append(self.calibration_dataset)
+
+    class _StubModuleLooper:
+        def __init__(self, _model, *, processors, **_kwargs):
+            self.processors = processors
+
+        def loop(self, **_kwargs):
+            return self.processors[0].calibration_dataset
+
+    monkeypatch.setattr(gptq_processor, "GPTQProcessor", _StubProcessor)
+    monkeypatch.setattr(module_looper, "ModuleLooper", _StubModuleLooper)
+
+    result = qmodel._quantize_with_calibration(
+        calibration=["short"],
+        calibration_concat_size=None,
+        calibration_sort=None,
+        calibration_data_min_length=1,
+        batch_size=1,
+        backend=None,
+        adapter_calibration_dataset=None,
+        calibration_concat_separator=None,
+        embed_quant_config=None,
+    )
+
+    assert result is prepared_datasets[0]
+    assert len(result) == 1
+    assert result[0]["input_ids"].tolist() == [[ord(char) for char in "short"]]
+    assert qmodel.prepare_dataset(calibration_dataset=["short"]) == []
 
 
 def test_prepare_dataset_normalizes_rank_4_attention_mask():
