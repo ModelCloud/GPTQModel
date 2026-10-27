@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** evidence for revision 0.2 of the
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.3 of the
 [component quantization proposal](component-quantization-design.md), 2026-10-27.
 This is a source audit and design input, not an implementation or a claim that
 every combination below is supported today.
@@ -235,12 +235,13 @@ helpers elsewhere in the tree do not establish public-path parity for every
 architecture, modifier, or checkpoint option. The same caution applies to
 EXL3's internal backend helpers versus the public dispatch restrictions.
 
-Staged GSQ can shard documents and synchronize training across ranks. A serial
-outer scheduler therefore means one ready lifecycle operation at a time; it does
-not require that the operation itself use only one device or process. Resources,
-collectives, primary-rank work, failure propagation, and completion barriers
-must be visible to the executor. See
-[GSQ distributed support](../gptqmodel/quantization/gsq_distributed.py).
+Staged GSQ can shard documents and synchronize training across ranks. Resources,
+collectives, primary-rank work, failure propagation, and completion barriers must
+be visible to the executor. Revision 0.3 also requires concurrent independent
+stages and explicit capture/model/solve partitioning capabilities. A serial
+reference profile remains useful but is not the general executor contract. See
+[GSQ distributed support](../gptqmodel/quantization/gsq_distributed.py) and the
+[parallel execution proposal](quantization-parallel-execution.md).
 
 Current resumability is narrower than method availability.
 [Checkpoint registration](../gptqmodel/looper/gptq_checkpoint.py) has explicit

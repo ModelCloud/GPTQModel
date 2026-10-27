@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.2, 2026-10-27.
+**Status:** design discussion, revision 0.3, 2026-10-27.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -20,12 +20,20 @@ programs**. The coordinator respects dependencies between model regions; each
 method declares its own observations, transformations, optimization stages,
 artifacts, and installation boundaries. Candidate replay and selective
 refinement are composition policies when applicable, not mandatory steps for
-every quantizer. The outer executor can remain serial.
+every quantizer. Multi-GPU execution is a first-class capability: the scheduler
+supports independent jobs and cooperative distributed stages under explicit
+numerical/resource contracts. Serial execution remains a reference/debug profile.
 
 Read the companion [method lifecycle inventory](quantization-method-lifecycles.md)
 for the source audit behind this revision. The design must accommodate every
 current method route and admit future methods without adding another hardcoded
-method branch to a universal layer loop.
+method branch to a universal layer loop. Revision 0.3 adds three companion designs:
+
+| Document | Purpose |
+| --- | --- |
+| [2026 architecture audit](quantization-architecture-2026.md) | Source-backed family/pattern coverage, compatibility gaps, and adapter acceptance cases. |
+| [Parallel execution](quantization-parallel-execution.md) | Multi-GPU capture, fitting, model partitioning, resource scheduling, and failure/continuation contracts. |
+| [Public API](quantization-plan-api.md) | Direct operations, immutable chaining, recipe composition, explicit order, selectors, and serialized plans. |
 
 Backward compatibility is **not a requirement and should not constrain this
 design**. Compatibility shims and preservation of the legacy lifecycle are
@@ -70,10 +78,20 @@ The design must support all of the following independently:
 | Numerical context | Record that language was calibrated against an earlier vision revision. |
 | Persistence | Save and restore the complete mixed dense/packed composition. |
 
-Serial execution is sufficient for an initial implementation. Global mutable
-state and assumptions about one decoder stack are the constraints to remove.
+Global mutable state and assumptions about one decoder stack are constraints to
+remove. A usable redesign must also preserve and generalize the repository's
+existing parallel capture, module/expert work, offload, and distributed training.
+A serial prototype alone does not establish acceptable quantization cost.
 
 ## 2. Architectural evidence and its limits
+
+The [broader 2026 audit](quantization-architecture-2026.md) covers public families
+from Qwen, DeepSeek, Kimi, Gemma, GLM, Hunyuan, Nemotron, MiMo, MiniMax, Liquid AI,
+Meta, Reflection, and others, plus diffusion, streaming speech, and action models.
+It records structural compatibility separately from implemented adapters and
+measured quantization quality. Private/undisclosed architectures and uninspected
+successor checkpoints cannot be certified from a family name. The following were
+the initial anchor examples; they no longer define the limits of the design.
 
 Qwen3.8 is a family. Qwen3.8-Flash-Next is the forward-looking open architecture
 used here; the Qwen3.8-Omni report supplies an additional multimodal reference.
@@ -99,6 +117,13 @@ The released DeepSeek checkpoint already declares FP8 quantization and FP4
 expert weights. An immutable source snapshot of that release is not an original
 BF16 model. Source precision and native numerical behavior must be recorded.
 [Checkpoint configuration][deepseek-config]
+
+The expanded audit adds several concrete requirements: Gemma 4 Unified makes
+modality routes distinct from parameter ownership; Kimi K3 adds depth-history
+dependencies; HRM-Text reuses parameter owners across nested invocations;
+DiffusionGemma/TwoTower and streaming audio require sampler/event traces. These
+are contract changes, not a claim that an unmodified decoder loop supports the
+models. See the companion matrix for primary sources and acceptance cases.
 
 ## 3. Proposed contracts
 
@@ -129,6 +154,12 @@ BF16 model. Source precision and native numerical behavior must be recorded.
 11. **Installation preserves the fitted result.** An already-fitted payload is
     not silently requantized by a generic finalizer. Quantization fused with
     encoding is itself a declared numerical stage.
+12. **Parallel execution has numerical semantics.** Replicas, shards, independent
+    tasks, reductions, collectives, and their state ownership are distinct
+    capabilities. A scheduler cannot change an objective to make work parallel.
+13. **Public composition is explicit and immutable.** Direct calls and fluent or
+    serialized plans compile through the same capability checks. Order, overrides,
+    and modifier stacking cannot conceal a different numerical experiment.
 
 ## 4. Core objects and ownership
 
@@ -136,11 +167,15 @@ BF16 model. Source precision and native numerical behavior must be recorded.
 | --- | --- |
 | `ModelComposition` | Component registry, parameter aliases, architecture adapter, and assembled revision. |
 | `Component` | Stable public identity, owned parameter/buffer references, per-operator representations, recipes, and revision history. |
+| `Route` | A supported input/output path and modality/task semantics; several routes may execute the same parameter owners. |
 | `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
-| `StateResource` | KV, recurrent state, convolution history, retrieval indices, token history, or another execution resource with explicit producers and consumers. |
+| `StateResource` | KV, recurrence/convolution state, depth history, retrieval indices, per-layer inputs, sampler/stream state, or another resource with explicit producers and consumers. |
+| `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
 | `DataRequirements` / data suites | Method-declared calibration, training, selection, and validation roles. `CalibrationSuite` supplies prepared inputs, routes, traces, weighting, and coverage when observations are needed. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
-| `QuantizationPlan` | Immutable resolved selection, writes, sources, dependency graph, compiled lifecycle programs, budgets, and validation policy. |
+| `Plan` | Immutable public specification of operations, recipes/modifiers, data bindings, order constraints, resource policy, and validation. |
+| `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and validation policy after compilation. |
+| `ExecutionLayout` | Physical stage placement, replica/shard ownership, resource reservations, transfers, and collective groups under the resolved numerical plan. |
 | `QuantizationRun` | Program/stage progress, staged candidate revisions, checkpoints, observations, and evaluation results. |
 
 ```mermaid
@@ -154,7 +189,7 @@ flowchart TD
     S --> P
     D[Required data roles and scenarios] --> P
     L[Method and modifier lifecycle programs] --> P
-    P --> E[Serial outer executor]
+    P --> E[Dependency and resource scheduler]
     E --> T[Staged component revisions]
     T --> V[Composition validation]
     V --> M[Published artifact manifest]
@@ -163,6 +198,11 @@ flowchart TD
 Components are logical identities such as `vision.encoder`, `vision.projector`,
 `language`, or `audio.encoder`. A named selection such as `vision` can expand to
 several components without becoming another mutable owner.
+
+Modality labels do not guarantee separate owners. An encoder-free model can have
+image/audio/text routes through one backbone. `inspect()` must report affected
+routes and missing selections honestly: changing shared weights changes all
+their consumers, even if calibration uses one modality.
 
 Resolve ownership using canonical parameter identities, including storage aliases
 and overlapping views. Attribute paths are bindings, not identities. A projector
@@ -196,6 +236,8 @@ The dependency representation needs distinct edge types:
 | Shared state | Several attention layers read one KV source. | Rebuild dependent state when its producer changes. |
 | Control | Indexer selects entries; router selects experts. | Replay the candidate's actual selection path. |
 | Temporal state | Recurrent state advances across tokens/chunks. | Preserve sequence boundaries, history, and state lineage. |
+| Depth history | Attention Residuals consumes earlier block representations. | Preserve the full history interface and keep its producers live until consumed. |
+| Sampler/event state | A denoiser revisits a canvas; duplex audio receives new input while producing output. | Order bounded logical-time invocations, commits, and stream events explicitly. |
 | Parameter alias | Drafter and main model share an output head. | Enforce one write owner and compatible representation. |
 | Objective coupling | Reconstruction loss spans a projector and consuming block. | Declare the optimization region and its permitted writes. |
 
@@ -211,10 +253,18 @@ region or supported iterative execution contract; otherwise planning fails.
 Adapters declare possible paths. Observed traces validate coverage but do not
 prove that unobserved branches or experts are unreachable.
 
+One owner can be invoked repeatedly in recurrence or denoising. Discovery must
+not manufacture a separate parameter owner for every unrolled visit. The method
+declares how observations across visits are weighted or jointly optimized; the
+trace records their individual state and logical coordinates.
+
 ## 6. Public API sketch
 
 Loading establishes structure and representations. Recipes belong to operations.
-Names, signatures, and return types remain open questions.
+Direct calls, immutable fluent plans, and configuration files compile through
+one planner. The [API companion](quantization-plan-api.md) defines stacking,
+ordering, selector precedence, fragments, serialization, and parallel policy.
+Names/signatures remain proposals; examples are independent sketches.
 
 ```python
 model = GPTQModel.load("source-checkpoint")
@@ -226,24 +276,25 @@ calibration = CalibrationSuite(
     scenarios=["prefill", "decode"],
 )
 
-model.quantize(
+run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
     calibration=calibration,
+    resources=Resources.local(gpus="all"),
 )
 
 # Language is packed; the selected vision weights are still dense.
-model.quantize(
+run = model.quantize(
     target="vision.encoder",
     recipe=GPTQ(bits=8, group_size=64),
     calibration=calibration,
 )
-model.save("mixed-model")
+run.save("mixed-model")
 
 model.requantize(
     target="vision.encoder",
     recipe=GPTQ(bits=4, group_size=64),
-    weights=SourceSnapshot("source-checkpoint"),
+    source=SourceSnapshot("source-checkpoint"),
     calibration=calibration,
 )
 ```
@@ -251,9 +302,9 @@ model.requantize(
 | Operation | Proposed meaning |
 | --- | --- |
 | `quantize(target=...)` | Execute the selected method program for dense weights; reject already-packed weights within the resolved write selection. Data is required only when the resolved program requires it. |
-| `requantize(target=..., weights=...)` | Replace selected packed representations using an identified source. |
+| `requantize(target=..., source=...)` | Replace selected packed representations using an identified source policy. |
 | `repack(target=..., format=...)` | Convert storage layout without changing quantized numerical values, where supported. |
-| `save(...)` | Persist the complete current composition. Validation status is recorded. |
+| `run.save(...)` / `model.save(...)` | Persist the run's assembled revision or the current composition, respectively, including untouched components and validation status. |
 
 Dequantizing current low-bit weights and fitting them again must be an explicit
 source policy. It does not recover lost precision. Preflight reports mixed source
@@ -262,33 +313,48 @@ representations and any additional lossy conversion.
 The convenience APIs compile into the same planner as a coordinated operation:
 
 ```python
-plan = model.plan(
-    targets={
-        "vision": GPTQ(bits=8, group_size=64),
-        "language": GPTQ(bits=4, group_size=128),
-    },
-    reference=SourceSnapshot("source-checkpoint"),
-    calibration=calibration,
-    schedule=PhasedSchedule(
-        initial_fit="dependency_order",
-        replay="candidate",
-    ),
-    refinement=SelectiveRefinement(
-        algorithm=RegionReconstruction(),  # Optional, capability-checked plugin.
-        write_scope="selected",
-        max_passes=2,  # Illustrative budget, not an established optimum.
-    ),
+model = GPTQModel.load("source-checkpoint")
+plan = (
+    Plan()
+    .calibrate(calibration)
+    .resources(Resources.local(gpus=[0, 1, 2, 3]))
+    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
+    .add(Quantize("language", GPTQ(bits=4), name="language"))
+    .evaluate(held_out_suite)
 )
-print(plan)
-model.run(plan, executor="serial")
+resolved = plan.compile(model)
+print(resolved.explain())
+run = model.run(resolved)
+run.save("mixed-model")
 ```
+
+`add` declares operations and lets the compiler infer mandatory dependencies;
+`then` adds explicit completion order; `parallel` creates legal fork/join branches;
+`after` names a targeted dependency. A requested parallel group with a true
+dependency or shared-write conflict fails with an explanation. Resource policy
+determines feasible overlap and whether a stage uses replicas, shards, or
+cooperative optimization. Ordering syntax cannot override method semantics.
+
+Recipes can be reused and extended with typed modifiers:
+
+```python
+text_recipe = Recipe(GPTQ(bits=4, group_size=128)).with_modifier(EoRA(rank=32))
+awq_recipe = Recipe(AWQ(bits=4)).with_modifier(StagedGSQ(epochs=2))
+```
+
+Modifier stacking compiles the combined program, including any earlier teacher
+capture it needs; it is not a list of callbacks run after the base quantizer.
+Preservation rules and conflicting overrides resolve explicitly, and unknown
+options or zero-match selectors fail before numerical execution.
 
 The preview distinguishes `modify`, `execute`, `observe`, `preserve`, and
 `validate` scopes. It resolves transforms that also change norms, scales, or
-neighboring projections, including AWQ-style coupling. No undeclared write is
-permitted simply because an algorithm normally performs it.
+neighboring projections, including AWQ-style coupling. It also shows teacher/data
+roles, parallel layouts, memory estimates, serialized bottlenecks, and validation
+coverage. No undeclared write is permitted simply because an algorithm normally
+performs it.
 
-The sketch above is an activation-calibrated GPTQ example. A data-free operation
+The coordinated sketch is an activation-calibrated GPTQ example. A data-free operation
 can instead be as small as:
 
 ```python
@@ -360,6 +426,15 @@ to regenerate them. Repeated invocations of the same component must remain
 distinct. Captured tensor views cannot remain attached to buffers later mutated
 by another forward.
 
+`InvocationTrace` extends identity beyond token position: depth history,
+recurrence iteration, canvas/denoising step, stream event/time, and speculative
+branch are recorded where applicable. Sampler/stream adapters own reset, step,
+commit, mask, noise, and temporal-alignment semantics. Bidirectional encoders also
+require their noncausal attention/convolution context and actual task heads;
+neither causal replay nor next-token evaluation is universal. The method declares
+how observations from repeated visits are combined; there is no universal
+one-hook-call-per-layer assumption.
+
 Calibration scenarios should cover applicable modes: multimodal prefill,
 continuation decode, chunked/streaming execution, cache restoration, and drafting
 or verification. Fixed-token traces align reference and candidate measurements;
@@ -389,7 +464,7 @@ candidate-conditioned fitting, not a universal ordering rule for every stage.
 ```mermaid
 flowchart TD
     A[Resolve scopes, capabilities, sources, and budgets] --> B[Compile method programs and required data roles]
-    B --> C[Execute next ready lifecycle stage]
+    B --> C[Execute ready lifecycle stages under resource contracts]
     C --> D[Record artifacts and effects at declared boundary]
     D --> E{Pending required stages?}
     E -->|Yes| C
@@ -413,10 +488,11 @@ operator capabilities, shared ownership, state contracts, preprocessing, effects
 and observation requirements before mutation. Resolve method/modifier/backend
 combinations rather than checking a method name alone.
 
-Compile stage dependencies and resource budgets. Derived teachers are frozen at
-their declared stages, which can be later than this phase. Source reference
-outputs can be generated lazily. This phase does not collect every Hessian or
-require a dataset/model forward for data-free conversion.
+Compile stage dependencies, parallel capabilities, and resource budgets into a
+resolved numerical plan and physical execution layout. Derived teachers are
+frozen at their declared stages, which can be later than this phase. Source
+reference outputs can be generated lazily. This phase does not collect every
+Hessian or require a dataset/model forward for data-free conversion.
 
 ### Phase B: Execute required method programs
 
@@ -432,10 +508,12 @@ only permitted execution model. Publish a stage result to dependents only at a
 declared stable artifact boundary. Intermediate optimizer states are private
 unless the method explicitly exports a frozen revision for another stage.
 
-Independent branches may share a phase while executing serially. A future
-parallel executor may overlap stages only when effects, versioned reads, state
-isolation, and resource budgets permit it. A stage may itself use a declared
-distributed/native optimizer even with a serial outer scheduler.
+Independent stages may execute concurrently when effects, versioned reads, state
+isolation, and complete resource reservations permit it. A stage may itself use
+replicated observations, a sharded model forward, or a cooperative distributed
+optimizer when supported. These are separate declared capabilities; GPU count
+does not imply a legal decomposition. Method-owned stages and dependent
+producer/consumer revisions keep their required ordering.
 
 ### Phase C: Validate the assembled candidate
 
@@ -467,9 +545,9 @@ the same lifecycle/effect contracts and may have a different program from the
 initial conversion.
 
 After any relevant change, regenerate affected state and evaluate again. Bound
-passes and resource use; retain the best candidate on a separate selection set. Reserve a
-held-out set for final acceptance. Alternating updates have no assumed convergence
-or monotonic improvement guarantee.
+passes and resource use; retain the best candidate on a separate selection set.
+Reserve a held-out set for final acceptance. Alternating updates have no assumed
+convergence or monotonic improvement guarantee.
 
 ### Phase E: Validate and publish
 
@@ -611,10 +689,13 @@ Cache identity includes source/candidate revision, actual producer dependencies,
 region/boundary identity, dataset and preprocessing fingerprints, scenario and
 positions, numerical profile, adapter version, lifecycle stage/iteration,
 reference/observation role, objective, validity masks/weighting, and relevant
-execution settings. Hashes of a component name or model path alone are
-insufficient. Identical module inputs do not establish interchangeable GPTQ,
-GPTAQ, FOEM, or reconstruction statistics. Deduplication requires a matching
-statistic schema and observation contract as well as matching lineage.
+execution settings. Distributed statistics also identify partition membership,
+merge/reduction semantics, and any layout-dependent state; trace identity includes
+the applicable sampler/stream/recurrence axes. Hashes of a component name or model
+path alone are insufficient. Identical module inputs do not establish
+interchangeable GPTQ, GPTAQ, FOEM, or reconstruction statistics. Deduplication
+requires a matching statistic schema and observation contract as well as
+matching lineage.
 
 Changing a producer invalidates transitive derived activations/state and affected
 validation results. Independent caches remain reusable. A state checkpoint can
@@ -639,7 +720,9 @@ without publishing the entire composition as validated. Failed work leaves
 earlier published revisions intact. A coupled transformation commits all affected
 parameters, auxiliary resources, and alias changes together.
 
-The initial executor can use an exclusive mutation lease. Resume checks the plan,
+Private parallel work uses canonical read/write ownership and resource leases;
+an exclusive installation lease can protect the live composition without
+serializing every numerical task. Resume checks the plan,
 source weights, dependency revisions, prepared data, numerical profile, algorithm
 and stage-schema versions, continuation/optimizer state, RNG, and supported
 device/runtime identity. Mismatches fail with a specific reason rather than
@@ -660,6 +743,8 @@ The native artifact manifest describes the complete composition:
 
 - Schema, architecture, adapter, source, and assembled revision identities.
 - Components, canonical parameters, aliases, and shared ownership groups.
+- Route/owner mappings, logical tensor identities, and complete shard metadata
+  where the saved representation is partitioned.
 - Per-operator dense or packed representations and codec metadata.
 - Runtime transforms, activation scales, adapters, and structural changes.
 - Resolved method/variant/modifier programs and source/dependency/teacher
@@ -682,8 +767,8 @@ unrepresentable mixtures; a single global quantization config is not authoritati
 | Boundary | Responsibility |
 | --- | --- |
 | Architecture adapter | Discovery, bindings, region boundaries, setup/restoration stages, execution modes, state/alias effects, and replay equivalence. |
-| Planner | Resolve scopes and method programs; combine architecture and lifecycle dependencies, effects, capabilities, and budgets. |
-| Executor | Execute ready stages, isolate state contexts, grant resources, manage artifact lifetime, and enforce durable/transaction boundaries. |
+| Planner | Resolve scopes and method programs; combine architecture and lifecycle dependencies, effects, parallel capabilities, budgets, and physical layout constraints. |
+| Executor | Schedule ready stages and collective groups, isolate state, reserve complete resources, manage transfers/artifact lifetime, and enforce durable/transaction boundaries. |
 | Method/operation plugin | Declare a versioned lifecycle program, observation/reference roles, transformations, objectives, outputs, fallback branches, and continuation capabilities. |
 | Modifier plugin | Compose compatible stages through typed inputs/outputs and explicit effects; it cannot silently intercept arbitrary callbacks. |
 | Representation codec | Encode/decode artifacts and convert layout where supported. Numerical quantization fused with encoding is explicitly a method stage. |
@@ -724,7 +809,7 @@ flowchart TD
     L --> P
     D[Sources, data roles, and resource budgets] --> P
     P --> G[Combined versioned stage and artifact graph]
-    G --> E[Execute ready stage with declared resources]
+    G --> E[Schedule ready stages with declared resources]
     E --> O[Typed outputs and explicit effects]
     O --> B{Declared durable or install boundary?}
     B -->|Yes| C[Validate and commit atomic group]
@@ -754,6 +839,7 @@ serialization schema.
 | Effects | Parameter/buffer/alias/runtime-state reads and writes, structural changes, invalidation closure, and atomic installation group. |
 | Dependencies/control flow | Required predecessor artifacts, capture-completion barriers, bounded repeats/iterations, conditional fallback, and any permitted subprogram expansion. |
 | Execution resources | Framework, device/memory/offload needs, autograd/inference mode, RNG, distributed participants/collectives, and stream ownership. |
+| Parallel contract | Legal independent splits, replica/shard identities, observation reducers, cooperative group operations, process reentrancy, and supported topology/resume rules. |
 | Lifetime | When temporary teachers, statistics, uncorrected weights, optimizer state, and native resources can be released or recomputed. |
 | Completion and validation | Output invariants, stable candidate revision boundary, replay semantics where needed, and codec/runtime checks. |
 | Continuation/failure | Supported checkpoint boundaries and versioned state, restart semantics, cancellation points, quiescence/cleanup, and retry safety. |
@@ -798,9 +884,33 @@ silent use of a different teacher or approximation.
 
 Autograd mode belongs to the stage. Wrapping the entire run in Torch inference
 mode would break optimizers; requiring Torch hooks would exclude native MLX.
-Likewise, serial scheduling does not forbid a stage's declared multi-device
-training. Framework adapters must isolate their state and satisfy the same
-effects, artifact, and cleanup contracts.
+Framework adapters must isolate their state and satisfy the same effects,
+artifact, parallel-execution, and cleanup contracts.
+
+### 12.4 Parallel execution and cost
+
+The [parallel execution proposal](quantization-parallel-execution.md) distinguishes
+independent component/module/expert work, data-parallel capture, distributed
+optimization, model partitioning, partitioned quantizer solves, and I/O overlap.
+Current device pools, replicated forwards, Hessian partials, asynchronous workers,
+and distributed GSQ are evidence for these separate contracts; they are not proof
+that every method already supports every layout.
+
+A `ParallelContract` declares legal splits and exact observation/reduction
+semantics. A `PartitionSpec` preserves canonical tensor identity, shard axes,
+expert ownership, and quantizer group geometry. An `ExecutionLayout` places ready
+work with complete device/memory reservations and ordered collective groups.
+Replica-local means cannot be blindly averaged when observation counts differ;
+arbitrary column/token splitting cannot drop coupling or sequence state to fit
+memory. Unsupported required layouts fail before execution.
+
+Memory estimates include teachers, optimizer state, statistics, activations,
+transfers, and packing buffers as well as source/candidate weights. Checkpoints
+and installed results require complete validated shard groups. Worker loss,
+collective failure, retry, and changed-topology resume have explicit contracts.
+Serial/multi-GPU runs are compared for both numerical behavior and elapsed time,
+GPU-hours, peak memory, and communication cost. The planner reports unknown
+estimates rather than promising a speedup from the device count.
 
 Existing algorithms and kernels are reuse candidates. The new orchestration
 should not be a wrapper around the old global lifecycle. A one-component text
@@ -808,12 +918,14 @@ model uses exactly the same contracts as a composite model.
 
 The first implementation, if approved later, should prove that these different
 existing lifecycle families fit the contract before treating a text-only GPTQ
-demo as architectural validation. Establish explicit state handling, mixed
-persistence, and applicable assembled replay before adding new reconstruction
-mathematics. Mandatory whole-model QAT, a universal tensor-graph compiler,
-speculative auto-detection of arbitrary remote-code semantics, and concurrent
-outer scheduling are outside that initial scope. Existing methods' required
-training/native execution remains part of the design's scope.
+demo as architectural validation. Its usable execution milestone must include
+parallel capture/merging, independent fitting work, and a cooperative optimization
+path, with explicit supported combinations and cost evidence. Establish state
+handling, mixed persistence, and applicable assembled replay before adding new
+reconstruction mathematics. Mandatory whole-model QAT, a universal tensor-graph
+compiler, and speculative auto-detection of arbitrary remote-code semantics are
+outside the initial scope. Existing methods' required training/native execution
+and multi-GPU resource handling remain in scope.
 
 ## 13. Validation and experiment plan
 
@@ -844,6 +956,12 @@ The following are proposed acceptance criteria and experiments.
 | V20 | Continuation contracts | Each supported combination resumes only at its declared boundaries; unsupported resume granularity fails preflight and partial optimizer/capture state is not mistaken for a durable result. |
 | V21 | Global allocation | A precision-search result is capability/ownership checked before installation; its search budget, candidate lineage, and resolved allocation are recorded. |
 | V22 | Future-method admission | A synthetic plugin adds a custom observation type, bounded optimization loop, derived teacher, and non-scalar artifact without edits to coordinator method dispatch. Undeclared effects and unsupported capabilities fail visibly. |
+| V23 | Shared multimodal ownership | Encoder-free routes expose their actual shared owners; a vision-only selector cannot imply independent ownership of a shared backbone. |
+| V24 | Nonstandard execution traces | Depth history, nested recurrence, diffusion canvas/commit steps, and duplex stream events retain correct invocation/state identity under capture, replay, and resume. |
+| V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P7 cover failure and resource pressure. |
+| V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
+| V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; immutable reuse, named dependencies, fork/join, fragments, selector overrides, and invalid composition diagnostics behave as specified. |
+| V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -881,7 +999,7 @@ proposed defaults, not final design approval.
 | D5 | Explicit shared parameter groups. | What is the smallest useful public selection and conflict-reporting vocabulary? |
 | D6 | Bounded optional composition refinement, separate from required method optimization. | Which additional objectives and regions improve quality at practical cost? |
 | D7 | Checkpoint declared durable method boundaries; publish explicit validation coverage. | What atomicity is required for cross-component transforms and live model replacement? |
-| D8 | Serial outer executor first, with stage-specific native/distributed resources. | What effects and memory contracts must exist now to allow later safe concurrency? |
+| D8 | Parallel-capable scheduling and distributed stages are core; serial remains a reference profile. | Which legal decompositions and memory/topology policies deliver practical cost reductions for the first supported combinations? |
 | D9 | Native mixed-representation manifest. | Which external export formats can represent which mixtures? |
 | D10 | Scenario-aware calibration with explicit weighting. | What coverage requirements are feasible for sparse experts, rare modalities, and long contexts? |
 | D11 | Actual candidate routing during final replay. | When should indexers, routers, and residual gates be preserved at source precision or refined? |
@@ -890,6 +1008,10 @@ proposed defaults, not final design approval.
 | D14 | Typed artifacts and producer/consumer lifetime. | Which schemas can be shared, and which require method-specific representations or exact-payload installation? |
 | D15 | Capability checks for complete method/modifier/backend combinations. | Which combinations are admitted first, and what evidence is required for each continuation guarantee? |
 | D16 | Required data roles and explicit validation profiles. | Which task-quality checks should convenience APIs default to when callers supply no evaluation data? |
+| D17 | Separate route, component-owner, and invocation registries. | How should selectors explain shared multimodal writes and repeated visits without overwhelming common workflows? |
+| D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
+| D19 | Direct operations plus immutable fluent/file plans. | Are `add`, `then`, `parallel`, named `after`, typed modifiers, and explicit override precedence the clearest minimal surface? |
+| D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -903,18 +1025,22 @@ revisions should update the current proposal and decision register together;
 superseded choices should not remain presented as current defaults.
 
 Before implementation, agree on ownership/write semantics, reference and state
-contracts, lifecycle/typed-artifact contracts, the first supported combinations
-and adapters, and a budgeted experiment plan. A later implementation proposal
-can stage work as follows:
+contracts, lifecycle/typed-artifact/parallel contracts, public composition semantics,
+the first supported combinations and adapters, and a budgeted experiment plan.
+A later implementation proposal can stage work as follows:
 
 1. Contract examples for every audited lifecycle family, including data-free,
    deferred grouped, optimization-based, auxiliary, and framework-native routes.
 2. Conformance harness plus one-component adapters proving distinct lifecycles;
    enumerate supported combinations and explicit gaps rather than claiming
    universal support from a GPTQ-only demonstration.
-3. Vision + projector + language discovery, incremental operations, and persistence.
-4. Recurrent/shared-memory replay with failure and invalidation checks.
-5. Controlled schedule comparisons and optional reconstruction experiments.
+3. Multi-GPU capture/statistic merging, independent jobs, and a cooperative
+   optimizer, including failure/resume and bounded materialization or supported
+   sharded execution for a model larger than one device.
+4. Vision + projector + language and shared-backbone route discovery, incremental
+   operations, and persistence, driven by direct and composed API forms.
+5. Recurrent/shared-memory/depth/sampler replay with failure and invalidation checks.
+6. Controlled schedule/cost comparisons and optional reconstruction experiments.
 
 These are discussion gates, not an approved execution checklist or timeline.
 
@@ -922,6 +1048,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | --- | --- |
 | 0.1, 2026-10-27 | Initial clean-sheet proposal covering independent targets, phased coordination, explicit state, source/candidate separation, and open design questions. |
 | 0.2, 2026-10-27 | Audit all current method configurations and auxiliary routes; replace the universal fitting loop with method-owned lifecycle programs, stage-specific references/data, typed artifacts, conditional replay, and explicit future-method/continuation contracts. |
+| 0.3, 2026-10-27 | Broaden the sourced 2026 architecture audit; make route/owner/invocation distinctions explicit; require parallel scheduling, distributed stages, reducers and partition contracts; add a fluent, typed, serializable API with defined chaining/stacking semantics. |
 
 ## Sources
 
