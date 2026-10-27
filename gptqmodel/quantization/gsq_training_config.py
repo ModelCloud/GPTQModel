@@ -31,6 +31,7 @@ class GSQTrainingConfig:
     warmup_steps: int = 0
     min_lr: float = .1
     decay: str = 'cosine'
+    restore_best: bool | None = None
 
     def __post_init__(self):
         if not isinstance(self.enabled, bool):
@@ -54,6 +55,8 @@ class GSQTrainingConfig:
                 raise ValueError(f'GSQTrainingConfig: invalid {name}')
         if self.min_lr > 1 or self.decay not in ('cosine', 'linear', 'constant'):
             raise ValueError('GSQTrainingConfig: invalid learning-rate schedule')
+        if self.restore_best is not None and not isinstance(self.restore_best, bool):
+            raise TypeError('GSQTrainingConfig: restore_best must be boolean or None')
         for name in ('betas', 'temperature', 'multiplier'):
             pair = getattr(self, name)
             if not isinstance(pair, (tuple, list)) or len(pair) != 2:
