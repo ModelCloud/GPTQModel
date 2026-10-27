@@ -24,7 +24,7 @@ run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
     calibration=multimodal_calibration,
-    resources=Resources.local(gpus="all"),
+    devices=Local(gpus="all"),
 )
 run.save("language-quantized")
 
@@ -67,7 +67,7 @@ ownership of a shared multimodal backbone.
 plan = (
     Plan()
     .calibrate(multimodal_calibration)
-    .resources(Resources.local(gpus=[0, 1, 2, 3]))
+    .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
         target="vision.encoder", recipe=GPTQ(bits=8), name="vision"
     ))
@@ -103,7 +103,7 @@ For users who want explicit operation order, provide ordinary named methods:
 plan = (
     Plan()
     .calibrate(multimodal_calibration)
-    .resources(Resources.local(gpus=[0, 1, 2, 3]))
+    .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize("vision.encoder", GPTQ(bits=8), name="vision"),
         Quantize("audio.encoder", GPTQ(bits=8), name="audio"),
@@ -146,7 +146,7 @@ native_inputs = Observations.from_source(SourceSnapshot("source-checkpoint"))
 independent = (
     Plan()
     .calibrate(multimodal_calibration)
-    .resources(Resources.local(gpus=[0, 1, 2, 3]))
+    .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize("vision.encoder", GPTQ(bits=8),
                  observations=native_inputs, name="vision"),
@@ -258,24 +258,26 @@ default calibration suite just because one is present.
 
 ## 6. Multi-GPU use is easy; exact layouts are available
 
-The common request supplies resources and lets compilation choose supported
-parallelism, recording the result:
+The common request selects devices and budgets, then lets compilation choose
+supported parallelism, recording the result. Fluent plans use
+`.devices(Local(...))`; direct operations use `devices=Local(...)`.
 
 ```python
-resources = Resources.local(
+devices = Local(
     gpus=[0, 1, 2, 3],
     memory_per_gpu="70GiB",
     host_memory="256GiB",
     scratch="/scratch/quantization",
 )
-plan = plan.resources(resources).parallelism(Parallelism.auto())
+plan = plan.devices(devices).parallelism(Parallelism.auto())
 ```
 
 Automatic placement chooses among declared legal layouts. It never changes the
 algorithm, silently approximates statistics, or invents distributed support for
 a single-device method. Device names refer to the supplied/local resource pool;
 the API does not implicitly allocate cloud infrastructure. External launchers
-can supply a typed distributed resource context for multiple nodes.
+can supply a typed distributed device context through the same `devices` entry
+point for multiple nodes.
 
 Advanced policies can require a particular stage layout:
 
@@ -316,7 +318,7 @@ def perception_plan(vision_recipe, audio_recipe):
 plan = (
     Plan()
     .calibrate(multimodal_calibration)
-    .resources(resources)
+    .devices(devices)
     .include(perception_plan(higher_precision, higher_precision), namespace="senses")
     .then(Quantize("language", with_adapter, rules=text_rules, name="language"))
     .evaluate(held_out_suite)
@@ -339,9 +341,10 @@ or materialized into an identified dataset artifact before portable execution.
 schema: gptqmodel.plan/v1
 data:
   calibration: {binding: multimodal_calibration}
-resources:
+devices:
+  kind: local
   gpus: [0, 1, 2, 3]
-  parallelism: auto
+parallelism: auto
 operations:
   - id: vision
     kind: quantize

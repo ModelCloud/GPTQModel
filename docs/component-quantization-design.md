@@ -280,7 +280,7 @@ run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
     calibration=calibration,
-    resources=Resources.local(gpus="all"),
+    devices=Local(gpus="all"),
 )
 
 # Language is packed; the selected vision weights are still dense.
@@ -317,7 +317,7 @@ model = GPTQModel.load("source-checkpoint")
 plan = (
     Plan()
     .calibrate(calibration)
-    .resources(Resources.local(gpus=[0, 1, 2, 3]))
+    .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
     .add(Quantize("language", GPTQ(bits=4), name="language"))
     .evaluate(held_out_suite)

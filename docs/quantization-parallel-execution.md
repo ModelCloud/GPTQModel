@@ -68,7 +68,7 @@ or objective.
 
 | Contract | Required fields/behavior |
 | --- | --- |
-| `Resources` | Visible devices/nodes, memory budgets, host/pinned-memory/disk budgets, interconnect/topology information when available, and allowed offload. No assumption that all visible GPUs form one fast collective domain. |
+| Device context (`Local` or a supplied distributed context) | Visible devices/nodes, memory budgets, host/pinned-memory/disk budgets, interconnect/topology information when available, and allowed offload. Bound through `devices(...)` on a plan or `devices=` on a direct operation. No assumption that all visible GPUs form one fast collective domain. |
 | `ParallelContract` | Legal task splits, replica/shard semantics, minimum/maximum workers, process/thread reentrancy, framework/backend restrictions, deterministic profile, and unsupported combinations. |
 | `PartitionSpec` | Global tensor/owner identity, shard axes/ranges, replication groups, expert ownership, quantizer group alignment, and reconstruction/resharding rules. |
 | `ObservationReducer` | Statistic schema, raw sufficient-statistic or other merge representation, counts/weights/masks, reduction precision/order, duplicate policy, and finalization point. `Not mergeable` is valid. |
