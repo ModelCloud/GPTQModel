@@ -266,6 +266,14 @@ blocks are written atomically under the destination signature and record
 `imported_from`; source files are preserved. This resumes completed blocks,
 not an interrupted block's optimizer state.
 
+New checkpoints also record the hash of their preceding packed blocks. A
+changed predecessor is rejected, and checkpoint gaps are rejected before any
+training starts. Legacy checkpoints have no historical predecessor hash: their
+source directory must be intact, and its complete earlier packed prefix must
+match the prefix installed by this run. Rank-local capture and incremental
+replay failures propagate to every rank; completed captures are registered for
+cleanup before the next capture begins.
+
 The current source trees are
 `/models/datasets/gsq-bench8b-original/w2gsq/ckpt` and
 `/models/datasets/gsq-bench8b-original/w3gsq/ckpt`, each with layers 00–02.

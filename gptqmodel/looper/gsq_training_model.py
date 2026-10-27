@@ -40,8 +40,12 @@ def _checkpoint_documents_digest(documents):
 
 def _checkpoint_module_digest(module):
     """Identify a source block without retaining a second full model copy."""
+    return _checkpoint_state_digest(module.state_dict())
+
+
+def _checkpoint_state_digest(state):
     digest = hashlib.sha256()
-    for name, value in module.state_dict().items():
+    for name, value in state.items():
         if not isinstance(value, torch.Tensor):
             raise TypeError(f'Unsupported GSQ checkpoint state value: {name}')
         value = value.detach().to(device='cpu').contiguous()
@@ -50,6 +54,30 @@ def _checkpoint_module_digest(module):
         digest.update(repr(tuple(value.shape)).encode('ascii'))
         digest.update(value.reshape(-1).view(torch.uint8).numpy().tobytes())
     return digest.hexdigest()
+
+
+def _checkpoint_packed_prefix(prefix, index, state):
+    digest = hashlib.sha256(bytes.fromhex(prefix))
+    digest.update(index.to_bytes(8, 'little'))
+    digest.update(bytes.fromhex(_checkpoint_state_digest(dict(sorted(state.items())))))
+    return digest.hexdigest()
+
+
+def _checkpoint_plan(indices, destination, source):
+    """Select one contiguous completed prefix before starting any training."""
+    plan, missing = [], False
+    for index in indices:
+        name = f'layer-{index:02d}.pt'
+        checkpoint = None if destination is None else destination/name
+        imported = None if source is None else source/name
+        selected = (str(checkpoint), False) if checkpoint is not None and checkpoint.is_file() else (
+            (str(imported), True) if imported is not None and imported.is_file() else (None, False))
+        if selected[0] is None:
+            missing = True
+        elif missing:
+            raise ValueError(f'GSQ checkpoint prefix has a gap before {selected[0]}')
+        plan.append(selected)
+    return plan
 
 
 def _checkpoint_prefix_digests(model, layer_indices):
@@ -265,8 +293,14 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             capture_directory = capture_directory/f'rank-{distributed.rank:02d}'
     carried = None
     active_captures = ()
+    packed_prefix = hashlib.sha256(b'GSQ packed prefix v1').hexdigest()
     try:
-        for index in indices:
+        def select_checkpoints():
+            return _checkpoint_plan(indices, checkpoint_directory, resume_prefix_directory)
+
+        checkpoint_plan = (select_checkpoints() if distributed is None else
+                           distributed.primary_call(select_checkpoints))
+        for index, (source_checkpoint, imported) in zip(indices, checkpoint_plan):
             import logging
 
             block_started = time.monotonic()
@@ -274,16 +308,6 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             run['current_layer'] = index
             checkpoint = (checkpoint_directory/f'layer-{index:02d}.pt'
                           if checkpoint_directory is not None else None)
-            def select_checkpoint(checkpoint=checkpoint):
-                if checkpoint is not None and checkpoint.exists():
-                    return str(checkpoint), False
-                if (checkpoint is not None and resume_prefix_directory is not None
-                        and (resume_prefix_directory/checkpoint.name).is_file()):
-                    return str(resume_prefix_directory/checkpoint.name), True
-                return None, False
-
-            source_checkpoint, imported = (select_checkpoint() if distributed is None else
-                                           distributed.primary_call(select_checkpoint))
             if source_checkpoint is not None:
                 source_checkpoint = Path(source_checkpoint)
                 if carried is not None:
@@ -291,12 +315,31 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                         if captured is not None:
                             captured.cleanup()
                     carried = None
-                layer_signature = dict(signature, source_prefix=source_prefixes[index])
+                layer_signature = dict(signature, source_prefix=source_prefixes[index], packed_prefix=packed_prefix)
                 def read_checkpoint(source_checkpoint=source_checkpoint, layer_signature=layer_signature,
-                                    imported=imported, index=index, checkpoint=checkpoint):
+                                    imported=imported, index=index, checkpoint=checkpoint,
+                                    packed_prefix=packed_prefix):
                     saved = torch.load(source_checkpoint, map_location='cpu', weights_only=True)
                     expected = dict(layer_signature)
                     actual = dict(saved.get('signature', {})) if isinstance(saved, dict) else {}
+                    if 'packed_prefix' not in actual:
+                        # Legacy checkpoints have no predecessor hash. Accept
+                        # their contiguous source prefix only when its packed
+                        # bytes match the blocks we have actually installed.
+                        legacy_prefix = hashlib.sha256(b'GSQ packed prefix v1').hexdigest()
+                        for previous in indices:
+                            if previous >= index:
+                                break
+                            predecessor = source_checkpoint.parent/f'layer-{previous:02d}.pt'
+                            if not predecessor.is_file():
+                                raise ValueError(f'Unverified legacy GSQ checkpoint prefix: {predecessor}')
+                            state = torch.load(predecessor, map_location='cpu', weights_only=True)['state_dict']
+                            legacy_prefix = _checkpoint_packed_prefix(legacy_prefix, previous, state)
+                        if legacy_prefix != packed_prefix:
+                            raise ValueError(f'GSQ checkpoint packed prefix mismatch: {source_checkpoint}')
+                        expected.pop('packed_prefix')
+                    elif actual['packed_prefix'] != packed_prefix:
+                        raise ValueError(f'GSQ checkpoint packed prefix mismatch: {source_checkpoint}')
                     if imported:
                         # Explicit migration may change execution placement but must
                         # preserve the model, corpora, bits and optimizer recipe.
@@ -317,9 +360,10 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                             os.replace(temporary, checkpoint)
                         finally:
                             temporary.unlink(missing_ok=True)
-                    return saved
+                    return saved, _checkpoint_packed_prefix(packed_prefix, index, saved['state_dict'])
 
-                saved = read_checkpoint() if distributed is None else distributed.primary_call(read_checkpoint)
+                saved, packed_prefix = (read_checkpoint() if distributed is None else
+                                        distributed.primary_call(read_checkpoint))
                 packed = _restore_packed_layer(
                     layers[index], saved['state_dict'], names=names, bits=run['layer_bits'][index],
                     group_size=group_size, device=device)
@@ -332,7 +376,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 del saved
                 logging.getLogger(__name__).info('Resumed packed GSQ block %d/%d', index+1, len(layers))
                 continue
-            layer_signature = (dict(signature, source_prefix=source_prefixes[index])
+            layer_signature = (dict(signature, source_prefix=source_prefixes[index], packed_prefix=packed_prefix)
                                if checkpoint is not None else None)
             capture_options = {}
             if offload_capture:
@@ -342,7 +386,13 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             if not offload_capture and capture_batch_size != 1:
                 capture_options['capture_batch_size'] = capture_batch_size
             if carried is None:
-                cache = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
+                def capture_training(index=index, capture_options=capture_options):
+                    nonlocal active_captures
+                    captured = capture_llama_gsq_inputs(model, documents, layer_index=index, **capture_options)
+                    active_captures = (captured, None, None)
+                    return captured
+
+                cache = capture_training() if distributed is None else distributed.local_call(capture_training)
                 initialization_cache = None
                 validation_cache = None
             else:
@@ -350,13 +400,15 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             active_captures = (cache, initialization_cache, validation_cache)
             try:
                 if initialization_documents is not None and carried is None:
-                    def capture_initialization(index=index, capture_options=capture_options):
-                        nonlocal initialization_cache
+                    def capture_initialization(index=index, capture_options=capture_options,
+                                               cache=cache, validation_cache=validation_cache):
+                        nonlocal initialization_cache, active_captures
                         init_options = dict(capture_options)
                         if capture_directory is not None:
                             init_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'gptq'
                         initialization_cache = capture_llama_gsq_inputs(
                             model, initialization_documents, layer_index=index, **init_options)
+                        active_captures = (cache, initialization_cache, validation_cache)
 
                     if distributed is None:
                         capture_initialization()
@@ -365,11 +417,19 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                         # full calibration activation cache to other ranks.
                         distributed.primary_call(capture_initialization)
                 if validation_documents is not None and gsq.enabled and carried is None:
-                    val_options = dict(capture_options)
-                    if capture_directory is not None:
-                        val_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'validation'
-                    validation_cache = capture_llama_gsq_inputs(
-                        model, validation_documents, layer_index=index, **val_options)
+                    def capture_validation(index=index, capture_options=capture_options,
+                                           cache=cache, initialization_cache=initialization_cache):
+                        nonlocal active_captures
+                        val_options = dict(capture_options)
+                        if capture_directory is not None:
+                            val_options['offload_directory'] = capture_directory/f'layer-{index:02d}'/'validation'
+                        captured = capture_llama_gsq_inputs(
+                            model, validation_documents, layer_index=index, **val_options)
+                        active_captures = (cache, initialization_cache, captured)
+                        return captured
+
+                    validation_cache = (capture_validation() if distributed is None else
+                                        distributed.local_call(capture_validation))
                 active_captures = (cache, initialization_cache, validation_cache)
                 packed, result = quantize_llama_gsq_capture(layers[index], cache,
                                                            bits=run['layer_bits'][index],
@@ -391,21 +451,21 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             record['block_seconds'] = time.monotonic()-block_started
             if checkpoint is not None:
                 def write_checkpoint(checkpoint=checkpoint, layer_signature=layer_signature,
-                                     index=index, packed=packed, record=record):
+                                     index=index, packed=packed, record=record, packed_prefix=packed_prefix):
                     temporary = checkpoint.with_suffix('.pt.tmp')
                     try:
+                        state = {name: value.detach().cpu().clone() for name, value in packed.state_dict().items()}
                         torch.save(dict(signature=layer_signature, layer_index=index,
-                                        state_dict={name: value.detach().cpu().clone()
-                                                    for name, value in packed.state_dict().items()},
-                                        record=record), temporary)
+                                        state_dict=state, record=record), temporary)
                         os.replace(temporary, checkpoint)
+                        return _checkpoint_packed_prefix(packed_prefix, index, state)
                     finally:
                         temporary.unlink(missing_ok=True)
 
                 if distributed is None:
-                    write_checkpoint()
+                    packed_prefix = write_checkpoint()
                 else:
-                    distributed.primary_call(write_checkpoint)
+                    packed_prefix = distributed.primary_call(write_checkpoint)
                 if primary:
                     logging.getLogger(__name__).info('Saved packed GSQ block %d/%d to %s (%.1fs)',
                                                       index+1, len(layers), checkpoint, record['block_seconds'])
@@ -415,8 +475,11 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
             layers[index] = packed
             run['blocks'].append(record)
             if reuse_capture and index+1 in indices:
-                carried = tuple(None if captured is None else advance_llama_gsq_inputs(packed, captured, device=device)
-                                for captured in active_captures)
+                def advance_captures(packed=packed, active_captures=active_captures):
+                    return tuple(None if captured is None else advance_llama_gsq_inputs(packed, captured, device=device)
+                                 for captured in active_captures)
+
+                carried = advance_captures() if distributed is None else distributed.local_call(advance_captures)
             else:
                 carried = None
                 for captured in active_captures:

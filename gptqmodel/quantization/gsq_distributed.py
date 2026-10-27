@@ -250,6 +250,16 @@ class GSQDistributed:
     def barrier(self):
         dist.barrier(group=self.group)
 
+    def local_call(self, fn):
+        """Run rank-local work, synchronizing failures without sharing its result."""
+        result, error = None, None
+        try:
+            result = fn()
+        except Exception as exc:  # noqa: BLE001 - propagate any rank's local capture/replay failure
+            error = f'{type(exc).__name__}: {exc}'
+        self._agree('local_call', error=error)
+        return result
+
     def primary_call(self, fn):
         """Run ``fn`` only on group rank zero and broadcast its detached result.
 
