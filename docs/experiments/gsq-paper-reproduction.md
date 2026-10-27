@@ -119,6 +119,26 @@ interval to 0.12-0.16 nats. Paired seeds are the cheaper axis: 5-19 replicates
 per arm, or evaluate on the full split with `--n 128`. Either way the tables
 above cannot distinguish a 0.05-nat effect from zero.
 
+## Noise cadence and the scale-gradient reduction
+
+`train_stage_update` draws a fresh `uniform` for every microbatch, and that is
+faithful to the pinned author: `src/trainer.py` `train_step` rebuilds
+`quantized_weights` *inside* the accumulation loop, and
+`GumbelSoftmaxFunction.forward` in `src/quantization/gumbel_quantizer_2bit.py`
+draws `u = torch.rand_like(quant_logits)` on every call. Reusing one draw across
+microbatches would change the estimator, so the relaxed weights are deliberately
+**not** hoisted out of the loop; `scripts/gsq_paper/bench_stage_update.py` can
+measure that variant, and it is faster but it is not the paper's method.
+
+What is free is the scale-gradient reduction. The backward pass scattered
+`[out,in]` terms into `[out,groups]` with `scatter_add_`, which collides on every
+element of the contiguous `arange(in)//group_size` map and accounted for 34% of
+stage CUDA time. When the group map is contiguous the reduction now reshapes to
+a segment sum. This is the same sum in a different reduction order (fp32
+relative difference ~1e-7; the forward output is bit-identical), and it matches
+what the optional fused kernel already did in `gsq_scale_reduce`. Peak VRAM is
+unchanged.
+
 ## Reproducibility
 
 The staged training has one duplicate-index `scatter_add_` in the scalar
