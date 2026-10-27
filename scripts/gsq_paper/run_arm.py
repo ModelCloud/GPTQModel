@@ -71,6 +71,8 @@ def parse_args():
                         help='uniform width, ignored when --assignment is given')
     parser.add_argument('--assignment', default=None,
                         help='RCO assignment.json: one width per decoder block')
+    parser.add_argument('--device', default='cuda:0',
+                        help='accelerator for quantization and evaluation')
     parser.add_argument('--group-size', type=int, default=128)
     parser.add_argument('--train-seqs', type=int, default=4096)
     parser.add_argument('--gptq-seqs', type=int, default=512)
@@ -106,7 +108,7 @@ def main():
                         device=DEVICE.CUDA, offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                              attn_implementation='sdpa')
-    wrapper.model.to('cuda:0')
+    wrapper.model.to(args.device)
 
     train = documents(args.corpus, 'train', args.train_seqs)
     gptq = documents(args.corpus, 'gptq', args.gptq_seqs)
@@ -169,7 +171,8 @@ def main():
         raw = evaluate(
             model_or_id_or_path=str(model_dir), tasks=ZERO_SHOT_TASKS, backend=BACKEND.TORCH,
             batch_size=16, apply_chat_template=False,
-            model_args={'dtype': 'bfloat16', 'attn_implementation': 'sdpa', 'device': 'cuda:0'},
+            model_args={'dtype': 'bfloat16', 'attn_implementation': 'sdpa',
+                        'device': args.device},
             gen_kwargs='do_sample=false,temperature=0.0,top_p=1.0,top_k=50',
             suite_kwargs=suite)
         evaluation = get_eval_task_results(raw)
