@@ -44,6 +44,7 @@ from ..models._const import (
 from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.exllamav2_awq import AwqExllamaV2Linear
+from ..nn_modules.qlinear.marlin import MarlinLinear
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import (
@@ -1388,6 +1389,69 @@ def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: Quantize
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
 
 
+def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
+    """Refresh the writable CPU snapshot after Marlin changes its packed layout."""
+    if not module.qweight.is_meta:
+        module.post_init()
+        return
+
+    from accelerate.hooks import AlignDevicesHook, SequentialHook
+    from accelerate.utils import PrefixedDataset
+
+    attached = getattr(module, "_hf_hook", None)
+    hooks = attached.hooks if isinstance(attached, SequentialHook) else (attached,)
+    offload_hooks = [
+        hook for hook in hooks if isinstance(hook, AlignDevicesHook) and hook.offload
+    ]
+    if len(offload_hooks) != 1 or offload_hooks[0].place_submodules:
+        raise RuntimeError(
+            "CPU-offloaded Marlin requires a layer-level Accelerate offload hook."
+        )
+    hook = offload_hooks[0]
+    weights_map = hook.weights_map
+    if isinstance(weights_map, PrefixedDataset) and isinstance(
+        weights_map.dataset, dict
+    ):
+        storage, prefix = weights_map.dataset, weights_map.prefix
+    elif isinstance(weights_map, dict):
+        storage, prefix = weights_map, ""
+    else:
+        raise RuntimeError(
+            "CPU-offloaded Marlin requires a writable in-memory weights map."
+        )
+
+    names = [
+        name
+        for name, tensor in module.named_parameters(recurse=False)
+        if tensor.is_meta
+    ]
+    names.extend(
+        name
+        for name, tensor in module.named_buffers(recurse=False)
+        if tensor.is_meta and name not in module._non_persistent_buffers_set
+    )
+    missing = [name for name in names if f"{prefix}{name}" not in storage]
+    if missing:
+        raise RuntimeError(
+            f"CPU-offloaded Marlin is missing weights map entries: {missing}."
+        )
+
+    updated = {}
+    hook.pre_forward(module)
+    try:
+        module.post_init()
+        for name in names:
+            tensor = getattr(module, name, None)
+            if tensor is None or tensor.is_meta:
+                raise RuntimeError(
+                    f"Marlin did not materialize offloaded tensor `{name}`."
+                )
+            updated[f"{prefix}{name}"] = tensor.detach().to("cpu").clone()
+    finally:
+        hook.post_forward(module, None)
+    storage.update(updated)
+
+
 def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
     """
@@ -1446,6 +1510,8 @@ def gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeCon
         if isinstance(submodule, (ExllamaV2Linear, AwqExllamaV2Linear)):
             device = submodule.qweight.device
             submodule.post_init(scratch_space=model.device_tensors[device])
+        elif isinstance(submodule, MarlinLinear):
+            _post_init_cpu_offloaded_marlin(submodule)
         elif isinstance(submodule, BaseQuantLinear):
             submodule.post_init()
 
