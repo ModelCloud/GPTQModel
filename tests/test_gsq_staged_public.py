@@ -217,7 +217,9 @@ def test_staged_llama_resumes_after_later_block_failure(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["attention", "mlp"])
-def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path):
+@pytest.mark.parametrize("in_memory", [False, True])
+@pytest.mark.parametrize("activation_checkpointing", [False, True])
+def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path, in_memory, activation_checkpointing):
     from transformers import LlamaConfig, LlamaForCausalLM
 
     from gptqmodel.quantization.gsq_batching import CachedLlamaStageBatches
@@ -262,7 +264,8 @@ def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path):
     old_loss = reconstruction_stage_loss(stage, (hidden,), kwargs, student_weights=old_weights,
                                          teacher_weights=teacher_weights)
     old_loss.backward()
-    paths = cache_llama_stage_targets(stage, original, teacher_weights, mode=mode, directory=tmp_path)
+    paths = cache_llama_stage_targets(stage, original, teacher_weights, mode=mode,
+                                      directory=None if in_memory else tmp_path)
     cached = CachedLlamaStageBatches(original, paths, mode=mode, device="cpu")
     if mode == "mlp":
         assert cached[0][1][0][0].shape[0] == 1
@@ -271,9 +274,11 @@ def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path):
         inputs, cached_kwargs, mask, teacher = cached[0][0][0]
         new_loss = reconstruction_stage_student_loss(stage, (inputs,), cached_kwargs,
                                                       student_weights=new_weights, teacher=teacher,
-                                                      output_mask=mask)
+                                                      output_mask=mask,
+                                                      activation_checkpointing=activation_checkpointing)
     else:
-        new_loss = reconstruction_cached_llama_mlp_loss(stage, cached[0][0][0], new_weights)
+        new_loss = reconstruction_cached_llama_mlp_loss(
+            stage, cached[0][0][0], new_weights, activation_checkpointing=activation_checkpointing)
     new_loss.backward()
     torch.testing.assert_close(new_loss, old_loss, rtol=0, atol=0)
     for name in old_weights:

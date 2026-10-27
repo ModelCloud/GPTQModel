@@ -117,6 +117,61 @@ class DeviceBackedLlamaDocuments:
             yield hidden, kwargs
 
 
+@torch.inference_mode()
+def advance_llama_gsq_inputs(layer, cache, *, device):
+    """Advance a memory capture through the newly installed packed decoder.
+
+    Input geometry and rotary/mask tensors remain fixed. Each captured chunk is
+    replaced immediately, bounding extra hidden storage by one chunk. Packed
+    inference weights retain their normal lifetime; no dense weights are cached.
+    """
+    from .input_cache import InputCache
+
+    if not isinstance(cache, (InputCache, DeviceBackedLlamaCapture)):
+        raise TypeError('Incremental GSQ capture requires a memory-backed capture')
+    moved = {}
+
+    def move(value):
+        if isinstance(value, torch.Tensor):
+            key = id(value)
+            if key not in moved:
+                moved[key] = value.to(device)
+            return moved[key]
+        if isinstance(value, tuple):
+            return tuple(move(item) for item in value)
+        if isinstance(value, list):
+            return [move(item) for item in value]
+        if isinstance(value, dict):
+            return {key: move(item) for key, item in value.items()}
+        return value
+
+    def forward(hidden, kwargs):
+        output = layer(hidden.to(device), **move(kwargs))
+        if isinstance(output, tuple):
+            output = output[0]
+        if not isinstance(output, torch.Tensor) or output.shape != hidden.shape:
+            raise ValueError('Incremental GSQ capture requires a shape-preserving decoder')
+        return output.detach().to(hidden.device)
+
+    if isinstance(cache, DeviceBackedLlamaCapture):
+        chunks = list(cache.chunks)
+        cache.chunks = chunks
+        for index, (hidden, kwargs) in enumerate(chunks):
+            chunks[index] = (forward(hidden, kwargs), kwargs)
+        cache.chunks = tuple(chunks)
+    else:
+        for index in range(len(cache.layer_inputs)):
+            hidden = cache.layer_inputs[index]
+            if len(hidden) != 1:
+                raise ValueError('Incremental GSQ capture requires one decoder hidden input')
+            kwargs = dict(cache.layer_input_kwargs[index])
+            kwargs['position_ids'] = cache.position_ids[index]
+            kwargs['attention_mask'] = cache.attention_masks[index]
+            cache.layer_inputs[index] = [forward(hidden[0], kwargs)]
+            cache.src_inputs[index] = cache.layer_inputs[index]
+    return cache
+
+
 def prepare_llama_gsq_capture(layer, cache, *, device=None):
     """Copy a pristine block and its exact captured masks/rotary tensors.
 
@@ -220,7 +275,8 @@ def prepare_llama_gsq_capture(layer, cache, *, device=None):
 
 
 def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack=True, device=None,
-                                initialization_cache=None, validation_cache=None):
+                                initialization_cache=None, validation_cache=None, distributed=None,
+                                target_cache='none', activation_checkpointing=False):
     """Train/export a shared captured block even when its caller uses inference mode.
 
     The shared looper still owns installing the result and replaying it before
@@ -239,7 +295,8 @@ def quantize_llama_gsq_capture(layer, cache, *, bits, group_size, gsq=None, pack
         return quantize_llama_gsq_block(prepared, batches, bits=bits, group_size=group_size,
                                         gsq=gsq, pack=pack,
                                         initialization_batches=initialization_batches,
-                                        validation_batches=validation_batches)
+                                        validation_batches=validation_batches, distributed=distributed,
+                                        target_cache=target_cache, activation_checkpointing=activation_checkpointing)
 
 
 def capture_llama_gsq_inputs(

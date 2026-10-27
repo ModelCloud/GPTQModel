@@ -299,7 +299,7 @@ class GSQScalarTrainingModule(torch.nn.Module):
 
 
 def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_weights=None, output_select=None,
-                              output_mask=None):
+                              output_mask=None, activation_checkpointing=False):
     """Evaluate an actual stage with differentiable weight substitutions.
 
     The caller chooses the stage module/output (linear, attention-to-MLP, or
@@ -326,7 +326,7 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
         teacher = torch.func.functional_call(module, (teacher_state, buffers), args, kwargs)
         teacher = teacher if output_select is None else output_select(teacher)
     student_state = {**parameters, **{name: match_parameter(name, value) for name, value in student_weights.items()}}
-    student = torch.func.functional_call(module, (student_state, buffers), args, kwargs)
+    student = _student_forward(module, student_state, buffers, args, kwargs, activation_checkpointing)
     student = student if output_select is None else output_select(student)
     if not isinstance(student, torch.Tensor) or not isinstance(teacher, torch.Tensor):
         raise ValueError('GSQ stage requires tensor outputs or an output selector')
@@ -341,8 +341,21 @@ def reconstruction_stage_loss(module, args, kwargs, *, student_weights, teacher_
     return torch.nn.functional.mse_loss(student, teacher)
 
 
+def _student_forward(module, state, buffers, args, kwargs, activation_checkpointing):
+    if not activation_checkpointing or not torch.is_grad_enabled():
+        return torch.func.functional_call(module, (state, buffers), args, kwargs)
+    from torch.utils.checkpoint import checkpoint
+
+    names = tuple(state)
+
+    def forward(*values):
+        return torch.func.functional_call(module, (dict(zip(names, values)), buffers), args, kwargs)
+
+    return checkpoint(forward, *state.values(), use_reentrant=False)
+
+
 def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
-                                      teacher, output_mask=None):
+                                      teacher, output_mask=None, activation_checkpointing=False):
     """Evaluate only the trainable path against an exact cached teacher output."""
     parameters = {name: value.detach() for name, value in module.named_parameters()}
     buffers = {name: value.detach().clone() for name, value in module.named_buffers()}
@@ -355,9 +368,7 @@ def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
         student_state[name] = value.to(
             device=parameter.device, dtype=parameter.dtype,
         ) if value.device != parameter.device or value.dtype != parameter.dtype else value
-    student = torch.func.functional_call(
-        module, (student_state, buffers), args, kwargs,
-    )
+    student = _student_forward(module, student_state, buffers, args, kwargs, activation_checkpointing)
     if not isinstance(student, torch.Tensor) or not isinstance(teacher, torch.Tensor):
         raise TypeError('GSQ cached stage requires tensor student and teacher outputs')
     if student.shape != teacher.shape or student.device != teacher.device:
@@ -371,7 +382,7 @@ def reconstruction_stage_student_loss(module, args, kwargs, *, student_weights,
     return torch.nn.functional.mse_loss(student, teacher)
 
 
-def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights):
+def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights, *, activation_checkpointing=False):
     """Train only the changing MLP against an exact fixed-block cache."""
     residual, teacher = batch
     from .gsq_cuda_relaxation import cuda_rms_norm
@@ -390,20 +401,28 @@ def reconstruction_cached_llama_mlp_loss(layer, batch, student_weights):
         if value.shape != projection.weight.shape:
             raise ValueError('GSQ cached MLP replacement shape differs')
         weights.append(value.to(device=projection.weight.device, dtype=projection.weight.dtype))
-    gate = torch.nn.functional.linear(norm_input, weights[0], projections[0].bias)
-    up = torch.nn.functional.linear(norm_input, weights[1], projections[1].bias)
-    hidden = layer.mlp.act_fn(gate)*up
-    student = residual + torch.nn.functional.linear(hidden, weights[2], projections[2].bias)
+    def forward(inputs, gate_weight, up_weight, down_weight):
+        gate = torch.nn.functional.linear(inputs, gate_weight, projections[0].bias)
+        up = torch.nn.functional.linear(inputs, up_weight, projections[1].bias)
+        hidden = layer.mlp.act_fn(gate)*up
+        return residual + torch.nn.functional.linear(hidden, down_weight, projections[2].bias)
+
+    if activation_checkpointing and torch.is_grad_enabled():
+        from torch.utils.checkpoint import checkpoint
+
+        student = checkpoint(forward, norm_input, *weights, use_reentrant=False)
+    else:
+        student = forward(norm_input, *weights)
     if student.shape != teacher.shape or student.device != teacher.device:
         raise ValueError('GSQ cached MLP target does not match the student')
     return torch.nn.functional.mse_loss(student, teacher)
 
 
-def cache_llama_stage_targets(stage, batches, teacher_weights, *, mode, directory):
+def cache_llama_stage_targets(stage, batches, teacher_weights, *, mode, directory, cache_device='cpu'):
     """Precompute fixed teacher results with the original microbatch geometry."""
     if mode not in ('attention', 'mlp'):
         raise ValueError('Invalid GSQ fixed-target cache mode')
-    directory = Path(directory)
+    directory = None if directory is None else Path(directory)
     parameters = {name: value.detach() for name, value in stage.named_parameters()}
     for name, value in teacher_weights.items():
         if name not in parameters or value.shape != parameters[name].shape:
@@ -422,26 +441,29 @@ def cache_llama_stage_targets(stage, batches, teacher_weights, *, mode, director
                 buffers = {name: value.detach().clone() for name, value in stage.named_buffers()}
                 teacher = torch.func.functional_call(stage, (parameters, buffers), (inputs,), kwargs)
                 if mode == 'attention':
-                    payload = teacher.detach().cpu()
-                    path = directory/f'{batch_index:05d}-{microbatch_index:03d}.pt'
-                    torch.save(payload, path)
+                    payload = teacher.detach().to(cache_device)
+                    path = payload if directory is None else directory/f'{batch_index:05d}-{microbatch_index:03d}.pt'
+                    if directory is not None:
+                        torch.save(payload, path)
                     microbatch_files.append(path)
                 else:
                     residual = attention(inputs, **kwargs)
-                    payload = torch.stack((residual, teacher)).detach().cpu()
+                    payload = torch.stack((residual, teacher)).detach().to(cache_device)
                     packed_batch.append(payload)
             if mode == 'attention':
                 files.append(tuple(microbatch_files))
             else:
-                path = directory/f'{batch_index:05d}.pt'
-                same_shape = all(item.shape == packed_batch[0].shape for item in packed_batch)
-                torch.save(torch.stack(packed_batch) if same_shape else tuple(packed_batch), path)
+                path = tuple(packed_batch) if directory is None else directory/f'{batch_index:05d}.pt'
+                if directory is not None:
+                    same_shape = all(item.shape == packed_batch[0].shape for item in packed_batch)
+                    torch.save(torch.stack(packed_batch) if same_shape else tuple(packed_batch), path)
                 files.append(path)
     return files
 
 
 def train_stage_update(quantizers, optimizer, microbatches, objective, *, generator,
-                       temperature, multiplier, uniforms=None, static_gradients=False):
+                       temperature, multiplier, uniforms=None, static_gradients=False,
+                       distributed=None):
     """One accumulated staged update; objective(batch, weights) returns mean MSE.
 
     Microbatches are (batch, element_count) pairs. Counts describe reconstructed
@@ -479,6 +501,8 @@ def train_stage_update(quantizers, optimizer, microbatches, objective, *, genera
             (loss*fraction).backward()
             contribution = loss.detach()*fraction
             reported = contribution if reported is None else reported+contribution
+        if distributed is not None:
+            reported = distributed.reduce_update(optimizer, reported, total)
         gradients = [
             parameter.grad
             for group in optimizer.param_groups
@@ -535,7 +559,7 @@ def _hard_stage_weights(quantizers, *, dtype=None):
     )
 
 
-def evaluate_hard_stage(quantizers, batches, objective, *, weights=None):
+def evaluate_hard_stage(quantizers, batches, objective, *, weights=None, distributed=None):
     """Measure deterministic hard assignments over the complete stage dataset."""
     import logging
     import time
@@ -573,9 +597,10 @@ def evaluate_hard_stage(quantizers, batches, objective, *, weights=None):
     # ``float`` above would serialize the CUDA stream once per microbatch. The
     # CPU weighted sum retains the historical binary64 operation order.
     loss_values = torch.stack(losses).cpu().tolist()
-    if not all(math.isfinite(value) for value in loss_values):
+    if distributed is None and not all(math.isfinite(value) for value in loss_values):
         raise ValueError('GSQ hard stage objective must be a finite scalar')
-    return sum(value*count for value, count in zip(loss_values, counts))/elements
+    value = sum(value*count for value, count in zip(loss_values, counts))/elements
+    return value if distributed is None else distributed.mean_loss(value, elements)
 
 
 class LlamaGSQAttentionStage(torch.nn.Module):
@@ -629,7 +654,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                              fp32_tail_epochs=0, validation_start_epoch=0,
                              export_weights=True,
                              reuse_best_hard_weights=False,
-                             hard_weight_dtype=None):
+                             hard_weight_dtype=None, distributed=None):
     """Train one stage with an optional held-out guard and hard-weight export.
 
     Each batch contains (microbatch, output_element_count) entries. The caller
@@ -671,16 +696,18 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     import time
 
     started = time.perf_counter()
+    if distributed is not None:
+        distributed.sync_quantizers(quantizers)
     initial_hard_weights = _hard_stage_weights(
         quantizers, dtype=hard_weight_dtype,
     )
     hard_loss_before = evaluate_hard_stage(
-        quantizers, batches, objective, weights=initial_hard_weights,
+        quantizers, batches, objective, weights=initial_hard_weights, distributed=distributed,
     )
     validation_hard_loss_before = (
         evaluate_hard_stage(
             quantizers, validation_batches, objective,
-            weights=initial_hard_weights,
+            weights=initial_hard_weights, distributed=distributed,
         )
         if validation_batches else None
     )
@@ -713,7 +740,8 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                  torch.optim.AdamW(groups, betas=betas, eps=1e-8, foreach=False, fused=False))
     initial_lrs = [group['lr'] for group in optimizer.param_groups]
     device = next(iter(quantizers.values())).logits.device
-    sampling_rng = torch.Generator(device=device).manual_seed(seed)
+    sampling_rng = torch.Generator(device=device).manual_seed(
+        seed if distributed is None else distributed.seed(seed))
     shuffle_rng = torch.Generator().manual_seed(seed)
     total_steps = epochs*len(batches)
     history = []
@@ -740,7 +768,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 group['lr'] = learning_rate
             loss = train_stage_update(
                 quantizers, optimizer, microbatches, objective,
-                generator=sampling_rng, temperature=tau, multiplier=kappa,
+                generator=sampling_rng, temperature=tau, multiplier=kappa, distributed=distributed,
             )
             if step == 0 or (step+1) % 100 == 0 or step+1 == total_steps or time.monotonic() >= progress_at:
                 import logging
@@ -764,7 +792,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
             )
             validation_loss = evaluate_hard_stage(
                 quantizers, validation_batches, objective,
-                weights=checkpoint_weights,
+                weights=checkpoint_weights, distributed=distributed,
             )
             validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
             if validation_loss < best_validation_loss:
@@ -798,7 +826,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
         _hard_stage_weights(quantizers, dtype=hard_weight_dtype)
     )
     result['hard_loss_after'] = evaluate_hard_stage(
-        quantizers, batches, objective, weights=final_hard_weights,
+        quantizers, batches, objective, weights=final_hard_weights, distributed=distributed,
     )
     result['hard_loss_delta'] = result['hard_loss_after']-hard_loss_before
     result['validation_history'] = validation_history
@@ -810,7 +838,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
     else:
         result['validation_hard_loss_after'] = evaluate_hard_stage(
             quantizers, validation_batches, objective,
-            weights=final_hard_weights,
+            weights=final_hard_weights, distributed=distributed,
         )
     del final_hard_weights
     result['best_validation_hard_loss'] = best_validation_loss
@@ -827,7 +855,8 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
 def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, seed=7,
                      qk_steps=2000, qk_damp_percent=.01, reinitialize_mlp=True, initializer='gptq',
                      batch_size=1, microbatch_size=1, affine_initializers=False,
-                     initialization_batches=None, validation_batches=None, **training):
+                     initialization_batches=None, validation_batches=None, distributed=None,
+                     target_cache='none', activation_checkpointing=False, **training):
     """Fit a Llama block in author stage order from supplied scalar initializers.
 
     Batches are (hidden_states, attention_kwargs) pairs without padding. Caller
@@ -845,9 +874,17 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             raise ValueError('GSQ batch sizes must be positive integers')
     if microbatch_size > batch_size:
         raise ValueError('GSQ microbatch size exceeds optimizer batch size')
+    if distributed is not None:
+        if batch_size % distributed.world_size or microbatch_size > batch_size // distributed.world_size:
+            raise ValueError('GSQ global batch must divide world size and local batch must fit a microbatch')
+        batch_size //= distributed.world_size
     attention_implementation = layer.self_attn.config._attn_implementation
     if attention_implementation not in ('eager', 'sdpa'):
         raise ValueError('Staged GSQ requires eager or SDPA Llama attention')
+    if target_cache not in ('none', 'cpu', 'device'):
+        raise ValueError('GSQ target cache must be none, cpu or device')
+    if target_cache != 'none' and attention_implementation != 'sdpa':
+        raise ValueError('GSQ memory target caching requires SDPA')
     device = next(layer.parameters()).device
     if attention_implementation == 'sdpa':
         for source in (batches, initialization_batches, validation_batches):
@@ -896,16 +933,20 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
             documents = getattr(source, 'documents', None)
             return getattr(getattr(documents, 'capture', None), 'directory', None)
 
-        cache_targets = (attention_implementation == 'sdpa' and disk_source(stage_batches) is not None
-                         and (validation_stage_batches is None or disk_source(validation_stage_batches) is not None))
+        cache_targets = (attention_implementation == 'sdpa' and (target_cache != 'none' or
+                         (disk_source(stage_batches) is not None and (validation_stage_batches is None or
+                          disk_source(validation_stage_batches) is not None))))
         with ExitStack() as stack:
             if cache_targets:
                 def cached(source, label):
-                    parent = Path(disk_source(source)).parent
-                    directory = stack.enter_context(TemporaryDirectory(
-                        prefix=f'gsq-{stage_name}-{label}-', dir=parent))
+                    directory = None
+                    if target_cache == 'none':
+                        parent = Path(disk_source(source)).parent
+                        directory = stack.enter_context(TemporaryDirectory(
+                            prefix=f'gsq-{stage_name}-{label}-', dir=parent))
                     files = cache_llama_stage_targets(stage, source, teacher, mode=stage_name,
-                                                      directory=directory)
+                                                      directory=directory,
+                                                      cache_device=device if target_cache == 'device' else 'cpu')
                     return CachedLlamaStageBatches(source, files, mode=stage_name, device=device)
 
                 stage_batches = cached(stage_batches, 'train')
@@ -913,16 +954,19 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
                     validation_stage_batches = cached(validation_stage_batches, 'validation')
 
             def objective(batch, weights):
+                checkpoint_options = {'activation_checkpointing': True} if activation_checkpointing else {}
                 if cache_targets:
                     if stage_name == 'attention':
                         inputs, kwargs, mask, target = batch
                         return reconstruction_stage_student_loss(
                             stage, (inputs,), kwargs, student_weights=weights,
-                            teacher=target, output_mask=mask)
-                    return reconstruction_cached_llama_mlp_loss(stage, batch, weights)
+                            teacher=target, output_mask=mask, **checkpoint_options)
+                    return reconstruction_cached_llama_mlp_loss(
+                        stage, batch, weights, **checkpoint_options)
                 inputs, kwargs, mask = batch
                 return reconstruction_stage_loss(stage, (inputs,), kwargs, student_weights=weights,
-                                                 teacher_weights=teacher, output_mask=mask)
+                                                 teacher_weights=teacher, output_mask=mask,
+                                                 **checkpoint_options)
             if training.get('restore_best') is True and not validation_stage_batches:
                 raise ValueError(
                     'Staged GSQ restore_best=True requires held-out validation batches for every '
@@ -930,7 +974,8 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
                     'for automatic selection, or disable restore_best')
             result = fit_reconstruction_stage(quantizers, stage_batches, objective,
                                               epochs=epochs, seed=seed,
-                                              validation_batches=validation_stage_batches, **training)
+                                              validation_batches=validation_stage_batches,
+                                              distributed=distributed, **training)
         if affine_initializers:
             result['zeros'] = {name: quant.zeros.detach().clone() for name, quant in quantizers.items()}
             result['codes'] = {name: quant.hard_codes().detach().clone() for name, quant in quantizers.items()}
@@ -943,34 +988,33 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
     qk_inputs = (initialization_batches.iter_hidden_batches()
                  if hasattr(initialization_batches, 'iter_hidden_batches') else
                  (hidden for hidden, _ in initialization_batches))
-    factor, dead = prepare_qk_calibration_factor(
-        qk_inputs,
-        damp_percent=qk_damp_percent,
-        device=device,
-        transform=fitted.input_layernorm,
-    )
-    for name in names[:2]:
+    def train_qk():
+        factor, dead = prepare_qk_calibration_factor(
+            qk_inputs, damp_percent=qk_damp_percent, device=device, transform=fitted.input_layernorm,
+        )
+        results = {}
+        for name in names[:2]:
+            projection = fitted.get_submodule(name)
+            quant = quantizer(name)
+            qk_option_names = (
+                'assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier', 'optimizer',
+            )
+            qk_options = {key: value for key, value in training.items() if key in qk_option_names}
+            result = fit_qk_projection(
+                quant, projection.weight, factor=factor, dead=dead, steps=qk_steps,
+                damp_percent=qk_damp_percent, seed=seed, **qk_options,
+            )
+            if affine_initializers:
+                result['zeros'] = {'weight': quant.zeros.detach().clone()}
+                result['codes'] = {'weight': quant.hard_codes().detach().clone()}
+            result['objective'] = 'prepared_qk_quadratic_sum'
+            result['damp_percent'] = qk_damp_percent
+            results[name] = result
+        return results
+
+    qk_results = train_qk() if distributed is None else distributed.primary_call(train_qk)
+    for name, result in qk_results.items():
         projection = fitted.get_submodule(name)
-        quant = quantizer(name)
-        qk_option_names = (
-            'assignment_lr', 'scale_lr', 'betas', 'weight_decay', 'temperature', 'multiplier', 'optimizer',
-        )
-        qk_options = {key: value for key, value in training.items() if key in qk_option_names}
-        result = fit_qk_projection(
-            quant,
-            projection.weight,
-            factor=factor,
-            dead=dead,
-            steps=qk_steps,
-            damp_percent=qk_damp_percent,
-            seed=seed,
-            **qk_options,
-        )
-        if affine_initializers:
-            result['zeros'] = {'weight': quant.zeros.detach().clone()}
-            result['codes'] = {'weight': quant.hard_codes().detach().clone()}
-        result['objective'] = 'prepared_qk_quadratic_sum'
-        result['damp_percent'] = qk_damp_percent
         with torch.no_grad():
             projection.weight.copy_(result['weights']['weight'])
         records[name] = result
@@ -1011,11 +1055,14 @@ def fit_llama_stages(layer, initializers, batches, *, bits, group_size, epochs, 
         teacher=dense_attention, validation_stage_batches=validation_stage_batches)
     mlp_metadata = None
     if reinitialize_mlp:
-        refreshed, mlp_metadata = initialize_llama_gptq(fitted, initialization_batches,
-                                                       bits={name: width[name] for name in names[4:]},
-                                                       group_size=group_size,
-                                                       damp_percent=qk_damp_percent, projections=names[4:],
-                                                       initializer=initializer)
+        def refresh_mlp():
+            return initialize_llama_gptq(fitted, initialization_batches,
+                                         bits={name: width[name] for name in names[4:]},
+                                         group_size=group_size, damp_percent=qk_damp_percent,
+                                         projections=names[4:], initializer=initializer)
+
+        refreshed, mlp_metadata = (refresh_mlp() if distributed is None else
+                                   distributed.primary_call(refresh_mlp))
         initializers.update(refreshed)
     # The block target also uses original dense attention and dense MLP;
     # the student uses fitted attention and learns the three MLP projections.
@@ -1266,7 +1313,8 @@ def pack_llama_staged_block(fitted, records, *, bits, group_size):
 
 
 def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack=True,
-                             initialization_batches=None, validation_batches=None):
+                             initialization_batches=None, validation_batches=None, distributed=None,
+                             target_cache='none', activation_checkpointing=False):
     """Quantize one captured Llama block, optionally train GSQ, then export.
 
     The default performs ordinary GPTQ initialization. Enabled staged GSQ has
@@ -1290,13 +1338,17 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
     if not isinstance(pack, bool):
         raise TypeError('pack must be boolean')
     initialization_batches = batches if initialization_batches is None else initialization_batches
-    initializers, metadata = initialize_llama_gptq(layer, initialization_batches, bits=width,
-                                                   group_size=group_size,
-                                                   damp_percent=gsq.damp_percent, initializer=gsq.initializer)
+    def initialize():
+        return initialize_llama_gptq(layer, initialization_batches, bits=width,
+                                     group_size=group_size, damp_percent=gsq.damp_percent,
+                                     initializer=gsq.initializer)
+
+    initializers, metadata = initialize() if distributed is None else distributed.primary_call(initialize)
     if gsq.enabled:
         fitted, records = fit_llama_stages(layer, initializers, batches, bits=width, group_size=group_size,
                                            initialization_batches=initialization_batches,
-                                           validation_batches=validation_batches,
+                                           validation_batches=validation_batches, distributed=distributed,
+                                           target_cache=target_cache, activation_checkpointing=activation_checkpointing,
                                            **gsq.training_kwargs())
     else:
         fitted = copy.deepcopy(layer).eval()
