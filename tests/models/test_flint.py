@@ -5,7 +5,7 @@ from model_test import ModelTest
 
 
 class TestFlint(ModelTest):
-    NATIVE_MODEL_ID = "/monster/data/model/RecursiveSI-flint-BF16"
+    NATIVE_MODEL_ID = "RecursiveSI/flint"
     TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
