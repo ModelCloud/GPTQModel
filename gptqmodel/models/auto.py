@@ -90,6 +90,7 @@ from .definitions.deepseek_v2 import DeepSeekV2QModel  # noqa: E402
 from .definitions.deepseek_v3 import DeepSeekV3QModel  # noqa: E402
 from .definitions.deepseek_v32 import DeepSeekV32QModel  # noqa: E402
 from .definitions.raon1_mini import Raon1MiniQModel  # noqa: E402
+from .definitions.flint import FlintQModel  # noqa: E402
 from .definitions.deepseek_v4 import DeepSeekV4QModel  # noqa: E402
 from .definitions.deepseek_ocr2 import DeepSeekOCR2QModel  # noqa: E402
 from .definitions.deepseek_vl import DeepSeekVLQModel  # noqa: E402
@@ -359,6 +360,7 @@ MODEL_MAP = {
     "deepseek_v3": DeepSeekV3QModel,
     "deepseek_v32": DeepSeekV32QModel,
     "raon1_mini": Raon1MiniQModel,
+    "flint": FlintQModel,
     "deepseek_v4": DeepSeekV4QModel,
     "deepseek_ocr2": DeepSeekOCR2QModel,
     "deepseek_vl": DeepSeekVLQModel,
