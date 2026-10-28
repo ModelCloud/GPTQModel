@@ -213,6 +213,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | DBRX / DBRX Converted | `dbrx`, `dbrx_converted` |
 | DeciLM | `deci` |
 | DeepSeek V2 / V3 / V3.2 / V4 / VL / VL2 / OCR2 | `deepseek_v2`, `deepseek_v3`, `deepseek_v32`, `deepseek_v4`, `deepseek_vl`, `deepseek_vl_v2`, `deepseek_ocr2` |
+| KRAFTON Raon-1 mini | `raon1_mini` |
 | DiffusionGemma | `diffusion_gemma` |
 | Dots1 | `dots1` |
 | Dream | `dream` |
