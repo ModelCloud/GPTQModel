@@ -1,11 +1,13 @@
 # SPDX-FileCopyrightText: 2026 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 from model_test import ModelTest
 
 
 class TestFlint(ModelTest):
-    NATIVE_MODEL_ID = "RecursiveSI/flint"
+    NATIVE_MODEL_ID = os.getenv("FLINT_MODEL_ID", "RecursiveSI/flint")
     TRUST_REMOTE_CODE = False
     EVAL_TASKS_SLOW = {
         "arc_challenge": {
