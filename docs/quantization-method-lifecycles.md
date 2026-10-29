@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.8
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.9
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -33,6 +33,11 @@ explicit successful save. This does not remove intrinsic optimizer validation,
 early stopping, reconstruction objectives, or RCO/refinement selection. Those
 measurements retain their method-owned roles; saved-artifact evaluation has its
 own data/resources and report and cannot change a completed quantization result.
+
+Mapped AUTO targets and `DynamicModuleTargeting` queries resolve before method
+compilation. The full composed program still checks selected representations,
+coupled writes, aliases, and capabilities. A method or extension cannot broaden
+an AUTO default, silently drop unsupported owners, or retarget during execution.
 
 ## 1. Coverage and classification
 

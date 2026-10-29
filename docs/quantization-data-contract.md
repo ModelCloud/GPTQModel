@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.8 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.9 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -162,6 +162,11 @@ observations from the image route as well as any supplied text-only route. Raw
 images are not sent to a text-only tokenizer, but the image corpus is not excluded
 from downstream backbone calibration. Executing a component for observations
 does not authorize changing its weights.
+Likewise, `Target.AUTO` resolves the operation's declared scope from the model
+mapping; it does not derive a weight-write scope from the dataset class. When a
+language operation is selected too, it still receives the required image-derived
+observations. `DynamicModuleTargeting` narrows module writes independently of
+these automatically resolved input paths.
 
 ```mermaid
 flowchart LR
@@ -303,8 +308,8 @@ plan = (
     Plan()
     .devices(Local(gpus=[0, 1, 2, 3]))
     .data(images, texts)
-    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
-    .then(Quantize("language", GPTQ(bits=4), name="language"))
+    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 
 # Optional coverage controls; the image route is still inferred.

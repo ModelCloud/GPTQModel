@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.8, 2026-10-29.
+**Status:** design discussion, revision 0.9, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -132,7 +132,9 @@ models. See the companion matrix for primary sources and acceptance cases.
 ## 3. Proposed contracts
 
 1. **Selection determines what may change.** Calibration can execute outside
-   that selection, but cannot silently expand the weight write scope.
+   that selection, but cannot silently expand the weight write scope. Targets
+   default to `Target.AUTO` within a declared scope/model default; the model
+   mapping resolves paths and `DynamicModuleTargeting` narrows the selection.
 2. **Components own representation and revisions.** Root status is a derived
    summary, not a global quantized boolean.
 3. **Dependencies determine scheduling.** Python containment, modality labels,
@@ -175,6 +177,7 @@ models. See the companion matrix for primary sources and acceptance cases.
 | --- | --- |
 | `ModelComposition` | Component registry, parameter aliases, architecture adapter, and assembled revision. |
 | `Component` | Stable public identity, owned parameter/buffer references, per-operator representations, recipes, and revision history. |
+| `Target.AUTO` / `DynamicModuleTargeting` | Mapped default selection or immutable module query, resolved within an operation scope to canonical owner IDs at compile time. Labels and dataset routing do not determine weight writes. |
 | `Route` | A supported input/output path and modality/task semantics; several routes may execute the same parameter owners. |
 | `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
 | `StateResource` | KV, recurrence/convolution state, depth history, retrieval indices, per-layer inputs, sampler/stream state, or another resource with explicit producers and consumers. |
@@ -210,6 +213,11 @@ flowchart TD
 Components are logical identities such as `vision.encoder`, `vision.projector`,
 `language`, or `audio.encoder`. A named selection such as `vision` can expand to
 several components without becoming another mutable owner.
+The model mapping declares versioned scope/default selections. Typed constructors
+such as `Quantize.vision(...)` supply the scope; an omitted target is `Target.AUTO`
+and needs no path string. The mapping explicitly decides whether a default group
+includes bridge/projector owners. Ambiguous or absent defaults require a concrete
+selection instead of guessing. An operation's `name` remains only its label.
 
 Modality labels do not guarantee separate owners. An encoder-free model can have
 image/audio/text routes through one backbone. `inspect()` must report affected
@@ -312,8 +320,8 @@ model.requantize(
 
 | Operation | Proposed meaning |
 | --- | --- |
-| `quantize(target=...)` | Execute the selected method program for dense weights; reject already-packed weights within the resolved write selection. Data is required only when the resolved program requires it. |
-| `requantize(target=..., source=...)` | Replace selected packed representations using an identified source policy. |
+| `quantize(target=Target.AUTO, ...)` | Resolve mapped defaults or an explicit query and execute the dense-weight method program; reject already-packed selected weights. Data is required only by the composed program. |
+| `requantize(target=Target.AUTO, source=..., ...)` | Resolve mapped defaults or an explicit query and replace selected packed representations using an identified source policy. |
 | `repack(target=..., format=...)` | Convert storage layout without changing quantized numerical values, where supported. |
 | `run.save(...)` / `model.save(...)` | Commit the run's assembled revision or the current composition, including untouched components and method/integrity status; return a pinned `ModelArtifact`. |
 | `artifact.evaluate(suite=..., data=...)` | Independently evaluate an already-saved artifact and return an `EvaluationReport`. It is not a quantization-plan operation. |
@@ -330,8 +338,8 @@ plan = (
     Plan()
     .data(calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
-    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
-    .add(Quantize("language", GPTQ(bits=4), name="language"))
+    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .add(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 resolved = plan.compile(model)
 print(resolved.explain())
@@ -346,6 +354,10 @@ report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 dependency or shared-write conflict fails with an explanation. Resource policy
 determines feasible overlap and whether a stage uses replicas, shards, or
 cooperative optimization. Ordering syntax cannot override method semantics.
+Scoped constructors use `Target.AUTO` by default. Module queries use
+`DynamicModuleTargeting`, including role filters and grouped expert selection.
+Resolution precedes GPU partitioning and freezes mapping/owner identities.
+Explicit jobs do not cause AUTO to claim other unselected weights as leftovers.
 
 Recipes can be reused and composed through one typed operation:
 
@@ -1051,6 +1063,7 @@ The following are proposed acceptance criteria and experiments.
 | V31 | Compilation, saving, and independent evaluation | Compilation consumes no data or model forward. Quantization has no evaluation node or binding; saving returns a committed artifact before optional evaluation starts. Evaluation tests persisted state, reports separately, and cannot change quantization/save success or trigger refinement. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
 | V33 | Concrete multimodal target | The pinned DeepSeek V4.1 Flash example satisfies DS1-DS6: grouped global expert selection, preserved owners, inferred downstream data paths, explicit native low-bit fitting source, and admitted multi-GPU execution. |
+| V34 | Automatic mapped targets | Omitted/explicit `Target.AUTO` and scoped Python/file plans resolve the same default groups. `DynamicModuleTargeting` narrows the scope; labels, data routes, other jobs, and GPU layout cannot expand it. Missing/ambiguous defaults or stale mappings fail concretely. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1085,7 +1098,7 @@ proposed defaults, not final design approval.
 | D2 | Method programs with progressive candidate-conditioned fitting where legal. | Which observations must precede mutation, and which quality/resource criteria justify composition refinement? |
 | D3 | Explicit state resources and isolated execution contexts. | Where is snapshotting preferable to prefix recomputation, and how are ambient globals adapted? |
 | D4 | Immutable lineage with explicit stage-specific teacher/initializer roles. | How should APIs distinguish raw/derived references, native packed sources, candidate initializers, and retained optimization masters? |
-| D5 | Explicit shared parameter groups. | What is the smallest useful public selection and conflict-reporting vocabulary? |
+| D5 | Mapped `Target.AUTO` defaults, scoped `DynamicModuleTargeting` queries, and explicit shared ownership groups. | Which default groups should each adapter declare, and how should shared/bridge owners appear in scope and conflict reports? |
 | D6 | Bounded optional composition refinement, separate from required method optimization. | Which additional objectives and regions improve quality at practical cost? |
 | D7 | Checkpoint declared durable method boundaries; publish explicit validation coverage. | What atomicity is required for cross-component transforms and live model replacement? |
 | D8 | Parallel-capable scheduling and distributed stages are core; serial remains a reference profile. | Which legal decompositions and memory/topology policies deliver practical cost reductions for the first supported combinations? |
@@ -1145,6 +1158,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.6, 2026-10-29 | Infer modality routes and downstream data consumers from dataset schemas and architecture contracts. Remove routine route/component bindings, add `.data(*datasets)` source groups, and preserve lifecycle-role distinctions, alignment, weighting, producer revisions, and distributed provenance. |
 | 0.7, 2026-10-29 | Add the pinned DeepSeek V4.1 Flash mock config and DS1-DS6 acceptance target; define grouped expert selection and bounded decoded-weight source descriptors without implementing either API. |
 | 0.8, 2026-10-29 | Remove final evaluation from quantization plans. Successful saving returns a pinned artifact; optional evaluation follows save with independent data, resources, failure/retry, and reports. Preserve intrinsic method validation and selection. |
+| 0.9, 2026-10-29 | Default targets to `Target.AUTO`; resolve scoped module groups through versioned model mappings. Use `DynamicModuleTargeting` for module queries, add typed scope constructors, and preserve exact selection across labels, data routes, partial jobs, and device layouts. |
 
 ## Sources
 

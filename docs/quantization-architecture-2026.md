@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.8, with the broad source survey inspected through 2026-10-27.
+0.9, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
@@ -103,6 +103,12 @@ authorized structural specialization is introduced.
 `inspect()` should expose both `components` and `routes`, including affected
 routes for every selected write. Missing selectors fail with available choices.
 No dummy encoder is fabricated to make a modality-oriented API look uniform.
+The model mapping also declares default quantization groups per scope. An
+omitted `target` is `Target.AUTO`; a typed vision operation resolves those mapped
+owners without module paths from the caller. Multiple encoders need a declared
+default/union or an explicit `DynamicModuleTargeting` query. Labels, input routes,
+and a neighboring operation's partial selection cannot silently supply scope.
+Defaults, bridge ownership, mapping version, and resolved IDs appear in previews.
 
 Dataset routing should use the same architecture registry. `ImageDataSet` enters
 the supported image path without a user-supplied route name; its features remain
@@ -195,6 +201,7 @@ for this PR.
 | --- | --- |
 | Encoder-free multimodality | The adapter reports no nonexistent encoder, exposes image/audio/text routes, and identifies shared weights affected by a backbone operation. |
 | Automatic data routing | Typed sources enter the correct input paths without component bindings; shared consumers receive all applicable supplied routes. Missing alignment or unresolved task/route choices fail concretely, and vision changes invalidate candidate-derived image features before downstream fitting. |
+| Automatic module targeting | Scoped AUTO and explicit dynamic queries resolve the same canonical owners across path renames and GPU layouts under one mapping version; absent/ambiguous default groups and stale compiled mappings fail without widening writes. |
 | AttnRes / multi-stream residuals | Boundary replay preserves complete depth history/streams and invalidates every real consumer when a producer changes. |
 | Latent MoE | Shared latent projections, router, experts, and reconstruction scope are explicit; parallel expert work does not duplicate shared ownership. |
 | Nested recurrence | Repeated invocations reuse one packed owner; statistics preserve iteration policy and state, including when examples move between workers. |

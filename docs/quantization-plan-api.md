@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.8 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.9 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -79,6 +79,9 @@ permits bounded decoding during the consuming fitting stage. It does not recover
 pre-quantization weights, eagerly expand the full model, create a persistent
 expanded inference cache, or override the method's observation/teacher policy.
 
+`target` defaults to `Target.AUTO` for direct operations and operation builders.
+The direct calls above use explicit overrides to illustrate incremental selection;
+the scoped builders below resolve their module paths from the model mapping.
 The component names in these examples are adapter-provided selections. On an
 encoder-free model, `vision.encoder` fails with a report of available owners and
 routes. Selecting a vision **route** for calibration does not create vision-only
@@ -91,11 +94,11 @@ plan = (
     Plan()
     .data(multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
-    .add(Quantize(
-        target="vision.encoder", recipe=GPTQ(bits=8), name="vision"
+    .add(Quantize.vision(
+        recipe=GPTQ(bits=8), name="vision"
     ))
-    .add(Quantize(
-        target="language", recipe=GPTQ(bits=4), name="language"
+    .add(Quantize.language(
+        recipe=GPTQ(bits=4), name="language"
     ))
 )
 
@@ -133,8 +136,8 @@ plan = (
     Plan()
     .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
     .devices(Local(gpus=[0, 1, 2, 3]))
-    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
-    .then(Quantize("language", GPTQ(bits=4), name="language"))
+    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 ```
 
@@ -159,10 +162,10 @@ plan = (
     .data(multimodal_calibration, audio_calibration, omni_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
-        Quantize("vision.encoder", GPTQ(bits=8), name="vision"),
-        Quantize("audio.encoder", GPTQ(bits=8), name="audio"),
+        Quantize.vision(recipe=GPTQ(bits=8), name="vision"),
+        Quantize.audio(recipe=GPTQ(bits=8), name="audio"),
     )
-    .then(Quantize("language", GPTQ(bits=4), name="language"))
+    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
     .then(TuneNorms(
         target="language", source=SourceSnapshot("source-checkpoint"),
         data=norm_training_data, name="norms",
@@ -208,10 +211,10 @@ independent = (
     .data(multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
-        Quantize("vision.encoder", GPTQ(bits=8),
-                 observations=native_inputs, name="vision"),
-        Quantize("language", GPTQ(bits=4),
-                 observations=native_inputs, name="language"),
+        Quantize.vision(recipe=GPTQ(bits=8),
+                        observations=native_inputs, name="vision"),
+        Quantize.language(recipe=GPTQ(bits=4),
+                          observations=native_inputs, name="language"),
     )
 )
 ```
@@ -341,7 +344,51 @@ A separately requested post-quantization adapter uses `GenerateAdapter(...)` on
 the packed base and explicit source/data roles. It is not the same request as
 requantizing the base with a modifier.
 
-## 5. Selectors and overrides stay explicit
+## 5. Automatic mapped targets and dynamic module selection
+
+`target=Target.AUTO` is the default, so callers need not write model-specific
+module paths. A versioned model mapping declares canonical ownership, semantic
+groups, and a default quantization selection for each supported scope. Typed
+constructors such as `Quantize.vision(...)`, `Quantize.language(...)`, and
+`Requantize.language(...)` establish that scope and return ordinary operations;
+they use the same `add`/`then`/`parallel` composition and lifecycle contracts.
+These conveniences lower to an ordinary `scope="vision"`, `scope="language"`,
+or `scope="audio"` field. Additional scopes are registered mapping contracts,
+not new coordinator branches; callers can use `scope=` directly for them.
+
+These two values are equivalent:
+
+```python
+vision_job = Quantize.vision(recipe=GPTQ(bits=8))
+explicit_default = Quantize.vision(
+    target=Target.AUTO,
+    recipe=GPTQ(bits=8),
+)
+```
+
+The scope expresses intent; the model mapping supplies actual modules/paths.
+`name="vision"` is only an operation label, and renaming it cannot change the
+weights selected. Bits, dataset modality, existing packed state, call order,
+and other operations' selections cannot silently determine a different scope.
+In particular, AUTO does not mean "all weights left over after explicit jobs".
+A partial language-expert selection cannot make another AUTO operation claim
+the remaining language weights.
+
+For an unscoped call, AUTO uses the mapping's explicitly declared model default.
+That may be one group or a documented union, not an assumed text-only tree. If no
+unambiguous default is declared, compilation reports available scopes rather
+than guessing. Multiple visual towers require a declared default/union or an
+explicit query. An encoder-free model cannot fabricate an independently owned
+vision encoder because its data includes images.
+
+Resolution is metadata-only, before device placement: bind the scope and mapping
+version, expand AUTO or an explicit query to canonical owners, apply preservation
+rules, then check complete method/representation/write capabilities. Unsupported
+selected operators fail rather than being dropped to make AUTO succeed. Shared
+aliases, coupled transforms, and conflicts between jobs retain the existing scope
+rules. `explain()` records the requested default/query, mapping version, scope,
+and resolved owner IDs. A changed mapping requires recompilation; execution and
+resume use the frozen selection.
 
 Use typed semantic selectors for the common cases and escaped exact paths/globs
 when needed. Selectors resolve to canonical ownership and operator roles, not
@@ -351,8 +398,11 @@ an ambiguous string syntax.
 ```python
 text_rules = (
     Rules()
-    .preserve(Select.role("router"))
-    .override(Select.role("attention_projection"), Recipe(GPTQ(bits=8)))
+    .preserve(DynamicModuleTargeting(role="router"))
+    .override(
+        DynamicModuleTargeting(role="attention_projection"),
+        Recipe(GPTQ(bits=8)),
+    )
 )
 
 job = Quantize(
@@ -383,19 +433,24 @@ Grouped expert selection uses canonical logical IDs:
 
 ```python
 last_10_experts = (
-    Select.component("language")
+    DynamicModuleTargeting()
     .experts(kind="routed")
     .last(10, per="moe_layer", order_by="expert_id")
 )
 ```
 
-`Select.component` chooses semantic owners; `experts(kind="routed")` selects their
-routed expert groups, excluding shared and independently owned draft experts.
+`DynamicModuleTargeting` is the public immutable module-selection descriptor.
+The query above inherits the enclosing language operation's scope. Optional
+`component=` and `role=` filters further narrow mapped owners and operators;
+an explicit query cannot escape its operation's scope. `experts(kind="routed")`
+selects routed expert groups, excluding shared and independently owned draft experts.
 `last` sorts each selected MoE layer by global logical expert ID and takes its
 final ten experts before partitioning. It expands each group to its declared
 quantizable projections. Fewer than ten experts in any selected layer, missing
 IDs, or ambiguous ownership/order fail instead of silently shrinking the request.
 Fused storage needs an admitted partial-write path preserving unselected values.
+"Dynamic" describes a reusable query resolved against model metadata at compile
+time; it does not permit changing write targets during capture or fitting.
 The [DeepSeek V4.1 Flash mock config](quantization-example-deepseek-v4.1-flash.md)
 combines this selector with automatic data routing, native low-bit sources, and
 an explicit vision-to-language dependency as a concrete acceptance target.
@@ -518,8 +573,8 @@ fitting. Avoid a single `parallel=True` switch that conceals all three.
 ```python
 def perception_plan(vision_recipe, audio_recipe, *datasets):
     return Plan().data(*datasets).parallel(
-        Quantize("vision.encoder", vision_recipe, name="vision"),
-        Quantize("audio.encoder", audio_recipe, name="audio"),
+        Quantize.vision(recipe=vision_recipe, name="vision"),
+        Quantize.audio(recipe=audio_recipe, name="audio"),
     )
 
 language_data = DataBindings(
@@ -534,8 +589,8 @@ plan = (
                         multimodal_calibration, audio_calibration),
         namespace="senses",
     )
-    .then(Quantize("language", with_adapter, rules=text_rules,
-                   data=language_data, name="language"))
+    .then(Quantize.language(recipe=with_adapter, rules=text_rules,
+                           data=language_data, name="language"))
 )
 ```
 
@@ -566,11 +621,13 @@ parallelism: auto
 operations:
   - id: vision
     kind: quantize
-    target: {component: vision.encoder}
+    scope: vision
+    target: auto
     recipe: {method: gptqmodel/gptq@1, bits: 8}
   - id: language
     kind: quantize
-    target: {component: language}
+    scope: language
+    target: auto
     after: [vision]
     recipe: {method: gptqmodel/gptq@1, bits: 4, group_size: 128}
 ```
@@ -585,6 +642,10 @@ Positional data shorthand serializes to inferred role bindings after resolution;
 source groups use `datasets: [images, texts]` in place of a single `dataset`.
 The compiled artifact additionally records resolved routes and adapter defaults.
 Authoring files may omit those choices, just as Python callers do.
+Scope is explicit typed intent; `target` may be omitted and defaults to `auto`.
+Dynamic queries serialize their component/role filters and grouped expert
+selection, not Python callbacks. The compiled artifact records the mapping
+version and concrete owner IDs in addition to the authoring specification.
 
 Recipe composition serializes typed extensions, not Python method names. For
 example, the EoRA recipe above has the following recipe value; its containing
@@ -650,3 +711,6 @@ shared-backbone observations,
 explicit ambiguity overrides, source-group ordering/weighting, aliases/disjointness,
 custom schemas, and streaming cursor compatibility. These are design acceptance
 criteria, not tests of an implemented API.
+Target checks require omitted/explicit AUTO equivalence, labels that do not
+affect scope, no residual-weight inference, scoped dynamic queries, frozen global
+IDs before sharding, and concrete diagnostics for missing/ambiguous mappings.

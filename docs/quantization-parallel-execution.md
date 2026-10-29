@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.8 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.9 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -176,6 +176,9 @@ may legitimately contribute to several selected owners, but retries or overlappi
 capture requests cannot double-count the same declared observation contribution.
 Compatible capture reuse is permitted; separate candidate revisions or teacher
 streams still require distinct provenance and statistics.
+Mapped `Target.AUTO` defaults and `DynamicModuleTargeting` queries resolve global
+owner/expert IDs before placement as well. Repartitioning cannot select a different
+last-ten set per rank or expand a scoped target into other available modules.
 
 Reducers merge the method's declared sufficient statistics and normalization
 metadata. Averaging per-rank averages is generally wrong when valid token counts

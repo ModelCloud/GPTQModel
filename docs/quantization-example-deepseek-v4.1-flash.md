@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.8 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.9 design example, 2026-10-29. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -55,7 +55,7 @@ model = GPTQModel.load(checkpoint, revision=revision)
 source = SourceSnapshot(checkpoint, revision=revision)
 
 last_10_experts = (
-    Select.component("language")
+    DynamicModuleTargeting()
     .experts(kind="routed")
     .last(10, per="moe_layer", order_by="expert_id")
 )
@@ -67,12 +67,11 @@ plan = (
         ImageDataSet(image_text_samples),
         TextDataSet(text_samples),
     )
-    .add(Quantize(
-        target="vision.encoder",
+    .add(Quantize.vision(
         recipe=Recipe(GPTQ(bits=8, group_size=128)),
         name="vision",
     ))
-    .then(Requantize(
+    .then(Requantize.language(
         target=last_10_experts,
         recipe=Recipe(GPTQ(bits=4, group_size=128)),
         source=source.dequantized(),
@@ -90,8 +89,16 @@ report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
 The bits and group sizes are mock design choices, not measured recommendations.
-`vision.encoder` and `language` are proposed semantic adapter owners, not assumed
-module attribute paths. The adapter must verify selected tensor representations:
+`Quantize.vision` supplies vision scope; its omitted `target` is `Target.AUTO`.
+The proposed checkpoint mapping resolves that default to the vision encoder's
+quantizable projections and keeps the projector in its separate bridge group.
+`Requantize.language` supplies main-backbone scope, narrowed by the
+`DynamicModuleTargeting` query. Neither operation needs a module path string.
+The names are labels; changing them cannot change scope or select additional
+weights. AUTO does not consume language weights left outside the expert query.
+
+The mapping's semantic owners and default groups are proposed adapter contracts.
+The adapter must verify selected tensor representations:
 `Quantize` requires dense stored vision weights and rejects a packed input.
 A dense ViT topology alone does not prove that its checkpoint weights are dense.
 
@@ -171,11 +178,12 @@ The following is an expected resolution summary, **not captured runtime output**
 
 ```text
 vision
-  writes: admitted dense vision projections
+  target: AUTO in vision scope -> mapped vision encoder projections
   data: image source through inferred image path
 
 language
   waits for: installed vision revision
+  target: DynamicModuleTargeting in language scope
   writes: main layers 0..39, routed expert IDs 374..383, gate/up/down
   count: 400 expert groups; 1,200 logical projection weights
   weights: bounded decoding of pinned released FP4 values
@@ -192,7 +200,7 @@ These are future conformance requirements, not tests passed by this PR:
 
 | ID | Required demonstration |
 | --- | --- |
-| DS1 | Resolve the pinned semantic owners and grouped selector to the expected main-layer expert IDs; reject missing owners, fewer than ten experts in a selected group, and ambiguous ordering. |
+| DS1 | Omitted target equals explicit `Target.AUTO` in vision scope and resolves only mapped encoder projections. The language `DynamicModuleTargeting` query resolves the expected main-layer expert IDs before sharding. Renaming jobs cannot change selection; reject missing/ambiguous defaults, insufficient expert counts, and ambiguous ordering. |
 | DS2 | Preserve all unselected packed/dense payloads and aliases, including the projector, shared experts, and draft owners; require a valid partial-write codec for fused expert storage. |
 | DS3 | Infer image/text routes without manual bindings; collect language observations from both, and invalidate image features when their vision producer changes. |
 | DS4 | Decode only the declared low-bit weight source during fitting, preserve native source identity, and distinguish the new representation from the native FP4 baseline. |
