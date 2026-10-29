@@ -221,6 +221,36 @@ def test_derive_fast_eval_tasks_skips_evalution_metadata_keys():
     assert eval_tasks["gsm8k_platinum_cot"]["acc,num"] == {"value": 0.47, "floor_pct": 0.04, "ceil_pct": 1.0}
 
 
+def test_derive_fast_eval_tasks_preserves_numeric_evalution_batch_size():
+    # `evalution_batch_size` accepts concrete integers as well as the "auto"
+    # sentinel. A numeric value must stay metadata rather than being silently
+    # coerced into a metric dict by `float()`.
+    eval_tasks = {
+        "task": {
+            "chat_template": True,
+            "evalution_batch_size": 8,
+            "acc": {"value": 0.5, "floor_pct": 0.05, "ceil_pct": 1.0},
+        },
+    }
+
+    metrics = ModelTest.derive_fast_eval_tasks(eval_tasks)["task"]
+
+    assert metrics["evalution_batch_size"] == 8
+    assert not isinstance(metrics["evalution_batch_size"], dict)
+    assert metrics["acc"] == {"value": 0.5, "floor_pct": 0.05, "ceil_pct": 1.0}
+    assert set(metrics) == {"chat_template", "evalution_batch_size", "acc"}
+
+
+def test_derive_fast_eval_tasks_preserves_all_evalution_batch_size_forms():
+    for batch_size in (8, 4, 0, "auto", None):
+        eval_tasks = {"task": {"evalution_batch_size": batch_size, "acc": 0.5}}
+        metrics = ModelTest.derive_fast_eval_tasks(eval_tasks)["task"]
+
+        assert metrics["evalution_batch_size"] == batch_size, batch_size
+        assert not isinstance(metrics["evalution_batch_size"], dict), batch_size
+        assert isinstance(metrics["acc"], dict), batch_size
+
+
 def test_derive_fast_eval_tasks_wraps_scalar_metrics_and_raises_calibrated_ceil():
     eval_tasks = {
         "arc_challenge": {
