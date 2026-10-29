@@ -6,9 +6,10 @@
 import os
 import unittest
 
+from model_test import ModelTest
+
 from gptqmodel import BACKEND
 from gptqmodel.quantization import FORMAT, METHOD
-from model_test import ModelTest
 
 
 # E2E Swordfish (Blackwell sm100/sm110) integration test using the same

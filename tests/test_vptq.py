@@ -36,11 +36,11 @@ from transformers.models.qwen3.modeling_qwen3 import Qwen3Config, Qwen3ForCausal
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Lora
-from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.nn_modules.qlinear.vptq_cuda import (
     VPTQCudaLinear,
     _vptq_cuda_fused_max_rows,
 )
+from gptqmodel.nn_modules.qlinear.vptq_torch import VPTQLinear
 from gptqmodel.quantization import vptq as vptq_module
 from gptqmodel.quantization.config import FORMAT, METHOD, Fallback, QuantizeConfig, VPTQConfig
 from gptqmodel.quantization.vptq import (
@@ -1987,6 +1987,8 @@ def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_l
 
     from gptqmodel.utils.vptq_cuda import (
         vptq_cuda_dequantize as real_vptq_cuda_dequantize,
+    )
+    from gptqmodel.utils.vptq_cuda import (
         vptq_cuda_linear as real_vptq_cuda_linear,
     )
 

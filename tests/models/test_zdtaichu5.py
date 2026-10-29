@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-import math
 
 from model_test import ModelTest
 

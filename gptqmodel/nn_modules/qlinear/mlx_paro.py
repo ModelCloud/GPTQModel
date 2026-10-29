@@ -6,9 +6,9 @@
 
 from functools import lru_cache
 
-import numpy as np
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 
 
 @lru_cache(maxsize=1)

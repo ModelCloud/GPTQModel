@@ -3,8 +3,9 @@
 
 import os
 
-from gptqmodel import BACKEND
 from model_test import ModelTest
+
+from gptqmodel import BACKEND
 
 
 class TestFlint(ModelTest):

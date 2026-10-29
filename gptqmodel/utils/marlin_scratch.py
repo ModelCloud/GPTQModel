@@ -10,9 +10,9 @@ bounded, eager execution scope without putting temporary tensors on a model.
 
 from __future__ import annotations
 
+import threading
 from collections import OrderedDict
 from contextvars import ContextVar, Token
-import threading
 from typing import Any, Optional
 
 import torch

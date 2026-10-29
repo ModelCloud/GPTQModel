@@ -20,7 +20,7 @@ def test_projection_bits_accept_scalar_and_map():
 
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    assert resolve_projection_bits(3) == {name: 3 for name in names}
+    assert resolve_projection_bits(3) == dict.fromkeys(names, 3)
 
     partial = {name: (3 if name.startswith('self_attn.q') else 2) for name in names}
     assert resolve_projection_bits(partial) == partial
@@ -42,7 +42,7 @@ def test_projection_bits_reject_unknown_projection():
 
     names = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
              'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
-    mapping = {name: 2 for name in names}
+    mapping = dict.fromkeys(names, 2)
     mapping['mlp.nonexistent'] = 3
     with pytest.raises(ValueError):
         resolve_projection_bits(mapping)
@@ -52,7 +52,7 @@ def test_budget_plan_reproduces_paper_promoted_layers():
     """Sixteen equal-width blocks promote 6 / 10 layers at 2.375 / 2.625 bits."""
     from gptqmodel.quantization.gsq_training import projection_bits_for_budget
 
-    counts = {index: 1 for index in range(16)}
+    counts = dict.fromkeys(range(16), 1)
     plan = projection_bits_for_budget(counts, [2.375, 2.625])
 
     for target, expected in ((2.375, 6), (2.625, 10)):

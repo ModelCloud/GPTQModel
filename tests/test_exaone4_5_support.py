@@ -4,7 +4,7 @@
 from types import SimpleNamespace
 
 from gptqmodel.models import auto
-from gptqmodel.models.definitions.exaone4 import Exaone4QModel, Exaone4_5QModel
+from gptqmodel.models.definitions.exaone4 import Exaone4_5QModel, Exaone4QModel
 
 
 def test_exaone4_5_model_types_select_expected_definitions(monkeypatch):

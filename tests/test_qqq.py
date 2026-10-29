@@ -11,7 +11,6 @@ import tempfile
 import unittest
 
 import torch
-
 from datasets import load_dataset
 from models.model_test import ModelTest
 from parameterized import parameterized

@@ -19,7 +19,6 @@ from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.marlin import replace_parameter
 from ...utils.marlin_scalar_type import scalar_types
-
 from ...utils.rocm import IS_ROCM
 from ...utils.swordfish import (
     _validate_swordfish_device_support,
@@ -32,6 +31,7 @@ from ...utils.swordfish import (
     swordfish_prepack_B,
     swordfish_runtime_error,
 )
+
 
 log = setup_logger()
 

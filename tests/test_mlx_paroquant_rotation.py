@@ -13,6 +13,7 @@ import torch
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 

@@ -9,8 +9,7 @@ import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor, ProcessorMixin
 
 from ...utils.calibration import batched
-from ...utils.model import MODALITY, get_module
-from ...utils.model import move_to
+from ...utils.model import MODALITY, get_module, move_to
 from ...utils.offload import offload_to_disk
 from .._const import CPU
 from ..base import BaseQModel

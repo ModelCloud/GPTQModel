@@ -6,8 +6,8 @@
 import sys
 import types
 
-from model_test import ModelTest
 import torch
+from model_test import ModelTest
 
 from gptqmodel.models.definitions import intern_s2_preview
 

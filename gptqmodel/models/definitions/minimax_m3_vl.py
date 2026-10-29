@@ -8,6 +8,7 @@ from transformers import AutoModelForImageTextToText
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
 
+
 class MiniMaxM3VLGPTQ(BaseQModel):
     loader = AutoModelForImageTextToText
     require_load_processor = False

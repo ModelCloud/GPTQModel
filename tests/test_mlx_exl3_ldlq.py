@@ -21,6 +21,7 @@ from tests.test_mlx_exl3_viterbi import (
     _torch_viterbi_oracle_tensors,
 )
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 

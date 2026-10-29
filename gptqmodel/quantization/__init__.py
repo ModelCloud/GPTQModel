@@ -26,7 +26,6 @@ from .config import (
                      GGUFConfig,
                      GPTAQConfig,
                      GPTQConfig,
-                     GSQConfig as GSQConfig,
                      HessianConfig,
                      MSEConfig,
                      NormConfig,
@@ -55,6 +54,9 @@ from .config import (
                      VPTQConfig,
                      WeightOnlyConfig,
                      WeightOnlyMethod,
+)
+from .config import (
+                     GSQConfig as GSQConfig,
 )
 from .foem import FOEM
 from .gptaq import GPTAQ

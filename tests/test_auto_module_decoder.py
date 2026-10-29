@@ -743,7 +743,7 @@ def test_shell_materialize_forward_builds_fp4_wrapper_when_native_supported(tmp_
         named_module=named,
     )
 
-    expected = dequantize_f4_e2m1(
+    dequantize_f4_e2m1(
         packed_float4.cpu(),
         scale=scales.cpu(),
         axis=None,

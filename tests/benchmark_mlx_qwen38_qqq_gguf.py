@@ -13,13 +13,13 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 import torch
-
 from benchmark_mlx_qwen38_27b import milliseconds
+from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
+
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.mlx import GGUFMlxQuantLinear, QQQMlxQuantLinear
 from gptqmodel.nn_modules.qlinear.mlx_qqq import MlxQQQLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQTorchLinear
-from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 
 def build_qqq(input_dims, output_dims):

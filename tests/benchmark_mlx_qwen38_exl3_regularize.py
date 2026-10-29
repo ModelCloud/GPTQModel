@@ -26,6 +26,7 @@ from tests.test_mlx_exl3_regularize import (
 )
 from tests.test_mlx_exl3_rms import _normalized_rms_drift, _torch_block_rms_oracle
 
+
 _CODEBOOK_SCALE = 1.24371088
 
 

@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
-from gptqmodel import BACKEND
 from model_test import ModelTest
 from ovis import image_to_test_dataset
+
+from gptqmodel import BACKEND
 
 
 def test_prepare_hunyuan_ocr_dataset_reuses_shared_dataset(monkeypatch):

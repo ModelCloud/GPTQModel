@@ -640,8 +640,8 @@ class QQQ:
             hessian=hessian, cross_moment=cross, channel_scales=result[7], config=self.qcfg.gsq)
         if after < before:
             result[0] = qqq_codes_to_packer_weight(best, scales, group_size=group_size, dtype=weight.dtype)
-        self.gsq_diagnostics = dict(before=before, after=after, history=history,
-                                    objective="asymmetric_quadratic_without_constant")
+        self.gsq_diagnostics = {"before": before, "after": after, "history": history,
+                                    "objective": "asymmetric_quadratic_without_constant"}
         self._gsq_moments.clear()
         return tuple(result)
 

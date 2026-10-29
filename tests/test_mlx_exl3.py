@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+
 mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 

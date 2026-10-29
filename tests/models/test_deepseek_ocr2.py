@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: 2026 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from gptqmodel import BACKEND
 from model_test import ModelTest
 from ovis import image_to_test_dataset
+
+from gptqmodel import BACKEND
 
 
 def test_prepare_deepseek_ocr2_dataset_reuses_shared_dataset(monkeypatch):

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: 2024-2025 qubitium@modelcloud.ai
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
-from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 from gptqmodel.models.definitions.apertus import Apertus1p5QModel
 from gptqmodel.models.definitions.base_qwen2_5_omni import BaseQwen2_5_OmniGPTQ
 from gptqmodel.models.definitions.base_qwen2_vl import BaseQwen2VLGPTQ
@@ -34,6 +33,7 @@ from gptqmodel.models.definitions.ovis2_5 import Ovis2_5QModel
 from gptqmodel.models.definitions.ovis2_6_moe import Ovis2_6_MoeQModel
 from gptqmodel.models.definitions.smolvlm import SmolVLMQModel
 from gptqmodel.models.definitions.unlimited_ocr import UnlimitedOCRQModel
+from gptqmodel.models.definitions.zdtaichu5 import ZDTaichu5QModel
 
 
 def format_ovis_dataset(image, assistant):

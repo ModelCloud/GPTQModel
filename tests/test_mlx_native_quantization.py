@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 

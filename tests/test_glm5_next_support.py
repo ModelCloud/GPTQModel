@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from defuser.model_registry import MODEL_CONFIG
 from torch import nn
 
 from gptqmodel.models import auto
@@ -10,7 +11,6 @@ from gptqmodel.models.loader import _convert_model_with_defuser
 from gptqmodel.models.moe_lifecycle import GateUpDownMoELifecycleHooks
 from gptqmodel.utils.model import find_modules
 from gptqmodel.utils.structure import LazyTurtle
-from defuser.model_registry import MODEL_CONFIG
 
 
 def _tiny_text_config():

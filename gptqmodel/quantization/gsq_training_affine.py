@@ -93,7 +93,7 @@ def prepare_affine_export(codes, scales, zeros, group_index, *, bits, packing, s
                              packing=packing, scale_dtype=scale_dtype)
     if not torch.isfinite(weight).all() or not torch.equal(recovered, codes):
         raise ValueError('Affine staged hard assignments do not survive producer arithmetic')
-    return dict(weight=weight, scales=scales, zeros=zeros, g_idx=groups, codes=codes)
+    return {'weight': weight, 'scales': scales, 'zeros': zeros, 'g_idx': groups, 'codes': codes}
 
 
 def pack_llama_affine_stages(fitted, records, *, group_size, scale_dtype=torch.float16):

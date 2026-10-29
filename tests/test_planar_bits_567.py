@@ -171,11 +171,11 @@ def test_dequantize_weight_matches_reference(bits: int):
 
 @pytest.mark.parametrize("bits", PLANAR_BITS)
 def test_qzeros_v1_v2_conversion_roundtrip(bits: int):
+    from gptqmodel.quantization.config import QuantizeConfig
     from gptqmodel.utils.model import (
         convert_gptq_v1_to_v2_format_module,
         convert_gptq_v2_to_v1_format_module,
     )
-    from gptqmodel.quantization.config import QuantizeConfig
 
     linear, scales, zeros, g_idx = _make_quant_inputs(bits)
     module = _new_module(bits)

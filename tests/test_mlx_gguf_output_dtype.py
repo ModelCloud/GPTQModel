@@ -11,6 +11,7 @@ import pytest
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("MLX Metal tests require macOS", allow_module_level=True)
 
@@ -18,8 +19,8 @@ mx = pytest.importorskip("mlx.core")
 nn = pytest.importorskip("mlx.nn")
 torch = pytest.importorskip("torch")
 
-from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear  # noqa: E402
 from gptqmodel.nn_modules.qlinear.gguf import _dequantize_gguf_tensor_numpy  # noqa: E402
+from gptqmodel.nn_modules.qlinear.mlx_gguf import MlxGGUFLinear  # noqa: E402
 from gptqmodel.utils.mlx_gguf_packing import repack_gguf_affine  # noqa: E402
 
 

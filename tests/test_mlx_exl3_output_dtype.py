@@ -12,6 +12,7 @@ import pytest
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("MLX Metal tests require macOS", allow_module_level=True)
 
@@ -20,6 +21,7 @@ torch = pytest.importorskip("torch")
 
 from gptqmodel.nn_modules.exllamav3_torch import ExllamaV3TorchLinear
 from gptqmodel.nn_modules.qlinear.mlx_exl3 import MlxEXL3Linear
+
 
 WIDE_QWEN38_27B_PROJECTIONS = tuple(
     shape for shape in QWEN38_27B_PROJECTIONS if shape[1] > shape[2]

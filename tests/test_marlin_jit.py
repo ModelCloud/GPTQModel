@@ -13,8 +13,8 @@ import gptqmodel.nn_modules.qlinear.marlin as marlin_qlinear_module
 import gptqmodel.nn_modules.qlinear.marlin_awq as marlin_awq_qlinear_module
 import gptqmodel.utils.marlin as marlin_utils
 from gptqmodel import extension as extension_api
-from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils import cpp as cpp_module
+from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.marlin_scalar_type import scalar_types
 
 
