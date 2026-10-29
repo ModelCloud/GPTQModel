@@ -191,6 +191,172 @@ def test_mode_specific_baseline_value_supports_gpu_mapping(monkeypatch):
     assert helper._mode_specific_baseline_value("NATIVE_ARC_CHALLENGE_ACC") == 0.53
 
 
+def test_derive_fast_eval_tasks_skips_evalution_metadata_keys():
+    eval_tasks = {
+        "gsm8k_platinum_cot": {
+            "chat_template": True,
+            "evalution_use_model_path": True,
+            # `"auto"` is a valid batch-size sentinel and is not numeric.
+            "evalution_batch_size": "auto",
+            "evalution_model_args": {"dtype": "bfloat16", "device": "cuda:0"},
+            "evalution_suite_kwargs": {"batch_size": 32, "max_new_tokens": 256},
+            "acc,num": {"value": 0.47, "floor_pct": 0.04, "ceil_pct": 1.0},
+        },
+    }
+
+    fast_tasks = ModelTest.derive_fast_eval_tasks(eval_tasks, min_ceil_pct=1.0)
+    metrics = fast_tasks["gsm8k_platinum_cot"]
+
+    # Metadata is preserved verbatim, not coerced into metric dicts.
+    assert metrics["chat_template"] is True
+    assert metrics["evalution_use_model_path"] is True
+    assert metrics["evalution_batch_size"] == "auto"
+    assert metrics["evalution_model_args"] == {"dtype": "bfloat16", "device": "cuda:0"}
+    assert metrics["evalution_suite_kwargs"] == {"batch_size": 32, "max_new_tokens": 256}
+
+    # Only real metrics are normalized/ceil-adjusted.
+    assert metrics["acc,num"] == {"value": 0.47, "floor_pct": 0.04, "ceil_pct": 1.0}
+
+    # Input config is not mutated in place.
+    assert eval_tasks["gsm8k_platinum_cot"]["acc,num"] == {"value": 0.47, "floor_pct": 0.04, "ceil_pct": 1.0}
+
+
+def test_derive_fast_eval_tasks_preserves_numeric_evalution_batch_size():
+    # `evalution_batch_size` accepts concrete integers as well as the "auto"
+    # sentinel. A numeric value must stay metadata rather than being silently
+    # coerced into a metric dict by `float()`.
+    eval_tasks = {
+        "task": {
+            "chat_template": True,
+            "evalution_batch_size": 8,
+            "acc": {"value": 0.5, "floor_pct": 0.05, "ceil_pct": 1.0},
+        },
+    }
+
+    metrics = ModelTest.derive_fast_eval_tasks(eval_tasks)["task"]
+
+    assert metrics["evalution_batch_size"] == 8
+    assert not isinstance(metrics["evalution_batch_size"], dict)
+    assert metrics["acc"] == {"value": 0.5, "floor_pct": 0.05, "ceil_pct": 1.0}
+    assert set(metrics) == {"chat_template", "evalution_batch_size", "acc"}
+
+
+def test_derive_fast_eval_tasks_preserves_all_evalution_batch_size_forms():
+    for batch_size in (8, 4, 0, "auto", None):
+        eval_tasks = {"task": {"evalution_batch_size": batch_size, "acc": 0.5}}
+        metrics = ModelTest.derive_fast_eval_tasks(eval_tasks)["task"]
+
+        assert metrics["evalution_batch_size"] == batch_size, batch_size
+        assert not isinstance(metrics["evalution_batch_size"], dict), batch_size
+        assert isinstance(metrics["acc"], dict), batch_size
+
+
+def test_derive_fast_eval_tasks_wraps_scalar_metrics_and_raises_calibrated_ceil():
+    eval_tasks = {
+        "arc_challenge": {
+            "chat_template": False,
+            "acc": 0.30,
+            "acc_norm": {"value": 0.35, "ceil_pct": 0.01},
+        },
+    }
+
+    fast_tasks = ModelTest.derive_fast_eval_tasks(eval_tasks, min_ceil_pct=1.0)
+    metrics = fast_tasks["arc_challenge"]
+
+    assert metrics["acc"] == {
+        "value": 0.30,
+        "floor_pct": model_test_module.DEFAULT_FLOOR_PCT,
+        "ceil_pct": 1.0,
+    }
+    # Existing metric dicts keep their floor and get the raised ceil.
+    assert metrics["acc_norm"] == {"value": 0.35, "ceil_pct": 1.0}
+
+
+def test_derive_fast_eval_tasks_skips_unknown_evalution_prefixed_keys():
+    eval_tasks = {
+        "task": {
+            # A future metadata key that is not yet in the explicit set.
+            "evalution_future_option": "auto",
+            "acc": 0.5,
+        },
+    }
+
+    metrics = ModelTest.derive_fast_eval_tasks(eval_tasks, min_ceil_pct=0.10)["task"]
+
+    assert metrics["evalution_future_option"] == "auto"
+    assert metrics["acc"] == {
+        "value": 0.5,
+        "floor_pct": model_test_module.DEFAULT_FLOOR_PCT,
+        "ceil_pct": model_test_module.DEFAULT_CEIL_PCT,
+    }
+
+
+def test_derive_fast_eval_tasks_handles_none_and_non_dict_task_payloads():
+    assert ModelTest.derive_fast_eval_tasks(None) is None
+
+    eval_tasks = {"arc_challenge": None, "gsm8k": ("accuracy",)}
+
+    assert ModelTest.derive_fast_eval_tasks(eval_tasks) == eval_tasks
+
+
+def test_get_eval_tasks_consumes_metadata_and_keeps_metric_baselines():
+    class _Harness(ModelTest):
+        EVAL_TASKS = {
+            "gsm8k_platinum_cot": {
+                "chat_template": True,
+                "evalution_use_model_path": True,
+                "evalution_batch_size": "auto",
+                "evalution_model_args": {"dtype": "bfloat16"},
+                "evalution_suite_kwargs": {"batch_size": 32},
+                "acc,num": {"value": 0.47, "floor_pct": 0.04, "ceil_pct": 1.0},
+            },
+        }
+
+    helper = _Harness(methodName="runTest")
+    baselines = helper.get_eval_tasks()
+
+    assert baselines == {
+        "gsm8k_platinum_cot": {
+            "acc,num": {
+                "value": 0.47,
+                "floor_pct": 0.04,
+                "ceil_pct": 1.0,
+                "metric_key": None,
+            }
+        }
+    }
+    assert helper._task_evalution_batch_size == {"gsm8k_platinum_cot": "auto"}
+    assert helper._task_evalution_use_model_path == {"gsm8k_platinum_cot": True}
+    assert helper._task_chat_template == {"gsm8k_platinum_cot": True}
+
+
+def test_eval_task_metadata_keys_match_get_eval_tasks_consumed_keys():
+    class _Harness(ModelTest):
+        EVAL_TASKS = {
+            "task": {
+                "chat_template": True,
+                "evalution_use_model_path": True,
+                "evalution_batch_size": "auto",
+                "evalution_model_args": {"dtype": "bfloat16"},
+                "evalution_suite_kwargs": {"batch_size": 1},
+                "acc": {"value": 0.5},
+            },
+        }
+
+    # If `get_eval_tasks` starts consuming a new metadata key, the shared set used
+    # by `derive_fast_eval_tasks` must be updated with it.
+    helper = _Harness(methodName="runTest")
+    normalized = helper.get_eval_tasks()["task"]
+    assert set(normalized) == {"acc"}
+    assert model_test_module.EVAL_TASK_METADATA_KEYS == {
+        "chat_template",
+        "evalution_suite_kwargs",
+        "evalution_model_args",
+        "evalution_use_model_path",
+        "evalution_batch_size",
+    }
+
+
 def test_evalution_threads_seed_and_explicit_greedy_gen_kwargs(monkeypatch):
     captured = {}
 
