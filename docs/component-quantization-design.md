@@ -178,7 +178,7 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
 | `QDataSet` / `DataBindings` | Typed raw or prepared sources, modality/schema identity, and explicit calibration, initialization, training, validation, selection, adapter, evaluation, profiling, or plugin-defined roles. `CalibrationDataSet(QDataSet)` is a role-aware view, not a text-only container. |
 | `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
-| `RecipeExtension` | Registered typed contribution selected by `Recipe.with_()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
+| `RecipeExtension` | Registered typed contribution selected by `Recipe.use()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
 | `Plan` | Immutable public specification of operations, recipes/modifiers, data bindings, order constraints, resource policy, and validation. |
 | `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and validation policy after compilation. |
@@ -345,14 +345,14 @@ cooperative optimization. Ordering syntax cannot override method semantics.
 Recipes can be reused and composed through one typed operation:
 
 ```python
-text_recipe = Recipe(GPTQ(bits=4, group_size=128)).with_(EoRA(rank=32))
-awq_recipe = Recipe(AWQ(bits=4)).with_(StagedGSQ(epochs=2))
+text_recipe = Recipe(GPTQ(bits=4, group_size=128)).use(EoRA(rank=32))
+awq_recipe = Recipe(AWQ(bits=4)).use(StagedGSQ(epochs=2))
 ```
 
-Python reserves `with`, so `.with_(...)` is the valid Python spelling of the
-requested combinator. The supplied object's registered type determines its
-contribution: modifier, preparation transform, or output format. Chained and
-variadic forms produce the same immutable specification. Unknown, ambiguous,
+`Recipe.use(...)` includes typed behavior in a new immutable recipe. The supplied
+object's registered type determines its contribution: modifier, preparation
+transform, or output format. Chained and variadic forms produce the same
+immutable specification. Unknown, ambiguous,
 duplicate, or incompatible extensions fail explicitly; no class-name branches
 are added to the coordinator. The [API contract](quantization-plan-api.md)
 defines dispatch, ordering, and serialization.
@@ -810,7 +810,7 @@ unrepresentable mixtures; a single global quantization config is not authoritati
 | Planner | Resolve scopes and method programs; combine architecture and lifecycle dependencies, effects, parallel capabilities, budgets, and physical layout constraints. |
 | Executor | Schedule ready stages and collective groups, isolate state, reserve complete resources, manage transfers/artifact lifetime, and enforce durable/transaction boundaries. |
 | Method/operation plugin | Declare a versioned lifecycle program, observation/reference roles, transformations, objectives, outputs, fallback branches, and continuation capabilities. |
-| Recipe extension registry/plugin | Dispatch `with_()` by a registered typed descriptor; compose modifier, preparation, and format contributions through typed artifacts and declared effects. |
+| Recipe extension registry/plugin | Dispatch `use()` by a registered typed descriptor; compose modifier, preparation, and format contributions through typed artifacts and declared effects. |
 | Representation codec | Encode/decode artifacts and convert layout where supported. Numerical quantization fused with encoding is explicitly a method stage. |
 | Runtime backend | Execute supported packed operators under the declared numerical profile. |
 | Artifact store | Immutable objects, manifests, checkpoints, integrity, and publication. |
@@ -912,7 +912,7 @@ through an assumed scalar intermediate. For methods that use pseudo weights
 during fitting, declare how that replay relates to the packed runtime and verify
 the deployment path separately.
 
-`Recipe.with_()` dispatch selects the registered extension contract; it does not
+`Recipe.use()` dispatch selects the registered extension contract; it does not
 determine execution time from the call position. Compose contributions by
 matching declared input/output contracts, ordered-transform constraints, and
 effects. EoRA consumes a source residual and the **uncorrected** quantized base;
@@ -1012,7 +1012,7 @@ The following are proposed acceptance criteria and experiments.
 | V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; immutable reuse, named dependencies, fork/join, fragments, selector overrides, and invalid composition diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
 | V29 | Dataset contracts | `QDataSet` modality/schema identity, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD15. |
-| V30 | Typed recipe composition | Chained/variadic `with_()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
+| V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
 | V31 | Compilation and final acceptance | Compilation consumes no data or model forward; pending runtime checks gate fitting. Final evaluation reads the frozen winner and has no automated feedback edge to refinement or selection. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
 
@@ -1063,7 +1063,7 @@ proposed defaults, not final design approval.
 | D16 | Required data roles and explicit validation profiles. | Which task-quality checks should convenience APIs default to when callers supply no evaluation data? |
 | D17 | Separate route, component-owner, and invocation registries. | How should selectors explain shared multimodal writes and repeated visits without overwhelming common workflows? |
 | D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
-| D19 | Direct operations plus immutable fluent/file plans and typed `Recipe.with_()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
+| D19 | Direct operations plus immutable fluent/file plans and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
 | D21 | `QDataSet` sources with orthogonal modality schemas and lifecycle-role bindings. | Which additional built-in role views and modality classes deserve convenience names beyond the proposed core? |
 
@@ -1105,7 +1105,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.2, 2026-10-27 | Audit all current method configurations and auxiliary routes; replace the universal fitting loop with method-owned lifecycle programs, stage-specific references/data, typed artifacts, conditional replay, and explicit future-method/continuation contracts. |
 | 0.3, 2026-10-27 | Broaden the sourced 2026 architecture audit; make route/owner/invocation distinctions explicit; require parallel scheduling, distributed stages, reducers and partition contracts; add a fluent, typed, serializable API with defined chaining/stacking semantics. |
 | 0.4, 2026-10-29 | Audit current data paths; introduce an inheritable `QDataSet`, modality/schema subclasses, `CalibrationDataSet` views, extensible lifecycle-role bindings, architecture-owned preparation, streaming/distributed cursors, and split/leakage provenance. |
-| 0.5, 2026-10-29 | Unify recipe composition through typed `with_()` dispatch; review all six documents and tighten effective data roles, modality coverage, view identity, compilation boundaries, final-evaluation isolation, distributed batching/cursor commits, and concurrent publication. |
+| 0.5, 2026-10-29 | Unify recipe composition through typed `use()` dispatch; review all six documents and tighten effective data roles, modality coverage, view identity, compilation boundaries, final-evaluation isolation, distributed batching/cursor commits, and concurrent publication. |
 
 ## Sources
 

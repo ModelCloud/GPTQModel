@@ -93,7 +93,7 @@ These are not all interchangeable decorators. Some change observations, some
 introduce whole optimization programs, and some operate on an already quantized
 model. Their compatibility must be declared per combination.
 
-The public API composes registered typed objects through `Recipe.with_()`.
+The public API composes registered typed objects through `Recipe.use()`.
 The object's descriptor selects modifier, preparation, or format behavior;
 the combined lifecycle below still determines placement and effective data
 requirements. A short entry point cannot collapse these distinct programs into

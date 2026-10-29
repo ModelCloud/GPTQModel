@@ -252,7 +252,7 @@ plan = (
     Plan()
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
-        "language", Recipe(GPTQ(bits=4)).with_(StagedGSQ()),
+        "language", Recipe(GPTQ(bits=4)).use(StagedGSQ()),
         data=gsq_data, name="language",
     ))
     .evaluate(suite=language_quality, data=splits.evaluation)

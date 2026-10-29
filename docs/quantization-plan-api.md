@@ -205,10 +205,10 @@ the new terminal revision, and any earlier feedback must be recorded as used.
 
 ```python
 scalar = Recipe(GPTQ(bits=4, group_size=128))
-with_adapter = scalar.with_(EoRA(rank=32))
+with_adapter = scalar.use(EoRA(rank=32))
 higher_precision = scalar.configure(bits=8)
 
-staged_awq = Recipe(AWQ(bits=4, group_size=128)).with_(
+staged_awq = Recipe(AWQ(bits=4, group_size=128)).use(
     StagedGSQ(epochs=2)
 )
 
@@ -221,10 +221,10 @@ staged_data = DataBindings(
 job = Quantize("language", staged_awq, data=staged_data, name="language")
 ```
 
-`Recipe.with_(*extensions)` is the single composition entry point. Python reserves
-`with`, so the requested `.with(...)` spelling is a syntax error; the trailing
-underscore is required for an ordinary Python method call. Dispatch follows the
-registered type of each supplied object, with no category argument for the caller.
+`Recipe.use(*extensions)` is the single composition entry point. Each call includes
+typed behavior in a new immutable recipe. Dispatch follows the registered type of
+each supplied object, with no category argument for the caller. Building a recipe
+does not execute its lifecycle stages.
 
 | Typed object | Contribution to the recipe |
 | --- | --- |
@@ -242,7 +242,7 @@ options fail with the offending object identified. Repeatable extensions must
 declare that capability and have distinct instance identities. Adding a second
 codec or a second nonrepeatable modifier never silently replaces the first.
 
-`recipe.with_(a, b)` and `recipe.with_(a).with_(b)` produce the same immutable
+`recipe.use(a, b)` and `recipe.use(a).use(b)` produce the same immutable
 specification. The resolved program determines stage execution order. For
 order-sensitive preparation transforms, extension order is an explicit constraint
 at their supported insertion points; incompatible constraints fail compilation.
@@ -261,8 +261,8 @@ Preparation and export use the same composition operation:
 ```python
 gguf_recipe = (
     Recipe(GGUF(quant_type="Q4_K"))
-    .with_(SmoothMAD())
-    .with_(GGUFFormat())
+    .use(SmoothMAD())
+    .use(GGUFFormat())
 )
 ```
 
@@ -331,7 +331,7 @@ gsq_data = DataBindings(
     train=reconstruction_data,
     validate=held_out_validation,
 )
-staged_gsq = Recipe(GPTQ(bits=4)).with_(StagedGSQ(epochs=2))
+staged_gsq = Recipe(GPTQ(bits=4)).use(StagedGSQ(epochs=2))
 job = Quantize("language", staged_gsq, data=gsq_data, name="language")
 ```
 
@@ -523,7 +523,7 @@ to the coordinator or new top-level flags for every option. New behavior that
 cannot be expressed requires a versioned contract extension, not a raw hook that
 bypasses planning.
 
-Proposed API checks include typed `.with_()` dispatch, chained/variadic/file
+Proposed API checks include typed `.use()` dispatch, chained/variadic/file
 equivalence, unknown/ambiguous/duplicate extension rejection, full recipe
 revalidation after `configure()`, direct/plan semantic equivalence, immutable reuse,
 fragment namespacing, Python/file round-trips with explicit bindings, stable
