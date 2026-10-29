@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.9, with the broad source survey inspected through 2026-10-27.
+0.10, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and

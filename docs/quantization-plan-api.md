@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.9 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.10 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -136,8 +136,8 @@ plan = (
     Plan()
     .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
     .devices(Local(gpus=[0, 1, 2, 3]))
-    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
-    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 ```
 
@@ -149,7 +149,13 @@ method and adapter permit it; data routing does not expand its write selection.
 
 ## 3. Explicit ordering and parallel branches
 
-For users who want explicit operation order, provide ordinary named methods:
+`.serial(...)` and `.parallel(...)` are plan-level execution combinators for
+actionable lifecycles. Their arguments are typed operation descriptors such as
+`Quantize`, `Requantize`, `GenerateAdapter`, `TuneNorms`, or other registered
+actions. Each action compiles its own lifecycle program. The combinators describe
+ordering between actions; they do not impose a shared set of stages or run an
+action when the plan is built. Bare recipes, datasets, and arbitrary callbacks
+are not lifecycle actions.
 
 ```python
 audio_calibration = CalibrationDataSet(AudioDataSet(audio_text_samples))
@@ -165,8 +171,8 @@ plan = (
         Quantize.vision(recipe=GPTQ(bits=8), name="vision"),
         Quantize.audio(recipe=GPTQ(bits=8), name="audio"),
     )
-    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
-    .then(TuneNorms(
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(TuneNorms(
         target="language", source=SourceSnapshot("source-checkpoint"),
         data=norm_training_data, name="norms",
     ))
@@ -176,10 +182,18 @@ plan = (
 | Expression | Exact proposed meaning |
 | --- | --- |
 | `add(operation)` | Add a named operation without an insertion-order edge. Required architecture/method dependencies still apply. |
-| `then(operation)` | Add completion edges from the current terminal operations to this operation. Completion means its declared stable installed result/artifacts, not merely a worker submission. |
-| `parallel(a, b)` | Fork from the current terminal operations into branches that may overlap; subsequent `then` joins all branch terminals. The compiler rejects an inter-branch dependency or write conflict rather than pretending the branches are independent. |
+| `serial(*operations)` | Join the current terminal operations before the first supplied action, then chain the supplied actions in order. Completion means the action's stable installed result/artifacts, not merely worker submission. The first action in an empty plan has no predecessor. |
+| `parallel(*operations)` | Fork from the current terminal operations into branches that may overlap; a subsequent `serial(...)` joins all branch terminals. The compiler rejects an inter-branch dependency or write conflict rather than pretending the branches are independent. |
 | `operation.after("name")` | Add a targeted completion dependency without globally serializing unrelated operations. Names resolve within the assembled plan/fragment namespace. |
 | `refine(policy)` | Add a declared bounded composition-refinement program with permitted writes, sources, selection data, and stopping criteria. It does not replace intrinsic method optimization. |
+
+`serial(a, b)` and `serial(a).serial(b)` describe the same operation order.
+For example, `serial(a).parallel(b, c).serial(d)` means `a -> {b, c} -> d`.
+Both combinators require at least one lifecycle action and return a new plan.
+An operation inside `serial(...)` can still use multiple GPUs for capture,
+expert fitting, or a distributed optimizer: serial order between actions is
+independent of physical parallelism within an action. `add` remains the advanced
+form for declaring intent without insertion-order edges.
 
 `parallel()` permits legal overlap; device count and memory still bound actual
 concurrency. The preview shows feasible placement and serialized bottlenecks.
@@ -194,12 +208,12 @@ Shared-backbone owners require a different selection and must not be presented
 as independent encoder branches.
 Calling `.parallel(vision, language)` is invalid when the selected language
 program requires the newly quantized vision output. The error points to the
-dependency and suggests `then` or `add`; it must not silently change the objective.
+dependency and suggests `serial` or `add`; it must not silently change the objective.
 
 Explicit order can constrain a legal schedule, not override numerical dependencies.
 A conflicting order reports a dependency cycle with stage IDs and source roles.
 An intentional text-first experiment uses separately declared snapshots/observation
-policies; spelling `then(vision)` alone cannot erase its context-change effects.
+policies; spelling `serial(vision)` alone cannot erase its context-change effects.
 
 Observation choice is an explicit part of the experiment. For example, independent
 GPTQ fitting against one source's inputs can be requested as follows:
@@ -351,7 +365,7 @@ module paths. A versioned model mapping declares canonical ownership, semantic
 groups, and a default quantization selection for each supported scope. Typed
 constructors such as `Quantize.vision(...)`, `Quantize.language(...)`, and
 `Requantize.language(...)` establish that scope and return ordinary operations;
-they use the same `add`/`then`/`parallel` composition and lifecycle contracts.
+they use the same `add`/`serial`/`parallel` composition and lifecycle contracts.
 These conveniences lower to an ordinary `scope="vision"`, `scope="language"`,
 or `scope="audio"` field. Additional scopes are registered mapping contracts,
 not new coordinator branches; callers can use `scope=` directly for them.
@@ -434,7 +448,7 @@ Grouped expert selection uses canonical logical IDs:
 ```python
 last_10_experts = (
     DynamicModuleTargeting()
-    .experts(kind="routed")
+    .experts(type="routed")
     .last(10, per="moe_layer", order_by="expert_id")
 )
 ```
@@ -442,8 +456,10 @@ last_10_experts = (
 `DynamicModuleTargeting` is the public immutable module-selection descriptor.
 The query above inherits the enclosing language operation's scope. Optional
 `component=` and `role=` filters further narrow mapped owners and operators;
-an explicit query cannot escape its operation's scope. `experts(kind="routed")`
-selects routed expert groups, excluding shared and independently owned draft experts.
+an explicit query cannot escape its operation's scope. `experts(type="routed")`
+selects the routed expert bank; `experts(type="shared")` selects mapped shared
+experts instead. The operation scope separately excludes independently owned
+draft experts. Unknown expert types fail with the mapping's supported choices.
 `last` sorts each selected MoE layer by global logical expert ID and takes its
 final ten experts before partitioning. It expands each group to its declared
 quantizable projections. Fewer than ten experts in any selected layer, missing
@@ -589,8 +605,8 @@ plan = (
                         multimodal_calibration, audio_calibration),
         namespace="senses",
     )
-    .then(Quantize.language(recipe=with_adapter, rules=text_rules,
-                           data=language_data, name="language"))
+    .serial(Quantize.language(recipe=with_adapter, rules=text_rules,
+                             data=language_data, name="language"))
 )
 ```
 
@@ -635,7 +651,7 @@ operations:
 This is an explicitly ordered two-operation plan. An unordered `add` plan omits
 user ordering edges but still acquires mandatory numerical dependencies at
 compilation. List order in the file is not an implicit correctness constraint.
-Fluent `then` and `parallel` serialize to explicit edges/groups, not opaque method
+Fluent `serial` and `parallel` serialize to explicit edges/groups, not opaque method
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
 Positional data shorthand serializes to inferred role bindings after resolution;
@@ -700,7 +716,8 @@ bypasses planning.
 Proposed API checks include typed `.use()` dispatch, chained/variadic/file
 equivalence, unknown/ambiguous/duplicate extension rejection, full recipe
 revalidation after `configure()`, direct/plan semantic equivalence, immutable reuse,
-fragment namespacing, Python/file round-trips with explicit bindings, stable
+fragment namespacing, serial chained/variadic equivalence, parallel fork/join,
+action-type validation, Python/file round-trips with explicit bindings, stable
 resolved IDs, override-conflict diagnostics, invalid parallel groups, cycle
 explanations, unsupported required layouts, and correct reporting of zero-match
 or shared multimodal selectors. Save/evaluate checks require a committed artifact,

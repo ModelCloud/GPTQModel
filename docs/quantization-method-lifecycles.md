@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.9
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.10
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -38,6 +38,12 @@ Mapped AUTO targets and `DynamicModuleTargeting` queries resolve before method
 compilation. The full composed program still checks selected representations,
 coupled writes, aliases, and capabilities. A method or extension cannot broaden
 an AUTO default, silently drop unsupported owners, or retarget during execution.
+
+`serial(...)` and `parallel(...)` accept lifecycle actions, including quantization
+and auxiliary operations. They compose the actions' completion dependencies;
+each method retains its own program, intrinsic stages, and distributed capabilities.
+The same scheduling vocabulary applies to future registered actions without
+requiring the coordinator to flatten them into a common quantization loop.
 
 ## 1. Coverage and classification
 

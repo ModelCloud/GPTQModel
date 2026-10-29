@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.9 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.10 design example, 2026-10-29. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -56,7 +56,7 @@ source = SourceSnapshot(checkpoint, revision=revision)
 
 last_10_experts = (
     DynamicModuleTargeting()
-    .experts(kind="routed")
+    .experts(type="routed")
     .last(10, per="moe_layer", order_by="expert_id")
 )
 
@@ -67,11 +67,11 @@ plan = (
         ImageDataSet(image_text_samples),
         TextDataSet(text_samples),
     )
-    .add(Quantize.vision(
+    .serial(Quantize.vision(
         recipe=Recipe(GPTQ(bits=8, group_size=128)),
         name="vision",
     ))
-    .then(Requantize.language(
+    .serial(Requantize.language(
         target=last_10_experts,
         recipe=Recipe(GPTQ(bits=4, group_size=128)),
         source=source.dequantized(),
@@ -115,7 +115,7 @@ expert groups and 1,200 logical gate/up/down projection weights. Fused or sharde
 storage must map those logical weights to their actual owners; partial writes
 require an admitted representation, never changes to neighboring experts.
 It does not mean the last ten layers, the most active ten experts, or ten experts
-per GPU. Shared experts and draft experts are excluded by ownership and kind.
+per GPU. Shared experts and draft experts are excluded by ownership and expert type.
 
 ## Data flow and quantization order
 
@@ -146,12 +146,15 @@ flowchart TD
     E --> REPORT[Separate evaluation report]
 ```
 
-`.then(...)` makes the installed vision result precede candidate-conditioned
-language capture. The pinned source supplies the expert weights being refitted;
-it does not force language observations to use the old vision outputs. After
+Chained `.serial(...)` actions make the installed vision result precede
+candidate-conditioned language capture. The pinned source supplies the expert
+weights being refitted; it does not force language observations to use the old
+vision outputs. After
 each admitted language publication boundary, subsequent observations respect
 the current candidate and the method's within-layer dependencies. This remains
 progressive fitting, not simultaneous joint optimization.
+Each lifecycle action can still use admitted multi-GPU execution internally;
+the serial chain controls completion order between vision and language.
 
 The quantization plan ends at its method/integrity checks. `save()` commits the
 complete mixed artifact before optional `artifact.evaluate(...)` starts. The

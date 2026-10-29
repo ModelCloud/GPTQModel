@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.9 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.10 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -308,8 +308,8 @@ plan = (
     Plan()
     .devices(Local(gpus=[0, 1, 2, 3]))
     .data(images, texts)
-    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
-    .then(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 
 # Optional coverage controls; the image route is still inferred.

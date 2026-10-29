@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.9, 2026-10-29.
+**Status:** design discussion, revision 0.10, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -186,7 +186,7 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
 | `RecipeExtension` | Registered typed contribution selected by `Recipe.use()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
-| `Plan` | Immutable specification of quantization operations, recipes/modifiers, data bindings, order constraints, resource policy, and internal method/integrity checks. |
+| `Plan` | Immutable specification of lifecycle actions composed with `serial`/`parallel`, recipes/modifiers, data bindings, order constraints, resource policy, and internal method/integrity checks. |
 | `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and internal check policy after compilation. |
 | `ExecutionLayout` | Physical stage placement, replica/shard ownership, resource reservations, transfers, and collective groups under the resolved numerical plan. |
 | `QuantizationRun` | Program/stage progress, candidate revisions, checkpoints, observations, method diagnostics, and saved-artifact references. |
@@ -338,8 +338,8 @@ plan = (
     Plan()
     .data(calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
-    .add(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
-    .add(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
 )
 resolved = plan.compile(model)
 print(resolved.explain())
@@ -348,10 +348,16 @@ artifact = run.save("mixed-model")
 report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
-`add` declares operations and lets the compiler infer mandatory dependencies;
-`then` adds explicit completion order; `parallel` creates legal fork/join branches;
-`after` names a targeted dependency. A requested parallel group with a true
-dependency or shared-write conflict fails with an explanation. Resource policy
+`serial` and `parallel` compose actionable lifecycles such as quantization,
+requantization, and norm tuning. `serial(a, b)` is equivalent to
+`serial(a).serial(b)`; a serial action after a parallel group joins its branch
+terminals. They build ordering intent without executing or flattening the
+method-owned lifecycle programs. An action ordered serially can still execute
+across several GPUs internally.
+
+`add` declares intent without insertion-order edges; `after` names a targeted
+dependency. The compiler always infers mandatory dependencies. A parallel group
+with a true dependency or shared-write conflict fails with an explanation. Resource policy
 determines feasible overlap and whether a stage uses replicas, shards, or
 cooperative optimization. Ordering syntax cannot override method semantics.
 Scoped constructors use `Target.AUTO` by default. Module queries use
@@ -1056,7 +1062,7 @@ The following are proposed acceptance criteria and experiments.
 | V24 | Nonstandard execution traces | Depth history, nested recurrence, diffusion canvas/commit steps, and duplex stream events retain correct invocation/state identity under capture, replay, and resume. |
 | V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P9 cover failure, resource pressure, cost, and logical batches. |
 | V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
-| V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; immutable reuse, named dependencies, fork/join, fragments, selector overrides, and invalid composition diagnostics behave as specified. |
+| V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; serial chained/variadic forms and parallel fork/join compose lifecycle actions without disabling internal multi-GPU execution. Immutable reuse, dependencies, fragments, overrides, and invalid-action diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
 | V29 | Dataset contracts | `QDataSet` modality/schema identity, automatic routes and downstream consumers, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD18. |
 | V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
@@ -1112,7 +1118,7 @@ proposed defaults, not final design approval.
 | D16 | Required method data/checks inside quantization; optional independent artifact evaluation only after save. | Which report and suite conventions best support repeatable artifact comparisons without coupling evaluation to quantization? |
 | D17 | Separate route, component-owner, and invocation registries. | How should selectors explain shared multimodal writes and repeated visits without overwhelming common workflows? |
 | D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
-| D19 | Direct operations plus immutable fluent/file plans and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
+| D19 | Direct operations, immutable fluent/file plans with `serial`/`parallel` lifecycle actions, and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
 | D21 | `QDataSet` schemas infer input routes and shared downstream consumers; lifecycle roles remain orthogonal and are inferred only when unambiguous. | Which adapter defaults and coverage profiles minimize manual configuration without hiding meaningful task choices? |
 
@@ -1159,6 +1165,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.7, 2026-10-29 | Add the pinned DeepSeek V4.1 Flash mock config and DS1-DS6 acceptance target; define grouped expert selection and bounded decoded-weight source descriptors without implementing either API. |
 | 0.8, 2026-10-29 | Remove final evaluation from quantization plans. Successful saving returns a pinned artifact; optional evaluation follows save with independent data, resources, failure/retry, and reports. Preserve intrinsic method validation and selection. |
 | 0.9, 2026-10-29 | Default targets to `Target.AUTO`; resolve scoped module groups through versioned model mappings. Use `DynamicModuleTargeting` for module queries, add typed scope constructors, and preserve exact selection across labels, data routes, partial jobs, and device layouts. |
+| 0.10, 2026-10-29 | Use `experts(type=...)` and `serial(...)`/`parallel(...)` to compose actionable lifecycles. Define serial chaining/variadic equivalence, completion barriers, and the independence of action ordering from internal multi-GPU execution. |
 
 ## Sources
 

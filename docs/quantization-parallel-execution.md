@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.9 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.10 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -18,6 +18,12 @@ usable design. The planner must express both simultaneous independent jobs and
 cooperative execution of one stage across devices. Every method need not support
 every layout, but supported layouts and restrictions must be visible before a
 long job starts.
+
+The public `.serial(...)` and `.parallel(...)` controls compose lifecycle actions.
+Serial action ordering does not restrict an action to one GPU: its capture,
+fitting, or optimizer stages retain their admitted physical parallelism. A serial
+action after a parallel group waits for every branch's declared stable result.
+Parallel actions may overlap only when dependencies, writes, and resources permit.
 
 ## 1. Existing behavior to preserve or deliberately replace
 
