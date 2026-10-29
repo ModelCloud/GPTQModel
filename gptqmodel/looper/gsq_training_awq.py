@@ -77,4 +77,4 @@ def refine_awq_staged_layer(processor, teacher_capture, modules, *, layer_index)
                                       'hard_loss_before', 'hard_loss_after', 'hard_loss_delta')}
                    for stage, record in records.items()}
     processor.qcfg.meta.setdefault('gsq_training_runs', []).append(
-        dict(layer_index=layer_index, initializer='awq', config=config.to_dict(), stages=diagnostics))
+        {'layer_index': layer_index, 'initializer': 'awq', 'config': config.to_dict(), 'stages': diagnostics})

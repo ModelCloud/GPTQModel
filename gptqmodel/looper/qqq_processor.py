@@ -100,7 +100,7 @@ class QQQProcessor(LoopProcessor):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
         # entire module is skipped
-        if self.qcfg.dynamic_get(layer_name=module.full_name) == False:
+        if not self.qcfg.dynamic_get(layer_name=module.full_name):
             return
 
         qcfg_clone = copy.deepcopy(self.qcfg)
@@ -152,7 +152,7 @@ class QQQProcessor(LoopProcessor):
 
         # gptq has no dynamic method of full override (removal)
         t = self.tasks.get(module.name, False)
-        if t == False:
+        if not t:
             return True
         else:
             return False

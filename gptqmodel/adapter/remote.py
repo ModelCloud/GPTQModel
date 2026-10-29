@@ -15,6 +15,7 @@ from urllib.parse import unquote, urlparse
 from ..utils.hub import hf_hub_download
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 if TYPE_CHECKING:

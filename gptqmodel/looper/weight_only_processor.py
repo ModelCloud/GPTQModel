@@ -11,7 +11,7 @@ from typing import Optional
 
 import torch
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import CPU
@@ -26,11 +26,12 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
+from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..quantization.config import (
+    METHOD,
     BitsAndBytesConfig,
     FP8Config,
     GGUFConfig,
-    METHOD,
     RTNConfig,
     clone_weight_only_config_for_module,
     resolve_quant_format,
@@ -38,7 +39,6 @@ from ..quantization.config import (
 from ..quantization.rtn import RTN
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, pack_module
-from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..utils.module_locks import parent_module_lock
 
 

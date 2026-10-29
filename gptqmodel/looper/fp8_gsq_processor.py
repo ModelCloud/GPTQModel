@@ -10,11 +10,11 @@ import time
 
 import torch
 
-from .loop_processor import ExecutionConfig, LoopProcessor
-from .weight_only_processor import WeightOnlyProcessor
 from ..quantization.config import FP8Config, clone_weight_only_config_for_module
 from ..quantization.gsq_fp8_task import FP8GSQTask
 from ..quantization.gsq_scalar import gsq_enabled_for
+from .loop_processor import ExecutionConfig, LoopProcessor
+from .weight_only_processor import WeightOnlyProcessor
 
 
 class FP8GSQProcessor(WeightOnlyProcessor):

@@ -14,18 +14,17 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
-
 from transformers.activations import ACT2FN
 from transformers.cache_utils import Cache, DynamicCache
 from transformers.generation import GenerationMixin
 from transformers.masking_utils import create_causal_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import MoeCausalLMOutputWithPast, MoeModelOutputWithPast
 from transformers.modeling_utils import PreTrainedModel
+from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, repeat_kv, rotate_half
 from transformers.utils import logging
 
-from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding, repeat_kv, rotate_half
-
 from .configuration_minimax_m2 import MiniMaxM2Config
+
 
 logger = logging.get_logger(__name__)
 

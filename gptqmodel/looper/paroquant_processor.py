@@ -1964,7 +1964,7 @@ class ParoQuantProcessor(LoopProcessor):
             base_lrs = [float(group["lr"]) for group in optimizer.param_groups]
             scaler = torch.amp.GradScaler(enabled=use_amp)
             active_prefixes = tuple(optim_modules.keys())
-            needs_angle_reset = any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
+            any(optim_module.theta.requires_grad for optim_module in optim_modules.values())
             best_state_dtype = _resolve_best_state_snapshot_dtype(
                 best_state_dtype=getattr(self.qcfg, "opt_best_state_dtype", "fp32"),
                 device=opt_device,

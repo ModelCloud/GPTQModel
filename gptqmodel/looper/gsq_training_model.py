@@ -7,7 +7,9 @@ import hashlib
 import os
 import time
 from pathlib import Path
+
 import torch
+
 from ..quantization.gsq_training_config import GSQTrainingConfig
 from .gsq_training_capture import advance_llama_gsq_inputs, capture_llama_gsq_inputs, quantize_llama_gsq_capture
 
@@ -242,18 +244,18 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                 raise ValueError(f'Layer {index} {name} is already quantized or unsupported')
             if module.in_features % group_size:
                 raise ValueError('Staged model quantization requires complete contiguous groups')
-    run = dict(state='running', gsq_training=effective,
-               bits=bits if not isinstance(bits, dict) else dict(bits),
-               layer_bits=({index: bits if not isinstance(bits, dict) else bits[index] for index in indices}
-                           if isinstance(bits, dict) else {index: bits for index in indices}),
-               group_size=group_size,
-               layer_indices=indices, device=str(device), blocks=[],
-               training_documents=len(documents),
-               initialization_documents=len(initialization_documents) if initialization_documents is not None else len(documents),
-               validation_documents=len(validation_documents) if validation_documents is not None else 0,
-               offload_capture=offload_capture,
-               capture_storage='disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
-               deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
+    run = {"state": 'running', "gsq_training": effective,
+               "bits": bits if not isinstance(bits, dict) else dict(bits),
+               "layer_bits": ({index: bits if not isinstance(bits, dict) else bits[index] for index in indices}
+                           if isinstance(bits, dict) else dict.fromkeys(indices, bits)),
+               "group_size": group_size,
+               "layer_indices": indices, "device": str(device), "blocks": [],
+               "training_documents": len(documents),
+               "initialization_documents": len(initialization_documents) if initialization_documents is not None else len(documents),
+               "validation_documents": len(validation_documents) if validation_documents is not None else 0,
+               "offload_capture": offload_capture,
+               "capture_storage": 'disk' if capture_directory is not None else ('cpu' if offload_capture else 'device'),
+               "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
     run.update(world_size=1 if distributed is None else distributed.world_size,
                target_cache=target_cache, activation_checkpointing=activation_checkpointing,
                reuse_capture=reuse_capture,
@@ -264,17 +266,17 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     signature = None
     source_prefixes = None
     if checkpoint_directory is not None:
-        signature = dict(bits=bits, group_size=group_size, gsq_training=effective,
-                         layer_indices=indices, model_config=model.config.to_dict(),
-                         training_documents=_checkpoint_documents_digest(documents),
-                         initialization_documents=_checkpoint_documents_digest(
+        signature = {"bits": bits, "group_size": group_size, "gsq_training": effective,
+                         "layer_indices": indices, "model_config": model.config.to_dict(),
+                         "training_documents": _checkpoint_documents_digest(documents),
+                         "initialization_documents": _checkpoint_documents_digest(
                              documents if initialization_documents is None else initialization_documents),
-                         validation_documents=(None if validation_documents is None else
+                         "validation_documents": (None if validation_documents is None else
                                                _checkpoint_documents_digest(validation_documents)),
-                         capture_batch_size=capture_batch_size,
-                         attention_implementation=getattr(model.config, '_attn_implementation', None),
-                         device=str(device),
-                         deterministic_algorithms=torch.are_deterministic_algorithms_enabled())
+                         "capture_batch_size": capture_batch_size,
+                         "attention_implementation": getattr(model.config, '_attn_implementation', None),
+                         "device": str(device),
+                         "deterministic_algorithms": torch.are_deterministic_algorithms_enabled()}
         if distributed is not None:
             signature.update(device=device.type, distributed_world_size=distributed.world_size)
         if target_cache != 'none' or activation_checkpointing:
@@ -444,10 +446,10 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                     for captured in (cache, initialization_cache, validation_cache):
                         if captured is not None and hasattr(captured, 'cleanup'):
                             captured.cleanup()
-            record = dict(layer_index=index, stages={
+            record = {"layer_index": index, "stages": {
                 name: {key: value for key, value in stage.items() if key not in ('weights', 'scales')}
                 for name, stage in result['stages'].items()},
-                initializer_metadata=result['initializer_metadata'])
+                "initializer_metadata": result['initializer_metadata']}
             record['block_seconds'] = time.monotonic()-block_started
             if checkpoint is not None:
                 def write_checkpoint(checkpoint=checkpoint, layer_signature=layer_signature,
@@ -455,8 +457,8 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                     temporary = checkpoint.with_suffix('.pt.tmp')
                     try:
                         state = {name: value.detach().cpu().clone() for name, value in packed.state_dict().items()}
-                        torch.save(dict(signature=layer_signature, layer_index=index,
-                                        state_dict=state, record=record), temporary)
+                        torch.save({"signature": layer_signature, "layer_index": index,
+                                        "state_dict": state, "record": record}, temporary)
                         os.replace(temporary, checkpoint)
                         return _checkpoint_packed_prefix(packed_prefix, index, state)
                     finally:

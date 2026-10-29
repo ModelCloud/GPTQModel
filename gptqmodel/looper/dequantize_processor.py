@@ -13,6 +13,7 @@ from ..models import BaseQModel
 from ..nn_modules.qlinear.torch import TorchLinear
 from ..utils.logger import setup_logger
 
+
 log = setup_logger()
 
 class DequantizeProcessor(LoopProcessor):

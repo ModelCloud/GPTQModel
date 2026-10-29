@@ -1337,28 +1337,28 @@ def run_subset_stage(
 
     # Keep the helper callsite compact while still passing the fully resolved
     # execution context into every chunk or single-pass invocation.
-    common_args = dict(
-        looper=looper,
-        processor=processor,
-        module=module,
-        layer_inputs=layer_inputs,
-        layer_input_kwargs=layer_input_kwargs,
-        position_ids=position_ids,
-        attention_masks=attention_masks,
-        cur_layer_device=cur_layer_device,
-        is_lm_head_module=is_lm_head_module,
-        layer_descriptor=layer_descriptor,
-        layer_title=layer_title,
-        layer_index=layer_index,
-        full=full,
-        fallback=fallback,
-        shared_kv_cache_dict=shared_kv_cache_dict,
-        pb=pb,
-        logger=logger,
-        is_awq_processor=is_awq_processor,
-        region_timer=region_timer,
-        previous_processed_subset=previous_processed_subset,
-    )
+    common_args = {
+        "looper": looper,
+        "processor": processor,
+        "module": module,
+        "layer_inputs": layer_inputs,
+        "layer_input_kwargs": layer_input_kwargs,
+        "position_ids": position_ids,
+        "attention_masks": attention_masks,
+        "cur_layer_device": cur_layer_device,
+        "is_lm_head_module": is_lm_head_module,
+        "layer_descriptor": layer_descriptor,
+        "layer_title": layer_title,
+        "layer_index": layer_index,
+        "full": full,
+        "fallback": fallback,
+        "shared_kv_cache_dict": shared_kv_cache_dict,
+        "pb": pb,
+        "logger": logger,
+        "is_awq_processor": is_awq_processor,
+        "region_timer": region_timer,
+        "previous_processed_subset": previous_processed_subset,
+    }
 
     # Once a plan exists, subset execution is just a dispatch over the plan's
     # shape rather than another round of subset analysis.
@@ -1372,7 +1372,7 @@ def run_subset_stage(
 
         # Create progress bar for MOE chunks
         moe_chunk_pb = logger.pb(range(len(plan.module_chunks))).manual()
-        moe_chunk_pb.title(f"MoE Chunk")
+        moe_chunk_pb.title("MoE Chunk")
 
         for chunk_idx in moe_chunk_pb:
             chunk_plan = plan.for_modules(plan.module_chunks[chunk_idx])

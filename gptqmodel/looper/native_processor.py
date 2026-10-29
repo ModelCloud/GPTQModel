@@ -15,6 +15,7 @@ from ..quantization.config import QuantizeConfig
 from ..utils.logger import setup_logger
 from ..utils.torch import CPU, DEVICE_1
 
+
 log = setup_logger()
 
 NATIVE_INPUTS_STATE_KEY = "native_inp"

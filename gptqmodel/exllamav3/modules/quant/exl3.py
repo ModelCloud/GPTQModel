@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import torch
 
-from .exl3_lib.quantize import preapply_had_l, preapply_had_r, had_k, had_n
 from ...ext import exllamav3_ext as ext
 from ...util.tensor import g_tensor_cache
+from .exl3_lib.quantize import had_k, had_n, preapply_had_l, preapply_had_r
+
 
 class LinearEXL3:
 
