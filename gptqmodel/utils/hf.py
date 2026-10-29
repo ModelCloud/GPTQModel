@@ -1135,6 +1135,9 @@ def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
         with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except Exception:
+        # A broken local config.json is not "this is some other model"; record it
+        # so a failed DeepSeek-VL2 pre-config patch is diagnosable.
+        log.debug("DeepSeek-VL2 probe could not read %s", config_path, exc_info=True)
         return False
 
     return str(config.get("model_type", "")).lower() == "deepseek_vl_v2"
@@ -2202,15 +2205,15 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
 
 def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
     try:
-        config_dict, kwargs = GenerationConfig.get_config_dict(path)
+        # transformers >= 5 exposes generation configs through from_pretrained
+        # only; the old `get_config_dict` helper no longer exists. Calling it
+        # raised AttributeError on every model, so this branch was dead and the
+        # caller always fell back to a defaults-only config.
+        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
     except Exception:
+        log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None
 
-    cleaned = dict(config_dict)
-    if cleaned.get("do_sample") is not True:
-        cleaned["do_sample"] = True
-
-    cfg = GenerationConfig.from_dict(cleaned, **kwargs)
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
     return cfg
 

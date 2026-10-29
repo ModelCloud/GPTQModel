@@ -161,27 +161,16 @@ def test_mlx_probe_does_not_catch_base_exception():
     assert "except BaseException" not in source[probe_start:probe_end]
 
 
-def test_subset_callback_failure_is_logged(monkeypatch):
-    """A failing subset callback must be recorded *and* reported."""
-    logged = {}
-
-    class FakeLogger:
-        def warning(self, msg, *args, **kwargs):
-            logged["msg"] = msg
-            logged["exc_info"] = kwargs.get("exc_info")
-
+def _make_looper():
     looper = object.__new__(ModuleLooper)
     looper.lock = threading.Lock()
     looper._loop_stop_event = threading.Event()
     looper._loop_stop_exc = None
     looper._loop_stop_waited = False
+    return looper
 
-    def failing_handler(**_kwargs):
-        raise RuntimeError("callback bug")
 
-    monkeypatch.setattr(ModuleLooper, "_resolve_subset_callback", lambda self: failing_handler)
-    monkeypatch.setattr("gptqmodel.looper.module_looper.log", FakeLogger())
-
+def _emit_subset(looper, *, raise_in_place):
     looper._emit_subset_event(
         stage="process",
         layer_idx=0,
@@ -189,9 +178,152 @@ def test_subset_callback_failure_is_logged(monkeypatch):
         subset_total=1,
         module_names=[],
         processor="test",
-        raise_in_place=False,
+        raise_in_place=raise_in_place,
     )
 
-    assert logged.get("msg", "").startswith("Subset callback raised")
-    assert logged.get("exc_info") is True
+
+def test_subset_callback_failure_is_logged_when_swallowed(monkeypatch):
+    """The swallowed path must leave a record instead of only latching."""
+
+    class FakeLogger:
+        def __init__(self):
+            self.calls = []
+
+        def warning(self, msg, *args, **kwargs):
+            self.calls.append((msg, kwargs.get("exc_info")))
+
+    fake_log = FakeLogger()
+    looper = _make_looper()
+
+    def failing_handler(**_kwargs):
+        raise RuntimeError("callback bug")
+
+    monkeypatch.setattr(ModuleLooper, "_resolve_subset_callback", lambda self: failing_handler)
+    monkeypatch.setattr("gptqmodel.looper.module_looper.log", fake_log)
+
+    _emit_subset(looper, raise_in_place=False)
+
+    assert len(fake_log.calls) == 1
+    msg, exc_info = fake_log.calls[0]
+    assert msg.startswith("Subset callback raised")
+    assert exc_info is True
     assert isinstance(looper._loop_stop_exc, RuntimeError)
+
+
+@pytest.mark.parametrize("control_error", [KeyboardInterrupt, SystemExit, RuntimeError])
+def test_subset_callback_in_place_propagates_without_spurious_warning(monkeypatch, control_error):
+    """Ctrl-C must propagate cleanly, not be reported as a callback bug."""
+
+    class ExplodingLogger:
+        def __init__(self):
+            self.calls = 0
+
+        def warning(self, *_args, **_kwargs):
+            self.calls += 1
+
+    fake_log = ExplodingLogger()
+    looper = _make_looper()
+
+    def failing_handler(**_kwargs):
+        raise control_error("raised by handler")
+
+    monkeypatch.setattr(ModuleLooper, "_resolve_subset_callback", lambda self: failing_handler)
+    monkeypatch.setattr("gptqmodel.looper.module_looper.log", fake_log)
+
+    with pytest.raises(control_error):
+        _emit_subset(looper, raise_in_place=True)
+
+    assert fake_log.calls == 0, "in-place propagation must not log a spurious warning"
+
+
+# ---------------------------------------------------------------------------
+# 3. Degradations that hide real failures must be reported
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_config_json_is_reported(tmp_path, monkeypatch):
+    """A corrupt config.json must not silently read as "not DeepSeek-VL2"."""
+    from gptqmodel.utils import hf as hf_utils
+
+    model_dir = tmp_path / "broken-model"
+    model_dir.mkdir()
+    (model_dir / "config.json").write_text("{ this is not json", encoding="utf-8")
+
+    calls = []
+
+    class FakeLogger:
+        def debug(self, msg, *args, **kwargs):
+            calls.append((msg, kwargs.get("exc_info")))
+
+    monkeypatch.setattr(hf_utils, "log", FakeLogger())
+
+    assert hf_utils._is_deepseek_vl_v2_model_path(str(model_dir)) is False
+    assert calls, "a corrupt config.json was silently ignored"
+    assert calls[0][1] is True
+
+
+def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
+    """Regression: `get_config_dict` vanished in transformers 5, so this path
+    always raised AttributeError and the caller silently used defaults."""
+    from gptqmodel.utils import hf as hf_utils
+
+    (tmp_path / "generation_config.json").write_text(
+        '{"max_new_tokens": 7, "do_sample": false}', encoding="utf-8"
+    )
+
+    cfg = hf_utils._load_sanitized_generation_config(str(tmp_path))
+
+    assert cfg is not None, "generation config silently failed to load"
+    assert cfg.max_new_tokens == 7
+    # _sanitize_generation_config forces sampling on.
+    assert cfg.do_sample is True
+
+
+def test_unreadable_generation_config_is_reported(tmp_path, monkeypatch):
+    from transformers import GenerationConfig
+
+    from gptqmodel.utils import hf as hf_utils
+
+    calls = []
+
+    class FakeLogger:
+        def debug(self, msg, *args, **kwargs):
+            calls.append((msg, kwargs.get("exc_info")))
+
+    def broken_from_pretrained(*_args, **_kwargs):
+        raise ValueError("corrupt generation config")
+
+    monkeypatch.setattr(hf_utils, "log", FakeLogger())
+    monkeypatch.setattr(GenerationConfig, "from_pretrained", staticmethod(broken_from_pretrained))
+
+    assert hf_utils._load_sanitized_generation_config(str(tmp_path)) is None
+    assert calls, "an unreadable generation config was silently ignored"
+    assert calls[0][1] is True
+
+
+def test_failed_device_move_is_reported(monkeypatch):
+    """A buffer that cannot reach the target device is a correctness problem."""
+    calls = []
+
+    class FakeLogger:
+        def warning(self, msg, *args, **kwargs):
+            calls.append((msg, kwargs.get("exc_info")))
+
+    class StubbornTensor(torch.Tensor):
+        def to(self, *_args, **_kwargs):
+            raise RuntimeError("device move failed")
+
+    stubborn = torch.zeros(2).as_subclass(StubbornTensor)
+
+    module = torch.nn.Module()
+    module.register_buffer("stubborn", torch.zeros(2))
+    module._buffers["stubborn"] = stubborn
+
+    monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+
+    looper_helpers.rehome_module_to_device(
+        module, torch.device("cpu"), only_mismatched=False
+    )
+
+    assert calls, "a failed buffer move was silently swallowed"
+    assert calls[0][1] is True

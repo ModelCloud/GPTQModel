@@ -241,7 +241,15 @@ def rehome_module_to_device(
                         try:
                             sub._buffers[name] = buf.to(device)
                         except Exception:
-                            pass
+                            # The buffer stays on its original device; that is a
+                            # correctness problem, not a benign fallback.
+                            log.warning(
+                                "failed to move buffer %r of %s to %s",
+                                name,
+                                type(sub).__name__,
+                                device,
+                                exc_info=True,
+                            )
 
             if move_parameters:
                 for pname, p in list(getattr(sub, "_parameters", {}).items()):
@@ -265,7 +273,13 @@ def rehome_module_to_device(
                                 )
                             sub._parameters[pname] = new_p
                         except Exception:
-                            pass
+                            log.warning(
+                                "failed to move parameter %r of %s to %s",
+                                pname,
+                                type(sub).__name__,
+                                device,
+                                exc_info=True,
+                            )
 
         if move_parameters:
             _realign_materialized_hooks(module, device, root_module)
