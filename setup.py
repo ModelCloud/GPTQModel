@@ -14,7 +14,9 @@ def _package_version() -> str:
     return version_vars["__version__"]
 
 
-packages = find_packages(exclude=("tests", "tests.*"))
+# Keep repository-only trees out of the wheel: `scripts/` and `tests/` are
+# checkouts helpers, and shipping either creates top-level name clashes.
+packages = find_packages(exclude=("tests", "tests.*", "scripts", "scripts.*"))
 for package_name in find_namespace_packages(include=("gptqmodel_ext.*",)):
     if package_name not in packages:
         packages.append(package_name)
