@@ -124,15 +124,37 @@ except Exception:
     HAS_NPU = False
 
 
+mlx = None
+
+
+def _detect_mlx() -> bool:
+    """Probe for a usable MLX install, binding the package on success.
+
+    MLX is an optional accelerator: absence (or a broken native install) is
+    expected on most hosts, so probe failures are reported as "unavailable".
+    ``except Exception`` is deliberate -- ``KeyboardInterrupt``/``SystemExit``
+    must stay visible rather than being reported as a missing dependency.
+
+    The module-level ``mlx`` name is only assigned when the probe succeeds, so
+    a partially-installed package never leaves a half-bound name behind.
+    """
+    global mlx
+
+    try:
+        import mlx.core  # type: ignore # noqa: F401
+        import mlx.core.metal  # noqa: F401
+    except Exception:
+        # `import mlx.core` binds the top-level `mlx` name even when the probe
+        # fails partway, so clear it: a partial install must never leave
+        # `mlx` set while `HAS_MLX` is False.
+        mlx = None
+        return False
+
+    return True
+
+
 # mlx check
-try:
-    import mlx.core  # type: ignore # noqa: F401
-    import mlx.core.metal  # noqa: F401
-    HAS_MLX = True
-except Exception:
-    # MLX is an optional accelerator: absence (or a broken native install) is
-    # expected on most hosts. KeyboardInterrupt/SystemExit must stay visible.
-    HAS_MLX = False
+HAS_MLX = _detect_mlx()
 
 try:
     torch.backends.fp32_precision

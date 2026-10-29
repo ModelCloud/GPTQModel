@@ -224,6 +224,24 @@ def rehome_module_to_device(
     Omit ``root_module`` when ancestry is unknown to preserve hook ownership.
     A standalone module may supply itself as the root.
     """
+    # Log amplification guard: this runs under `_rehome_lock` and is called
+    # per module (and, for batch workers, repeatedly). A model whose tensors
+    # cannot reach the target device would otherwise emit one full traceback
+    # per tensor. Emit the first failure with its traceback, then a single
+    # summary line -- never one warning per tensor.
+    failures: List[str] = []
+
+    def _record_failure(kind: str, name: str, sub: torch.nn.Module) -> None:
+        label = f"{kind} {name!r} of {type(sub).__name__}"
+        if not failures:
+            log.warning(
+                "failed to move %s to %s",
+                label,
+                device,
+                exc_info=True,
+            )
+        failures.append(label)
+
     with _rehome_lock:
         for sub in module.modules():
             if move_buffers:
@@ -243,13 +261,7 @@ def rehome_module_to_device(
                         except Exception:
                             # The buffer stays on its original device; that is a
                             # correctness problem, not a benign fallback.
-                            log.warning(
-                                "failed to move buffer %r of %s to %s",
-                                name,
-                                type(sub).__name__,
-                                device,
-                                exc_info=True,
-                            )
+                            _record_failure("buffer", name, sub)
 
             if move_parameters:
                 for pname, p in list(getattr(sub, "_parameters", {}).items()):
@@ -273,13 +285,15 @@ def rehome_module_to_device(
                                 )
                             sub._parameters[pname] = new_p
                         except Exception:
-                            log.warning(
-                                "failed to move parameter %r of %s to %s",
-                                pname,
-                                type(sub).__name__,
-                                device,
-                                exc_info=True,
-                            )
+                            _record_failure("parameter", pname, sub)
+
+        if failures and len(failures) > 1:
+            log.warning(
+                "%d more tensor(s) could not be moved to %s; the first failure is "
+                "reported above. Per-tensor detail is available from the first traceback.",
+                len(failures) - 1,
+                device,
+            )
 
         if move_parameters:
             _realign_materialized_hooks(module, device, root_module)

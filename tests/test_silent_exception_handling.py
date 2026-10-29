@@ -5,13 +5,16 @@
 Two guarantees are covered:
 
 1. Optional-dependency / compatibility-shim failures are reported instead of
-   vanishing (issue: "静默吞异常面过大").
+   vanishing.
 2. ``KeyboardInterrupt``/``SystemExit`` are never swallowed by fallbacks that
    exist only to survive a *failed* operation.
 """
 
+import ast
 import contextlib
+import inspect
 import io
+import textwrap
 import threading
 
 import pytest
@@ -58,22 +61,63 @@ def test_paroquant_quantizer_compat_reports_upstream_api_change(monkeypatch):
     assert "ParoQuant quantizer compat is inactive" in stderr
 
 
-def test_openvino_compat_stays_quiet_when_dependency_is_absent(monkeypatch):
-    """A genuinely optional dependency must not spam warnings when missing."""
+class _RecordingLogger:
+    """Minimal stand-in for the project logger that records call levels."""
+
+    def __init__(self):
+        self.debug_calls = []
+        self.warning_calls = []
+
+    def debug(self, msg, *args, **kwargs):
+        self.debug_calls.append((msg, kwargs.get("exc_info")))
+
+    def warning(self, msg, *args, **kwargs):
+        self.warning_calls.append((msg, kwargs.get("exc_info")))
+
+
+def _block_imports(monkeypatch, prefix, exc_factory):
     import builtins
 
     real_import = builtins.__import__
 
     def fake_import(name, *args, **kwargs):
-        if name.startswith("openvino"):
-            raise ImportError("openvino not installed")
+        if name == prefix or name.startswith(prefix + "."):
+            raise exc_factory()
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
 
-    stderr = _captured_stderr(gptqmodel._patch_openvino_gptqmodel_compat)
 
-    assert "compat is inactive" not in stderr
+def test_openvino_compat_stays_quiet_when_dependency_is_absent(monkeypatch):
+    """A genuinely optional dependency must not spam warnings when missing."""
+    recording = _RecordingLogger()
+    monkeypatch.setattr(gptqmodel, "log", recording)
+    _block_imports(monkeypatch, "openvino", lambda: ImportError("openvino not installed"))
+
+    gptqmodel._patch_openvino_gptqmodel_compat()
+
+    assert not recording.warning_calls, (
+        f"a missing optional dependency must not log at warning level: {recording.warning_calls}"
+    )
+    assert any("OpenVINO" in msg for msg, _ in recording.debug_calls), (
+        f"the skipped OpenVINO shim was not recorded at debug level: {recording.debug_calls}"
+    )
+
+
+def test_openvino_compat_reports_unexpected_probe_failure(monkeypatch):
+    """A broken (not merely missing) OpenVINO install must be visible."""
+    recording = _RecordingLogger()
+    monkeypatch.setattr(gptqmodel, "log", recording)
+    _block_imports(
+        monkeypatch,
+        "openvino",
+        lambda: RuntimeError("openvino native library is corrupt"),
+    )
+
+    gptqmodel._patch_openvino_gptqmodel_compat()
+
+    assert recording.warning_calls, "an unexpected OpenVINO probe failure was silently dropped"
+    assert recording.warning_calls[0][1] is True, "the warning must carry the traceback"
 
 
 def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):
@@ -107,13 +151,52 @@ def test_triton_patch_failure_is_reported_by_import_guard(monkeypatch):
     assert not any(isinstance(stmt, ast.Pass) for stmt in handler.body), (
         "TritonPatch.apply() failures are swallowed by a bare `pass`"
     )
-    assert any(
-        isinstance(call, ast.Call)
-        and isinstance(call.func, ast.Attribute)
-        and call.func.attr in {"warning", "warn", "error", "exception"}
+    log_calls = [
+        call
         for stmt in handler.body
         for call in ast.walk(stmt)
-    ), "TritonPatch.apply() failures are not logged"
+        if isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"warning", "warn", "error", "exception"}
+    ]
+    assert log_calls, "TritonPatch.apply() failures are not logged"
+
+    # The traceback is the only way to diagnose which triton API moved.
+    assert any(
+        any(
+            kw.arg == "exc_info"
+            and isinstance(kw.value, ast.Constant)
+            and kw.value.value is True
+            for kw in call.keywords
+        )
+        for call in log_calls
+    ), "the TritonPatch.apply() warning must pass exc_info=True"
+
+
+def test_causal_conv1d_compat_reports_upstream_api_change(monkeypatch):
+    """A renamed transformers integration must not fail silently."""
+    real_import = __import__
+
+    def renamed_integration_import(name, globals=None, locals=None, fromlist=(), level=0):
+        # Break only the shim's own `from transformers.integrations import
+        # hub_kernels`; every other import must keep working.
+        if name == "transformers.integrations" and fromlist and "hub_kernels" in fromlist:
+            raise ImportError("cannot import name 'hub_kernels' from 'transformers.integrations'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    recording = _RecordingLogger()
+    monkeypatch.setattr(gptqmodel, "log", recording)
+    monkeypatch.setattr("builtins.__import__", renamed_integration_import)
+
+    gptqmodel._patch_transformers_causal_conv1d_hub_kernel_compat()
+
+    assert recording.warning_calls, "a broken causal-conv1d shim was silently ignored"
+    msg, exc_info = recording.warning_calls[0]
+    assert "causal-conv1d" in msg
+    assert "inactive" in msg, (
+        f"the shim must report that it is inert, not a generic probe failure: {msg!r}"
+    )
+    assert exc_info is True
 
 
 # ---------------------------------------------------------------------------
@@ -152,13 +235,65 @@ def test_torch_replicate_device_sync_propagates_control_flow_exceptions(monkeypa
 
 def test_mlx_probe_does_not_catch_base_exception():
     """The MLX probe is optional, but must not mask Ctrl-C during import."""
-    import inspect
+    tree = ast.parse(textwrap.dedent(inspect.getsource(torch_utils._detect_mlx)))
 
-    source = inspect.getsource(torch_utils)
-    probe_start = source.index("import mlx.core")
-    probe_end = source.index("BACKENDS_HAS_FP32_PRECISION", probe_start)
+    caught = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        caught.add("BaseException" if node.type is None else ast.unparse(node.type))
 
-    assert "except BaseException" not in source[probe_start:probe_end]
+    assert caught, "the MLX probe no longer guards its import at all"
+    assert not any("BaseException" in entry for entry in caught), (
+        f"the MLX probe swallows control-flow exceptions: caught {sorted(caught)}"
+    )
+
+
+def test_mlx_probe_reports_unavailable_when_import_fails(monkeypatch):
+    """MLX is optional, so a failed probe must resolve to "unavailable"."""
+    _block_imports(monkeypatch, "mlx", lambda: ImportError("mlx not installed"))
+
+    assert torch_utils._detect_mlx() is False
+
+
+def test_partial_mlx_install_does_not_leave_module_bound(monkeypatch):
+    """A half-installed MLX must not leave ``mlx`` set while ``HAS_MLX`` is False.
+
+    ``import mlx.core`` binds the top-level name before ``mlx.core.metal`` can
+    fail, so a naive probe leaves a dangling module reference behind.
+    """
+    import builtins
+    import types
+
+    real_import = builtins.__import__
+
+    fake_mlx = types.ModuleType("mlx")
+    fake_mlx_core = types.ModuleType("mlx.core")
+    fake_mlx.core = fake_mlx_core
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "mlx.core":
+            # Mimic CPython: importing a submodule binds the parent package.
+            globals["mlx"] = fake_mlx
+            return fake_mlx_core
+        if name == "mlx.core.metal":
+            raise ModuleNotFoundError("No module named 'mlx.core.metal'")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(torch_utils, "mlx", "sentinel")
+
+    assert torch_utils._detect_mlx() is False
+    assert torch_utils.mlx is None, "a partial MLX install left a dangling module reference"
+
+
+@pytest.mark.parametrize("control_error", [KeyboardInterrupt, SystemExit])
+def test_mlx_probe_propagates_control_flow_exceptions(monkeypatch, control_error):
+    """A Ctrl-C raised during the MLX probe must reach the caller."""
+    _block_imports(monkeypatch, "mlx", control_error)
+
+    with pytest.raises(control_error):
+        torch_utils._detect_mlx()
 
 
 def _make_looper():
@@ -326,4 +461,63 @@ def test_failed_device_move_is_reported(monkeypatch):
     )
 
     assert calls, "a failed buffer move was silently swallowed"
+    assert calls[0][1] is True
+
+
+def _stubborn_tensor():
+    class StubbornTensor(torch.Tensor):
+        def to(self, *_args, **_kwargs):
+            raise RuntimeError("device move failed")
+
+    return torch.zeros(2).as_subclass(StubbornTensor)
+
+
+def test_failed_device_moves_do_not_flood_the_log(monkeypatch):
+    """Failure reporting must be bounded: one traceback plus one summary line.
+
+    ``rehome_module_to_device`` runs under a global lock and batch workers call
+    it repeatedly, so a per-tensor warning would repeat a full traceback for
+    every tensor of every module.
+    """
+    calls = []
+
+    class FakeLogger:
+        def warning(self, msg, *args, **kwargs):
+            calls.append((msg % args if args else msg, kwargs.get("exc_info")))
+
+    model = torch.nn.Module()
+    for index in range(10):
+        layer = torch.nn.Module()
+        for name in ("a", "b", "c"):
+            layer.register_buffer(name, torch.zeros(2))
+            layer._buffers[name] = _stubborn_tensor()
+        model.add_module(f"layer{index}", layer)
+
+    monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+
+    looper_helpers.rehome_module_to_device(model, torch.device("cpu"), only_mismatched=False)
+
+    assert len(calls) == 2, f"expected 1 traceback + 1 summary, got {len(calls)}: {calls}"
+    assert calls[0][1] is True, "the first failure must carry the traceback"
+    assert not calls[1][1], "the summary needs no traceback"
+    assert "29 more" in calls[1][0], f"summary must count the remaining failures: {calls[1][0]}"
+
+
+def test_single_failed_device_move_logs_without_summary(monkeypatch):
+    """One failure needs no trailing summary line."""
+    calls = []
+
+    class FakeLogger:
+        def warning(self, msg, *args, **kwargs):
+            calls.append((msg % args if args else msg, kwargs.get("exc_info")))
+
+    module = torch.nn.Module()
+    module.register_buffer("stubborn", torch.zeros(2))
+    module._buffers["stubborn"] = _stubborn_tensor()
+
+    monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+
+    looper_helpers.rehome_module_to_device(module, torch.device("cpu"), only_mismatched=False)
+
+    assert len(calls) == 1, f"a single failure must not add a summary: {calls}"
     assert calls[0][1] is True
