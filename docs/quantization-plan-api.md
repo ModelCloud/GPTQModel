@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.5 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.6 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -20,17 +20,13 @@ to quantize a supported model.
 
 ```python
 model = GPTQModel.load("source-checkpoint")
-multimodal_calibration = CalibrationDataSet(
-    MultiModalDataSet(image_text_samples),
-    route="image_text",
-    scenarios=("prefill", "decode"),
-)
+images = ImageDataSet(image_text_samples)
 
 # One target, one method. The operation compiles and executes a plan.
 run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
-    data=multimodal_calibration,
+    data=images,
     devices=Local(gpus="all"),
 )
 run.save("language-quantized")
@@ -41,8 +37,18 @@ run.save("mixed-model")
 ```
 
 An ordinary method configuration is shorthand for `Recipe(method)`. Direct
-operations return a run/result object, with installed revision, reports, status,
-and saved artifact references. They do not return a partially configured model
+operations infer the input route from the dataset schema and architecture adapter;
+GPTQ's single data role makes `data=images` calibration without another wrapper.
+`CalibrationDataSet` is available for explicit role/coverage controls:
+
+```python
+multimodal_calibration = CalibrationDataSet(
+    images, scenarios=("prefill", "decode"),
+)
+```
+
+Direct operations return a run/result object, with installed revision, reports,
+status, and saved artifact references. They do not return a partially configured model
 builder. Every direct operation can be previewed through the plan form below.
 `run.save()` saves that run's assembled revision, including untouched components;
 it cannot silently save a later run's changes. `model.save()` explicitly saves
@@ -73,7 +79,7 @@ ownership of a shared multimodal backbone.
 ```python
 plan = (
     Plan()
-    .data(calibration=multimodal_calibration)
+    .data(multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
         target="vision.encoder", recipe=GPTQ(bits=8), name="vision"
@@ -108,28 +114,41 @@ content validation, capture, and profiling are explicit execution stages. Checks
 that depend on unseen samples remain pending until those stages complete; a
 plan preview cannot certify unknown coverage or held-out status.
 
+Multiple modality sources also need no per-component bindings:
+
+```python
+plan = (
+    Plan()
+    .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
+    .devices(Local(gpus=[0, 1, 2, 3]))
+    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
+    .then(Quantize("language", GPTQ(bits=4), name="language"))
+)
+```
+
+The adapter sends images through the image path and text through the text path.
+The shared language backbone observes both paths, including image features from
+the installed vision revision. Selecting language weights does not make its data
+text-only. A vision-only stage can stop at the required vision boundary when its
+method and adapter permit it; data routing does not expand its write selection.
+
 ## 3. Explicit ordering and parallel branches
 
 For users who want explicit operation order, provide ordinary named methods:
 
 ```python
-audio_calibration = CalibrationDataSet(
-    AudioDataSet(audio_text_samples), route="audio_text",
-)
+audio_calibration = CalibrationDataSet(AudioDataSet(audio_text_samples))
 omni_calibration = CalibrationDataSet(
     MultiModalDataSet(aligned_image_audio_text_samples),
-    route="image_audio_text",
 )
 
 plan = (
     Plan()
-    .data(calibration=omni_calibration)
+    .data(multimodal_calibration, audio_calibration, omni_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
-        Quantize("vision.encoder", GPTQ(bits=8),
-                 data=multimodal_calibration, name="vision"),
-        Quantize("audio.encoder", GPTQ(bits=8),
-                 data=audio_calibration, name="audio"),
+        Quantize("vision.encoder", GPTQ(bits=8), name="vision"),
+        Quantize("audio.encoder", GPTQ(bits=8), name="audio"),
     )
     .then(Quantize("language", GPTQ(bits=4), name="language"))
     .then(TuneNorms(
@@ -152,10 +171,14 @@ plan = (
 `parallel()` permits legal overlap; device count and memory still bound actual
 concurrency. The preview shows feasible placement and serialized bottlenecks.
 Strict physical-layout requirements belong in the parallelism policy below.
-The example assumes an adapter with independent vision/audio owners and the
-named routes. The language corpus covers both modalities; an image-text corpus
-alone cannot satisfy audio coverage. Shared-backbone owners require a different
-selection and must not be presented as independent encoder branches.
+The example assumes an adapter with independent vision/audio owners and supported
+image, audio, and aligned joint routes. It resolves each source automatically:
+the vision branch observes image-bearing inputs, the audio branch observes
+audio-bearing inputs, and language observes all applicable paths. The aligned
+corpus covers joint events; independent image and audio corpora cannot invent
+that alignment. An image-text corpus alone cannot satisfy audio coverage.
+Shared-backbone owners require a different selection and must not be presented
+as independent encoder branches.
 Calling `.parallel(vision, language)` is invalid when the selected language
 program requires the newly quantized vision output. The error points to the
 dependency and suggests `then` or `add`; it must not silently change the objective.
@@ -172,7 +195,7 @@ GPTQ fitting against one source's inputs can be requested as follows:
 native_inputs = Observations.from_source(SourceSnapshot("source-checkpoint"))
 independent = (
     Plan()
-    .data(calibration=multimodal_calibration)
+    .data(multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize("vision.encoder", GPTQ(bits=8),
@@ -321,9 +344,15 @@ schema/modalities, identity, streaming/replay capabilities, and per-run cursors.
 `CalibrationDataSet(QDataSet)` is a delegating role-aware view, so calibration
 can wrap any modality without multiple-inheritance combinations.
 
-A plan-wide `.data(calibration=...)` call supplies a default role binding; an
-operation can supply a plain `QDataSet` when it has exactly one unambiguous data
-requirement or a `DataBindings` value for several roles:
+A plan-wide `.data(*datasets)` registers sources, infers unambiguous lifecycle
+roles, and resolves input routes from their schemas. Chained positional calls
+append sources in the same order as one variadic call. A positional
+`CalibrationDataSet` supplies the calibration role explicitly; a plain
+`ImageDataSet` or `TextDataSet` can fill the same sole role for GPTQ. Explicit
+operation bindings take precedence, and a source is never guessed into multiple
+unresolved roles. `.data(calibration=(images, texts))` names a role for a source
+group when needed, without naming components or routes. An operation accepts a
+plain `QDataSet` for one unambiguous role or `DataBindings` for several roles:
 
 ```python
 gsq_data = DataBindings(
@@ -351,10 +380,23 @@ never silently copied into every role of a multi-role recipe.
 
 `Plan.calibrate(dataset)` may be convenience sugar for
 `Plan.data(calibration=dataset)`, but the resolved and serialized form is a role
-binding. Architecture adapters, rather than the dataset or quantizer, compile
-raw samples into route-specific model inputs. Preparation identity includes the
-processor/tokenizer/template and modality transforms so caches cannot cross
-incompatible routes.
+binding with one source or an ordered source group. Multiple sources default to
+deterministic concatenation of their finite/bounded views, preserving sample
+weights and the method's normalization; `.mix(...)` can request another declared
+policy. There is no inferred pairing or equal-corpus weighting.
+Global sample caps must preserve required route coverage; duplicate source
+registrations cannot silently increase their weight.
+
+Architecture adapters resolve schemas/tasks to input routes and compile raw
+samples into the required model inputs. An optional `dataset.for_route("route_id")`
+restricts an ambiguous or intentionally narrowed workflow; ordinary modality
+datasets need no route string. Resolution retains every applicable path into
+shared consumers, including models with no separate vision/audio encoder.
+Unknown fields, missing aligned inputs, or multiple routes without an adapter
+default produce specific diagnostics. Preparation identity includes the resolved
+route/default, processor/tokenizer/template, modality transforms, and producer
+revisions for learned features. These choices are frozen before execution, so
+automatic routing cannot reuse stale candidate features or change during resume.
 
 ## 6. Multi-GPU use is easy; exact layouts are available
 
@@ -409,10 +451,10 @@ fitting. Avoid a single `parallel=True` switch that conceals all three.
 ## 7. Reusable fragments and configuration files
 
 ```python
-def perception_plan(vision_recipe, audio_recipe, vision_data, audio_data):
-    return Plan().parallel(
-        Quantize("vision.encoder", vision_recipe, data=vision_data, name="vision"),
-        Quantize("audio.encoder", audio_recipe, data=audio_data, name="audio"),
+def perception_plan(vision_recipe, audio_recipe, *datasets):
+    return Plan().data(*datasets).parallel(
+        Quantize("vision.encoder", vision_recipe, name="vision"),
+        Quantize("audio.encoder", audio_recipe, name="audio"),
     )
 
 language_data = DataBindings(
@@ -475,6 +517,10 @@ compilation. List order in the file is not an implicit correctness constraint.
 Fluent `then` and `parallel` serialize to explicit edges/groups, not opaque method
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
+Positional data shorthand serializes to inferred role bindings after resolution;
+source groups use `datasets: [images, texts]` in place of a single `dataset`.
+The compiled artifact additionally records resolved routes and adapter defaults.
+Authoring files may omit those choices, just as Python callers do.
 
 Recipe composition serializes typed extensions, not Python method names. For
 example, the EoRA recipe above has the following recipe value; its containing
@@ -499,6 +545,8 @@ deserialization cannot execute unregistered callables or skip validation.
 teacher/data each stage uses, what can overlap, what needs a collective, what
 cannot fit, and what validation will be performed. Offer a compact summary and
 an expandable graph/table, both derived from the same resolved plan.
+Show inferred data routes, actual downstream consumers, and weighting alongside
+explicit overrides; the user need not write that wiring to inspect it.
 
 An illustrative preview might show:
 
@@ -530,6 +578,7 @@ fragment namespacing, Python/file round-trips with explicit bindings, stable
 resolved IDs, override-conflict diagnostics, invalid parallel groups, cycle
 explanations, unsupported required layouts, and correct reporting of zero-match
 or shared multimodal selectors. Dataset checks cover single-role shorthand,
-multi-role bindings, explicit aliases/disjointness, custom schemas, and streaming
-cursor compatibility. These are design acceptance criteria, not tests of an
-implemented API.
+multi-role bindings, automatic modality routing, shared-backbone observations,
+explicit ambiguity overrides, source-group ordering/weighting, aliases/disjointness,
+custom schemas, and streaming cursor compatibility. These are design acceptance
+criteria, not tests of an implemented API.

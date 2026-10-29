@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.5 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.6 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -146,6 +146,66 @@ A dataset can declare several modalities without using one of these conveniences
 For example, `ImageDataSet` may carry caption text, while a synchronized audio,
 video, and text timeline is more naturally a `MultiModalDataSet`.
 
+### Automatic routing is the default
+
+Supplying an `ImageDataSet` should be enough to enter the model's image input
+path. Users should not have to repeat `route="image_text"` or bind the same source
+to each component along that path. The architecture adapter resolves the route
+from the source schema, task/scenario requirements, and its registered input
+contracts. Resolution uses schema metadata, not hardcoded dataset class names,
+so custom subclasses participate without planner changes.
+
+Input routing and parameter selection remain distinct. In a vision-language
+model, images enter the vision processor/encoder, and their features can flow
+through a projector into the language backbone. That backbone therefore needs
+observations from the image route as well as any supplied text-only route. Raw
+images are not sent to a text-only tokenizer, but the image corpus is not excluded
+from downstream backbone calibration. Executing a component for observations
+does not authorize changing its weights.
+
+```mermaid
+flowchart LR
+    I[ImageDataSet with aligned prompts] --> V[Image processor and vision encoder]
+    V --> P[Projector]
+    P --> L[Shared language backbone]
+    T[TextDataSet] --> E[Text preparation and embeddings]
+    E --> L
+    V -.-> VC[Selected vision observations]
+    L -.-> LC[Selected backbone observations from both routes]
+```
+
+This illustrates an encoder/projector architecture, not a universal topology.
+Encoder-free models route images into their actual shared input path. Audio,
+video, and future modalities follow their adapter's contracts in the same way.
+The resolver applies these rules before device placement:
+
+1. Apply any explicit route restriction, then match the declared schema and
+   requested task/scenarios to supported input contracts. Select the unique
+   match, or the adapter's versioned default for that task/schema. If distinct
+   choices remain, report them and request only the missing route choice.
+   A union schema compiles a route dispatch for each declared record variant;
+   runtime schema validation checks those variants without guessing new routes.
+2. Resolve each consuming stage's required portion of that execution path.
+   Pruning downstream execution is legal only when the adapter and method
+   declare that the observations need no downstream context or objective.
+   Full-context and end-to-end methods retain the complete required path.
+3. Keep every applicable supplied route for a shared consumer. Selection of
+   language weights cannot silently discard image/audio observations because
+   their input entered another component. Missing required modality coverage
+   remains a reported error or pending content check.
+4. Preserve alignment. Separate image and text sources do not imply paired
+   captions, and separate audio/video sources do not imply synchronized events.
+   Use aligned records or `zip_aligned` when a route requires that relationship.
+   Missing prompts/fields require data or an adapter-declared default recorded
+   in preparation identity; the planner does not fabricate them.
+
+An optional `QDataSet.for_route("route_id")` returns an immutable restricted
+view for ambiguous or deliberately narrowed workflows. `CalibrationDataSet`'s
+optional `route=` is equivalent. Neither spelling binds raw samples directly
+to a module or bypasses preparation. Prepared inputs retain their already-pinned
+route and producer lineage. `explain()` records inferred and explicit choices,
+the executed path, the observation consumers, and selected writes separately.
+
 ## 4. `CalibrationDataSet` and lifecycle roles
 
 `CalibrationDataSet` is a delegating, inheritable `QDataSet` view:
@@ -160,8 +220,9 @@ class CalibrationDataSet(QDataSet[SampleT]):
         return self.source.open(request)
 ```
 
-`CalibrationProfile` declares routes/scenarios, coverage strata, weighting,
-length/chunk policy, and trace axes. The view identity includes the source view
+`CalibrationProfile` declares optional route/scenario restrictions, coverage
+strata, weighting, length/chunk policy, and trace axes. Omitted routes are inferred
+by the architecture adapter. The view identity includes the source view
 and profile; schema and cursor capabilities delegate to the source subject to
 the view's declared constraints. The sketch omits those property implementations.
 Changing a route or weighting policy changes the view identity even if the raw
@@ -171,8 +232,9 @@ observation requirements, not the raw dataset loader.
 The profile does not perform tensor preparation. A project can subclass
 `CalibrationDataSet` to add domain validation while retaining the same cursor
 and identity rules.
-The friendly constructor can accept `route=`, `scenarios=`, and related keyword
-arguments and build the immutable profile shown in the contract sketch.
+The friendly constructor accepts `scenarios=` and related keyword arguments to
+build the immutable profile. `route=` is an optional override, not boilerplate
+required by the dataset's modality.
 
 Roles are typed bindings, not a closed subclass list:
 
@@ -209,28 +271,69 @@ alone cannot determine augmentation or noise in a topology-independent replay.
 ## 5. Friendly API
 
 The common one-role case accepts a `QDataSet` directly. A plain dataset binds to
-the operation's only unambiguous required role. If a method requires several
-roles, compilation asks for named bindings instead of guessing.
+the operation's only unambiguous required role, and its route is inferred. Neither
+a `CalibrationDataSet` wrapper nor a route string is required for ordinary GPTQ:
 
 ```python
-corpus = MultiModalDataSet.from_hf(
+images = ImageDataSet.from_hf(
     "org/image-text-calibration",
     revision="7d2c...",
     split="train",
 )
-calibration = CalibrationDataSet(
-    corpus,
-    route="image_text",
-    scenarios=("prefill", "decode"),
-)
-
 run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
-    data=calibration,
+    data=images,
     devices=Local(gpus="all"),
 )
 ```
+
+For multiple inputs, `.data(*datasets)` registers sources once for the plan.
+Chaining `.data(images).data(texts)` is equivalent to `.data(images, texts)`:
+
+```python
+images = ImageDataSet(image_text_samples)
+texts = TextDataSet(text_samples)
+
+plan = (
+    Plan()
+    .devices(Local(gpus=[0, 1, 2, 3]))
+    .data(images, texts)
+    .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
+    .then(Quantize("language", GPTQ(bits=4), name="language"))
+)
+
+# Optional coverage controls; the image route is still inferred.
+calibration = CalibrationDataSet(images, scenarios=("prefill", "decode"))
+```
+
+The vision operation consumes the image source. The language operation consumes
+both the image-conditioned and text-only paths. It observes the installed vision
+revision under the progressive policy; automatic data routing does not change
+teacher/candidate selection or allow stale image features to cross that boundary.
+
+Role resolution is independent of route resolution. Explicit operation bindings
+take precedence; positional `CalibrationDataSet` views supply the `calibration`
+role. A plain positional source can fill remaining compatible requirements only
+when their role is unambiguous, including the same role across multiple operations.
+Multiple unresolved roles require named bindings; modality never implies whether
+samples are for training, validation, or evaluation. An explicitly named binding
+can use any compatible `QDataSet` view regardless of its positional role default.
+Data-free programs acquire no consumers.
+
+A named role accepts one source or an ordered source group, for example
+`.data(calibration=(images, texts))`. Each source resolves its own route;
+this does not pair their records. With several sources for one consumer, the
+default is deterministic concatenation in registration order over finite or
+explicitly bounded views. Sample weights and the method's valid-observation
+normalization are preserved; there is no implicit equal weighting of corpora
+or oversampling of rare modalities. `.mix(...)` supplies an explicit alternative
+sampling/weighting policy. An unbounded first source cannot silently starve a
+later source. Resolved ordering, limits, and weights enter the plan identity.
+Stage-wide sample caps must retain required route coverage or fail before fitting;
+they cannot silently exhaust the budget on the first source. Repeated source
+registrations are diagnosed; intentional extra weighting belongs in an explicit
+mixture policy rather than duplicated bindings.
 
 Named roles remain compact and chainable:
 
@@ -280,8 +383,9 @@ deterministic split policy, but the compiled plan shows the resulting views and
 overlap guarantees.
 
 `Plan.calibrate(dataset)` can remain ergonomic sugar for
-`Plan.data(calibration=dataset)`. The canonical serialized form is a role binding
-so it can express all lifecycles without adding a top-level method per role.
+`Plan.data(calibration=dataset)`. The canonical serialized form records role
+bindings and source groups. Resolved plans additionally freeze adapter/route
+choices, so inferred defaults remain reviewable and cannot change during resume.
 
 ## 6. Preparation belongs to the architecture route
 
@@ -290,7 +394,8 @@ prepared inputs required by a route and lifecycle stage:
 
 ```mermaid
 flowchart LR
-    Q[QDataSet and role binding] --> S[Select, split, shard, and weight]
+    Q[QDataSet schema and lifecycle role] --> A[Resolve architecture input route]
+    A --> S[Select, split, shard, and weight]
     S --> F[Fetch and decode modality assets]
     F --> R[Render route messages or task inputs]
     R --> P[Tokenizer or multimodal processor]
@@ -376,6 +481,7 @@ The manifest records:
 
 - Dataset identities, revisions, splits, selectors, limits, seeds, and transforms.
 - Role bindings and explicit aliases.
+- Inferred/explicit route decisions, adapter defaults, and observation consumers.
 - Schema/modalities, preparation pipeline, route/scenarios, and weighting.
 - Cardinality/counts actually consumed, skipped/invalid samples, and coverage.
 - Distributed partitions, duplicates/retries, cursor checkpoints, and ordering.
@@ -405,6 +511,9 @@ explicitly materialized artifacts.
 | QD13 | View/profile changes invalidate the appropriate prepared caches while retaining sample ancestry; explicit aliases do not merge incompatible teacher/candidate observations or method statistics. |
 | QD14 | Compilation consumes no cursor; runtime content checks gate fitting, and cursor/statistic checkpoints recover correctly with prefetched input and retried shards. |
 | QD15 | Final acceptance is disjoint from all declared fitting/selection roles, and final metrics cannot feed the automated refinement loop. Unknown overlap cannot pass a strict held-out requirement. |
+| QD16 | `.data(images, texts)` resolves image and text input paths without manual route/component bindings; shared-backbone observations include both paths and an encoder-only observation stops early only under an admitted replay contract. |
+| QD17 | Custom modality schemas and encoder-free adapters resolve through registered input contracts; ambiguous routes, missing aligned fields, and explicit incompatible route restrictions fail with concrete choices. |
+| QD18 | Source groups preserve declared limits, ordering, weights, and actual coverage across GPU layouts; no implicit pairing, equal-corpus weighting, duplicated contributions, or reuse across distinct lifecycle roles occurs. Resolved routes and producer revisions survive save/resume. |
 
 ## 10. Proposed decisions
 
@@ -419,8 +528,10 @@ explicitly materialized artifacts.
    iterable to a list.
 7. Make split/alias/disjointness, preparation identity, sharding, resume, and
    actual consumed coverage part of provenance.
-8. Keep the common API small: a single unambiguous `QDataSet` works directly;
-   multi-role methods use named bindings.
+8. Keep the common API small: `data=dataset` and `.data(*datasets)` infer routes
+   and unambiguous roles; multi-role methods use named bindings.
+9. Route by schema and architecture contracts, including downstream shared
+   consumers; explicit route restrictions are reserved for overrides/ambiguity.
 
 The proposal uses the requested `QDataSet` / `DataSet` spelling and
 `calibration` as the canonical public role name. Method-specific observation

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.5
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.6
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -21,6 +21,12 @@ training/initialization/validation documents, ParoQuant's internal split, norm
 training, activation-scale fitting/measurement, RCO search batches, and task
 evaluation data. That later audit extends data contracts without changing the
 method-lifecycle observations pinned here.
+
+Revision 0.6 infers dataset input routes from schema and architecture contracts.
+That convenience leaves each composed method's effective data roles and
+observation streams intact: an image source can traverse vision into a language
+consumer, but modality cannot choose between optimizer training and validation
+or merge native and candidate statistics. Data-free programs still load no data.
 
 ## 1. Coverage and classification
 

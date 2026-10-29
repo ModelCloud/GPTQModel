@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.5, with the broad source survey inspected through 2026-10-27.
+0.6, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
@@ -101,6 +101,16 @@ authorized structural specialization is introduced.
 routes for every selected write. Missing selectors fail with available choices.
 No dummy encoder is fabricated to make a modality-oriented API look uniform.
 
+Dataset routing should use the same architecture registry. `ImageDataSet` enters
+the supported image path without a user-supplied route name; its features remain
+inputs to downstream shared owners. For example, DeepSeek-V4.1 inserts projected
+visual features into the sequence processed by its language backbone. [Report][ds41]
+Automatically excluding image observations from language fitting would therefore
+change its calibration distribution. Encoder-free models use their real input
+path, and custom schemas resolve through registered contracts. Explicit route
+choices are needed only for ambiguity or intentional restrictions. Preparation,
+observation consumers, and weight-write scopes remain separately inspectable.
+
 ### A trace records invocations, not just layers and token positions
 
 An `InvocationTrace` names the region, parameter revision, episode/sample,
@@ -178,6 +188,7 @@ for this PR.
 | Case | Required demonstration |
 | --- | --- |
 | Encoder-free multimodality | The adapter reports no nonexistent encoder, exposes image/audio/text routes, and identifies shared weights affected by a backbone operation. |
+| Automatic data routing | Typed sources enter the correct input paths without component bindings; shared consumers receive all applicable supplied routes. Missing alignment or unresolved task/route choices fail concretely, and vision changes invalidate candidate-derived image features before downstream fitting. |
 | AttnRes / multi-stream residuals | Boundary replay preserves complete depth history/streams and invalidates every real consumer when a producer changes. |
 | Latent MoE | Shared latent projections, router, experts, and reconstruction scope are explicit; parallel expert work does not duplicate shared ownership. |
 | Nested recurrence | Repeated invocations reuse one packed owner; statistics preserve iteration policy and state, including when examples move between workers. |

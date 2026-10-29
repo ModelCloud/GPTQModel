@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.5, 2026-10-29.
+**Status:** design discussion, revision 0.6, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -176,7 +176,7 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
 | `StateResource` | KV, recurrence/convolution state, depth history, retrieval indices, per-layer inputs, sampler/stream state, or another resource with explicit producers and consumers. |
 | `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
-| `QDataSet` / `DataBindings` | Typed raw or prepared sources, modality/schema identity, and explicit calibration, initialization, training, validation, selection, adapter, evaluation, profiling, or plugin-defined roles. `CalibrationDataSet(QDataSet)` is a role-aware view, not a text-only container. |
+| `QDataSet` / `DataBindings` | Typed raw or prepared sources with modality/schema identity and inferred input routes. Lifecycle roles are inferred when unambiguous or named for calibration, initialization, training, validation, selection, adapter, evaluation, profiling, or plugin-defined needs. `CalibrationDataSet(QDataSet)` is an optional role/profile view. |
 | `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
 | `RecipeExtension` | Registered typed contribution selected by `Recipe.use()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
@@ -278,8 +278,7 @@ model = GPTQModel.load("source-checkpoint")
 model.inspect()
 
 calibration = CalibrationDataSet(
-    source=MultiModalDataSet(image_text_samples),
-    route="image_text",  # Registered by the architecture adapter.
+    source=ImageDataSet(image_text_samples),
     scenarios=("prefill", "decode"),
 )
 
@@ -323,7 +322,7 @@ The convenience APIs compile into the same planner as a coordinated operation:
 model = GPTQModel.load("source-checkpoint")
 plan = (
     Plan()
-    .data(calibration=calibration)
+    .data(calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
     .add(Quantize("language", GPTQ(bits=4), name="language"))
@@ -457,8 +456,18 @@ continuation decode, chunked/streaming execution, cache restoration, and draftin
 or verification. Fixed-token traces align reference and candidate measurements;
 generation-based evaluation separately tests behavioral divergence.
 
-When observations are required, dataset mixtures, context-length buckets,
-preprocessing, modality alignment, and observation weighting are explicit.
+Input routes are inferred from `QDataSet` schemas and architecture contracts.
+An `ImageDataSet` enters the image path without manual route/component bindings;
+its encoded features also supply any shared backbone observations required by
+the selected method. `.data(images, texts)` registers both sources once. The
+adapter resolves their paths and all actual consumers, including encoder-free
+architectures, while weight selection remains independent. Named lifecycle roles
+remain necessary when training, validation, or other uses are ambiguous.
+Route restrictions are optional overrides; the compiled plan records every
+inferred choice and keeps source/candidate producer dependencies intact.
+
+When observations are required, resolved dataset mixtures, context-length buckets,
+preprocessing, modality alignment, and observation weighting are recorded.
 Count valid observations and expert coverage.
 Do not force artificial routing to fill missing statistics without declaring an
 algorithm-specific policy. Empty observations require an explicit fallback,
@@ -1011,7 +1020,7 @@ The following are proposed acceptance criteria and experiments.
 | V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
 | V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; immutable reuse, named dependencies, fork/join, fragments, selector overrides, and invalid composition diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
-| V29 | Dataset contracts | `QDataSet` modality/schema identity, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD15. |
+| V29 | Dataset contracts | `QDataSet` modality/schema identity, automatic routes and downstream consumers, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD18. |
 | V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
 | V31 | Compilation and final acceptance | Compilation consumes no data or model forward; pending runtime checks gate fitting. Final evaluation reads the frozen winner and has no automated feedback edge to refinement or selection. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
@@ -1065,7 +1074,7 @@ proposed defaults, not final design approval.
 | D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
 | D19 | Direct operations plus immutable fluent/file plans and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
-| D21 | `QDataSet` sources with orthogonal modality schemas and lifecycle-role bindings. | Which additional built-in role views and modality classes deserve convenience names beyond the proposed core? |
+| D21 | `QDataSet` schemas infer input routes and shared downstream consumers; lifecycle roles remain orthogonal and are inferred only when unambiguous. | Which adapter defaults and coverage profiles minimize manual configuration without hiding meaningful task choices? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -1106,6 +1115,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.3, 2026-10-27 | Broaden the sourced 2026 architecture audit; make route/owner/invocation distinctions explicit; require parallel scheduling, distributed stages, reducers and partition contracts; add a fluent, typed, serializable API with defined chaining/stacking semantics. |
 | 0.4, 2026-10-29 | Audit current data paths; introduce an inheritable `QDataSet`, modality/schema subclasses, `CalibrationDataSet` views, extensible lifecycle-role bindings, architecture-owned preparation, streaming/distributed cursors, and split/leakage provenance. |
 | 0.5, 2026-10-29 | Unify recipe composition through typed `use()` dispatch; review all six documents and tighten effective data roles, modality coverage, view identity, compilation boundaries, final-evaluation isolation, distributed batching/cursor commits, and concurrent publication. |
+| 0.6, 2026-10-29 | Infer modality routes and downstream data consumers from dataset schemas and architecture contracts. Remove routine route/component bindings, add `.data(*datasets)` source groups, and preserve lifecycle-role distinctions, alignment, weighting, producer revisions, and distributed provenance. |
 
 ## Sources
 
