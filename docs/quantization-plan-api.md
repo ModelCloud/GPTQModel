@@ -3,10 +3,12 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.3 design sketch, 2026-10-27. None of these new APIs is
+**Status:** revision 0.4 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
-the [parallel contract](quantization-parallel-execution.md) defines legal layouts.
+the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
+the [data contract](quantization-data-contract.md) defines `QDataSet`, modality
+schemas, lifecycle roles, preparation, streaming, and provenance.
 
 The public surface should have three levels: a direct operation for common work,
 an immutable fluent plan for composition, and typed extension contracts for
@@ -18,12 +20,17 @@ to quantize a supported model.
 
 ```python
 model = GPTQModel.load("source-checkpoint")
+multimodal_calibration = CalibrationDataSet(
+    MultiModalDataSet(image_text_samples),
+    route="image_text",
+    scenarios=("prefill", "decode"),
+)
 
 # One target, one method. The operation compiles and executes a plan.
 run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
-    calibration=multimodal_calibration,
+    data=multimodal_calibration,
     devices=Local(gpus="all"),
 )
 run.save("language-quantized")
@@ -52,7 +59,7 @@ run = model.requantize(
     target="vision.encoder",
     recipe=GPTQ(bits=4, group_size=64),
     source=SourceSnapshot("source-checkpoint"),
-    calibration=multimodal_calibration,
+    data=multimodal_calibration,
 )
 ```
 
@@ -66,7 +73,7 @@ ownership of a shared multimodal backbone.
 ```python
 plan = (
     Plan()
-    .calibrate(multimodal_calibration)
+    .data(calibration=multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
         target="vision.encoder", recipe=GPTQ(bits=8), name="vision"
@@ -102,7 +109,7 @@ For users who want explicit operation order, provide ordinary named methods:
 ```python
 plan = (
     Plan()
-    .calibrate(multimodal_calibration)
+    .data(calibration=multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize("vision.encoder", GPTQ(bits=8), name="vision"),
@@ -145,7 +152,7 @@ GPTQ fitting against one source's inputs can be requested as follows:
 native_inputs = Observations.from_source(SourceSnapshot("source-checkpoint"))
 independent = (
     Plan()
-    .calibrate(multimodal_calibration)
+    .data(calibration=multimodal_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize("vision.encoder", GPTQ(bits=8),
@@ -250,11 +257,39 @@ targets can be marked optional explicitly and appear as skipped in the preview.
 An error such as “unsupported model” should instead identify the failed operator,
 method stage, numerical format, or missing replay/parallel capability.
 
-Data selection is separate from weight selection. A plan-wide calibration suite
-is a default binding; an operation can supply its own `calibration=` or a method's
-named `data=` roles. Training, initialization, adapter, selection, and held-out
-data are distinct typed requirements. A data-free method does not consume a
-default calibration suite just because one is present.
+Data selection is separate from weight selection. `QDataSet` describes source,
+schema/modalities, identity, streaming/replay capabilities, and per-run cursors.
+`TextDataSet`, `ImageDataSet`, `AudioDataSet`, `VideoDataSet`,
+`MultiModalDataSet`, and custom subclasses validate common sample structures.
+`CalibrationDataSet(QDataSet)` is a delegating role-aware view, so calibration
+can wrap any modality without multiple-inheritance combinations.
+
+A plan-wide `.data(calibration=...)` call supplies a default role binding; an
+operation can supply a plain `QDataSet` when it has exactly one unambiguous data
+requirement or a `DataBindings` value for several roles:
+
+```python
+gsq_data = DataBindings(
+    initialize=initialization_data,
+    train=reconstruction_data,
+    validate=held_out_validation,
+)
+job = Quantize("language", staged_gsq, data=gsq_data, name="language")
+```
+
+Observation/calibration, training, initialization, adapter, validation,
+selection, profiling, and final evaluation data are distinct typed requirements.
+Plugins can register namespaced roles without new top-level API parameters.
+Explicit aliases record intentional reuse; roles requiring disjoint samples
+reject overlap. A data-free method does not open a default dataset or initialize
+a tokenizer/processor merely because a plan binding exists.
+
+`Plan.calibrate(dataset)` may be convenience sugar for
+`Plan.data(calibration=dataset)`, but the resolved and serialized form is a role
+binding. Architecture adapters, rather than the dataset or quantizer, compile
+raw samples into route-specific model inputs. Preparation identity includes the
+processor/tokenizer/template and modality transforms so caches cannot cross
+incompatible routes.
 
 ## 6. Multi-GPU use is easy; exact layouts are available
 
@@ -317,7 +352,7 @@ def perception_plan(vision_recipe, audio_recipe):
 
 plan = (
     Plan()
-    .calibrate(multimodal_calibration)
+    .data(calibration=multimodal_calibration)
     .devices(devices)
     .include(perception_plan(higher_precision, higher_precision), namespace="senses")
     .then(Quantize("language", with_adapter, rules=text_rules, name="language"))
@@ -339,8 +374,12 @@ or materialized into an identified dataset artifact before portable execution.
 
 ```yaml
 schema: gptqmodel.plan/v1
+datasets:
+  multimodal_calibration:
+    binding: multimodal_calibration
+    schema: image-text-conversation/v1
 data:
-  calibration: {binding: multimodal_calibration}
+  calibration: {dataset: multimodal_calibration}
 devices:
   kind: local
   gpus: [0, 1, 2, 3]
@@ -388,14 +427,17 @@ performance prediction. The preview includes all coupled write effects and
 reports if a chosen recipe requires an additional source or a wider scope.
 
 Future methods register typed configuration, lifecycle compilation, artifact and
-codec schemas, parallel capabilities, and conformance cases. They participate in
-the same recipe/plan API without adding method-name branches to the coordinator
-or new top-level flags for every option. New behavior that cannot be expressed
-requires a versioned contract extension, not a raw hook that bypasses planning.
+codec schemas, data requirements, parallel capabilities, and conformance cases.
+They participate in the same recipe/plan API without adding method-name branches
+to the coordinator or new top-level flags for every option. New behavior that
+cannot be expressed requires a versioned contract extension, not a raw hook that
+bypasses planning.
 
 Proposed API checks include direct/plan semantic equivalence, immutable reuse,
 fragment namespacing, Python/file round-trips with explicit bindings, stable
 resolved IDs, override-conflict diagnostics, invalid parallel groups, cycle
 explanations, unsupported required layouts, and correct reporting of zero-match
-or shared multimodal selectors. These are design acceptance criteria, not tests
-of an implemented API.
+or shared multimodal selectors. Dataset checks cover single-role shorthand,
+multi-role bindings, explicit aliases/disjointness, custom schemas, and streaming
+cursor compatibility. These are design acceptance criteria, not tests of an
+implemented API.

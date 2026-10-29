@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.3, 2026-10-27.
+**Status:** design discussion, revision 0.4, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -27,13 +27,15 @@ numerical/resource contracts. Serial execution remains a reference/debug profile
 Read the companion [method lifecycle inventory](quantization-method-lifecycles.md)
 for the source audit behind this revision. The design must accommodate every
 current method route and admit future methods without adding another hardcoded
-method branch to a universal layer loop. Revision 0.3 adds three companion designs:
+method branch to a universal layer loop. Revisions 0.3 and 0.4 add four companion
+designs:
 
 | Document | Purpose |
 | --- | --- |
 | [2026 architecture audit](quantization-architecture-2026.md) | Source-backed family/pattern coverage, compatibility gaps, and adapter acceptance cases. |
 | [Parallel execution](quantization-parallel-execution.md) | Multi-GPU capture, fitting, model partitioning, resource scheduling, and failure/continuation contracts. |
 | [Public API](quantization-plan-api.md) | Direct operations, immutable chaining, recipe composition, explicit order, selectors, and serialized plans. |
+| [Data contract](quantization-data-contract.md) | `QDataSet`, modality schemas, lifecycle-role bindings, preparation, streaming, sharding, and provenance. |
 
 Backward compatibility is **not a requirement and should not constrain this
 design**. Compatibility shims and preservation of the legacy lifecycle are
@@ -171,7 +173,8 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
 | `StateResource` | KV, recurrence/convolution state, depth history, retrieval indices, per-layer inputs, sampler/stream state, or another resource with explicit producers and consumers. |
 | `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
-| `DataRequirements` / data suites | Method-declared calibration, training, selection, and validation roles. `CalibrationSuite` supplies prepared inputs, routes, traces, weighting, and coverage when observations are needed. |
+| `QDataSet` / `DataBindings` | Typed raw or prepared sources, modality/schema identity, and explicit calibration, initialization, training, validation, selection, adapter, evaluation, profiling, or plugin-defined roles. `CalibrationDataSet(QDataSet)` is a role-aware view, not a text-only container. |
+| `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
 | `Plan` | Immutable public specification of operations, recipes/modifiers, data bindings, order constraints, resource policy, and validation. |
 | `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and validation policy after compilation. |
@@ -270,16 +273,16 @@ Names/signatures remain proposals; examples are independent sketches.
 model = GPTQModel.load("source-checkpoint")
 model.inspect()
 
-calibration = CalibrationSuite(
-    samples=image_text_samples,
+calibration = CalibrationDataSet(
+    source=MultiModalDataSet(image_text_samples),
     route="image_text",  # Registered by the architecture adapter.
-    scenarios=["prefill", "decode"],
+    scenarios=("prefill", "decode"),
 )
 
 run = model.quantize(
     target="language",
     recipe=GPTQ(bits=4, group_size=128),
-    calibration=calibration,
+    data=calibration,
     devices=Local(gpus="all"),
 )
 
@@ -287,7 +290,7 @@ run = model.quantize(
 run = model.quantize(
     target="vision.encoder",
     recipe=GPTQ(bits=8, group_size=64),
-    calibration=calibration,
+    data=calibration,
 )
 run.save("mixed-model")
 
@@ -295,7 +298,7 @@ model.requantize(
     target="vision.encoder",
     recipe=GPTQ(bits=4, group_size=64),
     source=SourceSnapshot("source-checkpoint"),
-    calibration=calibration,
+    data=calibration,
 )
 ```
 
@@ -316,7 +319,7 @@ The convenience APIs compile into the same planner as a coordinated operation:
 model = GPTQModel.load("source-checkpoint")
 plan = (
     Plan()
-    .calibrate(calibration)
+    .data(calibration=calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
     .add(Quantize("language", GPTQ(bits=4), name="language"))
@@ -371,7 +374,7 @@ The preview exposes method-required training stages independently of optional
 composition refinement. For example, disabling `refinement` does not remove
 ParoQuant optimization or any stage required by a selected GSQ training recipe.
 
-## 7. Reference, candidate, and calibration state
+## 7. Reference, candidate, and data state
 
 The source snapshot describes available weights, configuration, native numerical
 formats, and required preprocessing. A reference role executes an identified
@@ -449,9 +452,12 @@ preserved representation, or failure.
 
 Caches are bounded and can be streamed to CPU/disk or recomputed. No phase assumes
 all Hessians, all activations, or two complete models fit in device memory.
-Training, initialization, selection, and final acceptance data have distinct
-roles; the program declares which roles may share samples. A forward-only
-calibration API cannot implicitly stand in for an optimizer's training contract.
+Training, initialization, selection, adapter generation, profiling, and final
+acceptance data have distinct roles; the program declares which roles may share
+samples. A forward-only calibration API cannot implicitly stand in for an
+optimizer's training contract. The
+[data contract](quantization-data-contract.md) defines source/schema identity,
+role bindings, preparation, splits, streaming, and distributed cursors.
 
 ## 8. Proposed phased schedule
 
@@ -962,6 +968,7 @@ The following are proposed acceptance criteria and experiments.
 | V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
 | V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; immutable reuse, named dependencies, fork/join, fragments, selector overrides, and invalid composition diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
+| V29 | Dataset contracts | `QDataSet` modality/schema identity, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD12. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1012,6 +1019,7 @@ proposed defaults, not final design approval.
 | D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
 | D19 | Direct operations plus immutable fluent/file plans. | Are `add`, `then`, `parallel`, named `after`, typed modifiers, and explicit override precedence the clearest minimal surface? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
+| D21 | `QDataSet` sources with orthogonal modality schemas and lifecycle-role bindings. | Which additional built-in role views and modality classes deserve convenience names beyond the proposed core? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -1025,8 +1033,9 @@ revisions should update the current proposal and decision register together;
 superseded choices should not remain presented as current defaults.
 
 Before implementation, agree on ownership/write semantics, reference and state
-contracts, lifecycle/typed-artifact/parallel contracts, public composition semantics,
-the first supported combinations and adapters, and a budgeted experiment plan.
+contracts, lifecycle/typed-artifact/parallel/data contracts, public composition
+semantics, the first supported combinations and adapters, and a budgeted
+experiment plan.
 A later implementation proposal can stage work as follows:
 
 1. Contract examples for every audited lifecycle family, including data-free,
@@ -1049,6 +1058,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.1, 2026-10-27 | Initial clean-sheet proposal covering independent targets, phased coordination, explicit state, source/candidate separation, and open design questions. |
 | 0.2, 2026-10-27 | Audit all current method configurations and auxiliary routes; replace the universal fitting loop with method-owned lifecycle programs, stage-specific references/data, typed artifacts, conditional replay, and explicit future-method/continuation contracts. |
 | 0.3, 2026-10-27 | Broaden the sourced 2026 architecture audit; make route/owner/invocation distinctions explicit; require parallel scheduling, distributed stages, reducers and partition contracts; add a fluent, typed, serializable API with defined chaining/stacking semantics. |
+| 0.4, 2026-10-29 | Audit current data paths; introduce an inheritable `QDataSet`, modality/schema subclasses, `CalibrationDataSet` views, extensible lifecycle-role bindings, architecture-owned preparation, streaming/distributed cursors, and split/leakage provenance. |
 
 ## Sources
 

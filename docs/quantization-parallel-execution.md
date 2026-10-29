@@ -3,12 +3,14 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.3 design proposal, 2026-10-27. No executor implementation
+**Status:** revision 0.4 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
 [architecture audit](quantization-architecture-2026.md), and
-[API examples](quantization-plan-api.md).
+[API examples](quantization-plan-api.md). The
+[data contract](quantization-data-contract.md) defines dataset cursors, shards,
+streaming, splits, preparation identity, and consumed-sample provenance.
 
 Multi-GPU quantization is a first-class requirement. A serial executor is useful
 as a reference/debug profile; it is not the capability ceiling of the first
@@ -114,7 +116,8 @@ flowchart TD
 
 Resource reservation includes candidate/source weights, teacher/master copies,
 activations, Hessians, optimizer state, collective workspaces, packing buffers,
-and transfers. Parameter bytes alone are not a useful peak-memory estimate.
+dataset decode/preparation and prefetch queues, and transfers. Parameter bytes
+alone are not a useful peak-memory estimate.
 Replicating a large layer can increase memory beyond the savings from sharding
 its data. Do not schedule every expert at once merely because GPU workers exist.
 
@@ -143,6 +146,12 @@ Every observation carries its global sample/episode and invocation identity,
 producer revision, valid mask, routing membership, and weight. The input manifest
 defines partitioning and duplicates. A retry or distributed sampler padding must
 not count a sample twice unless that weighting is part of the method.
+
+`QDataSet` opens a private cursor for each resolved role/shard. Map-style index
+partitions, provider-backed streaming shards, and materialized snapshots are
+different capabilities. Unknown cardinality is legal only with a bounded stop
+policy; repeated optimizer epochs require a replayable cursor or an explicitly
+budgeted spool. Cursor/shard progress is part of continuation state.
 
 Reducers merge the method's declared sufficient statistics and normalization
 metadata. Averaging per-rank averages is generally wrong when valid token counts

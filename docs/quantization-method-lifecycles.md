@@ -3,8 +3,9 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.3 of the
-[component quantization proposal](component-quantization-design.md), 2026-10-27.
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.4
+of the [component quantization proposal](component-quantization-design.md),
+2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
 every combination below is supported today.
 
@@ -12,6 +13,14 @@ The audit baseline is GPTQModel
 [`536b7f9b`](https://github.com/ModelCloud/GPTQModel/tree/536b7f9b6af3c1e39f1e7a1b2e58a50d8793af4e).
 Repository links below identify the inspected files; observations refer to that
 revision even if those files change later.
+
+The companion [data contract](quantization-data-contract.md) separately audits
+the newer `main` data surface at commit `6d90aa19`: the public calibration union,
+32 architecture preparation overrides, EoRA adapter data, staged GSQ
+training/initialization/validation documents, ParoQuant's internal split, norm
+training, activation-scale fitting/measurement, RCO search batches, and task
+evaluation data. That later audit extends data contracts without changing the
+method-lifecycle observations pinned here.
 
 ## 1. Coverage and classification
 
@@ -237,9 +246,11 @@ EXL3's internal backend helpers versus the public dispatch restrictions.
 
 Staged GSQ can shard documents and synchronize training across ranks. Resources,
 collectives, primary-rank work, failure propagation, and completion barriers must
-be visible to the executor. Revision 0.3 also requires concurrent independent
-stages and explicit capture/model/solve partitioning capabilities. A serial
-reference profile remains useful but is not the general executor contract. See
+be visible to the executor. Revision 0.3 requires concurrent independent stages
+and explicit capture/model/solve partitioning capabilities. Revision 0.4 adds
+`QDataSet` cursor/shard identity and role-specific split/replay semantics. A
+serial reference profile remains useful but is not the general executor
+contract. See
 [GSQ distributed support](../gptqmodel/quantization/gsq_distributed.py) and the
 [parallel execution proposal](quantization-parallel-execution.md).
 
@@ -290,6 +301,9 @@ minimum acceptance cases:
     inference-mode wrapper.
 12. Add a future method with new stage names, bounded control flow, objectives,
     and artifact schemas without a new method-name branch in the coordinator.
+13. Add method-specific data roles and sample schemas through `DataRequirement`
+    and `QDataSet` contracts without another public raw-dataset union or
+    coordinator branch.
 
 Conformance must enumerate configuration **routes and combinations**, not just
 the enum. A future method still needs a plugin, codec/runtime support, and
