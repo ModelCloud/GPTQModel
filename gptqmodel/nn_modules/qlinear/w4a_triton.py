@@ -13,9 +13,47 @@ from contextlib import nullcontext
 import torch
 import triton
 import triton.language as tl
-from triton.experimental import gluon
-from triton.experimental.gluon import language as gl
-from triton.experimental.gluon.language.nvidia.ampere import mma_v2
+
+
+# The grouped FP8 GEMM is written in Gluon and needs ``mma_v2``, which not every
+# Triton build ships. The token quantizer above uses plain ``tl.jit`` and does
+# not need Gluon, so import the Gluon pieces lazily: a consumer that only packs
+# or quantizes activations still imports this module, and a caller that actually
+# asks for the native FP8 GEMM gets a clear error instead of an import failure.
+try:
+    from triton.experimental import gluon
+    from triton.experimental.gluon import language as gl
+    from triton.experimental.gluon.language.nvidia.ampere import mma_v2
+except ImportError:  # pragma: no cover - exercised on a build without mma_v2
+    gluon = None
+    gl = None
+    mma_v2 = None
+
+
+def _gluon_jit(fn):
+    """Decorate ``fn`` with ``gluon.jit`` when Gluon is importable.
+
+    Without a usable Gluon Ampere MMA the kernel cannot be lowered. Keep the
+    definition so the module surface is stable, but leave it undecorated: the
+    callers check :func:`native_fp8_gemm_error` first and report that error.
+    """
+    if gluon is None:
+        return fn
+    return gluon.jit(fn)
+
+
+NATIVE_FP8_GEMM_MIN_TRITON = "3.6.0"
+
+
+def native_fp8_gemm_error() -> RuntimeError | None:
+    """Return why the Gluon FP8 GEMM cannot run here, or ``None`` when it can."""
+    if mma_v2 is not None:
+        return None
+    return RuntimeError(
+        "W4AFP8 native FP8 GEMM needs Triton >= "
+        f"{NATIVE_FP8_GEMM_MIN_TRITON} (Gluon `mma_v2`); installed Triton is "
+        f"{getattr(triton, '__version__', 'unknown')}."
+    )
 
 
 def _launch_device(device: torch.device):
@@ -63,7 +101,7 @@ def _token_fp8_quant(X, Q, RowScale, K: tl.constexpr, BK: tl.constexpr):
     tl.store(RowScale + row, scale)
 
 
-@gluon.jit
+@_gluon_jit
 def _grouped_fp8_gemm(
     A, W, Scales, RowScale, Bias, Out,
     M: gl.constexpr, N: gl.constexpr, K: gl.constexpr,
@@ -135,6 +173,9 @@ def fp8_linear_prepacked(q: torch.Tensor, row_scale: torch.Tensor,
                          weight_e4m3: torch.Tensor, scales: torch.Tensor,
                          bias: torch.Tensor | None, output_dtype: torch.dtype) -> torch.Tensor:
     """Consume encoded FP8 and its token scales without re-quantization."""
+    unsupported = native_fp8_gemm_error()
+    if unsupported is not None:
+        raise unsupported
     if q.dtype != torch.float8_e4m3fn or q.ndim != 2 or q.shape[1] != weight_e4m3.shape[0]:
         raise ValueError("FP8 operand has the wrong dtype or K dimension.")
     if (q.device.type != "cuda" or q.device != weight_e4m3.device or

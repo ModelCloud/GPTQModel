@@ -9,7 +9,7 @@ from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation, pack_acti
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 from tests.kernels.test_w4afp8_gb10 import _assert_native_gemm_close
-from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
+from tests.w4a_hardware_marks import FP8_HARDWARE, GLUON_FP8, NVFP4_HARDWARE
 
 
 def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch.Tensor:
@@ -65,6 +65,7 @@ def _independent_nvfp4_qdq(x: torch.Tensor, global_scale: torch.Tensor) -> torch
     return torch.where((error < best_error)[..., None], reconstructed, best_reconstructed).reshape_as(x)
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode", [
     pytest.param("w4afp8", marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
@@ -95,6 +96,7 @@ def test_encoded_activation_matches_independent_torch_oracle(mode, rows, width):
     torch.testing.assert_close(encoded.decode(torch.float32), expected, rtol=1e-6, atol=1e-6)
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode,kernel", [
     pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
@@ -144,6 +146,7 @@ def test_prepacked_linear_matches_independent_torch_oracle(mode, kernel):
     _assert_native_gemm_close(actual.reshape(rows, n), reference, magnitude)
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode,kernel", [
     pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
@@ -181,6 +184,7 @@ def test_rotated_prepacked_input_is_reencoded_before_gemm(monkeypatch, mode, ker
     )
 
 
+@GLUON_FP8
 @FP8_HARDWARE
 def test_activation_carrier_moves_as_a_single_operand():
     """Placement hooks must be able to re-home the carrier as one operand.
@@ -211,6 +215,7 @@ def test_activation_carrier_moves_as_a_single_operand():
                                rtol=0, atol=0)
 
 
+@GLUON_FP8
 @FP8_HARDWARE
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
 def test_sharded_layer_launches_kernels_on_its_own_device():
@@ -248,6 +253,7 @@ def test_sharded_layer_launches_kernels_on_its_own_device():
     torch.testing.assert_close(actual.cpu(), expected.cpu(), rtol=0, atol=0)
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode,kernel", [
     pytest.param("w4afp8", W4AFP8Linear, marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", W4ANVFP4Linear, marks=NVFP4_HARDWARE),
