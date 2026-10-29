@@ -1658,8 +1658,8 @@ def ModelLoader(cls):
                 backend = expected_backend
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
-            if BITBLAS_AVAILABLE is False:
+            from ..nn_modules.qlinear.bitblas import BITBLAS_INSTALL_HINT, bitblas_available
+            if not bitblas_available():
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
         model_local_path = str(model_local_path)

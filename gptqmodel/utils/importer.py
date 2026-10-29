@@ -8,6 +8,7 @@ import os
 import pkgutil
 import threading
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Type, Union
 
 import torch
@@ -405,6 +406,14 @@ def _iter_dynamic_contracts(
 
 
 def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
+    """Return every registered kernel class, importing kernel modules on demand.
+
+    Importing the kernel packages at ``gptqmodel`` import time would pull in
+    optional backends (bitsandbytes, BitBLAS, llama-cpp, ...) plus the modules
+    that depend on them. Discovery therefore imports them on first use only.
+    """
+
+    _import_all_qlinear_kernels()
     kernels = []
     seen = set()
 
@@ -442,6 +451,7 @@ def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
 
 
 def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
+    _import_all_qlinear_kernels()
     backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
     for cls in iter_quant_linear_kernels():
@@ -463,6 +473,7 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     return matches[0]
 
 
+@lru_cache(maxsize=None)
 def _import_all_qlinear_kernels() -> None:
     from ..nn_modules import qlinear as qlinear_pkg
 
@@ -476,6 +487,7 @@ def _import_all_qlinear_kernels() -> None:
             log.debug(f"Skipping qlinear module import `{name}`: {exc}")
 
 
+@lru_cache(maxsize=1)
 def build_kernel_support_maps():
     _import_all_qlinear_kernels()
     # Build auto-select order and format support from kernel declarations.
@@ -530,7 +542,31 @@ def build_kernel_support_maps():
     return auto_select_backend_order_map, supports_backend_map
 
 
-AUTO_BACKEND_KERNEL_MAPPING, BACKEND_TO_METHOD_FORMAT_MAPPING = build_kernel_support_maps()
+def get_auto_backend_kernel_mapping():
+    """Return the auto-select ``METHOD -> FORMAT -> BACKEND -> kernel`` mapping.
+
+    The kernel registry is built on first use so that ``import gptqmodel`` does
+    not import every optional backend. The mapping object is cached, so callers
+    that mutate it (tests, tooling) keep observing the same instance.
+    """
+
+    return build_kernel_support_maps()[0]
+
+
+def get_backend_to_method_format_mapping():
+    """Return the cached ``METHOD -> FORMAT -> [BACKEND]`` support mapping."""
+
+    return build_kernel_support_maps()[1]
+
+
+def __getattr__(name: str):
+    # Backwards-compatible lazy module attributes. Importing gptqmodel must not
+    # materialize the kernel registry; attribute/from-import access still does.
+    if name == "AUTO_BACKEND_KERNEL_MAPPING":
+        return get_auto_backend_kernel_mapping()
+    if name == "BACKEND_TO_METHOD_FORMAT_MAPPING":
+        return get_backend_to_method_format_mapping()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def debug_print_kernel_maps():
@@ -571,14 +607,14 @@ def debug_print_kernel_maps():
         return "\n".join(lines)
 
     auto_tree = {}
-    for method, fmt_map in AUTO_BACKEND_KERNEL_MAPPING.items():
+    for method, fmt_map in get_auto_backend_kernel_mapping().items():
         auto_tree[method] = {}
         for fmt, backend_map in fmt_map.items():
             entries = [f"{backend.value} -> {cls.__name__}" for backend, cls in backend_map.items()]
             auto_tree[method][fmt] = entries
 
     supports_tree = {}
-    for method, fmt_map in BACKEND_TO_METHOD_FORMAT_MAPPING.items():
+    for method, fmt_map in get_backend_to_method_format_mapping().items():
         supports_tree[method] = {}
         for fmt, backends in fmt_map.items():
             supports_tree[method][fmt] = [backend.value for backend in backends]
@@ -881,7 +917,7 @@ def select_quant_linear(
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
-    supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
+    supported_formats = get_backend_to_method_format_mapping().get(quant_method)
     if supported_formats is None:
         raise ValueError(f"Unsupported quantization method: `{quant_method}`")
     if format not in supported_formats:
@@ -920,7 +956,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = list(AUTO_BACKEND_KERNEL_MAPPING[quant_method].get(format, {}).items())
+        allow_quant_linears = list(get_auto_backend_kernel_mapping()[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
 

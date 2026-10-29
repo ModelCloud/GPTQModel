@@ -9,6 +9,7 @@ import ctypes
 import os
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -140,7 +141,39 @@ def _is_bitblas_available() -> bool:
     return True
 
 
-BITBLAS_AVAILABLE = _is_bitblas_available()
+_UNSET = object()
+
+
+@lru_cache(maxsize=1)
+def _probe_bitblas_available() -> bool:
+    """Probe BitBLAS once, on first real use.
+
+    Importing BitBLAS pulls in TVM and costs a large fraction of a second, so it
+    must not run while the kernel registry is merely being discovered.
+    """
+
+    return _is_bitblas_available()
+
+
+def bitblas_available() -> bool:
+    """Return whether a supported BitBLAS build is importable.
+
+    A module attribute named ``BITBLAS_AVAILABLE`` still overrides the probe so
+    tests and downstream tooling can force the value.
+    """
+
+    override = globals().get("BITBLAS_AVAILABLE", _UNSET)
+    if override is not _UNSET:
+        return bool(override)
+    return _probe_bitblas_available()
+
+
+def __getattr__(name: str):
+    if name == "BITBLAS_AVAILABLE":
+        return bitblas_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 _BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
 _BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 
@@ -455,7 +488,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
         del fast_decoding  # unused, kept for signature compatibility
 
-        if not BITBLAS_AVAILABLE:
+        if not bitblas_available():
             raise ImportError(BITBLAS_INSTALL_HINT)
 
         self.TORCH_DTYPE = dtype
@@ -494,7 +527,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITBLAS_AVAILABLE:
+        if not bitblas_available():
             return False, ValueError(BITBLAS_INSTALL_HINT)
 
         try:

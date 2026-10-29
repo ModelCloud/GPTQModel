@@ -62,6 +62,9 @@ _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS = 512 * 512
 _CPU_INT8_DENSE_TILE_FEATURES = 512
 
 
+_UNSET = object()
+
+
 def _is_bitsandbytes_available() -> bool:
     try:
         import bitsandbytes as bnb
@@ -70,6 +73,37 @@ def _is_bitsandbytes_available() -> bool:
         return False
 
     return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
+
+
+@lru_cache(maxsize=1)
+def _probe_bitsandbytes_available() -> bool:
+    """Probe bitsandbytes once, on first real use.
+
+    Importing bitsandbytes costs seconds and must not happen while the kernel
+    registry is merely being discovered. The probe is cached so repeated
+    ``validate_once`` calls stay cheap.
+    """
+
+    return _is_bitsandbytes_available()
+
+
+def bitsandbytes_available() -> bool:
+    """Return whether a supported bitsandbytes is installed.
+
+    A module attribute named ``BITSANDBYTES_AVAILABLE`` still overrides the
+    probe, which keeps monkeypatching in tests and downstream tooling working.
+    """
+
+    override = globals().get("BITSANDBYTES_AVAILABLE", _UNSET)
+    if override is not _UNSET:
+        return bool(override)
+    return _probe_bitsandbytes_available()
+
+
+def __getattr__(name: str):
+    if name == "BITSANDBYTES_AVAILABLE":
+        return bitsandbytes_available()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def import_bitsandbytes():
@@ -239,9 +273,6 @@ def _cpu_int8_dense_should_use(
     return in_features * out_features <= _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS
 
 
-BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
-
-
 def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
     weight = linear.weight.detach()
     if isinstance(linear, _ConvNd):
@@ -369,7 +400,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITSANDBYTES_AVAILABLE:
+        if not bitsandbytes_available():
             return False, ImportError(BITSANDBYTES_INSTALL_HINT)
 
         try:
@@ -845,8 +876,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 BitsAndBytes4bitLinear = BitsAndBytesLinear
 
 __all__ = [
-    "BITSANDBYTES_AVAILABLE",
+    # Resolved lazily by module ``__getattr__``; ruff cannot see it as a global.
+    "BITSANDBYTES_AVAILABLE",  # noqa: F822
     "BITSANDBYTES_INSTALL_HINT",
+    "bitsandbytes_available",
     "BitsAndBytes4bitLinear",
     "BitsAndBytesLinear",
     "import_bitsandbytes",
