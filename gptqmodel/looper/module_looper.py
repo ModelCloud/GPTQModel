@@ -691,6 +691,18 @@ class ModuleLooper(DeviceAssignmentState):
                 raise
             return
         except BaseException as exc:
+            # Control-flow exceptions (KeyboardInterrupt/SystemExit) are forwarded
+            # to the loop-stop latch and re-raised by _check_loop_stop(); genuine
+            # callback bugs are surfaced here as well as through the latch.
+            log.warning(
+                "Subset callback raised (stage=%s, layer=%s, subset=%s/%s): %r",
+                stage,
+                layer_idx,
+                subset_index,
+                subset_total,
+                exc,
+                exc_info=True,
+            )
             self._request_loop_stop(exc)
             if raise_in_place:
                 raise

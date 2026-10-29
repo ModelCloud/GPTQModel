@@ -56,8 +56,8 @@ def torch_replicate(
             if dev.type in {"cuda", "xpu", "mps", "npu"}:
                 try:
                     torch_sync(dev)
-                except BaseException:
-                    pass
+                except Exception:
+                    log.debug("torch_sync(%s) before replicate failed", dev, exc_info=True)
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()

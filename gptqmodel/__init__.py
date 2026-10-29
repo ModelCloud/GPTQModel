@@ -10,10 +10,13 @@ import sys
 # isort: off
 from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
+from .utils.logger import setup_logger  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
 
 # isort: on
 
+
+log = setup_logger()
 
 patch_safetensors_save_file()
 
@@ -22,7 +25,7 @@ patch_safetensors_save_file()
 try:
     TritonPatch.apply()
 except Exception:
-    pass
+    log.warning("TritonPatch.apply() failed; triton autotuner threading fix is NOT active", exc_info=True)
 
 
 def _patch_transformers_gptq_device_map_compat():
@@ -31,7 +34,16 @@ def _patch_transformers_gptq_device_map_compat():
         from functools import wraps
 
         from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
+    except ImportError:
+        # transformers is a hard dependency, so a missing symbol means the
+        # upstream API moved and this compatibility shim is now inert.
+        log.warning(
+            "transformers GPTQ device-map compat is inactive: GptqHfQuantizer API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("transformers GPTQ device-map compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -68,7 +80,14 @@ def _patch_transformers_paroquant_quantizer_compat():
         from transformers.quantizers import auto as hf_quant_auto
         from transformers.quantizers.quantizer_gptq import GptqHfQuantizer
         from transformers.utils.quantization_config import GPTQConfig
+    except ImportError:
+        log.warning(
+            "ParoQuant quantizer compat is inactive: transformers quantizer API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("ParoQuant quantizer compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -84,7 +103,11 @@ def _patch_openvino_gptqmodel_compat():
     """Extend OpenVINO's GPTQ patcher to understand GPTQModel new kernels."""
     try:
         from openvino.frontend.pytorch import gptq as ov_gptq
+    except ImportError:
+        log.debug("OpenVINO GPTQ compat skipped: openvino not installed", exc_info=True)
+        return
     except Exception:
+        log.warning("OpenVINO GPTQ compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -107,7 +130,14 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
 
         import transformers.integrations as hf_integrations
         from transformers.integrations import hub_kernels
+    except ImportError:
+        log.warning(
+            "causal-conv1d hub-kernel compat is inactive: transformers integrations API changed",
+            exc_info=True,
+        )
+        return
     except Exception:
+        log.warning("causal-conv1d hub-kernel compat probe failed", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -154,7 +184,6 @@ def _patch_transformers_causal_conv1d_hub_kernel_compat():
 
 from .utils import has_gil_disabled
 from .utils.env import env_flag
-from .utils.logger import setup_logger
 from .utils.modelscope import ensure_modelscope_available
 
 
@@ -318,7 +347,7 @@ from .utils import BACKEND, PROFILE
 from .version import __version__
 
 
-setup_logger().info(
+log.info(
     "\n%s",
     get_startup_banner(
         ASCII_LOGO,

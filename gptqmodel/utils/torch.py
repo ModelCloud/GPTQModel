@@ -129,8 +129,10 @@ try:
     import mlx.core  # type: ignore # noqa: F401
     import mlx.core.metal  # noqa: F401
     HAS_MLX = True
-except BaseException:
-    pass
+except Exception:
+    # MLX is an optional accelerator: absence (or a broken native install) is
+    # expected on most hosts. KeyboardInterrupt/SystemExit must stay visible.
+    HAS_MLX = False
 
 try:
     torch.backends.fp32_precision
@@ -203,7 +205,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         return module
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
-    except BaseException as e:
+    except Exception as e:
         log.warn.once(f"Failed to compile `{module}`, {e}")
         return module
 

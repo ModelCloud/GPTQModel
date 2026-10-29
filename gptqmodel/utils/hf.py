@@ -141,6 +141,7 @@ def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
     try:
         from transformers.dynamic_module_utils import HF_MODULES_CACHE, _sanitize_module_name
     except Exception:
+        log.debug("remote-code cache probe skipped: transformers.dynamic_module_utils unavailable", exc_info=True)
         return
 
     repo_name = os.path.basename(os.path.normpath(model_id_or_path))
@@ -498,6 +499,7 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
         import transformers.modeling_gguf_pytorch_utils as gguf_utils
         from transformers.utils import import_utils as hf_import_utils
     except Exception:
+        log.debug("prism GGUF compat skipped: transformers GGUF internals unavailable", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -703,6 +705,7 @@ def _patch_transformers_remote_code_compat() -> None:
     try:
         from transformers.utils import import_utils
     except Exception:
+        log.debug("remote-code compat skipped: transformers.utils.import_utils unavailable", exc_info=True)
         return
 
     try:
@@ -1148,6 +1151,7 @@ def patch_remote_code_before_config_load(model_id_or_path: Optional[str]) -> Non
         import transformers.modeling_utils as modeling_utils
         from transformers.utils import is_flash_attn_2_available
     except Exception:
+        log.debug("DeepSeek-VL2 pre-config patch skipped: transformers modeling utils unavailable", exc_info=True)
         return
 
     try:
@@ -2039,7 +2043,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             import peft.import_utils as peft_import_utils
             import peft.tuners.lora.awq as peft_awq
         except Exception:
-            pass
+            log.debug("PEFT AWQ probe patch skipped: peft AWQ internals unavailable", exc_info=True)
         else:
             if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
                 # PEFT later imports `awq.modules.linear`, so the availability
