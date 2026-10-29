@@ -16,7 +16,7 @@ from gptqmodel.quantization.activation_calibration import (
 )
 from gptqmodel.quantization.config import QuantizeConfig
 from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
-from tests.w4a_hardware_marks import NVFP4_HARDWARE
+from tests.w4a_hardware_marks import GLUON_FP8, NVFP4_HARDWARE
 
 
 # Cases that build W4ANVFP4Linear are gated to GB10 / SM 12.1 by the module's
@@ -81,6 +81,7 @@ def test_fp32_global_scales_serialize_without_bf16_rounding(tmp_path):
     assert not quantizer.state_dict()
 
 
+@GLUON_FP8
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("rows,width", [(1, 128), (33, 256), (129, 128)])
 def test_fixed_producer_scale_matches_independent_oracle(rows, width):
@@ -146,6 +147,7 @@ def _tiny_stream(scales=None, dtype=torch.bfloat16, *, fused_norms=False):
 
 # The packed fixture below constructs NVFP4 modules, so the SM 12.1
 # tensor-core floor applies to the whole case.
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_fused_norm_stream_requires_unit_norm_weights():
     """NVFP4 code reuse must reject a non-unit norm instead of silently repacking."""
@@ -155,6 +157,7 @@ def test_fused_norm_stream_requires_unit_norm_weights():
         install_w4a_llama_stream(core, "w4a_nvfp4", "least_squares", fused_norms=True)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_headroom_norm_scale_follows_attention_and_mlp_policies(dtype):
@@ -181,6 +184,7 @@ def test_headroom_norm_scale_follows_attention_and_mlp_policies(dtype):
     assert torch.isfinite(logits).all()
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_fp8_attention_does_not_demand_qkv_headroom_scales(dtype):
@@ -203,6 +207,7 @@ def test_fp8_attention_does_not_demand_qkv_headroom_scales(dtype):
     assert torch.isfinite(logits).all()
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
@@ -221,6 +226,7 @@ def test_attention_headroom_with_dynamic_mlp_keeps_input_norm_scale(dtype):
     assert torch.isfinite(logits).all()
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
@@ -296,6 +302,7 @@ def test_headroom_norm_uses_live_consumer_scale_after_buffer_replacement(dtype, 
     install_w4a_llama_stream(packed, "w4a_nvfp4", recipe)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("recipe", ["nvidia_headroom", "least_squares_headroom"])
 @pytest.mark.parametrize("installed", [False, True])
@@ -321,6 +328,7 @@ def test_headroom_scale_mismatch_leaves_model_untouched(recipe, installed, group
 
 # The packed fixture constructs NVFP4 modules even for the FP8 attention
 # parameter, so the SM 12.1 tensor-core floor applies.
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("attention_mode,mlp_fp8_layers", [("w4afp8", ()), ("w4a_nvfp4", (0,))])
 def test_runtime_rejects_scales_for_fp8_producers_before_install(attention_mode, mlp_fp8_layers):
@@ -336,6 +344,7 @@ def test_runtime_rejects_scales_for_fp8_producers_before_install(attention_mode,
     assert not any(getattr(module, "_require_activation_stream", False) for module in packed.modules())
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("fused_norms", [False, True])
@@ -444,6 +453,7 @@ def test_headroom_probe_capture_and_native_norm_share_operands(monkeypatch, dtyp
                                    rtol=1e-6, atol=1e-6)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_replay_norm_operand_matches_actual_encoded_runtime_and_independent_oracle(dtype):
@@ -492,6 +502,7 @@ def test_replay_norm_operand_matches_actual_encoded_runtime_and_independent_orac
     torch.testing.assert_close(captured[0], captured[1], rtol=1e-6, atol=1e-6)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("fixed_scales", [False, True])
@@ -626,6 +637,7 @@ def test_mixed_replay_applies_attention_and_mlp_policies(dtype):
     assert not torch.equal(uniform_gate, promoted_gate)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_mixed_replay_matches_runtime_operands(dtype):
@@ -683,6 +695,7 @@ def test_mixed_replay_matches_runtime_operands(dtype):
     assert isinstance(runtime_gate, W4AActivation) and runtime_gate.mode == "w4afp8"
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 def test_fp8_boundary_operands_keep_fp32(dtype):
@@ -807,6 +820,7 @@ def test_token_global_diagnostic_keeps_encoded_handoffs_and_native_weights():
             handle.remove()
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_calibrates_in_order_propagates_carriers_and_preserves_weights():
     core = _tiny_stream()
@@ -843,6 +857,7 @@ def test_calibrates_in_order_propagates_carriers_and_preserves_weights():
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_calibration_failure_rolls_back_scales_and_observers():
     core = _tiny_stream()
@@ -864,6 +879,7 @@ def test_missing_producer_scales_rejected():
         _tiny_stream({"model.layers.0.input": 1.0})
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 def test_producer_calibration_supports_mixed_policy_stream():
     """Calibration must target only the boundaries the installed policy keeps NVFP4."""
@@ -886,6 +902,7 @@ def test_producer_calibration_supports_mixed_policy_stream():
     assert set(statistics) == expected
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("recipe,attention_recipe", [("nvidia", "least_squares"), ("least_squares", "nvidia")])
@@ -981,6 +998,7 @@ def test_token_energy_experiment_preserves_native_state_and_encoded_handoffs():
             handle.remove()
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("rows", [1, 33])
 def test_energy_corrected_carrier_gemm_matches_independent_native_int4_oracle(monkeypatch, rows):
@@ -1033,6 +1051,7 @@ def test_energy_corrected_carrier_gemm_matches_independent_native_int4_oracle(mo
         torch.testing.assert_close(value, native[name], rtol=0, atol=0)
 
 
+@GLUON_FP8
 @NVFP4_HARDWARE
 @pytest.mark.parametrize("abort", [False, True])
 def test_producer_reconstruction_propagates_carriers_preserves_weights_and_rolls_back(abort):

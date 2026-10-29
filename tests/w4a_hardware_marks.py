@@ -24,6 +24,20 @@ def _capability() -> tuple[int, int] | None:
     return torch.cuda.get_device_capability(0)
 
 
+def _has_native_fp8_gemm() -> bool:
+    """Whether this Triton build exposes the Gluon ``mma_v2`` FP8 GEMM.
+
+    ``mma_v2`` first appears in Triton 3.6.0, and not every build provides it.
+    Probe the symbol instead of comparing version strings so a backport or a
+    nightly build that carries the API is accepted.
+    """
+    try:
+        from triton.experimental.gluon.language.nvidia.ampere import mma_v2  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
 FP8_HARDWARE = pytest.mark.skipif(
     _capability() is None or _capability() < (8, 9),
     reason="FP8 tensor cores (SM 8.9+ / Ada or newer) required",
@@ -31,4 +45,10 @@ FP8_HARDWARE = pytest.mark.skipif(
 NVFP4_HARDWARE = pytest.mark.skipif(
     _capability() != (12, 1),
     reason="GB10 / SM 12.1 required for NVFP4",
+)
+# Every W4A carrier is packed and multiplied by the Triton kernels, so a build
+# without the Gluon `mma_v2` FP8 GEMM cannot run any of them.
+GLUON_FP8 = pytest.mark.skipif(
+    not _has_native_fp8_gemm(),
+    reason="Triton with Gluon `mma_v2` FP8 GEMM (>= 3.6.0) required",
 )

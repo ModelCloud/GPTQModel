@@ -113,6 +113,9 @@ class W4ANVFP4Linear(W4AFP8Linear):
             from . import w4a_nvfp4_triton  # noqa: F401
         except (ImportError, OSError) as exc:
             return False, RuntimeError(f"W4ANVFP4 needs Triton for activation packing: {exc}")
+        # The FP4 packer and accumulator are plain ``tl.jit`` kernels, so pure
+        # NVFP4 does not need the Gluon FP8 GEMM. A mixed recipe that steps the
+        # attention lane down to FP8 reports the Triton floor when it runs.
         if not hasattr(torch, "float4_e2m1fn_x2"):
             return False, RuntimeError("W4ANVFP4 requires native PyTorch FP4 support.")
         if not all(hasattr(torch.nn.functional, name) for name in ("scaled_mm", "ScalingType", "SwizzleType")):

@@ -8,7 +8,7 @@ import torch
 from tests.kernels.test_w4a_nvfp4_gb10 import _module
 from tests.kernels.test_w4a_stream import _independent_nvfp4_qdq
 from tests.kernels.test_w4afp8_gb10 import _packed_linear
-from tests.w4a_hardware_marks import FP8_HARDWARE, NVFP4_HARDWARE
+from tests.w4a_hardware_marks import FP8_HARDWARE, GLUON_FP8, NVFP4_HARDWARE
 
 
 def _staged(mode):
@@ -20,6 +20,7 @@ def _cache_names(mode: str) -> list[str]:
     return ["_weight_e4m3", "_weight_both", "_unit_weight_scales"] if mode == "w4a_nvfp4" else ["_weight_e4m3"]
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode", [
     pytest.param("w4afp8", marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
@@ -47,6 +48,7 @@ def test_model_dtype_conversion_preserves_hardware_cache_bytes(mode, dtype, meth
         assert name not in module.state_dict()
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode", [
     pytest.param("w4afp8", marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
@@ -72,6 +74,7 @@ def test_native_weight_changes_invalidate_every_derived_cache(mode, operation):
     assert torch.equal(module._weight_e4m3.float(), torch.full((256, 128), float(expected_code)))
 
 
+@GLUON_FP8
 @pytest.mark.parametrize("mode", [
     pytest.param("w4afp8", marks=FP8_HARDWARE),
     pytest.param("w4a_nvfp4", marks=NVFP4_HARDWARE),
