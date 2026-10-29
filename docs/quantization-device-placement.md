@@ -3,78 +3,81 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Device placement inside lifecycle actions
 
-**Status:** revision 0.11 design proposal, 2026-10-29. These APIs and execution
+**Status:** revision 0.12 design proposal, 2026-10-29. These APIs and execution
 guarantees are proposed, not implemented. See the [public API](quantization-plan-api.md),
 [parallel contract](quantization-parallel-execution.md), and
 [DeepSeek example](quantization-example-deepseek-v4.1-flash.md).
 
 ## 1. Actions own their resources and execution policies
 
-Configure devices and mappings on the action supplied to `serial` or `parallel`:
+The common request names devices and an optional execution mode:
 
 ```python
-vision = (
-    Quantize.vision(recipe=GPTQ(bits=8), name="vision")
-    .devices(Local(gpus=[0, 1]))
-    .parallelism(Parallelism.auto().for_stage(
-        "observe", DataParallel(workers=2), required=True,
-    ))
+language = Quantize.language(recipe=GPTQ(bits=4)).devices(
+    Local(gpus=[0, 1, 2, 3], parallel="tensor")
 )
-language = (
-    Quantize.language(recipe=GPTQ(bits=4), name="language")
-    .devices(Local(gpus=[0, 1, 2, 3]))
-    .parallelism(Parallelism.auto().for_stage(
-        "observe", TensorParallel(shards=4), required=True,
-    ))
-)
-plan = Plan().data(multimodal_calibration).serial(vision).serial(language)
+plan = Plan().data(calibration).serial(language)
 ```
 
-Constructor arguments `devices=` and `parallelism=` are equivalent to these
-immutable action builders. Direct calls accept the same arguments. There is no
-`Plan.devices` or `Plan.parallelism`: including a fragment cannot replace its
-actions' device assignments. Reuse immutable `Local` descriptions explicitly
-when actions should share a configuration. Omitted action policies resolve to
-recorded automatic defaults; they do not inherit another action's assignments.
-An independent evaluator owns its own device configuration after saving.
-
-`observe` above is an illustrative action-local stage ID, not a mandatory stage
-in every method. The compiled ID gains the action namespace. Unknown stages or
-unsupported required layouts fail. Data parallelism for observations and data
-parallelism for optimization have different reducer requirements. Applying data
-parallelism to an arbitrary solve is not implied by a capture policy.
+No lifecycle stage name, policy wrapper, duplicate GPU count, or `required=True`
+is needed. `parallel="data"` requests data parallelism. Omitting `parallel` means
+`"auto"`; an explicit mode is a requirement and unsupported requests fail.
+Constructor `devices=` and immutable `.devices(...)` are equivalent; direct
+calls use the same descriptor. Devices and their mode belong to the action passed
+to `serial`, `parallel`, or `add`. A plan or included fragment cannot replace
+them. Reuse immutable `Local` values explicitly when actions share configuration.
+An independent evaluator owns its configuration after saving.
 
 | Control | Meaning |
 | --- | --- |
 | `Plan.serial(a, b)` / `Plan.parallel(a, b)` | Completion order or legal overlap between lifecycle actions. |
-| `action.devices(Local(...))` | This action's permitted hardware, budgets, tensor placement, and stage resource constraints. |
-| `action.parallelism(...)` | How admitted stages use that hardware: replicas, tensor partitions, or another declared layout. |
-| `DataParallel(workers=2)` | Two complete logical replicas process different data partitions, with the declared statistic/gradient reduction. A logical replica can itself be sharded. |
-| `TensorParallel(shards=4)` | Four workers execute one logical computation over partitioned tensors, with adapter-declared axes and collectives. |
+| `Local(gpus=[0, 1, 2, 3])` | Choose a supported layout automatically within this action's pool and budgets; show the resolution. |
+| `Local(gpus=[0, 1, 2, 3], parallel="data")` | Four logical replicas process different data partitions using the declared observation/gradient reducers. |
+| `Local(gpus=[0, 1, 2, 3], parallel="tensor")` | One logical model execution uses four tensor shards with declared axes and collectives. |
+| `Local(gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2})` | Two data replicas, each with two tensor shards. |
 
 Running two lifecycle actions concurrently is neither data parallelism nor tensor
-parallelism. Both execution modes can occur inside a single serial action, and
-both can coexist in one stage when supported:
+parallelism. Both execution modes can occur inside a single serial action. To
+combine them, specify their counts in the same device description:
 
 ```python
-hybrid = HybridParallel(
-    mesh=DeviceMesh(devices=[[0, 1], [2, 3]], axes=("data", "tensor")),
-    data_axis="data",
-    tensor_axis="tensor",
-)
-language = language.parallelism(
-    Parallelism.auto().for_stage("observe", hybrid, required=True)
+hybrid_devices = Local(
+    gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2},
 )
 ```
 
-This requests two data replicas, each tensor-sharded across two GPUs. Tensor
+The count product must equal the selected GPU count. Counts are positive integers;
+unknown axes, duplicate devices, boolean counts, and incompatible maps fail. The
+default axis order is data then tensor, independent of dictionary key order. Tensor
+groups use contiguous entries in the supplied GPU list, so the example's tensor
 groups are `[0, 1]` and `[2, 3]`; corresponding data-reduction groups are `[0, 2]`
 and `[1, 3]`. Replicas consume different samples while the tensor ranks of a
 replica cooperate on the same logical batch. The reducer must not count one
 sample once per tensor rank. Shared memory, optimizer state, RNG, and collectives
 retain explicit replica/shard identities. This is a capability request, not a
 claim that any current method/backend implements it. Expert or pipeline layouts
-remain separate supported partition types.
+remain separate supported partition types, with explicit advanced contracts.
+
+### The method resolves its own stages
+
+A method registers supported action execution profiles for the complete composed
+recipe, architecture, and backend. The profile lowers `parallel` into the actual
+forward/capture/training layouts and required reducers. It also declares local
+solves, CPU packing, and other work that remains local. Tensor-parallel model
+execution does not promise a distributed Hessian solve; data-parallel capture does
+not authorize independent optimizer copies without gradient synchronization.
+
+An explicit mode must have a supported profile that actually uses it. The compiler
+cannot apply it to an arbitrary subset of stages, silently substitute another mode,
+or advertise success for an action with no applicable work. An override of a
+particular stage is an explicit advanced choice. A new modifier revalidates the
+whole profile. The resolved graph records profile version, placements, reducers,
+and local stages; these details need not appear in ordinary authoring code.
+
+Profile resolution preserves numerical recipes, data weights, teacher choices,
+and method order. Unsupported profiles report the blocking method/architecture
+capability and supported modes before work starts. The user can inspect stage
+details through `explain()` without having to name those stages to configure a run.
 
 ## 2. Placement separates storage, execution, and fitting
 
@@ -213,11 +216,16 @@ Stage/buffer IDs are plugin-declared; this example requests an observation stage
 with host-spooled observations and transfer buffers. Unsupported placements fail,
 including methods requiring GPU-resident statistics. Similar registered buffer
 roles cover statistics, fitting masters, optimizer state, packing, and dataset
-decode/prefetch. Worker pools, buffer rules, owner mappings, and `Parallelism`
+decode/prefetch. Worker pools, buffer rules, owner mappings, and execution-mode
 constraints must agree; stage pools narrow permitted resources rather than silently
 overriding explicit owner locations. Optional stage/view qualifiers on `place`
 can express different reference/candidate execution without changing provenance.
 They participate in the same field/priority rules.
+Advanced callers may also pass `parallel=` to `Local.for_stage(...)`; it replaces
+the inherited mode only at that named stage, retaining all owner/resource checks.
+Unknown stages or unsupported modes fail. There is no separate policy-builder
+API or `required` flag. Stage names and buffers are plugin-declared details for
+specialized overrides, not inputs required by the common mode selector.
 
 ## 3. NUMA is a memory and execution contract
 
@@ -304,8 +312,9 @@ Changing kernels/reduction order can change the numerical execution profile;
 placement is not a bitwise-equivalence promise.
 
 Portable files store device policies **inside each operation**. They serialize
-typed selectors, half-open ranges, priorities, mappings, and registered layout
-descriptors, never Python callbacks. The compiled layout records concrete owners,
+typed selectors, half-open ranges, priorities, mappings, and the `parallel` string
+or axis-count map inside `devices`, never Python callbacks. Explicit stage
+overrides also live inside that device description. The compiled layout records concrete owners,
 physical topology, and policy/allocator versions. Resuming under a changed layout
 requires the method's continuation capability and revalidation of NUMA placement.
 Saving records execution provenance but does not require the evaluator or another
@@ -343,7 +352,7 @@ an Engram/NUMA memory allocation contract. See the pinned [configuration][repo-c
 [subset placement][repo-subset], and [worker affinity][repo-threadx].
 
 The redesign retains those distinctions without inheriting their old API or silent
-fallbacks. Future conformance gates P10-P15 in the
+fallbacks. Future conformance gates P10-P16 in the
 [parallel contract](quantization-parallel-execution.md) cover action-local ownership,
 dense/expert maps, data/tensor combinations, NUMA allocation, buffer lifetimes,
 and portable layout/resume behavior. No CPU/GPU runtime test or performance claim

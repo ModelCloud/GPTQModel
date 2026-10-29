@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.11 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.12 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -25,9 +25,10 @@ fitting, or optimizer stages retain their admitted physical parallelism. A seria
 action after a parallel group waits for every branch's declared stable result.
 Parallel actions may overlap only when dependencies, writes, and resources permit.
 Each action owns its devices, mappings, and parallel execution policy; there is
-no plan-level device configuration. `DataParallel` and `TensorParallel` describe
-different execution modes inside an action. A supported `HybridParallel` mesh
-combines them. See [device placement](quantization-device-placement.md) for the
+no plan-level device configuration. `Local(..., parallel="data")` and
+`parallel="tensor"` select the action's mode without lifecycle stage names.
+`parallel={"data": 2, "tensor": 2}` combines the axes. The composed method
+resolves a complete supported execution profile. See [device placement](quantization-device-placement.md) for the
 public controls, dense/expert/module maps, and CPU/NUMA requirements.
 
 ## 1. Existing behavior to preserve or deliberately replace
@@ -335,6 +336,7 @@ Proposed acceptance gates:
 | P13 | Enforce CPU table allocation and worker affinity independently: before-first-touch allocation, eager-tensor migration, cpuset restrictions, file/shared mappings, pinned staging, and unavailable NUMA features. Hard policy failure cannot become undocumented fallback. |
 | P14 | Table lookup/gather transfers, observation/statistic/optimizer buffers, CPU packing, and decode/prefetch queues obey per-stage/per-node budgets and event lifetimes. Unsupported CPU lookup or buffer placement fails; no persistent expanded table cache is introduced. |
 | P15 | Python/file placement policies preserve scopes, ranges, priorities, mesh axes, and rule identities. Changed-topology resume revalidates allocation/continuation capabilities; independent artifact evaluation has a fresh layout and cannot inherit live quantization leases. |
+| P16 | Simple mode requests resolve the composed method's versioned profile without stage names or repeated counts. Validate inferred world size, axis products/order, and modifier compatibility. Explicit modes cannot become partial best-effort application, silent fallback, or a no-op; advanced stage overrides retain numerical and placement checks. |
 
 The first usable executor milestone must demonstrate independent task work,
 multi-device capture/statistic merging, and a cooperative optimizer path using

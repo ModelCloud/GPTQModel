@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.11, 2026-10-29.
+**Status:** design discussion, revision 0.12, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -357,9 +357,12 @@ requantization, and norm tuning. `serial(a, b)` is equivalent to
 terminals. They build ordering intent without executing or flattening the
 method-owned lifecycle programs. An action ordered serially can still execute
 across several GPUs internally.
-Each action owns its `.devices(...)` and `.parallelism(...)` configuration;
-`Plan` has neither setting. Action concurrency, data-parallel replicas, and
-tensor-parallel execution are separate controls. A supported hybrid layout can
+Each action configures devices and execution mode together through
+`.devices(Local(..., parallel="tensor"))`; `Plan` has no device setting.
+Use `parallel="data"` for data replicas, or omit the mode for automatic placement.
+The method resolves its own stages; normal callers need no stage IDs or wrappers.
+Action concurrency, data-parallel replicas, and tensor-parallel execution are
+separate controls. A supported hybrid layout can
 combine data and tensor axes inside one serial action.
 
 `add` declares intent without insertion-order edges; `after` names a targeted
@@ -1077,7 +1080,7 @@ The following are proposed acceptance criteria and experiments.
 | V22 | Future-method admission | A synthetic plugin adds a custom observation type, bounded optimization loop, derived teacher, and non-scalar artifact without edits to coordinator method dispatch. Undeclared effects and unsupported capabilities fail visibly. |
 | V23 | Shared multimodal ownership | Encoder-free routes expose their actual shared owners; a vision-only selector cannot imply independent ownership of a shared backbone. |
 | V24 | Nonstandard execution traces | Depth history, nested recurrence, diffusion canvas/commit steps, and duplex stream events retain correct invocation/state identity under capture, replay, and resume. |
-| V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P15 cover failure, resource pressure, cost, logical batches, action placement, and data/tensor layouts. |
+| V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P16 cover failure, resource pressure, cost, logical batches, action placement, data/tensor layouts, and method-owned execution profiles. |
 | V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
 | V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; serial chained/variadic forms and parallel fork/join compose lifecycle actions without disabling internal multi-GPU execution. Immutable reuse, dependencies, fragments, overrides, and invalid-action diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
@@ -1089,6 +1092,7 @@ The following are proposed acceptance criteria and experiments.
 | V34 | Automatic mapped targets | Omitted/explicit `Target.AUTO` and scoped Python/file plans resolve the same default groups. `DynamicModuleTargeting` narrows the scope; labels, data routes, other jobs, and GPU layout cannot expand it. Missing/ambiguous defaults or stale mappings fail concretely. |
 | V35 | Action-local placement | Dense groups, per-layer expert/module maps, backing storage, fitting workers, and buffers obey explicit constraints without expanding writes. Concurrent actions share physical reservations; serial transitions drain leases before changing placement. |
 | V36 | Heterogeneous memory and parallel modes | CPU/NUMA table residency and worker affinity are independently enforced; data, tensor, and hybrid layouts preserve declared reductions and shard identities. Unsupported kernels, allocation policies, or layouts fail explicitly. |
+| V37 | Simple execution intent | Common device/mode configuration requires one `Local` value with no stage IDs, nested policy builders, duplicated worker counts, or `required` flag. String/axis-count modes resolve a versioned profile for the composed recipe, preserving all existing placement/numerical constraints. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1140,7 +1144,7 @@ proposed defaults, not final design approval.
 | D19 | Direct operations, immutable fluent/file plans with `serial`/`parallel` lifecycle actions, and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
 | D21 | `QDataSet` schemas infer input routes and shared downstream consumers; lifecycle roles remain orthogonal and are inferred only when unambiguous. | Which adapter defaults and coverage profiles minimize manual configuration without hiding meaningful task choices? |
-| D22 | Devices, mappings, and parallelism belong to each action; global scheduling accounts for shared physical resources. Storage, execution, fit, buffers, and NUMA policy are distinct constraints. | Which CPU allocation backends and data/tensor/hybrid combinations can provide enforceable locality and practical cost for the first adapters? |
+| D22 | Devices and execution mode use one action-owned `Local` description; `parallel` selects auto/data/tensor or axis counts, and methods resolve their stages. Global scheduling shares physical accounting; storage, execution, fit, buffers, and NUMA remain distinct constraints. | Which complete recipe/backend execution profiles and CPU allocation backends can provide enforceable locality and practical cost for the first adapters? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -1187,6 +1191,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.9, 2026-10-29 | Default targets to `Target.AUTO`; resolve scoped module groups through versioned model mappings. Use `DynamicModuleTargeting` for module queries, add typed scope constructors, and preserve exact selection across labels, data routes, partial jobs, and device layouts. |
 | 0.10, 2026-10-29 | Use `experts(type=...)` and `serial(...)`/`parallel(...)` to compose actionable lifecycles. Define serial chaining/variadic equivalence, completion barriers, and the independence of action ordering from internal multi-GPU execution. |
 | 0.11, 2026-10-29 | Configure devices and mappings inside actions. Add storage/execution/fit and stage-buffer placement, dense/per-layer/expert/module maps, Engram CPU/NUMA controls, shared physical reservations, and explicit data/tensor/hybrid execution modes distinct from lifecycle concurrency. |
+| 0.12, 2026-10-29 | Simplify common configuration to `Local(gpus=..., parallel="data"/"tensor")`, with optional axis counts for combined layouts. Remove the public parallelism policy builder and enforcement flag; methods resolve execution profiles, while stage overrides remain advanced options. |
 
 ## Sources
 

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.11 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.12 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -199,7 +199,7 @@ form for declaring intent without insertion-order edges.
 
 `parallel()` permits legal overlap; device count and memory still bound actual
 concurrency. The preview shows feasible placement and serialized bottlenecks.
-Strict physical-layout requirements belong in the parallelism policy below.
+Explicit execution modes belong in each action's device description below.
 Devices, mappings, and execution modes belong to each supplied action.
 `Plan.parallel(a, b)` schedules lifecycle actions; data-parallel replicas and
 tensor-parallel shards are separate modes inside their stages. A serial action
@@ -548,21 +548,13 @@ automatic routing cannot reuse stale candidate features or change during resume.
 
 The common request configures devices on the lifecycle action passed to `serial`,
 `parallel`, or `add`. Constructor `devices=` and immutable `.devices(...)` are
-equivalent; direct operations use the same descriptor. Omitted action settings
-resolve to recorded automatic defaults. `Plan` has no device or parallelism
-configuration. Reusable descriptions are ordinary immutable values:
+equivalent; direct operations use the same descriptor. Add `parallel="tensor"`
+or `parallel="data"` to select a mode; omit it for automatic placement. The GPU
+list supplies the worker count. `Plan` has no device or execution-mode setting:
 
 ```python
-devices = Local(
-    gpus=[0, 1, 2, 3],
-    memory_per_gpu="70GiB",
-    host_memory="256GiB",
-    scratch="/scratch/quantization",
-)
-language = (
-    Quantize.language(recipe=GPTQ(bits=4), name="language")
-    .devices(devices)
-    .parallelism(Parallelism.auto())
+language = Quantize.language(recipe=GPTQ(bits=4)).devices(
+    Local(gpus=[0, 1, 2, 3], parallel="tensor")
 )
 plan = Plan().data(calibration).serial(language)
 ```
@@ -575,6 +567,11 @@ can supply a typed distributed device context through the same `devices` entry
 point on an action for multiple nodes. The coordinator reconciles all actions'
 requests against one physical resource ledger: the same GPU in two descriptions
 is still one GPU. Device budgets are not multiplied by concurrent actions.
+Explicit modes are strict by default, so there is no `required=True` flag.
+The composed method owns the mapping from a mode to its lifecycle stages; callers
+need no stage IDs or nested policy builders. Unsupported profiles fail with an
+explanation, and `explain()` shows any local stages such as packing or solves.
+Optional memory/scratch budgets remain ordinary fields on `Local`.
 
 `Local.place(...)` adds explicit dense-layer, per-layer module, expert, and CPU
 tensor mappings. `storage`, `execute`, and `fit` independently constrain backing
@@ -584,42 +581,31 @@ separates memory allocation from worker affinity. See the complete
 [device placement contract](quantization-device-placement.md) for examples,
 priorities, stage buffers, NUMA enforcement, and source materialization.
 
-Advanced policies can require a particular stage layout:
+Both execution axes can be combined without another wrapper:
 
 ```python
-parallel = (
-    Parallelism.auto()
-    .for_stage(
-        "observe", DataParallel(workers=4), required=True
-    )
-    .for_stage(
-        "gsq/attention", DataParallel(workers=4), required=True
-    )
-)
-language = (
-    Quantize.language(recipe=Recipe(GPTQ(bits=4)).use(StagedGSQ()), name="language")
-    .devices(devices)
-    .parallelism(parallel)
+devices = Local(
+    gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2},
 )
 ```
 
-Stage IDs above are illustrative action-local IDs exposed by a selected plugin's preview,
-not universal required stage names. A role selector can select compatible stages
-without hardcoding IDs, but unknown or ambiguous matches fail. Each requirement
-is checked against the resolved method, architecture, data, and resources.
-Unsupported layouts report alternatives; a `required=True` request never falls
-back silently.
+This is two data replicas, each tensor-sharded across two GPUs. The product must
+equal the GPU count; the device-list order defines contiguous tensor groups, so
+these are `[0, 1]` and `[2, 3]`. Dictionary key order does not change the axes.
+The complete composed recipe must support this combination. Explicit owner maps
+remain hard constraints and cannot silently become replicas or tensor shards.
 
 Mesh layouts for supported tensor/expert/pipeline/context partitioning use typed
 axis and ownership descriptors from the parallel contract. Configuration must
 distinguish model partitioning from data replication and independent expert
-fitting. `DataParallel` partitions samples over complete logical replicas;
-`TensorParallel` partitions tensors within one logical computation. Both can
-coexist through an explicit `HybridParallel` mesh, with declared data and tensor
-groups. They are distinct from `Plan.parallel(...)`, which permits lifecycle
-overlap. A single `parallel=True` flag cannot express these meanings. Hard
-single-device owner mappings cannot silently become replicas or tensor shards;
-mapping and execution-policy constraints must agree or compilation fails.
+fitting. `parallel="data"` partitions samples over complete logical replicas;
+`parallel="tensor"` partitions tensors within one logical model execution. They
+are distinct from `Plan.parallel(...)`, which permits lifecycle overlap. Neither
+mode changes numerical objectives or invents a distributed solve. Advanced
+`Local.for_stage(...)` overrides can change a named stage's mode/resources;
+they remain optional and use the same capability checks. The
+[device placement contract](quantization-device-placement.md) defines profile
+coverage, strict failures, and stage-specific overrides.
 
 ## 7. Reusable fragments and configuration files
 
@@ -674,7 +660,6 @@ operations:
     target: auto
     recipe: {method: gptqmodel/gptq@1, bits: 8}
     devices: {kind: local, gpus: [0, 1]}
-    parallelism: auto
   - id: language
     kind: quantize
     scope: language
@@ -682,7 +667,6 @@ operations:
     after: [vision]
     recipe: {method: gptqmodel/gptq@1, bits: 4, group_size: 128}
     devices: {kind: local, gpus: [0, 1, 2, 3]}
-    parallelism: auto
 ```
 
 This is an explicitly ordered two-operation plan. An unordered `add` plan omits
@@ -691,10 +675,11 @@ compilation. List order in the file is not an implicit correctness constraint.
 Fluent `serial` and `parallel` serialize to explicit edges/groups, not opaque method
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
-Device mappings and parallelism belong inside each serialized operation. Typed
+Device mappings and `parallel` belong inside each operation's `devices`. Typed
 placement rules include selector, storage/execute/fit fields, priorities, and
-half-open ranges; hybrid layouts include mesh axes and groups. Unregistered
-callbacks are not a mapping format. Authoring IDs resolve to physical devices
+half-open ranges; hybrid requests specify axis counts and resolved layouts record
+actual groups. Unregistered callbacks are not a mapping format. Authoring IDs
+resolve to physical devices
 and canonical owners in the compiled layout.
 Positional data shorthand serializes to inferred role bindings after resolution;
 source groups use `datasets: [images, texts]` in place of a single `dataset`.
@@ -776,4 +761,6 @@ IDs before sharding, and concrete diagnostics for missing/ambiguous mappings.
 Placement checks cover action-local policies, global physical reservations,
 dense/per-layer/per-expert mappings, CPU/NUMA allocation before first touch,
 buffer placement, and separate data/tensor/hybrid capabilities. A scoped fitting
-map never changes a weight-write query. These gates are detailed in P10-P15.
+map never changes a weight-write query. Common mode selection requires no stage
+names, policy wrappers, duplicate counts, or enforcement flags; Python/file forms
+resolve the same versioned method profile. These gates are detailed in P10-P16.

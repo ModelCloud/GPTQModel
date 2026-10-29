@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.11
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.12
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -291,12 +291,19 @@ must respect the composed program: AWQ scaling/rotation groups and joint GSQ or
 ParoQuant objectives are not automatically independent per-module jobs. Stages
 declare supported buffer locations, CPU lookup/packing, materialization, and
 collective semantics. A data-free/native path need not acquire an observation
-stage just because another method exposes one. `DataParallel`, `TensorParallel`,
+stage just because another method exposes one. Data parallelism, tensor parallelism,
 and their combination each require specific capability evidence; distributed
 GSQ support alone does not prove tensor-parallel support for its optimizer.
 These resource contracts admit future methods without a fixed universal stage
 list. Preserved conditional-memory tables still need execution/NUMA placement;
 quantizing such tables needs a separately admitted lookup/codec method.
+
+Revision 0.12 exposes those choices through `Local(..., parallel="data")`,
+`parallel="tensor"`, or an axis-count map. The method registers an execution
+profile for its whole composed recipe, mapping that simple intent to its own
+stages, collective groups, reducers, and required local work. Plugins revalidate
+the profile when modifiers change. Ordinary callers do not supply stage IDs;
+unsupported modes fail instead of applying to an arbitrary compatible subset.
 
 Current resumability is narrower than method availability.
 [Checkpoint registration](../gptqmodel/looper/gptq_checkpoint.py) has explicit

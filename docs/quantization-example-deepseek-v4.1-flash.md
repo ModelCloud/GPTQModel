@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.11 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.12 design example, 2026-10-29. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -243,8 +243,8 @@ non-table storage/buffers, remain automatic but must appear in the preview.
 These are hard execution maps, not promises that every layer stays resident.
 Unspecified backing storage can use admitted bounded materialization within the
 resolved host/GPU budgets. `ByExpert` assigns whole experts, not tensor shards.
-The action may request `DataParallel`, `TensorParallel`, or `HybridParallel` for
-supported stages using its `.parallelism(...)` policy, but replication or tensor
+The action may set `parallel="data"`, `parallel="tensor"`, or an axis-count map
+on its `Local` description; the method resolves its stages. Replication or tensor
 splitting cannot silently override these single-device owner assignments. A new
 compatible mapping/mesh and capability check are required for such a variant.
 `.parallel(action_a, action_b)` has the separate meaning of lifecycle overlap.
