@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.7 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.8 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -52,8 +52,11 @@ status, and saved artifact references. They do not return a partially configured
 builder. Every direct operation can be previewed through the plan form below.
 `run.save()` saves that run's assembled revision, including untouched components;
 it cannot silently save a later run's changes. `model.save()` explicitly saves
-the current assembled revision. Both record validation coverage and provisional
-status where applicable.
+the current assembled revision. Both return a `ModelArtifact` only after its
+payloads and manifest are durably committed. The handle pins the saved revision
+and integrity identity, not a mutable path or the live model. Saving records
+method/integrity checks and provisional status where applicable; task evaluation
+is a separate optional operation on that saved artifact.
 
 `quantize` handles selected dense weights. `requantize` requires an explicit
 source policy when replacing a packed representation. `repack` is a supported
@@ -94,13 +97,15 @@ plan = (
     .add(Quantize(
         target="language", recipe=GPTQ(bits=4), name="language"
     ))
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 
 resolved = plan.compile(model)
 print(resolved.explain())
 run = model.run(resolved)
-run.save("mixed-model")
+artifact = run.save("mixed-model")
+
+# Optional, independent evaluation after saving has completed.
+report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
 `add()` registers intent; its call order does not demand execution order. The
@@ -162,7 +167,6 @@ plan = (
         target="language", source=SourceSnapshot("source-checkpoint"),
         data=norm_training_data, name="norms",
     ))
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
@@ -172,7 +176,6 @@ plan = (
 | `then(operation)` | Add completion edges from the current terminal operations to this operation. Completion means its declared stable installed result/artifacts, not merely a worker submission. |
 | `parallel(a, b)` | Fork from the current terminal operations into branches that may overlap; subsequent `then` joins all branch terminals. The compiler rejects an inter-branch dependency or write conflict rather than pretending the branches are independent. |
 | `operation.after("name")` | Add a targeted completion dependency without globally serializing unrelated operations. Names resolve within the assembled plan/fragment namespace. |
-| `evaluate(suite=..., data=...)` | Add final evaluation of the assembled terminal composition. The suite declares tasks, metrics, and acceptance rules; data binds the `evaluate` role and may instead be supplied as a plan default. |
 | `refine(policy)` | Add a declared bounded composition-refinement program with permitted writes, sources, selection data, and stopping criteria. It does not replace intrinsic method optimization. |
 
 `parallel()` permits legal overlap; device count and memory still bound actual
@@ -210,26 +213,58 @@ independent = (
         Quantize("language", GPTQ(bits=4),
                  observations=native_inputs, name="language"),
     )
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
 Here both fitting streams use the named frozen source, so the language fit need
 not wait for quantized vision. This is the independent baseline from the main
-design, not the progressive default or joint optimization. Evaluation uses the
-assembled candidate's own state. `observations=` controls a method's supported
-caller-selectable observation policy; it cannot overwrite intrinsic teacher,
+design, not the progressive default or joint optimization. A later evaluation
+loads the saved composition and creates its own inference state.
+`observations=` controls a method's supported caller-selectable observation
+policy; it cannot overwrite intrinsic teacher,
 clean/noisy-stream, or initializer requirements. Methods with multiple roles
 expose typed named bindings and reject ambiguous or unsupported policies. Optional
 refinement must separately declare its write scope, source, selection data,
 pass/resource budget, and stopping criteria.
 
-The final evaluation reads the chosen terminal revision after all fitting and
-refinement. Its results cannot drive automated refitting, early stopping, or
-candidate selection. Those decisions consume `train`, `validate`, or `select`
-data. A final failure reports unmet criteria; it does not restart refinement on
-the same held-out set. Adding a later mutating operation requires evaluation of
-the new terminal revision, and any earlier feedback must be recorded as used.
+### Evaluation follows saving
+
+Evaluation is outside the quantization lifecycle. There is no `Plan.evaluate()`;
+neither Python builders nor serialized quantization plans accept an evaluation
+operation or an `evaluate` data binding. Quantization finishes without an
+evaluation suite or final holdout. Method-required optimization, stopping, and
+candidate selection still consume their own `train`, `validate`, or `select`
+data inside the method program.
+
+`ModelArtifact.evaluate(...)` starts a separate evaluation and returns an
+`EvaluationReport`. The suite and data are bound only when the caller requests
+it after a successful save. The fluent spelling is:
+
+```python
+report = run.save("mixed-model").evaluate(
+    suite=held_out_suite,
+    data=held_out_data,
+    devices=Local(gpus=[0, 1, 2, 3]),
+)
+```
+
+This call loads the exact committed artifact and its inference assets, using
+the persisted representation and fresh runtime state. It does not test an
+unsaved optimizer/candidate overlay. A failed save cannot start evaluation;
+a failed or cancelled evaluation leaves the artifact and quantization result
+intact and may be retried independently. Evaluation has its own resources and
+does not keep the quantization worker pool alive.
+If a mutable destination path has been replaced, the evaluator must resolve the
+pinned artifact or fail identity verification; it cannot follow the new files
+or fall back to the live model.
+
+The report records artifact identity, suite/version, data provenance, runtime,
+coverage, metrics, and overlap/held-out status. It is stored separately and does
+not rewrite the saved model manifest or change quantization success. Its scores
+cannot trigger automatic refitting or select another candidate. Later work
+informed by those scores is a new experiment with recorded selection evidence;
+a new held-out claim requires fresh independent data. Further model changes and
+saves create a new artifact identity that needs its own evaluation.
 
 ## 4. Stack recipes without flattening their lifecycles
 
@@ -393,7 +428,9 @@ job = Quantize("language", staged_gsq, data=gsq_data, name="language")
 ```
 
 Observation/calibration, training, initialization, adapter, validation,
-selection, profiling, and final evaluation data are distinct typed requirements.
+selection, and profiling data are distinct quantization requirements. The same
+`QDataSet` abstraction supplies evaluation data to the separate saved-artifact
+evaluator; that binding never enters `Plan.data(...)`.
 Plugins can register namespaced roles without new top-level API parameters.
 Explicit aliases record intentional reuse; roles requiring disjoint samples
 reject overlap. A data-free method does not open a default dataset or initialize
@@ -499,7 +536,6 @@ plan = (
     )
     .then(Quantize("language", with_adapter, rules=text_rules,
                    data=language_data, name="language"))
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
@@ -582,7 +618,6 @@ An illustrative preview might show:
 senses/vision   writes vision.encoder   GPUs 0-1   capture replicas + local solves
 senses/audio    writes audio.encoder    GPUs 2-3   capture replicas + local solves
 language       waits for both encoder revisions  supported 4-GPU method program
-evaluation     reads final composition           held-out task checks
 
 Preserved: selected routers, unselected components, declared aliases
 Unmeasured: estimated duration until a cost profile is supplied
@@ -591,6 +626,8 @@ Unmeasured: estimated duration until a cost profile is supplied
 Actual placement depends on method capabilities and budgets; this is not a
 performance prediction. The preview includes all coupled write effects and
 reports if a chosen recipe requires an additional source or a wider scope.
+It includes method/integrity checks, not a future evaluation job. Saving and
+optional artifact evaluation are separate caller actions after the run.
 
 Future methods register typed configuration, lifecycle compilation, artifact and
 codec schemas, data requirements, parallel capabilities, and conformance cases.
@@ -605,8 +642,11 @@ revalidation after `configure()`, direct/plan semantic equivalence, immutable re
 fragment namespacing, Python/file round-trips with explicit bindings, stable
 resolved IDs, override-conflict diagnostics, invalid parallel groups, cycle
 explanations, unsupported required layouts, and correct reporting of zero-match
-or shared multimodal selectors. Dataset checks cover single-role shorthand,
-multi-role bindings, automatic modality routing, shared-backbone observations,
+or shared multimodal selectors. Save/evaluate checks require a committed artifact,
+fresh inference state, independent failure/retry, and unchanged quantization
+status; plans reject evaluation nodes and data bindings. Dataset checks cover
+single-role shorthand, multi-role bindings, automatic modality routing,
+shared-backbone observations,
 explicit ambiguity overrides, source-group ordering/weighting, aliases/disjointness,
 custom schemas, and streaming cursor compatibility. These are design acceptance
 criteria, not tests of an implemented API.

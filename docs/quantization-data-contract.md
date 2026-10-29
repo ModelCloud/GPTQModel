@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.7 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.8 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -15,9 +15,9 @@ separate:
 
 1. **Content and modality** describe each sample: text, image, audio, video,
    state/action, a multimodal event stream, or already prepared tensors.
-2. **Lifecycle role** describes why a method consumes samples: observation,
+2. **Data role** describes why a processor consumes samples: observation,
    initialization, training, validation, selection, adapter generation,
-   profiling, or final evaluation.
+   profiling, or independent evaluation of a saved artifact.
 
 `CalibrationDataSet` should inherit from `QDataSet`, as proposed, and act as a
 role-aware view over any compatible source. It should not become the parent of
@@ -57,7 +57,7 @@ than implying those APIs are implemented by this PR.
 | ParoQuant | One captured corpus is divided internally into prefix training rows and suffix validation rows; module and grouped scopes use the resulting splits differently. [ParoQuant processor][paro] | Split selection, overlap policy, row/sample units, and seed belong in data provenance. Validation cannot be assumed held out merely because code calls a suffix `validation`. |
 | Norm tuning | The argument named `calibration` is sampled repeatedly as optimization data for teacher/student distillation. [Norm tuning][norm] | Bind it as training data for that operation. Its role is not Hessian calibration even when the same raw corpus is reused. |
 | Activation calibration | `calibrate_activations(samples)` fits producer scales; `measure_nvfp4_producers(samples)` measures a separate held-out reconstruction set. [Activation calibration][activation] | Represent scale fitting and selection/measurement as distinct role bindings with compatible prepared schemas. |
-| RCO and evaluation | RCO consumes objective batches during a precision search, while `utils.data` separately constructs prompt/label evaluation loaders. [RCO][rco], [evaluation data][eval-data] | Search/selection and final evaluation are named roles. Labels, task adapters, metrics, and leakage policy are not calibration metadata. |
+| RCO and evaluation | RCO consumes objective batches during a precision search, while `utils.data` separately constructs prompt/label evaluation loaders. [RCO][rco], [evaluation data][eval-data] | Search/selection is a method role; final evaluation belongs to an independent saved-artifact consumer. Both use typed datasets, with task labels, metrics, and leakage provenance kept outside calibration metadata. |
 | Method-local loading | The AWQ utility can load a named Hugging Face dataset, shuffle it, tokenize it, and form blocks inside the method package. [AWQ data utility][awq-data] | Loading, selection, and block formation must be visible in the resolved data pipeline instead of hidden inside a quantizer. |
 
 The repository therefore has more than a calibration dataset. It has raw data
@@ -246,12 +246,16 @@ Roles are typed bindings, not a closed subclass list:
 | `validate` | Held-out epoch/checkpoint selection and stopping decisions inside an optimizer. |
 | `select` | Precision search, bounded refinement choice, activation-scale recipe selection, or best-candidate choice. |
 | `adapter` | EoRA or another adapter-generation operation. |
-| `evaluate` | Final task/quality acceptance of the assembled model. It is never silently reused for fitting. |
+| `evaluate` | Independent task evaluation of a committed artifact after saving. This role belongs to the artifact evaluator and is rejected in quantization plans. |
 | `profile` | Bounded cost/memory profiling used by physical planning. Timing an optimizer/solve uses disposable candidate state, declared fitting roles, and no retained numerical result. |
 
 Method plugins can add namespaced roles, for example
 `vendor/method:contrastive_negatives`, together with a `DataRequirement`.
 Coordinator code does not add a new keyword or enum branch for each future role.
+The built-in `evaluate` role is reserved for the separate evaluator. It cannot
+be supplied through `Plan.data(...)`, a quantization operation, or a serialized
+quantization plan. Method validation, stopping, and selection keep their own
+roles; final evaluation data is neither loaded nor required while quantizing.
 
 `DataRequirement` declares accepted schemas/modalities, whether raw or prepared
 data is accepted, minimum coverage, access pattern, replay/pass count, ordering,
@@ -358,8 +362,10 @@ plan = (
         "language", Recipe(GPTQ(bits=4)).use(StagedGSQ()),
         data=gsq_data, name="language",
     ))
-    .evaluate(suite=language_quality, data=splits.evaluation)
 )
+run = model.run(plan.compile(model))
+artifact = run.save("language-quantized")
+report = artifact.evaluate(suite=language_quality, data=splits.evaluation)
 ```
 
 Plan-level bindings are defaults. Operation-level bindings override by exact
@@ -464,20 +470,23 @@ not post-padding rows. The split unit is schema metadata. Group-aware splitting
 keeps related frames, turns, augmentations, or embodiments together where the
 task requires it.
 
-The compiler computes overlap when recorded ancestry permits it and otherwise
-reports the guarantee as unknown. Different dataset names or hashes alone do not
-prove that content is disjoint. Requirements can demand validation of sample or
-group ancestry before fitting. Final evaluation defaults to disjointness from
-all fitting and selection roles, including calibration, initialization, adapter
-generation, optimizer validation, and refinement selection. An explicit reuse
-policy can permit overlap, but the result cannot be labeled held out.
+The quantization compiler computes overlap among fitting/selection inputs when
+recorded ancestry permits it and otherwise reports the guarantee as unknown.
+Different dataset names or hashes alone do not prove that content is disjoint.
+Requirements can demand validation of sample or
+group ancestry before fitting. After saving, the separate evaluator compares its
+data against the artifact's recorded fitting/selection provenance. It defaults
+to disjointness from calibration, initialization, training, adapter generation,
+optimizer validation, and refinement selection. An explicit reuse policy can
+permit overlap, but the result cannot be labeled held out. Missing provenance
+reports unknown overlap; this affects the evaluation claim, not the completed save.
 
-Final evaluation is terminal acceptance for the selected candidate. Its metrics
-cannot trigger the same run's automated refinement or select a different winner.
+Final evaluation is optional work on a saved artifact. Its metrics cannot trigger
+the completed run's refinement, change its status, or select a different winner.
 If a later experiment uses that feedback, record the earlier evaluation as
 selection evidence and obtain fresh independent data for a held-out claim.
 
-The manifest records:
+The quantization manifest records its fitting/selection data:
 
 - Dataset identities, revisions, splits, selectors, limits, seeds, and transforms.
 - Role bindings and explicit aliases.
@@ -485,7 +494,12 @@ The manifest records:
 - Schema/modalities, preparation pipeline, route/scenarios, and weighting.
 - Cardinality/counts actually consumed, skipped/invalid samples, and coverage.
 - Distributed partitions, duplicates/retries, cursor checkpoints, and ordering.
-- Proven or unknown overlap between fitting, selection, validation, and evaluation.
+- Proven or unknown overlap among fitting, selection, and validation inputs.
+
+The separate evaluation report records artifact identity, suite/runtime, its own
+dataset provenance and consumed coverage, and overlap against the saved fitting
+provenance. It does not add data requirements to quantization or rewrite the
+committed model manifest.
 
 Raw private samples need not be embedded in the model artifact. The manifest can
 retain identities and aggregate coverage while data artifacts follow their own
@@ -505,12 +519,12 @@ explicitly materialized artifacts.
 | QD7 | Text, image+text, audio+text, image/video, OCR, and prepared-tensor routes reproduce the architecture adapter's declared inputs without dropping auxiliary fields. |
 | QD8 | Map and streaming sources support their declared 1/2/4/8-worker partition/resume semantics without duplicate weighting or broken sequence/event boundaries. |
 | QD9 | Preparation-cache keys change for tokenizer/processor/template/decode/frame/resample/concat/collation changes and remain reusable across physical layouts when numerical inputs are identical. |
-| QD10 | Selection/validation/evaluation leakage and unknown-overlap states appear in `explain()` and the final manifest; an unverified set is not called held out. |
+| QD10 | Fitting/selection overlap appears in the plan/manifest; the separate evaluator records final-data overlap against saved provenance in its own report. Missing provenance cannot establish a held-out claim or invalidate the completed save. |
 | QD11 | A synthetic future method registers a namespaced data role and custom sample schema without changing planner dispatch or the `QDataSet` base. |
 | QD12 | Dataset and prepared-batch memory, prefetch, decode, and materialization limits participate in scheduling and fail preflight when no legal bounded plan exists. |
 | QD13 | View/profile changes invalidate the appropriate prepared caches while retaining sample ancestry; explicit aliases do not merge incompatible teacher/candidate observations or method statistics. |
 | QD14 | Compilation consumes no cursor; runtime content checks gate fitting, and cursor/statistic checkpoints recover correctly with prefetched input and retried shards. |
-| QD15 | Final acceptance is disjoint from all declared fitting/selection roles, and final metrics cannot feed the automated refinement loop. Unknown overlap cannot pass a strict held-out requirement. |
+| QD15 | Evaluation data is bound only after a successful save and is rejected in quantization plans. The independent evaluator checks disjointness from recorded fitting/selection inputs; unknown overlap cannot pass a strict held-out requirement. Its report/failure/retry cannot alter the artifact or quantization status. |
 | QD16 | `.data(images, texts)` resolves image and text input paths without manual route/component bindings; shared-backbone observations include both paths and an encoder-only observation stops early only under an admitted replay contract. |
 | QD17 | Custom modality schemas and encoder-free adapters resolve through registered input contracts; ambiguous routes, missing aligned fields, and explicit incompatible route restrictions fail with concrete choices. |
 | QD18 | Source groups preserve declared limits, ordering, weights, and actual coverage across GPU layouts; no implicit pairing, equal-corpus weighting, duplicated contributions, or reuse across distinct lifecycle roles occurs. Resolved routes and producer revisions survive save/resume. |
@@ -532,6 +546,8 @@ explicitly materialized artifacts.
    and unambiguous roles; multi-role methods use named bindings.
 9. Route by schema and architecture contracts, including downstream shared
    consumers; explicit route restrictions are reserved for overrides/ambiguity.
+10. Reuse `QDataSet` in the independent saved-artifact evaluator, with a separate
+    role scope, data binding, cursor lifetime, and provenance report.
 
 The proposal uses the requested `QDataSet` / `DataSet` spelling and
 `calibration` as the canonical public role name. Method-specific observation

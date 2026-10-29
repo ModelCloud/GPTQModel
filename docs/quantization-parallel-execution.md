@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.7 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.8 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -256,6 +256,15 @@ the same numerical recipe. Falling back to a slower but legal layout is explicit
 in the resolved plan. A strict requested capability fails preflight instead of
 quietly using one GPU for a job expected to need many.
 
+Optional task evaluation starts only after saving and has its own resource
+request and execution lifetime. Quantization/save completion does not wait for
+an evaluation suite, and the evaluator does not retain quantization workers or
+optimizer state. Compare quantization time, save time, and independent evaluation
+time separately; attach quality results by the exact saved artifact identity.
+Method-required validation/selection remains in the quantization cost and layout.
+The evaluator loads its saved representation within its own memory/offload budget;
+independence does not require a second fully resident model or a dense copy.
+
 Proposed acceptance gates:
 
 | ID | Check |
@@ -267,7 +276,7 @@ Proposed acceptance gates:
 | P5 | Memory-pressure scheduling accounts for live teachers, statistics, optimizer and transfer buffers; bounded overlap does not corrupt data or introduce a hidden numerical approximation. |
 | P6 | Failure/cancellation tests cover rank loss, collective mismatch, worker exceptions, partial offload, and publication, with no partial installed result. |
 | P7 | Resume validates topology and numerical identity; supported repartitioning is tested independently from exact-layout resume. |
-| P8 | Comparable 1/2/4/8-device runs, where supported, report elapsed time, GPU-hours, peak device/host memory, transfer volume, utilization, and final quality at the same numerical settings. |
+| P8 | Comparable 1/2/4/8-device runs report quantization/save elapsed time, GPU-hours, peak device/host memory, transfer volume, and utilization at matched numerical settings. Report independent evaluation cost separately, with quality tied to exact saved artifacts and comparable evaluation settings. |
 | P9 | Supported layout changes preserve global sample selection, logical batches/steps, and declared RNG semantics. Prefetch/retry failure injection recovers committed cursor and update state together without lost or duplicated contributions. |
 
 The first usable executor milestone must demonstrate independent task work,

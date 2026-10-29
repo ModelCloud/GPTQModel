@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.7 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.8 design example, 2026-10-29. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -43,8 +43,9 @@ Its expert `w1`, `w3`, and `w2` map to gate, up, and down respectively.
 `image_text_samples`, `text_samples`, `held_out_data`, and `held_out_suite` are
 caller-provided bindings. The first two are finite or explicitly bounded source
 views with stable identities. Image records include their aligned prompts; the
-separate text corpus is not implicitly paired with those images. The final suite
-checks both text and image-conditioned behavior on disjoint data.
+separate text corpus is not implicitly paired with those images. The optional
+suite/data are used only after saving, to evaluate text and image-conditioned
+behavior independently of quantization.
 
 ```python
 checkpoint = "deepseek-ai/DeepSeek-V4.1-Flash-1017"
@@ -77,11 +78,15 @@ plan = (
         source=source.dequantized(),
         name="language",
     ))
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 
 resolved = plan.compile(model)
 print(resolved.explain())
+run = model.run(resolved)
+artifact = run.save("deepseek-v4.1-flash-mixed")
+
+# Optional evaluation of the saved artifact; outside the quantization plan.
+report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
 The bits and group sizes are mock design choices, not measured recommendations.
@@ -114,6 +119,7 @@ supplied paths. [Multimodal architecture][report]
 
 ```mermaid
 flowchart TD
+    subgraph Q[Quantization run]
     I[ImageDataSet with aligned prompts] --> V[Fit selected dense vision projections]
     V --> VI[Install vision revision]
     VI --> IC[Prepare image path with installed vision]
@@ -125,8 +131,12 @@ flowchart TD
     F --> U[Install selected weights at admitted publication boundary]
     U --> M{More language regions?}
     M -->|Yes| C
-    M -->|No| E[Evaluate frozen assembled candidate on held-out data]
+    M -->|No| DONE[Finalize quantization result]
+    end
+    DONE --> SAVE[Explicit save commits model artifact]
+    SAVE -.-> E[Optional independent evaluation of saved artifact]
     H[Held-out data and suite] --> E
+    E --> REPORT[Separate evaluation report]
 ```
 
 `.then(...)` makes the installed vision result precede candidate-conditioned
@@ -135,6 +145,12 @@ it does not force language observations to use the old vision outputs. After
 each admitted language publication boundary, subsequent observations respect
 the current candidate and the method's within-layer dependencies. This remains
 progressive fitting, not simultaneous joint optimization.
+
+The quantization plan ends at its method/integrity checks. `save()` commits the
+complete mixed artifact before optional `artifact.evaluate(...)` starts. The
+evaluator loads the persisted representations with fresh inference state and
+writes a separate report. Missing evaluation data or a later evaluation failure
+cannot block quantization/saving, mutate the artifact, or restart fitting.
 
 Only selected owners are written, but the model still executes its required
 attention, memory, projector, router, and expert paths. Routing considers the
@@ -165,12 +181,12 @@ language
   weights: bounded decoding of pinned released FP4 values
   observations: candidate image path + text-only path
 
-evaluation
-  reads: frozen final composition, including preserved owners
-  data: disjoint held-out text and image tasks
-
 devices: local GPUs 0,1,2,3; layout and memory feasibility must be resolved
 ```
+
+The preview contains no evaluation stage. After the run, the caller saves the
+assembled result; optional evaluation then reads that committed artifact,
+including preserved owners, and records text/image metrics separately.
 
 These are future conformance requirements, not tests passed by this PR:
 
@@ -181,7 +197,7 @@ These are future conformance requirements, not tests passed by this PR:
 | DS3 | Infer image/text routes without manual bindings; collect language observations from both, and invalidate image features when their vision producer changes. |
 | DS4 | Decode only the declared low-bit weight source during fitting, preserve native source identity, and distinguish the new representation from the native FP4 baseline. |
 | DS5 | Preserve global expert selection, sample weights, method dependencies, and producer revisions across admitted serial and multi-GPU layouts; handle low expert coverage explicitly. |
-| DS6 | Reject incompatible kernels/layouts or an infeasible memory plan before dependent writes; successful final evaluation uses the assembled candidate and cannot feed refitting. |
+| DS6 | Reject incompatible kernels/layouts or infeasible memory before dependent writes. Quantization requires no evaluation suite/data; after successful save, an independent evaluator reads the committed artifact. Its failure/retry cannot alter saved weights or quantization success. |
 
 [config]: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json
 [vision]: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/vision.py

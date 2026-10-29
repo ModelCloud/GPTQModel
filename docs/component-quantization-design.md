@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.7, 2026-10-29.
+**Status:** design discussion, revision 0.8, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -104,7 +104,7 @@ Do not assume every Qwen3.8 checkpoint has these exact structures.
 | Reference | Relevant structure | Design implication |
 | --- | --- | --- |
 | Qwen3.8-Flash-Next | Gated DeltaNet interleaved with sparse attention, four residual branches, and n-gram memory. [Report][qwen-report] | Replay boundaries must include recurrent state and the complete residual representation. |
-| Qwen3.8-Omni | Visual, general-audio, and spatial-audio encoders feed a shared Thinker with aligned inputs. [Report][omni-report] | Independent branches require composition-level calibration and evaluation. |
+| Qwen3.8-Omni | Visual, general-audio, and spatial-audio encoders feed a shared Thinker with aligned inputs. [Report][omni-report] | Independent branches require composition-level calibration; assess task quality separately after saving. |
 | DeepSeek V4.1 | Causal encoder/decoder organization; decoder global KV derives from encoder output; CSA2 reuses KV and sparse selections. [Report][deepseek-report] | Track memory producers and consumers across nonadjacent layers. |
 | DeepSeek V4.1 reference implementation | Shared attention state is held outside ordinary module arguments. Draft blocks alias the main embedding and output head. [Code][deepseek-code] | Capture ambient state explicitly and preserve shared parameter identity. |
 
@@ -164,9 +164,10 @@ models. See the companion matrix for primary sources and acceptance cases.
 13. **Public composition is explicit and immutable.** Direct calls and fluent or
     serialized plans compile through the same capability checks. Order, overrides,
     and typed extension stacking cannot conceal a different numerical experiment.
-14. **Final evaluation has no fitting feedback edge.** Selection and refinement
-    use declared development data; final acceptance reads the chosen revision
-    without changing it or choosing another candidate from its score.
+14. **Evaluation is independent and follows saving.** Quantization uses its
+    required training, validation, and selection data. Optional task evaluation
+    loads a committed model artifact after `save()` and produces a separate
+    report; it cannot gate saving, mutate the artifact, or trigger refitting.
 
 ## 4. Core objects and ownership
 
@@ -178,14 +179,16 @@ models. See the companion matrix for primary sources and acceptance cases.
 | `Region` | A semantic computation boundary with complete inputs, outputs, state effects, and supported method capabilities. |
 | `StateResource` | KV, recurrence/convolution state, depth history, retrieval indices, per-layer inputs, sampler/stream state, or another resource with explicit producers and consumers. |
 | `InvocationTrace` | Region visits with sample/episode, logical time, recurrence/sampler/stream/branch axes, state lineage, and observation weighting. |
-| `QDataSet` / `DataBindings` | Typed raw or prepared sources with modality/schema identity and inferred input routes. Lifecycle roles are inferred when unambiguous or named for calibration, initialization, training, validation, selection, adapter, evaluation, profiling, or plugin-defined needs. `CalibrationDataSet(QDataSet)` is an optional role/profile view. |
+| `QDataSet` / `DataBindings` | Typed sources with modality/schema identity, inferred input routes, and quantization roles for calibration, initialization, training, validation, selection, adapter, profiling, or plugin-defined needs. The independent evaluator also accepts `QDataSet`; its data is never bound to a quantization plan. |
 | `DataRequirement` / `DataPipeline` | Method-declared role/access/coverage needs and architecture-route preparation from samples to model-ready batches and invocation traces. |
 | `RecipeExtension` | Registered typed contribution selected by `Recipe.use()`: modifier, preparation, or output format, with versioned configuration, effects, and composition constraints. |
 | `LifecycleProgram` | A versioned method/operation program with stages, bounded control flow, typed artifacts, effects, resource requirements, and safe continuation points. |
-| `Plan` | Immutable public specification of operations, recipes/modifiers, data bindings, order constraints, resource policy, and validation. |
-| `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and validation policy after compilation. |
+| `Plan` | Immutable specification of quantization operations, recipes/modifiers, data bindings, order constraints, resource policy, and internal method/integrity checks. |
+| `ResolvedPlan` | Frozen canonical selection, sources, writes, dependency graph, compiled lifecycle programs, and internal check policy after compilation. |
 | `ExecutionLayout` | Physical stage placement, replica/shard ownership, resource reservations, transfers, and collective groups under the resolved numerical plan. |
-| `QuantizationRun` | Program/stage progress, staged candidate revisions, checkpoints, observations, and evaluation results. |
+| `QuantizationRun` | Program/stage progress, candidate revisions, checkpoints, observations, method diagnostics, and saved-artifact references. |
+| `ModelArtifact` | Handle returned by a successful save, pinning committed payloads and manifest identity; independent evaluation reads this exact artifact. |
+| `EvaluationReport` | Separate report with artifact identity, suite/data/runtime provenance, metrics, coverage, and held-out status. It does not modify quantization success or the saved manifest. |
 
 ```mermaid
 flowchart TD
@@ -312,7 +315,8 @@ model.requantize(
 | `quantize(target=...)` | Execute the selected method program for dense weights; reject already-packed weights within the resolved write selection. Data is required only when the resolved program requires it. |
 | `requantize(target=..., source=...)` | Replace selected packed representations using an identified source policy. |
 | `repack(target=..., format=...)` | Convert storage layout without changing quantized numerical values, where supported. |
-| `run.save(...)` / `model.save(...)` | Persist the run's assembled revision or the current composition, respectively, including untouched components and validation status. |
+| `run.save(...)` / `model.save(...)` | Commit the run's assembled revision or the current composition, including untouched components and method/integrity status; return a pinned `ModelArtifact`. |
+| `artifact.evaluate(suite=..., data=...)` | Independently evaluate an already-saved artifact and return an `EvaluationReport`. It is not a quantization-plan operation. |
 
 Dequantizing current low-bit weights and fitting them again must be an explicit
 source policy. It does not recover lost precision. Preflight reports mixed source
@@ -328,12 +332,12 @@ plan = (
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize("vision.encoder", GPTQ(bits=8), name="vision"))
     .add(Quantize("language", GPTQ(bits=4), name="language"))
-    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 resolved = plan.compile(model)
 print(resolved.explain())
 run = model.run(resolved)
-run.save("mixed-model")
+artifact = run.save("mixed-model")
+report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
 `add` declares operations and lets the compiler infer mandatory dependencies;
@@ -380,8 +384,9 @@ model.quantize(target="vision.encoder", recipe=RTN(bits=8))
 ```
 
 The resolved method/backend must support that target. No forward is needed just
-to satisfy a common lifecycle interface. Optional task evaluation can request
-data separately. The plan vocabulary also needs explicit operations for adapter
+to satisfy a common lifecycle interface. Optional task evaluation requests its
+data after saving and runs independently. The plan vocabulary also needs
+explicit operations for adapter
 generation, activation calibration, norm tuning, structural transforms, and
 precision allocation. They cannot all be aliases for fitting dense weights.
 
@@ -477,9 +482,10 @@ preserved representation, or failure.
 
 Caches are bounded and can be streamed to CPU/disk or recomputed. No phase assumes
 all Hessians, all activations, or two complete models fit in device memory.
-Training, initialization, selection, adapter generation, profiling, and final
-acceptance data have distinct roles; the program declares which roles may share
-samples. A forward-only calibration API cannot implicitly stand in for an
+Training, initialization, selection, adapter generation, and profiling data have
+distinct quantization roles; the program declares which may share samples.
+Final evaluation receives its own data after saving, outside that program.
+A forward-only calibration API cannot implicitly stand in for an
 optimizer's training contract. The
 [data contract](quantization-data-contract.md) defines source/schema identity,
 role bindings, preparation, splits, streaming, and distributed cursors.
@@ -494,21 +500,23 @@ candidate-conditioned fitting, not a universal ordering rule for every stage.
 
 ```mermaid
 flowchart TD
+    subgraph Q[Quantization run]
     A[Resolve scopes, capabilities, sources, and budgets] --> B[Compile method programs and required data roles]
     B --> C[Execute ready lifecycle stages under resource contracts]
     C --> D[Record artifacts and effects at declared boundary]
     D --> E{Pending required stages?}
     E -->|Yes| C
-    E -->|No| F[Check structure and declared development or selection criteria]
-    F --> G{Meets declared quality criteria?}
-    G -->|Yes| H[Freeze chosen revision and run final acceptance]
+    E -->|No| F[Check declared method development or selection criteria]
+    F --> G{Meets declared method criteria?}
+    G -->|Yes| H[Finalize result with structural and codec checks]
     G -->|No| I{Refinement enabled and budget remains?}
     I -->|Yes| J[Compile permitted refinement programs and invalidate affected state]
     J --> C
-    I -->|No| K[Retain chosen candidate and report unmet criteria]
-    H --> L{Validation passes?}
-    L -->|Yes| M[Publish composition with explicit validation coverage]
-    L -->|No| K
+    I -->|No| K[Retain candidate and report unmet method criteria]
+    end
+    H --> S[Explicit save commits model artifact]
+    S -.-> EVAL[Optional independent artifact evaluation]
+    EVAL --> R[Separate evaluation report]
 ```
 
 ### Phase A: Resolve, freeze, and compile
@@ -548,59 +556,67 @@ optimizer when supported. These are separate declared capabilities; GPU count
 does not imply a legal decomposition. Method-owned stages and dependent
 producer/consumer revisions keep their required ordering.
 
-### Phase C: Check the assembled candidate on development data
+### Phase C: Check method criteria on development data
 
-Structural/representation checks always apply. Task evaluation and paired replay
-apply when selected by the validation profile or required by a method. Data-free
-conversion must be usable with structural validation only, recorded as task
-quality **not evaluated**. If task-quality thresholds are requested, their data
-and execution requirements must be satisfied; they cannot silently be skipped.
+Structural/representation checks always apply. Reconstruction measurements,
+paired replay, stopping criteria, and candidate selection apply when required by
+the method or a requested refinement program. Their declared data and execution
+requirements must be satisfied. Data-free conversion can finish with integrity
+checks alone. No quantization run requires a final task-evaluation suite.
 
-For task-validated multimodal runs, execute the complete candidate on declared
-scenarios with independent candidate state. Measure composition-level errors in
-addition to local fitting loss. Reference indices, KV, or recurrent state must
-not be substituted into the deployment candidate path merely to improve its score.
+When a method's development objective spans the composition, execute the complete
+candidate on its declared scenarios with independent candidate state. Reference
+indices, KV, or recurrent state must not be substituted into that path merely to
+improve its objective.
 
 When measurements can trigger refinement or candidate selection, bind them to
-`select` or the method's `validate` role. Reserve `evaluate` data for Phase E;
-checking a final holdout on every refinement pass turns it into selection data.
+`select` or the method's `validate` role. Final holdout data is supplied only to
+the independent evaluator after saving; it is not part of the resolved plan.
 
-Observe task quality, boundary reconstruction, long-sequence state behavior,
-sparse selection, and routing where relevant. Selection/routing differences are
-diagnostics; the declared task acceptance criteria remain authoritative.
+Observe the method's objective, boundary reconstruction, long-sequence state,
+sparse selection, and routing where relevant. These diagnostics and development
+scores cannot be presented as an independent final task evaluation.
 
 ### Phase D: Optional selective refinement
 
 Choose permitted interventions using measured regressions: increased precision,
 refitting on refreshed candidate inputs, or a declared region reconstruction
 algorithm. Cross-component fitting requires a write scope containing all changed
-parameters. Shared producers can have a wider evaluation scope than write scope.
+parameters. Shared producers can have a wider measurement scope than write scope.
 
 This phase is additional composition repair. Disabling it does not disable
 training stages intrinsic to a chosen method. Every intervention compiles into
 the same lifecycle/effect contracts and may have a different program from the
 initial conversion.
 
-After any relevant change, regenerate affected state and evaluate again. Bound
-passes and resource use; retain the best candidate on a separate selection set.
-Reserve a held-out set for final acceptance. Alternating updates have no assumed
+After any relevant change, regenerate affected state and remeasure the objective.
+Bound passes and resource use; retain the best candidate on a separate selection set.
+Keep final holdout data outside the run. Alternating updates have no assumed
 convergence or monotonic improvement guarantee.
 
-### Phase E: Validate and publish
+### Phase E: Finalize the quantization result
 
-Publish an assembled revision with validation dimensions and coverage recorded:
-structural integrity, numerical/codec checks, and task quality as applicable.
+Publish an assembled revision with method checks and coverage recorded:
+structural integrity, numerical/codec checks, and development criteria as applicable.
 Intermediate results remain durable checkpoints with explicit provisional status.
-An unmet requested quality criterion produces a report and retained candidate,
-not a false success. A structural-only artifact must not be labeled task-validated.
-Saving a provisional candidate is allowed with its status explicit.
+An unmet method criterion produces a report and retained candidate, not a false
+success. The run returns without performing final task evaluation or requiring
+its datasets, metrics, or resources.
 
-Freeze the chosen revision before terminal task evaluation. A failing final
-score cannot trigger another automated fitting pass or choose a different winner
-in this run. Later work informed by that score records the feedback as selection
-evidence and needs fresh independent data for a new held-out claim. Final data
-must be disjoint from calibration, initialization, training, adapter fitting,
-validation, and selection wherever a strict held-out guarantee is requested.
+The caller then invokes `save()`. It commits the selected composition and returns
+a `ModelArtifact` only after integrity checks and durable publication succeed.
+Saving a structurally valid provisional candidate is allowed with its status
+explicit. No task score gates saving, and method diagnostics do not establish
+final task quality.
+
+After saving, optional `artifact.evaluate(...)` loads that exact artifact with
+fresh inference state and produces a separate report. It does not use unsaved
+optimizer overlays or mutate the saved manifest. Evaluation failure, cancellation,
+or retry cannot undo the save or change quantization status. Its scores have no
+automatic fitting/selection feedback edge. Later work informed by those scores
+records selection evidence and needs fresh independent data for a new held-out
+claim. The evaluator checks disjointness against recorded fitting/selection data;
+its input is never a requirement of the completed quantization run.
 
 ## 9. Model-specific scheduling sketches
 
@@ -661,10 +677,11 @@ candidate source. Adapters should use this structure to express dependencies.
 At each shared-memory boundary used for candidate-conditioned observations,
 finish the required producer revision, regenerate memory with candidate numerical
 semantics, and fit dependent consumers. A later producer change invalidates
-derived memory and evaluations across its dependent consumers, including
-nonadjacent layers.
+derived memory and development measurements across its dependent consumers,
+including nonadjacent layers. Historical evaluation reports remain evidence for
+their exact saved artifact, not for a newly changed composition.
 
-The draft model should be evaluated against the finalized main candidate,
+The draft model should be evaluated after saving the finalized main composition,
 including acceptance and throughput measurements when supported. DSpark's
 reported staged training provides architectural context, not evidence that a
 particular quantization schedule will be optimal. [Report][deepseek-report]
@@ -675,8 +692,8 @@ particular quantization schedule will be optimal. [Report][deepseek-report]
 | --- | --- | --- | --- |
 | Independent fitting against one source snapshot | Simple isolation and parallelism. | Downstream fits do not observe upstream quantization effects. | Experimental baseline. |
 | One progressive dependency-ordered pass | Consumers observe updated upstream computation. | Local objectives may miss composition-level or temporal errors; a method's native-capture requirements still apply. | Default for compatible candidate-conditioned fitting stages. |
-| Method programs with progressive fitting, candidate replay, and selective refinement | Preserves algorithm lifecycles while measuring interactions and targeting repair work. | Additional replay cost; refinement algorithm and stopping policy need validation. | Proposed task-validated composition workflow. |
-| Independent weight-only conversion | No activation dependency between separately owned weights. | Does not measure composition task quality by itself. | Valid data-free route; add task evaluation explicitly. |
+| Method programs with progressive fitting, candidate replay, and selective refinement | Preserves algorithm lifecycles while measuring interactions and targeting repair work. | Additional replay cost; refinement algorithm and stopping policy need validation. | Proposed composition workflow with declared development objectives; evaluate its saved result separately. |
+| Independent weight-only conversion | No activation dependency between separately owned weights. | Does not measure composition task quality by itself. | Valid data-free route; optionally evaluate the saved artifact separately. |
 | Joint end-to-end optimization of all selected weights | Can optimize a shared downstream objective. | Memory/compute cost, differentiability issues, and no guaranteed superiority. | Optional research/plugin path. |
 
 Simultaneously installing independently fitted results does not make their
@@ -754,8 +771,10 @@ Per-operator representation: Dense(dtype) | Packed(codec, metadata)
 Other installed resources: activation scales, runtime transforms, adapters, norms
 Method output: TypedArtifact(schema, version, payload, provenance)
 Stage progress: pending -> ready -> running -> completed | failed | cancelled
-Run: planned -> executing -> validating -> accepted | unmet | failed | cancelled
-Validation dimensions: structural, numerical/codec, task quality and coverage
+Quantization run: planned -> executing -> checking -> completed | unmet | failed | cancelled
+Internal checks: structural, numerical/codec, method objectives and coverage
+Saved artifact: committed payloads and immutable manifest identity
+Optional evaluation after save: pending -> running -> completed | failed | cancelled
 ```
 
 Use immutable staged tensor artifacts and private runtime overlays. Completed
@@ -801,11 +820,15 @@ The native artifact manifest describes the complete composition:
 - Resolved method/variant/modifier programs and source/dependency/teacher
   provenance for fitted regions; training-only continuation is stored separately.
 - Numerical profiles and required runtime capabilities.
-- Validation status, scenario coverage, and relevant reports.
+- Method/integrity status, development coverage, and fitting diagnostics.
 - Model configuration, tokenizer, processor, and required inference assets.
 
 Runtime session caches are separate from the model artifact. They belong in a
 continuation checkpoint only when the replay contract requires them.
+An independent evaluation report references the committed artifact identity and
+records its own data, suite, runtime, coverage, and metrics. It is not written
+back into the immutable model manifest; saved artifacts need no evaluation
+report to be loadable, usable, or eligible for later evaluation.
 
 Inference loading is self-contained and does not require the source checkpoint.
 Original-source references support future refitting but are not inference
@@ -825,6 +848,7 @@ unrepresentable mixtures; a single global quantization config is not authoritati
 | Representation codec | Encode/decode artifacts and convert layout where supported. Numerical quantization fused with encoding is explicitly a method stage. |
 | Runtime backend | Execute supported packed operators under the declared numerical profile. |
 | Artifact store | Immutable objects, manifests, checkpoints, integrity, and publication. |
+| Artifact evaluator | Separate optional execution after save; load the exact artifact, isolate inference state/resources, and produce an artifact-linked report without quantization writes. |
 
 ### 12.1 Method descriptors and compilation
 
@@ -1024,7 +1048,7 @@ The following are proposed acceptance criteria and experiments.
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
 | V29 | Dataset contracts | `QDataSet` modality/schema identity, automatic routes and downstream consumers, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD18. |
 | V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
-| V31 | Compilation and final acceptance | Compilation consumes no data or model forward; pending runtime checks gate fitting. Final evaluation reads the frozen winner and has no automated feedback edge to refinement or selection. |
+| V31 | Compilation, saving, and independent evaluation | Compilation consumes no data or model forward. Quantization has no evaluation node or binding; saving returns a committed artifact before optional evaluation starts. Evaluation tests persisted state, reports separately, and cannot change quantization/save success or trigger refinement. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
 | V33 | Concrete multimodal target | The pinned DeepSeek V4.1 Flash example satisfies DS1-DS6: grouped global expert selection, preserved owners, inferred downstream data paths, explicit native low-bit fitting source, and admitted multi-GPU execution. |
 
@@ -1072,7 +1096,7 @@ proposed defaults, not final design approval.
 | D13 | Versioned method-owned lifecycle programs. | What is the smallest graph/control-flow contract that expresses every audited route without opaque orchestration bypasses? |
 | D14 | Typed artifacts and producer/consumer lifetime. | Which schemas can be shared, and which require method-specific representations or exact-payload installation? |
 | D15 | Capability checks for complete method/modifier/backend combinations. | Which combinations are admitted first, and what evidence is required for each continuation guarantee? |
-| D16 | Required data roles and explicit validation profiles. | Which task-quality checks should convenience APIs default to when callers supply no evaluation data? |
+| D16 | Required method data/checks inside quantization; optional independent artifact evaluation only after save. | Which report and suite conventions best support repeatable artifact comparisons without coupling evaluation to quantization? |
 | D17 | Separate route, component-owner, and invocation registries. | How should selectors explain shared multimodal writes and repeated visits without overwhelming common workflows? |
 | D18 | Architecture-owned sampler/stream/depth-state contracts. | Which bounded traces and task evaluators are required before admitting diffusion, duplex, or action-model adapters? |
 | D19 | Direct operations plus immutable fluent/file plans and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
@@ -1120,6 +1144,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.5, 2026-10-29 | Unify recipe composition through typed `use()` dispatch; review all six documents and tighten effective data roles, modality coverage, view identity, compilation boundaries, final-evaluation isolation, distributed batching/cursor commits, and concurrent publication. |
 | 0.6, 2026-10-29 | Infer modality routes and downstream data consumers from dataset schemas and architecture contracts. Remove routine route/component bindings, add `.data(*datasets)` source groups, and preserve lifecycle-role distinctions, alignment, weighting, producer revisions, and distributed provenance. |
 | 0.7, 2026-10-29 | Add the pinned DeepSeek V4.1 Flash mock config and DS1-DS6 acceptance target; define grouped expert selection and bounded decoded-weight source descriptors without implementing either API. |
+| 0.8, 2026-10-29 | Remove final evaluation from quantization plans. Successful saving returns a pinned artifact; optional evaluation follows save with independent data, resources, failure/retry, and reports. Preserve intrinsic method validation and selection. |
 
 ## Sources
 

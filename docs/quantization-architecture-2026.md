@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.7, with the broad source survey inspected through 2026-10-27.
+0.8, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
@@ -162,12 +162,14 @@ flowchart TD
     R -->|No| N
     R -->|Yes| C[Commit tokens for next canvas]
     C --> E
-    C --> O[Output and task evaluation]
+    C --> O[Model output]
 ```
 
-This is a logical-time execution trace. Quantization stages consume its versioned
-observations; the drawing is not permission to concurrently mutate the encoder
-while its denoiser consumes an old, unlabeled context.
+This is a logical-time model execution trace. Quantization stages consume its
+versioned observations; the drawing is not permission to concurrently mutate
+the encoder while its denoiser consumes an old, unlabeled context. Independent
+task evaluation uses the same architecture execution contracts after saving,
+with the persisted artifact and fresh state; it is not a quantization stage.
 
 ### Partitioning is part of execution semantics
 
@@ -178,8 +180,9 @@ Parallel placement cannot split a recurrent stream, denoising canvas, collective
 or coupled optimization region merely to fill idle GPUs. Per-operation data must
 cover the selected routes: an image-text default cannot satisfy an audio branch,
 and independently calibrated encoders still require joint route coverage for the
-backbone and assembled evaluation. Typed recipe extensions change their declared
-programs without creating new parameter owners or expanding write selection. See the
+backbone and, separately after saving, artifact evaluation. Typed recipe extensions
+change their declared programs without creating new parameter owners or expanding
+write selection. See the
 [parallel contract](quantization-parallel-execution.md) for legal decomposition.
 
 ## 3. Adapter acceptance cases
@@ -200,7 +203,7 @@ for this PR.
 | Diffusion canvas | Noisy-step and committed-context states remain distinct; masks, sampled edits, schedule, and commit points survive replay/resume. |
 | Full-duplex streaming | Timeline-aligned audio/video/text and output history survive sharding, continuation, and restoration. |
 | Native compressed release | Source format and runtime behavior remain explicit; an unavailable dense ancestor is not synthesized or falsely labeled original. |
-| Draft model | Acceptance/throughput and required hidden-state taps are evaluated against the final main-model candidate. |
+| Draft model | Independent evaluation after saving measures acceptance/throughput and required hidden-state taps against the persisted main/draft composition. |
 | Generative audio/video/action | Appropriate sampler, non-text input preparation, and task evaluator are mandatory before claiming supported quantization. |
 
 Model adapters should publish a capability report for these cases, linked to
