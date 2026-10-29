@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.6 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.7 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -68,6 +68,13 @@ run = model.requantize(
     data=multimodal_calibration,
 )
 ```
+
+For an explicitly decoded low-bit fitting source,
+`SourceSnapshot(checkpoint, revision=revision).dequantized()` returns a lazy
+weight-source descriptor. It records the native codec and decoding profile and
+permits bounded decoding during the consuming fitting stage. It does not recover
+pre-quantization weights, eagerly expand the full model, create a persistent
+expanded inference cache, or override the method's observation/teacher policy.
 
 The component names in these examples are adapter-provided selections. On an
 encoder-free model, `vision.encoder` fails with a report of available owners and
@@ -336,6 +343,27 @@ and conflicting shared-weight recipes fail with a concrete report. Optional
 targets can be marked optional explicitly and appear as skipped in the preview.
 An error such as “unsupported model” should instead identify the failed operator,
 method stage, numerical format, or missing replay/parallel capability.
+
+Grouped expert selection uses canonical logical IDs:
+
+```python
+last_10_experts = (
+    Select.component("language")
+    .experts(kind="routed")
+    .last(10, per="moe_layer", order_by="expert_id")
+)
+```
+
+`Select.component` chooses semantic owners; `experts(kind="routed")` selects their
+routed expert groups, excluding shared and independently owned draft experts.
+`last` sorts each selected MoE layer by global logical expert ID and takes its
+final ten experts before partitioning. It expands each group to its declared
+quantizable projections. Fewer than ten experts in any selected layer, missing
+IDs, or ambiguous ownership/order fail instead of silently shrinking the request.
+Fused storage needs an admitted partial-write path preserving unselected values.
+The [DeepSeek V4.1 Flash mock config](quantization-example-deepseek-v4.1-flash.md)
+combines this selector with automatic data routing, native low-bit sources, and
+an explicit vision-to-language dependency as a concrete acceptance target.
 
 Data selection is separate from weight selection. `QDataSet` describes source,
 schema/modalities, identity, streaming/replay capabilities, and per-run cursors.

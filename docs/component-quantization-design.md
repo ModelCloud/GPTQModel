@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.6, 2026-10-29.
+**Status:** design discussion, revision 0.7, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -28,7 +28,8 @@ Read the companion [method lifecycle inventory](quantization-method-lifecycles.m
 for the source audit behind this revision. The design must accommodate every
 current method route and admit future methods without adding another hardcoded
 method branch to a universal layer loop. Four further companions define the
-architecture, parallel, API, and data contracts:
+architecture, parallel, API, and data contracts. A checkpoint-specific example
+provides a concrete review target:
 
 | Document | Purpose |
 | --- | --- |
@@ -36,6 +37,7 @@ architecture, parallel, API, and data contracts:
 | [Parallel execution](quantization-parallel-execution.md) | Multi-GPU capture, fitting, model partitioning, resource scheduling, and failure/continuation contracts. |
 | [Public API](quantization-plan-api.md) | Direct operations, immutable chaining, recipe composition, explicit order, selectors, and serialized plans. |
 | [Data contract](quantization-data-contract.md) | `QDataSet`, modality schemas, lifecycle-role bindings, preparation, streaming, sharding, and provenance. |
+| [DeepSeek V4.1 Flash mock config](quantization-example-deepseek-v4.1-flash.md) | Concrete design target: vision plus the last ten routed experts per main layer, automatic data routing, source policy, expected preview, and acceptance cases. |
 
 Backward compatibility is **not a requirement and should not constrain this
 design**. Compatibility shims and preservation of the legacy lifecycle are
@@ -1024,6 +1026,7 @@ The following are proposed acceptance criteria and experiments.
 | V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
 | V31 | Compilation and final acceptance | Compilation consumes no data or model forward; pending runtime checks gate fitting. Final evaluation reads the frozen winner and has no automated feedback edge to refinement or selection. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
+| V33 | Concrete multimodal target | The pinned DeepSeek V4.1 Flash example satisfies DS1-DS6: grouped global expert selection, preserved owners, inferred downstream data paths, explicit native low-bit fitting source, and admitted multi-GPU execution. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1116,6 +1119,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.4, 2026-10-29 | Audit current data paths; introduce an inheritable `QDataSet`, modality/schema subclasses, `CalibrationDataSet` views, extensible lifecycle-role bindings, architecture-owned preparation, streaming/distributed cursors, and split/leakage provenance. |
 | 0.5, 2026-10-29 | Unify recipe composition through typed `use()` dispatch; review all six documents and tighten effective data roles, modality coverage, view identity, compilation boundaries, final-evaluation isolation, distributed batching/cursor commits, and concurrent publication. |
 | 0.6, 2026-10-29 | Infer modality routes and downstream data consumers from dataset schemas and architecture contracts. Remove routine route/component bindings, add `.data(*datasets)` source groups, and preserve lifecycle-role distinctions, alignment, weighting, producer revisions, and distributed provenance. |
+| 0.7, 2026-10-29 | Add the pinned DeepSeek V4.1 Flash mock config and DS1-DS6 acceptance target; define grouped expert selection and bounded decoded-weight source descriptors without implementing either API. |
 
 ## Sources
 

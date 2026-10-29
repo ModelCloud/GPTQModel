@@ -4,13 +4,16 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.6, with the broad source survey inspected through 2026-10-27.
+0.7, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
 [public API proposal](quantization-plan-api.md). Dataset modality, route
 preparation, streaming, and role binding are specified by the
 [data contract](quantization-data-contract.md).
+The [DeepSeek V4.1 Flash mock config](quantization-example-deepseek-v4.1-flash.md)
+turns one pinned checkpoint into a concrete design target with expected selections
+and acceptance cases; it does not establish runtime support.
 
 The survey covers publicly documented 2026 model families and their distinct
 execution patterns, including the October releases. It is not an exhaustive
