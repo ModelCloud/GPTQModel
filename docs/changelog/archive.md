@@ -19,7 +19,7 @@ Release highlights before 7.3.4 are kept here so the project README can focus on
 * **5.4.0 / 5.2.0** — Added Intel CPU/XPU AWQ kernels, AWQ `torch.compile` support, balanced VRAM strategy, and more MoE support.
 * **5.0.0** — Introduced data-parallel MoE quantization, disk offload by default, accelerated packing, and production AWQ support.
 * **4.2.5 / 4.2.0 / 4.1.0 / 4.0.0** — Added `act_group_aware`, FailSafe controls, GAR, Python free-threading, and support for Qwen3, Llama 4, GPT-OSS, Gemma3, and other model families.
-* **3.0.0 / 2.2.0 / 2.1.0 / 2.0.0** — Added GPTQ v2 experiments, QQQ, staged quantization internals, GSM8K Platinum and MMLU-Pro evaluation, and expanded multimodal/model support.
+* **3.0.0 / 2.2.0 / 2.1.0 / 2.0.0** — Added GPTAQ experiments, QQQ, staged quantization internals, GSM8K Platinum and MMLU-Pro evaluation, and expanded multimodal/model support.
 * **1.9.0 through 1.5.0** — Improved tokenizer and `lm_head` handling, flexible packing, buffered forward, compilation, MLX support, AMD ROCm, OpenAI-compatible serving, and multimodal quantization.
 
 ## 2024
