@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.10 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.11 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -93,12 +93,11 @@ ownership of a shared multimodal backbone.
 plan = (
     Plan()
     .data(multimodal_calibration)
-    .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize.vision(
-        recipe=GPTQ(bits=8), name="vision"
+        recipe=GPTQ(bits=8), devices=Local(gpus=[0, 1]), name="vision"
     ))
     .add(Quantize.language(
-        recipe=GPTQ(bits=4), name="language"
+        recipe=GPTQ(bits=4), devices=Local(gpus=[0, 1, 2, 3]), name="language"
     ))
 )
 
@@ -135,9 +134,10 @@ Multiple modality sources also need no per-component bindings:
 plan = (
     Plan()
     .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
-    .devices(Local(gpus=[0, 1, 2, 3]))
-    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+            .devices(Local(gpus=[0, 1])))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+            .devices(Local(gpus=[0, 1, 2, 3])))
 )
 ```
 
@@ -166,15 +166,17 @@ omni_calibration = CalibrationDataSet(
 plan = (
     Plan()
     .data(multimodal_calibration, audio_calibration, omni_calibration)
-    .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
-        Quantize.vision(recipe=GPTQ(bits=8), name="vision"),
-        Quantize.audio(recipe=GPTQ(bits=8), name="audio"),
+        Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+                .devices(Local(gpus=[0, 1])),
+        Quantize.audio(recipe=GPTQ(bits=8), name="audio")
+                .devices(Local(gpus=[2, 3])),
     )
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+            .devices(Local(gpus=[0, 1, 2, 3])))
     .serial(TuneNorms(
         target="language", source=SourceSnapshot("source-checkpoint"),
-        data=norm_training_data, name="norms",
+        data=norm_training_data, devices=Local(gpus=[0, 1, 2, 3]), name="norms",
     ))
 )
 ```
@@ -198,6 +200,11 @@ form for declaring intent without insertion-order edges.
 `parallel()` permits legal overlap; device count and memory still bound actual
 concurrency. The preview shows feasible placement and serialized bottlenecks.
 Strict physical-layout requirements belong in the parallelism policy below.
+Devices, mappings, and execution modes belong to each supplied action.
+`Plan.parallel(a, b)` schedules lifecycle actions; data-parallel replicas and
+tensor-parallel shards are separate modes inside their stages. A serial action
+can use either or a supported combination. There are no plan-level device or
+parallelism defaults that silently replace action configuration.
 The example assumes an adapter with independent vision/audio owners and supported
 image, audio, and aligned joint routes. It resolves each source automatically:
 the vision branch observes image-bearing inputs, the audio branch observes
@@ -223,12 +230,13 @@ native_inputs = Observations.from_source(SourceSnapshot("source-checkpoint"))
 independent = (
     Plan()
     .data(multimodal_calibration)
-    .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
         Quantize.vision(recipe=GPTQ(bits=8),
-                        observations=native_inputs, name="vision"),
+                        observations=native_inputs, devices=Local(gpus=[0, 1]),
+                        name="vision"),
         Quantize.language(recipe=GPTQ(bits=4),
-                          observations=native_inputs, name="language"),
+                          observations=native_inputs, devices=Local(gpus=[2, 3]),
+                          name="language"),
     )
 )
 ```
@@ -335,8 +343,9 @@ visible when composition refinement is disabled.
 `configure()` returns a recipe with validated changes to its base method's typed
 options and revalidates every attached extension. The base method is supplied
 to `Recipe(method)`; another quantizer is not an extension that replaces it.
-Dataset bindings and devices retain their scoped `.data(...)` and
-`.devices(Local(...))` entry points. They are not recipe extensions.
+Dataset bindings retain plan/operation scopes. Devices use
+`action.devices(Local(...))` or the equivalent action/direct-call `devices=`
+argument. They are not recipe extensions or plan-wide resource defaults.
 
 Preparation and export use the same composition operation:
 
@@ -456,7 +465,8 @@ last_10_experts = (
 `DynamicModuleTargeting` is the public immutable module-selection descriptor.
 The query above inherits the enclosing language operation's scope. Optional
 `component=` and `role=` filters further narrow mapped owners and operators;
-an explicit query cannot escape its operation's scope. `experts(type="routed")`
+an explicit weight-write query cannot escape its operation's scope. Placement
+queries may address preserved dependency owners as described below. `experts(type="routed")`
 selects the routed expert bank; `experts(type="shared")` selects mapped shared
 experts instead. The operation scope separately excludes independently owned
 draft experts. Unknown expert types fail with the mapping's supported choices.
@@ -534,11 +544,13 @@ route/default, processor/tokenizer/template, modality transforms, and producer
 revisions for learned features. These choices are frozen before execution, so
 automatic routing cannot reuse stale candidate features or change during resume.
 
-## 6. Multi-GPU use is easy; exact layouts are available
+## 6. Each action owns devices, mappings, and parallel execution
 
-The common request selects devices and budgets, then lets compilation choose
-supported parallelism, recording the result. Fluent plans use
-`.devices(Local(...))`; direct operations use `devices=Local(...)`.
+The common request configures devices on the lifecycle action passed to `serial`,
+`parallel`, or `add`. Constructor `devices=` and immutable `.devices(...)` are
+equivalent; direct operations use the same descriptor. Omitted action settings
+resolve to recorded automatic defaults. `Plan` has no device or parallelism
+configuration. Reusable descriptions are ordinary immutable values:
 
 ```python
 devices = Local(
@@ -547,7 +559,12 @@ devices = Local(
     host_memory="256GiB",
     scratch="/scratch/quantization",
 )
-plan = plan.devices(devices).parallelism(Parallelism.auto())
+language = (
+    Quantize.language(recipe=GPTQ(bits=4), name="language")
+    .devices(devices)
+    .parallelism(Parallelism.auto())
+)
+plan = Plan().data(calibration).serial(language)
 ```
 
 Automatic placement chooses among declared legal layouts. It never changes the
@@ -555,7 +572,17 @@ algorithm, silently approximates statistics, or invents distributed support for
 a single-device method. Device names refer to the supplied/local resource pool;
 the API does not implicitly allocate cloud infrastructure. External launchers
 can supply a typed distributed device context through the same `devices` entry
-point for multiple nodes.
+point on an action for multiple nodes. The coordinator reconciles all actions'
+requests against one physical resource ledger: the same GPU in two descriptions
+is still one GPU. Device budgets are not multiplied by concurrent actions.
+
+`Local.place(...)` adds explicit dense-layer, per-layer module, expert, and CPU
+tensor mappings. `storage`, `execute`, and `fit` independently constrain backing
+residency, model execution, and fitting. `ByLayer`, `ByExpert`, `ModuleMap`, and
+`RoundRobin` use global logical IDs. `CPU(numa=..., memory_policy=..., cores=...)`
+separates memory allocation from worker affinity. See the complete
+[device placement contract](quantization-device-placement.md) for examples,
+priorities, stage buffers, NUMA enforcement, and source materialization.
 
 Advanced policies can require a particular stage layout:
 
@@ -563,16 +590,20 @@ Advanced policies can require a particular stage layout:
 parallel = (
     Parallelism.auto()
     .for_stage(
-        "language/observe", DataParallel(workers=4), required=True
+        "observe", DataParallel(workers=4), required=True
     )
     .for_stage(
-        "language/gsq/attention", DataParallel(workers=4), required=True
+        "gsq/attention", DataParallel(workers=4), required=True
     )
 )
-plan = plan.parallelism(parallel)
+language = (
+    Quantize.language(recipe=Recipe(GPTQ(bits=4)).use(StagedGSQ()), name="language")
+    .devices(devices)
+    .parallelism(parallel)
+)
 ```
 
-Stage IDs above are illustrative IDs exposed by a selected plugin's preview,
+Stage IDs above are illustrative action-local IDs exposed by a selected plugin's preview,
 not universal required stage names. A role selector can select compatible stages
 without hardcoding IDs, but unknown or ambiguous matches fail. Each requirement
 is checked against the resolved method, architecture, data, and resources.
@@ -582,15 +613,21 @@ back silently.
 Mesh layouts for supported tensor/expert/pipeline/context partitioning use typed
 axis and ownership descriptors from the parallel contract. Configuration must
 distinguish model partitioning from data replication and independent expert
-fitting. Avoid a single `parallel=True` switch that conceals all three.
+fitting. `DataParallel` partitions samples over complete logical replicas;
+`TensorParallel` partitions tensors within one logical computation. Both can
+coexist through an explicit `HybridParallel` mesh, with declared data and tensor
+groups. They are distinct from `Plan.parallel(...)`, which permits lifecycle
+overlap. A single `parallel=True` flag cannot express these meanings. Hard
+single-device owner mappings cannot silently become replicas or tensor shards;
+mapping and execution-policy constraints must agree or compilation fails.
 
 ## 7. Reusable fragments and configuration files
 
 ```python
-def perception_plan(vision_recipe, audio_recipe, *datasets):
+def perception_plan(vision_recipe, audio_recipe, vision_devices, audio_devices, *datasets):
     return Plan().data(*datasets).parallel(
-        Quantize.vision(recipe=vision_recipe, name="vision"),
-        Quantize.audio(recipe=audio_recipe, name="audio"),
+        Quantize.vision(recipe=vision_recipe, devices=vision_devices, name="vision"),
+        Quantize.audio(recipe=audio_recipe, devices=audio_devices, name="audio"),
     )
 
 language_data = DataBindings(
@@ -599,14 +636,14 @@ language_data = DataBindings(
 )
 plan = (
     Plan()
-    .devices(devices)
     .include(
         perception_plan(higher_precision, higher_precision,
+                        Local(gpus=[0, 1]), Local(gpus=[2, 3]),
                         multimodal_calibration, audio_calibration),
         namespace="senses",
     )
     .serial(Quantize.language(recipe=with_adapter, rules=text_rules,
-                             data=language_data, name="language"))
+                             data=language_data, devices=devices, name="language"))
 )
 ```
 
@@ -630,22 +667,22 @@ datasets:
     schema: image-text-conversation/v1
 data:
   calibration: {dataset: multimodal_calibration}
-devices:
-  kind: local
-  gpus: [0, 1, 2, 3]
-parallelism: auto
 operations:
   - id: vision
     kind: quantize
     scope: vision
     target: auto
     recipe: {method: gptqmodel/gptq@1, bits: 8}
+    devices: {kind: local, gpus: [0, 1]}
+    parallelism: auto
   - id: language
     kind: quantize
     scope: language
     target: auto
     after: [vision]
     recipe: {method: gptqmodel/gptq@1, bits: 4, group_size: 128}
+    devices: {kind: local, gpus: [0, 1, 2, 3]}
+    parallelism: auto
 ```
 
 This is an explicitly ordered two-operation plan. An unordered `add` plan omits
@@ -654,6 +691,11 @@ compilation. List order in the file is not an implicit correctness constraint.
 Fluent `serial` and `parallel` serialize to explicit edges/groups, not opaque method
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
+Device mappings and parallelism belong inside each serialized operation. Typed
+placement rules include selector, storage/execute/fit fields, priorities, and
+half-open ranges; hybrid layouts include mesh axes and groups. Unregistered
+callbacks are not a mapping format. Authoring IDs resolve to physical devices
+and canonical owners in the compiled layout.
 Positional data shorthand serializes to inferred role bindings after resolution;
 source groups use `datasets: [images, texts]` in place of a single `dataset`.
 The compiled artifact additionally records resolved routes and adapter defaults.
@@ -731,3 +773,7 @@ criteria, not tests of an implemented API.
 Target checks require omitted/explicit AUTO equivalence, labels that do not
 affect scope, no residual-weight inference, scoped dynamic queries, frozen global
 IDs before sharding, and concrete diagnostics for missing/ambiguous mappings.
+Placement checks cover action-local policies, global physical reservations,
+dense/per-layer/per-expert mappings, CPU/NUMA allocation before first touch,
+buffer placement, and separate data/tensor/hybrid capabilities. A scoped fitting
+map never changes a weight-write query. These gates are detailed in P10-P15.

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.10 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.11 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -24,6 +24,11 @@ Serial action ordering does not restrict an action to one GPU: its capture,
 fitting, or optimizer stages retain their admitted physical parallelism. A serial
 action after a parallel group waits for every branch's declared stable result.
 Parallel actions may overlap only when dependencies, writes, and resources permit.
+Each action owns its devices, mappings, and parallel execution policy; there is
+no plan-level device configuration. `DataParallel` and `TensorParallel` describe
+different execution modes inside an action. A supported `HybridParallel` mesh
+combines them. See [device placement](quantization-device-placement.md) for the
+public controls, dense/expert/module maps, and CPU/NUMA requirements.
 
 ## 1. Existing behavior to preserve or deliberately replace
 
@@ -44,6 +49,12 @@ These mechanisms do not establish generic tensor/expert/context parallel support
 for every current method. The new contract must state what is implemented and
 what is required but unavailable. Backend-specific fast paths, free-threaded
 Python behavior, and method reentrancy are separate capabilities.
+
+A focused follow-up at [6d90aa19](https://github.com/ModelCloud/GPTQModel/tree/6d90aa196e7c94c9d62459c60267b346fa1fb613)
+also confirms distinct dense/MoE strategy device pools and group-preserving
+placement, plus worker CPU-core affinity. The [placement audit](quantization-device-placement.md)
+records those sources and the missing NUMA memory-allocation contract separately
+from the earlier baseline.
 
 ## 2. Different kinds of parallelism
 
@@ -66,10 +77,18 @@ sharded across devices, and distributing already-captured independent expert
 fitting tasks. The latter does not by itself implement the former. Statistics
 must follow actual routing, or an explicitly selected alternative coverage policy.
 
+Data and tensor parallelism are independent axes. With a two-by-two mesh, two
+data replicas can each execute using two tensor ranks. The data reducer operates
+between corresponding tensor partitions; tensor ranks cannot each contribute the
+same sample as independent data. Rank roles, logical batches, shard geometry,
+group membership, and collective order are explicit. Unsupported combined layouts
+fail even if each mode is supported independently. Lifecycle `.parallel(...)`
+only permits concurrent actions and selects none of these modes by itself.
+
 ## 3. Logical plan and physical execution layout
 
 Keep source/teacher/objective dependencies independent of placement. Compile the
-logical plan into an `ExecutionLayout` using the supplied resource pool and
+logical plan into an `ExecutionLayout` using each action's resource description and
 method/architecture capabilities. Record both identities. Relocating a task
 cannot silently change its source policy, observation set, quantization grouping,
 or objective.
@@ -84,7 +103,8 @@ include the resulting preparation and reduction identity.
 
 | Contract | Required fields/behavior |
 | --- | --- |
-| Device context (`Local` or a supplied distributed context) | Visible devices/nodes, memory budgets, host/pinned-memory/disk budgets, interconnect/topology information when available, and allowed offload. Bound through `devices(...)` on a plan or `devices=` on a direct operation. No assumption that all visible GPUs form one fast collective domain. |
+| Device context (`Local` or a supplied distributed context) | An action's visible devices/nodes, GPU/host/pinned-memory/disk budgets, CPU cores/NUMA nodes, topology, and allowed offload. Bound through `action.devices(...)` or action/direct-call `devices=`. Overlapping contexts share physical capacity; there is no plan-level device setting or assumption of one fast collective domain. |
+| Placement rules | Canonical dense/expert/module selectors with distinct backing-storage, forward-execution, fitting, and stage-buffer locations; explicit priorities, CPU allocation policy, and affinity. Rules cannot expand weight writes or violate method/alias co-location. |
 | `ParallelContract` | Legal task splits, replica/shard semantics, minimum/maximum workers, process/thread reentrancy, framework/backend restrictions, deterministic profile, and unsupported combinations. |
 | `PartitionSpec` | Global tensor/owner identity, shard axes/ranges, replication groups, expert ownership, quantizer group alignment, and reconstruction/resharding rules. |
 | `ObservationReducer` | Statistic schema, raw sufficient-statistic or other merge representation, counts/weights/masks, reduction precision/order, duplicate policy, and finalization point. `Not mergeable` is valid. |
@@ -106,6 +126,24 @@ numerical recipe and validation; they cannot be a scheduler memory fallback.
 
 ## 4. Scheduling and resource ownership
 
+Resolve action-local maps against one physical inventory and shared reservation
+ledger. Visible GPU ordinals resolve to stable device identities; NUMA node/core
+requests are checked against allowed topology. Duplicate device descriptions do
+not multiply capacity. CPU cores, per-node host bytes, pinned buffers, and shared
+table replicas participate in admission alongside GPUs. Hard conflicting storage
+requirements across simultaneous actions require supported immutable copies,
+serialization, or rejection; one action cannot relocate another's live owners.
+
+When serial actions use different maps, the predecessor installs its result and
+drains its transfers/readers before releasing leases. The next action can move
+that exact revision under its own policy. NUMA policy is established before bulk
+allocation/first touch, or existing allocations need verified migration/copy.
+Changing a CPU thread affinity mask alone is not a memory-placement operation.
+Portable manifests retain owner/source identity across those transitions.
+Worker completion releases temporary leases; still-resident outputs and retained
+artifacts keep their storage reservations until transfer or eviction. Reserve
+transfer destinations before releasing source storage, including between actions.
+
 The ready queue contains lifecycle stages with satisfiable dependencies. A stage
 becomes runnable only when its exact input artifacts are available and its whole
 resource request can be reserved. Independent work may overlap, but it cannot
@@ -114,7 +152,7 @@ read a producer halfway through a coupled update.
 ```mermaid
 flowchart TD
     P[Compiled stage and artifact graph] --> Q[Dependency-ready queue]
-    R[Devices, topology, and memory budgets] --> A[Reserve complete resource group]
+    R[Action maps, topology, and shared memory budgets] --> A[Reserve complete resource group]
     Q --> A
     A --> X{Declared execution layout}
     X --> T[Independent tasks on separate workers]
@@ -253,6 +291,10 @@ backend versions, and RNG policy; compare against the declared guarantee.
 `compile().explain()` reports estimated peak memory by resource class, feasible
 concurrency, replicated versus sharded state, major transfers, serial bottlenecks,
 and unsupported requested layouts. Estimates include confidence/unknown fields.
+Report storage/execution/fit destinations separately, per-layer/expert assignments,
+data/tensor group membership, CPU affinity and NUMA memory policy, host/staging
+transfers, and placement conflicts. Actual page-locality checks belong to runtime
+materialization, not a claim inferred from the requested policy.
 A calibrated cost profile may improve them; the planner must not invent a wall
 time or promise linear speedup from GPU count.
 
@@ -287,6 +329,12 @@ Proposed acceptance gates:
 | P7 | Resume validates topology and numerical identity; supported repartitioning is tested independently from exact-layout resume. |
 | P8 | Comparable 1/2/4/8-device runs report quantization/save elapsed time, GPU-hours, peak device/host memory, transfer volume, and utilization at matched numerical settings. Report independent evaluation cost separately, with quality tied to exact saved artifacts and comparable evaluation settings. |
 | P9 | Supported layout changes preserve global sample selection, logical batches/steps, and declared RNG semantics. Prefetch/retry failure injection recovers committed cursor and update state together without lost or duplicated contributions. |
+| P10 | Each action retains its devices/maps through chaining, fragments, and file round-trips. Concurrent actions using the same GPU/NUMA node share one capacity ledger; serial transitions drain leases before relocation. |
+| P11 | Dense groups, nested per-layer expert maps, and exact module overrides resolve stable IDs and explicit priorities. Partial/conflicting maps, split aliases, and illegal coupled-group placement fail; fitting maps cannot expand writes or reroute observations. |
+| P12 | Data, tensor, and supported hybrid layouts identify replica/shard groups, preserve logical batches and group geometry, and reduce samples exactly once. Independent support for two modes does not authorize their combination. Hard owner maps cannot silently become replicas/shards. |
+| P13 | Enforce CPU table allocation and worker affinity independently: before-first-touch allocation, eager-tensor migration, cpuset restrictions, file/shared mappings, pinned staging, and unavailable NUMA features. Hard policy failure cannot become undocumented fallback. |
+| P14 | Table lookup/gather transfers, observation/statistic/optimizer buffers, CPU packing, and decode/prefetch queues obey per-stage/per-node budgets and event lifetimes. Unsupported CPU lookup or buffer placement fails; no persistent expanded table cache is introduced. |
+| P15 | Python/file placement policies preserve scopes, ranges, priorities, mesh axes, and rule identities. Changed-topology resume revalidates allocation/continuation capabilities; independent artifact evaluation has a fresh layout and cannot inherit live quantization leases. |
 
 The first usable executor milestone must demonstrate independent task work,
 multi-device capture/statistic merging, and a cooperative optimizer path using

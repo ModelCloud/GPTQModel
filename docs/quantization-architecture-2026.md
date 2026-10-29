@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.10, with the broad source survey inspected through 2026-10-27.
+0.11, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
@@ -54,6 +54,7 @@ inference and proposed compatibility condition.
 | Qwen3.8-Flash-Next, August report | Hybrid linear/sparse attention, multiple residual branches, and n-gram memory. [Report][qwen38] | **Extend:** residual structure and token-derived memory must be explicit input resources; changing embeddings can invalidate more than the next layer's hidden state. |
 | Qwen3.8-Omni, September report | Multiple perceptual encoders and a shared multimodal Thinker. [Report][qwen-omni] | **Extend:** common ownership plus aligned modality/event traces; execution branches are not automatically independently writable. |
 | DeepSeek V4.1-Flash, September/October release | Encoder/decoder memory dependencies, reused sparse selections, native low-precision source, and draft-model bindings. [Report][ds41], [release][ds-release] | **Fits:** track nonadjacent state producers and aliases; qualify the actual native source and complete candidate path. Large-model execution also requires partition contracts. |
+| Engram conditional memory, focused October 29 inspection of the 2026 work | Token-derived lookup into persistent embedding tables with host-memory offload as a design property. DeepSeek's pinned configuration declares tables at layers 1 and 14. [Official repository][engram], [pinned configuration][engram-config] | **Extend:** separate table ownership/storage, lookup execution, GPU fusion, and bounded row transfers. Action-local CPU/NUMA allocation and affinity are required; a placement option alone does not establish an executable CPU backend or a table quantizer. |
 | Kimi K2.5, 2026 release family | Native vision and sparse MoE language modeling. [Model card][kimi25] | **Fits:** vision-conditioned calibration, routed expert coverage, and complete mixed persistence. Do not infer reverse text-to-vision inference dependencies from joint training. |
 | Kimi K3, July release | KDA plus gated MLA, Attention Residuals, latent MoE, vision, and a release with MXFP4 weights/MXFP8 activations. [Pinned card][kimi3], [architecture description][kimi3-blog] | **Extend:** retain depth-history inputs for AttnRes, recurrent state, latent expert boundaries, and native numerical semantics. Do not collapse every block input to one residual tensor or silently assume a dense original. |
 | GLM-5.3-Flash, August release | Sparse/linear attention hybrid, multimodality, and manifold-constrained hyper-connections. [Pinned card][glm53] | **Extend:** carry the complete residual-stream structure, indexer control state, and recurrent state. Support for an earlier GLM family does not certify this one. |
@@ -191,6 +192,23 @@ change their declared programs without creating new parameter owners or expandin
 write selection. See the
 [parallel contract](quantization-parallel-execution.md) for legal decomposition.
 
+### Persistent lookup tables need explicit heterogeneous placement
+
+The [placement contract](quantization-device-placement.md) gives each lifecycle
+action its own dense/expert/module maps and CPU allocation/affinity policies.
+Tables, lookup operators, projection/gating operators, and recurrent hash/history
+state are separately described. Token-derived addresses do not make the returned
+features independent of the table revision. Changing tables invalidates dependent
+row buffers/captures; merely moving unchanged tables preserves their identity.
+Forward placement is needed even for owners whose weights are preserved.
+
+Data parallelism repeats a logical model across sample partitions; tensor
+parallelism partitions one logical computation. Table replication, row sharding,
+and NUMA page interleaving are different layouts with different memory costs.
+Hybrid data/tensor groups require explicit observation accounting and supported
+communication. None follows automatically from listing several GPUs or placing
+two lifecycle actions inside `parallel(...)`.
+
 ## 3. Adapter acceptance cases
 
 These proposed cases turn architecture claims into reviewable requirements.
@@ -211,6 +229,7 @@ for this PR.
 | Full-duplex streaming | Timeline-aligned audio/video/text and output history survive sharding, continuation, and restoration. |
 | Native compressed release | Source format and runtime behavior remain explicit; an unavailable dense ancestor is not synthesized or falsely labeled original. |
 | Draft model | Independent evaluation after saving measures acceptance/throughput and required hidden-state taps against the persisted main/draft composition. |
+| Host-backed conditional memory | Canonical table identity, native lookup/masks, bounded row transfers, CPU/NUMA allocation, and worker affinity survive action changes and continuation. Unsupported memory/lookup backends fail; page interleaving cannot masquerade as row sharding. |
 | Generative audio/video/action | Appropriate sampler, non-text input preparation, and task evaluator are mandatory before claiming supported quantization. |
 
 Model adapters should publish a capability report for these cases, linked to
@@ -229,6 +248,8 @@ not claims that our quantization approach is optimal.
 The revision 0.5 consistency review rechecked the Qwen3.8-Next, Qwen3.8-Omni,
 and DeepSeek-V4.1 anchor reports on 2026-10-29. It retains the broad survey's
 original evidence date; it is not a new census of releases since that audit.
+Revision 0.11 adds a focused Engram/placement inspection on October 29 without
+changing the broad survey date. The matrix now contains 34 family/pattern groups.
 
 [qwen35]: https://huggingface.co/docs/transformers/v5.15.0/model_doc/qwen3_5
 [qwen38]: https://arxiv.org/html/2608.30320v1
@@ -276,3 +297,5 @@ original evidence date; it is not a new census of releases since that audit.
 [cosmos3]: https://research.nvidia.com/labs/cosmos-lab/cosmos3/
 [gr00t]: https://huggingface.co/blog/nvidia/gr00t-n1-7
 [gr00t-card]: https://huggingface.co/nvidia/GR00T-N1.7-3B/blob/main/README.md
+[engram]: https://github.com/deepseek-ai/Engram
+[engram-config]: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json

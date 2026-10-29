@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.10 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.11 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -306,10 +306,11 @@ texts = TextDataSet(text_samples)
 
 plan = (
     Plan()
-    .devices(Local(gpus=[0, 1, 2, 3]))
     .data(images, texts)
-    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision"))
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language"))
+    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+            .devices(Local(gpus=[0, 1])))
+    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+            .devices(Local(gpus=[0, 1, 2, 3])))
 )
 
 # Optional coverage controls; the image route is still inferred.
@@ -362,10 +363,9 @@ gsq_data = DataBindings(
 
 plan = (
     Plan()
-    .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
         "language", Recipe(GPTQ(bits=4)).use(StagedGSQ()),
-        data=gsq_data, name="language",
+        data=gsq_data, devices=Local(gpus=[0, 1, 2, 3]), name="language",
     ))
 )
 run = model.run(plan.compile(model))
@@ -438,7 +438,16 @@ corresponding producer dependencies remain in the lifecycle graph.
 
 ## 7. Streaming, parallelism, and continuation
 
-Data placement is compiled with the [parallel execution contract](quantization-parallel-execution.md):
+Data placement is compiled with the [parallel execution contract](quantization-parallel-execution.md).
+
+Each consuming action supplies its device, buffer, and NUMA policy through
+`action.devices(...)`. Dataset descriptions remain reusable across those layouts.
+Decode workers, prepared batches, pinned staging, and cursors are reserved under
+the action's stage policy and the shared physical resource ledger; no plan-wide
+device setting overrides them. Data-parallel replicas partition the logical
+sample stream; tensor-parallel ranks cooperate on the same samples. Combined
+layouts count contributions once per logical replica and declared reducer, not
+once per tensor shard. See [device placement](quantization-device-placement.md).
 
 - Map-style sources can use deterministic index partitions. Streaming sources
   need provider-supported shards or durable cursor/range assignments.
