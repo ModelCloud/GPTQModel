@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.4 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.5 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -94,7 +94,7 @@ The minimal contract includes:
 | `DataSetIdentity` | Provider/URI or binding name, immutable revision where available, split, selection/sampling policy, transform graph, and schema version. It excludes credentials. In-memory data receives an explicit run-local binding identity or a materialized artifact identity. |
 | `SampleSchema` | Required and optional fields, modalities, dtypes/encodings, alignment units, labels/targets, timestamps or state axes, and semantic version. Arbitrary dictionaries are allowed only behind an adapter that validates a declared schema. |
 | `DataSetCapabilities` | Map or streaming access, known/unknown cardinality, replayability, stable sample IDs, random access, resumable cursor, finite/infinite status, and supported partitioning. |
-| `ReadRequest` | Resolved selection, deterministic seed, epoch/pass, shard/worker identity, ordering, limits, retry policy, and requested fields. It cannot silently change the dataset definition. |
+| `ReadRequest` | Resolved selection, deterministic seed, epoch/pass, shard/worker identity, ordering, limits, retry policy, and requested fields. The planner lowers view policies into this request; a source loader does not resolve model routes or teacher policies. |
 | `DataCursor` | A private cursor yielding sample envelopes, with checkpoint/close semantics where supported. Opening a second cursor is explicit; a single-pass stream can reject it. |
 | `QSample` | Stable sample/event ID, typed payload, optional weight/group/trace metadata, and source offset. Batch position is not sample identity. |
 
@@ -103,14 +103,27 @@ efficient projection. A subclass cannot conceal a model forward, download a
 different revision after compilation, or return a different schema without
 changing its identity.
 
-Common immutable operations return another `QDataSet`: `select`, `split`,
-`shuffle`, `limit`, `map`, `mix`, and `zip_aligned`. Each operation enters the
-identity and provenance. Registered transforms have names and versions; portable
-plans do not serialize arbitrary callables.
+Common immutable operations return another `QDataSet`: `select`, `shuffle`,
+`limit`, `map`, `mix`, and `zip_aligned`. `split` returns a `DataSplits` collection
+of named `QDataSet` views, such as `splits.train`. Each operation enters identity
+and provenance. Registered transforms have names and versions; portable plans
+do not serialize arbitrary callables. A streaming shuffle must name its bounded
+buffer/reservoir policy; it cannot claim to be a full random permutation. Split
+ratios use a declared exact-count or stable-hash policy according to capabilities.
+
+Source identity, view identity, and prepared-input identity are separate. Views
+retain parent/sample ancestry for overlap checks. A mutable in-memory binding
+must be frozen, verified, or materialized before use; a Python object address
+cannot establish immutable contents. Sources without stable IDs require recorded
+IDs and offsets in a bounded snapshot to support replay and overlap guarantees.
 
 `len(dataset)` is optional. Requiring it would exclude streaming corpora and live
 event traces. A method that needs exact cardinality declares that requirement;
-the planner can materialize a bounded snapshot or reject an incompatible source.
+the planner can schedule a bounded snapshot stage or reject an incompatible
+source. Compilation only resolves metadata and declared capabilities. It does
+not open a stream to discover its size. Content-dependent schema, coverage,
+and overlap checks run in explicit validation stages before dependent fitting;
+unmet guarantees fail or use a predeclared fallback, never silently pass.
 
 ## 3. Modality and structure subclasses
 
@@ -143,13 +156,21 @@ class CalibrationDataSet(QDataSet[SampleT]):
     profile: CalibrationProfile
 
     def open(self, request: ReadRequest) -> DataCursor[SampleT]:
-        return self.source.open(request.with_profile(self.profile))
+        # Selection and weighting have already been lowered by the planner.
+        return self.source.open(request)
 ```
 
 `CalibrationProfile` declares routes/scenarios, coverage strata, weighting,
-length/chunk policy, trace axes, and observation source policy. It does not
-perform tensor preparation. A project can subclass `CalibrationDataSet` to add
-domain validation while retaining the same cursor and identity rules.
+length/chunk policy, and trace axes. The view identity includes the source view
+and profile; schema and cursor capabilities delegate to the source subject to
+the view's declared constraints. The sketch omits those property implementations.
+Changing a route or weighting policy changes the view identity even if the raw
+samples stay the same. Teacher/candidate source choice belongs to the recipe's
+observation requirements, not the raw dataset loader.
+
+The profile does not perform tensor preparation. A project can subclass
+`CalibrationDataSet` to add domain validation while retaining the same cursor
+and identity rules.
 The friendly constructor can accept `route=`, `scenarios=`, and related keyword
 arguments and build the immutable profile shown in the contract sketch.
 
@@ -164,7 +185,7 @@ Roles are typed bindings, not a closed subclass list:
 | `select` | Precision search, bounded refinement choice, activation-scale recipe selection, or best-candidate choice. |
 | `adapter` | EoRA or another adapter-generation operation. |
 | `evaluate` | Final task/quality acceptance of the assembled model. It is never silently reused for fitting. |
-| `profile` | Bounded cost/memory profiling used by physical planning, without authorizing numerical fitting. |
+| `profile` | Bounded cost/memory profiling used by physical planning. Timing an optimizer/solve uses disposable candidate state, declared fitting roles, and no retained numerical result. |
 
 Method plugins can add namespaced roles, for example
 `vendor/method:contrastive_negatives`, together with a `DataRequirement`.
@@ -173,8 +194,17 @@ Coordinator code does not add a new keyword or enum branch for each future role.
 `DataRequirement` declares accepted schemas/modalities, whether raw or prepared
 data is accepted, minimum coverage, access pattern, replay/pass count, ordering,
 full-context needs, split/disjointness rules, batching, and legal distributed
-partitioning. Compilation matches requirements to `DataBindings` and reports
-missing or incompatible roles before loading a large model or dataset.
+partitioning. Compilation matches requirements to `DataBindings` using source
+descriptors and model handles, without requiring full weight/data materialization.
+It reports missing/incompatible declarations and distinguishes pending runtime
+checks from proven guarantees. Composed recipes declare their effective roles;
+they do not automatically inherit every role of each standalone extension.
+
+Aliases permit intentional reuse of raw samples, not implicit reuse of fitted
+statistics or captured activations. GPTAQ/native and candidate streams must align
+sample IDs, positions, masks, and augmentation draws while retaining distinct
+producer revisions. RNG keys include sample/trace identity and pass; worker ID
+alone cannot determine augmentation or noise in a topology-independent replay.
 
 ## 5. Friendly API
 
@@ -213,26 +243,28 @@ splits = TextDataSet.from_hf(
 )
 
 gsq_data = DataBindings(
-    initialize=splits.train.view(limit=512),
+    initialize=splits.train.limit(512).alias(reason="initialize on training subset"),
     train=splits.train,
     validate=splits.validation,
-    evaluate=splits.evaluation,
 )
 
 plan = (
     Plan()
-    .data(calibration=calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .add(Quantize(
-        "language", Recipe(GPTQ(bits=4)).with_modifier(StagedGSQ()),
+        "language", Recipe(GPTQ(bits=4)).with_(StagedGSQ()),
         data=gsq_data, name="language",
     ))
-    .evaluate(data=splits.evaluation, suite=language_quality)
+    .evaluate(suite=language_quality, data=splits.evaluation)
 )
 ```
 
 Plan-level bindings are defaults. Operation-level bindings override by exact
-role and appear in `explain()`. Reusing the same view for multiple roles is
+role and appear in `explain()`. Unknown roles and unused operation-specific
+bindings are errors; the report identifies consumers of plan defaults.
+Namespaced roles can be passed as a mapping, for example
+`DataBindings({"vendor/method:contrastive_negatives": negatives})`.
+Reusing the same view for multiple roles is
 written explicitly:
 
 ```python
@@ -283,6 +315,11 @@ different artifacts. A method that can consume prepared batches does not gain
 permission to reinterpret raw samples. A `PreparedDataSet` bypasses only the
 declared preparation steps and must satisfy the final prepared schema exactly.
 
+Learned features or teacher targets require the producing model revision and
+invocation lineage as well. Supplying them through `PreparedDataSet` cannot hide
+a model forward or make the cache independent of changed producer weights; the
+corresponding producer dependencies remain in the lifecycle graph.
+
 ## 7. Streaming, parallelism, and continuation
 
 Data placement is compiled with the [parallel execution contract](quantization-parallel-execution.md):
@@ -305,6 +342,11 @@ Data placement is compiled with the [parallel execution contract](quantization-p
   non-replayable source must be spooled within budget or rejected before the
   first destructive model stage.
 
+Checkpoints record committed consumption, not the furthest prefetched offset.
+Cursor progress, shuffle/RNG state, and the corresponding statistic or optimizer
+update must describe one consistent boundary. Retries can reread input, but cannot
+double-count committed samples or skip prefetched samples whose update was lost.
+
 Data memory estimates include decoded modality assets, processor outputs,
 prefetch queues, pinned buffers, prepared batches, and captured observations.
 The scheduler bounds them independently from weight, Hessian, and optimizer
@@ -317,10 +359,18 @@ not post-padding rows. The split unit is schema metadata. Group-aware splitting
 keeps related frames, turns, augmentations, or embodiments together where the
 task requires it.
 
-The compiler computes overlap when identities permit it and otherwise reports
-the guarantee as unknown. `validate`, `select`, and `evaluate` requirements can
-demand disjointness from training roles. Final evaluation defaults to disjoint;
-sharing it requires an explicit policy and the result cannot be labeled held out.
+The compiler computes overlap when recorded ancestry permits it and otherwise
+reports the guarantee as unknown. Different dataset names or hashes alone do not
+prove that content is disjoint. Requirements can demand validation of sample or
+group ancestry before fitting. Final evaluation defaults to disjointness from
+all fitting and selection roles, including calibration, initialization, adapter
+generation, optimizer validation, and refinement selection. An explicit reuse
+policy can permit overlap, but the result cannot be labeled held out.
+
+Final evaluation is terminal acceptance for the selected candidate. Its metrics
+cannot trigger the same run's automated refinement or select a different winner.
+If a later experiment uses that feedback, record the earlier evaluation as
+selection evidence and obtain fresh independent data for a held-out claim.
 
 The manifest records:
 
@@ -352,6 +402,9 @@ explicitly materialized artifacts.
 | QD10 | Selection/validation/evaluation leakage and unknown-overlap states appear in `explain()` and the final manifest; an unverified set is not called held out. |
 | QD11 | A synthetic future method registers a namespaced data role and custom sample schema without changing planner dispatch or the `QDataSet` base. |
 | QD12 | Dataset and prepared-batch memory, prefetch, decode, and materialization limits participate in scheduling and fail preflight when no legal bounded plan exists. |
+| QD13 | View/profile changes invalidate the appropriate prepared caches while retaining sample ancestry; explicit aliases do not merge incompatible teacher/candidate observations or method statistics. |
+| QD14 | Compilation consumes no cursor; runtime content checks gate fitting, and cursor/statistic checkpoints recover correctly with prefetched input and retried shards. |
+| QD15 | Final acceptance is disjoint from all declared fitting/selection roles, and final metrics cannot feed the automated refinement loop. Unknown overlap cannot pass a strict held-out requirement. |
 
 ## 10. Proposed decisions
 

@@ -4,7 +4,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 # 2026 architecture audit for the quantization redesign
 
 **Status:** design evidence introduced in revision 0.3 and retained in revision
-0.4, inspected through 2026-10-27.
+0.5, with the broad source survey inspected through 2026-10-27.
 See the [main proposal](component-quantization-design.md),
 [method inventory](quantization-method-lifecycles.md),
 [parallel execution proposal](quantization-parallel-execution.md), and
@@ -27,17 +27,18 @@ replay equivalence checks, and numerical/task validation.
 
 ## 1. Findings and compatibility matrix
 
-The component/state/lifecycle separation survives this survey, but revision 0.2
-was incomplete. Revision 0.3 must make shared multimodal ownership, invocation
-identity, depth history, iterative samplers, streaming events, and physical
-partitioning explicit. Parallel execution is a core requirement rather than a
-later optimization.
+The component/state/lifecycle separation survives this survey. The current
+proposal incorporates the required contracts for shared multimodal ownership,
+invocation identity, depth history, iterative samplers, streaming events, and
+physical partitioning. Parallel execution is a core requirement.
 
 The status column assesses the design, not current GPTQModel support:
 
 - **Fits:** existing ownership/state/program concepts express the pattern;
   model-specific adapters and validation are still required.
-- **Extend:** this audit requires a more explicit contract in revision 0.3.
+- **Extend:** this audit identified an extension incorporated into the current
+  contract. The label records the design requirement, not an outstanding omission
+  or an implemented adapter.
 - **Domain:** the lifecycle model can represent it, but a new input/sampler/task
   adapter is needed; do not advertise generic text-calibration support.
 
@@ -161,7 +162,11 @@ The same graph may run through replicas, tensor shards, experts, pipeline stages
 or context partitions. These layouts must preserve canonical owner identity,
 complete invocation state, observation counts, and method-specific group geometry.
 Parallel placement cannot split a recurrent stream, denoising canvas, collective,
-or coupled optimization region merely to fill idle GPUs. See the
+or coupled optimization region merely to fill idle GPUs. Per-operation data must
+cover the selected routes: an image-text default cannot satisfy an audio branch,
+and independently calibrated encoders still require joint route coverage for the
+backbone and assembled evaluation. Typed recipe extensions change their declared
+programs without creating new parameter owners or expanding write selection. See the
 [parallel contract](quantization-parallel-execution.md) for legal decomposition.
 
 ## 3. Adapter acceptance cases
@@ -196,6 +201,10 @@ were inspected on 2026-10-27. Pinned cards are snapshots retrieved during the
 audit. Other links are moving documents; an implementation phase must pin them
 and verify concrete checkpoint details. The reports support structural facts,
 not claims that our quantization approach is optimal.
+
+The revision 0.5 consistency review rechecked the Qwen3.8-Next, Qwen3.8-Omni,
+and DeepSeek-V4.1 anchor reports on 2026-10-29. It retains the broad survey's
+original evidence date; it is not a new census of releases since that audit.
 
 [qwen35]: https://huggingface.co/docs/transformers/v5.15.0/model_doc/qwen3_5
 [qwen38]: https://arxiv.org/html/2608.30320v1

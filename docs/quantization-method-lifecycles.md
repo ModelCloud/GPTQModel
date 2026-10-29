@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.4
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.5
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -92,6 +92,13 @@ fallback. The result and report must identify the branch actually used.
 These are not all interchangeable decorators. Some change observations, some
 introduce whole optimization programs, and some operate on an already quantized
 model. Their compatibility must be declared per combination.
+
+The public API composes registered typed objects through `Recipe.with_()`.
+The object's descriptor selects modifier, preparation, or format behavior;
+the combined lifecycle below still determines placement and effective data
+requirements. A short entry point cannot collapse these distinct programs into
+post-quantization callbacks. See the [API proposal](quantization-plan-api.md)
+for dispatch, duplicate handling, order constraints, and serialization.
 
 | Operation or modifier | Current behavior | Required lifecycle information |
 | --- | --- | --- |
@@ -304,6 +311,9 @@ minimum acceptance cases:
 13. Add method-specific data roles and sample schemas through `DataRequirement`
     and `QDataSet` contracts without another public raw-dataset union or
     coordinator branch.
+14. Compose registered extensions through one typed entry point while retaining
+    derived-teacher freeze points, conditional data requirements, exact payload
+    installation, and method-specific sequencing; reject incompatible stacks.
 
 Conformance must enumerate configuration **routes and combinations**, not just
 the enum. A future method still needs a plugin, codec/runtime support, and

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.4 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.5 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
@@ -81,7 +81,7 @@ plan = (
     .add(Quantize(
         target="language", recipe=GPTQ(bits=4), name="language"
     ))
-    .evaluate(held_out_suite)
+    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 
 resolved = plan.compile(model)
@@ -102,25 +102,41 @@ identities, options, stage versions, and the selected execution layout. Running
 a compiled plan against a changed composition requires validation/recompilation,
 not hidden rebinding to whichever weights happen to be live.
 
+Compilation can resolve read-only metadata, but it does not consume dataset
+cursors, execute a model, profile devices, or fit weights. Required materialization,
+content validation, capture, and profiling are explicit execution stages. Checks
+that depend on unseen samples remain pending until those stages complete; a
+plan preview cannot certify unknown coverage or held-out status.
+
 ## 3. Explicit ordering and parallel branches
 
 For users who want explicit operation order, provide ordinary named methods:
 
 ```python
+audio_calibration = CalibrationDataSet(
+    AudioDataSet(audio_text_samples), route="audio_text",
+)
+omni_calibration = CalibrationDataSet(
+    MultiModalDataSet(aligned_image_audio_text_samples),
+    route="image_audio_text",
+)
+
 plan = (
     Plan()
-    .data(calibration=multimodal_calibration)
+    .data(calibration=omni_calibration)
     .devices(Local(gpus=[0, 1, 2, 3]))
     .parallel(
-        Quantize("vision.encoder", GPTQ(bits=8), name="vision"),
-        Quantize("audio.encoder", GPTQ(bits=8), name="audio"),
+        Quantize("vision.encoder", GPTQ(bits=8),
+                 data=multimodal_calibration, name="vision"),
+        Quantize("audio.encoder", GPTQ(bits=8),
+                 data=audio_calibration, name="audio"),
     )
     .then(Quantize("language", GPTQ(bits=4), name="language"))
     .then(TuneNorms(
         target="language", source=SourceSnapshot("source-checkpoint"),
         data=norm_training_data, name="norms",
     ))
-    .evaluate(held_out_suite)
+    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
@@ -130,12 +146,16 @@ plan = (
 | `then(operation)` | Add completion edges from the current terminal operations to this operation. Completion means its declared stable installed result/artifacts, not merely a worker submission. |
 | `parallel(a, b)` | Fork from the current terminal operations into branches that may overlap; subsequent `then` joins all branch terminals. The compiler rejects an inter-branch dependency or write conflict rather than pretending the branches are independent. |
 | `operation.after("name")` | Add a targeted completion dependency without globally serializing unrelated operations. Names resolve within the assembled plan/fragment namespace. |
-| `evaluate(suite)` | Add evaluation of the assembled terminal composition, with explicit data/criteria. It does not silently add a refitting operation. |
+| `evaluate(suite=..., data=...)` | Add final evaluation of the assembled terminal composition. The suite declares tasks, metrics, and acceptance rules; data binds the `evaluate` role and may instead be supplied as a plan default. |
 | `refine(policy)` | Add a declared bounded composition-refinement program with permitted writes, sources, selection data, and stopping criteria. It does not replace intrinsic method optimization. |
 
 `parallel()` permits legal overlap; device count and memory still bound actual
 concurrency. The preview shows feasible placement and serialized bottlenecks.
 Strict physical-layout requirements belong in the parallelism policy below.
+The example assumes an adapter with independent vision/audio owners and the
+named routes. The language corpus covers both modalities; an image-text corpus
+alone cannot satisfy audio coverage. Shared-backbone owners require a different
+selection and must not be presented as independent encoder branches.
 Calling `.parallel(vision, language)` is invalid when the selected language
 program requires the newly quantized vision output. The error points to the
 dependency and suggests `then` or `add`; it must not silently change the objective.
@@ -160,7 +180,7 @@ independent = (
         Quantize("language", GPTQ(bits=4),
                  observations=native_inputs, name="language"),
     )
-    .evaluate(held_out_suite)
+    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
@@ -174,46 +194,83 @@ expose typed named bindings and reject ambiguous or unsupported policies. Option
 refinement must separately declare its write scope, source, selection data,
 pass/resource budget, and stopping criteria.
 
+The final evaluation reads the chosen terminal revision after all fitting and
+refinement. Its results cannot drive automated refitting, early stopping, or
+candidate selection. Those decisions consume `train`, `validate`, or `select`
+data. A final failure reports unmet criteria; it does not restart refinement on
+the same held-out set. Adding a later mutating operation requires evaluation of
+the new terminal revision, and any earlier feedback must be recorded as used.
+
 ## 4. Stack recipes without flattening their lifecycles
 
 ```python
 scalar = Recipe(GPTQ(bits=4, group_size=128))
-with_adapter = scalar.with_modifier(EoRA(rank=32))
+with_adapter = scalar.with_(EoRA(rank=32))
 higher_precision = scalar.configure(bits=8)
 
-staged_awq = Recipe(AWQ(bits=4, group_size=128)).with_modifier(
+staged_awq = Recipe(AWQ(bits=4, group_size=128)).with_(
     StagedGSQ(epochs=2)
 )
 
-job = Quantize("language", staged_awq, name="language")
+# Each binding is a QDataSet; the composed program declares its required roles.
+staged_data = DataBindings(
+    initialize=awq_initialization_data,
+    train=reconstruction_data,
+    validate=held_out_validation,
+)
+job = Quantize("language", staged_awq, data=staged_data, name="language")
 ```
 
+`Recipe.with_(*extensions)` is the single composition entry point. Python reserves
+`with`, so the requested `.with(...)` spelling is a syntax error; the trailing
+underscore is required for an ordinary Python method call. Dispatch follows the
+registered type of each supplied object, with no category argument for the caller.
+
+| Typed object | Contribution to the recipe |
+| --- | --- |
+| `EoRA(rank=32)` | Adapter fitting stages and their residual/base/data requirements. |
+| `StagedGSQ(epochs=2)` | Intrinsic training program, teacher freeze points, initializer, and training/validation roles. |
+| `SmoothMAD()` | Supported preparation transforms, observations if required, and explicit write effects. |
+| `GGUFFormat()` | Output representation and codec requirements, including exact-payload validation. |
+
+Each type registers a versioned `RecipeExtension` descriptor with its category,
+configuration schema, compatibility rules, effects, and lifecycle constraints.
+The registry resolves one descriptor unambiguously; future extensions use the
+same protocol without coordinator branches for class names. Unknown types,
+ambiguous registrations, unsupported combinations, or conflicting singleton
+options fail with the offending object identified. Repeatable extensions must
+declare that capability and have distinct instance identities. Adding a second
+codec or a second nonrepeatable modifier never silently replaces the first.
+
+`recipe.with_(a, b)` and `recipe.with_(a).with_(b)` produce the same immutable
+specification. The resolved program determines stage execution order. For
+order-sensitive preparation transforms, extension order is an explicit constraint
+at their supported insertion points; incompatible constraints fail compilation.
+Staged AWQ GSQ still freezes its teacher between scaling and clipping, and EoRA
+still consumes the uncorrected base and residual. Required training remains
+visible when composition refinement is disabled.
+
 `configure()` returns a recipe with validated changes to its base method's typed
-options. Unknown/method-inapplicable keys fail; there is no giant bag of unrelated
-parameters. Modifier options belong to their own typed objects and have stable
-names/versions. Duplicate incompatible modifiers are errors, not last-writer wins.
+options and revalidates every attached extension. The base method is supplied
+to `Recipe(method)`; another quantizer is not an extension that replaces it.
+Dataset bindings and devices retain their scoped `.data(...)` and
+`.devices(Local(...))` entry points. They are not recipe extensions.
 
-`with_modifier()` is declarative composition, not a promise to run the modifier
-strictly after the quantizer. Staged AWQ GSQ must capture a teacher between scaling
-and clipping; EoRA needs residual/uncorrected-base handoffs. The compiler expands
-the compatible combined lifecycle. Required training is visible even when
-composition refinement is disabled.
-
-Supported preparation and export can also be named explicitly:
+Preparation and export use the same composition operation:
 
 ```python
 gguf_recipe = (
     Recipe(GGUF(quant_type="Q4_K"))
-    .prepare(SmoothMAD())
-    .export(GGUFFormat())
+    .with_(SmoothMAD())
+    .with_(GGUFFormat())
 )
 ```
 
-The method/codec validates this particular combination. `prepare` declares
-transforms and their write scope; it is not permission to change unselected
-neighbors. `export` specifies output representation; it does not add a second
-lossy quantizer to an already-fitted payload. A global rotation or structural
-change can instead be an explicit plan operation with its full target scope.
+The method/codec validates this particular combination. A preparation extension
+declares its write scope and cannot change unselected neighbors. A format
+extension specifies the output representation; any quantization fused with
+encoding remains a declared stage of the selected method. A global rotation or
+structural change can instead be a plan operation with its full target scope.
 
 A separately requested post-quantization adapter uses `GenerateAdapter(...)` on
 the packed base and explicit source/data roles. It is not the same request as
@@ -274,6 +331,7 @@ gsq_data = DataBindings(
     train=reconstruction_data,
     validate=held_out_validation,
 )
+staged_gsq = Recipe(GPTQ(bits=4)).with_(StagedGSQ(epochs=2))
 job = Quantize("language", staged_gsq, data=gsq_data, name="language")
 ```
 
@@ -283,6 +341,13 @@ Plugins can register namespaced roles without new top-level API parameters.
 Explicit aliases record intentional reuse; roles requiring disjoint samples
 reject overlap. A data-free method does not open a default dataset or initialize
 a tokenizer/processor merely because a plan binding exists.
+
+Requirements come from the complete composed program. A staged initializer may
+use `initialize` in place of the base method's ordinary `calibration` role;
+composition does not blindly union every standalone requirement. Unknown roles
+and unused operation-specific bindings fail early. Plan defaults may be unused
+by an operation, but `explain()` shows their actual consumers. A plain dataset is
+never silently copied into every role of a multi-role recipe.
 
 `Plan.calibrate(dataset)` may be convenience sugar for
 `Plan.data(calibration=dataset)`, but the resolved and serialized form is a role
@@ -344,19 +409,27 @@ fitting. Avoid a single `parallel=True` switch that conceals all three.
 ## 7. Reusable fragments and configuration files
 
 ```python
-def perception_plan(vision_recipe, audio_recipe):
+def perception_plan(vision_recipe, audio_recipe, vision_data, audio_data):
     return Plan().parallel(
-        Quantize("vision.encoder", vision_recipe, name="vision"),
-        Quantize("audio.encoder", audio_recipe, name="audio"),
+        Quantize("vision.encoder", vision_recipe, data=vision_data, name="vision"),
+        Quantize("audio.encoder", audio_recipe, data=audio_data, name="audio"),
     )
 
+language_data = DataBindings(
+    calibration=omni_calibration,
+    adapter=omni_calibration.alias(reason="shared EoRA observation corpus"),
+)
 plan = (
     Plan()
-    .data(calibration=multimodal_calibration)
     .devices(devices)
-    .include(perception_plan(higher_precision, higher_precision), namespace="senses")
-    .then(Quantize("language", with_adapter, rules=text_rules, name="language"))
-    .evaluate(held_out_suite)
+    .include(
+        perception_plan(higher_precision, higher_precision,
+                        multimodal_calibration, audio_calibration),
+        namespace="senses",
+    )
+    .then(Quantize("language", with_adapter, rules=text_rules,
+                   data=language_data, name="language"))
+    .evaluate(suite=held_out_suite, data=held_out_data)
 )
 ```
 
@@ -403,6 +476,23 @@ Fluent `then` and `parallel` serialize to explicit edges/groups, not opaque meth
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
 
+Recipe composition serializes typed extensions, not Python method names. For
+example, the EoRA recipe above has the following recipe value; its containing
+operation must also bind the declared `calibration` and `adapter` roles:
+
+```yaml
+method: gptqmodel/gptq@1
+bits: 4
+group_size: 128
+extensions:
+  - type: gptqmodel/eora@1
+    rank: 32
+```
+
+Extension list order is preserved for declared order-sensitive constraints. The
+same registry and compatibility checks apply to Python and serialized plans;
+deserialization cannot execute unregistered callables or skip validation.
+
 ## 8. Preview, errors, and extension contracts
 
 `explain()` should answer: what changes, what executes, why this order, which
@@ -433,7 +523,9 @@ to the coordinator or new top-level flags for every option. New behavior that
 cannot be expressed requires a versioned contract extension, not a raw hook that
 bypasses planning.
 
-Proposed API checks include direct/plan semantic equivalence, immutable reuse,
+Proposed API checks include typed `.with_()` dispatch, chained/variadic/file
+equivalence, unknown/ambiguous/duplicate extension rejection, full recipe
+revalidation after `configure()`, direct/plan semantic equivalence, immutable reuse,
 fragment namespacing, Python/file round-trips with explicit bindings, stable
 resolved IDs, override-conflict diagnostics, invalid parallel groups, cycle
 explanations, unsupported required layouts, and correct reporting of zero-match

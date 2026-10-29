@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.4 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.5 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -67,6 +67,14 @@ logical plan into an `ExecutionLayout` using the supplied resource pool and
 method/architecture capabilities. Record both identities. Relocating a task
 cannot silently change its source policy, observation set, quantization grouping,
 or objective.
+
+The numerical plan fixes global sample selection, logical batch/optimizer-step
+boundaries, weighting, and RNG policy. A layout may change supported microbatch
+execution or worker assignment while preserving those semantics within its
+declared equivalence guarantee. If world size changes batch packing, padding,
+normalization, random draws, or update count in a way the method cannot preserve,
+it changes the numerical plan and must be recompiled explicitly. Cache keys
+include the resulting preparation and reduction identity.
 
 | Contract | Required fields/behavior |
 | --- | --- |
@@ -153,6 +161,13 @@ different capabilities. Unknown cardinality is legal only with a bounded stop
 policy; repeated optimizer epochs require a replayable cursor or an explicitly
 budgeted spool. Cursor/shard progress is part of continuation state.
 
+Global selection/splitting precedes worker assignment. Stateful batches and
+augmentations retain stable sample/trace/pass identities across workers. A
+prefetched cursor may run ahead of the consumer, so a durable boundary couples
+committed offsets and sampler/RNG state with the completed statistics or optimizer
+update. Retry deduplication uses committed contribution identities; rereading an
+input does not authorize counting it twice or skipping a lost update.
+
 Reducers merge the method's declared sufficient statistics and normalization
 metadata. Averaging per-rank averages is generally wrong when valid token counts
 or expert traffic differ. Reconstruction gradients and losses likewise need the
@@ -192,6 +207,12 @@ manifest after validation; workers do not race to update the same model files.
 Installation is idempotent by artifact identity even when computation is retried.
 An atomic AWQ group cannot become half-visible after one rank succeeds.
 
+Publication checks expected owner revisions and declared live-candidate reads.
+The coordinator merges disjoint results into one assembled revision rather than
+replacing it with a worker's older whole-model manifest. A failed version check
+requires recomputation or a declared revalidation policy; it cannot silently
+accept stale candidate-conditioned statistics.
+
 Checkpoint state may include observation partitions, complete statistics,
 optimizer/master state, collective epoch, candidate prefix, and random streams,
 but only where the method supports that boundary. No rank-local snapshot is
@@ -218,7 +239,10 @@ A calibrated cost profile may improve them; the planner must not invent a wall
 time or promise linear speedup from GPU count.
 
 An optional bounded profiling operation measures representative stages and
-records model/data/runtime identity. It can recommend a placement revision within
+records model/data/runtime identity. Compilation only schedules it. A profile
+that times a solve or optimizer uses disposable state and declares the fitting
+data roles it consumes; those results never become an installed quantization or
+an untracked teacher. It can recommend a placement revision within
 the same numerical recipe. Falling back to a slower but legal layout is explicit
 in the resolved plan. A strict requested capability fails preflight instead of
 quietly using one GPU for a job expected to need many.
@@ -235,6 +259,7 @@ Proposed acceptance gates:
 | P6 | Failure/cancellation tests cover rank loss, collective mismatch, worker exceptions, partial offload, and publication, with no partial installed result. |
 | P7 | Resume validates topology and numerical identity; supported repartitioning is tested independently from exact-layout resume. |
 | P8 | Comparable 1/2/4/8-device runs, where supported, report elapsed time, GPU-hours, peak device/host memory, transfer volume, utilization, and final quality at the same numerical settings. |
+| P9 | Supported layout changes preserve global sample selection, logical batches/steps, and declared RNG semantics. Prefetch/retry failure injection recovers committed cursor and update state together without lost or duplicated contributions. |
 
 The first usable executor milestone must demonstrate independent task work,
 multi-device capture/statistic merging, and a cooperative optimizer path using
