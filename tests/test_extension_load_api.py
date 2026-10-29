@@ -111,7 +111,7 @@ def test_load_defaults_to_all_extensions(monkeypatch):
 
     result = extension_api.load()
 
-    assert result == {name: True for name in fakes}
+    assert result == dict.fromkeys(fakes, True)
     assert all(fake.load_calls == 1 for fake in fakes.values())
 
 

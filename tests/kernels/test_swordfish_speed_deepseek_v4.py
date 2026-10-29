@@ -22,6 +22,7 @@ from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.logger import setup_logger
 
+
 log = setup_logger()
 
 

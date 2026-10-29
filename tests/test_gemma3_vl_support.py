@@ -4,9 +4,9 @@
 from types import SimpleNamespace
 
 import torch
-from torch import nn
 from safetensors import safe_open
 from safetensors.torch import save_file
+from torch import nn
 from transformers import BatchEncoding
 
 from gptqmodel.models import auto

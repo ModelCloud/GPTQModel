@@ -15,6 +15,7 @@ from .modeling_minimax_m2 import (
     MiniMaxPreTrainedModel,
 )
 
+
 __all__ = [
     "MiniMaxM2Config",
     "MiniMaxM2PreTrainedModel",

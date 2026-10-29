@@ -7,6 +7,7 @@ from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils.backend import BACKEND
 from gptqmodel.utils.importer import select_quant_linear
 
+
 pytestmark = pytest.mark.skipif(
     torch.version.hip is None or not torch.cuda.is_available(),
     reason="ROCm GPU required",

@@ -5,6 +5,7 @@
 
 from model_test import ModelTest
 
+
 class TestDeepSeekV32(ModelTest):
     NATIVE_MODEL_ID = "/monster/data/model/DeepSeek-V3.2-BF16"
     TRUST_REMOTE_CODE = False

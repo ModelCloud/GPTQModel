@@ -31,6 +31,7 @@ import os
 
 import torch
 
+
 # A single source of truth for both backends. Warp-level intrinsics are written
 # against ``warpSize`` because AMD waves are 64 lanes wide while NVIDIA warps
 # are 32; the synchronisation mask is 64-bit on HIP and 32-bit on CUDA.

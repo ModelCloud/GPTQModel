@@ -4,13 +4,13 @@ import threading
 
 import pytest
 import torch
+from test_marlin_scratch_context import _gemm_args, _patch_ops
 
 from gptqmodel.utils import marlin
 from gptqmodel.utils.marlin_scratch import (
     MarlinScratchContext,
     active_marlin_scratch_context,
 )
-from test_marlin_scratch_context import _gemm_args, _patch_ops
 
 
 def ordered_args(m, dtype=torch.float16, fp32=True):
@@ -103,7 +103,7 @@ def test_loader_failure_returns_lease(monkeypatch):
 
 
 def cuda_controls(monkeypatch):
-    state = dict(stream=object(), device=0, capture=False)
+    state = {"stream": object(), "device": 0, "capture": False}
     monkeypatch.setattr(torch.cuda, "current_device", lambda: state["device"])
     monkeypatch.setattr(torch.cuda, "current_stream", lambda _device: state["stream"])
     monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: state["capture"])

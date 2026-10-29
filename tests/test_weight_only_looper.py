@@ -5,8 +5,8 @@ from concurrent.futures import Future
 from contextlib import nullcontext
 from types import SimpleNamespace
 
-import torch
 import pytest
+import torch
 from torch import nn
 
 import gptqmodel.looper.weight_only_looper as weight_only_looper_module

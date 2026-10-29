@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from ...utils.model import move_to
 from ..base import BaseQModel
 from ..moe_lifecycle import GateUpDownMoELifecycleHooks
-from ...utils.model import move_to
 
 
 class GlmMoeDsaQModel(BaseQModel):

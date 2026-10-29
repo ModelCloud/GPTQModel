@@ -1,9 +1,11 @@
-from dataclasses import dataclass
-from collections import deque
-import torch
 import gc
 import sys
+from collections import deque
+from dataclasses import dataclass
+
+import torch
 from pydantic import PydanticUserError
+
 
 # @lru_cache
 # def init_pynvml():
@@ -72,6 +74,7 @@ def list_gpu_tensors(min_size: int = 1, cuda_only: bool = True):
 
     import threading
     import warnings
+
     from ...utils.logger import render_table
 
     # Suppress FutureWarning from Torch every time we try to access certain objects

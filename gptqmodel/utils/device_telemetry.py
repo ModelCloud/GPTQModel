@@ -18,6 +18,7 @@ import torch
 
 from .logger import setup_logger
 
+
 log = setup_logger()
 
 _enabled = ContextVar("gptqmodel_device_telemetry", default=False)

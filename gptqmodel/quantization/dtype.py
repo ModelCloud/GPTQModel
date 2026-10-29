@@ -15,8 +15,8 @@ from typing import Optional
 import torch
 import torch.nn.functional as F
 
-from ..utils.torch import HAS_NPU
 from ..utils.logger import setup_logger
+from ..utils.torch import HAS_NPU
 
 
 log = setup_logger()

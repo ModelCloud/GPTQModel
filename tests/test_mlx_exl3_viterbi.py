@@ -15,6 +15,7 @@ import torch
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 from tests.test_mlx_exl3_codebook import _torch_codebook_oracle
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 

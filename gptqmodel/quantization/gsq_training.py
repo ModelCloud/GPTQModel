@@ -7,6 +7,7 @@ import math
 from contextlib import ExitStack
 from pathlib import Path
 from tempfile import TemporaryDirectory
+
 import torch
 
 
@@ -117,7 +118,7 @@ class GSQLion(torch.optim.Optimizer):
             raise ValueError('GSQ Lion requires positive learning rate and two betas in [0,1]')
         if not math.isfinite(weight_decay) or weight_decay < 0:
             raise ValueError('GSQ Lion requires finite nonnegative weight decay')
-        super().__init__(params, dict(lr=lr, betas=betas, weight_decay=weight_decay))
+        super().__init__(params, {'lr': lr, 'betas': betas, 'weight_decay': weight_decay})
 
     @torch.no_grad()
     def step(self, closure=None):
@@ -172,7 +173,7 @@ def resolve_projection_bits(bits, projections=LLAMA_STAGED_PROJECTIONS):
         return resolved
     if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
         raise ValueError('Staged model quantization supports W2/W3/W4')
-    return {name: bits for name in projections}
+    return dict.fromkeys(projections, bits)
 
 
 def projection_bits_for_budget(param_counts, targets, *, low=2, high=3):
@@ -194,7 +195,7 @@ def projection_bits_for_budget(param_counts, targets, *, low=2, high=3):
         if not (low <= target <= high):
             raise ValueError(f'Target {target} is outside the W{low}/W{high} interpolation range')
         remaining = (target-low)*total
-        widths = {name: low for name in param_counts}
+        widths = dict.fromkeys(param_counts, low)
         for name, count in sorted(param_counts.items(), key=lambda item: (-item[1], item[0])):
             if count > remaining:
                 # This block is too large for what is left; a smaller block may
@@ -239,8 +240,8 @@ def scalar_training_candidates(weight, scales, group_size, *, bits, std=.01, str
         prior = prior-(prior*valid).sum(0, keepdim=True)/valid.sum(0, keepdim=True)
     if noise.shape != candidates.shape or noise.device != weight.device or not torch.isfinite(noise).all():
         raise ValueError('GSQ initializer noise must match candidate geometry and be finite')
-    return dict(candidates=candidates.detach(), valid=valid, group_index=groups,
-                logits=(std*(noise+prior*strength)).detach(), scales=scales.float().detach().clone())
+    return {'candidates': candidates.detach(), 'valid': valid, 'group_index': groups,
+                'logits': (std*(noise+prior*strength)).detach(), 'scales': scales.float().detach().clone()}
 
 
 class GSQScalarTrainingModule(torch.nn.Module):
@@ -794,7 +795,7 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 quantizers, validation_batches, objective,
                 weights=checkpoint_weights, distributed=distributed,
             )
-            validation_history.append(dict(epoch=epoch, hard_loss=validation_loss))
+            validation_history.append({'epoch': epoch, 'hard_loss': validation_loss})
             if validation_loss < best_validation_loss:
                 best_validation_loss = validation_loss
                 best_epoch = epoch
@@ -813,13 +814,13 @@ def fit_reconstruction_stage(quantizers, batches, objective, *, epochs, seed=7,
                 parameters = dict(quantizer.named_parameters())
                 for parameter_name, value in best_parameters[quantizer_name].items():
                     parameters[parameter_name].copy_(value)
-    result = dict(weights=(
+    result = {'weights': (
                       {name: quantizer.hard_weight().detach().clone()
                        for name, quantizer in quantizers.items()}
                       if export_weights else None
                   ),
-                  scales={name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
-                  history=history, hard_loss_before=hard_loss_before)
+                  'scales': {name: quantizer.scales.detach().clone() for name, quantizer in quantizers.items()},
+                  'history': history, 'hard_loss_before': hard_loss_before}
     final_hard_weights = (
         best_hard_weights
         if restore_best and reuse_best_hard_weights else
@@ -1111,7 +1112,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
     else:
         if isinstance(bits, bool) or not isinstance(bits, int) or bits not in (2, 3, 4):
             raise ValueError('Staged Llama GPTQ requires W2/W3/W4 and calibration batches')
-        width = {name: bits for name in names}
+        width = dict.fromkeys(names, bits)
     if initializer == 'rtn':
         from .config import RTNConfig
         from .rtn import RTN
@@ -1135,7 +1136,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
             if not torch.equal(groups, expected.to(groups.dtype)):
                 raise ValueError('RTN initializer grouping does not match contiguous GSQ groups')
             initializers[name] = (weight.detach().clone(), scales.detach().clone())
-            metadata[name] = dict(loss=loss, damp=damp, samples=samples)
+            metadata[name] = {'loss': loss, 'damp': damp, 'samples': samples}
         return initializers, metadata
     try:
         for name in names:
@@ -1200,7 +1201,7 @@ def initialize_llama_gptq(layer, batches, *, bits, group_size, damp_percent=.01,
             if not torch.equal(groups, expected.to(groups.dtype)):
                 raise ValueError('GPTQ initializer grouping does not match contiguous GSQ groups')
             initializers[name] = (weight.detach().clone(), scales.detach().clone())
-            metadata[name] = dict(loss=loss, damp=damp, samples=samples)
+            metadata[name] = {'loss': loss, 'damp': damp, 'samples': samples}
         return initializers, metadata
     finally:
         for handle in handles:
@@ -1357,7 +1358,7 @@ def quantize_llama_gsq_block(layer, batches, *, bits, group_size, gsq=None, pack
                 fitted.get_submodule(name).weight.copy_(weight)
         records = {name: {'scales': {'weight': scales}} for name, (_, scales) in initializers.items()}
     exported = pack_llama_staged_block(fitted, records, bits=width, group_size=group_size) if pack else fitted
-    return exported, dict(gsq_training=effective, bits=bits, group_size=group_size,
-                          projection_bits=width,
-                          packed=pack, deterministic_algorithms=torch.are_deterministic_algorithms_enabled(),
-                          initializers=initializers, initializer_metadata=metadata, stages=records)
+    return exported, {'gsq_training': effective, 'bits': bits, 'group_size': group_size,
+                          'projection_bits': width,
+                          'packed': pack, 'deterministic_algorithms': torch.are_deterministic_algorithms_enabled(),
+                          'initializers': initializers, 'initializer_metadata': metadata, 'stages': records}

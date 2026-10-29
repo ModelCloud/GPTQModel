@@ -25,6 +25,7 @@ from ..utils.looper_helpers import (
 from ..utils.model import move_to, nested_move_to
 from ..utils.torch import torch_sync
 
+
 if TYPE_CHECKING:  # pragma: no cover - imports for typing only
     from logbar.progress import ProgressBar
 

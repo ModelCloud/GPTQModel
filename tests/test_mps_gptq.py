@@ -11,6 +11,7 @@ import torch
 from gptqmodel.quantization.config import QuantizeConfig
 from gptqmodel.quantization.gptq import GPTQ
 
+
 pytestmark = pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS")
 
 

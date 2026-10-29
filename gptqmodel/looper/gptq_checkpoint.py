@@ -42,6 +42,7 @@ from .paroquant_processor import ParoQuantProcessor
 from .qqq_processor import QQQProcessor
 from .weight_only_processor import WeightOnlyProcessor
 
+
 _CHECKPOINT_IDENTITY_VERSION = 2
 _IDENTITY_EXCLUDED_CONFIG_FIELDS = {
     "offload_to_disk_path",

@@ -15,8 +15,8 @@ from parameterized import parameterized
 from gptqmodel.nn_modules.qlinear.swordfish import SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.utils.swordfish import (
-    prewarm_swordfish_extension,
     _validate_swordfish_device_support,
+    prewarm_swordfish_extension,
     swordfish_runtime_available,
     swordfish_runtime_error,
 )
@@ -335,15 +335,15 @@ class TestSwordfishKernel(unittest.TestCase):
             _assert_pair(torch_linear, sf, x)
 
     def test_swordfish_accepts_only_int32_packing(self):
-        kwargs = dict(
-            bits=4,
-            group_size=64,
-            desc_act=False,
-            sym=True,
-            in_features=64,
-            out_features=64,
-            dtype=torch.float16,
-        )
+        kwargs = {
+            "bits": 4,
+            "group_size": 64,
+            "desc_act": False,
+            "sym": True,
+            "in_features": 64,
+            "out_features": 64,
+            "dtype": torch.float16,
+        }
         ok, error = SwordfishLinear.validate(pack_dtype=torch.int32, **kwargs)
         self.assertTrue(ok, error)
         self.assertIsNone(error)

@@ -266,9 +266,10 @@ def test_subprocess_recovery(
         assert actual and all(".layers.0." not in event["name"] for event in actual)
         # Compare the full set/multiplicity of task initializations and input
         # batches, plus sample counts and exact pre-quantization Hessian hashes.
-        canonical = lambda records: sorted(
-            json.dumps(event, sort_keys=True) for event in records
-        )
+        def canonical(records):
+            return sorted(
+                    json.dumps(event, sort_keys=True) for event in records
+                )
         assert canonical(actual) == canonical(expected)
         killed = [
             event for event in events(interrupted.stdout) if event["event"] == "kill"

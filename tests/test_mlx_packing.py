@@ -395,10 +395,10 @@ def test_packed_mixed_layers_with_bias_match_independent_torch_oracle(monkeypatc
     import mlx.nn as mlx_nn
     import torch
 
+    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
+    from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.nn_modules.qlinear.mlx_gptq import MlxGPTQGroup16Linear, MlxGPTQLinear
-    from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQGroup16Linear, MlxAWQLinear
     from gptqmodel.utils import mlx as mlx_utils
 
     rng = np.random.default_rng(286)
@@ -526,11 +526,11 @@ def test_mlx_quant_linear_registry_validates_capabilities(format):
         (MlxQuantLinear, METHOD.GPTQ, FORMAT.GPTQ_V2) if format == "gptq"
         else (AwqMlxQuantLinear, METHOD.AWQ, FORMAT.GEMM)
     )
-    contract = dict(
-        bits=4, group_size=64, desc_act=False, sym=False,
-        pack_dtype=torch.int32, dtype=torch.float16,
-        in_features=128, out_features=64, device=DEVICE.MPS,
-    )
+    contract = {
+        "bits": 4, "group_size": 64, "desc_act": False, "sym": False,
+        "pack_dtype": torch.int32, "dtype": torch.float16,
+        "in_features": 128, "out_features": 64, "device": DEVICE.MPS,
+    }
     assert select_quant_linear(
         **{key: contract[key] for key in ("bits", "group_size", "desc_act", "sym", "pack_dtype", "dtype", "device")},
         backend=BACKEND.MLX, format=checkpoint_format, quant_method=method,

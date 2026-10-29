@@ -16,27 +16,35 @@ import torch
 from torch import nn
 from torch.nn import Module
 
-from ..looper.loop_processor import DTYPE_SIZE_COLUMN, ExecutionConfig, MODULE_FEATURE_COLUMN, LoopProcessor
+from ..looper.loop_processor import DTYPE_SIZE_COLUMN, MODULE_FEATURE_COLUMN, ExecutionConfig, LoopProcessor
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import DEVICE, SUPPORTS_MODULE_TYPES
-from ..models.writer import (PROCESS_LOG_LAYER, PROCESS_LOG_MODULE, PROCESS_LOG_NAME,
-                             PROCESS_LOG_TIME, PROCESS_USED_MEMORY, QUANT_LOG_LOSS, QUANT_LOG_NSAMPLES)
+from ..models.writer import (
+    PROCESS_LOG_LAYER,
+    PROCESS_LOG_MODULE,
+    PROCESS_LOG_NAME,
+    PROCESS_LOG_TIME,
+    PROCESS_USED_MEMORY,
+    QUANT_LOG_LOSS,
+    QUANT_LOG_NSAMPLES,
+)
 from ..nn_modules.qlinear.gemm_awq import AwqGEMMLinear
 from ..nn_modules.qlinear.gemv_awq import AwqGEMVLinear
 from ..nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear
 from ..nn_modules.qlinear.torch_awq import AwqTorchLinear
 from ..quantization.awq.quantize.scale import apply_clip, apply_scale
-from ..quantization.awq.utils.module import append_str_prefix, get_op_name, get_op_by_name
+from ..quantization.awq.utils.module import append_str_prefix, get_op_by_name, get_op_name
 from ..quantization.config import FORMAT, METHOD, MSEConfig, QuantizeConfig, resolve_quant_format
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.ctx import ctx
 from ..utils.device import get_device
 from ..utils.fallback import normalize_fallback
-from ..utils.logger import setup_logger, log_time_block
-from ..utils.model import find_modules, get_module_by_name_prefix, move_to, create_quant_module, pack_module
+from ..utils.logger import log_time_block, setup_logger
+from ..utils.model import create_quant_module, find_modules, get_module_by_name_prefix, move_to, pack_module
 from ..utils.module_locks import parent_module_lock
 from ..utils.torch import CPU
+
 
 log = setup_logger()
 
@@ -1699,7 +1707,7 @@ class AWQProcessor(LoopProcessor):
 
         for name in named_linears:
             # due to qk bmm, it is hard to clip precisely
-            if any([_ in name for _ in avoid_clipping]):
+            if any(_ in name for _ in avoid_clipping):
                 continue
 
             linear = named_linears[name]

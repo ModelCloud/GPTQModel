@@ -19,6 +19,7 @@ import triton
 import triton.language as tl
 
 from gptqmodel.utils.env import env_flag
+
 from .scheduler import SUPPORTED_GROUP_SIZES, validate_fused_config
 
 

@@ -7,6 +7,7 @@ from gptqmodel.utils import marlin as marlin_utils
 from gptqmodel.utils.marlin_scratch import MarlinScratchContext
 from scripts.marlin_scratch_fixture import gemm_arguments, make_layer
 
+
 pytestmark = [pytest.mark.cuda, pytest.mark.skipif(
     not torch.cuda.is_available(), reason="CUDA required")]
 
@@ -79,7 +80,7 @@ def test_invalid_scratch_rejected(dtype, target, fault):
                               device="cuda", dtype=torch.uint8)
         args["a"] = storage[:args["a"].numel() * dtype.itemsize].view(dtype).reshape_as(args["a"])
         bad = storage[:length * good.element_size()].view(good.dtype)
-    buffers = dict(c_tmp=c_tmp, a_tmp=a_tmp)
+    buffers = {"c_tmp": c_tmp, "a_tmp": a_tmp}
     buffers[target] = bad
     with pytest.raises(RuntimeError, match=target):
         marlin_utils.gptq_marlin_gemm(**args, **buffers)
@@ -93,7 +94,7 @@ def test_scratch_alias_with_other_arguments_rejected(target, alias):
     args = gemm_arguments(layer, torch.randn(17, 256, device="cuda", dtype=torch.float16))
     args["c"] = torch.empty(17, 128, device="cuda", dtype=torch.float16)
     c_tmp, a_tmp = scratch(args)
-    buffers = dict(c_tmp=c_tmp, a_tmp=a_tmp)
+    buffers = {"c_tmp": c_tmp, "a_tmp": a_tmp}
     good = buffers[target]
     if alias == "other_scratch":
         name = "a_tmp" if target == "c_tmp" else "c_tmp"
@@ -132,7 +133,7 @@ def test_scratch_from_other_cuda_device_rejected(target):
     layer, _, _ = make_layer("gptq", torch.float16, act_order=True)
     args = gemm_arguments(layer, torch.randn(17, 256, device="cuda:0", dtype=torch.float16))
     c_tmp, a_tmp = scratch(args)
-    buffers = dict(c_tmp=c_tmp, a_tmp=a_tmp)
+    buffers = {"c_tmp": c_tmp, "a_tmp": a_tmp}
     buffers[target] = buffers[target].to("cuda:1")
     with pytest.raises(RuntimeError, match=target):
         marlin_utils.gptq_marlin_gemm(**args, **buffers)

@@ -26,8 +26,8 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
-from .gsq_training_config import GSQTrainingConfig
 from ..utils.vptq import vptq_index_bits
+from .gsq_training_config import GSQTrainingConfig
 
 
 log = setup_logger()

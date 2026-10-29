@@ -18,12 +18,12 @@ import mlx.core as mx
 import mlx.nn as nn
 import numpy as np
 import torch
+from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 from gptqmodel.nn_modules.qlinear.mlx import ParoMlxQuantLinear
 from gptqmodel.nn_modules.qlinear.mlx_paro import MlxParoLinear
 from gptqmodel.nn_modules.qlinear.paroquant import ParoLinear
 from gptqmodel.quantization import FORMAT
-from qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
 
 def milliseconds(fn, synchronize, repeats):

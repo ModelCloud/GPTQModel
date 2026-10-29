@@ -32,16 +32,6 @@ from ..models.writer import (
 from ..nn_modules.qlinear.torch import TorchQuantEmbeddings
 from ..nn_modules.qlinear.w4a_boundary import layer_mlp_policy
 from ..quantization import FOEM, GPTAQ, GPTQ
-from ..quantization.config import (
-    GPTAQConfig,
-    FOEMConfig,
-    HessianConfig,
-    METHOD,
-    QuantizeConfig,
-    normalize_gsq_config,
-    _normalize_mse,
-    resolve_quant_format,
-)
 from ..quantization.activation_floatx import (
     NVFP4ActivationHeadroom,
     fp8_token_qdq,
@@ -49,6 +39,16 @@ from ..quantization.activation_floatx import (
     nvfp4_block_qdq,
     nvfp4_global_scale,
     nvfp4_uses_headroom,
+)
+from ..quantization.config import (
+    METHOD,
+    FOEMConfig,
+    GPTAQConfig,
+    HessianConfig,
+    QuantizeConfig,
+    _normalize_mse,
+    normalize_gsq_config,
+    resolve_quant_format,
 )
 from ..quantization.gptq import SharedHessianFactorCache
 from ..utils.device import get_device

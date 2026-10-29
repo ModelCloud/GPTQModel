@@ -6,9 +6,10 @@
 """Saved model coverage for the public staged scalar GSQ lifecycle."""
 
 import copy
+import math
+
 import pytest
 import torch
-import math
 
 
 def _write_checkpoint_marker(path):
@@ -246,8 +247,8 @@ def test_cached_llama_stage_preserves_loss_and_gradients(mode, tmp_path, in_memo
             fitted.get_submodule(name).weight.add_(0.01)
     hidden = torch.randn(2, 16, 64)
     positions = torch.arange(16).expand(2, -1)
-    kwargs = dict(attention_mask=None, position_ids=positions,
-                  position_embeddings=model.model.rotary_emb(hidden, positions), use_cache=False)
+    kwargs = {"attention_mask": None, "position_ids": positions,
+                  "position_embeddings": model.model.rotary_emb(hidden, positions), "use_cache": False}
     original = [[((hidden, kwargs, None), hidden.numel())]]
     if mode == "mlp":
         short_kwargs = {**kwargs, "position_ids": positions[:1],
@@ -330,7 +331,7 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, 
     from gptqmodel.models.definitions.llama import LlamaQModel
     from gptqmodel.nn_modules.qlinear.torch import TorchLinear
     from gptqmodel.nn_modules.qlinear.torch_awq import AwqTorchLinear
-    from gptqmodel.quantization import AWQConfig, FORMAT, GPTQConfig
+    from gptqmodel.quantization import FORMAT, AWQConfig, GPTQConfig
     from gptqmodel.utils.backend import BACKEND
 
     torch.manual_seed(7)
@@ -369,8 +370,8 @@ def test_staged_llama_checkpoint_roundtrip(tmp_path, monkeypatch, method, bits, 
     tokenizer = PreTrainedTokenizerFast(
         tokenizer_object=Tokenizer(WordLevel({str(i): i for i in range(128)}, unk_token="0")),
         unk_token="0", pad_token="0")
-    training = dict(enabled=True, initializer=initializer, epochs=1, qk_steps=2,
-                    batch_size=1, microbatch_size=1)
+    training = {"enabled": True, "initializer": initializer, "epochs": 1, "qk_steps": 2,
+                    "batch_size": 1, "microbatch_size": 1}
     if method == "gptq":
         quant_config = GPTQConfig(bits=bits, group_size=32, format=FORMAT.GPTQ_V2,
                                   act_group_aware=False, device=DEVICE.CPU, offload_to_disk=False,

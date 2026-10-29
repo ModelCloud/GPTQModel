@@ -13,7 +13,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import torch
-
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace

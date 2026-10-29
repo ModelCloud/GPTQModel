@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 
 import torch
-from torch import nn
 from accelerate import init_empty_weights
 from safetensors import safe_open
+from torch import nn
 from transformers import AutoConfig, AutoModelForMultimodalLM, DiffusionGemmaConfig
 from transformers.models.diffusion_gemma.generation_diffusion_gemma import (
     DiffusionGemmaGenerationConfig,

@@ -26,8 +26,7 @@ from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS  # noqa: E402
 def test_awq_gemv_packed_transfer_matches_codes_and_torch(variant, group_size, dtype, monkeypatch):
     from gptqmodel.nn_modules.qlinear.gemv_awq import AwqGEMVLinear
     from gptqmodel.nn_modules.qlinear.gemv_fast_awq import AwqGEMVFastLinear, LLMAwqLinear, pack_intweight
-    from gptqmodel.nn_modules.qlinear.mlx import (AwqGemvFastMlxQuantLinear,
-                                                  AwqGemvMlxQuantLinear, LLMAwqMlxQuantLinear)
+    from gptqmodel.nn_modules.qlinear.mlx import AwqGemvFastMlxQuantLinear, AwqGemvMlxQuantLinear, LLMAwqMlxQuantLinear
     from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
     from gptqmodel.utils import mlx as mlx_utils
 
@@ -117,8 +116,8 @@ def test_awq_qwen38_outputs_preserve_dtype_and_match_torch(
         zeros.reshape(-1, out_features // 8, 8)[:, :, order].astype(np.uint32) << shifts, axis=-1,
     )
 
-    from gptqmodel.utils.mlx_packing import repack_awq_4bit
     from gptqmodel.nn_modules.qlinear.mlx_awq import MlxAWQLinear
+    from gptqmodel.utils.mlx_packing import repack_awq_4bit
 
     packed, mlx_scales, biases = repack_awq_4bit(qweight, qzeros, scales, in_features, out_features)
     linear = nn.QuantizedLinear(

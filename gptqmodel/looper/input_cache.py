@@ -26,7 +26,7 @@ class InputCache:
     def module_kwargs(self):
         """Returns the replay kwargs that are shared across cached module calls."""
 
-        result = dict()
+        result = {}
         result["position_ids"] = self.position_ids
         result["attention_masks"] = self.attention_masks
         return result

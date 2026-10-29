@@ -30,7 +30,7 @@ def test_paired_case_uses_public_context_module(monkeypatch, tmp_path):
 
     def measure(fn, torch, device, iters):
         fn()
-        return dict(cpu_submit_us=1., forward_us=2., gpu_span_us=3.)
+        return {"cpu_submit_us": 1., "forward_us": 2., "gpu_span_us": 3.}
 
     def audit(fn, torch, device, path):
         fn()
@@ -42,8 +42,8 @@ def test_paired_case_uses_public_context_module(monkeypatch, tmp_path):
     utils = SimpleNamespace(marlin_scratch_sizes=lambda *args: (16, 0))
     args = SimpleNamespace(device="cpu", seed=17, cache_bytes=1024,
                            warmup=1, rounds=2, iters=1, graph=False)
-    case = dict(shape="test", k=8, n=4, m=2, dtype="fp16", method="gptq",
-                act_order=False, fp32=True)
+    case = {"shape": "test", "k": 8, "n": 4, "m": 2, "dtype": "fp16", "method": "gptq",
+                "act_order": False, "fp32": True}
     result = benchmark.run_case(case, torch, utils, args, tmp_path)
 
     assert result["status"] == "complete"

@@ -63,8 +63,8 @@ def assert_batches_identical(eager, lazy):
 @pytest.mark.parametrize('implicit_causal', [True, False])
 def test_lazy_staging_matches_eager_staging(implicit_causal):
     captured = documents(8, 16, 8)
-    kwargs = dict(batch_size=4, microbatch_size=2, device='cpu',
-                  implicit_causal=implicit_causal)
+    kwargs = {'batch_size': 4, 'microbatch_size': 2, 'device': 'cpu',
+                  'implicit_causal': implicit_causal}
     eager = llama_stage_batches(captured, lazy=False, **kwargs)
     lazy = llama_stage_batches(captured, lazy=True, **kwargs)
     assert_batches_identical(eager, lazy)
@@ -72,7 +72,7 @@ def test_lazy_staging_matches_eager_staging(implicit_causal):
 
 def test_lazy_staging_preserves_partial_trailing_batch():
     captured = documents(6, 16, 8)
-    kwargs = dict(batch_size=4, microbatch_size=3, device='cpu', implicit_causal=True)
+    kwargs = {'batch_size': 4, 'microbatch_size': 3, 'device': 'cpu', 'implicit_causal': True}
     eager = llama_stage_batches(captured, lazy=False, **kwargs)
     lazy = llama_stage_batches(captured, lazy=True, **kwargs)
     assert len(eager) == len(lazy) == 2
@@ -84,7 +84,7 @@ def test_lazy_staging_materializes_one_batch_at_a_time():
     import tracemalloc
 
     captured = documents(128, 64, 32)
-    kwargs = dict(batch_size=32, microbatch_size=16, device='cpu', implicit_causal=True)
+    kwargs = {'batch_size': 32, 'microbatch_size': 16, 'device': 'cpu', 'implicit_causal': True}
 
     tracemalloc.start()
     lazy = llama_stage_batches(captured, lazy=True, **kwargs)

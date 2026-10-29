@@ -17,6 +17,7 @@ from gptqmodel.looper.checkpoint_store import (
     CheckpointStore,
 )
 
+
 IDENTITY = {"model": "dense", "algorithm": {"bits": 4}}
 
 

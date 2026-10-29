@@ -12,10 +12,10 @@ import torch
 import gptqmodel.models._const as model_const
 from gptqmodel.models._const import DEVICE
 from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.gguf import GGUFTorchLinear
 from gptqmodel.nn_modules.qlinear.gguf_cpp import GGUFCppKernel, GGUFCudaKernel
 from gptqmodel.nn_modules.qlinear.gguf_triton import GGUFTritonKernel
-from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
 from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
@@ -23,10 +23,10 @@ from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
+from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512 import TorchCpuAvx512Linear
 from gptqmodel.nn_modules.qlinear.torch_cpu_avx512_awq import TorchCpuAvx512AwqLinear
 from gptqmodel.nn_modules.qlinear.tritonv2 import TritonV2Linear
-from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
 from gptqmodel.quantization import FORMAT, METHOD
 from gptqmodel.utils import importer
 from gptqmodel.utils.backend import BACKEND
@@ -892,7 +892,7 @@ def test_validation_cache_partitions_capability_and_index(monkeypatch):
             calls.append(kwargs["device"])
             return True, None
 
-    contract = dict(bits=4, group_size=128, trainable=False)
+    contract = {"bits": 4, "group_size": 128, "trainable": False}
     validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:0"))
     validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:0"))
     validate_quant_linear(DeviceKernel, **contract, device=torch.device("cuda:1"))
@@ -918,17 +918,17 @@ def test_validation_cache_is_contract_and_device_sensitive():
             calls.append(kwargs)
             return True, None
 
-    common = dict(
-        bits=4,
-        group_size=128,
-        desc_act=False,
-        sym=True,
-        pack_dtype=torch.int32,
-        dtype=torch.float16,
-        dynamic=None,
-        trainable=False,
-        adapter=None,
-    )
+    common = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "pack_dtype": torch.int32,
+        "dtype": torch.float16,
+        "dynamic": None,
+        "trainable": False,
+        "adapter": None,
+    }
     validate_quant_linear(ContractKernel, **common, device=torch.device("cpu"), in_features=128, out_features=256)
     validate_quant_linear(ContractKernel, **common, device=torch.device("cpu"), in_features=128, out_features=256)
 

@@ -3,9 +3,9 @@
 
 """Focused Hessian pipeline tests for stream-safe reuse and factor caching."""
 
-from concurrent.futures import ThreadPoolExecutor
 import gc
 import weakref
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 import torch

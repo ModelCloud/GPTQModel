@@ -46,6 +46,7 @@ from ..utils.torch import CPU, torch_empty_cache, torch_sync
 from .extension import LoopStep
 from .stage_subset import SubsetPlan, build_layer_subset_plans, run_subset_stage
 
+
 if TYPE_CHECKING:  # pragma: no cover - type hints only
     from .module_looper import ModuleLooper
 
@@ -592,8 +593,8 @@ def run_layer_stage(
 
         for p_index, processor in enumerate(looper.processors):
             if looper.gptq_model.quantize_config.activation_mode in {"w4afp8", "w4a_nvfp4"}:
-                from .native_processor import NativeProcessor
                 from ..nn_modules.qlinear.w4a_llama_replay import set_w4a_replay_enabled
+                from .native_processor import NativeProcessor
 
                 set_w4a_replay_enabled(module, not isinstance(processor, NativeProcessor))
             # Each processor contributes a quantization phase; walk them in
