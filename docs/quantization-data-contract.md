@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Data contract for quantization lifecycles
 
-**Status:** revision 0.12 design proposal, 2026-10-29. No data API is
+**Status:** revision 0.13 design proposal, 2026-10-29. No data API is
 implemented by this PR. See the
 [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -279,6 +279,26 @@ alone cannot determine augmentation or noise in a topology-independent replay.
 
 ## 5. Friendly API
 
+The preferred composer attaches sources directly:
+
+```python
+job = Quantize(
+    Vision(GPTQ(bits=8)).Use(ImageDataSet(image_text_samples)),
+    Language(GPTQ(bits=4)).Use(TextDataSet(text_samples)),
+    model=model,
+)
+```
+
+These positional items run serially in the listed order. `Use` dispatches
+`QDataSet`, `DataBindings`, and recipe extensions by registered type. Compatible
+calibration routes propagate downstream: language observes image-conditioned
+inputs as well as its attached text source. Attachment is not a private modality
+pipeline. Training, validation, selection, and adapter bindings retain explicit
+roles; route propagation cannot reuse them as arbitrary calibration data.
+See the [composer contract](quantization-composer-api.md) for model binding and
+ambiguity rules. The direct and advanced graph forms below lower to the same
+requirements.
+
 The common one-role case accepts a `QDataSet` directly. A plain dataset binds to
 the operation's only unambiguous required role, and its route is inferred. Neither
 a `CalibrationDataSet` wrapper nor a route string is required for ordinary GPTQ:
@@ -307,9 +327,9 @@ texts = TextDataSet(text_samples)
 plan = (
     Plan()
     .data(images, texts)
-    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
             .devices(Local(gpus=[0, 1])))
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
             .devices(Local(gpus=[0, 1, 2, 3])))
 )
 
@@ -363,7 +383,7 @@ gsq_data = DataBindings(
 
 plan = (
     Plan()
-    .add(Quantize(
+    .add(QuantizeComponent(
         "language", Recipe(GPTQ(bits=4)).use(StagedGSQ()),
         data=gsq_data, devices=Local(gpus=[0, 1, 2, 3]), name="language",
     ))
@@ -542,6 +562,7 @@ explicitly materialized artifacts.
 | QD16 | `.data(images, texts)` resolves image and text input paths without manual route/component bindings; shared-backbone observations include both paths and an encoder-only observation stops early only under an admitted replay contract. |
 | QD17 | Custom modality schemas and encoder-free adapters resolve through registered input contracts; ambiguous routes, missing aligned fields, and explicit incompatible route restrictions fail with concrete choices. |
 | QD18 | Source groups preserve declared limits, ordering, weights, and actual coverage across GPU layouts; no implicit pairing, equal-corpus weighting, duplicated contributions, or reuse across distinct lifecycle roles occurs. Resolved routes and producer revisions survive save/resume. |
+| QD19 | Component `Use` preserves typed roles while compatible calibration routes reach downstream consumers. Image-conditioned language observations are retained; train/validate/select data cannot leak into another role, independent sources cannot be paired implicitly, and data/extension dispatch is unambiguous. |
 
 ## 10. Proposed decisions
 

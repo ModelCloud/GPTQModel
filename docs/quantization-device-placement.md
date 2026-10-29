@@ -3,65 +3,64 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Device placement inside lifecycle actions
 
-**Status:** revision 0.12 design proposal, 2026-10-29. These APIs and execution
+**Status:** revision 0.13 design proposal, 2026-10-29. These APIs and execution
 guarantees are proposed, not implemented. See the [public API](quantization-plan-api.md),
 [parallel contract](quantization-parallel-execution.md), and
 [DeepSeek example](quantization-example-deepseek-v4.1-flash.md).
 
 ## 1. Actions own their resources and execution policies
 
-The common request names devices and an optional execution mode:
+The [component composer](quantization-composer-api.md) configures execution with
+one typed value and an ordinary device list:
 
 ```python
-language = Quantize.language(recipe=GPTQ(bits=4)).devices(
-    Local(gpus=[0, 1, 2, 3], parallel="tensor")
+job = Quantize(Language(GPTQ(bits=4)).Use(textData), model=model).Default(
+    parallel=TensorParallel(devices=[0, 1, 2, 3])
 )
-plan = Plan().data(calibration).serial(language)
 ```
 
-No lifecycle stage name, policy wrapper, duplicate GPU count, or `required=True`
-is needed. `parallel="data"` requests data parallelism. Omitting `parallel` means
-`"auto"`; an explicit mode is a requirement and unsupported requests fail.
-Constructor `devices=` and immutable `.devices(...)` are equivalent; direct
-calls use the same descriptor. Devices and their mode belong to the action passed
-to `serial`, `parallel`, or `add`. A plan or included fragment cannot replace
-them. Reuse immutable `Local` values explicitly when actions share configuration.
-An independent evaluator owns its configuration after saving.
+`DataParallel` selects data replicas; `TensorParallel` selects tensor shards.
+Omitting execution settings permits a supported automatic layout. An explicit
+mode is a requirement and unsupported requests fail. `.Default(...)` belongs to
+this composed action; `.MoE(...)` and component-local settings override fields
+under the composer's documented precedence. An outer `Plan` has no global device
+setting. Advanced graph descriptors carry the resolved per-component settings.
 
 | Control | Meaning |
 | --- | --- |
-| `Plan.serial(a, b)` / `Plan.parallel(a, b)` | Completion order or legal overlap between lifecycle actions. |
-| `Local(gpus=[0, 1, 2, 3])` | Choose a supported layout automatically within this action's pool and budgets; show the resolution. |
-| `Local(gpus=[0, 1, 2, 3], parallel="data")` | Four logical replicas process different data partitions using the declared observation/gradient reducers. |
-| `Local(gpus=[0, 1, 2, 3], parallel="tensor")` | One logical model execution uses four tensor shards with declared axes and collectives. |
-| `Local(gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2})` | Two data replicas, each with two tensor shards. |
+| `Quantize(a, b)` | Run a then b, including stable installation and completion barriers. |
+| `Quantize(Parallel(a, b))` | Request supported concurrent component lifecycles and join their results. |
+| `Default(devices=Local(gpus=[0, 1, 2, 3]))` | Automatic execution with this device context, budgets, and maps. |
+| `Default(parallel=DataParallel(devices=[0, 1, 2, 3]))` | Four logical replicas distribute samples inside the applicable lifecycle. |
+| `Default(parallel=TensorParallel(devices=[0, 1, 2, 3]))` | One logical model execution uses four tensor shards. |
 
-Running two lifecycle actions concurrently is neither data parallelism nor tensor
-parallelism. Both execution modes can occur inside a single serial action. To
-combine them, specify their counts in the same device description:
+Typed execution values accept `devices=Local(...)` for budgets, custom maps, and
+CPU/NUMA controls; a list or tuple is the common shorthand. A mode and its device
+pool replace as one execution field. There is no stage ID, duplicate worker count,
+or enforcement flag in the common request. The previous `Local(parallel=...)`
+authoring spelling is superseded; local contexts describe physical resources.
+
+An advanced combined layout retains explicit axis counts:
 
 ```python
-hybrid_devices = Local(
-    gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2},
-)
+execution = HybridParallel(devices=[0, 1, 2, 3], data=2, tensor=2)
 ```
 
 The count product must equal the selected GPU count. Counts are positive integers;
-unknown axes, duplicate devices, boolean counts, and incompatible maps fail. The
-default axis order is data then tensor, independent of dictionary key order. Tensor
-groups use contiguous entries in the supplied GPU list, so the example's tensor
-groups are `[0, 1]` and `[2, 3]`; corresponding data-reduction groups are `[0, 2]`
-and `[1, 3]`. Replicas consume different samples while the tensor ranks of a
-replica cooperate on the same logical batch. The reducer must not count one
-sample once per tensor rank. Shared memory, optimizer state, RNG, and collectives
-retain explicit replica/shard identities. This is a capability request, not a
-claim that any current method/backend implements it. Expert or pipeline layouts
-remain separate supported partition types, with explicit advanced contracts.
+unknown axes, duplicate devices, boolean counts, and incompatible maps fail.
+The axis order is data then tensor. Contiguous tensor groups are `[0, 1]` and
+`[2, 3]`; corresponding data-reduction groups are `[0, 2]` and `[1, 3]`. Replicas
+consume different samples while tensor ranks cooperate on the same logical batch.
+The reducer must not count one sample once per tensor rank. Shared memory,
+optimizer state, RNG, and collectives retain replica/shard identities. This is a
+capability request, not a claim that current methods implement this combination.
+Expert/task placement remains distinct from both execution modes and component
+concurrency.
 
 ### The method resolves its own stages
 
 A method registers supported action execution profiles for the complete composed
-recipe, architecture, and backend. The profile lowers `parallel` into the actual
+recipe, architecture, and backend. The profile lowers the typed execution request into the actual
 forward/capture/training layouts and required reducers. It also declares local
 solves, CPU packing, and other work that remains local. Tensor-parallel model
 execution does not promise a distributed Hessian solve; data-parallel capture does
@@ -132,7 +131,7 @@ language_devices = (
         execute=CPU(numa=0, cores=list(range(0, 8))),
     )
 )
-mapped_language = Quantize.language(recipe=GPTQ(bits=4), name="language").devices(language_devices)
+mapped_language = QuantizeComponent.language(recipe=GPTQ(bits=4), name="language").devices(language_devices)
 ```
 
 `dense()` selects the adapter's dense per-layer execution groups: ordinary attention/MLP,
@@ -279,7 +278,8 @@ and maintains shared reservations across all actions, processes, and collective
 groups. Per-action budgets are ceilings, not additional hardware capacity.
 Concurrent requests must also fit host, pinned-memory, core, and bandwidth limits.
 Inconsistent descriptions of the same topology fail; external usage is rechecked
-at runtime. `.parallel` allows resource serialization when overlap cannot fit.
+at runtime. An explicit concurrent group requires a feasible concurrent schedule;
+if only whole-group serialization fits, admission fails rather than downgrades.
 
 For `serial(vision, language)`, install vision's stable result, drain outstanding
 transfers/readers, release its leases, and materialize the language action's
@@ -312,9 +312,10 @@ Changing kernels/reduction order can change the numerical execution profile;
 placement is not a bitwise-equivalence promise.
 
 Portable files store device policies **inside each operation**. They serialize
-typed selectors, half-open ranges, priorities, mappings, and the `parallel` string
-or axis-count map inside `devices`, never Python callbacks. Explicit stage
-overrides also live inside that device description. The compiled layout records concrete owners,
+typed selectors, half-open ranges, priorities, mappings, and typed execution
+values, never Python callbacks. Composer defaults and MoE settings resolve to
+per-component execution values with explicit provenance. Stage overrides retain
+their device context. The compiled layout records concrete owners,
 physical topology, and policy/allocator versions. Resuming under a changed layout
 requires the method's continuation capability and revalidation of NUMA placement.
 Saving records execution provenance but does not require the evaluator or another
@@ -352,7 +353,7 @@ an Engram/NUMA memory allocation contract. See the pinned [configuration][repo-c
 [subset placement][repo-subset], and [worker affinity][repo-threadx].
 
 The redesign retains those distinctions without inheriting their old API or silent
-fallbacks. Future conformance gates P10-P16 in the
+fallbacks. Future conformance gates P10-P18 in the
 [parallel contract](quantization-parallel-execution.md) cover action-local ownership,
 dense/expert maps, data/tensor combinations, NUMA allocation, buffer lifetimes,
 and portable layout/resume behavior. No CPU/GPU runtime test or performance claim

@@ -3,16 +3,39 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Public API proposal: simple operations, composable plans
 
-**Status:** revision 0.12 design sketch, 2026-10-29. None of these new APIs is
+**Status:** revision 0.13 design sketch, 2026-10-29. None of these new APIs is
 implemented by this PR. Names and signatures remain open for discussion.
 The [main proposal](component-quantization-design.md) defines numerical semantics;
 the [parallel contract](quantization-parallel-execution.md) defines legal layouts;
 the [data contract](quantization-data-contract.md) defines `QDataSet`, modality
 schemas, lifecycle roles, preparation, streaming, and provenance.
 
-The public surface should have three levels: a direct operation for common work,
-an immutable fluent plan for composition, and typed extension contracts for
-advanced methods. They all compile to the same resolved plan. Users should not
+The preferred authoring surface is the
+[component composer](quantization-composer-api.md):
+
+```python
+job = (
+    Quantize(
+        Language(GPTQ()).Use(textData),
+        Vision(GPTQ()).Use(visionData),
+        model=model,
+    )
+    .Default(parallel=DataParallel(devices=[0, 1]))
+    .MoE(routing=MoERouting.bypass, parallel=DataParallel(devices=[2, 3]))
+)
+run = job.Run()
+```
+
+The positional components run serially in the listed order. Explicit
+`Parallel(Language(...), Vision(...))` requests concurrent component lifecycles
+when admitted; `DataParallel(...)` controls execution within those lifecycles.
+The composer defines model binding, typed `.Use`, inherited defaults, MoE override
+precedence, and context diagnostics. It never silently reorders the component list.
+
+Direct model calls and the advanced `Plan`/`QuantizeComponent` graph descriptors
+below expose the same underlying contracts. `Quantize` now names only the
+composer; there is no overloaded legacy single-component constructor. These forms
+all compile to the same resolved plan. Users should not
 have to assemble capture hooks, optimizer callbacks, finalizers, or process groups
 to quantize a supported model.
 
@@ -87,16 +110,16 @@ encoder-free model, `vision.encoder` fails with a report of available owners and
 routes. Selecting a vision **route** for calibration does not create vision-only
 ownership of a shared multimodal backbone.
 
-## 2. Declarative composition without accidental serialization
+## 2. Advanced dependency graph declarations
 
 ```python
 plan = (
     Plan()
     .data(multimodal_calibration)
-    .add(Quantize.vision(
+    .add(QuantizeComponent.vision(
         recipe=GPTQ(bits=8), devices=Local(gpus=[0, 1]), name="vision"
     ))
-    .add(Quantize.language(
+    .add(QuantizeComponent.language(
         recipe=GPTQ(bits=4), devices=Local(gpus=[0, 1, 2, 3]), name="language"
     ))
 )
@@ -110,7 +133,9 @@ artifact = run.save("mixed-model")
 report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 ```
 
-`add()` registers intent; its call order does not demand execution order. The
+`Plan.add()` explicitly declares dependency-driven intent; its call order does not
+demand execution order. This advanced graph form differs from the preferred
+`Quantize(...)` sequence, whose argument order is serial. The
 compiler resolves architecture dependencies, method stages, sources, and writes.
 For progressive candidate-conditioned fitting, the language observations wait
 for the required vision revision. Native/derived teacher capture can occur at
@@ -134,9 +159,9 @@ Multiple modality sources also need no per-component bindings:
 plan = (
     Plan()
     .data(ImageDataSet(image_text_samples), TextDataSet(text_samples))
-    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
             .devices(Local(gpus=[0, 1])))
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
             .devices(Local(gpus=[0, 1, 2, 3])))
 )
 ```
@@ -151,8 +176,9 @@ method and adapter permit it; data routing does not expand its write selection.
 
 `.serial(...)` and `.parallel(...)` are plan-level execution combinators for
 actionable lifecycles. Their arguments are typed operation descriptors such as
-`Quantize`, `Requantize`, `GenerateAdapter`, `TuneNorms`, or other registered
-actions. Each action compiles its own lifecycle program. The combinators describe
+`QuantizeComponent`, `RequantizeComponent`, `GenerateAdapter`, `TuneNorms`, or other registered
+actions, including a complete `Quantize(...)` composer. Each action compiles its
+own lifecycle program. The combinators describe
 ordering between actions; they do not impose a shared set of stages or run an
 action when the plan is built. Bare recipes, datasets, and arbitrary callbacks
 are not lifecycle actions.
@@ -167,12 +193,12 @@ plan = (
     Plan()
     .data(multimodal_calibration, audio_calibration, omni_calibration)
     .parallel(
-        Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+        QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
                 .devices(Local(gpus=[0, 1])),
-        Quantize.audio(recipe=GPTQ(bits=8), name="audio")
+        QuantizeComponent.audio(recipe=GPTQ(bits=8), name="audio")
                 .devices(Local(gpus=[2, 3])),
     )
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
             .devices(Local(gpus=[0, 1, 2, 3])))
     .serial(TuneNorms(
         target="language", source=SourceSnapshot("source-checkpoint"),
@@ -197,8 +223,10 @@ expert fitting, or a distributed optimizer: serial order between actions is
 independent of physical parallelism within an action. `add` remains the advanced
 form for declaring intent without insertion-order edges.
 
-`parallel()` permits legal overlap; device count and memory still bound actual
-concurrency. The preview shows feasible placement and serialized bottlenecks.
+`parallel()` requires an admitted concurrent schedule, as does the composer's
+`Parallel(...)`. Device count and memory bound actual overlap; a group that can
+only execute wholly serially fails rather than silently losing its requested mode.
+The preview shows feasible placement and individual serialized bottlenecks.
 Explicit execution modes belong in each action's device description below.
 Devices, mappings, and execution modes belong to each supplied action.
 `Plan.parallel(a, b)` schedules lifecycle actions; data-parallel replicas and
@@ -231,10 +259,10 @@ independent = (
     Plan()
     .data(multimodal_calibration)
     .parallel(
-        Quantize.vision(recipe=GPTQ(bits=8),
+        QuantizeComponent.vision(recipe=GPTQ(bits=8),
                         observations=native_inputs, devices=Local(gpus=[0, 1]),
                         name="vision"),
-        Quantize.language(recipe=GPTQ(bits=4),
+        QuantizeComponent.language(recipe=GPTQ(bits=4),
                           observations=native_inputs, devices=Local(gpus=[2, 3]),
                           name="language"),
     )
@@ -308,7 +336,7 @@ staged_data = DataBindings(
     train=reconstruction_data,
     validate=held_out_validation,
 )
-job = Quantize("language", staged_awq, data=staged_data, name="language")
+job = QuantizeComponent("language", staged_awq, data=staged_data, name="language")
 ```
 
 `Recipe.use(*extensions)` is the single composition entry point. Each call includes
@@ -343,7 +371,7 @@ visible when composition refinement is disabled.
 `configure()` returns a recipe with validated changes to its base method's typed
 options and revalidates every attached extension. The base method is supplied
 to `Recipe(method)`; another quantizer is not an extension that replaces it.
-Dataset bindings retain plan/operation scopes. Devices use
+Dataset bindings retain plan/operation scopes. Advanced graph devices use
 `action.devices(Local(...))` or the equivalent action/direct-call `devices=`
 argument. They are not recipe extensions or plan-wide resource defaults.
 
@@ -372,9 +400,11 @@ requantizing the base with a modifier.
 `target=Target.AUTO` is the default, so callers need not write model-specific
 module paths. A versioned model mapping declares canonical ownership, semantic
 groups, and a default quantization selection for each supported scope. Typed
-constructors such as `Quantize.vision(...)`, `Quantize.language(...)`, and
-`Requantize.language(...)` establish that scope and return ordinary operations;
-they use the same `add`/`serial`/`parallel` composition and lifecycle contracts.
+declarations such as `Vision(GPTQ(...))` and `Language(GPTQ(...))` establish that
+scope. The advanced graph constructors `QuantizeComponent.vision(...)`,
+`QuantizeComponent.language(...)`, and `RequantizeComponent.language(...)` express
+the same scope as ordinary operations, using the same `add`/`serial`/`parallel`
+composition and lifecycle contracts.
 These conveniences lower to an ordinary `scope="vision"`, `scope="language"`,
 or `scope="audio"` field. Additional scopes are registered mapping contracts,
 not new coordinator branches; callers can use `scope=` directly for them.
@@ -382,8 +412,8 @@ not new coordinator branches; callers can use `scope=` directly for them.
 These two values are equivalent:
 
 ```python
-vision_job = Quantize.vision(recipe=GPTQ(bits=8))
-explicit_default = Quantize.vision(
+vision_job = QuantizeComponent.vision(recipe=GPTQ(bits=8))
+explicit_default = QuantizeComponent.vision(
     target=Target.AUTO,
     recipe=GPTQ(bits=8),
 )
@@ -428,7 +458,7 @@ text_rules = (
     )
 )
 
-job = Quantize(
+job = QuantizeComponent(
     target="language",
     recipe=Recipe(GPTQ(bits=4, group_size=128)),
     rules=text_rules,
@@ -505,7 +535,7 @@ gsq_data = DataBindings(
     validate=held_out_validation,
 )
 staged_gsq = Recipe(GPTQ(bits=4)).use(StagedGSQ(epochs=2))
-job = Quantize("language", staged_gsq, data=gsq_data, name="language")
+job = QuantizeComponent("language", staged_gsq, data=gsq_data, name="language")
 ```
 
 Observation/calibration, training, initialization, adapter, validation,
@@ -544,76 +574,55 @@ route/default, processor/tokenizer/template, modality transforms, and producer
 revisions for learned features. These choices are frozen before execution, so
 automatic routing cannot reuse stale candidate features or change during resume.
 
-## 6. Each action owns devices, mappings, and parallel execution
+## 6. Defaults and overrides belong to the composed action
 
-The common request configures devices on the lifecycle action passed to `serial`,
-`parallel`, or `add`. Constructor `devices=` and immutable `.devices(...)` are
-equivalent; direct operations use the same descriptor. Add `parallel="tensor"`
-or `parallel="data"` to select a mode; omit it for automatic placement. The GPU
-list supplies the worker count. `Plan` has no device or execution-mode setting:
+The common composer sets a typed mode with a simple device list:
 
 ```python
-language = Quantize.language(recipe=GPTQ(bits=4)).devices(
-    Local(gpus=[0, 1, 2, 3], parallel="tensor")
-)
-plan = Plan().data(calibration).serial(language)
-```
-
-Automatic placement chooses among declared legal layouts. It never changes the
-algorithm, silently approximates statistics, or invents distributed support for
-a single-device method. Device names refer to the supplied/local resource pool;
-the API does not implicitly allocate cloud infrastructure. External launchers
-can supply a typed distributed device context through the same `devices` entry
-point on an action for multiple nodes. The coordinator reconciles all actions'
-requests against one physical resource ledger: the same GPU in two descriptions
-is still one GPU. Device budgets are not multiplied by concurrent actions.
-Explicit modes are strict by default, so there is no `required=True` flag.
-The composed method owns the mapping from a mode to its lifecycle stages; callers
-need no stage IDs or nested policy builders. Unsupported profiles fail with an
-explanation, and `explain()` shows any local stages such as packing or solves.
-Optional memory/scratch budgets remain ordinary fields on `Local`.
-
-`Local.place(...)` adds explicit dense-layer, per-layer module, expert, and CPU
-tensor mappings. `storage`, `execute`, and `fit` independently constrain backing
-residency, model execution, and fitting. `ByLayer`, `ByExpert`, `ModuleMap`, and
-`RoundRobin` use global logical IDs. `CPU(numa=..., memory_policy=..., cores=...)`
-separates memory allocation from worker affinity. See the complete
-[device placement contract](quantization-device-placement.md) for examples,
-priorities, stage buffers, NUMA enforcement, and source materialization.
-
-Both execution axes can be combined without another wrapper:
-
-```python
-devices = Local(
-    gpus=[0, 1, 2, 3], parallel={"data": 2, "tensor": 2},
+job = Quantize(Language(GPTQ(bits=4)).Use(textData), model=model).Default(
+    parallel=TensorParallel(devices=[0, 1, 2, 3])
 )
 ```
 
-This is two data replicas, each tensor-sharded across two GPUs. The product must
-equal the GPU count; the device-list order defines contiguous tensor groups, so
-these are `[0, 1]` and `[2, 3]`. Dictionary key order does not change the axes.
-The complete composed recipe must support this combination. Explicit owner maps
-remain hard constraints and cannot silently become replicas or tensor shards.
+Use `DataParallel` for data replicas. Omit the setting for supported automatic
+execution. A `.MoE(...)` setting overrides the matching routed-expert work;
+component-local `.Default(...)`/`.MoE(...)` supply finer choices. The
+[composer contract](quantization-composer-api.md) defines exact field precedence,
+atomic replacement of execution mode/device pools, serial argument order, and
+strict admission of `Parallel(...)` groups. These are action-local defaults, not
+settings on an outer `Plan` or global process.
 
-Mesh layouts for supported tensor/expert/pipeline/context partitioning use typed
-axis and ownership descriptors from the parallel contract. Configuration must
-distinguish model partitioning from data replication and independent expert
-fitting. `parallel="data"` partitions samples over complete logical replicas;
-`parallel="tensor"` partitions tensors within one logical model execution. They
-are distinct from `Plan.parallel(...)`, which permits lifecycle overlap. Neither
-mode changes numerical objectives or invents a distributed solve. Advanced
-`Local.for_stage(...)` overrides can change a named stage's mode/resources;
-they remain optional and use the same capability checks. The
-[device placement contract](quantization-device-placement.md) defines profile
-coverage, strict failures, and stage-specific overrides.
+Typed execution values accept `Local(...)` when budgets, custom maps, NUMA, or
+scratch settings are needed. `Default(devices=Local(...))` selects automatic
+execution with that context. Explicit modes are requirements; methods compile
+their profiles without caller-supplied stage IDs or enforcement flags.
+
+```python
+devices = Local(gpus=[0, 1, 2, 3], host_memory="256GiB")
+execution = HybridParallel(devices=devices, data=2, tensor=2)
+```
+
+The combined layout has two data replicas with two tensor shards each; axis
+counts must match the device pool. Whole expert/task placement, data replication,
+tensor sharding, and component concurrency remain different concepts.
+`Local.place(...)` independently constrains storage, forward execution, and
+fitting by global layer/expert/module identity. CPU allocation and worker affinity
+are separate fields. See [device placement](quantization-device-placement.md).
+
+The coordinator shares physical reservations across all scopes and actions;
+describing the same GPU twice cannot multiply capacity. Hard owner maps, method
+coupling, and alias constraints still apply after defaults resolve. Unsupported
+combinations or an explicit concurrent group that can only execute wholly serially
+fail without a hidden fallback. Advanced stage overrides remain available through
+registered graph/resource contracts.
 
 ## 7. Reusable fragments and configuration files
 
 ```python
 def perception_plan(vision_recipe, audio_recipe, vision_devices, audio_devices, *datasets):
     return Plan().data(*datasets).parallel(
-        Quantize.vision(recipe=vision_recipe, devices=vision_devices, name="vision"),
-        Quantize.audio(recipe=audio_recipe, devices=audio_devices, name="audio"),
+        QuantizeComponent.vision(recipe=vision_recipe, devices=vision_devices, name="vision"),
+        QuantizeComponent.audio(recipe=audio_recipe, devices=audio_devices, name="audio"),
     )
 
 language_data = DataBindings(
@@ -628,7 +637,7 @@ plan = (
                         multimodal_calibration, audio_calibration),
         namespace="senses",
     )
-    .serial(Quantize.language(recipe=with_adapter, rules=text_rules,
+    .serial(QuantizeComponent.language(recipe=with_adapter, rules=text_rules,
                              data=language_data, devices=devices, name="language"))
 )
 ```
@@ -675,11 +684,13 @@ compilation. List order in the file is not an implicit correctness constraint.
 Fluent `serial` and `parallel` serialize to explicit edges/groups, not opaque method
 call history. Editing resource choices produces a new execution layout; editing
 teacher/recipe/data choices changes the numerical plan identity as well.
-Device mappings and `parallel` belong inside each operation's `devices`. Typed
-placement rules include selector, storage/execute/fit fields, priorities, and
-half-open ranges; hybrid requests specify axis counts and resolved layouts record
-actual groups. Unregistered callbacks are not a mapping format. Authoring IDs
-resolve to physical devices
+This is a compiled/advanced graph specification. Composer authoring files preserve
+ordered components, explicit parallel groups, defaults, and MoE settings before
+lowering; the composer contract defines that separate form. Resolved execution
+values include mode and device context, while placement rules retain typed
+selectors, storage/execute/fit fields, priorities, and half-open ranges. Hybrid
+requests record axes and groups. Unregistered callbacks are not a mapping format.
+Authoring IDs resolve to physical devices
 and canonical owners in the compiled layout.
 Positional data shorthand serializes to inferred role bindings after resolution;
 source groups use `datasets: [images, texts]` in place of a single `dataset`.
@@ -762,5 +773,6 @@ Placement checks cover action-local policies, global physical reservations,
 dense/per-layer/per-expert mappings, CPU/NUMA allocation before first touch,
 buffer placement, and separate data/tensor/hybrid capabilities. A scoped fitting
 map never changes a weight-write query. Common mode selection requires no stage
-names, policy wrappers, duplicate counts, or enforcement flags; Python/file forms
-resolve the same versioned method profile. These gates are detailed in P10-P16.
+names, nested policy builders, duplicate counts, or enforcement flags. Composer
+and compiled-file forms preserve order, parallel groups, overrides, data roles,
+and the same versioned method profile. These gates are detailed in P10-P18.

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Parallel execution contract for quantization lifecycles
 
-**Status:** revision 0.12 design proposal, 2026-10-29. No executor implementation
+**Status:** revision 0.13 design proposal, 2026-10-29. No executor implementation
 or performance measurements accompany this document.
 See the [main design](component-quantization-design.md),
 [method audit](quantization-method-lifecycles.md),
@@ -23,12 +23,14 @@ The public `.serial(...)` and `.parallel(...)` controls compose lifecycle action
 Serial action ordering does not restrict an action to one GPU: its capture,
 fitting, or optimizer stages retain their admitted physical parallelism. A serial
 action after a parallel group waits for every branch's declared stable result.
-Parallel actions may overlap only when dependencies, writes, and resources permit.
+Parallel actions require an admitted concurrent schedule. A group that can only
+execute wholly serially fails; per-stage dependencies still constrain overlap.
 Each action owns its devices, mappings, and parallel execution policy; there is
-no plan-level device configuration. `Local(..., parallel="data")` and
-`parallel="tensor"` select the action's mode without lifecycle stage names.
-`parallel={"data": 2, "tensor": 2}` combines the axes. The composed method
-resolves a complete supported execution profile. See [device placement](quantization-device-placement.md) for the
+no global device configuration on an outer `Plan`. The composer uses serial
+positional items and explicit `Parallel(...)` groups, with action-local `.Default`
+and `.MoE` settings. `DataParallel(devices=[...])` and `TensorParallel(...)`
+select execution modes inside a lifecycle; `HybridParallel` combines their axes.
+The composed method resolves a complete supported execution profile. See [device placement](quantization-device-placement.md) for the
 public controls, dense/expert/module maps, and CPU/NUMA requirements.
 
 ## 1. Existing behavior to preserve or deliberately replace
@@ -84,7 +86,7 @@ between corresponding tensor partitions; tensor ranks cannot each contribute the
 same sample as independent data. Rank roles, logical batches, shard geometry,
 group membership, and collective order are explicit. Unsupported combined layouts
 fail even if each mode is supported independently. Lifecycle `.parallel(...)`
-only permits concurrent actions and selects none of these modes by itself.
+requests concurrent actions and selects none of these modes by itself.
 
 ## 3. Logical plan and physical execution layout
 
@@ -337,6 +339,8 @@ Proposed acceptance gates:
 | P14 | Table lookup/gather transfers, observation/statistic/optimizer buffers, CPU packing, and decode/prefetch queues obey per-stage/per-node budgets and event lifetimes. Unsupported CPU lookup or buffer placement fails; no persistent expanded table cache is introduced. |
 | P15 | Python/file placement policies preserve scopes, ranges, priorities, mesh axes, and rule identities. Changed-topology resume revalidates allocation/continuation capabilities; independent artifact evaluation has a fresh layout and cannot inherit live quantization leases. |
 | P16 | Simple mode requests resolve the composed method's versioned profile without stage names or repeated counts. Validate inferred world size, axis products/order, and modifier compatibility. Explicit modes cannot become partial best-effort application, silent fallback, or a no-op; advanced stage overrides retain numerical and placement checks. |
+| P17 | Composer position implies serial order; explicit `Parallel` groups retain fork/join boundaries. Dependency, write, capability, or capacity conflicts fail without silently reordering, serializing the whole group, or changing observation policies. Text-first context changes are reported. |
+| P18 | Defaults and MoE overrides resolve scoped field precedence and atomic execution-pool replacement. Validate cross-pool replica redistribution, bypass data weighting, bounded expert batches, and restoration before normal replay. Neither data parallelism nor bypass expands expert write selection. |
 
 The first usable executor milestone must demonstrate independent task work,
 multi-device capture/statistic merging, and a cooperative optimizer path using

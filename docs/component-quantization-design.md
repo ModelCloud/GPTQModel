@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Draft design for component and phased quantization
 
-**Status:** design discussion, revision 0.12, 2026-10-29.
+**Status:** design discussion, revision 0.13, 2026-10-29.
 
 **Related issue:** [#2928](https://github.com/ModelCloud/GPTQModel/issues/2928).
 
@@ -33,6 +33,7 @@ checkpoint-specific example provides a concrete review target:
 
 | Document | Purpose |
 | --- | --- |
+| [Component composer](quantization-composer-api.md) | Preferred component recipes, serial argument order, explicit `Parallel`, typed `Use`, and scoped `Default`/`MoE` overrides. |
 | [2026 architecture audit](quantization-architecture-2026.md) | Source-backed family/pattern coverage, compatibility gaps, and adapter acceptance cases. |
 | [Parallel execution](quantization-parallel-execution.md) | Multi-GPU capture, fitting, model partitioning, resource scheduling, and failure/continuation contracts. |
 | [Device placement](quantization-device-placement.md) | Action-local dense/expert/module mappings, separate storage/execution/fitting, CPU/NUMA control, and data/tensor/hybrid layouts. |
@@ -177,6 +178,8 @@ models. See the companion matrix for primary sources and acceptance cases.
 | Object | Owns or describes |
 | --- | --- |
 | `ModelComposition` | Component registry, parameter aliases, architecture adapter, and assembled revision. |
+| `Quantize` / component declarations | An immutable composer of `Language`, `Vision`, and registered scopes with recipes/data; positional items run serially. `Default` and `MoE` configure settings within this action. |
+| `Parallel` | Explicit concurrent component group with a join barrier, admitted only when numerical dependencies, ownership, and resources permit. Distinct from data/tensor parallel execution. |
 | `Component` | Stable public identity, owned parameter/buffer references, per-operator representations, recipes, and revision history. |
 | `Target.AUTO` / `DynamicModuleTargeting` | Mapped default selection or immutable module query, resolved within an operation scope to canonical owner IDs at compile time. Labels and dataset routing do not determine weight writes. |
 | `Route` | A supported input/output path and modality/task semantics; several routes may execute the same parameter owners. |
@@ -216,7 +219,7 @@ Components are logical identities such as `vision.encoder`, `vision.projector`,
 `language`, or `audio.encoder`. A named selection such as `vision` can expand to
 several components without becoming another mutable owner.
 The model mapping declares versioned scope/default selections. Typed constructors
-such as `Quantize.vision(...)` supply the scope; an omitted target is `Target.AUTO`
+such as `Vision(GPTQ(...))` supply the scope; an omitted target is `Target.AUTO`
 and needs no path string. The mapping explicitly decides whether a default group
 includes bridge/projector owners. Ambiguous or absent defaults require a concrete
 selection instead of guessing. An operation's `name` remains only its label.
@@ -288,6 +291,36 @@ one planner. The [API companion](quantization-plan-api.md) defines stacking,
 ordering, selector precedence, fragments, serialization, and parallel policy.
 Names/signatures remain proposals; examples are independent sketches.
 
+The preferred authoring form follows the
+[component composer contract](quantization-composer-api.md):
+
+```python
+run = (
+    Quantize(
+        Language(GPTQ()).Use(textData),
+        Vision(GPTQ()).Use(visionData),
+        model=model,
+    )
+    .Default(parallel=DataParallel(devices=[0, 1]))
+    .MoE(routing=MoERouting.bypass, parallel=DataParallel(devices=[2, 3]))
+    .Run()
+)
+```
+
+Argument order is serial: language completes before vision. Wrap the components
+in `Parallel(...)` to request concurrent lifecycles when supported. `DataParallel`
+and `TensorParallel` configure execution within a lifecycle; they do not make
+components concurrent. Explicit producer requirements can reject a conflicting
+order; a permitted text-first run records its original vision context and reports
+a later context change without hidden reordering or refitting.
+
+`Use` attaches typed data or recipe extensions. `Default` applies only inside this
+composer, and `MoE` overrides fields for applicable routed-expert work. The
+compiler resolves per-component settings before GPU placement. `model=` permits
+`.Run()` without a process-global model; unbound jobs can use `.Run(model)`.
+Direct calls and advanced graph descriptors expose the underlying contracts:
+
+
 ```python
 model = GPTQModel.load("source-checkpoint")
 model.inspect()
@@ -339,9 +372,9 @@ model = GPTQModel.load("source-checkpoint")
 plan = (
     Plan()
     .data(calibration)
-    .serial(Quantize.vision(recipe=GPTQ(bits=8), name="vision")
+    .serial(QuantizeComponent.vision(recipe=GPTQ(bits=8), name="vision")
             .devices(Local(gpus=[0, 1])))
-    .serial(Quantize.language(recipe=GPTQ(bits=4), name="language")
+    .serial(QuantizeComponent.language(recipe=GPTQ(bits=4), name="language")
             .devices(Local(gpus=[0, 1, 2, 3])))
 )
 resolved = plan.compile(model)
@@ -357,9 +390,10 @@ requantization, and norm tuning. `serial(a, b)` is equivalent to
 terminals. They build ordering intent without executing or flattening the
 method-owned lifecycle programs. An action ordered serially can still execute
 across several GPUs internally.
-Each action configures devices and execution mode together through
-`.devices(Local(..., parallel="tensor"))`; `Plan` has no device setting.
-Use `parallel="data"` for data replicas, or omit the mode for automatic placement.
+The composer configures execution through `.Default(parallel=DataParallel(...))`
+or `TensorParallel(...)`, with component settings and `.MoE(...)` overrides.
+`Plan` has no global device setting; defaults belong to the composed action.
+The lower-level graph examples use resolved component device descriptions.
 The method resolves its own stages; normal callers need no stage IDs or wrappers.
 Action concurrency, data-parallel replicas, and tensor-parallel execution are
 separate controls. A supported hybrid layout can
@@ -370,6 +404,7 @@ dependency. The compiler always infers mandatory dependencies. A parallel group
 with a true dependency or shared-write conflict fails with an explanation. Resource policy
 determines feasible overlap and whether a stage uses replicas, shards, or
 cooperative optimization. Ordering syntax cannot override method semantics.
+An explicit concurrent group that can only run wholly serially fails admission.
 Scoped constructors use `Target.AUTO` by default. Module queries use
 `DynamicModuleTargeting`, including role filters and grouped expert selection.
 Resolution precedes GPU partitioning and freezes mapping/owner identities.
@@ -1080,19 +1115,22 @@ The following are proposed acceptance criteria and experiments.
 | V22 | Future-method admission | A synthetic plugin adds a custom observation type, bounded optimization loop, derived teacher, and non-scalar artifact without edits to coordinator method dispatch. Undeclared effects and unsupported capabilities fail visibly. |
 | V23 | Shared multimodal ownership | Encoder-free routes expose their actual shared owners; a vision-only selector cannot imply independent ownership of a shared backbone. |
 | V24 | Nonstandard execution traces | Depth history, nested recurrence, diffusion canvas/commit steps, and duplex stream events retain correct invocation/state identity under capture, replay, and resume. |
-| V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P16 cover failure, resource pressure, cost, logical batches, action placement, data/tensor layouts, and method-owned execution profiles. |
+| V25 | Parallel numerical semantics | Serial and supported parallel paths satisfy declared reducers, weighting, shard identities, collective order, and continuation guarantees; companion gates P1-P18 cover failure, resource pressure, cost, logical batches, action placement, data/tensor layouts, and method-owned execution profiles. |
 | V26 | Quantization cost | Supported 1/2/4/8-device cases report quality plus time, GPU-hours, memory, transfer volume, and bottlenecks at matched numerical settings; no silent serial fallback for a required layout. |
 | V27 | Composable public API | Direct/fluent/file plans resolve equivalent semantics; serial chained/variadic forms and parallel fork/join compose lifecycle actions without disabling internal multi-GPU execution. Immutable reuse, dependencies, fragments, overrides, and invalid-action diagnostics behave as specified. |
 | V28 | Architecture claims | Checkpoint-pinned adapter reports distinguish structural discovery, working replay, method/layout support, and measured quality; new family names do not automatically imply compatibility. |
-| V29 | Dataset contracts | `QDataSet` modality/schema identity, automatic routes and downstream consumers, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD18. |
+| V29 | Dataset contracts | `QDataSet` modality/schema identity, automatic routes and downstream consumers, role bindings, preparation lineage, splits/aliases, streaming cursors, distributed partitions, and actual consumed coverage satisfy companion checks QD1-QD19. |
 | V30 | Typed recipe composition | Chained/variadic `use()` and serialized extensions resolve the same program; unknown/ambiguous/conflicting types fail, and `configure()` revalidates the composed recipe. |
 | V31 | Compilation, saving, and independent evaluation | Compilation consumes no data or model forward. Quantization has no evaluation node or binding; saving returns a committed artifact before optional evaluation starts. Evaluation tests persisted state, reports separately, and cannot change quantization/save success or trigger refinement. |
 | V32 | Concurrent publication | Independent branch commits retain each other's outputs; changed live-candidate read dependencies and conflicting owner revisions reject stale publication without losing prior committed work. |
-| V33 | Concrete multimodal target | The pinned DeepSeek V4.1 Flash example satisfies DS1-DS7: grouped global expert selection, preserved owners, inferred downstream data paths, explicit native low-bit fitting source, and action-local GPU/NUMA placement. |
+| V33 | Concrete multimodal target | The pinned DeepSeek V4.1 Flash example satisfies DS1-DS8: grouped global expert selection, preserved owners, inferred downstream data paths, explicit native low-bit fitting source, and action-local GPU/NUMA placement. |
 | V34 | Automatic mapped targets | Omitted/explicit `Target.AUTO` and scoped Python/file plans resolve the same default groups. `DynamicModuleTargeting` narrows the scope; labels, data routes, other jobs, and GPU layout cannot expand it. Missing/ambiguous defaults or stale mappings fail concretely. |
 | V35 | Action-local placement | Dense groups, per-layer expert/module maps, backing storage, fitting workers, and buffers obey explicit constraints without expanding writes. Concurrent actions share physical reservations; serial transitions drain leases before changing placement. |
 | V36 | Heterogeneous memory and parallel modes | CPU/NUMA table residency and worker affinity are independently enforced; data, tensor, and hybrid layouts preserve declared reductions and shard identities. Unsupported kernels, allocation policies, or layouts fail explicitly. |
-| V37 | Simple execution intent | Common device/mode configuration requires one `Local` value with no stage IDs, nested policy builders, duplicated worker counts, or `required` flag. String/axis-count modes resolve a versioned profile for the composed recipe, preserving all existing placement/numerical constraints. |
+| V37 | Simple execution intent | `Default(parallel=DataParallel(devices=[...]))` and the tensor counterpart require no stage IDs, repeated worker counts, or enforcement flag. Typed modes resolve a versioned profile for the composed recipe, preserving placement/numerical constraints. |
+| V38 | Serial composer and explicit concurrency | Positional `Quantize` items execute in order; `Parallel` retains branch boundaries and joins. Unsupported concurrency or conflicting producer requirements fail without silent serialization, reordering, or observation-policy changes. |
+| V39 | Scoped defaults and MoE | General/component defaults and MoE overrides resolve documented field precedence. Execution mode/pools replace atomically; unsupported coupled groups, replica redistribution, or routing bypass fail. Bypass changes provenance and never expands writes or leaks into saved inference. |
+| V40 | Typed component authoring | `Language`/`Vision`/registered scopes, `Use`, model binding, `Compile`, and `Run` lower to the canonical graph/data contracts. Packed selections require explicit source lineage; no overloaded legacy `Quantize` constructor or process-global model is needed. |
 
 The inventory is a maintained coverage checklist, not proof that the current
 repository already supports all those combinations. Migrating every kernel at
@@ -1144,7 +1182,8 @@ proposed defaults, not final design approval.
 | D19 | Direct operations, immutable fluent/file plans with `serial`/`parallel` lifecycle actions, and typed `Recipe.use()` composition. | Which extension categories can repeat, and how should instance identities and order conflicts appear in common workflows? |
 | D20 | Explicit observation reducers, partition schemas, and complete collective/shard commits. | Which numerical/reproducibility guarantees survive changed device topology, and which require restart? |
 | D21 | `QDataSet` schemas infer input routes and shared downstream consumers; lifecycle roles remain orthogonal and are inferred only when unambiguous. | Which adapter defaults and coverage profiles minimize manual configuration without hiding meaningful task choices? |
-| D22 | Devices and execution mode use one action-owned `Local` description; `parallel` selects auto/data/tensor or axis counts, and methods resolve their stages. Global scheduling shares physical accounting; storage, execution, fit, buffers, and NUMA remain distinct constraints. | Which complete recipe/backend execution profiles and CPU allocation backends can provide enforceable locality and practical cost for the first adapters? |
+| D22 | Typed execution configuration owns its device list/context; methods resolve stages. Composer defaults are action-local; global scheduling shares physical accounting. Storage, execution, fit, buffers, and NUMA remain distinct constraints. | Which complete recipe/backend profiles and CPU allocation backends provide enforceable locality and practical cost? |
+| D23 | `Quantize` is serial in argument order; `Parallel` explicitly requests component concurrency. `Use` attaches typed data/extensions; `Default`/`MoE` supply scoped overrides. | Which additional semantic-region overrides merit convenient names, and which should remain advanced module queries? |
 
 Unresolved research topics include whether interface reconstruction suffices for
 most multimodal error, how to detect a beneficial coupling region, how many replay
@@ -1192,6 +1231,7 @@ These are discussion gates, not an approved execution checklist or timeline.
 | 0.10, 2026-10-29 | Use `experts(type=...)` and `serial(...)`/`parallel(...)` to compose actionable lifecycles. Define serial chaining/variadic equivalence, completion barriers, and the independence of action ordering from internal multi-GPU execution. |
 | 0.11, 2026-10-29 | Configure devices and mappings inside actions. Add storage/execution/fit and stage-buffer placement, dense/per-layer/expert/module maps, Engram CPU/NUMA controls, shared physical reservations, and explicit data/tensor/hybrid execution modes distinct from lifecycle concurrency. |
 | 0.12, 2026-10-29 | Simplify common configuration to `Local(gpus=..., parallel="data"/"tensor")`, with optional axis counts for combined layouts. Remove the public parallelism policy builder and enforcement flag; methods resolve execution profiles, while stage overrides remain advanced options. |
+| 0.13, 2026-10-29 | Adopt the component composer: positional `Quantize` items are serial; explicit `Parallel` requests concurrent lifecycles. Add typed `Use`, action-local `Default`/`MoE`, direct data/tensor-parallel device lists, bound `Run`, and bypass provenance. Rename advanced component graph actions to avoid overloading the composer. |
 
 ## Sources
 

@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # Quantization lifecycle inventory and design constraints
 
-**Status:** source audit introduced in revision 0.2 and retained in revision 0.12
+**Status:** source audit introduced in revision 0.2 and retained in revision 0.13
 of the [component quantization proposal](component-quantization-design.md),
 2026-10-29.
 This is a source audit and design input, not an implementation or a claim that
@@ -116,7 +116,8 @@ These are not all interchangeable decorators. Some change observations, some
 introduce whole optimization programs, and some operate on an already quantized
 model. Their compatibility must be declared per combination.
 
-The public API composes registered typed objects through `Recipe.use()`.
+The composer attaches typed objects with `Use`; its recipe layer composes
+registered extensions through `Recipe.use()`.
 The object's descriptor selects modifier, preparation, or format behavior;
 the combined lifecycle below still determines placement and effective data
 requirements. A short entry point cannot collapse these distinct programs into
@@ -298,12 +299,15 @@ These resource contracts admit future methods without a fixed universal stage
 list. Preserved conditional-memory tables still need execution/NUMA placement;
 quantizing such tables needs a separately admitted lookup/codec method.
 
-Revision 0.12 exposes those choices through `Local(..., parallel="data")`,
-`parallel="tensor"`, or an axis-count map. The method registers an execution
-profile for its whole composed recipe, mapping that simple intent to its own
-stages, collective groups, reducers, and required local work. Plugins revalidate
-the profile when modifiers change. Ordinary callers do not supply stage IDs;
-unsupported modes fail instead of applying to an arbitrary compatible subset.
+The [component composer](quantization-composer-api.md) supplies these choices
+through `.Default(parallel=DataParallel(...))`, the tensor counterpart, and
+`.MoE(...)` overrides. The method registers a profile for the complete composed
+recipe, including its own stage layouts, reducers, and required local work.
+`Use` dispatches typed data and recipe extensions into these existing contracts.
+`MoERouting.bypass` is a separate observation policy requiring method/adapter
+support, provenance, bounded batching, and restoration before ordinary replay;
+it is not a device optimization. Unsupported profiles or bypass fail explicitly.
+
 
 Current resumability is narrower than method availability.
 [Checkpoint registration](../gptqmodel/looper/gptq_checkpoint.py) has explicit

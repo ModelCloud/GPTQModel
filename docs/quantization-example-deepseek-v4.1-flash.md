@@ -3,7 +3,7 @@ SPDX-License-Identifier: Apache-2.0 -->
 
 # DeepSeek V4.1 Flash: mock config and design target
 
-**Status:** revision 0.12 design example, 2026-10-29. This is a proposed API and
+**Status:** revision 0.13 design example, 2026-10-29. This is a proposed API and
 an acceptance target for the redesign, not an executable current-package example
 or a validated quantization recipe. No model loading or quantization was performed.
 See the [main design](component-quantization-design.md),
@@ -100,25 +100,21 @@ language_devices = (
     )
 )
 
-plan = (
-    Plan()
-    .data(
-        ImageDataSet(image_text_samples),
-        TextDataSet(text_samples),
-    )
-    .serial(Quantize.vision(
-        recipe=Recipe(GPTQ(bits=8, group_size=128)),
-        name="vision",
-    ).devices(vision_devices))
-    .serial(Requantize.language(
+job = Quantize(
+    Vision(GPTQ(bits=8, group_size=128))
+        .Use(ImageDataSet(image_text_samples))
+        .Default(devices=vision_devices),
+    Language(
+        GPTQ(bits=4, group_size=128),
         target=last_10_experts,
-        recipe=Recipe(GPTQ(bits=4, group_size=128)),
         source=source.dequantized(),
-        name="language",
-    ).devices(language_devices))
+    )
+        .Use(TextDataSet(text_samples))
+        .Default(devices=language_devices),
+    model=model,
 )
 
-resolved = plan.compile(model)
+resolved = job.Compile()
 print(resolved.explain())
 run = model.run(resolved)
 artifact = run.save("deepseek-v4.1-flash-mixed")
@@ -129,26 +125,28 @@ report = artifact.evaluate(suite=held_out_suite, data=held_out_data)
 
 The bits and group sizes are mock design choices, not measured recommendations.
 Device/NUMA IDs are illustrative physical requests and require matching local
-hardware. Both `.devices(...)` calls belong to the actions inside `.serial(...)`;
-there is no plan-wide device configuration. `load()` is a source-backed handle,
+hardware. Component `.Default(devices=...)` values configure this action;
+`Quantize(Vision(...), Language(...))` runs them serially in that exact order.
+There is no global device setting on an outer plan. `load()` is a source-backed handle,
 with bulk tensor allocation deferred until each action's materialization policy
 is established. Existing eagerly allocated models need verified placement or an
 explicitly budgeted migration; CPU affinity alone cannot relocate their tables.
-`Quantize.vision` supplies vision scope; its omitted `target` is `Target.AUTO`.
+`Vision` supplies vision scope; its omitted `target` is `Target.AUTO`.
 The proposed checkpoint mapping resolves that default to the vision encoder's
 quantizable projections and keeps the projector in its separate bridge group.
-`Requantize.language` supplies main-backbone scope, narrowed by the
+`Language` supplies main-backbone scope, narrowed by the
 `DynamicModuleTargeting` query. Neither operation needs a module path string.
 The names are labels; changing them cannot change scope or select additional
 weights. AUTO does not consume language weights left outside the expert query.
 
 The mapping's semantic owners and default groups are proposed adapter contracts.
 The adapter must verify selected tensor representations:
-`Quantize` requires dense stored vision weights and rejects a packed input.
+`QuantizeComponent` requires dense stored vision weights and rejects a packed input.
 A dense ViT topology alone does not prove that its checkpoint weights are dense.
 
-The language operation is `Requantize` because the released routed experts are
-already FP4. `source.dequantized()` explicitly fits decoded values from that pinned
+The language declaration supplies an explicit source because the released routed
+experts are already FP4; compilation records a `RequantizeComponent` operation.
+`source.dequantized()` explicitly fits decoded values from that pinned
 release; it does not recover original BF16 weights or request a dense full-model
 teacher. It is a lazy weight-source descriptor with bounded decoding inside the
 consuming fitting stage. It neither changes the source snapshot nor retains an
@@ -191,7 +189,7 @@ flowchart TD
     E --> REPORT[Separate evaluation report]
 ```
 
-Chained `.serial(...)` actions make the installed vision result precede
+Serial constructor order makes the installed vision result precede
 candidate-conditioned language capture. The pinned source supplies the expert
 weights being refitted; it does not force language observations to use the old
 vision outputs. After
@@ -199,7 +197,7 @@ each admitted language publication boundary, subsequent observations respect
 the current candidate and the method's within-layer dependencies. This remains
 progressive fitting, not simultaneous joint optimization.
 Each lifecycle action can still use admitted multi-GPU execution internally;
-the serial chain controls completion order between vision and language.
+the positional sequence controls completion order between vision and language.
 
 The quantization plan ends at its method/integrity checks. `save()` commits the
 complete mixed artifact before optional `artifact.evaluate(...)` starts. The
@@ -243,11 +241,15 @@ non-table storage/buffers, remain automatic but must appear in the preview.
 These are hard execution maps, not promises that every layer stays resident.
 Unspecified backing storage can use admitted bounded materialization within the
 resolved host/GPU budgets. `ByExpert` assigns whole experts, not tensor shards.
-The action may set `parallel="data"`, `parallel="tensor"`, or an axis-count map
-on its `Local` description; the method resolves its stages. Replication or tensor
+The action may set `.Default(parallel=DataParallel(...))` or the tensor counterpart,
+with an applicable `.MoE(...)` override; the method resolves its stages. Replication or tensor
 splitting cannot silently override these single-device owner assignments. A new
 compatible mapping/mesh and capability check are required for such a variant.
-`.parallel(action_a, action_b)` has the separate meaning of lifecycle overlap.
+`Parallel(...)` explicitly requests lifecycle overlap and must be admitted for
+these objectives and resources. This example keeps native expert routing.
+`job.MoE(routing=MoERouting.bypass)` would request a different calibration experiment
+for the selected routed experts; it cannot reuse native statistics or widen the
+last-ten query. See the [composer contract](quantization-composer-api.md).
 
 ## Expected preview and acceptance target
 
@@ -291,6 +293,7 @@ These are future conformance requirements, not tests passed by this PR:
 | DS5 | Preserve global expert selection, sample weights, method dependencies, and producer revisions across admitted serial and multi-GPU layouts; handle low expert coverage explicitly. |
 | DS6 | Reject incompatible kernels/layouts or infeasible memory before dependent writes. Quantization requires no evaluation suite/data; after successful save, an independent evaluator reads the committed artifact. Its failure/retry cannot alter saved weights or quantization success. |
 | DS7 | Preserve action-local placements: dense layer groups, full routed forward bank, five selected expert fits per GPU 2/3 per layer, and table-specific CPU/NUMA allocation. Verify native lookup/mask behavior and bounded transfers; unsupported CPU lookup, topology, or conflicting data/tensor layouts fail without moving other active actions' owners. |
+| DS8 | Composer lowering retains vision-first serial order, per-component settings, image-derived language observations, explicit packed-weight source, and exact last-ten selection. Parallel and bypass variants require separate admission/provenance; neither silently changes order, routing, or selected writes. |
 
 [config]: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/config.json
 [vision]: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017/blob/1bae0e1088993b9b82de08f59de5be5a34e42170/inference/vision.py
