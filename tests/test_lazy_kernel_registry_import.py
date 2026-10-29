@@ -112,6 +112,25 @@ def test_optional_backend_probes_are_deferred_until_use():
     )
 
 
+def test_gguf_cpp_defers_llama_cpp_import_until_the_kernel_runs():
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.gguf_cpp as gguf_cpp
+
+            # Importing the kernel module must not import llama-cpp-python.
+            assert not gguf_cpp._LLAMA_CPP_LOADED
+            import sys
+
+            assert "llama_cpp" not in sys.modules
+
+            gguf_cpp._require_llama_cpp()
+            assert gguf_cpp._LLAMA_CPP_LOADED
+            """
+        )
+    )
+
+
 def test_legacy_availability_attributes_still_accept_overrides(monkeypatch):
     import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
     import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_module
