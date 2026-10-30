@@ -1532,6 +1532,8 @@ class BaseQModel(nn.Module):
 
         if format_code == FORMAT.BITBLAS:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            # ``is False`` (not ``not``) keeps the pre-lazy semantics: an
+            # explicit ``None``/``0`` override means "unknown", not "absent".
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
