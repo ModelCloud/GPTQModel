@@ -642,3 +642,62 @@ def test_scanner_does_not_flag_the_native_checkpoint_or_packed_fp4():
     if getattr(torch, "float4_e2m1fn_x2", None) is not None:
         module._packed = torch.zeros(K // 2, N, dtype=torch.float4_e2m1fn_x2)
         assert _expanded_weight_tensors(module) == []
+
+
+# --------------------------------------------------------------------------
+# Inference tensors carry no version counter, so an in-place weight write is
+# invisible to the layout token; the explicit-clear contract must cover it.
+# --------------------------------------------------------------------------
+
+def test_invalidate_weight_layout_forces_revalidation():
+    """The public hook drops readiness and forward() refuses until post_init()."""
+    module = _module(W4AFP8Linear)
+    assert module._w4a_weights_ready is True
+
+    module.invalidate_weight_layout()
+
+    assert module._w4a_weights_ready is False
+    assert module._w4a_layout_token is None
+    with pytest.raises(RuntimeError, match="not initialized"):
+        module(torch.zeros(1, K, dtype=torch.bfloat16))
+
+    module.post_init()
+    assert module._w4a_weights_ready is True
+    assert _expanded_weight_tensors(module) == []
+
+
+def test_inference_tensor_layout_is_reported_as_unobservable():
+    """Inference tensors have no version counter, so the token cannot change.
+
+    The module must therefore admit the gap rather than let a stale token look
+    current: it warns once and offers ``invalidate_weight_layout()``.
+    """
+    with torch.inference_mode():
+        module = _module(W4AFP8Linear)
+
+    assert module.qzeros.is_inference()
+    assert not module._layout_token_is_observable()
+
+    before = module._weight_layout_token()
+    module._w4a_layout_token = before
+    module._w4a_weights_ready = True
+
+    # The blind spot is real: mutating the packed zero points in place leaves
+    # the token byte-identical, so it cannot be used to detect the write.
+    with torch.inference_mode():
+        module.qzeros.fill_(0x00000000)
+    assert not torch.equal(
+        W4AFP8Linear._group_zero_points(module), torch.full((K // 128, N), 8)
+    )
+    assert module._weight_layout_token() == before
+
+    # Explicit invalidation is the supported escape hatch.
+    module.invalidate_weight_layout()
+    assert module._w4a_weights_ready is False
+    assert _expanded_weight_tensors(module) == []
+
+
+def test_observable_layout_is_reported_for_normal_construction():
+    module = _module(W4AFP8Linear)
+    assert module.qzeros.is_inference() is False
+    assert module._layout_token_is_observable()

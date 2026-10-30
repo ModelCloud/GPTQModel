@@ -11,7 +11,11 @@ import torch
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from . import PackableQuantLinear
+
+
+log = setup_logger()
 
 
 class W4AFP8Linear(PackableQuantLinear):
@@ -118,6 +122,18 @@ class W4AFP8Linear(PackableQuantLinear):
         for name in self._WEIGHT_CACHE_NAMES:
             setattr(self, name, getattr(self, name).new_empty(0))
 
+    def invalidate_weight_layout(self) -> None:
+        """Drop the cached layout validation and require a fresh ``post_init()``.
+
+        Inference tensors (anything built inside ``torch.inference_mode()``) have
+        no version counter, so an in-place write to ``qweight``/``qzeros``/``g_idx``
+        cannot be observed by ``_weight_layout_token()``. Callers that mutate
+        quantized weights after ``post_init()`` must either leave inference mode
+        or call this method; ``forward()`` then raises until ``post_init()`` runs
+        again rather than decoding a layout that is no longer known to be valid.
+        """
+        self._invalidate_weight_cache()
+
     def _apply(self, fn, recurse=True):
         # These buffers encode hardware operands, not model-precision values.
         # Byte views let Module.to()/half()/bfloat16() move them without casting
@@ -206,6 +222,33 @@ class W4AFP8Linear(PackableQuantLinear):
         """True when the cached layout validation still describes the weights."""
         return (self._w4a_weights_ready
                 and self._w4a_layout_token == self._weight_layout_token())
+
+    def _layout_token_is_observable(self) -> bool:
+        """True when every layout-defining tensor tracks in-place writes.
+
+        Inference tensors carry no version counter, so their token entry can
+        never change; a stale token would then look current forever. Such a
+        module must be revalidated explicitly instead of trusted.
+        """
+        return all(version is not None for _, version in self._weight_layout_token())
+
+    def _warn_unobservable_layout(self) -> None:
+        """Warn once that in-place weight writes cannot be detected here.
+
+        Revalidating on every forward would put the ``torch.equal``/all-reduce
+        sync back on the decode path, so the unobservable case is reported once
+        and ``invalidate_weight_layout()`` is offered as the explicit hook.
+        """
+        if getattr(self, "_w4a_unobservable_warned", False):
+            return
+        self._w4a_unobservable_warned = True
+        log.warning(
+            "%s holds inference tensors, which have no version counter. In-place "
+            "writes to qweight/qzeros/g_idx will not be detected; call "
+            "invalidate_weight_layout() after mutating quantized weights outside "
+            "inference_mode building.",
+            self.__class__.__name__,
+        )
 
     def _centered_int4_codes(self) -> torch.Tensor:
         """Read native GPTQ packing without changing the saved weight format.
@@ -303,6 +346,8 @@ class W4AFP8Linear(PackableQuantLinear):
                 raise RuntimeError(
                     "W4AFP8 weights are not initialized; call post_init() after loading or packing."
                 )
+        elif not self._layout_token_is_observable():
+            self._warn_unobservable_layout()
         return self._centered_int4_codes().to(torch.float8_e4m3fn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
