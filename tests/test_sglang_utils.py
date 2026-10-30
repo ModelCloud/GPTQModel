@@ -299,7 +299,9 @@ def test_engine_generation_passes_dict_sampling_and_parses_single_batch_results(
         temperature=0.9,
         max_new_tokens=3,
     )
-    assert output == ["one", "two"]
+    # Results carry the usage fields SGLang reports, so the server can return
+    # real counts instead of a fabricated `completion_tokens=0`.
+    assert [result.text for result in output] == ["one", "two"]
     call = runtime.calls[0]
     assert call["prompt"] == ["a", "b"]
     assert call["input_ids"] is None
@@ -310,12 +312,9 @@ def test_engine_generation_input_ids_and_result_validation(fake_sglang):
     runtime = _FakeEngine()
     setattr(runtime, sglang_utils._ENGINE_MARKER, True)
     runtime.result = {"text": "ok"}
-    assert (
-        sglang_utils.sglang_generate(
-            runtime, input_ids=torch.tensor([0, 1, 2]), attention_mask=[0, 1, 1]
-        )
-        == "ok"
-    )
+    assert sglang_utils.sglang_generate(
+        runtime, input_ids=torch.tensor([0, 1, 2]), attention_mask=[0, 1, 1]
+    ).text == "ok"
     assert runtime.calls[-1]["input_ids"] == [1, 2]
     with pytest.raises(RuntimeError, match="missing.*text"):
         runtime.result = {"value": "bad"}
@@ -326,6 +325,32 @@ def test_engine_generation_input_ids_and_result_validation(fake_sglang):
     with pytest.raises(TypeError, match="Unexpected"):
         runtime.result = "bad"
         sglang_utils.sglang_generate(runtime, prompts="x")
+
+
+def test_engine_metadata_is_preserved_for_usage_and_finish_reason(fake_sglang):
+    runtime = _FakeEngine()
+    setattr(runtime, sglang_utils._ENGINE_MARKER, True)
+    runtime.result = {
+        "text": "generated",
+        "meta_info": {"completion_tokens": 7, "finish_reason": "length"},
+    }
+    result = sglang_utils.sglang_generate(runtime, prompts="x")
+    assert result.text == "generated"
+    assert result.completion_tokens == 7
+    assert result.finish_reason == "length"
+
+    # A missing or malformed meta block means "unknown", never a zero count.
+    for meta in (None, {}, {"completion_tokens": "7"}, {"completion_tokens": True}, {"finish_reason": "other"}):
+        runtime.result = {"text": "generated", "meta_info": meta}
+        result = sglang_utils.sglang_generate(runtime, prompts="x")
+        assert result.completion_tokens is None
+        assert result.finish_reason is None
+
+    # Zero generated tokens is a legitimate count and must survive.
+    runtime.result = {"text": "", "meta_info": {"completion_tokens": 0, "finish_reason": "stop"}}
+    result = sglang_utils.sglang_generate(runtime, prompts="x")
+    assert result.completion_tokens == 0
+    assert result.finish_reason == "stop"
 
 
 def test_legacy_generation_is_flattened_and_supports_batch_text(monkeypatch):

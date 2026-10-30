@@ -500,6 +500,8 @@ class BaseQModel(nn.Module):
         self.quantize_config = quantize_config
         self.quant_region_timer = QuantizationRegionTimer(logger=log)
         self._runtime_generate = None
+        # Populated by `serve()`; `serve_shutdown()`/`serve_wait_until_ready()` read it.
+        self.server = None
 
         self.processor: ProcessorMixin = None
 
@@ -2731,9 +2733,10 @@ class BaseQModel(nn.Module):
     def serve(self,
                host: str = "0.0.0.0",
                port: int = 80,
-               async_mode: bool = False):
+               async_mode: bool = False,
+               api_key: Optional[Union[str, List[str]]] = None):
         from ..utils.openai_server import OpenAiServer
-        self.server = OpenAiServer(model=self)
+        self.server = OpenAiServer(model=self, api_key=api_key)
         self.server.start(host=host, port=port, async_mode=async_mode)
 
     def serve_shutdown(self):

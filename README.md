@@ -472,8 +472,21 @@ Notes:
 ### OpenAI API compatible endpoint 🌐
 ```py
 # load model using above inference guide first
-model.serve(host="0.0.0.0",port="12345")
+model.serve(host="127.0.0.1", port=8000)  # the bind address is your choice
+
+# Exposing the port beyond localhost requires an API key (or GPTQMODEL_OPENAI_API_KEY).
+model.serve(host="0.0.0.0", port=8000, api_key="<secret>")
+
+# Multiple keys are accepted; any of them authorizes a request.
+model.serve(host="0.0.0.0", port=8000, api_key=["<k1>", "<k2>"])
 ```
+
+When at least one key is configured, every path under `/v1`, `/v2` and
+`/inference` requires `Authorization: Bearer <key>`; `/health`, `/` and CORS
+preflight stay open. An explicitly passed `api_key` replaces (does not merge
+with) `GPTQMODEL_OPENAI_API_KEY`, and blank keys are ignored. Starting on a
+non-loopback host without a key only emits a warning — the server still starts.
+`/shutdown` is limited to loopback callers unless a valid key is presented.
 
 ### Quantization 🔧
 Example: quantizing an LLM with `GPT-QModel`:

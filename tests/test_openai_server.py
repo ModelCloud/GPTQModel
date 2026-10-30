@@ -52,6 +52,8 @@ class TestOpeniServer(unittest.TestCase):
             messages=messages,
             temperature=0,
         )
-        result_text = response.choices[0].text
+        # A chat completion must expose `choices[].message.content`, not `choices[].text`.
+        self.assertEqual(response.object, "chat.completion")
+        result_text = response.choices[0].message.content
         self.assertEqual(result_text.strip(), "1 + 1 = 2")
         self.model.serve_shutdown()
