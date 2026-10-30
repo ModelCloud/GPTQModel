@@ -25,6 +25,7 @@ import weakref
 import pytest
 import torch
 
+from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
 
@@ -484,6 +485,24 @@ def test_byte_unpack_nibble_order_is_low_first():
     for position in range(8):
         expected[position * 8 + position, 0] = 15
     assert torch.equal(W4AFP8Linear._unpack_int4_codes(one_hot), expected)
+
+
+def test_centered_codes_works_on_foreign_gptq_module():
+    """The checkpoint audits call this on a ``TorchLinear``, which has no helper.
+
+    ``W4AFP8Linear._centered_int4_codes(module)`` is the documented entry point
+    for modules that are not ``W4AFP8Linear`` instances. Resolving the unpacker
+    through ``self`` raised ``AttributeError`` there, so pin the cross-module
+    path instead of only the self-hosted one.
+    """
+    module = _module(TorchLinear, 256, 64)
+    assert not hasattr(TorchLinear, "_unpack_int4_codes")
+
+    codes = W4AFP8Linear._centered_int4_codes(module)
+
+    expected = _shift_unpack_reference(module.qweight).to(torch.int16) - 8
+    assert codes.dtype == torch.int16
+    assert torch.equal(codes, expected)
 
 
 # --------------------------------------------------------------------------

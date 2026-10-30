@@ -253,7 +253,10 @@ class W4AFP8Linear(PackableQuantLinear):
         ``>> (4*j) & 15`` sequence exactly.
         """
         owned = isinstance(self, W4AFP8Linear)
-        codes = self._unpack_int4_codes(self.qweight)
+        # Call the module-level unpacker, not ``self.``: this method is invoked as
+        # ``W4AFP8Linear._centered_int4_codes(torch_linear_module)`` by the
+        # checkpoint audits, and a ``TorchLinear`` has no ``_unpack_int4_codes``.
+        codes = unpack_int4_codes(self.qweight)
         if owned:
             # post_init()/`_weights_are_current()` already proved every zero
             # point is 8. Re-checking here would be a device sync on every
@@ -277,28 +280,8 @@ class W4AFP8Linear(PackableQuantLinear):
 
     @staticmethod
     def _unpack_int4_codes(packed: torch.Tensor) -> torch.Tensor:
-        """Expand packed GPTQ nibble words into one code per row, as uint8.
-
-        ``packed`` is ``[in/8, out]`` for ``qweight`` and ``[in/128/8, out]``
-        for ``qzeros``; both hold eight 4-bit codes per int32 word, low nibble
-        first. The result is ``[rows, out]`` in ``[0, 15]``.
-
-        Going through a ``uint8`` view instead of shifting the int32 values
-        keeps every intermediate at 1 B/weight. The int32 form materializes a
-        4 B/weight plane for both the shift and the mask, which dominates the
-        per-forward staging cost on large projections and is pure bandwidth --
-        see the docstring above for the measured split.
-        """
-        words, out = packed.shape
-        # One int32 word is four bytes holding eight nibbles, low nibble first.
-        # Little-endian byte order is exactly the nibble order of the word, so
-        # byte 0 carries nibbles 0 and 1, byte 1 carries nibbles 2 and 3, ...
-        viewed = packed.view(torch.uint8).reshape(words, out, 4)
-        nibbles = torch.stack((viewed & 0x0F, viewed >> 4), dim=-1).reshape(
-            words, out, 8
-        )
-        # [word, out, nibble] -> [word, nibble, out] -> [rows, out].
-        return nibbles.permute(0, 2, 1).reshape(words * 8, out)
+        """See :func:`unpack_int4_codes`; kept as a class-level alias."""
+        return unpack_int4_codes(packed)
 
     @torch.no_grad()
     def fp8_weight_operand(self) -> torch.Tensor:
@@ -353,3 +336,28 @@ class W4AFP8Linear(PackableQuantLinear):
         x = self._apply_rotation_to_input(x)
         weight = self.fp8_weight_operand()
         return fp8_linear(x, weight, self.scales, self.bias)
+
+
+def unpack_int4_codes(packed: torch.Tensor) -> torch.Tensor:
+    """Expand packed GPTQ nibble words into one code per row, as uint8.
+
+    ``packed`` is ``[in/8, out]`` for ``qweight`` and ``[in/128/8, out]``
+    for ``qzeros``; both hold eight 4-bit codes per int32 word, low nibble
+    first. The result is ``[rows, out]`` in ``[0, 15]``.
+
+    Going through a ``uint8`` view instead of shifting the int32 values
+    keeps every intermediate at 1 B/weight. The int32 form materializes a
+    4 B/weight plane for both the shift and the mask, which dominates the
+    per-forward staging cost on large projections and is pure bandwidth --
+    see ``_centered_int4_codes`` for the measured split.
+    """
+    words, out = packed.shape
+    # One int32 word is four bytes holding eight nibbles, low nibble first.
+    # Little-endian byte order is exactly the nibble order of the word, so
+    # byte 0 carries nibbles 0 and 1, byte 1 carries nibbles 2 and 3, ...
+    viewed = packed.view(torch.uint8).reshape(words, out, 4)
+    nibbles = torch.stack((viewed & 0x0F, viewed >> 4), dim=-1).reshape(
+        words, out, 8
+    )
+    # [word, out, nibble] -> [word, nibble, out] -> [rows, out].
+    return nibbles.permute(0, 2, 1).reshape(words * 8, out)
