@@ -33,8 +33,12 @@ import torch
 
 
 # A single source of truth for both backends. Warp-level intrinsics are written
-# against ``warpSize`` because AMD waves are 64 lanes wide while NVIDIA warps
-# are 32; the synchronisation mask is 64-bit on HIP and 32-bit on CUDA.
+# against ``warpSize`` because the wavefront width is 64 lanes on CDNA (gfx9xx),
+# 32 lanes on RDNA (gfx11xx/gfx12xx), and 32 on NVIDIA.  The synchronisation
+# mask type is 64-bit on HIP and 32-bit on CUDA, but the *active* mask is taken
+# from ``__activemask()`` at runtime so no wave64 assumption is baked into the
+# reduction: on a wave32 target a hard-coded 64-bit all-ones mask would name
+# lanes that do not exist in the wave.
 _SOURCE = r'''
 #ifdef __HIP_PLATFORM_AMD__
 typedef unsigned long long gsq_mask_t;
@@ -152,7 +156,7 @@ __global__ void gsq_scale_reduce(
         sum += terms[row*columns+column];
     }
     for (int offset = warpSize/2; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(GSQ_FULL_MASK, sum, offset, warpSize);
+        sum += __shfl_down_sync(__activemask(), sum, offset, warpSize);
     }
     if (lane == 0) grad_scales[index] = sum;
 }
@@ -246,6 +250,28 @@ def _boxes(args):
         else:
             boxes.append(ctypes.c_int(value))
     return boxes
+
+
+# Thread-block sizes for the reductions.  ``gsq_scale_reduce`` derives its warp
+# count from ``blockDim.x / warpSize``, so the block size must stay a multiple
+# of the target wavefront (64 on CDNA, 32 on RDNA).  128 divides both.  The RMS
+# norm kernel needs exactly 256 because of its 256-entry shared reduction tree.
+_REDUCE_BLOCK = 128
+_RMS_NORM_BLOCK = 256
+
+
+def _warp_multiple_block(block, warp_size):
+    """Return ``block`` rounded up to a whole number of ``warp_size`` lanes.
+
+    128 is already a multiple of both 64 (CDNA) and 32 (RDNA/NVIDIA), so this is
+    a no-op on every supported target; it exists so a future non-power-of-two
+    wavefront cannot silently drop a partial warp in ``gsq_scale_reduce``.
+    """
+    if warp_size <= 0:
+        return block
+    if block % warp_size == 0:
+        return block
+    return ((block + warp_size - 1) // warp_size) * warp_size
 
 
 def _hip_launch(hip, function, grid, block, args):
@@ -395,7 +421,9 @@ def cuda_rms_norm(hidden, weight, epsilon):
         return None
     output = torch.empty_like(hidden)
     rows = hidden.shape[0]*hidden.shape[1]
-    backend.launch(3, rows, 256,
+    # 256 threads is both a multiple of 64 (CDNA) and 32 (RDNA), and the kernel's
+    # shared-memory tree reduction (`sums[256]`, offsets from 128) requires it.
+    backend.launch(3, rows, _RMS_NORM_BLOCK,
                    (hidden, weight, output, rows, hidden.shape[-1], float(epsilon)))
     return output
 
@@ -413,7 +441,8 @@ class _GSQCudaRelaxation(torch.autograd.Function):
         probability = torch.empty_like(logits)
         expected = torch.empty_like(initial)
         fp32 = int(logits.dtype == torch.float32)
-        backend.launch(0, (count+127)//128, 128,
+        block = _warp_multiple_block(_REDUCE_BLOCK, backend.warp_size)
+        backend.launch(0, (count+block-1)//block, block,
                        (logits, scales, initial, valid, uniform, output, probability, expected,
                         count, columns, groups, group_size, temperature, multiplier, fp32))
         ctx.save_for_backward(probability, expected, scales)
@@ -432,12 +461,14 @@ class _GSQCudaRelaxation(torch.autograd.Function):
         grad_scales = torch.empty_like(scales)
         backend = ctx.backend
         fp32 = int(ctx.logit_dtype == torch.float32)
-        backend.launch(1, (count+127)//128, 128,
+        block = _warp_multiple_block(_REDUCE_BLOCK, backend.warp_size)
+        backend.launch(1, (count+block-1)//block, block,
                        (grad_output.contiguous(), probability, expected, scales,
                         grad_logits, scale_terms,
                         count, columns, groups, group_size, temperature, multiplier, fp32))
-        per_block = max(128 // backend.warp_size, 1)
-        backend.launch(2, (rows*groups+per_block-1)//per_block, 128,
+        block = _warp_multiple_block(_REDUCE_BLOCK, backend.warp_size)
+        per_block = max(block // backend.warp_size, 1)
+        backend.launch(2, (rows*groups+per_block-1)//per_block, block,
                        (scale_terms, grad_scales, rows, columns, groups, group_size))
         return grad_logits, grad_scales, None, None, None, None, None, None
 
