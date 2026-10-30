@@ -168,13 +168,16 @@ class OpenAiServer:
                 return [stop]
             return [value for value in stop if isinstance(value, str) and value]
 
-        def _strip_stop(text: str, stop_strings: list) -> str:
-            # OpenAI returns the text without the stop sequence that ended generation.
+        def _strip_stop(text: str, stop_strings: list):
+            """Trim at the earliest stop sequence and report whether one was hit."""
+            earliest = None
             for stop_string in stop_strings:
                 index = text.find(stop_string)
-                if index != -1:
-                    text = text[:index]
-            return text
+                if index != -1 and (earliest is None or index < earliest):
+                    earliest = index
+            if earliest is None:
+                return text, False
+            return text[:earliest], True
 
         @self.app.post("/v1/chat/completions", response_model=OpenAiResponse)
         async def create_completion(request: OpenAiRequest):
@@ -211,6 +214,14 @@ class OpenAiServer:
                     generate_kwargs["temperature"] = request.temperature
                     generate_kwargs["top_p"] = request.top_p
                 if request.n != 1:
+                    if not do_sample:
+                        # Transformers refuses multiple greedy sequences; reject the
+                        # request up front instead of surfacing it as a server error.
+                        raise HTTPException(
+                            status_code=400,
+                            detail="`n` must be 1 when `temperature` is 0 (greedy decoding). "
+                            "Set `temperature` > 0 to request multiple sequences.",
+                        )
                     generate_kwargs["num_return_sequences"] = request.n
 
                 if stop_strings:
@@ -225,23 +236,48 @@ class OpenAiServer:
                 with torch.inference_mode():
                     outputs = self.model.generate(**generate_kwargs, **generate_inputs)
 
+                pad_token_id = self.tokenizer.pad_token_id
+                eos_token_id = self.tokenizer.eos_token_id
+
                 if torch.is_tensor(outputs):
+                    generated_ids = outputs[:, prompt_length:]
                     generated_texts = self.tokenizer.batch_decode(
-                        outputs[:, prompt_length:],
+                        generated_ids,
                         skip_special_tokens=True,
                     )
-                    completion_tokens = max(int(outputs.shape[-1]) - prompt_length, 0)
+                    # Count each sequence separately: usage aggregates them, while a
+                    # single row length is only the max across the batch.
+                    if pad_token_id is None:
+                        token_counts = [int(row.numel()) for row in generated_ids]
+                    else:
+                        token_counts = [int((row != pad_token_id).sum()) for row in generated_ids]
+                    finish_reasons = []
+                    for row, count in zip(generated_ids, token_counts):
+                        if count and eos_token_id is not None and int(row[count - 1]) == eos_token_id:
+                            finish_reasons.append("stop")
+                        else:
+                            # Ran out of `max_new_tokens` without reaching EOS.
+                            finish_reasons.append("length")
                 else:
-                    generated_texts = [str(text) for text in outputs]
-                    completion_tokens = 0
+                    # Runtime adapters return decoded text; a bare string is one result.
+                    generated_texts = [outputs] if isinstance(outputs, str) else [str(text) for text in outputs]
+                    token_counts = [0] * len(generated_texts)
+                    finish_reasons = ["stop"] * len(generated_texts)
 
-                generated_texts = [_strip_stop(text, stop_strings) for text in generated_texts]
+                completion_tokens = sum(token_counts)
+
+                trimmed = [_strip_stop(text, stop_strings) for text in generated_texts]
+                generated_texts = [text for text, _ in trimmed]
+                # A sequence cut by a stop string ends on that stop, not on the budget.
+                finish_reasons = [
+                    "stop" if matched else reason for reason, (_, matched) in zip(finish_reasons, trimmed)
+                ]
 
                 choices = [
                     OpenAiResponseChoice(
                         message=OpenAiResponseMessage(content=gen_text),
                         index=i,
-                        finish_reason="stop",
+                        finish_reason=finish_reasons[i],
                     )
                     for i, gen_text in enumerate(generated_texts)
                 ]

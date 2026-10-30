@@ -196,6 +196,39 @@ def test_greedy_decoding_does_not_request_multiple_sequences(client, model):
     assert model.calls[-1]["num_return_sequences"] == 2
 
 
+def test_greedy_with_multiple_sequences_is_rejected_not_a_server_error(client, model):
+    # `n > 1` without sampling makes the backend raise; that must be a 400, not a 500.
+    response = _chat(client, temperature=0, n=2)
+    assert response.status_code == 400, response.text
+    assert "temperature" in response.json()["detail"]
+    assert model.calls == [] or "num_return_sequences" not in model.calls[-1]
+
+
+def test_finish_reason_is_length_when_the_token_budget_runs_out(client):
+    # One token is well under the stub's stop condition, so generation is truncated.
+    body = _chat(client, temperature=0, max_tokens=1).json()
+    assert body["choices"][0]["finish_reason"] == "length"
+
+
+def test_finish_reason_is_stop_when_a_stop_string_truncates(client):
+    # Budget must exceed the stop string, otherwise the sequence ends on `length` first.
+    baseline = _chat(client, temperature=0).json()["choices"][0]["message"]["content"]
+    body = _chat(client, temperature=0, max_tokens=len(baseline) + 16, stop=[baseline]).json()
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["choices"][0]["message"]["content"] == ""
+
+
+def test_usage_sums_tokens_across_returned_sequences(client, model):
+    response = _chat(client, temperature=0.9, n=3, max_tokens=6)
+    assert response.status_code == 200, response.text
+
+    body = response.json()
+    assert len(body["choices"]) == 3
+    # Usage covers every returned sequence, so it cannot equal a single sequence's length.
+    assert body["usage"]["completion_tokens"] == 3 * 6
+    assert body["usage"]["total_tokens"] == body["usage"]["prompt_tokens"] + 18
+
+
 def test_rejects_empty_messages(client):
     response = client.post("/v1/chat/completions", json={"model": "stub-model", "messages": []})
     assert response.status_code == 400
