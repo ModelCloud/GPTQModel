@@ -10,6 +10,7 @@ These cover the three defects verified against the previous implementation:
 3. chat completions serialized with the legacy ``text_completion`` schema.
 """
 
+import hashlib
 import inspect
 import warnings
 
@@ -19,7 +20,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel.models.base import BaseQModel
-from gptqmodel.utils.openai_server import DEFAULT_HOST, DEFAULT_PORT, OpenAiServer
+from gptqmodel.utils.openai_server import DEFAULT_HOST, DEFAULT_PORT, OpenAiServer, _token_hashes
 
 
 pytestmark = [pytest.mark.cpu]
@@ -195,6 +196,16 @@ def test_rejects_empty_messages(client):
 
 def test_no_authentication_required_when_no_key_configured(client):
     assert _chat(client).status_code == 200
+
+
+def test_token_digests_are_keyed_and_fixed_length(model):
+    # Digests must be process-keyed (not reusable as an offline verifier) and
+    # fixed length (so comparison cannot leak the configured key length).
+    first = _token_hashes(["a"])
+    assert first == _token_hashes(["a"])
+    assert len(first[0]) == 32
+    assert first[0] != hashlib.sha256(b"a").digest()
+    assert first != _token_hashes(["ab"])
 
 
 def test_configured_api_key_is_enforced(model):

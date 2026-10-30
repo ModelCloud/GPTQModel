@@ -4,6 +4,7 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import hashlib
+import hmac
 import ipaddress
 import os
 import secrets
@@ -51,9 +52,21 @@ def _resolve_api_keys(api_key) -> list:
     return [key for key in keys if key]
 
 
+# Per-process secret for the token digests below. It never leaves the process, so
+# a digest cannot be used as an offline password verifier even if one leaked.
+_TOKEN_DIGEST_KEY = secrets.token_bytes(32)
+
+
+def _token_digest(token: str) -> bytes:
+    # Fixed-length digests keep the comparison constant-time without leaking the
+    # configured key length, and keying them keeps the cost cheap enough to run on
+    # every request (an expensive password hash here would be a denial-of-service
+    # vector instead of a protection).
+    return hmac.new(_TOKEN_DIGEST_KEY, token.encode("utf-8"), hashlib.sha256).digest()
+
+
 def _token_hashes(keys: list) -> list:
-    # Hashing first means the comparison never leaks the configured key length.
-    return [hashlib.sha256(key.encode("utf-8")).digest() for key in keys]
+    return [_token_digest(key) for key in keys]
 
 
 def _bearer_token_matches(authorization: str, token_hashes: list) -> bool:
@@ -62,7 +75,7 @@ def _bearer_token_matches(authorization: str, token_hashes: list) -> bool:
     scheme, _, param = authorization.partition(" ")
     if scheme.lower() != "bearer":
         return False
-    param_hash = hashlib.sha256(param.encode("utf-8")).digest()
+    param_hash = _token_digest(param)
     matched = False
     for token_hash in token_hashes:
         # `|=` instead of `break` keeps the work constant regardless of which key matches.
