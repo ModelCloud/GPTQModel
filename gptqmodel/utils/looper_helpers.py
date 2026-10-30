@@ -56,11 +56,16 @@ def torch_replicate(
             if dev.type in {"cuda", "xpu", "mps", "npu"}:
                 try:
                     torch_sync(dev)
-                except BaseException:
-                    pass
+                except Exception:
+                    log.debug("torch_sync(%s) before replicate failed", dev, exc_info=True)
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
 
 log = setup_logger()
+
+# Tensors whose device-move failure has already been reported with a traceback.
+# See `rehome_module_to_device`: without this, per-batch callers repeat the same
+# failure for every batch of every layer.
+_REPORTED_MOVE_FAILURES: set = set()
 
 
 if TYPE_CHECKING:
@@ -224,6 +229,30 @@ def rehome_module_to_device(
     Omit ``root_module`` when ancestry is unknown to preserve hook ownership.
     A standalone module may supply itself as the root.
     """
+    # Log amplification guard. This runs under `_rehome_lock`, once per module,
+    # and batch workers call it again for every batch, so a model whose tensors
+    # cannot reach the target device would otherwise emit one full traceback
+    # per tensor *per batch*. The failure traceback is emitted once per
+    # ``(device, exception type)`` for the life of the process; every call then
+    # reports only a count. Keying on the exception type (not the tensor) is
+    # what keeps a 30-tensor model from emitting 30 identical tracebacks.
+    failure_count = [0]
+
+    def _record_failure(kind: str, name: str, sub: torch.nn.Module, exc: BaseException) -> None:
+        failure_count[0] += 1
+        key = (str(device), type(exc).__name__)
+        if key in _REPORTED_MOVE_FAILURES:
+            return
+        _REPORTED_MOVE_FAILURES.add(key)
+        log.warning(
+            "failed to move %s %r of %s to %s",
+            kind,
+            name,
+            type(sub).__name__,
+            device,
+            exc_info=True,
+        )
+
     with _rehome_lock:
         for sub in module.modules():
             if move_buffers:
@@ -240,8 +269,10 @@ def rehome_module_to_device(
                     except Exception:
                         try:
                             sub._buffers[name] = buf.to(device)
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            # The buffer stays on its original device; that is a
+                            # correctness problem, not a benign fallback.
+                            _record_failure("buffer", name, sub, exc)
 
             if move_parameters:
                 for pname, p in list(getattr(sub, "_parameters", {}).items()):
@@ -264,8 +295,16 @@ def rehome_module_to_device(
                                     requires_grad=p.requires_grad,
                                 )
                             sub._parameters[pname] = new_p
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            _record_failure("parameter", pname, sub, exc)
+
+        if failure_count[0]:
+            log.warning(
+                "%d tensor(s) could not be moved to %s; only the first failure per "
+                "exception type is shown with its traceback.",
+                failure_count[0],
+                device,
+            )
 
         if move_parameters:
             _realign_materialized_hooks(module, device, root_module)

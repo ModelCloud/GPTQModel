@@ -124,13 +124,38 @@ except Exception:
     HAS_NPU = False
 
 
-# mlx check
-try:
-    import mlx.core  # type: ignore # noqa: F401
-    import mlx.core.metal  # noqa: F401
+mlx = None
+
+
+def _detect_mlx() -> bool:
+    """Probe for a usable MLX install, binding the package on success.
+
+    MLX is an optional accelerator: absence (or a broken native install) is
+    expected on most hosts, so probe failures are reported as "unavailable".
+    ``except Exception`` is deliberate -- ``KeyboardInterrupt``/``SystemExit``
+    must stay visible rather than being reported as a missing dependency.
+
+    ``mlx`` and ``HAS_MLX`` are updated together so callers guarded by
+    ``if HAS_MLX: mlx.core.clear_cache()`` can never see one without the other.
+    A partially-installed package binds ``mlx`` while ``mlx.core.metal`` raises,
+    so the failure path clears it again.
+    """
+    global HAS_MLX, mlx
+
+    try:
+        import mlx.core  # type: ignore # noqa: F401
+        import mlx.core.metal  # noqa: F401
+    except Exception:
+        HAS_MLX = False
+        mlx = None
+        return HAS_MLX
+
     HAS_MLX = True
-except BaseException:
-    pass
+    return HAS_MLX
+
+
+# mlx check
+HAS_MLX = _detect_mlx()
 
 try:
     torch.backends.fp32_precision
@@ -203,7 +228,7 @@ def torch_compile(module: Union[torch.nn.Module, Callable], backend:str ="induct
         return module
     try:
         return torch.compile(module, backend=backend, mode=mode, fullgraph=fullgraph)
-    except BaseException as e:
+    except Exception as e:
         log.warn.once(f"Failed to compile `{module}`, {e}")
         return module
 

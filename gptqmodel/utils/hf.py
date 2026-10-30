@@ -141,6 +141,7 @@ def _sync_local_remote_code_cache(model_id_or_path: Optional[str]) -> None:
     try:
         from transformers.dynamic_module_utils import HF_MODULES_CACHE, _sanitize_module_name
     except Exception:
+        log.debug("remote-code cache probe skipped: transformers.dynamic_module_utils unavailable", exc_info=True)
         return
 
     repo_name = os.path.basename(os.path.normpath(model_id_or_path))
@@ -498,6 +499,7 @@ def _patch_transformers_prism_gguf_compat(*, api_name: str) -> None:
         import transformers.modeling_gguf_pytorch_utils as gguf_utils
         from transformers.utils import import_utils as hf_import_utils
     except Exception:
+        log.debug("prism GGUF compat skipped: transformers GGUF internals unavailable", exc_info=True)
         return
 
     with _MONKEY_PATCH_LOCK:
@@ -703,6 +705,7 @@ def _patch_transformers_remote_code_compat() -> None:
     try:
         from transformers.utils import import_utils
     except Exception:
+        log.debug("remote-code compat skipped: transformers.utils.import_utils unavailable", exc_info=True)
         return
 
     try:
@@ -1132,6 +1135,9 @@ def _is_deepseek_vl_v2_model_path(model_id_or_path: Optional[str]) -> bool:
         with open(config_path, encoding="utf-8") as f:
             config = json.load(f)
     except Exception:
+        # A broken local config.json is not "this is some other model"; record it
+        # so a failed DeepSeek-VL2 pre-config patch is diagnosable.
+        log.debug("DeepSeek-VL2 probe could not read %s", config_path, exc_info=True)
         return False
 
     return str(config.get("model_type", "")).lower() == "deepseek_vl_v2"
@@ -1148,6 +1154,7 @@ def patch_remote_code_before_config_load(model_id_or_path: Optional[str]) -> Non
         import transformers.modeling_utils as modeling_utils
         from transformers.utils import is_flash_attn_2_available
     except Exception:
+        log.debug("DeepSeek-VL2 pre-config patch skipped: transformers modeling utils unavailable", exc_info=True)
         return
 
     try:
@@ -2039,7 +2046,7 @@ def prepare_remote_model_init_compat(model_id_or_path: Optional[str], config: An
             import peft.import_utils as peft_import_utils
             import peft.tuners.lora.awq as peft_awq
         except Exception:
-            pass
+            log.debug("PEFT AWQ probe patch skipped: peft AWQ internals unavailable", exc_info=True)
         else:
             if not getattr(peft_awq, "_gptqmodel_awq_probe_patch", False):
                 # PEFT later imports `awq.modules.linear`, so the availability
@@ -2198,15 +2205,20 @@ def _sanitize_generation_config(cfg: GenerationConfig, *, drop_sampling_fields: 
 
 def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
     try:
-        config_dict, kwargs = GenerationConfig.get_config_dict(path)
+        # transformers >= 5 exposes generation configs through from_pretrained
+        # only; the old `get_config_dict` helper no longer exists. Calling it
+        # raised AttributeError on every model, so this branch was dead and the
+        # caller always fell back to a defaults-only config.
+        #
+        # `do_sample=True` is passed here rather than forced afterwards: the
+        # loader validates sampling fields (temperature/top_p/top_k) against the
+        # file's own `do_sample`, so a `do_sample: false` config would warn that
+        # those flags "are not valid and may be ignored" before we flip the bit.
+        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
     except Exception:
+        log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None
 
-    cleaned = dict(config_dict)
-    if cleaned.get("do_sample") is not True:
-        cleaned["do_sample"] = True
-
-    cfg = GenerationConfig.from_dict(cleaned, **kwargs)
     _sanitize_generation_config(cfg, drop_sampling_fields=False)
     return cfg
 
