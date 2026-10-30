@@ -29,10 +29,17 @@ _llama_cpp_lib = None
 _llama_cpp_load_shared_library = None
 _LLAMA_CPP_IMPORT_ERROR = None
 _LLAMA_CPP_LOADED = False
+_LLAMA_CPP_LOCK = threading.Lock()
 
 
 def _require_llama_cpp():
-    """Import llama-cpp-python once and return its module objects."""
+    """Import llama-cpp-python once and return its module objects.
+
+    The lock keeps a concurrent caller from observing the "already loaded" flag
+    before the module objects are assigned, which used to hand back
+    ``(None, None, None)`` and turn a missing backend into an ``AttributeError``
+    on ``Path(None.__file__)``.
+    """
 
     global _LLAMA_CPP_LOADED, _LLAMA_CPP_IMPORT_ERROR
     global _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
@@ -40,20 +47,22 @@ def _require_llama_cpp():
     if _LLAMA_CPP_LOADED:
         return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
 
-    _LLAMA_CPP_LOADED = True
-    try:
-        import llama_cpp as llama_cpp_pkg
-        from llama_cpp import llama_cpp as llama_cpp_lib
-        from llama_cpp._ctypes_extensions import (
-            load_shared_library as llama_cpp_load_shared_library,
-        )
+    with _LLAMA_CPP_LOCK:
+        if not _LLAMA_CPP_LOADED:
+            try:
+                import llama_cpp as llama_cpp_pkg
+                from llama_cpp import llama_cpp as llama_cpp_lib
+                from llama_cpp._ctypes_extensions import (
+                    load_shared_library as llama_cpp_load_shared_library,
+                )
 
-        _llama_cpp_pkg = llama_cpp_pkg
-        _llama_cpp_lib = llama_cpp_lib
-        _llama_cpp_load_shared_library = llama_cpp_load_shared_library
-        _LLAMA_CPP_IMPORT_ERROR = None
-    except Exception as exc:  # pragma: no cover - optional dependency
-        _LLAMA_CPP_IMPORT_ERROR = exc
+                _llama_cpp_pkg = llama_cpp_pkg
+                _llama_cpp_lib = llama_cpp_lib
+                _llama_cpp_load_shared_library = llama_cpp_load_shared_library
+                _LLAMA_CPP_IMPORT_ERROR = None
+            except Exception as exc:  # pragma: no cover - optional dependency
+                _LLAMA_CPP_IMPORT_ERROR = exc
+            _LLAMA_CPP_LOADED = True
 
     return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
 

@@ -68,11 +68,14 @@ _UNSET = object()
 def _is_bitsandbytes_available() -> bool:
     try:
         import bitsandbytes as bnb
+        return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
     except Exception as exc:  # pragma: no cover - optional dependency
-        log.debug("bitsandbytes import failed: %s", exc)
+        # A missing package, a shared-library failure, or an unparsable
+        # ``__version__`` all mean "this backend is unusable", never a crash.
+        # ``validate_once`` promises a ``(bool, exception)`` tuple, so the probe
+        # must not raise either.
+        log.debug("bitsandbytes is unavailable: %s", exc)
         return False
-
-    return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
 
 
 @lru_cache(maxsize=1)

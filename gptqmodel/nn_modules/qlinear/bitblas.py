@@ -129,8 +129,14 @@ def _is_bitblas_available() -> bool:
         except Exception as retry_exc:
             log.debug("BitBLAS import retry failed: %s", retry_exc)
             return False
-    parsed_version = version.parse(bitblas.__version__)
-    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    try:
+        parsed_version = version.parse(bitblas.__version__)
+        minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    except Exception as exc:
+        # An unparsable ``__version__`` means the build is unusable; the probe
+        # backs ``validate_once``, which promises a ``(bool, exception)`` tuple.
+        log.debug("BitBLAS version %r could not be parsed: %s", bitblas.__version__, exc)
+        return False
     if parsed_version < minimum_version:
         log.debug(
             "BitBLAS version %s below minimum required %s",

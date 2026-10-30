@@ -487,6 +487,30 @@ def _import_all_qlinear_kernels() -> None:
             log.debug(f"Skipping qlinear module import `{name}`: {exc}")
 
 
+def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
+    """Return the kernels that belong to the shipped ``qlinear`` package.
+
+    ``iter_quant_linear_kernels()`` walks ``BaseQuantLinear.__subclasses__()``,
+    which is a live view of the interpreter's class graph.  While the auto-select
+    maps were frozen during ``import gptqmodel`` that did not matter: a subclass
+    defined later (a test helper, a downstream plugin, a notebook experiment)
+    could never reach them.  The maps are now built on first use, so the walk has
+    to be restricted to the kernels this package actually ships.  Discovery keeps
+    seeing every subclass, so ``get_kernel_for_backend()`` and
+    ``iter_quant_linear_kernels()`` behave exactly as they did before.
+    """
+
+    from ..nn_modules import qlinear as qlinear_pkg
+
+    prefix = f"{qlinear_pkg.__name__}."
+
+    return [
+        cls
+        for cls in iter_quant_linear_kernels()
+        if getattr(cls, "__module__", "").startswith(prefix)
+    ]
+
+
 @lru_cache(maxsize=1)
 def build_kernel_support_maps():
     _import_all_qlinear_kernels()
@@ -494,7 +518,7 @@ def build_kernel_support_maps():
     auto_entries = {}
     support_entries = {}
 
-    for cls in iter_quant_linear_kernels():
+    for cls in _registry_kernel_classes():
         supports_formats = cls.SUPPORTS_FORMATS
         if not isinstance(supports_formats, dict):
             raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
