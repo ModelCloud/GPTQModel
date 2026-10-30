@@ -4,7 +4,6 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import hashlib
-import hmac
 import ipaddress
 import os
 import secrets
@@ -58,11 +57,15 @@ _TOKEN_DIGEST_KEY = secrets.token_bytes(32)
 
 
 def _token_digest(token: str) -> bytes:
-    # Fixed-length digests keep the comparison constant-time without leaking the
-    # configured key length, and keying them keeps the cost cheap enough to run on
-    # every request (an expensive password hash here would be a denial-of-service
-    # vector instead of a protection).
-    return hmac.new(_TOKEN_DIGEST_KEY, token.encode("utf-8"), hashlib.sha256).digest()
+    # Keyed BLAKE2b is a message authentication code, which is the primitive this
+    # needs: a fixed-length, non-reversible value that cannot be recomputed without
+    # the in-process key. A deliberately slow password hash would be wrong here --
+    # it would run on every request and hand callers a denial of service.
+    return hashlib.blake2b(
+        token.encode("utf-8"),
+        key=_TOKEN_DIGEST_KEY,
+        digest_size=32,
+    ).digest()
 
 
 def _token_hashes(keys: list) -> list:
