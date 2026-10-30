@@ -24,6 +24,7 @@ from gptqmodel.utils.openai_server import (
     DEFAULT_PORT,
     OpenAiServer,
     _bearer_token_matches,
+    _token_digests,
 )
 
 
@@ -202,15 +203,17 @@ def test_no_authentication_required_when_no_key_configured(client):
     assert _chat(client).status_code == 200
 
 
-def test_token_comparison_never_short_circuits_on_the_first_key(model):
-    # Every configured key is compared, so timing does not reveal which one matched
-    # or how many exist. A wrong key that shares a long prefix with a valid one must
-    # still be rejected.
-    assert _bearer_token_matches("Bearer k1", ["k1", "k2"]) is True
-    assert _bearer_token_matches("Bearer k2", ["k1", "k2"]) is True
-    assert _bearer_token_matches("Bearer k", ["k1", "k2"]) is False
-    assert _bearer_token_matches("Bearer ", ["k1", "k2"]) is False
-    assert _bearer_token_matches("", ["k1"]) is False
+def test_token_comparison_compares_every_configured_key(model):
+    # Every configured key is compared, so the work does not reveal which one
+    # matched, and the digests are fixed length so it cannot reveal key length.
+    digests = _token_digests(["k1", "k2"])
+    assert len({len(digest) for digest in digests}) == 1 == len(digests) - 1
+
+    assert _bearer_token_matches("Bearer k1", digests) is True
+    assert _bearer_token_matches("Bearer k2", digests) is True
+    assert _bearer_token_matches("Bearer k", digests) is False
+    assert _bearer_token_matches("Bearer ", digests) is False
+    assert _bearer_token_matches("", digests) is False
     assert _bearer_token_matches("Bearer anything", []) is False
 
 

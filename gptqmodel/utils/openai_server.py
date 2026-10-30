@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+import hashlib
 import ipaddress
 import os
 import secrets
@@ -50,26 +51,23 @@ def _resolve_api_keys(api_key) -> list:
     return [key for key in keys if key]
 
 
-def _bearer_token_matches(authorization: str, tokens: list) -> bool:
-    """Check a bearer token against every configured key in constant time.
+def _token_digests(tokens: list) -> list:
+    # Digesting first gives the comparison a fixed-length operand, so it cannot
+    # expose the configured key length.
+    return [hashlib.sha256(token.encode("utf-8")).digest() for token in tokens]
 
-    The candidate and the configured keys are compared as-is with
-    ``secrets.compare_digest``. Hashing them first would add nothing: these are
-    high-entropy, per-deployment tokens that are never stored, never logged, and
-    never verified against a database, so the one thing a slow password hash
-    protects against does not apply. Doing it anyway would run on every request
-    and hand callers a cheap denial of service.
-    """
+
+def _bearer_token_matches(authorization: str, token_digests: list) -> bool:
     if not authorization:
         return False
     scheme, _, param = authorization.partition(" ")
     if scheme.lower() != "bearer":
         return False
-    candidate = param.encode("utf-8")
+    param_digest = hashlib.sha256(param.encode("utf-8")).digest()
     matched = False
-    for token in tokens:
+    for token_digest in token_digests:
         # `|=` instead of `break` keeps the work constant regardless of which key matches.
-        matched |= secrets.compare_digest(candidate, token.encode("utf-8"))
+        matched |= secrets.compare_digest(param_digest, token_digest)
     return matched
 
 
@@ -83,7 +81,7 @@ class AuthenticationMiddleware:
 
     def __init__(self, app, tokens: list) -> None:
         self.app = app
-        self.tokens = tokens
+        self.token_digests = _token_digests(tokens)
 
     def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket") or scope.get("method") == "OPTIONS":
@@ -92,7 +90,7 @@ class AuthenticationMiddleware:
         url_path = scope["path"].removeprefix(root_path)
         if url_path.startswith(GUARDED_PREFIX):
             headers = Headers(scope=scope)
-            if not _bearer_token_matches(headers.get("Authorization"), self.tokens):
+            if not _bearer_token_matches(headers.get("Authorization"), self.token_digests):
                 response = JSONResponse(
                     content={"error": "Unauthorized"},
                     status_code=401,
@@ -110,12 +108,13 @@ class OpenAiServer:
         self.tokenizer = model.tokenizer
         self.model_id_or_path = model.config.name_or_path
         self.api_keys = _resolve_api_keys(api_key)
+        self.token_digests = _token_digests(self.api_keys)
         if self.api_keys:
             self.app.add_middleware(AuthenticationMiddleware, tokens=self.api_keys)
         self.setup_routes()
 
     def _token_matches(self, authorization: str) -> bool:
-        return _bearer_token_matches(authorization, self.api_keys)
+        return _bearer_token_matches(authorization, self.token_digests)
 
     @staticmethod
     def _is_loopback(request: Request) -> bool:
