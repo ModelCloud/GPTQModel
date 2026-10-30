@@ -57,7 +57,7 @@ def _token_digests(tokens: list) -> list:
     return [hashlib.sha256(token.encode("utf-8")).digest() for token in tokens]
 
 
-def _bearer_token_matches(authorization: str, token_digests: list) -> bool:
+def _bearer_token_matches(authorization: str, api_tokens: list) -> bool:
     if not authorization:
         return False
     scheme, _, param = authorization.partition(" ")
@@ -65,7 +65,7 @@ def _bearer_token_matches(authorization: str, token_digests: list) -> bool:
         return False
     param_digest = hashlib.sha256(param.encode("utf-8")).digest()
     matched = False
-    for token_digest in token_digests:
+    for token_digest in api_tokens:
         # `|=` instead of `break` keeps the work constant regardless of which key matches.
         matched |= secrets.compare_digest(param_digest, token_digest)
     return matched
@@ -81,7 +81,10 @@ class AuthenticationMiddleware:
 
     def __init__(self, app, tokens: list) -> None:
         self.app = app
-        self.token_digests = _token_digests(tokens)
+        self.api_tokens = _token_digests(tokens)
+
+    def verify_token(self, headers: Headers) -> bool:
+        return _bearer_token_matches(headers.get("Authorization"), self.api_tokens)
 
     def __call__(self, scope, receive, send):
         if scope["type"] not in ("http", "websocket") or scope.get("method") == "OPTIONS":
@@ -90,7 +93,7 @@ class AuthenticationMiddleware:
         url_path = scope["path"].removeprefix(root_path)
         if url_path.startswith(GUARDED_PREFIX):
             headers = Headers(scope=scope)
-            if not _bearer_token_matches(headers.get("Authorization"), self.token_digests):
+            if not self.verify_token(headers):
                 response = JSONResponse(
                     content={"error": "Unauthorized"},
                     status_code=401,
@@ -108,13 +111,13 @@ class OpenAiServer:
         self.tokenizer = model.tokenizer
         self.model_id_or_path = model.config.name_or_path
         self.api_keys = _resolve_api_keys(api_key)
-        self.token_digests = _token_digests(self.api_keys)
+        self.api_tokens = _token_digests(self.api_keys)
         if self.api_keys:
             self.app.add_middleware(AuthenticationMiddleware, tokens=self.api_keys)
         self.setup_routes()
 
     def _token_matches(self, authorization: str) -> bool:
-        return _bearer_token_matches(authorization, self.token_digests)
+        return _bearer_token_matches(authorization, self.api_tokens)
 
     @staticmethod
     def _is_loopback(request: Request) -> bool:

@@ -15,6 +15,7 @@ import warnings
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.datastructures import Headers
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
@@ -22,6 +23,7 @@ from gptqmodel.models.base import BaseQModel
 from gptqmodel.utils.openai_server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    AuthenticationMiddleware,
     OpenAiServer,
     _bearer_token_matches,
     _token_digests,
@@ -206,15 +208,29 @@ def test_no_authentication_required_when_no_key_configured(client):
 def test_token_comparison_compares_every_configured_key(model):
     # Every configured key is compared, so the work does not reveal which one
     # matched, and the digests are fixed length so it cannot reveal key length.
-    digests = _token_digests(["k1", "k2"])
-    assert len({len(digest) for digest in digests}) == 1 == len(digests) - 1
+    api_tokens = _token_digests(["k1", "k2"])
+    assert len({len(token) for token in api_tokens}) == 1
 
-    assert _bearer_token_matches("Bearer k1", digests) is True
-    assert _bearer_token_matches("Bearer k2", digests) is True
-    assert _bearer_token_matches("Bearer k", digests) is False
-    assert _bearer_token_matches("Bearer ", digests) is False
-    assert _bearer_token_matches("", digests) is False
+    assert _bearer_token_matches("Bearer k1", api_tokens) is True
+    assert _bearer_token_matches("Bearer k2", api_tokens) is True
+    assert _bearer_token_matches("Bearer k", api_tokens) is False
+    assert _bearer_token_matches("Bearer ", api_tokens) is False
+    assert _bearer_token_matches("", api_tokens) is False
     assert _bearer_token_matches("Bearer anything", []) is False
+
+
+def test_middleware_verify_token_accepts_any_configured_key(model):
+    middleware = AuthenticationMiddleware(app=None, tokens=["k1", "k2"])
+
+    def headers_of(value):
+        raw = [(b"authorization", value)] if value else []
+        return Headers(scope={"type": "http", "headers": raw})
+
+    assert middleware.verify_token(headers_of(b"Bearer k1")) is True
+    assert middleware.verify_token(headers_of(b"Bearer k2")) is True
+    assert middleware.verify_token(headers_of(b"Bearer nope")) is False
+    assert middleware.verify_token(headers_of(b"k1")) is False
+    assert middleware.verify_token(headers_of(None)) is False
 
 
 def test_configured_api_key_is_enforced(model):
