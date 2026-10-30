@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import platform
 import sys
+import types
 from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
@@ -90,16 +91,22 @@ def _probe_bitsandbytes_available() -> bool:
     return _is_bitsandbytes_available()
 
 
+_AVAILABILITY_OVERRIDES = {}
+
+
 def bitsandbytes_available() -> bool:
     """Return whether a supported bitsandbytes is installed.
 
-    A module attribute named ``BITSANDBYTES_AVAILABLE`` still overrides the
-    probe, which keeps monkeypatching in tests and downstream tooling working.
+    An explicitly assigned module attribute named ``BITSANDBYTES_AVAILABLE``
+    still overrides the probe, which keeps monkeypatching in tests and
+    downstream tooling working. Overrides live in a private dict (see
+    ``_LazyAvailabilityModule``) rather than in the module ``__dict__`` so that
+    ``monkeypatch`` undo and ``delattr`` restore the real probe instead of
+    pinning a stale value for the rest of the process.
     """
 
-    override = globals().get("BITSANDBYTES_AVAILABLE", _UNSET)
-    if override is not _UNSET:
-        return bool(override)
+    if "BITSANDBYTES_AVAILABLE" in _AVAILABILITY_OVERRIDES:
+        return bool(_AVAILABILITY_OVERRIDES["BITSANDBYTES_AVAILABLE"])
     return _probe_bitsandbytes_available()
 
 
@@ -107,6 +114,37 @@ def __getattr__(name: str):
     if name == "BITSANDBYTES_AVAILABLE":
         return bitsandbytes_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class _LazyAvailabilityModule(types.ModuleType):
+    """Module type that keeps ``*_AVAILABLE`` overrides out of ``__dict__``.
+
+    Assigning the legacy name records an override instead of creating a real
+    module attribute, and deleting it drops the override so the probe becomes
+    authoritative again. That is what makes ``pytest``'s ``monkeypatch``
+    round-trip correctly: undo performs ``delattr`` when the attribute did not
+    exist before the patch.
+    """
+
+    def __setattr__(self, name, value):
+        if name == "BITSANDBYTES_AVAILABLE":
+            _AVAILABILITY_OVERRIDES[name] = value
+            return
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name == "BITSANDBYTES_AVAILABLE" and name in _AVAILABILITY_OVERRIDES:
+            del _AVAILABILITY_OVERRIDES[name]
+            return
+        if name == "BITSANDBYTES_AVAILABLE":
+            raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
+        super().__delattr__(name)
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | {"BITSANDBYTES_AVAILABLE"})
+
+
+sys.modules[__name__].__class__ = _LazyAvailabilityModule
 
 
 def import_bitsandbytes():

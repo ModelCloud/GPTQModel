@@ -290,3 +290,177 @@ def test_llama_cpp_import_is_single_flight():
             """
         )
     )
+
+
+def test_debug_env_does_not_materialize_the_registry_at_import_time():
+    """``DEBUG=1`` must not undo the laziness the module exists to provide.
+
+    ``debug_print_kernel_maps()`` needs the built maps, so calling it under
+    ``DEBUG`` at module scope imported every kernel (and optional backend) again.
+    A dedicated opt-in variable now guards the dump.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import os
+            os.environ["DEBUG"] = "1"
+
+            import gptqmodel.utils.importer as importer
+
+            assert importer._import_all_qlinear_kernels.cache_info().currsize == 0, (
+                "DEBUG=1 built the kernel registry during import"
+            )
+            assert importer.build_kernel_support_maps.cache_info().currsize == 0
+            """
+        )
+    )
+
+
+def test_kernel_map_build_is_single_flight_under_concurrency():
+    """Concurrent first callers must share one map instance and one build.
+
+    ``lru_cache`` alone is not single-flight: every racing thread computes its
+    own value and only the last is retained, so a caller can hold a map that no
+    later reader will ever observe.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import threading
+
+            import gptqmodel  # noqa: F401
+            import gptqmodel.utils.importer as importer
+
+            assert importer.build_kernel_support_maps.cache_info().currsize == 0
+
+            seen = []
+            barrier = threading.Barrier(8)
+
+            def build():
+                barrier.wait()
+                seen.append(id(importer.get_auto_backend_kernel_mapping()))
+
+            threads = [threading.Thread(target=build) for _ in range(8)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=120)
+
+            assert len(seen) == 8, seen
+            assert len(set(seen)) == 1, f"threads observed distinct maps: {len(set(seen))}"
+            assert importer.build_kernel_support_maps.cache_info().misses == 1
+            """
+        )
+    )
+
+
+def test_legacy_map_names_are_visible_to_dir_and_star_import():
+    """Module ``__getattr__`` names are invisible unless advertised.
+
+    Before the registry became lazy these were real globals, so ``dir()`` and
+    ``from ... import *`` exposed them. Keep that surface intact.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.utils.importer as importer
+
+            names = dir(importer)
+            assert "AUTO_BACKEND_KERNEL_MAPPING" in names
+            assert "BACKEND_TO_METHOD_FORMAT_MAPPING" in names
+
+            namespace = {}
+            exec("from gptqmodel.utils.importer import *", namespace)
+            assert "AUTO_BACKEND_KERNEL_MAPPING" in namespace
+            assert "BACKEND_TO_METHOD_FORMAT_MAPPING" in namespace
+            assert namespace["AUTO_BACKEND_KERNEL_MAPPING"] is importer.AUTO_BACKEND_KERNEL_MAPPING
+            """
+        )
+    )
+
+
+def test_missing_optional_version_does_not_escape_validate_once():
+    """A backend with no ``__version__`` at all must report unusable, not raise.
+
+    The first fix only covered an *unparsable* version: the debug log re-read
+    ``bitblas.__version__`` inside the handler, so a module without the attribute
+    raised again and escaped ``validate_once``'s ``(bool, exception)`` contract.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import sys
+            import types
+
+            for name in ("bitsandbytes", "bitblas"):
+                module = types.ModuleType(name)
+                # Deliberately no ``__version__`` attribute.
+                sys.modules[name] = module
+
+            from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
+            from gptqmodel.nn_modules.qlinear.bitsandbytes import BitsAndBytesLinear
+
+            for kernel in (BitsAndBytesLinear, BitblasLinear):
+                ok, error = kernel.validate_once()
+                assert ok is False, f"{kernel.__name__}.validate_once() returned {ok!r}"
+                assert isinstance(error, BaseException), error
+            """
+        )
+    )
+
+
+def test_monkeypatch_undo_restores_the_optional_probe():
+    """Patching a legacy name must not pin the probe for the rest of the process.
+
+    ``monkeypatch.undo()`` writes the pre-patch value back as a real module
+    attribute. If the accessor prefers ``globals()``, that stale value wins
+    forever and defeats both ``cache_clear()`` and the disable env flag.
+    """
+
+    from _pytest.monkeypatch import MonkeyPatch
+
+    import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
+    import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_module
+
+    for module, name, accessor in (
+        (bnb_module, "BITSANDBYTES_AVAILABLE", bnb_module.bitsandbytes_available),
+        (bitblas_module, "BITBLAS_AVAILABLE", bitblas_module.bitblas_available),
+    ):
+        baseline = accessor()
+        patcher = MonkeyPatch()
+        try:
+            patcher.setattr(module, name, not baseline, raising=False)
+            assert accessor() == (not baseline), module.__name__
+        finally:
+            patcher.undo()
+
+        assert accessor() == baseline, f"{module.__name__} stayed pinned after undo"
+        assert name not in module.__dict__, f"{module.__name__} leaked a real attribute"
+
+
+def test_overrides_stay_out_of_module_dict_and_delete_cleanly():
+    """Overrides must not become permanent module attributes.
+
+    An ordinary ``setattr`` used to land in ``__dict__``, where the accessor
+    preferred it over the probe forever. Overrides now live in a private dict,
+    so ``__dict__`` stays clean and ``del`` re-arms the real probe.
+    """
+
+    import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
+
+    baseline = bitblas_module.bitblas_available()
+    bitblas_module.BITBLAS_AVAILABLE = not baseline
+    try:
+        assert bitblas_module.bitblas_available() == (not baseline)
+        assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__, (
+            "override leaked into the module __dict__ and would outlive a delete"
+        )
+    finally:
+        del bitblas_module.BITBLAS_AVAILABLE
+
+    assert bitblas_module.bitblas_available() == baseline
+    assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__

@@ -511,8 +511,11 @@ def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
     ]
 
 
+_REGISTRY_BUILD_LOCK = threading.Lock()
+
+
 @lru_cache(maxsize=1)
-def build_kernel_support_maps():
+def _build_kernel_support_maps_cached():
     _import_all_qlinear_kernels()
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
@@ -566,6 +569,28 @@ def build_kernel_support_maps():
     return auto_select_backend_order_map, supports_backend_map
 
 
+def build_kernel_support_maps():
+    """Return the cached ``(auto_map, supports_map)`` pair.
+
+    ``lru_cache`` alone is not single-flight: concurrent cold-start callers each
+    build their own copy and only the last result is retained, so a caller can
+    hold and mutate a map nobody will ever read again. Guard the build so every
+    thread observes the one cached instance. The lock is only taken on a miss.
+    """
+
+    if _build_kernel_support_maps_cached.cache_info().currsize:
+        return _build_kernel_support_maps_cached()
+    with _REGISTRY_BUILD_LOCK:
+        return _build_kernel_support_maps_cached()
+
+
+# Keep the ``lru_cache`` introspection helpers that callers/tests already use
+# against ``build_kernel_support_maps`` even though the public entry point is now
+# a lock-guarded wrapper.
+build_kernel_support_maps.cache_info = _build_kernel_support_maps_cached.cache_info
+build_kernel_support_maps.cache_clear = _build_kernel_support_maps_cached.cache_clear
+
+
 def get_auto_backend_kernel_mapping():
     """Return the auto-select ``METHOD -> FORMAT -> BACKEND -> kernel`` mapping.
 
@@ -583,6 +608,9 @@ def get_backend_to_method_format_mapping():
     return build_kernel_support_maps()[1]
 
 
+_LAZY_EXPORTS = ("AUTO_BACKEND_KERNEL_MAPPING", "BACKEND_TO_METHOD_FORMAT_MAPPING")
+
+
 def __getattr__(name: str):
     # Backwards-compatible lazy module attributes. Importing gptqmodel must not
     # materialize the kernel registry; attribute/from-import access still does.
@@ -591,6 +619,15 @@ def __getattr__(name: str):
     if name == "BACKEND_TO_METHOD_FORMAT_MAPPING":
         return get_backend_to_method_format_mapping()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()`` and ``import *`` unless
+    # they are advertised. Keep the pre-change star-import surface intact.
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
+
+
+__all__ = [*_LAZY_EXPORTS]
 
 
 def debug_print_kernel_maps():
@@ -647,7 +684,12 @@ def debug_print_kernel_maps():
     print(render_tree("KERNEL BACKEND to METHOD/FORMAT MAPPING", supports_tree))
 
 
-if env_flag("DEBUG"):
+# ``DEBUG`` deliberately does not dump the maps here: printing them requires
+# building the registry, which would import every kernel (and optional backend)
+# at ``import gptqmodel`` and defeat the lazy registry this module provides.
+# Call ``debug_print_kernel_maps()`` explicitly, or set ``GPTQMODEL_DEBUG_KERNEL_MAPS=1``
+# when you accept the eager import cost.
+if env_flag("GPTQMODEL_DEBUG_KERNEL_MAPS", default="0"):
     debug_print_kernel_maps()
 
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
+import types
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -129,18 +130,21 @@ def _is_bitblas_available() -> bool:
         except Exception as retry_exc:
             log.debug("BitBLAS import retry failed: %s", retry_exc)
             return False
+    # Capture the attribute once. Reading ``bitblas.__version__`` inside the
+    # handler below would raise again for a module that has no ``__version__``
+    # at all, escaping ``validate_once``'s ``(bool, exception)`` contract.
+    raw_version = getattr(bitblas, "__version__", None)
     try:
-        parsed_version = version.parse(bitblas.__version__)
+        parsed_version = version.parse(raw_version)
         minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
     except Exception as exc:
-        # An unparsable ``__version__`` means the build is unusable; the probe
-        # backs ``validate_once``, which promises a ``(bool, exception)`` tuple.
-        log.debug("BitBLAS version %r could not be parsed: %s", bitblas.__version__, exc)
+        # An unparsable or missing ``__version__`` means the build is unusable.
+        log.debug("BitBLAS version %r could not be parsed: %s", raw_version, exc)
         return False
     if parsed_version < minimum_version:
         log.debug(
             "BitBLAS version %s below minimum required %s",
-            bitblas.__version__,
+            raw_version,
             MINIMUM_BITBLAS_VERSION,
         )
         return False
@@ -161,16 +165,20 @@ def _probe_bitblas_available() -> bool:
     return _is_bitblas_available()
 
 
+_AVAILABILITY_OVERRIDES = {}
+
+
 def bitblas_available() -> bool:
     """Return whether a supported BitBLAS build is importable.
 
-    A module attribute named ``BITBLAS_AVAILABLE`` still overrides the probe so
-    tests and downstream tooling can force the value.
+    An explicitly assigned module attribute named ``BITBLAS_AVAILABLE`` still
+    overrides the probe so tests and downstream tooling can force the value.
+    Overrides live in a private dict (see ``_LazyAvailabilityModule``) so that
+    ``monkeypatch`` undo and ``delattr`` fall back to the real probe.
     """
 
-    override = globals().get("BITBLAS_AVAILABLE", _UNSET)
-    if override is not _UNSET:
-        return bool(override)
+    if "BITBLAS_AVAILABLE" in _AVAILABILITY_OVERRIDES:
+        return bool(_AVAILABILITY_OVERRIDES["BITBLAS_AVAILABLE"])
     return _probe_bitblas_available()
 
 
@@ -178,6 +186,30 @@ def __getattr__(name: str):
     if name == "BITBLAS_AVAILABLE":
         return bitblas_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class _LazyAvailabilityModule(types.ModuleType):
+    """Module type that keeps ``*_AVAILABLE`` overrides out of ``__dict__``."""
+
+    def __setattr__(self, name, value):
+        if name == "BITBLAS_AVAILABLE":
+            _AVAILABILITY_OVERRIDES[name] = value
+            return
+        super().__setattr__(name, value)
+
+    def __delattr__(self, name):
+        if name == "BITBLAS_AVAILABLE" and name in _AVAILABILITY_OVERRIDES:
+            del _AVAILABILITY_OVERRIDES[name]
+            return
+        if name == "BITBLAS_AVAILABLE":
+            raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
+        super().__delattr__(name)
+
+    def __dir__(self):
+        return sorted(set(super().__dir__()) | {"BITBLAS_AVAILABLE"})
+
+
+sys.modules[__name__].__class__ = _LazyAvailabilityModule
 
 
 _BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
