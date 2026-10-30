@@ -564,8 +564,14 @@ def test_transient_staging_peak_is_measured_not_assumed():
     assert peak_delta >= floor, (
         f"staged peak {peak_delta} B is below the intermediate-plane floor {floor} B"
     )
-    # Whatever the exact allocator rounding, the old 65536 B claim is not it.
-    assert peak_delta != 2 * 65536 or peak_delta >= floor
+    # Bound the peak from above as well. The lower bound alone cannot detect a
+    # staging path that regressed to the old int32 form (8 B/weight) or that
+    # started leaking the operand beyond the call, and any assertion comparing
+    # against the superseded 65536 B constant is vacuous once the 5 B/weight
+    # floor holds. One allocator block of slack covers rounding.
+    assert peak_delta <= floor + K * N, (
+        f"staged peak {peak_delta} B exceeds the 5 B/weight bound {floor + K * N} B"
+    )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
