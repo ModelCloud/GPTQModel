@@ -64,6 +64,7 @@ from ..utils.model import (
     untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
+from ..utils.p2p import enable_for_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
@@ -332,6 +333,17 @@ class ModuleLooper(DeviceAssignmentState):
         self._dense_vram_strategy_explicit = bool(dense_strategy_devices) or self._dense_vram_strategy != VramStrategy.EXCLUSIVE
         self._moe_vram_strategy_explicit = bool(moe_strategy_devices) or self._moe_vram_strategy != VramStrategy.EXCLUSIVE
 
+        # Best-effort peer enablement once the dense/MoE pools are known.  The
+        # pools can span devices that ``quant_devices`` does not contain (for
+        # example ``device="cuda:0"`` with
+        # ``dense_vram_strategy_devices=["cuda:0", "cuda:1"]``), and module
+        # replicas still move tensors across that union.  ``enable_for_devices``
+        # caches, logs a single summary line, and degrades to host staging, so a
+        # failed probe never blocks quantization.
+        cross_device_pool = self._cross_device_pool()
+        if len(cross_device_pool) > 1:
+            enable_for_devices(cross_device_pool)
+
         self._moe_subset_threshold = 16
         self._subset_callback = getattr(self.gptq_model, "subset_callback", None)
 
@@ -381,6 +393,17 @@ class ModuleLooper(DeviceAssignmentState):
                 if self.output_embeddings_module is not None and callable(get_output_name)
                 else None
             )
+
+    def _cross_device_pool(self) -> List[torch.device]:
+        """Return the de-duplicated union of all pools that move tensors."""
+
+        pool: List[torch.device] = []
+        for device in (*self._quant_devices, *self._dense_quant_devices, *self._moe_quant_devices):
+            if device.type != "cuda":
+                continue
+            if device not in pool:
+                pool.append(device)
+        return pool
 
     def _emit_moe_parallel_quant_runtime(self) -> None:
         """Log the runtime knobs that decide whether MoE quant can fan out efficiently."""

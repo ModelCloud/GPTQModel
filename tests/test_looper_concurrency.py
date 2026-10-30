@@ -388,6 +388,11 @@ def test_rocm_without_vf_keeps_device_smi(monkeypatch):
     monkeypatch.setattr(processor, "_discover_accelerator_devices", lambda: ["rocm:0"])
     monkeypatch.setattr(torch.cuda, "get_device_name", lambda index: "AMD Instinct MI355X")
     monkeypatch.setattr("gptqmodel.looper.loop_processor.Device", lambda device: handle)
+    # ``_DEVICE_SMI_UNUSABLE`` is process-scoped and a real AMD SMI poll (for
+    # example a ``WeightOnlyProcessor`` built earlier in the same session) can
+    # leave ``rocm:0`` in it.  Start from a clean set so this test asserts the
+    # VF logic rather than whatever an earlier test probed.
+    monkeypatch.setattr("gptqmodel.looper.loop_processor._DEVICE_SMI_UNUSABLE", set())
 
     assert processor._init_device_smi_handles() == {"rocm:0": handle}
     assert processor._torch_rocm_memory_devices == []

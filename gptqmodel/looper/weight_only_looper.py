@@ -60,6 +60,7 @@ from ..utils.model import (
     move_to,
 )
 from ..utils.offload import offload_to_disk
+from ..utils.p2p import enable_for_devices
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
@@ -89,6 +90,27 @@ class WeightOnlyLooper(DeviceAssignmentState):
         self._module_device_map: Dict[str, torch.device] = {}
         self._quant_device_lock = threading.Lock()
         self._resolve_strategy_device_pools()
+        # Multi-device quantization moves quantized tensors between GPUs.  The
+        # peer probe must cover the *union* of every pool, not just
+        # ``self._quant_devices``: a single ``device="cuda:0"`` with
+        # ``dense_vram_strategy_devices=["cuda:0", "cuda:1"]`` leaves the quant
+        # pool at one device while module replicas still cross devices.  Enable
+        # peer access once, best effort; the helper caches, logs one summary,
+        # and falls back to host staging for unsupported/degraded links.
+        cross_device_pool = self._cross_device_pool()
+        if len(cross_device_pool) > 1:
+            enable_for_devices(cross_device_pool)
+
+    def _cross_device_pool(self) -> List[torch.device]:
+        """Return the de-duplicated union of all device pools that move tensors."""
+
+        pool: List[torch.device] = []
+        for device in (*self._quant_devices, *self._dense_quant_devices, *self._moe_quant_devices):
+            if device.type != "cuda":
+                continue
+            if device not in pool:
+                pool.append(device)
+        return pool
 
     def execution_device_pools(self):
         return {
