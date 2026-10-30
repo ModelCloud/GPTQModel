@@ -156,7 +156,9 @@ On ROCm, quantization runs with torch's rocBLAS backend instead of hipBLASLt: hi
 loads one Tensile library per (dtype, layout) pair on first use, and those one-time loads
 dominate a cold quantize while rocBLAS covers the same math. The override is scoped to the
 quantization phase and the previous backend is restored afterwards. Set
-`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` to keep torch's default backend.
+`GPTQMODEL_ROCM_QUANT_BLAS=hipblaslt` to keep torch's default backend. This
+applies to RDNA4 as well; the RDNA4 hipBLASLt Tensile libraries exist but are
+not tuned, so rocBLAS remains the default there too.
 
 ## Features ✨
 * ✨ Native integration with HF [Transformers](https://github.com/huggingface/transformers), [Optimum](https://github.com/huggingface/optimum), and [Peft](https://github.com/huggingface/peft)
@@ -320,7 +322,7 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
 | 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 6.2+` | Exllama V2, AWQ Triton GEMM, AWQ GEMV, QQQ, FP8 Torch, Torch (gfx950 fused GPTQ GEMV) |
+| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 6.2+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM, AWQ GEMV, QQQ, FP8 Torch, Torch (fused GPTQ GEMV on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, Torch |
@@ -329,9 +331,17 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 
 ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
 matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
-On gfx950, the Torch GPTQ backend uses a fused Triton GEMV for single-token
-2/4/8-bit inference and falls back to the existing path for other shapes. Set
-`GPTQ_TORCH_ROCM_GEMV=0` to disable the fused path.
+On gfx950 (CDNA4) and the gfx120*/gfx125* RDNA4 family, the Torch GPTQ backend
+uses a fused Triton GEMV for single-token 2/4/8-bit inference and a fused
+small-M GEMM for M=2..16, and falls back to the existing path for other shapes
+or unregistered architectures. Launch constants are selected per architecture
+by `gptqmodel/utils/arch.py`. On gfx1201 (R9700) the fused small-M GEMM measured
+1.1x-3.2x faster than dequantize+matmul for M=2..16 in FP16 up to K=17408, and
+its `.amdgcn` contains `v_wmma_f32_16x16x16_f16`. The fused small-M GEMM is
+FP16-only on RDNA4: BF16 measured 0.70x-1.17x of the split path there, so BF16
+falls back to dequantize+matmul (GEMV keeps both dtypes). Set
+`GPTQ_TORCH_ROCM_GEMV=0` / `GPTQ_TORCH_ROCM_GEMM=0` to disable the fused paths. See [`docs/rocm-rdna4.md`](docs/rocm-rdna4.md) for the per-backend RDNA4
+matrix, P2P auto-enablement, and known limitations.
 
 `Marlin` and JIT CUDA kernels now support NVIDIA `Turing+` (`sm_75+`) GPUs.
 Huawei Ascend NPU support uses native Torch kernels through `torch-npu` / `CANN`.
