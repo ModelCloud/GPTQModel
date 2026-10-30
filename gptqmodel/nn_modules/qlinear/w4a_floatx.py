@@ -281,10 +281,15 @@ class W4AFP8Linear(PackableQuantLinear):
         (~157 MiB per K=8192 layer). Measured on a quiet RTX 4090 with both forms
         interleaved, at 2048x8192: 374.7 us -> 175.1 us (2.14x) and at
         8192x2048: 374.6 us -> 175.3 us (2.14x), byte-identical output, and the
-        transient peak falls from 8 B/weight to exactly 5 B/weight. The remaining
-        step to close the gap to a resident cache is a fused kernel that reads
-        ``qweight`` and writes E4M3 directly; this form is the best that plain
-        Torch dispatch reaches.
+        transient peak falls from 8 B/weight to exactly 5 B/weight.
+
+        This Torch form is no longer the inference path on CUDA. It is the
+        reference the fused kernel is pinned against and the fallback for CPU
+        and meta weights: ``fp8_weight_operand`` decodes through
+        ``w4a_triton.unpack_int4_to_e4m3`` when the packed words live on a CUDA
+        device, and that kernel reads ``qweight`` and writes E4M3 in one pass,
+        so no intermediate plane is allocated at all (1 B/weight peak instead
+        of 5). Keep this decode exact and readable; it is the oracle.
 
         Validation only runs for instances of this class, so the checkpoint
         audits can keep calling it on a ``TorchLinear``:
@@ -326,16 +331,8 @@ class W4AFP8Linear(PackableQuantLinear):
         """See :func:`unpack_int4_codes`; kept as a class-level alias."""
         return unpack_int4_codes(packed)
 
-    @torch.no_grad()
-    def fp8_weight_operand(self) -> torch.Tensor:
-        """Materialize the E4M3 weight operand for exactly one forward.
-
-        Centered INT4 codes are exactly representable in E4M3, so this step is
-        lossless. The returned tensor is an expansion of the native INT4 codes:
-        callers must pass it straight to the kernel and drop it when that
-        launch is ordered on the stream. It is never stored on the module, so
-        nothing here touches module state or synchronizes the device.
-        """
+    def _require_current_weights(self) -> None:
+        """Revalidate a stale layout, or explain why decoding must not proceed."""
         if not self._weights_are_current():
             if self._w4a_weights_ready:
                 # Weights changed in place after post_init(); revalidate rather
@@ -348,6 +345,34 @@ class W4AFP8Linear(PackableQuantLinear):
                 )
         elif not self._layout_token_is_observable():
             self._warn_unobservable_layout()
+
+    @torch.no_grad()
+    def fp8_weight_operand(self) -> torch.Tensor:
+        """Materialize the E4M3 weight operand for exactly one forward.
+
+        Centered INT4 codes are exactly representable in E4M3, so this step is
+        lossless. The returned tensor is an expansion of the native INT4 codes:
+        callers must pass it straight to the kernel and drop it when that
+        launch is ordered on the stream. It is never stored on the module, so
+        nothing here touches module state or synchronizes the device.
+
+        On CUDA the decode runs as one fused Triton kernel that reads packed
+        words and writes E4M3 directly, so no intermediate plane exists at all.
+        The Torch decode remains the CPU fallback and the reference the kernel
+        is pinned against.
+        """
+        self._require_current_weights()
+        if self.qweight.device.type == "cuda" and self.qweight.dtype == torch.int32:
+            from .w4a_triton import unpack_int4_to_e4m3
+
+            return unpack_int4_to_e4m3(
+                self.qweight,
+                torch.empty(
+                    (self.in_features, self.out_features),
+                    device=self.qweight.device,
+                    dtype=torch.float8_e4m3fn,
+                ),
+            )
         return self._centered_int4_codes().to(torch.float8_e4m3fn)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -357,6 +382,8 @@ class W4AFP8Linear(PackableQuantLinear):
             raise RuntimeError(
                 "W4AFP8 weights changed since post_init(); call post_init() again before inference."
             )
+        if not self._layout_token_is_observable():
+            self._warn_unobservable_layout()
         from .w4a_activation import W4AActivation, pack_activation
         from .w4a_triton import fp8_linear, fp8_linear_prepacked
 

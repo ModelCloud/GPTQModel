@@ -27,7 +27,7 @@ import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
-from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear
+from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear, unpack_int4_codes
 
 
 K, N = 256, 128
@@ -525,30 +525,34 @@ def test_persistent_weight_bytes():
     )
     assert retained == 0  # no derived tensor at all
 
-    # Transient scratch for one forward. The byte-level unpack no longer
-    # materializes 4 B/weight int32 shift and mask planes; the peak is now the
-    # E4M3 operand plus the one-byte-per-weight intermediate planes that are
-    # live together while the decode runs. Measured on RTX 4090 the allocator
-    # delta is exactly 5 B/weight (163840 B here), down from 8 B/weight for the
-    # int32 form -- and still above the 65536 B figure the first draft of this
-    # work reported, which counted the operand plus one group but not the live
-    # intermediates.
-    floor = 5 * K * N
-    assert floor == 163840
-    assert floor > 2 * 65536, "the reported 65536 B constant cannot cover the intermediates"
+    # Transient scratch for one forward is just the E4M3 operand. The fused
+    # Triton unpack reads packed words and writes E4M3 in one pass, so neither
+    # the 4 B/weight int32 shift/mask planes nor the 1 B/weight uint8-view
+    # intermediates of the Torch decode are ever allocated. Measured on RTX
+    # 4090 the allocator delta is exactly 1 B/weight (32768 B here). The Torch
+    # fallback is retained for CPU/meta weights and still needs 5 B/weight; see
+    # the test below.
+    fused = K * N
+    assert fused == 32768
+    # The superseded staging forms, kept so a silent regression is caught here
+    # rather than only in the allocator measurement.
+    torch_uint8_view = 5 * K * N
+    torch_int32_shift = 8 * K * N
+    assert fused < torch_uint8_view < torch_int32_shift
 
 
 def test_transient_staging_peak_is_measured_not_assumed():
-    """Peak staging bytes must be measured on GPU, and exceed the old constant.
+    """Peak staging bytes must be measured on GPU, and stay at the fused floor.
 
-    On CPU there is no allocator to sample, so the analytic floor above is used.
-    On CUDA the real peak is sampled from the caching allocator; it must cover
-    the per-weight intermediates the decode allocates, not just the E4M3
-    operand.
+    On CPU there is no allocator to sample, so the analytic bound above is used.
+    On CUDA the real peak is sampled from the caching allocator. The fused
+    decode must peak at the E4M3 operand and nothing more; a regression to the
+    uint8 view (5 B/weight) or the int32 form (8 B/weight) has to be caught
+    here, so the bound is two-sided.
     """
     module = _module(W4AFP8Linear)
     operand_bytes = K * N
-    floor = 5 * K * N
+    floor = K * N
     if not torch.cuda.is_available():
         pytest.skip("allocator sampling requires CUDA")
 
@@ -562,15 +566,14 @@ def test_transient_staging_peak_is_measured_not_assumed():
     peak_delta = torch.cuda.max_memory_allocated() - baseline
     assert operand.numel() * operand.element_size() == operand_bytes
     assert peak_delta >= floor, (
-        f"staged peak {peak_delta} B is below the intermediate-plane floor {floor} B"
+        f"staged peak {peak_delta} B is below the fused floor {floor} B"
     )
     # Bound the peak from above as well. The lower bound alone cannot detect a
-    # staging path that regressed to the old int32 form (8 B/weight) or that
-    # started leaking the operand beyond the call, and any assertion comparing
-    # against the superseded 65536 B constant is vacuous once the 5 B/weight
-    # floor holds. One allocator block of slack covers rounding.
+    # staging path that regressed to the uint8 view (5 B/weight) or the int32
+    # form (8 B/weight), nor one that started leaking the operand past the
+    # call. One allocator block of slack covers rounding.
     assert peak_delta <= floor + K * N, (
-        f"staged peak {peak_delta} B exceeds the 5 B/weight bound {floor + K * N} B"
+        f"staged peak {peak_delta} B exceeds the fused 1 B/weight bound {floor + K * N} B"
     )
 
 
@@ -701,3 +704,78 @@ def test_observable_layout_is_reported_for_normal_construction():
     module = _module(W4AFP8Linear)
     assert module.qzeros.is_inference() is False
     assert module._layout_token_is_observable()
+
+
+# --------------------------------------------------------------------------
+# Fused INT4 -> E4M3 unpacking must stay byte-identical to the Torch decode.
+# --------------------------------------------------------------------------
+
+def _fused_unpack():
+    """Import the Triton module lazily.
+
+    ``w4a_triton`` needs a Triton build with Gluon ``mma_v2``; importing it at
+    module scope would break the CPU-only storage tests on a build without it.
+    """
+    from gptqmodel.nn_modules.qlinear.w4a_triton import unpack_int4_to_e4m3
+    return unpack_int4_to_e4m3
+
+
+@pytest.mark.parametrize("rows,out", [(256, 128), (512, 64), (1024, 96), (2048, 512)])
+def test_fused_unpack_matches_torch_decode(rows, out):
+    """The fused kernel must reproduce the Torch decode bit for bit.
+
+    The Torch path is the oracle: it expands the same packed words with plain
+    shifts and casts to E4M3, so any nibble-order, centering, or rounding
+    difference shows up as a byte mismatch. Random words exercise every nibble
+    position instead of a ramp that could agree by accident.
+    """
+    if not torch.cuda.is_available():
+        pytest.skip("the fused unpack runs on CUDA only")
+
+    generator = torch.Generator().manual_seed(rows * 17 + out)
+    packed = torch.randint(
+        0, 2**31 - 1, (rows // 8, out), generator=generator, dtype=torch.int64
+    ).to(torch.int32).cuda()
+
+    expected = (
+        unpack_int4_codes(packed.cpu()).to(torch.int16) - 8
+    ).to(torch.float8_e4m3fn).cuda()
+    fused = torch.empty((rows, out), device="cuda", dtype=torch.float8_e4m3fn)
+
+    _fused_unpack()(packed, fused)
+
+    assert fused.dtype == torch.float8_e4m3fn and fused.shape == (rows, out)
+    assert torch.equal(fused.view(torch.uint8), expected.view(torch.uint8))
+
+
+def test_fused_unpack_rejects_bad_arguments():
+    """Wrong dtype/shape/device must be refused instead of silently decoded."""
+    if not torch.cuda.is_available():
+        pytest.skip("the fused unpack runs on CUDA only")
+
+    packed = torch.zeros((32, 64), dtype=torch.int32, device="cuda")
+    good = torch.empty((256, 64), dtype=torch.float8_e4m3fn, device="cuda")
+
+    with pytest.raises(ValueError, match="CUDA"):
+        _fused_unpack()(packed.cpu(), good.cpu())
+    with pytest.raises(ValueError, match="E4M3"):
+        _fused_unpack()(packed, torch.empty((256, 64), dtype=torch.float16, device="cuda"))
+    with pytest.raises(ValueError, match=r"must be \(256, 64\)"):
+        _fused_unpack()(packed, torch.empty((128, 64), dtype=torch.float8_e4m3fn, device="cuda"))
+
+
+def test_fused_unpack_all_zero_and_all_fifteen_words():
+    """The extreme word values pin the ends of the centered INT4 range."""
+    if not torch.cuda.is_available():
+        pytest.skip("the fused unpack runs on CUDA only")
+
+    out = torch.empty((64, 32), device="cuda", dtype=torch.float8_e4m3fn)
+    zero_words = torch.zeros((8, 32), dtype=torch.int32, device="cuda")
+    full_words = torch.full((8, 32), -1, dtype=torch.int32, device="cuda")
+
+    assert torch.equal(
+        _fused_unpack()(zero_words, out).float(), torch.full((64, 32), -8.0, device="cuda")
+    )
+    assert torch.equal(
+        _fused_unpack()(full_words, out).float(), torch.full((64, 32), 7.0, device="cuda")
+    )

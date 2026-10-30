@@ -156,6 +156,62 @@ def fp8_linear(x: torch.Tensor, weight_e4m3: torch.Tensor, scales: torch.Tensor,
     return fp8_linear_prepacked(q, row_scale, weight_e4m3, scales, bias, x.dtype).reshape(shape)
 
 
+@triton.jit
+def _unpack_int4_to_e4m3(Packed, Out, K: tl.constexpr, N: tl.constexpr,
+                         BW: tl.constexpr, BN: tl.constexpr):
+    """Expand packed GPTQ nibble words straight into E4M3.
+
+    ``Packed`` is ``[K/8, N]`` int32 with eight codes per word, low nibble
+    first. One program owns ``BW`` words x ``BN`` columns and writes the eight
+    nibbles of those words in place of the word, so the packed int32 plane is
+    read once and the E4M3 plane is written once. No intermediate plane is
+    materialized, which is what the Torch path cannot avoid: shifting int32
+    values allocates 4 B/weight per step and a ``uint8`` view still allocates
+    1 B/weight intermediates.
+    """
+    word_row = tl.program_id(0) * BW + tl.arange(0, BW)
+    cols = tl.program_id(1) * BN + tl.arange(0, BN)
+    words = tl.load(
+        Packed + word_row[:, None] * N + cols[None, :],
+        mask=(word_row[:, None] < K // 8) & (cols[None, :] < N),
+        other=0,
+    )
+    codes_in_range = cols[None, :] < N
+    for nibble in tl.static_range(8):
+        centered = ((words >> (4 * nibble)) & 15).to(tl.float32) - 8.0
+        row = word_row * 8 + nibble
+        tl.store(
+            Out + row[:, None] * N + cols[None, :],
+            _to_e4m3_rn(centered),
+            mask=(row[:, None] < K) & codes_in_range,
+        )
+
+
+def unpack_int4_to_e4m3(packed: torch.Tensor, out: torch.Tensor) -> torch.Tensor:
+    """Decode packed GPTQ INT4 words into a caller-owned E4M3 buffer.
+
+    The buffer is supplied by the caller so that this stays a bounded staging
+    step owned by one forward: the module never keeps the result.
+    """
+    if packed.device.type != "cuda":
+        raise ValueError("Fused INT4 unpacking requires a CUDA tensor.")
+    if out.dtype != torch.float8_e4m3fn:
+        raise ValueError("Fused INT4 unpacking writes E4M3 only.")
+    words, n = packed.shape
+    k = words * 8
+    if out.shape != (k, n):
+        raise ValueError(f"E4M3 operand must be ({k}, {n}), got {tuple(out.shape)}.")
+    if not k or not n:
+        return out
+    block_words = 16
+    block_cols = 256 if n % 256 == 0 else (64 if n % 64 == 0 else 32)
+    with _launch_device(packed.device):
+        _unpack_int4_to_e4m3[(triton.cdiv(words, block_words), triton.cdiv(n, block_cols))](
+            packed, out, k, n, block_words, block_cols, num_warps=4,
+        )
+    return out
+
+
 def fp8_pack(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Encode CUDA [rows, K] with one E4M3 scale per row."""
     if x.ndim != 2 or x.device.type != "cuda":
