@@ -2209,7 +2209,12 @@ def _load_sanitized_generation_config(path: str) -> Optional[GenerationConfig]:
         # only; the old `get_config_dict` helper no longer exists. Calling it
         # raised AttributeError on every model, so this branch was dead and the
         # caller always fell back to a defaults-only config.
-        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path)
+        #
+        # `do_sample=True` is passed here rather than forced afterwards: the
+        # loader validates sampling fields (temperature/top_p/top_k) against the
+        # file's own `do_sample`, so a `do_sample: false` config would warn that
+        # those flags "are not valid and may be ignored" before we flip the bit.
+        cfg = GenerationConfig.from_pretrained(pretrained_model_name=path, do_sample=True)
     except Exception:
         log.debug("generation config %s could not be loaded; falling back to defaults", path, exc_info=True)
         return None

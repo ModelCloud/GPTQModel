@@ -42,23 +42,34 @@ def test_transformers_device_map_compat_reports_upstream_api_change(monkeypatch)
     """An upstream rename must produce a visible warning, not a silent no-op."""
     import transformers.quantizers.quantizer_gptq as quantizer_gptq
 
+    recording = _RecordingLogger()
+    monkeypatch.setattr(gptqmodel, "log", recording)
     monkeypatch.delattr(quantizer_gptq, "GptqHfQuantizer")
 
-    stderr = _captured_stderr(gptqmodel._patch_transformers_gptq_device_map_compat)
+    gptqmodel._patch_transformers_gptq_device_map_compat()
 
-    assert "device-map compat is inactive" in stderr
+    assert recording.warning_calls, "an upstream rename was reported at no level at all"
+    msg, exc_info = recording.warning_calls[0]
+    assert "device-map compat is inactive" in msg
+    assert exc_info is True, "the warning must carry the upstream traceback"
 
 
 def test_paroquant_quantizer_compat_reports_upstream_api_change(monkeypatch):
+    """Same guarantee for the ParoQuant shim."""
     # Simulate upstream moving GPTQConfig: the shim's import then fails even
     # though transformers itself is still installed.
     import transformers.utils.quantization_config as quantization_config
 
+    recording = _RecordingLogger()
+    monkeypatch.setattr(gptqmodel, "log", recording)
     monkeypatch.delattr(quantization_config, "GPTQConfig")
 
-    stderr = _captured_stderr(gptqmodel._patch_transformers_paroquant_quantizer_compat)
+    gptqmodel._patch_transformers_paroquant_quantizer_compat()
 
-    assert "ParoQuant quantizer compat is inactive" in stderr
+    assert recording.warning_calls, "an upstream rename was reported at no level at all"
+    msg, exc_info = recording.warning_calls[0]
+    assert "ParoQuant quantizer compat is inactive" in msg
+    assert exc_info is True, "the warning must carry the upstream traceback"
 
 
 class _RecordingLogger:
@@ -256,6 +267,47 @@ def test_mlx_probe_reports_unavailable_when_import_fails(monkeypatch):
     assert torch_utils._detect_mlx() is False
 
 
+def test_mlx_and_has_mlx_are_updated_together(monkeypatch):
+    """`HAS_MLX` and `mlx` must never disagree.
+
+    Callers are written as `if HAS_MLX: mlx.core.clear_cache()`, so a probe
+    that flips only one of them turns a supported path into an AttributeError.
+    """
+    import builtins
+    import types
+
+    real_import = builtins.__import__
+
+    pkg = types.ModuleType("mlx")
+    core = types.ModuleType("mlx.core")
+    core.clear_cache = lambda: None
+    core.metal = types.ModuleType("mlx.core.metal")
+    pkg.core = core
+
+    state = {"fail": False}
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        # CPython's `__import__` returns the *top-level* package for a dotted
+        # name, and `import a.b.c` binds that return value to `a`. Returning the
+        # submodule here would bind `mlx` to `mlx.core.metal` and make the
+        # invariant assertion check something production never does.
+        if name in {"mlx.core", "mlx.core.metal"}:
+            if name == "mlx.core" and state["fail"]:
+                raise ImportError("mlx broke after working once")
+            return pkg
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert torch_utils._detect_mlx() is True
+    assert torch_utils.HAS_MLX is True and torch_utils.mlx is pkg
+
+    # A later probe fails: both halves must flip, not just one.
+    state["fail"] = True
+    assert torch_utils._detect_mlx() is False
+    assert torch_utils.HAS_MLX is False and torch_utils.mlx is None
+
+
 def test_partial_mlx_install_does_not_leave_module_bound(monkeypatch):
     """A half-installed MLX must not leave ``mlx`` set while ``HAS_MLX`` is False.
 
@@ -414,6 +466,35 @@ def test_generation_config_is_loaded_not_silently_skipped(tmp_path):
     assert cfg.do_sample is True
 
 
+def test_generation_config_enables_sampling_before_validation(tmp_path):
+    """A `do_sample: false` config must not trigger transformers' flag warning.
+
+    The loader validates temperature/top_p/top_k against the file's own
+    `do_sample`; forcing the bit afterwards makes every such model warn that
+    those flags "are not valid and may be ignored".
+    """
+    from gptqmodel.utils import hf as hf_utils
+
+    (tmp_path / "generation_config.json").write_text(
+        '{"max_new_tokens": 11, "do_sample": false,'
+        ' "temperature": 0.5, "top_p": 0.9, "top_k": 12}',
+        encoding="utf-8",
+    )
+
+    stderr = _captured_stderr(
+        lambda: hf_utils._load_sanitized_generation_config(str(tmp_path))
+    )
+
+    assert "not valid and may be ignored" not in stderr, (
+        "do_sample was forced after validation, so sampling flags were discarded"
+    )
+
+    cfg = hf_utils._load_sanitized_generation_config(str(tmp_path))
+    assert cfg.do_sample is True
+    assert cfg.max_new_tokens == 11
+    assert cfg.temperature == 0.5, "sampling fields must survive the load"
+
+
 def test_unreadable_generation_config_is_reported(tmp_path, monkeypatch):
     from transformers import GenerationConfig
 
@@ -494,17 +575,23 @@ def test_failed_device_moves_do_not_flood_the_log(monkeypatch):
         model.add_module(f"layer{index}", layer)
 
     monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+    monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
 
     looper_helpers.rehome_module_to_device(model, torch.device("cpu"), only_mismatched=False)
 
     assert len(calls) == 2, f"expected 1 traceback + 1 summary, got {len(calls)}: {calls}"
     assert calls[0][1] is True, "the first failure must carry the traceback"
     assert not calls[1][1], "the summary needs no traceback"
-    assert "29 more" in calls[1][0], f"summary must count the remaining failures: {calls[1][0]}"
+    assert "30 tensor(s)" in calls[1][0], f"summary must count every failure: {calls[1][0]}"
 
 
-def test_single_failed_device_move_logs_without_summary(monkeypatch):
-    """One failure needs no trailing summary line."""
+def test_repeated_rehome_calls_do_not_repeat_the_traceback(monkeypatch):
+    """Batch workers re-run rehome per batch; the traceback must not repeat.
+
+    ``forward_batch_worker`` calls ``rehome_module_to_device`` once per batch,
+    so a per-call budget alone still produces `2 * batches` lines for a tensor
+    that can never move.
+    """
     calls = []
 
     class FakeLogger:
@@ -516,8 +603,35 @@ def test_single_failed_device_move_logs_without_summary(monkeypatch):
     module._buffers["stubborn"] = _stubborn_tensor()
 
     monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+    monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
+
+    for _ in range(8):
+        looper_helpers.rehome_module_to_device(module, torch.device("cpu"), only_mismatched=False)
+
+    tracebacks = [c for c in calls if c[1] is True]
+    assert len(tracebacks) == 1, (
+        f"the same failure was reported with a traceback {len(tracebacks)} times"
+    )
+    assert len(calls) == 9, f"expected one summary line per call, got {len(calls)}"
+
+
+def test_single_failed_device_move_still_reports_a_count(monkeypatch):
+    """One failure gets its traceback plus a one-line count."""
+    calls = []
+
+    class FakeLogger:
+        def warning(self, msg, *args, **kwargs):
+            calls.append((msg % args if args else msg, kwargs.get("exc_info")))
+
+    module = torch.nn.Module()
+    module.register_buffer("stubborn", torch.zeros(2))
+    module._buffers["stubborn"] = _stubborn_tensor()
+
+    monkeypatch.setattr(looper_helpers, "log", FakeLogger())
+    monkeypatch.setattr(looper_helpers, "_REPORTED_MOVE_FAILURES", set())
 
     looper_helpers.rehome_module_to_device(module, torch.device("cpu"), only_mismatched=False)
 
-    assert len(calls) == 1, f"a single failure must not add a summary: {calls}"
+    assert len(calls) == 2, f"expected traceback + count, got {calls}"
     assert calls[0][1] is True
+    assert "1 tensor(s)" in calls[1][0]

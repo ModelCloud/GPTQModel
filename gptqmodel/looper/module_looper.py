@@ -691,20 +691,20 @@ class ModuleLooper(DeviceAssignmentState):
                 raise
             return
         except BaseException as exc:
-            # Mirror _emit_layer_complete: when the caller asked for in-place
-            # propagation the exception reaches the caller unchanged, so logging
-            # here would only double-report it (and would mislabel a user Ctrl-C
-            # as a callback bug). Only the swallowed path needs a record.
+            # Only the swallowed path needs a record: when the caller asked for
+            # in-place propagation the exception reaches it unchanged, so logging
+            # here would double-report it and would mislabel a user Ctrl-C as a
+            # callback bug. Note `_emit_layer_complete` does not latch a stop on
+            # this path, so this is stricter than its sibling, not identical.
             if raise_in_place:
                 self._request_loop_stop(exc)
                 raise
             log.warning(
-                "Subset callback raised (stage=%s, layer=%s, subset=%s/%s): %r",
+                "Subset callback raised (stage=%s, layer=%s, subset=%s/%s)",
                 stage,
                 layer_idx,
                 subset_index,
                 subset_total,
-                exc,
                 exc_info=True,
             )
             self._request_loop_stop(exc)

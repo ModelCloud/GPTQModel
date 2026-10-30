@@ -135,22 +135,23 @@ def _detect_mlx() -> bool:
     ``except Exception`` is deliberate -- ``KeyboardInterrupt``/``SystemExit``
     must stay visible rather than being reported as a missing dependency.
 
-    The module-level ``mlx`` name is only assigned when the probe succeeds, so
-    a partially-installed package never leaves a half-bound name behind.
+    ``mlx`` and ``HAS_MLX`` are updated together so callers guarded by
+    ``if HAS_MLX: mlx.core.clear_cache()`` can never see one without the other.
+    A partially-installed package binds ``mlx`` while ``mlx.core.metal`` raises,
+    so the failure path clears it again.
     """
-    global mlx
+    global HAS_MLX, mlx
 
     try:
         import mlx.core  # type: ignore # noqa: F401
         import mlx.core.metal  # noqa: F401
     except Exception:
-        # `import mlx.core` binds the top-level `mlx` name even when the probe
-        # fails partway, so clear it: a partial install must never leave
-        # `mlx` set while `HAS_MLX` is False.
+        HAS_MLX = False
         mlx = None
-        return False
+        return HAS_MLX
 
-    return True
+    HAS_MLX = True
+    return HAS_MLX
 
 
 # mlx check
