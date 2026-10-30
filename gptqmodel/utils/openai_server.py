@@ -39,14 +39,19 @@ GUARDED_PREFIX = ("/v1", "/v2", "/inference")
 
 
 def _resolve_api_keys(api_key) -> list:
-    """Resolve configured keys: explicit keys win, the environment is a fallback."""
-    if isinstance(api_key, str):
-        keys = [api_key]
-    else:
-        keys = list(api_key or [])
-    if not keys:
+    """Resolve configured keys.
+
+    Only ``None`` falls back to the environment. Any explicit value is
+    authoritative, so ``api_key=[]`` means "no authentication" instead of
+    silently re-enabling the environment key.
+    """
+    if api_key is None:
         env_key = os.environ.get(API_KEY_ENV)
         keys = [env_key] if env_key else []
+    elif isinstance(api_key, str):
+        keys = [api_key]
+    else:
+        keys = list(api_key)
     # Blank entries must not silently disable authentication.
     return [key for key in keys if key]
 
@@ -165,7 +170,9 @@ class OpenAiServer:
             if stop is None:
                 return []
             if isinstance(stop, str):
-                return [stop]
+                # An empty scalar must be ignored exactly like an empty list
+                # entry: it matches at position zero and would drop the answer.
+                return [stop] if stop else []
             return [value for value in stop if isinstance(value, str) and value]
 
         def _strip_stop(text: str, stop_strings: list):
@@ -309,9 +316,18 @@ class OpenAiServer:
 
         @self.app.get("/shutdown")
         def shutdown(request: Request, authorization: str | None = Header(default=None)):
-            # Stopping the service is privileged: loopback callers, or a valid API key.
-            if not self._is_loopback(request) and not self._token_matches(authorization):
-                raise HTTPException(status_code=403, detail="`/shutdown` requires localhost or an API key.")
+            # Stopping the service is privileged. When a key is configured it is
+            # the only accepted credential: a loopback peer is not authorization,
+            # because any page open on the host can issue a cross-site GET here.
+            # Loopback is only sufficient while the server has no key at all.
+            if self.api_keys:
+                allowed = self._token_matches(authorization)
+                detail = "`/shutdown` requires a valid API key."
+            else:
+                allowed = self._is_loopback(request)
+                detail = "`/shutdown` requires a loopback caller when no API key is configured."
+            if not allowed:
+                raise HTTPException(status_code=403, detail=detail)
             self.shutdown()
             return {"message": "Server is shutting down..."}
 
