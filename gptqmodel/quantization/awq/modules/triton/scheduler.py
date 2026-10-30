@@ -164,23 +164,42 @@ def candidate_plans(M: int, N: int, K: int, group_size: int) -> tuple[list[AwqTr
     return candidates, rejected
 
 
+def _rocm_arch_for_index(index: int | None) -> str | None:
+    """Return the normalized HIP architecture for ``index`` (``gfx1201``).
+
+    Imported lazily so this module keeps its Triton-free, side-effect-free
+    import cost.  On ROCm, ``torch.cuda.get_device_capability`` is meaningless
+    and must never be used for dispatch, so the architecture string replaces it
+    as the device discriminator.
+    """
+    from .....utils.arch import rocm_arch
+
+    return rocm_arch(index)
+
+
 @lru_cache(maxsize=16)
 def _device_identity_cached(device_type: str, index: int | None) -> tuple[Any, ...]:
     name: str | None = None
     capability: tuple[int, int] | None = None
     sm_count: int | None = None
     total_memory: int | None = None
+    arch: str | None = None
     if device_type == "cuda" and torch.cuda.is_available():
         try:
             name = torch.cuda.get_device_name(index)
-            capability = tuple(torch.cuda.get_device_capability(index))
             props = torch.cuda.get_device_properties(index)
             sm_count = int(getattr(props, "multi_processor_count", 0))
             total_memory = int(getattr(props, "total_memory", 0))
+            if torch.version.hip is not None:
+                # HIP runtime: capability numbers are unrelated to the GPU
+                # generation, so classify by ``gcnArchName`` instead.
+                arch = _rocm_arch_for_index(index)
+            else:
+                capability = tuple(torch.cuda.get_device_capability(index))
         except Exception:
             # A mocked or unavailable runtime is unverified by design.
             pass
-    return (device_type, index, name, capability, sm_count, total_memory)
+    return (device_type, index, name, capability, sm_count, total_memory, arch)
 
 
 def device_identity(device: torch.device | str | None) -> tuple[Any, ...]:
@@ -274,7 +293,12 @@ def _builtin_plan(
     input_dtype: torch.dtype | None, compute_dtype: torch.dtype | None,
     output_dtype: torch.dtype | None, fp32_accum: bool,
 ) -> AwqTritonPlan | None:
-    profile = identity[2:] if len(identity) >= 6 else ()
+    # CUDA identities are six-tuples; ROCm identities append the HIP
+    # architecture as a seventh field.  A ROCm device can never match the
+    # measured NVIDIA profile because ``identity[6]`` is a ``gfx*`` string.
+    if len(identity) >= 7 and identity[6] is not None:
+        return None
+    profile = identity[2:6] if len(identity) >= 6 else ()
     if (
         profile != _VERIFIED_4090_PROFILE
         or input_dtype != torch.float16

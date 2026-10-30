@@ -1913,8 +1913,8 @@ def test_vptq_inference_matches_torch_oracle(dtype):
 def test_vptq_cuda_quantize_and_infer(dtype):
     """Quantization and inference must run on the target accelerator."""
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for VPTQ accelerator coverage")
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for VPTQ accelerator coverage (VPTQ_CUDA is CUDA-only)")
 
     device = torch.device("cuda:0")
     weight, hessian = synthetic_problem(out_features=64, in_features=128)
@@ -1963,8 +1963,8 @@ def test_vptq_cuda_quantize_and_infer(dtype):
 def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_len, monkeypatch):
     """Check fused and dense CUDA dispatch around the M crossover against an oracle."""
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for VPTQ fused inference coverage")
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for VPTQ fused inference coverage (VPTQ_CUDA is CUDA-only)")
 
     device = torch.device("cuda:0")
     weight, hessian = synthetic_problem(out_features=64, in_features=128, seed=71)
@@ -2037,8 +2037,8 @@ def test_vptq_cuda_linear_matches_independent_torch_oracle(dtype, rows, vector_l
 def test_vptq_cuda_outlier_path_matches_independent_torch_oracle(dtype, rows):
     """Both native CUDA paths handle outliers, groups, residuals, permutation and norm."""
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for VPTQ CUDA outlier coverage")
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for VPTQ CUDA outlier coverage (VPTQ_CUDA is CUDA-only)")
 
     device = torch.device("cuda:0")
     weight, hessian = synthetic_problem(out_features=32, in_features=64, seed=83)
@@ -2074,8 +2074,8 @@ def test_vptq_cuda_outlier_path_matches_independent_torch_oracle(dtype, rows):
 def test_vptq_cuda_empty_rows_skip_kernel_and_preserve_adapter(shape, monkeypatch):
     """Empty CUDA inputs preserve Linear shape and adapter behavior without a launch."""
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for VPTQ empty-input coverage")
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for VPTQ empty-input coverage (VPTQ_CUDA is CUDA-only)")
 
     class AddOneAdapter:
         def apply(self, *, x, out):
@@ -2394,8 +2394,8 @@ def test_tiny_qwen3_vptq_grouped_checkpoint_roundtrip(tmp_path: Path):
 def test_tiny_qwen3_vptq_cuda_smoke(tmp_path: Path):
     """Run the real calibration/quantize/pack lifecycle on an accelerator."""
 
-    if not torch.cuda.is_available():
-        pytest.skip("CUDA is required for the VPTQ accelerator smoke test")
+    if not torch.cuda.is_available() or torch.version.hip is not None:
+        pytest.skip("CUDA is required for the VPTQ accelerator smoke test (VPTQ_CUDA is CUDA-only)")
 
     native_dir = tmp_path / "native"
     native_dir.mkdir()

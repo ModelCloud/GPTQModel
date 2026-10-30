@@ -11,8 +11,13 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, PLATFORM
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.logger import setup_logger
 from ...utils.python import has_gil_disabled
+from ...utils.rocm import IS_ROCM
 from .gguf import GGUFTorchLinear, _unpack_q4_k_scale_min_torch
+
+
+log = setup_logger()
 
 
 try:
@@ -949,6 +954,16 @@ def _use_q1_0_g128_k2048_decode_specialization(
 def _cuda_device_capability(device: torch.device) -> tuple[int, int] | None:
     if device.type != "cuda":
         return None
+    if IS_ROCM:
+        # ROCm aliases the CUDA device namespace but reports a meaningless
+        # compute capability.  All NVIDIA capability-gated specializations
+        # (Q1_0 u32 layout, fixed decode/prefill configs) are therefore
+        # skipped; the generic Triton kernels and GGUF_TORCH remain available.
+        log.debug.once(
+            "GGUF Triton: ROCm host detected; CUDA capability specializations disabled "
+            "(generic launch configs only). The automatic backend is GGUF_TORCH."
+        )
+        return None
 
     index = device.index if device.index is not None else torch.cuda.current_device()
     capability = _CUDA_DEVICE_CAPABILITY_CACHE.get(index)
@@ -1423,6 +1438,18 @@ class GGUFTritonKernel(GGUFTorchLinear):
         if has_gil_disabled() and triton_v < version.parse("3.4.0"):
             return False, Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
 
+        if IS_ROCM:
+            # ``SUPPORTS_DEVICES`` only lists DEVICE.CUDA, so the selector
+            # already skips this kernel on ROCm; make the contract explicit so
+            # AUTO falls back to GGUF_TORCH instead of running an untuned path.
+            log.debug.once(
+                "GGUF Triton: unavailable on ROCm; falling back to GGUF_TORCH."
+            )
+            return False, NotImplementedError(
+                "GGUFTritonKernel requires CUDA: the fused GGUF Triton kernels are not "
+                "validated on ROCm. Use BACKEND.GGUF_TORCH for the portable torch fallback."
+            )
+
         return True, None
 
     def clear_weight_cache(self) -> None:
@@ -1530,7 +1557,7 @@ class GGUFTritonKernel(GGUFTorchLinear):
         return cached
 
     def _forward_triton(self, x_flat: torch.Tensor) -> torch.Tensor:
-        if x_flat.device.type != "cuda":
+        if x_flat.device.type != "cuda" or IS_ROCM:
             raise RuntimeError(
                 f"{self.__class__.__name__} only supports CUDA inference. "
                 "Load GGUF models on CUDA or use BACKEND.GGUF_TORCH for the torch fallback."
