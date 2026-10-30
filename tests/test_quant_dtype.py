@@ -319,8 +319,15 @@ def test_dequantize_f8_e4m3_raises_on_both_scale_and_inverse():
         dequantize_f8_e4m3(tensor, scale=torch.ones(2), scale_inv=torch.ones(2))
 
 
+def _force_cuda_runtime(monkeypatch):
+    """Pretend this is a non-HIP (NVIDIA) build so the SM table is exercised."""
+
+    monkeypatch.setattr(torch.version, "hip", None)
+
+
 def test_device_dtype_support_reports_arch_mapping(monkeypatch):
     _DTYPE_SUPPORT_CACHE.clear()
+    _force_cuda_runtime(monkeypatch)
 
 
 @pytest.mark.skipif(not hasattr(torch, "float8_e4m3fn"), reason="float8 dtype not available")
@@ -341,6 +348,7 @@ def test_dequantize_f8_e4m3_disable_avx2_override_matches_reference(monkeypatch,
 
     assert torch.equal(got, expected)
 
+    _force_cuda_runtime(monkeypatch)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 9))
 
@@ -355,6 +363,7 @@ def test_dequantize_f8_e4m3_disable_avx2_override_matches_reference(monkeypatch,
 
 def test_device_supports_native_fp8_reports_capability(monkeypatch):
     _DTYPE_SUPPORT_CACHE.clear()
+    _force_cuda_runtime(monkeypatch)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (8, 9))
     assert device_supports_native_fp8(torch.device("cuda", 0)) is True
@@ -369,6 +378,7 @@ def test_device_supports_native_fp8_reports_capability(monkeypatch):
 @pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
 def test_device_supports_native_fp4_reports_capability(monkeypatch):
     _DTYPE_SUPPORT_CACHE.clear()
+    _force_cuda_runtime(monkeypatch)
     monkeypatch.setattr("torch.cuda.is_available", lambda: True)
     monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (10, 0))
     support = get_device_dtype_support(torch.device("cuda", 0))
@@ -382,6 +392,54 @@ def test_device_supports_native_fp4_reports_capability(monkeypatch):
     assert torch.float4_e2m1fn_x2 not in support.advertised_linear_dtypes
     assert device_supports_native_fp4(torch.device("cuda", 0)) is False
     assert device_supports_dtype(torch.device("cuda", 0), torch.float4_e2m1fn_x2) is False
+
+
+def test_rocm_dtype_support_never_queries_device_capability(monkeypatch):
+    """Under HIP ``get_device_capability`` is meaningless, so it must not be used."""
+
+    _DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+    def _forbidden(device=None):
+        raise AssertionError("get_device_capability must not be used to classify ROCm devices")
+
+    monkeypatch.setattr("torch.cuda.get_device_capability", _forbidden)
+
+    support = get_device_dtype_support(torch.device("cuda", 0))
+
+    assert support.capability is None
+    assert torch.float16 in support.advertised_linear_dtypes
+    assert torch.bfloat16 in support.advertised_linear_dtypes
+    if hasattr(torch, "float8_e4m3fnuz"):
+        assert torch.float8_e4m3fnuz in support.advertised_linear_dtypes
+
+
+def test_rocm_validation_narrows_advertised_dtypes(monkeypatch):
+    """Runtime validation is what decides e4m3fnzn/fn support on a HIP build."""
+
+    _DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+    monkeypatch.setattr("torch.cuda.get_device_capability", lambda device=None: (12, 0))
+
+    rejected = getattr(torch, "float8_e5m2fnuz", None)
+    if rejected is None:
+        pytest.skip("float8_e5m2fnuz not available in this torch build")
+
+    import gptqmodel.quantization.dtype as dtype_module
+
+    real_validate = dtype_module._validate_linear_dtype_support
+    monkeypatch.setattr(
+        dtype_module,
+        "_validate_linear_dtype_support",
+        lambda device, dtype: False if dtype is rejected else real_validate(device, dtype),
+    )
+
+    support = get_device_dtype_support(torch.device("cuda", 0), validate=True)
+
+    assert rejected in support.advertised_linear_dtypes
+    assert rejected not in support.validated_linear_dtypes
 
 
 @pytest.mark.skipif(NVFP4Tensor is None, reason="torchao NVFP4 support required")
