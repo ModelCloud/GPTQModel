@@ -106,7 +106,7 @@ def test_defaults_are_left_to_the_caller(model):
     # Authentication is opt-in, and the key is part of the public API.
     assert "api_key" in defaults
 
-    # A list of keys is accepted, matching vLLM's repeatable `--api-key`.
+    # A list of keys is accepted so one deployment can rotate keys.
     server = OpenAiServer(model=model, api_key=["k1", "k2"])
     assert server.api_keys == ["k1", "k2"]
 
@@ -234,7 +234,7 @@ def test_multiple_api_keys_are_all_accepted(model):
 
 
 def test_blank_env_key_counts_as_no_key(model, monkeypatch):
-    # Same as vLLM: a blank key is filtered out, so it means "no key configured".
+    # A blank key is filtered out, so it means "no key configured".
     monkeypatch.setenv("GPTQMODEL_OPENAI_API_KEY", "")
     assert _chat(TestClient(OpenAiServer(model=model).app)).status_code == 200
 

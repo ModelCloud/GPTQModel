@@ -33,13 +33,13 @@ API_KEY_ENV = "GPTQMODEL_OPENAI_API_KEY"
 DEFAULT_HOST = "0.0.0.0"
 DEFAULT_PORT = 80
 
-# Follows vLLM: only the inference API is authenticated. Liveness/root routes stay
-# open so probes and browsers do not need the key.
+# Only the inference API is authenticated. Liveness/root routes stay open so
+# probes and browsers do not need the key.
 GUARDED_PREFIX = ("/v1", "/v2", "/inference")
 
 
 def _resolve_api_keys(api_key) -> list:
-    """Resolve configured keys the way vLLM does: explicit keys win, env is a fallback."""
+    """Resolve configured keys: explicit keys win, the environment is a fallback."""
     if isinstance(api_key, str):
         keys = [api_key]
     else:
@@ -71,7 +71,7 @@ def _bearer_token_matches(authorization: str, token_hashes: list) -> bool:
 
 
 class AuthenticationMiddleware:
-    """Pure ASGI bearer-token authentication, modeled on vLLM's middleware.
+    """Pure ASGI bearer-token authentication.
 
     Skipped in two cases:
         1. The HTTP method is OPTIONS (CORS preflight).
@@ -215,7 +215,7 @@ class OpenAiServer:
                         generate_kwargs["stop_strings"] = stop_strings
                         generate_kwargs["tokenizer"] = self.tokenizer
                     else:
-                        # The vLLM/SGLang adapters accept the OpenAI-style `stop` argument.
+                        # External runtime adapters accept the OpenAI-style `stop` argument.
                         generate_kwargs["stop"] = stop_strings
 
                 with torch.inference_mode():
@@ -264,7 +264,7 @@ class OpenAiServer:
 
         @self.app.get("/health")
         def health():
-            # Unauthenticated liveness probe, as in vLLM/SGLang; not under GUARDED_PREFIX.
+            # Unauthenticated liveness probe; deliberately outside GUARDED_PREFIX.
             return {"status": "ok"}
 
         @self.app.get("/shutdown")
