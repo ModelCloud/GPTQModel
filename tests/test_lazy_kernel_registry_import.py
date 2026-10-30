@@ -17,6 +17,7 @@ instead of a pytest session that already imported everything.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -29,13 +30,29 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 _OPTIONAL_MODULES = ("bitsandbytes", "bitblas", "llama_cpp")
 
 
+# Variables that change import-time behaviour. They are stripped from the child
+# environment so a developer shell (DEBUG=1, an opt-in kernel-map dump, ...)
+# cannot flip the meaning of these tests.
+_SCRUBBED_ENV = (
+    "DEBUG",
+    "GPTQMODEL_DEBUG_KERNEL_MAPS",
+    "GPTQMODEL_DISABLE_BITBLAS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+)
+
+
 def _run(code: str) -> subprocess.CompletedProcess:
+    env = {key: value for key, value in os.environ.items() if key not in _SCRUBBED_ENV}
+    # Import the tree these tests live in, not whatever is installed site-wide.
+    env["PYTHONPATH"] = str(REPO_ROOT)
     return subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code)],
         cwd=str(REPO_ROOT),
         capture_output=True,
         text=True,
         timeout=600,
+        env=env,
     )
 
 
@@ -58,7 +75,7 @@ def test_import_gptqmodel_skips_optional_backend_modules():
                 if name.startswith("gptqmodel.nn_modules.qlinear.")
                 and name.count(".") == 3
             ]
-            assert len(kernel_modules) < 20, (
+            assert len(kernel_modules) <= 12, (
                 f"kernel discovery ran eagerly at import time: {{sorted(kernel_modules)}}"
             )
             """
@@ -73,7 +90,7 @@ def test_kernel_registry_is_built_lazily_and_cached():
             import gptqmodel.utils.importer as importer
 
             # Nothing imports the kernel package until a caller asks for it.
-            assert importer._import_all_qlinear_kernels.cache_info().currsize == 0
+            assert importer._imported_kernel_module_count() == 0
             assert importer.build_kernel_support_maps.cache_info().currsize == 0
 
             auto = importer.get_auto_backend_kernel_mapping()
@@ -104,10 +121,12 @@ def test_optional_backend_probes_are_deferred_until_use():
             assert not bnb_module._probe_bitsandbytes_available.cache_info().currsize
 
             # Reading the legacy attribute performs (and caches) the probe.
-            assert isinstance(bool(bnb_module.BITSANDBYTES_AVAILABLE), bool)
+            assert bnb_module.BITSANDBYTES_AVAILABLE is bnb_module._probe_bitsandbytes_available()
             assert bnb_module._probe_bitsandbytes_available.cache_info().currsize == 1
-            # The accessor must agree with the cached probe it delegates to.
-            assert bnb_module.bitsandbytes_available() == bnb_module._probe_bitsandbytes_available()
+            assert not bitblas_module._probe_bitblas_available.cache_info().currsize
+
+            assert bitblas_module.BITBLAS_AVAILABLE is bitblas_module._probe_bitblas_available()
+            assert bitblas_module._probe_bitblas_available.cache_info().currsize == 1
             """
         )
     )
@@ -305,10 +324,13 @@ def test_debug_env_does_not_materialize_the_registry_at_import_time():
             """
             import os
             os.environ["DEBUG"] = "1"
+            # The child environment is scrubbed, so this test means the same
+            # thing on a developer shell that already exports the opt-in dump.
+            assert "GPTQMODEL_DEBUG_KERNEL_MAPS" not in os.environ
 
             import gptqmodel.utils.importer as importer
 
-            assert importer._import_all_qlinear_kernels.cache_info().currsize == 0, (
+            assert importer._imported_kernel_module_count() == 0, (
                 "DEBUG=1 built the kernel registry during import"
             )
             assert importer.build_kernel_support_maps.cache_info().currsize == 0
@@ -377,6 +399,20 @@ def test_legacy_map_names_are_visible_to_dir_and_star_import():
             assert "AUTO_BACKEND_KERNEL_MAPPING" in namespace
             assert "BACKEND_TO_METHOD_FORMAT_MAPPING" in namespace
             assert namespace["AUTO_BACKEND_KERNEL_MAPPING"] is importer.AUTO_BACKEND_KERNEL_MAPPING
+
+            # Before this module had an ``__all__``, ``import *`` exported every
+            # public global. Adding ``__all__`` must not shrink that surface to
+            # the two lazy names.
+            for name in (
+                "select_quant_linear",
+                "build_kernel_support_maps",
+                "iter_quant_linear_kernels",
+                "get_kernel_for_backend",
+                "validate_quant_linear",
+                "BACKEND",
+            ):
+                assert name in namespace, f"star-import lost {name}"
+            assert len([n for n in namespace if not n.startswith("_")]) >= 40
             """
         )
     )
@@ -426,9 +462,11 @@ def test_monkeypatch_undo_restores_the_optional_probe():
     import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
     import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_module
 
-    for module, name, accessor in (
-        (bnb_module, "BITSANDBYTES_AVAILABLE", bnb_module.bitsandbytes_available),
-        (bitblas_module, "BITBLAS_AVAILABLE", bitblas_module.bitblas_available),
+    for module, name, accessor, probe in (
+        (bnb_module, "BITSANDBYTES_AVAILABLE", bnb_module.bitsandbytes_available,
+         bnb_module._probe_bitsandbytes_available),
+        (bitblas_module, "BITBLAS_AVAILABLE", bitblas_module.bitblas_available,
+         bitblas_module._probe_bitblas_available),
     ):
         baseline = accessor()
         patcher = MonkeyPatch()
@@ -438,8 +476,16 @@ def test_monkeypatch_undo_restores_the_optional_probe():
         finally:
             patcher.undo()
 
-        assert accessor() == baseline, f"{module.__name__} stayed pinned after undo"
         assert name not in module.__dict__, f"{module.__name__} leaked a real attribute"
+        # ``undo()`` writes the probe's own value back, which is
+        # indistinguishable from an explicit override of that value. The bug was
+        # that the stale value then survived ``cache_clear()`` and hid every
+        # later environment change. Clearing must now re-arm the probe.
+        probe.cache_clear()
+        assert module._AVAILABILITY_OVERRIDES == {}, (
+            f"{module.__name__} kept {module._AVAILABILITY_OVERRIDES!r} after cache_clear()"
+        )
+        assert accessor() == probe(), f"{module.__name__} did not fall back to the probe"
 
 
 def test_overrides_stay_out_of_module_dict_and_delete_cleanly():
@@ -464,3 +510,266 @@ def test_overrides_stay_out_of_module_dict_and_delete_cleanly():
 
     assert bitblas_module.bitblas_available() == baseline
     assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__
+    assert bitblas_module.__dict__.get("_AVAILABILITY_DELETED") is True
+
+
+def test_transient_kernel_import_failure_is_retried():
+    """A kernel that fails to import once must not be hidden forever.
+
+    ``_import_all_qlinear_kernels`` used to be ``lru_cache``d, so a transient
+    ``ImportError``/``OSError`` (shared library not on the loader path yet,
+    extension installed later, ``sys.modules`` poisoned by another test) was
+    remembered for the life of the process, and clearing the map cache did not
+    re-arm it.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            broken = [True]
+            real_import_module = importlib.import_module
+
+            def flaky_import_module(name, *args, **kwargs):
+                if name.endswith(victim) and broken[0]:
+                    raise OSError("transient failure")
+                return real_import_module(name, *args, **kwargs)
+
+            importlib.import_module = flaky_import_module
+            try:
+                try:
+                    importer.get_kernel_for_backend(BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("expected the broken import to hide the kernel")
+            finally:
+                importlib.import_module = real_import_module
+
+            # The environment is fixed now; the retry must find the kernel even
+            # without clearing any cache.
+            broken[0] = False
+            kernel = importer.get_kernel_for_backend(
+                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+            )
+            assert kernel.__name__ == "SwordfishLinear", kernel
+            """
+        )
+    )
+
+
+def test_registry_build_reentry_reports_instead_of_deadlocking():
+    """Reading the maps from a kernel import must fail fast, not hang.
+
+    The build lock is a plain ``Lock`` held across every kernel import. A kernel
+    that touches the auto-select map while being imported would re-enter it and
+    hang forever; it now raises a ``RuntimeError`` that names the mistake.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+
+            real_import_module = importlib.import_module
+
+            def reentrant_import_module(name, *args, **kwargs):
+                if name.endswith("qlinear.swordfish"):
+                    importer.get_auto_backend_kernel_mapping()
+                return real_import_module(name, *args, **kwargs)
+
+            importlib.import_module = reentrant_import_module
+            try:
+                try:
+                    importer.build_kernel_support_maps()
+                except RuntimeError as exc:
+                    assert "re-entered" in str(exc), exc
+                else:
+                    raise AssertionError("re-entry was not reported")
+            finally:
+                importlib.import_module = real_import_module
+                importer.build_kernel_support_maps.cache_clear()
+            """
+        )
+    )
+
+
+def test_kernels_defined_in_the_qlinear_package_init_are_registered():
+    """A kernel defined in ``qlinear/__init__.py`` must reach the maps.
+
+    The package filter compared against ``"gptqmodel.nn_modules.qlinear."`` with
+    a trailing dot, so a class whose ``__module__`` is exactly the package name
+    was discovered but silently dropped from auto-selection.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+            class PackageLevelKernel(BaseQuantLinear):
+                SUPPORTS_FORMATS = {}
+                SUPPORTS_BACKENDS = []
+                SUPPORTS_METHODS = []
+
+            # Simulate a kernel that ships in the package ``__init__``.
+            PackageLevelKernel.__module__ = "gptqmodel.nn_modules.qlinear"
+
+            assert PackageLevelKernel in importer.iter_quant_linear_kernels()
+            assert PackageLevelKernel in importer._registry_kernel_classes()
+            """
+        )
+    )
+
+
+def test_legacy_map_names_accept_module_attribute_overrides(monkeypatch):
+    """``monkeypatch.setattr(importer, NAME, ...)`` must reach the selectors.
+
+    Both names used to be plain module globals that ``select_quant_linear()``
+    read directly. Now that they resolve through an accessor, a real module
+    attribute has to win over the cache, or patching them silently stops
+    affecting behaviour.
+    """
+
+    import gptqmodel.utils.importer as importer
+
+    sentinel = {"patched": True}
+    monkeypatch.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", sentinel)
+    assert importer.get_auto_backend_kernel_mapping() is sentinel
+
+    monkeypatch.delenv("GPTQMODEL_DISABLE_BITBLAS", raising=False)
+    monkeypatch.undo()
+    assert importer.get_auto_backend_kernel_mapping() is not sentinel
+    assert importer.get_auto_backend_kernel_mapping()
+
+
+def test_deleting_a_lazy_availability_name_restores_the_probe():
+    """``del mod.X_AVAILABLE`` must work and re-arm the probe, like a real attribute.
+
+    ``hasattr()`` is always True for the lazy name, so ``delattr`` used to raise
+    ``AttributeError`` even though the attribute was readable. It now drops the
+    override (or the real attribute) and the accessor falls back to the probe.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            baseline = module.bitblas_available()
+            module.BITBLAS_AVAILABLE = not baseline
+            assert module.bitblas_available() == (not baseline)
+
+            delattr(module, "BITBLAS_AVAILABLE")
+            assert module.bitblas_available() == baseline
+            assert module._AVAILABILITY_OVERRIDES == {}
+
+            # Before the lazy change the name was a real attribute, so a delete
+            # really removed it and reading it raised.
+            try:
+                module.BITBLAS_AVAILABLE
+            except AttributeError:
+                pass
+            else:
+                raise AssertionError("the deleted name is still readable")
+
+            # Reassigning re-arms it.
+            module.BITBLAS_AVAILABLE = not baseline
+            assert module.BITBLAS_AVAILABLE == (not baseline)
+            del module.BITBLAS_AVAILABLE
+            """
+        )
+    )
+
+
+def test_real_module_attribute_wins_over_the_private_override():
+    """``vars(mod)[NAME] = ...`` must behave like the pre-lazy module global.
+
+    The accessor reads a private override dict, while the attribute read goes
+    through ``__getattr__``. Without the ``__dict__`` check first, writing the
+    real attribute directly made the attribute and the accessor disagree, and
+    production code (which only calls the accessor) ignored the value.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            baseline = module.bitblas_available()
+            module.__dict__["BITBLAS_AVAILABLE"] = not baseline
+            try:
+                assert module.BITBLAS_AVAILABLE == (not baseline)
+                assert module.bitblas_available() == (not baseline), (
+                    "the accessor ignored a real module attribute"
+                )
+            finally:
+                del module.__dict__["BITBLAS_AVAILABLE"]
+            assert module.bitblas_available() == baseline
+            """
+        )
+    )
+
+
+def test_import_bitblas_reports_a_missing_version_as_import_error():
+    """A backend without ``__version__`` must not leak ``AttributeError``.
+
+    ``import_bitblas()`` parsed ``bitblas.__version__`` directly, so a forced
+    ``BITBLAS_AVAILABLE = True`` with a version-less package raised
+    ``AttributeError`` from inside the kernel constructor instead of the
+    documented ``ImportError(BITBLAS_INSTALL_HINT)``.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import sys
+            import types
+
+            sys.modules["bitblas"] = types.ModuleType("bitblas")
+
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            module.BITBLAS_AVAILABLE = True
+            try:
+                module.import_bitblas()
+            except ImportError as exc:
+                assert "BitBLAS" in str(exc) or "bitblas" in str(exc), exc
+            else:
+                raise AssertionError("expected ImportError for a version-less bitblas")
+            """
+        )
+    )
+
+
+def test_falsy_bitblas_override_keeps_the_pre_lazy_semantics():
+    """An explicit ``None`` override means "unknown", not "absent".
+
+    ``models/base.py`` and ``models/loader.py`` used ``BITBLAS_AVAILABLE is
+    False``; switching to ``not bitblas_available()`` made ``None``/``0`` raise
+    the install hint where the previous release did not.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            module.BITBLAS_AVAILABLE = None
+            assert module.BITBLAS_AVAILABLE is None
+            # ``is False`` is what the call sites use; ``not`` would be True here.
+            assert (module.BITBLAS_AVAILABLE is False) is False
+            assert not module.bitblas_available()  # the accessor still says unusable
+            del module.BITBLAS_AVAILABLE
+            """
+        )
+    )

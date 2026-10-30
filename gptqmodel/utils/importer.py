@@ -6,6 +6,7 @@
 import importlib
 import os
 import pkgutil
+import sys
 import threading
 from collections import OrderedDict
 from functools import lru_cache
@@ -473,18 +474,58 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     return matches[0]
 
 
-@lru_cache(maxsize=None)
+_QLINEAR_MODULE_NAMES = None
+_QLINEAR_IMPORTED = set()
+
+
+def _qlinear_module_names() -> List[str]:
+    """Return the importable module names of the shipped ``qlinear`` package."""
+
+    global _QLINEAR_MODULE_NAMES
+    if _QLINEAR_MODULE_NAMES is None:
+        from ..nn_modules import qlinear as qlinear_pkg
+
+        _QLINEAR_MODULE_NAMES = [
+            module_info.name
+            for module_info in pkgutil.iter_modules(qlinear_pkg.__path__)
+            if not module_info.name.startswith("_")
+        ]
+    return _QLINEAR_MODULE_NAMES
+
+
 def _import_all_qlinear_kernels() -> None:
+    """Import every kernel module once, retrying modules that failed.
+
+    A module that cannot be imported right now (shared library not on the
+    loader path yet, extension installed later, ``sys.modules`` poisoned by a
+    test) is *not* remembered as imported, so the next call retries it. Caching
+    the failure would hide that kernel for the rest of the process, and
+    ``build_kernel_support_maps.cache_clear()`` could not repair it.
+    """
+
     from ..nn_modules import qlinear as qlinear_pkg
 
-    for module_info in pkgutil.iter_modules(qlinear_pkg.__path__):
-        name = module_info.name
-        if name.startswith("_"):
+    for name in _qlinear_module_names():
+        if name in _QLINEAR_IMPORTED:
             continue
         try:
             importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
         except (ImportError, OSError) as exc:
             log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+            continue
+        _QLINEAR_IMPORTED.add(name)
+
+
+def _imported_kernel_module_count() -> int:
+    """Number of kernel modules imported so far (test/introspection helper)."""
+
+    return len(_QLINEAR_IMPORTED)
+
+
+def _reset_kernel_module_imports() -> None:
+    """Forget which kernel modules were imported so the next call retries all."""
+
+    _QLINEAR_IMPORTED.clear()
 
 
 def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
@@ -502,16 +543,20 @@ def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
 
     from ..nn_modules import qlinear as qlinear_pkg
 
-    prefix = f"{qlinear_pkg.__name__}."
+    package = qlinear_pkg.__name__
+    prefix = f"{package}."
 
-    return [
-        cls
-        for cls in iter_quant_linear_kernels()
-        if getattr(cls, "__module__", "").startswith(prefix)
-    ]
+    def _in_package(cls: Type[BaseQuantLinear]) -> bool:
+        # A kernel may live in a submodule (``...qlinear.marlin``) or be defined
+        # directly in the package ``__init__`` (``...qlinear``).
+        module = getattr(cls, "__module__", "")
+        return module == package or module.startswith(prefix)
+
+    return [cls for cls in iter_quant_linear_kernels() if _in_package(cls)]
 
 
 _REGISTRY_BUILD_LOCK = threading.Lock()
+_REGISTRY_BUILD_OWNER = None
 
 
 @lru_cache(maxsize=1)
@@ -576,19 +621,58 @@ def build_kernel_support_maps():
     build their own copy and only the last result is retained, so a caller can
     hold and mutate a map nobody will ever read again. Guard the build so every
     thread observes the one cached instance. The lock is only taken on a miss.
+
+    The build imports every kernel module while the lock is held. A kernel that
+    reads this mapping from its own import would re-enter the build; that is
+    reported as an error instead of deadlocking on the non-reentrant lock.
     """
+
+    global _REGISTRY_BUILD_OWNER
 
     if _build_kernel_support_maps_cached.cache_info().currsize:
         return _build_kernel_support_maps_cached()
+    if _REGISTRY_BUILD_OWNER == threading.get_ident():
+        raise RuntimeError(
+            "build_kernel_support_maps() was re-entered while building the kernel registry. "
+            "A kernel module must not read the auto-select maps at import time; move the "
+            "lookup to call time."
+        )
     with _REGISTRY_BUILD_LOCK:
-        return _build_kernel_support_maps_cached()
+        _REGISTRY_BUILD_OWNER = threading.get_ident()
+        try:
+            return _build_kernel_support_maps_cached()
+        finally:
+            _REGISTRY_BUILD_OWNER = None
 
 
 # Keep the ``lru_cache`` introspection helpers that callers/tests already use
 # against ``build_kernel_support_maps`` even though the public entry point is now
 # a lock-guarded wrapper.
 build_kernel_support_maps.cache_info = _build_kernel_support_maps_cached.cache_info
-build_kernel_support_maps.cache_clear = _build_kernel_support_maps_cached.cache_clear
+
+
+def _clear_kernel_registry_caches() -> None:
+    """Drop the map cache and re-arm kernel module imports."""
+
+    _build_kernel_support_maps_cached.cache_clear()
+    _reset_kernel_module_imports()
+
+
+build_kernel_support_maps.cache_clear = _clear_kernel_registry_caches
+
+
+_MISSING = object()
+
+
+def _module_override(name: str):
+    """Return a real module attribute that shadows the lazy accessor, if any.
+
+    Before this change the two names were plain module globals, so
+    ``monkeypatch.setattr(importer, NAME, ...)`` replaced what the selectors
+    read. Keep that working: a real entry in ``__dict__`` wins over the cache.
+    """
+
+    return sys.modules[__name__].__dict__.get(name, _MISSING)
 
 
 def get_auto_backend_kernel_mapping():
@@ -599,12 +683,18 @@ def get_auto_backend_kernel_mapping():
     that mutate it (tests, tooling) keep observing the same instance.
     """
 
+    override = _module_override("AUTO_BACKEND_KERNEL_MAPPING")
+    if override is not _MISSING:
+        return override
     return build_kernel_support_maps()[0]
 
 
 def get_backend_to_method_format_mapping():
     """Return the cached ``METHOD -> FORMAT -> [BACKEND]`` support mapping."""
 
+    override = _module_override("BACKEND_TO_METHOD_FORMAT_MAPPING")
+    if override is not _MISSING:
+        return override
     return build_kernel_support_maps()[1]
 
 
@@ -627,7 +717,6 @@ def __dir__():
     return sorted(set(globals()) | set(_LAZY_EXPORTS))
 
 
-__all__ = [*_LAZY_EXPORTS]
 
 
 def debug_print_kernel_maps():
@@ -1150,3 +1239,11 @@ def select_quant_linear(
     if multi_select:
         return [qlinear]
     return qlinear
+
+
+# ``from gptqmodel.utils.importer import *`` used to export every public module
+# global (there was no ``__all__``). Keep that surface, plus the two names that
+# now resolve through ``__getattr__``.
+__all__ = sorted(
+    {name for name in globals() if not name.startswith("_")} | set(_LAZY_EXPORTS)
+)

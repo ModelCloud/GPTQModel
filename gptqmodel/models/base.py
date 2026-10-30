@@ -1529,8 +1529,10 @@ class BaseQModel(nn.Module):
                     f"Unsupported `tokenizer` type: Expected `PreTrainedTokenizerBase`, actual = `{type(tokenizer)}`.")
 
         if format_code == FORMAT.BITBLAS:
-            from ..nn_modules.qlinear.bitblas import BITBLAS_INSTALL_HINT, bitblas_available
-            if not bitblas_available():
+            from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            # ``is False`` (not ``not``) keeps the pre-lazy semantics: an
+            # explicit ``None``/``0`` override means "unknown", not "absent".
+            if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 
         # overwrite quantize_config.adapter

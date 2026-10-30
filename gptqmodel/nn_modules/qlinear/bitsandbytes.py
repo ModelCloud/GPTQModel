@@ -83,7 +83,7 @@ def _is_bitsandbytes_available() -> bool:
 def _probe_bitsandbytes_available() -> bool:
     """Probe bitsandbytes once, on first real use.
 
-    Importing bitsandbytes costs seconds and must not happen while the kernel
+    Importing bitsandbytes is expensive and must not happen while the kernel
     registry is merely being discovered. The probe is cached so repeated
     ``validate_once`` calls stay cheap.
     """
@@ -91,57 +91,102 @@ def _probe_bitsandbytes_available() -> bool:
     return _is_bitsandbytes_available()
 
 
-_AVAILABILITY_OVERRIDES = {}
+# ``mod.BITSANDBYTES_AVAILABLE = value`` records an override here instead of creating a module
+# attribute, so it never outlives an explicit ``del``. A real module attribute
+# (``monkeypatch.setattr``, ``vars(mod)[...]``) still wins, exactly like the
+# pre-lazy global did.
+_AVAILABILITY_OVERRIDES: dict = {}
+
+# Set by ``del mod.BITSANDBYTES_AVAILABLE``: before the lazy change the name really was gone
+# after a delete, so attribute access must raise until it is reassigned.
+_AVAILABILITY_DELETED = False
 
 
 def bitsandbytes_available() -> bool:
-    """Return whether a supported bitsandbytes is installed.
+    """Return whether a supported bitsandbytes is usable.
 
-    An explicitly assigned module attribute named ``BITSANDBYTES_AVAILABLE``
-    still overrides the probe, which keeps monkeypatching in tests and
-    downstream tooling working. Overrides live in a private dict (see
-    ``_LazyAvailabilityModule``) rather than in the module ``__dict__`` so that
-    ``monkeypatch`` undo and ``delattr`` restore the real probe instead of
-    pinning a stale value for the rest of the process.
+    Precedence, highest first:
+
+    1. A real module attribute.
+    2. An override recorded by ``mod.BITSANDBYTES_AVAILABLE = ...``.
+    3. The cached probe.
     """
 
+    namespace = sys.modules[__name__].__dict__
+    if "BITSANDBYTES_AVAILABLE" in namespace:
+        return bool(namespace["BITSANDBYTES_AVAILABLE"])
     if "BITSANDBYTES_AVAILABLE" in _AVAILABILITY_OVERRIDES:
         return bool(_AVAILABILITY_OVERRIDES["BITSANDBYTES_AVAILABLE"])
     return _probe_bitsandbytes_available()
 
 
+_probe_cache_clear = _probe_bitsandbytes_available.cache_clear
+
+
+def _clear_availability_state() -> None:
+    """Drop the probe result and every override so the next access re-probes.
+
+    This is the escape hatch for tests and for long-lived processes where the
+    environment changes after the first probe (a package installed later, a
+    toolchain that becomes available). It also un-pins an override left behind
+    by ``monkeypatch.undo()``, which writes the pre-patch value back through
+    ``__setattr__`` and therefore looks like an explicit override.
+    """
+
+    global _AVAILABILITY_DELETED
+
+    _AVAILABILITY_OVERRIDES.clear()
+    _AVAILABILITY_DELETED = False
+    _probe_cache_clear()
+
+
+# ``cache_clear`` is the documented knob; keep it on the probe, extended with
+# the override state so clearing really re-arms everything.
+_probe_bitsandbytes_available.cache_clear = _clear_availability_state
+
+
 def __getattr__(name: str):
     if name == "BITSANDBYTES_AVAILABLE":
-        return bitsandbytes_available()
+        if _AVAILABILITY_DELETED:
+            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        namespace = sys.modules[__name__].__dict__
+        if "BITSANDBYTES_AVAILABLE" in namespace:
+            return namespace["BITSANDBYTES_AVAILABLE"]
+        if "BITSANDBYTES_AVAILABLE" in _AVAILABILITY_OVERRIDES:
+            return _AVAILABILITY_OVERRIDES["BITSANDBYTES_AVAILABLE"]
+        return _probe_bitsandbytes_available()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 class _LazyAvailabilityModule(types.ModuleType):
-    """Module type that keeps ``*_AVAILABLE`` overrides out of ``__dict__``.
-
-    Assigning the legacy name records an override instead of creating a real
-    module attribute, and deleting it drops the override so the probe becomes
-    authoritative again. That is what makes ``pytest``'s ``monkeypatch``
-    round-trip correctly: undo performs ``delattr`` when the attribute did not
-    exist before the patch.
-    """
+    """Module type that keeps ``*_AVAILABLE`` assignments lazy."""
 
     def __setattr__(self, name, value):
+        global _AVAILABILITY_DELETED
+
         if name == "BITSANDBYTES_AVAILABLE":
+            _AVAILABILITY_DELETED = False
             _AVAILABILITY_OVERRIDES[name] = value
             return
         super().__setattr__(name, value)
 
     def __delattr__(self, name):
-        if name == "BITSANDBYTES_AVAILABLE" and name in _AVAILABILITY_OVERRIDES:
-            del _AVAILABILITY_OVERRIDES[name]
-            return
+        global _AVAILABILITY_DELETED
+
         if name == "BITSANDBYTES_AVAILABLE":
-            raise AttributeError(f"module {self.__name__!r} has no attribute {name!r}")
+            if name in _AVAILABILITY_OVERRIDES:
+                del _AVAILABILITY_OVERRIDES[name]
+            elif name in sys.modules[self.__name__].__dict__:
+                super().__delattr__(name)
+            _AVAILABILITY_DELETED = True
+            return
         super().__delattr__(name)
 
     def __dir__(self):
-        return sorted(set(super().__dir__()) | {"BITSANDBYTES_AVAILABLE"})
+        names = set(super().__dir__())
+        if not _AVAILABILITY_DELETED:
+            names.add("BITSANDBYTES_AVAILABLE")
+        return sorted(names)
 
 
 sys.modules[__name__].__class__ = _LazyAvailabilityModule
@@ -150,7 +195,14 @@ sys.modules[__name__].__class__ = _LazyAvailabilityModule
 def import_bitsandbytes():
     import bitsandbytes as bnb
 
-    if version.parse(bnb.__version__) < version.parse(MINIMUM_BITSANDBYTES_VERSION):
+    # ``getattr`` + ``try`` keep a build with a missing or unparsable
+    # ``__version__`` on the documented ``ImportError`` path instead of letting
+    # ``AttributeError`` escape the kernel constructor.
+    try:
+        parsed_version = version.parse(getattr(bnb, "__version__", ""))
+    except Exception as exc:
+        raise ImportError(BITSANDBYTES_INSTALL_HINT) from exc
+    if parsed_version < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
     return bnb
 
