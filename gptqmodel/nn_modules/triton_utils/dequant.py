@@ -3,12 +3,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
+from typing import NamedTuple
+
 import torch
 import triton
 import triton.language as tl
 from torch.amp import custom_bwd, custom_fwd
 
+from ...utils.arch import arch_class, normalize_arch, rocm_arch
 from ...utils.torch import HAS_XPU
+
+
+class DequantLaunch(NamedTuple):
+    """Resolved launch shape for :func:`dequant` on one architecture class."""
+
+    x_block: int
+    num_warps: int
+    num_stages: int
 
 
 # Defaults tested on A100 with [Llama 3.2 1B and Falcon 7B] bits:4, group_size:128.
@@ -16,9 +27,34 @@ from ...utils.torch import HAS_XPU
 # gfx950 (X_BLOCK 256..4096, warps 1..8, stages 1..2) found every candidate
 # within 1-2% of this one. Keep it fixed rather than paying the per-call
 # autotune dispatch cost for a single candidate.
-DEQUANT_X_BLOCK = 1024
-DEQUANT_NUM_WARPS = 1
-DEQUANT_NUM_STAGES = 1
+_DEQUANT_LAUNCH_CONFIGS: dict[str, DequantLaunch] = {
+    # Measured on gfx950 (MI350X/MI355X).
+    "cdna4": DequantLaunch(x_block=1024, num_warps=1, num_stages=1),
+    # RDNA4 (gfx1200/gfx1201/gfx1250): NOT measured yet. The kernel is bound by
+    # memory latency rather than tile shape, and the CDNA sweep already showed
+    # every candidate within 1-2%, so reuse the same values provisionally.
+    "rdna4": DequantLaunch(x_block=1024, num_warps=1, num_stages=1),
+}
+
+# Used for CUDA/MPS/XPU and any unregistered ROCm target.
+_DEFAULT_DEQUANT_LAUNCH = DequantLaunch(x_block=1024, num_warps=1, num_stages=1)
+
+# Module-level defaults retained for compatibility with existing imports.
+DEQUANT_X_BLOCK = _DEFAULT_DEQUANT_LAUNCH.x_block
+DEQUANT_NUM_WARPS = _DEFAULT_DEQUANT_LAUNCH.num_warps
+DEQUANT_NUM_STAGES = _DEFAULT_DEQUANT_LAUNCH.num_stages
+
+
+def launch_config(arch=None) -> DequantLaunch:
+    """Return the dequant launch shape for an architecture string or device."""
+
+    if not isinstance(arch, str):
+        return _DEQUANT_LAUNCH_CONFIGS.get(arch_class(arch), _DEFAULT_DEQUANT_LAUNCH)
+
+    name = normalize_arch(arch)
+    if not name.startswith("gfx"):
+        return _DEFAULT_DEQUANT_LAUNCH
+    return _DEQUANT_LAUNCH_CONFIGS.get(arch_class(name), _DEFAULT_DEQUANT_LAUNCH)
 
 
 @triton.jit
@@ -258,8 +294,9 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
     out = torch.empty((in_features, out_features), device=qweight.device, dtype=dtype)
     out_dtype = dtype
 
+    cfg = launch_config(rocm_arch(qweight.device))
     numels = out.numel()
-    grid = (triton.cdiv(numels, DEQUANT_X_BLOCK),)
+    grid = (triton.cdiv(numels, cfg.x_block),)
 
     with torch.xpu.device(qweight.device) if HAS_XPU else torch.cuda.device(qweight.device):
         dequant_kernel[grid](
@@ -275,9 +312,9 @@ def dequant(dtype, qweight, scales, qzeros, g_idx, bits, pack_bits, maxq):
             bits=bits,
             out_features=out_features,
             num_groups=num_groups,
-            X_BLOCK=DEQUANT_X_BLOCK,
-            num_warps=DEQUANT_NUM_WARPS,
-            num_stages=DEQUANT_NUM_STAGES,
+            X_BLOCK=cfg.x_block,
+            num_warps=cfg.num_warps,
+            num_stages=cfg.num_stages,
         )
     return out
 
