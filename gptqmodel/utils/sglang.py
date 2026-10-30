@@ -12,6 +12,8 @@ from typing import Any, Mapping, Optional
 import torch
 from transformers import AutoConfig
 
+from .generation_result import GenerationResult
+
 
 SGLANG_VERSION: Optional[str] = None
 SGLANG_IMPORT_ERROR: Optional[Exception] = None
@@ -363,6 +365,29 @@ def _normalize_sglang_inputs(prompts: Any, input_ids: Any, attention_mask: Any):
     return None, token_batch[0] if single_prompt else token_batch
 
 
+def _sglang_result_metadata(result: Mapping) -> dict:
+    """Read the usage fields SGLang reports next to the generated text.
+
+    The engine returns ``{"text": ..., "meta_info": {"completion_tokens": ...,
+    "finish_reason": ...}}``. Reporting them lets the server return real usage
+    instead of a fabricated ``completion_tokens=0`` for every text result.
+    """
+    meta = result.get("meta_info")
+    if not isinstance(meta, Mapping):
+        return {}
+
+    metadata = {}
+    completion_tokens = meta.get("completion_tokens")
+    # 0 is a valid count (an immediately stopped sequence); only a missing or
+    # non-integer value means "unknown".
+    if isinstance(completion_tokens, int) and not isinstance(completion_tokens, bool):
+        metadata["completion_tokens"] = completion_tokens
+    finish_reason = meta.get("finish_reason")
+    if isinstance(finish_reason, str) and finish_reason in ("stop", "length"):
+        metadata["finish_reason"] = finish_reason
+    return metadata
+
+
 def _extract_sglang_text(result: Any):
     if isinstance(result, Mapping):
         if "text" not in result:
@@ -370,7 +395,7 @@ def _extract_sglang_text(result: Any):
         text = result["text"]
         if not isinstance(text, str):
             raise TypeError(f"SGLang generation result `text` must be a string, got {type(text)}.")
-        return text
+        return GenerationResult(text, **_sglang_result_metadata(result))
     if isinstance(result, list):
         return [_extract_sglang_text(item) for item in result]
     raise TypeError(f"Unexpected SGLang generation result type: {type(result)}.")

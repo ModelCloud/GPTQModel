@@ -14,6 +14,8 @@ import warnings
 
 import torch
 
+from .generation_result import GenerationResult
+
 
 try:
     import uvicorn
@@ -108,6 +110,82 @@ class AuthenticationMiddleware:
         return self.app(scope, receive, send)
 
 
+def _sequence_end(row, eos_token_id, pad_token_id):
+    """Return ``(token_count, finish_reason)`` for one generated row.
+
+    Counting runs to the first EOS, inclusive, and stops there. Masking every
+    ``pad_token_id`` occurrence would also delete the EOS whenever a tokenizer
+    reuses one id for both (Qwen and Mistral do), which both under-counts the
+    sequence and turns a real ``stop`` into ``length``. Anything after the EOS
+    is padding, including a second EOS written as the pad value.
+    """
+    ids = [int(token) for token in row.tolist()]
+    if eos_token_id is not None and eos_token_id in ids:
+        return ids.index(eos_token_id) + 1, "stop"
+    if pad_token_id is not None:
+        # No EOS: a row that only ends in padding was cut short by the budget.
+        while ids and ids[-1] == pad_token_id:
+            ids.pop()
+    return len(ids), "length"
+
+
+def _coerce_generation_results(outputs) -> list:
+    """Normalise whatever a runtime adapter returned into ``GenerationResult``s.
+
+    A bare string is one result (iterating it would emit one choice per
+    character). Mappings and objects are never iterated: only an explicit
+    ``{"text": ...}`` mapping or a ``.texts`` sequence is understood, and
+    anything else raises instead of silently producing `str()` of an object.
+    """
+    from collections.abc import Mapping as _Mapping
+
+    if isinstance(outputs, GenerationResult):
+        return [outputs]
+    if isinstance(outputs, str):
+        return [GenerationResult(outputs)]
+    if isinstance(outputs, _Mapping):
+        if isinstance(outputs.get("text"), str):
+            return [
+                GenerationResult(
+                    outputs["text"],
+                    completion_tokens=outputs.get("completion_tokens"),
+                    finish_reason=outputs.get("finish_reason"),
+                )
+            ]
+        raise TypeError(
+            "Runtime adapter returned a mapping without a `text` string; "
+            f"got keys {sorted(map(str, outputs))}."
+        )
+    texts = getattr(outputs, "texts", None)
+    if isinstance(texts, (list, tuple)):
+        outputs = texts
+    if isinstance(outputs, (list, tuple)):
+        results = []
+        for item in outputs:
+            if isinstance(item, GenerationResult):
+                results.append(item)
+            elif isinstance(item, str):
+                results.append(GenerationResult(item))
+            elif isinstance(item, _Mapping) and isinstance(item.get("text"), str):
+                results.append(
+                    GenerationResult(
+                        item["text"],
+                        completion_tokens=item.get("completion_tokens"),
+                        finish_reason=item.get("finish_reason"),
+                    )
+                )
+            else:
+                raise TypeError(
+                    "Runtime adapter result entries must be strings or describe a sequence; "
+                    f"got {type(item).__name__}."
+                )
+        return results
+    raise TypeError(
+        "Runtime adapter results must be text, a sequence of text, or a value exposing "
+        f"`texts`; got {type(outputs).__name__}."
+    )
+
+
 class OpenAiServer:
     def __init__(self, model, api_key: str = None):
         self.uvicorn_server = None
@@ -117,6 +195,9 @@ class OpenAiServer:
         self.model_id_or_path = model.config.name_or_path
         self.api_keys = _resolve_api_keys(api_key)
         self.api_tokens = _token_digests(self.api_keys)
+        # One generation at a time: the endpoint runs in the threadpool, and a
+        # single device cannot serve two concurrent generations.
+        self._generation_lock = threading.Lock()
         if self.api_keys:
             self.app.add_middleware(AuthenticationMiddleware, tokens=self.api_keys)
         self.setup_routes()
@@ -155,8 +236,10 @@ class OpenAiServer:
 
         class OpenAiUsage(BaseModel):
             prompt_tokens: int = 0
-            completion_tokens: int = 0
-            total_tokens: int = 0
+            # `None` means "not reported by the backend". A fabricated 0 would
+            # understate usage for every text-returning runtime adapter.
+            completion_tokens: int | None = None
+            total_tokens: int | None = None
 
         class OpenAiResponse(BaseModel):
             id: str = ""
@@ -187,7 +270,12 @@ class OpenAiServer:
             return text[:earliest], True
 
         @self.app.post("/v1/chat/completions", response_model=OpenAiResponse)
-        async def create_completion(request: OpenAiRequest):
+        def create_completion(request: OpenAiRequest):
+            # A plain `def` endpoint runs in the threadpool, so a long generation
+            # cannot stall the event loop and starve `/health` or `/shutdown`.
+            # `_generation_lock` keeps the model itself single-entry: one GPU
+            # cannot run two generations concurrently, and letting the threadpool
+            # call into it in parallel would raise VRAM use until it OOMs.
             # Authentication is enforced by AuthenticationMiddleware for /v1 paths.
             if not request.messages:
                 raise HTTPException(status_code=400, detail="`messages` must not be empty.")
@@ -240,7 +328,7 @@ class OpenAiServer:
                         # External runtime adapters accept the OpenAI-style `stop` argument.
                         generate_kwargs["stop"] = stop_strings
 
-                with torch.inference_mode():
+                with self._generation_lock, torch.inference_mode():
                     outputs = self.model.generate(**generate_kwargs, **generate_inputs)
 
                 pad_token_id = self.tokenizer.pad_token_id
@@ -254,24 +342,24 @@ class OpenAiServer:
                     )
                     # Count each sequence separately: usage aggregates them, while a
                     # single row length is only the max across the batch.
-                    if pad_token_id is None:
-                        token_counts = [int(row.numel()) for row in generated_ids]
-                    else:
-                        token_counts = [int((row != pad_token_id).sum()) for row in generated_ids]
+                    token_counts = []
                     finish_reasons = []
-                    for row, count in zip(generated_ids, token_counts):
-                        if count and eos_token_id is not None and int(row[count - 1]) == eos_token_id:
-                            finish_reasons.append("stop")
-                        else:
-                            # Ran out of `max_new_tokens` without reaching EOS.
-                            finish_reasons.append("length")
+                    for row in generated_ids:
+                        count, reason = _sequence_end(row, eos_token_id, pad_token_id)
+                        token_counts.append(count)
+                        finish_reasons.append(reason)
                 else:
-                    # Runtime adapters return decoded text; a bare string is one result.
-                    generated_texts = [outputs] if isinstance(outputs, str) else [str(text) for text in outputs]
-                    token_counts = [0] * len(generated_texts)
-                    finish_reasons = ["stop"] * len(generated_texts)
+                    results = _coerce_generation_results(outputs)
+                    generated_texts = [result.text for result in results]
+                    # An adapter that reports its own counts keeps them; one that
+                    # returns only text yields `None`, which is reported as unknown
+                    # rather than as a fabricated zero.
+                    token_counts = [result.completion_tokens for result in results]
+                    finish_reasons = [result.finish_reason for result in results]
 
-                completion_tokens = sum(token_counts)
+                # Unknown counts stay unknown instead of being summed as zero.
+                known_counts = [count for count in token_counts if count is not None]
+                completion_tokens = sum(known_counts) if known_counts else None
 
                 trimmed = [_strip_stop(text, stop_strings) for text in generated_texts]
                 generated_texts = [text for text, _ in trimmed]
@@ -289,16 +377,17 @@ class OpenAiServer:
                     for i, gen_text in enumerate(generated_texts)
                 ]
 
+                usage = OpenAiUsage(prompt_tokens=prompt_length)
+                if completion_tokens is not None:
+                    usage.completion_tokens = completion_tokens
+                    usage.total_tokens = prompt_length + completion_tokens
+
                 return OpenAiResponse(
                     id=f"{uuid.uuid4()}",
                     created=int(time.time()),
                     model=self.model_id_or_path,
                     choices=choices,
-                    usage=OpenAiUsage(
-                        prompt_tokens=prompt_length,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_length + completion_tokens,
-                    ),
+                    usage=usage,
                 )
             except HTTPException:
                 raise

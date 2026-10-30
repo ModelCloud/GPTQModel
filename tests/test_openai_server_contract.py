@@ -10,9 +10,12 @@ These cover the three defects verified against the previous implementation:
 3. chat completions serialized with the legacy ``text_completion`` schema.
 """
 
+import asyncio
 import inspect
+import time
 import warnings
 
+import httpx
 import pytest
 import torch
 from fastapi.testclient import TestClient
@@ -21,6 +24,7 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers
 from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 
 from gptqmodel.models.base import BaseQModel
+from gptqmodel.utils.generation_result import GenerationResult
 from gptqmodel.utils.openai_server import (
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -299,6 +303,179 @@ def test_usage_sums_tokens_across_returned_sequences(client, model):
     assert [choice["finish_reason"] for choice in body["choices"]] == ["length"] * 3
     assert body["usage"]["completion_tokens"] == 3 * 6
     assert body["usage"]["total_tokens"] == body["usage"]["prompt_tokens"] + 18
+
+
+def test_finish_reason_and_usage_when_pad_and_eos_share_an_id(tokenizer):
+    # Qwen and Mistral reuse one id for padding and EOS. Masking every pad id
+    # also deleted the terminating EOS, which reported a real stop as `length`
+    # and under-counted the sequence.
+    eos = tokenizer.eos_token_id
+    tokenizer.pad_token = tokenizer.eos_token
+    assert tokenizer.pad_token_id == tokenizer.eos_token_id
+
+    first, second = 65, 66
+
+    class _Fixed(_StubModel):
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            prompt = kwargs["input_ids"]
+            # Row 0 ends on EOS; row 1 was cut by the budget. Hugging Face pads
+            # the finished row with `pad_token_id`, which is the same EOS id here.
+            rows = torch.tensor([[first, second, eos, eos], [first, second, 67, 68]])
+            return torch.cat([prompt.repeat(len(rows), 1), rows], dim=1)
+
+    client = TestClient(OpenAiServer(model=_Fixed(tokenizer)).app)
+    body = _chat(client, temperature=0.7, n=2, max_tokens=4).json()
+
+    assert [choice["finish_reason"] for choice in body["choices"]] == ["stop", "length"]
+    assert [choice["message"]["content"] for choice in body["choices"]] == ["ab", "abcd"]
+    # 3 tokens for the EOS row (including the EOS) plus 4 for the truncated row.
+    assert body["usage"]["completion_tokens"] == 7
+
+
+def test_runtime_adapter_text_does_not_fabricate_usage_or_finish_reason(model):
+    class _TextAdapter(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self._runtime_generate = object()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            return "alpha beta"
+
+    client = TestClient(OpenAiServer(model=_TextAdapter(model.tokenizer)).app)
+    body = _chat(client, temperature=0).json()
+
+    assert body["choices"][0]["message"]["content"] == "alpha beta"
+    # Reported as unknown rather than as a fabricated zero or a constant "stop".
+    assert body["choices"][0]["finish_reason"] is None
+    assert body["usage"]["completion_tokens"] is None
+    assert body["usage"]["total_tokens"] is None
+    assert body["usage"]["prompt_tokens"] > 0
+
+
+def test_runtime_adapter_can_report_its_own_usage_and_finish_reason(model):
+    class _ReportingAdapter(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self._runtime_generate = object()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            return [
+                GenerationResult("alpha", completion_tokens=5, finish_reason="stop"),
+                GenerationResult("beta", completion_tokens=7, finish_reason="length"),
+            ]
+
+    client = TestClient(OpenAiServer(model=_ReportingAdapter(model.tokenizer)).app)
+    body = _chat(client, temperature=0.7, n=2).json()
+
+    assert [choice["message"]["content"] for choice in body["choices"]] == ["alpha", "beta"]
+    assert [choice["finish_reason"] for choice in body["choices"]] == ["stop", "length"]
+    assert body["usage"]["completion_tokens"] == 12
+    assert body["usage"]["total_tokens"] == body["usage"]["prompt_tokens"] + 12
+
+
+def test_runtime_adapter_mappings_are_not_iterated_as_sequences(model):
+    class _MappingAdapter(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self._runtime_generate = object()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            return {"text": "alpha", "meta": "ignored"}
+
+    client = TestClient(OpenAiServer(model=_MappingAdapter(model.tokenizer)).app)
+    body = _chat(client, temperature=0, max_tokens=4).json()
+
+    # A mapping is one result; iterating it would emit one choice per key.
+    assert len(body["choices"]) == 1
+    assert body["choices"][0]["message"]["content"] == "alpha"
+
+
+def test_runtime_adapter_unusable_result_is_an_error_not_silent_text(model):
+    class _NoneAdapter(_StubModel):
+        def __init__(self, tokenizer):
+            super().__init__(tokenizer)
+            self._runtime_generate = object()
+
+        def generate(self, **kwargs):
+            self.calls.append(kwargs)
+            return None
+
+    client = TestClient(OpenAiServer(model=_NoneAdapter(model.tokenizer)).app, raise_server_exceptions=False)
+    response = _chat(client, temperature=0)
+
+    assert response.status_code == 500
+    assert "NoneType" in response.json()["detail"]
+
+
+def test_generation_does_not_block_the_event_loop(model):
+    # A synchronous handler stalls every other task for the whole generation,
+    # so a liveness probe times out and a healthy service gets restarted.
+    # A ticker measures the largest gap in the loop instead of the latency of a
+    # request issued after the block, which cannot distinguish the two cases.
+    class _Slow(_StubModel):
+        def generate(self, **kwargs):
+            time.sleep(0.4)
+            return "alpha"
+
+    server = OpenAiServer(model=_Slow(model.tokenizer))
+    body = {"model": "stub-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+    gaps = []
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            async def ticker():
+                last = time.perf_counter()
+                while True:
+                    await asyncio.sleep(0.01)
+                    now = time.perf_counter()
+                    gaps.append(now - last)
+                    last = now
+
+            tick = asyncio.create_task(ticker())
+            response = await client.post("/v1/chat/completions", json=body)
+            tick.cancel()
+            return response.status_code
+
+    assert asyncio.run(scenario()) == 200
+    # A blocking handler keeps the loop from ticking at all, so an empty sample
+    # is the worst outcome, not a reason to skip the check.
+    assert gaps, "the ticker never ran: the loop was blocked for the whole generation"
+    assert max(gaps) < 0.2, f"event loop stalled for {max(gaps):.2f}s during generation"
+
+
+def test_concurrent_generations_are_serialised(model):
+    # The endpoint runs in a threadpool now, so the model itself must stay
+    # single-entry: one device cannot serve two generations at once.
+    active = []
+    overlap = []
+
+    class _Tracking(_StubModel):
+        def generate(self, **kwargs):
+            active.append(1)
+            if len(active) > 1:
+                overlap.append(len(active))
+            time.sleep(0.2)
+            active.pop()
+            return "alpha"
+
+    server = OpenAiServer(model=_Tracking(model.tokenizer))
+    body = {"model": "stub-model", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
+
+    async def scenario():
+        transport = httpx.ASGITransport(app=server.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            responses = await asyncio.gather(
+                *[client.post("/v1/chat/completions", json=body) for _ in range(3)]
+            )
+            return [response.status_code for response in responses]
+
+    assert asyncio.run(scenario()) == [200, 200, 200]
+    assert overlap == [], f"{len(overlap)} concurrent generations reached the model"
 
 
 def test_rejects_empty_messages(client):
