@@ -200,6 +200,11 @@ def awq_gemm_pack_backend(
     ROCm/XPU/NPU/CPU hosts.  Those hosts pack with the portable torch kernel
     instead, which emits the identical AWQ GEMM layout for in-range codes.
 
+    Every ROCm host -- CDNA (gfx950/gfx942) as well as RDNA4 (gfx1200/gfx1201/
+    gfx1250) -- takes ``AWQ_TORCH``.  RDNA4's hipBLASLt Tensile libraries exist
+    but the AWQ GEMM extension itself is still CUDA-only, so this is a kernel
+    availability decision, not an RDNA4 library gap.
+
     Args:
         device_type: Runtime type of the quantization device (``"cuda"``,
             ``"xpu"``, ``"npu"``, ``"cpu"``, ...).

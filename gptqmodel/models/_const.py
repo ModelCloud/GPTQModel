@@ -86,6 +86,12 @@ class PLATFORM(str, Enum):
 
 def validate_cuda_support(raise_exception: bool = False):
     got_cuda = HAS_CUDA
+    if got_cuda and IS_ROCM:
+        # ROCm reuses the ``cuda`` device namespace, where
+        # ``get_device_capability`` returns an unrelated numeric pair. Every
+        # supported gfx target is newer than the Pascal-era floor below, so the
+        # SM check only applies to NVIDIA builds.
+        return got_cuda
     if got_cuda:
         at_least_one_cuda_v6 = any(
             torch.cuda.get_device_capability(i)[0] >= 6 for i in range(torch.cuda.device_count()))

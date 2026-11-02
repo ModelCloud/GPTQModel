@@ -12,11 +12,15 @@ from ._banner import get_startup_banner  # noqa: E402
 from .utils import _MONKEY_PATCH_LOCK  # noqa: E402
 from .utils.logger import setup_logger  # noqa: E402
 from .utils.nogil_patcher import TritonPatch, patch_safetensors_save_file  # noqa: E402
+from .utils.rocm import warn_unsupported_rocm  # noqa: E402
 
 # isort: on
 
 
 log = setup_logger()
+
+# Fail loudly (once) on ROCm releases older than the supported floor.
+warn_unsupported_rocm()
 
 patch_safetensors_save_file()
 

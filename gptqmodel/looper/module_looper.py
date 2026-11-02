@@ -1275,6 +1275,9 @@ class ModuleLooper(DeviceAssignmentState):
             root_module=getattr(self.gptq_model, "model", None),
         )
 
+        # Remember the device this module was quantized on so the final pack
+        # step runs on the same GPU instead of an index-less default.
+        named_module.state["quant_device"] = target_device
         setattr(named_module, "target_device", target_device)
         setattr(named_module.module, "target_device", target_device)
         emit_device_telemetry(

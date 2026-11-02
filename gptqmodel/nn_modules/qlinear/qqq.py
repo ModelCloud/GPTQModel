@@ -27,6 +27,19 @@ log = setup_logger()
 
 _INT4_DIVISORS = (1, 16, 256, 4096, 65536, 1048576, 16777216, 268435456)
 
+# The Marlin-derived QQQ W4A8 kernel (``gptqmodel_ext/qqq/qqq_gemm.cu``) is
+# written against CUDA inline PTX: ``cp.async``, ``mma.sync``, ``ldmatrix``,
+# ``__cvta_generic_to_shared``, ``cvt.rn.f16.f32`` and ``ld.global.acquire.gpu``.
+# hipify rewrites the bindings but cannot translate that PTX, so on gfx1201
+# (RDNA4) hipcc rejects the build (20 errors, first at
+# ``gptqmodel_ext/qqq/qqq_gemm.hip:61``).  QQQ therefore has no native ROCm
+# kernel, and AUTO must select the portable ``QQQTorchLinear`` instead.
+QQQ_ROCM_UNSUPPORTED = (
+    "QQQ (BACKEND.QQQ) has no ROCm kernel: the Marlin-derived W4A8 extension "
+    "uses CUDA-only inline PTX and cannot be built by hipcc. "
+    "Use BACKEND.QQQ_TORCH, which is selected automatically for AUTO on AMD GPUs."
+)
+
 
 @lru_cache(maxsize=1)
 def _qqq_cpu_kernel():
@@ -94,7 +107,7 @@ class QQQLinear(GroupedQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [64]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -251,6 +264,11 @@ class QQQLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        # Check the architecture before the runtime probe: probing the JIT
+        # extension on ROCm spends ~18 s compiling before failing, and would
+        # still be the wrong kernel even if a future hipify translated it.
+        if IS_ROCM:
+            return False, NotImplementedError(QQQ_ROCM_UNSUPPORTED)
         if not qqq_runtime_available():
             return False, ImportError(qqq_runtime_error())
         return True, None
@@ -265,16 +283,27 @@ class QQQLinear(GroupedQuantLinear):
         ):
             raise ValueError(f"{cls} not supported `infeatures`: {in_features} and `outfeatures`: {out_features}.")
 
+        # ``_validate`` alone never consults ``validate_once``, so without this
+        # check AUTO selected QQQLinear on any host even when the Marlin-derived
+        # JIT extension could not be built.  On ROCm that is the steady state:
+        # ``qqq_gemm.cu`` relies on CUDA-only inline PTX, which hipify cannot
+        # translate, so the extension fails to build for gfx1201 and the first
+        # forward raises instead of the selector picking ``QQQTorchLinear``.
+        # Check the runtime here so the portable kernel is chosen up front.
+        ok_once, error_once = cls.cached_validate_once()
+        if not ok_once:
+            return False, error_once
+
         return cls._validate(**args)
 
     @classmethod
     def validate_device(cls, device: DEVICE | torch.device):
-        super().validate_device(device)
-        # QQQ has an independent ROCm implementation. ROCm exposes CUDA
-        # device values through torch, so an exact cuda:N target must not
-        # be mistaken for the unsupported CUDA Marlin path.
+        # ROCm exposes the CUDA device namespace through torch, so the device
+        # check alone would accept a cuda:N target.  Reject it explicitly here
+        # instead of inferring CUDA capability from a HIP device.
         if IS_ROCM:
-            return
+            raise NotImplementedError(QQQ_ROCM_UNSUPPORTED)
+        super().validate_device(device)
         if (device.type if isinstance(device, torch.device) else device) in ("cuda", DEVICE.CUDA):
             targets = (
                 (device,)

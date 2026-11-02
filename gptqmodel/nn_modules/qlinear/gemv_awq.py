@@ -21,6 +21,27 @@ from ...utils.logger import setup_logger
 
 log = setup_logger()
 
+# The GEMV/GEMV_FAST/LLM_AWQ kernels are entry points into
+# ``gptqmodel_ext/awq`` (``gemv_forward``/``gemmv2_forward``), which is a CUDA
+# JIT extension: its sources include ``cuda_fp16.h`` and CUDA-specific inline
+# asm, and the sources that hipify does translate still fail on wave32 (the
+# warp-sync mask must be 64-bit).  It therefore never builds with hipcc on
+# gfx1201 regardless of the include paths, so these kernels must not advertise
+# ROCm support.  The declaration is enforced by ``SUPPORTS_DEVICES`` below rather
+# than by ``validate_once``: packing is a pure Torch operation that must keep
+# working for checkpoint conversion/inspection even on a ROCm host, and only a
+# *placement* on ROCm is unsupported.  ``ModelLoader`` raises this message at
+# load time so a ROCm user gets an actionable error instead of the generic
+# "No valid quant linear".
+AWQ_GEMV_ROCM_UNSUPPORTED = (
+    "AWQ GEMV/GEMV_FAST/LLM_AWQ kernels require the native CUDA AWQ extension, "
+    "which is not available on ROCm (it includes cuda_fp16.h and CUDA-only inline "
+    "asm, and its hipified warp-sync reduction rejects wave32). Use the AWQ GEMM "
+    "layout with `backend=AUTO` or `BACKEND.AWQ_GEMM_TRITON`, which has a Triton "
+    "ROCm kernel, instead of FORMAT.GEMV/GEMV_FAST/LLM_AWQ."
+)
+
+
 class AwqGEMVLinear(AWQuantLinear):
     SUPPORTS_BACKENDS = [BACKEND.AWQ_GEMV]
     SUPPORTS_METHODS = [METHOD.AWQ]
@@ -41,7 +62,7 @@ class AwqGEMVLinear(AWQuantLinear):
     # native launch.
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [64]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
@@ -257,4 +278,4 @@ class AwqGEMVLinear(AWQuantLinear):
             )
         )
 
-__all__ = ["AwqGEMVLinear"]
+__all__ = ["AWQ_GEMV_ROCM_UNSUPPORTED", "AwqGEMVLinear"]

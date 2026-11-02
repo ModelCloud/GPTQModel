@@ -43,7 +43,20 @@ class ParoQuantTritonLinear(ParoLinear):
     SUPPORTS_AUTO_PADDING = ParoLinear.SUPPORTS_AUTO_PADDING
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_IN_FEATURES_DIVISIBLE_BY
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = ParoLinear.SUPPORTS_OUT_FEATURES_DIVISIBLE_BY
-    SUPPORTS_DEVICES = [DEVICE.CUDA]
+    # The Triton kernels in ``quantization/paroquant/modules/triton/gemm.py``
+    # use only portable language features: ``tl.load/store``, integer shifts,
+    # ``tl.interleave`` (a ``tl.join`` + ``tl.reshape`` composition) and
+    # ``tl.dot``.  There is no CUDA-only intrinsic, inline PTX/asm or
+    # ``libdevice`` use, and the launch helper wraps a ``torch.cuda`` device
+    # context that HIP also provides.  The sibling STE kernels already select
+    # ``triton.language.extra.hip.libdevice`` on HIP, so ROCm is a supported
+    # device family here too.
+    #
+    # ``SUPPORTS_FORMATS`` keeps FORMAT.PAROQUANT at priority 0, so this kernel
+    # is never chosen automatically; listing DEVICE.ROCM only allows an explicit
+    # ``BACKEND.PAROQUANT_TRITON`` request and leaves AUTO on the portable
+    # ``ParoLinear`` torch path.
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX, PLATFORM.WIN32]
     SUPPORTS_PACK_DTYPES = ParoLinear.SUPPORTS_PACK_DTYPES
     SUPPORTS_ADAPTERS = ParoLinear.SUPPORTS_ADAPTERS
@@ -57,20 +70,26 @@ class ParoQuantTritonLinear(ParoLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        """Validate the Triton and CUDA runtime prerequisites once per process."""
+        """Validate the Triton and GPU runtime prerequisites once per process."""
         from packaging import version
         from triton import __version__ as triton_version
 
         triton_v = version.parse(triton_version)
 
         if triton_v < version.parse("2.0.0"):
-            raise ImportError(f"triton version must be >= 2.0.0: actual = {triton_version}")
+            return False, ImportError(
+                f"triton version must be >= 2.0.0: actual = {triton_version}"
+            )
 
         if has_gil_disabled() and triton_v < version.parse("3.4.0"):
-            raise Exception("GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0")
+            return False, Exception(
+                "GIL is disabled and not compatible with current Triton. Please upgrade to Triton >= 3.4.0"
+            )
 
+        # HIP exposes the ROCm GPU through the ``cuda`` torch device namespace,
+        # so this check covers NVIDIA CUDA and AMD ROCm alike.
         if not torch.cuda.is_available():
-            raise RuntimeError("ParoQuant Triton requires CUDA.")
+            return False, RuntimeError("ParoQuant Triton requires a CUDA or ROCm GPU.")
 
         return True, None
 

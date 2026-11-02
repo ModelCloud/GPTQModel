@@ -5,12 +5,15 @@
 
 from __future__ import annotations
 
+from typing import Optional, Tuple
+
 import torch
 from torch.nn import functional as F
 
 from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
+from ...utils.rocm import IS_ROCM
 from .vptq_torch import VPTQLinear
 
 
@@ -40,6 +43,26 @@ class VPTQCudaLinear(VPTQLinear):
     SUPPORTS_PLATFORM = VPTQLinear.SUPPORTS_PLATFORM
     SUPPORTS_DTYPES = VPTQLinear.SUPPORTS_DTYPES
     QUANT_TYPE = "vptq_cuda"
+
+    @classmethod
+    def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
+        """Reject ROCm with an actionable message so AUTO falls back to VPTQ_TORCH.
+
+        The VPTQ extension is built from CUDA sources (``vptq_kernel.cu``) and
+        relies on CUDA-only intrinsics, so it cannot be compiled by hipcc.  ROCm
+        exposes the CUDA device namespace through HIP, which makes
+        ``torch.cuda.is_available()`` true there; an explicit architecture check
+        is therefore required instead of relying on the torch device type.
+        """
+        if IS_ROCM:
+            return False, NotImplementedError(
+                "VPTQ_CUDA is not available on ROCm: its extension is built from CUDA sources "
+                "and CUDA-only intrinsics. Use BACKEND.VPTQ_TORCH (the portable Torch kernel), "
+                "which is selected automatically for AUTO on AMD GPUs."
+            )
+        if not torch.cuda.is_available():
+            return False, RuntimeError("VPTQ_CUDA requires an available CUDA device.")
+        return True, None
 
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("backend", BACKEND.VPTQ_CUDA)

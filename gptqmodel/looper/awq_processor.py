@@ -2861,6 +2861,7 @@ class AWQProcessor(LoopProcessor):
                     quant_linear_cls=quant_linear_cls,
                     lock=self.lock,
                     quantize_config=self.qcfg,
+                    device=module.state.get("quant_device"),
                 )
         if timer is not None and pack_start is not None:
             timer.record(

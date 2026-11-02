@@ -511,3 +511,55 @@ def test_exllamav3_torch_cpu_bf16x3_env_disable(monkeypatch):
     exllamav3_torch._cpu_bf16x3_support.cache_clear()
 
     assert not exllamav3_torch._cpu_bf16x3_support()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav3_torch_hadamard_preserves_activation_dtype(dtype):
+    """The cached FP32 Hadamard must not force a dtype mismatch against activations."""
+
+    x = torch.randn(4, 256, dtype=dtype)
+    for apply in (exllamav3_torch._apply_hadamard_right, exllamav3_torch._apply_hadamard_left):
+        source = x if apply is exllamav3_torch._apply_hadamard_right else x.t().contiguous()
+        actual = apply(source)
+        assert actual.dtype == dtype
+        hadamard = exllamav3_torch._hadamard_128("cpu", None).double()
+        if apply is exllamav3_torch._apply_hadamard_right:
+            expected = (source.double().view(source.shape[0], -1, 128) @ hadamard).view_as(source)
+        else:
+            expected = (hadamard @ source.double().view(-1, 128, source.shape[1])).view_as(source)
+        # Pure dtype/rounding check (the forward test above covers accuracy
+        # against the FP64 oracle): BF16's unit roundoff is ~7.8e-3, so allow
+        # that much relative drift here and keep FP16 at the 2e-3 limit.
+        rtol = 8e-3 if dtype is torch.bfloat16 else 2e-3
+        torch.testing.assert_close(actual.double(), expected, rtol=rtol, atol=rtol)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_exllamav3_torch_forward_matches_oracle_with_hadamard_matmul(dtype):
+    """Exercises the same Hadamard path task AUTO selects on ROCm (EXL3_TORCH)."""
+
+    in_features, out_features = 384, 256
+    generator = torch.Generator().manual_seed(17 if dtype is torch.float16 else 29)
+    symbols = torch.randint(
+        0,
+        1 << 4,
+        (in_features // 16, out_features // 16, 256),
+        dtype=torch.int64,
+        generator=generator,
+    )
+    module = _make_module(
+        bits=4,
+        seed=3,
+        in_features=in_features,
+        out_features=out_features,
+        trellis=_pack_symbols(symbols, 4),
+    )
+    x = torch.randn(7, in_features, dtype=dtype, generator=generator)
+
+    with torch.inference_mode():
+        actual = module(x)
+
+    expected = x.double() @ _independent_weight_oracle(symbols, 4, module.suh, module.svh) + module.bias.double()
+    assert actual.dtype == dtype
+    assert _relative_l2(actual, expected) <= 2e-3
+    assert _relative_l2(actual, expected.to(dtype)) <= 2e-3

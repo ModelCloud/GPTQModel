@@ -24,13 +24,14 @@ from ..models.writer import (
     QUANT_LOG_LOSS,
     QUANT_LOG_NSAMPLES,
 )
-from ..nn_modules.qlinear.qqq import QQQLinear, QQQTorchLinear
+from ..nn_modules.qlinear.qqq import QQQ_ROCM_UNSUPPORTED, QQQLinear, QQQTorchLinear
 from ..quantization.config import METHOD, QuantizeConfig, _normalize_mse, resolve_quant_format
 from ..quantization.qqq import QQQ
 from ..utils.backend import BACKEND
 from ..utils.fallback import normalize_fallback
 from ..utils.logger import log_time_block, setup_logger
 from ..utils.model import create_quant_module, move_to, pack_module
+from ..utils.rocm import IS_ROCM
 from ..utils.torch import CPU
 
 
@@ -78,6 +79,14 @@ class QQQProcessor(LoopProcessor):
     def _quant_linear_kernel(self):
         if self.requested_backend == BACKEND.QQQ_TORCH or sys.platform == "darwin":
             return QQQTorchLinear, BACKEND.QQQ_TORCH
+        # QQQ's Marlin-derived W4A8 kernel is CUDA-only in practice; its JIT
+        # extension uses CUDA inline PTX that hipcc cannot compile for gfx120*.
+        # An explicit BACKEND.QQQ request on ROCm is a user error, so report it
+        # here rather than failing later inside the pack/forward path.
+        if IS_ROCM:
+            if self.requested_backend == BACKEND.QQQ:
+                raise NotImplementedError(QQQ_ROCM_UNSUPPORTED)
+            return QQQTorchLinear, BACKEND.QQQ_TORCH
         device = self.qcfg.device
         if isinstance(device, DEVICE):
             if device in (DEVICE.CPU, DEVICE.NPU):
@@ -99,8 +108,11 @@ class QQQProcessor(LoopProcessor):
     def preprocess(self, module: NamedModule, fallback=None, **kwargs):
         """Builds the per-module QQQ task after applying dynamic overrides."""
 
-        # entire module is skipped
-        if not self.qcfg.dynamic_get(layer_name=module.full_name):
+        # Skip only modules explicitly excluded by a `dynamic` rule. `dynamic_get`
+        # returns None when no rule matches (the common case, including
+        # `dynamic=None`), so a truthiness test here silently skipped every
+        # module and quantized nothing.
+        if self.qcfg.dynamic_get(layer_name=module.full_name) is False:
             return
 
         qcfg_clone = copy.deepcopy(self.qcfg)
@@ -347,6 +359,7 @@ class QQQProcessor(LoopProcessor):
                 lock=self.lock,
                 q_scales_extra=q_scales_extra,
                 quantize_config=self.qcfg,
+                device=module.state.get("quant_device"),
             )
 
         # TODO: store module quant results in module, not global processor result

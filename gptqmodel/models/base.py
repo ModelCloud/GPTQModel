@@ -1461,12 +1461,14 @@ class BaseQModel(nn.Module):
                 else:
                     raise ValueError(f"Unsupported FORMAT: `{self.quantize_config.format}` with `METHOD.AWQ`")
             elif self.quantize_config.method == METHOD.QQQ:
-                # QQQ's Marlin-derived kernel is CUDA/ROCm-only. CPU and NPU
-                # hosts must use the portable torch implementation instead of
-                # selecting a backend that fails validation.
+                # QQQ's Marlin-derived W4A8 kernel is CUDA-only in practice: its
+                # extension is built from CUDA inline PTX that hipify cannot
+                # translate, so it cannot be compiled by hipcc on gfx120*.  CPU,
+                # NPU and ROCm hosts must use the portable torch implementation
+                # instead of selecting a backend that fails validation.
                 preferred_backend = (
                     BACKEND.QQQ_TORCH
-                    if quant_device_type in ("cpu", "npu")
+                    if IS_ROCM or quant_device_type in ("cpu", "npu")
                     else BACKEND.QQQ
                 )
             elif self.quantize_config.method == METHOD.VPTQ:
