@@ -32,11 +32,15 @@ The module is opt-out via ``GPTQMODEL_P2P=0`` and force-on via ``GPTQMODEL_P2P=1
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import ctypes.util
+import glob
 import os
+import site
+import threading
 from dataclasses import dataclass, field
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import torch
 
@@ -88,6 +92,17 @@ _PEER_ALREADY_ENABLED = 704
 
 _STATUS_CACHE: dict[tuple[str, bool, tuple[int, ...]], "PeerStatus"] = {}
 _BANDWIDTH_CACHE: dict[tuple[int, int], tuple[float | None, float | None]] = {}
+
+# One actionable warning per process: a multi-GPU run that cannot enable every
+# ordered pair must not repeat the same diagnosis for every layer/module.
+_WARNED_DEGRADED = False
+_WARN_LOCK = threading.Lock()
+
+# Runtime peer-copy entry point, loaded once. ``peer_copy_batch`` runs on worker
+# threads, so guard the one-time initialization instead of reloading the shared
+# library on every batch.
+_PEER_COPY_RUNTIME: tuple[ctypes.CDLL, str] | None = None
+_PEER_COPY_LOCK = threading.Lock()
 
 
 @dataclass
@@ -280,6 +295,15 @@ def _load_hip():
             lib.hipDeviceEnablePeerAccess.restype = ctypes.c_int
             lib.hipGetLastError.argtypes = []
             lib.hipGetLastError.restype = ctypes.c_int
+            lib.hipMemcpyPeerAsync.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+            ]
+            lib.hipMemcpyPeerAsync.restype = ctypes.c_int
             return lib
         except OSError:
             continue
@@ -298,6 +322,61 @@ def _load_cuda():
         lib.cuDevicePrimaryCtxRelease.restype = ctypes.c_int
         lib.cuCtxEnablePeerAccess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
         lib.cuCtxEnablePeerAccess.restype = ctypes.c_int
+        return lib
+    return None
+
+
+def _load_cudart():
+    """Load the CUDA *runtime*, which owns ``cudaMemcpyPeerAsync``.
+
+    ``_load_cuda`` returns the driver library (``cuCtxEnablePeerAccess``); the
+    async peer copy lives in the runtime, which is usually shipped inside the
+    PyTorch wheel rather than installed system-wide.
+    """
+
+    candidates = [
+        "libcudart.so",
+        "libcudart.so.13",
+        "libcudart.so.12",
+        "libcudart.so.11.0",
+    ]
+    with contextlib.suppress(Exception):
+        discovered = ctypes.util.find_library("cudart")
+        if discovered:
+            candidates.append(discovered)
+
+    roots: list[str] = []
+    with contextlib.suppress(Exception):
+        roots.extend(site.getsitepackages())
+    with contextlib.suppress(Exception):
+        roots.append(site.getusersitepackages())
+    with contextlib.suppress(Exception):
+        roots.append(os.path.dirname(os.path.dirname(torch.__file__)))
+
+    for root in dict.fromkeys(roots):
+        if not root or not os.path.isdir(root):
+            continue
+        candidates.extend(
+            sorted(glob.glob(os.path.join(root, "nvidia", "**", "libcudart.so*"), recursive=True))
+        )
+        candidates.extend(sorted(glob.glob(os.path.join(root, "torch", "lib", "libcudart.so*"))))
+
+    for candidate in dict.fromkeys(candidates):
+        try:
+            lib = ctypes.CDLL(candidate, mode=ctypes.RTLD_GLOBAL)
+            lib.cudaGetLastError.argtypes = []
+            lib.cudaGetLastError.restype = ctypes.c_int
+            lib.cudaMemcpyPeerAsync.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_void_p,
+                ctypes.c_int,
+                ctypes.c_size_t,
+                ctypes.c_void_p,
+            ]
+            lib.cudaMemcpyPeerAsync.restype = ctypes.c_int
+        except (OSError, AttributeError):
+            continue
         return lib
     return None
 
@@ -522,6 +601,45 @@ def _probe_bandwidth(src: int, dst: int) -> tuple[float | None, float | None]:
     return direct, staged
 
 
+def _warn_degraded_once(status: PeerStatus) -> None:
+    """Log one actionable warning when a multi-GPU run lacks full P2P.
+
+    The wording is deliberately diagnostic: a missing directed pair is almost
+    always a platform limitation, and the user needs to know the run still
+    works but pays for host staging. ``_WARNED_DEGRADED`` makes it once per
+    process; the lock keeps concurrent first calls from logging twice.
+    """
+
+    global _WARNED_DEGRADED
+
+    if status.mode == _MODE_OFF or len(status.devices) < 2 or not status.pairs:
+        return
+    if all(state == STATE_ENABLED for state in status.pairs.values()):
+        return
+
+    with _WARN_LOCK:
+        if _WARNED_DEGRADED:
+            return
+        _WARNED_DEGRADED = True
+
+    enabled = sum(1 for state in status.pairs.values() if state == STATE_ENABLED)
+    total = len(status.pairs)
+    log.warning(
+        "Multi-GPU peer-to-peer (P2P) access could not be fully enabled/validated "
+        "for every ordered GPU pair (%d/%d directed pairs enabled). The GPUs do "
+        "not have usable P2P either because of motherboard compatibility (PCIe "
+        "slot wiring, ACS/IOMMU), BIOS compatibility (Above 4G decoding, "
+        "Resizable BAR, PCIe generation), or hardware compatibility. Cross-GPU "
+        "copies will fall back to slower host staging and multi-GPU "
+        "quantization/inference speed may be sub-optimal. Set %s=1 to force an "
+        "enablement attempt; details: %s",
+        enabled,
+        total,
+        ENV_P2P,
+        status.summary(),
+    )
+
+
 def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False) -> PeerStatus:
     """Enable peer access for every directed pair and classify each link.
 
@@ -555,6 +673,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     cache_key = (mode, checking, indices)
     cached = _STATUS_CACHE.get(cache_key)
     if cached is not None:
+        _warn_degraded_once(cached)
         if strict and cached.errors:
             (src, dst), detail = next(iter(cached.errors.items()))
             raise RuntimeError(f"P2P {src}->{dst} enablement failed: {detail}")
@@ -633,6 +752,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
 
     _STATUS_CACHE[cache_key] = status
     log.info("%s", status.summary())
+    _warn_degraded_once(status)
     return status
 
 
@@ -663,6 +783,360 @@ def copy_tensor_to(dst: torch.Tensor, src: torch.Tensor, status: PeerStatus | No
             log.debug("P2P %s->%s is degraded; driver staging may be used", src.device, dst.device)
     dst.copy_(src, non_blocking=True)
     return dst
+
+
+def p2p_all_enabled(devices: Sequence | None = None) -> bool:
+    """True when every directed pair between ``devices`` has peer access."""
+
+    indices = _normalize_indices(devices)
+    if len(indices) < 2:
+        return False
+    status = _cached_status_for(indices) or enable_peer_access(indices)
+    return all(
+        status.state(src, dst) == STATE_ENABLED
+        for src in indices
+        for dst in indices
+        if src != dst
+    )
+
+
+def _cached_status_for(indices: tuple[int, ...]) -> PeerStatus | None:
+    """Return a cached status whose device set covers ``indices``.
+
+    ``enable_peer_access`` caches by the exact device tuple, so a status
+    probed for ``[0, 1]`` would not answer a later ``[1, 0]`` query. The hot
+    copy path asks for directed pairs in whatever order the caller uses, so
+    reuse a superset instead of re-probing the same links.
+    """
+
+    mode = p2p_mode()
+    checking = _cache_namespace()
+    wanted = set(indices)
+    for (cached_mode, cached_checking, _), status in list(_STATUS_CACHE.items()):
+        if cached_mode != mode or cached_checking != checking:
+            continue
+        if wanted.issubset(status.devices):
+            return status
+    return None
+
+
+def _can_peer_copy(src: int, dst: int) -> bool:
+    """Return whether the runtime peer copy is usable for ``src -> dst``."""
+
+    if src == dst:
+        return False
+    try:
+        status = _cached_status_for((src, dst)) or enable_peer_access([src, dst])
+        return status.can_copy(src, dst)
+    except Exception as exc:  # pragma: no cover - runtime dependent
+        log.debug("P2P status check %s->%s failed: %s", src, dst, exc)
+        return False
+
+
+def _clear_last_error_for_backend(lib=None) -> None:
+    """Drain the sticky runtime error left behind by a failed peer copy."""
+
+    if getattr(torch.version, "hip", None) is not None:
+        if lib is not None:
+            _clear_hip_last_error(lib)
+        return
+    _clear_cuda_last_error()
+
+
+def _peer_copy_runtime() -> tuple[ctypes.CDLL, str] | None:
+    """Return ``(runtime_library, symbol)`` for the async peer copy."""
+
+    global _PEER_COPY_RUNTIME
+
+    if _PEER_COPY_RUNTIME is not None:
+        return _PEER_COPY_RUNTIME
+    with _PEER_COPY_LOCK:
+        if _PEER_COPY_RUNTIME is not None:
+            return _PEER_COPY_RUNTIME
+        if getattr(torch.version, "hip", None) is not None:
+            lib = _load_hip()
+            symbol = "hipMemcpyPeerAsync"
+        else:
+            lib = _load_cudart()
+            symbol = "cudaMemcpyPeerAsync"
+        if lib is None or not hasattr(lib, symbol):
+            return None
+        _PEER_COPY_RUNTIME = (lib, symbol)
+        return _PEER_COPY_RUNTIME
+
+
+def peer_copy_batch(
+    sources: Sequence[torch.Tensor],
+    targets: Sequence[torch.Tensor],
+) -> bool:
+    """Enqueue runtime peer-to-peer copies for ``sources -> targets``.
+
+    PyTorch's ``torch.cuda.comm.broadcast_coalesced`` funnels into
+    ``torch._C._broadcast_coalesced``. That entry point is not safe to call
+    from several threads on free-threaded (``PYTHON_GIL=0``) builds: it has
+    been measured to hang and to publish torn copies on both ROCm and CUDA.
+    The runtime's own ``cudaMemcpyPeerAsync``/``hipMemcpyPeerAsync`` is
+    reached through ``ctypes``, which releases the GIL for the enqueue, so
+    worker threads can stage replicas and calibration inputs concurrently.
+
+    Every source must live on one device and every target on one other device.
+    Copies are ordered after the source stream and are enqueued on the
+    destination device's current stream, so consumers must use that stream
+    (which normal PyTorch code on the destination device does).
+
+    Returns ``True`` when all copies were enqueued. Returns ``False`` when the
+    runtime is unavailable, P2P is not enabled for the pair, a tensor is not
+    contiguous, or the group is not a simple two-device batch, so callers can
+    fall back to ``Tensor.to()``.
+    """
+
+    if not sources or len(sources) != len(targets):
+        return False
+
+    source_device = sources[0].device
+    target_device = targets[0].device
+    if source_device.type != "cuda" or target_device.type != "cuda":
+        return False
+    if source_device == target_device:
+        return False
+    if source_device.index is None or target_device.index is None:
+        return False
+    if any(tensor.device != source_device for tensor in sources):
+        return False
+    if any(tensor.device != target_device for tensor in targets):
+        return False
+    if not _can_peer_copy(source_device.index, target_device.index):
+        return False
+
+    runtime = _peer_copy_runtime()
+    if runtime is None:
+        return False
+    lib, symbol = runtime
+    peer_copy = getattr(lib, symbol)
+
+    for source, target in zip(sources, targets):
+        # The copy moves raw bytes: a non-contiguous view would be read in
+        # storage order and silently corrupt the destination.
+        if not source.is_contiguous() or not target.is_contiguous():
+            return False
+        if source.numel() * source.element_size() != target.numel() * target.element_size():
+            return False
+
+    target_stream = torch.cuda.current_stream(target_device)
+    # Cross-device copies are not ordered against the producing stream unless
+    # we join them explicitly; the calling thread's own stream is what produced
+    # (or will consume) these tensors.
+    event = torch.cuda.Event()
+    event.record(torch.cuda.current_stream(source_device))
+    target_stream.wait_event(event)
+    stream_handle = ctypes.c_void_p(target_stream.cuda_stream)
+
+    try:
+        for source, target in zip(sources, targets):
+            byte_count = source.numel() * source.element_size()
+            if byte_count == 0:
+                continue
+            rc = peer_copy(
+                ctypes.c_void_p(target.data_ptr()),
+                int(target_device.index),
+                ctypes.c_void_p(source.data_ptr()),
+                int(source_device.index),
+                ctypes.c_size_t(byte_count),
+                stream_handle,
+            )
+            if rc != 0:
+                # A failed peer copy leaves a sticky runtime error that would
+                # otherwise surface from an unrelated PyTorch call later.
+                _clear_last_error_for_backend(lib)
+                return False
+    except Exception:
+        _clear_last_error_for_backend(lib)
+        return False
+
+    return True
+
+
+def _contiguous_like(tensor: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Allocate a contiguous destination for a peer copy."""
+
+    return torch.empty(
+        tuple(tensor.shape),
+        dtype=tensor.dtype,
+        device=device,
+        layout=tensor.layout,
+    )
+
+
+def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) -> bool:
+    """Move all CUDA leaves of ``module`` to ``device`` with runtime peer copies.
+
+    Returns ``True`` when the peer-copy path handled the move. Callers must
+    still realign Accelerate hooks afterwards; this helper only replaces the
+    many small ``tensor.to()`` calls that otherwise dominate cross-GPU module
+    moves. Returns ``False`` for CPU/meta/offloaded/mixed-device modules or
+    non-contiguous leaves so the caller can fall back to the regular move path.
+    """
+
+    target = device if isinstance(device, torch.device) else torch.device(str(device))
+    if target.type != "cuda" or target.index is None:
+        return False
+
+    leaves: list[tuple[torch.nn.Module, str, torch.Tensor, bool]] = []
+    source_devices = set()
+    seen_tensors = set()
+    for sub in module.modules():
+        for name, parameter in list(getattr(sub, "_parameters", {}).items()):
+            if parameter is None:
+                continue
+            if parameter.device.type != "cuda" or parameter.is_meta:
+                return False
+            # A shared (tied) parameter appears under more than one name. The
+            # peer path replaces parameter objects, so it must fall back rather
+            # than silently untie the weights.
+            if id(parameter) in seen_tensors:
+                return False
+            seen_tensors.add(id(parameter))
+            leaves.append((sub, name, parameter, True))
+            source_devices.add(parameter.device)
+        for name, buffer in list(getattr(sub, "_buffers", {}).items()):
+            if buffer is None or not isinstance(buffer, torch.Tensor):
+                continue
+            if buffer.device.type != "cuda" or buffer.is_meta:
+                return False
+            if id(buffer) in seen_tensors:
+                return False
+            seen_tensors.add(id(buffer))
+            leaves.append((sub, name, buffer, False))
+            source_devices.add(buffer.device)
+
+    if not leaves:
+        return False
+    if len(source_devices) != 1:
+        return False
+
+    source = next(iter(source_devices))
+    if source == target:
+        return True
+    if source.index is None or not _can_peer_copy(source.index, target.index):
+        return False
+
+    pending = [(sub, name, tensor, is_param) for sub, name, tensor, is_param in leaves if tensor.device != target]
+    if not pending:
+        return True
+
+    # The peer-copy path moves raw storage, so every leaf must be contiguous.
+    # A non-contiguous parameter would be copied in storage order and silently
+    # produce wrong values, so fall back to the regular move instead.
+    if any(not entry[2].is_contiguous() for entry in pending):
+        return False
+
+    try:
+        moved = [_contiguous_like(entry[2], target) for entry in pending]
+    except Exception:
+        return False
+    if not peer_copy_batch([entry[2] for entry in pending], moved):
+        return False
+
+    # Unlike a calibration input, a module move is structural: the new weights
+    # must be readable from any stream as soon as this returns, which is what
+    # ``Tensor.to`` guarantees. Wait for the copies we just enqueued.
+    torch.cuda.current_stream(target).synchronize()
+
+    for (sub, name, old, is_param), new in zip(pending, moved):
+        if is_param:
+            sub._parameters[name] = torch.nn.Parameter(new, requires_grad=old.requires_grad)
+        else:
+            if old.requires_grad:
+                new.requires_grad_(True)
+            sub._buffers[name] = new
+
+    return True
+
+
+_P2P_NOT_APPLICABLE = object()
+# Public alias for callers that need to distinguish "fast path handled it" from
+# "fall back to the regular move helper".
+P2P_NOT_APPLICABLE = _P2P_NOT_APPLICABLE
+
+
+def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 * 1024) -> Any:
+    """Move a nested tensor structure to ``device`` using coalesced peer copies.
+
+    Returns ``P2P_NOT_APPLICABLE`` when the fast path cannot be used so the
+    caller can fall back to its regular move helper. The fast path only
+    triggers for at least two tensors living on one CUDA source device, which
+    is exactly the multi-batch/multi-kwarg case where per-tensor copies add up.
+    """
+
+    target = device if isinstance(device, torch.device) else torch.device(str(device))
+    if (
+        target.type != "cuda"
+        or target.index is None
+        or not isinstance(value, (torch.Tensor, dict, list, tuple))
+    ):
+        return _P2P_NOT_APPLICABLE
+
+    tensors: list[torch.Tensor] = []
+
+    def _walk(item: Any) -> None:
+        if isinstance(item, torch.Tensor):
+            tensors.append(item)
+        elif isinstance(item, dict):
+            for child in item.values():
+                _walk(child)
+        elif isinstance(item, (list, tuple)):
+            for child in item:
+                _walk(child)
+
+    _walk(value)
+    if not tensors:
+        return _P2P_NOT_APPLICABLE
+
+    if all(tensor.device == target for tensor in tensors):
+        return value
+
+    pending = [tensor for tensor in tensors if tensor.device != target]
+    if len(pending) < 2:
+        return _P2P_NOT_APPLICABLE
+
+    # The peer-copy fast path always produces contiguous leaves and does not
+    # preserve autograd history. Both are fine for calibration/inference
+    # activations, but fall back to ``.to()`` when a caller relies on either.
+    if any(tensor.requires_grad for tensor in pending):
+        return _P2P_NOT_APPLICABLE
+    if not all(tensor.is_contiguous() for tensor in pending):
+        return _P2P_NOT_APPLICABLE
+    source_devices = {tensor.device for tensor in pending}
+    if len(source_devices) != 1:
+        return _P2P_NOT_APPLICABLE
+
+    source = next(iter(source_devices))
+    if source.type != "cuda" or source.index is None:
+        return _P2P_NOT_APPLICABLE
+
+    total_bytes = sum(tensor.numel() * tensor.element_size() for tensor in pending)
+    if total_bytes < min_bytes:
+        return _P2P_NOT_APPLICABLE
+
+    if not _can_peer_copy(source.index, target.index):
+        return _P2P_NOT_APPLICABLE
+
+    staged = [_contiguous_like(tensor, target) for tensor in pending]
+    if not peer_copy_batch(pending, staged):
+        return _P2P_NOT_APPLICABLE
+
+    replacements = {id(tensor): moved for tensor, moved in zip(pending, staged)}
+
+    def _rebuild(item: Any) -> Any:
+        if isinstance(item, torch.Tensor):
+            return replacements.get(id(item), item)
+        if isinstance(item, dict):
+            return {key: _rebuild(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return type(item)(_rebuild(child) for child in item)
+        return item
+
+    return _rebuild(value)
 
 
 def enable_for_devices(devices: Sequence | None = None, *, strict: bool = False) -> PeerStatus:

@@ -25,6 +25,7 @@ from ..quantization.config import FallbackStrategy, SmoothMSE
 from ..utils.device import get_device
 from ..utils.env import env_flag
 from ..utils.logger import setup_logger
+from ..utils.p2p import p2p_all_enabled
 from .fallback_smooth import mse_optimal_quant, smooth_block
 from .gar import (
     compose_final_perm,
@@ -991,6 +992,27 @@ class GPTQ:
             # GPU workers can finish in a different order after restart. A
             # stable reduction order avoids changing floating-point rounding.
             reduction_sources = list(self._device_hessian_partials.values())
+            # Reuse one staging buffer instead of allocating a temporary per
+            # partial. With P2P enabled the copy is direct GPU-to-GPU; without
+            # it the regular ``to(device)`` fallback below still applies.
+            reduction_staging = None
+            if result_accum.device.type == "cuda" and len(reduction_sources) > 1:
+                try:
+                    if p2p_all_enabled(
+                        [
+                            *[partial.device for partial in reduction_sources],
+                            result_accum.device,
+                        ]
+                    ):
+                        # Avoid turning a memory-tight layer into an avoidable
+                        # OOM: only allocate the staging buffer when the device
+                        # has room for it.
+                        staging_bytes = result_accum.numel() * result_accum.element_size()
+                        free_bytes, _ = torch.cuda.mem_get_info(result_accum.device)
+                        if free_bytes > staging_bytes * 1.1:
+                            reduction_staging = torch.empty_like(result_accum)
+                except Exception:
+                    reduction_staging = None
             for partial_device in sorted(self._device_hessian_partials, key=_device_reduction_key):
                 partial = self._device_hessian_partials[partial_device]
                 partial_device = torch.device(partial_device)
@@ -1001,9 +1023,14 @@ class GPTQ:
                     else:
                         partial_event.synchronize()
                 if partial.device != result_accum.device or partial.dtype != torch.float32:
-                    result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
+                    if reduction_staging is not None and partial.device.type == "cuda":
+                        reduction_staging.copy_(partial, non_blocking=True)
+                        result_accum.add_(reduction_staging)
+                    else:
+                        result_accum.add_(partial.to(device=result_accum.device, dtype=torch.float32))
                 else:
                     result_accum.add_(partial)
+            del reduction_staging
 
             result_accum.mul_(2.0 / float(total_samples))
 
@@ -1046,7 +1073,12 @@ class GPTQ:
             # the leader readiness dependency there before an asynchronous
             # cross-device copy, rather than waiting on the leader stream.
             leader._wait_hessian_ready(target_device)
-            copy = source.detach().to(device=target_device, dtype=torch.float32, copy=True)
+            copy = source.detach().to(
+                device=target_device,
+                dtype=torch.float32,
+                copy=True,
+                non_blocking=(target_device.type == "cuda" and source.device.type == "cuda"),
+            )
 
         with self.lock:
             self.H = copy

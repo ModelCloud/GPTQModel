@@ -47,8 +47,8 @@ from ..utils.logger import log_time_block, setup_logger
 from ..utils.looper_helpers import (
     device_ctx,
     find_last_quantized_layer_index,
+    move_module_to_device,
     normalize_device_like,
-    rehome_module_to_device,
     select_forward_devices,
 )
 from ..utils.model import (
@@ -57,7 +57,6 @@ from ..utils.model import (
     get_layers_with_prefixes,
     get_module,
     get_module_by_name_prefix,
-    move_to,
 )
 from ..utils.offload import offload_to_disk
 from ..utils.p2p import enable_for_devices
@@ -414,12 +413,9 @@ class WeightOnlyLooper(DeviceAssignmentState):
         except Exception:
             previous_device = None
         with device_ctx(target_device):
-            move_to(named.module, device=target_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 named.module,
                 target_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             # Keep the quantization device for the final pack step.
@@ -450,12 +446,9 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 previous_device=previous_device,
                 target_device=CPU,
             )
-            move_to(named.module, device=CPU)
-            rehome_module_to_device(
+            move_module_to_device(
                 named.module,
                 CPU,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
 

@@ -49,6 +49,7 @@ from ..utils.logger import setup_logger
 from ..utils.looper_helpers import (
     clone_module_for_devices,
     forward_batch_worker,
+    move_module_to_device,
     normalize_device_like,
     rehome_module_to_device,
     select_forward_devices,
@@ -58,7 +59,6 @@ from ..utils.model import (
     get_layers_with_prefixes,
     get_module,
     get_module_by_name_prefix,
-    move_to,
     restore_moe_topk,
     set_moe_topk,
     untie_word_embeddings,
@@ -1091,12 +1091,9 @@ class ModuleLooper(DeviceAssignmentState):
                 current_device=current,
                 target_device=target,
             )
-            move_to(module_ref, device=target)
-            rehome_module_to_device(
+            move_module_to_device(
                 module_ref,
                 target,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             if isinstance(named_module, NamedModule):
@@ -1132,12 +1129,9 @@ class ModuleLooper(DeviceAssignmentState):
                 module=getattr(named_module, "full_name", name) if named_module is not None else name,
                 target_device=revert_device,
             )
-            move_to(module_ref, device=revert_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 module_ref,
                 revert_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             if isinstance(named_module, NamedModule):
@@ -1171,24 +1165,18 @@ class ModuleLooper(DeviceAssignmentState):
 
         module_attr = getattr(task, "module", None)
         if isinstance(module_attr, torch.nn.Module):
-            move_to(module_attr, device=target_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 module_attr,
                 target_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             setattr(module_attr, "target_device", target_device)
 
         layer_attr = getattr(task, "layer", None)
         if isinstance(layer_attr, torch.nn.Module):
-            move_to(layer_attr, device=target_device)
-            rehome_module_to_device(
+            move_module_to_device(
                 layer_attr,
                 target_device,
-                move_parameters=True,
-                move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
             setattr(layer_attr, "target_device", target_device)
@@ -1256,7 +1244,11 @@ class ModuleLooper(DeviceAssignmentState):
             isinstance(decoder_plan, dict)
             and named_module.state.get("auto_module_decoder_forward_mode") == "native"
         )
-        if isinstance(named_module.state.get("quant_source_module"), torch.nn.Module) or needs_deferred_quant_source:
+        deferred_quant_source = (
+            isinstance(named_module.state.get("quant_source_module"), torch.nn.Module)
+            or needs_deferred_quant_source
+        )
+        if deferred_quant_source:
             prepared = self.gptq_model.shell_module_materialize(
                 target_submodule=named_module.module,
                 device=target_device,
@@ -1265,15 +1257,21 @@ class ModuleLooper(DeviceAssignmentState):
             )
             if prepared is not named_module.module:
                 named_module.module = prepared
+            # Shell materialization may leave Accelerate hooks pointing at the
+            # previous placement, so realign them explicitly.
+            rehome_module_to_device(
+                named_module.module,
+                target_device,
+                move_parameters=True,
+                move_buffers=True,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
         else:
-            move_to(named_module.module, device=target_device)
-        rehome_module_to_device(
-            named_module.module,
-            target_device,
-            move_parameters=True,
-            move_buffers=True,
-            root_module=getattr(self.gptq_model, "model", None),
-        )
+            move_module_to_device(
+                named_module.module,
+                target_device,
+                root_module=getattr(self.gptq_model, "model", None),
+            )
 
         # Remember the device this module was quantized on so the final pack
         # step runs on the same GPU instead of an index-less default.

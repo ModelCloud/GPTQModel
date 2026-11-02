@@ -99,9 +99,38 @@ flagging a link that is genuinely slower than the fallback. Lower
 `GPTQMODEL_P2P_MIN_RATIO` if a topology really does measure at parity.
 
 A `strict=False` failure never raises; one informational summary line is
-logged. Measure with `scripts/benchmark_multi_gpu_p2p.py` (its `host` column is
+logged. When a multi-GPU run cannot enable every ordered pair, GPT-QModel also
+logs exactly one actionable warning: the GPUs do not have P2P either because of
+motherboard compatibility (PCIe slot wiring, ACS/IOMMU), BIOS compatibility
+(Above 4G decoding, Resizable BAR, PCIe generation), or hardware compatibility,
+and multi-GPU quantization/inference speed may be sub-optimal. The run keeps
+working and falls back to driver/host staging.
+
+Measure with `scripts/benchmark_multi_gpu_p2p.py` (its `host` column is
 the non-peer reference; `pre_enable` is already peer-enabled by PyTorch after
 the warm-up, so it is not an "off" baseline).
+
+### GIL-safe peer copies
+
+Every hot cross-device copy goes through
+`gptqmodel.utils.p2p.peer_copy_batch`, which calls
+`cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` with the GIL
+released. It records an event on the source stream, waits for it on the
+destination stream, and enqueues the copies on the destination's current
+stream. `move_module_to_device` and `move_nested_to_device` in
+`gptqmodel/utils/looper_helpers.py` use it for module moves and calibration
+input/mask/`position_ids` staging; the Hessian partial reduction and
+shared-Hessian adoption use the same direct GPU-to-GPU path.
+
+Do **not** call `torch.cuda.comm.*` from worker threads. On a free-threaded
+(`PYTHON_GIL=0`) build `broadcast_coalesced` has hung and returned torn copies
+on both ROCm and CUDA, and `reduce_add` has segfaulted. `torch.nn.parallel.replicate`
+internally uses `broadcast_coalesced`; `clone_module_for_devices` skips it when
+the GIL is disabled and uses the deepcopy + `move_module_to_device` path
+instead. It is still serialized by `_THREAD_SAFE_PARALLEL` on GIL builds; set
+`GPTQMODEL_USE_TORCH_REPLICATE=0` to force the deepcopy path there too.
+`pytorch_gil_0_compat.md` records the measured status of every PyTorch API we
+use, plus the workaround for each unsafe one.
 
 ### RTX 4090 (consumer Ada) note
 
