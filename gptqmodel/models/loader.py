@@ -2086,22 +2086,14 @@ def ModelLoader(cls):
         dispatch_device_map.update(dict.fromkeys(no_placement_module_names(model), "cpu"))
         log.info(f"Loader: device_map = {device_map}")
 
-        # Multi-device loading moves shards between GPUs. Enable peer access
-        # once, best effort; the helper logs a summary and leaves unsupported or
-        # degraded directions on host staging.
-        map_devices = []
-        for target in dispatch_device_map.values():
-            if not isinstance(target, str) or not target.startswith("cuda"):
-                continue
-            try:
-                device_obj = torch.device(target)
-            except (TypeError, RuntimeError):
-                continue
-            if device_obj not in map_devices:
-                map_devices.append(device_obj)
-        if len(map_devices) > 1:
-            from ..utils.p2p import enable_for_devices
+        # Multi-device loading moves shards between GPUs. Pre-enable peer access
+        # once so the first transfer is already direct (PyTorch would otherwise
+        # enable it lazily on that first copy). Best effort: never blocks the
+        # load. Device maps may hold strings, ints or torch.device values.
+        from ..utils.p2p import accelerator_devices_from_device_map, enable_for_devices
 
+        map_devices = accelerator_devices_from_device_map(dispatch_device_map)
+        if len(map_devices) > 1:
             enable_for_devices(map_devices)
 
         load_checkpoint_in_model = native_gguf_qspec is None

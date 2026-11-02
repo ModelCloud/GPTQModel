@@ -112,6 +112,7 @@ def test_p2p_bandwidth_gate(monkeypatch):
         bandwidth=lambda src, dst: (1.0, 0.5) if (src, dst) == (0, 1) else (100.0, 50.0),
     )
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     # Capability true but slow: degraded, and direct copy is refused.
     assert status.state(0, 1) == p2p.STATE_DEGRADED
@@ -133,6 +134,7 @@ def test_p2p_parity_with_host_staging_stays_enabled(monkeypatch):
         bandwidth=lambda src, dst: (45.0, 45.0),
     )
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is True
@@ -148,6 +150,7 @@ def test_p2p_materially_slower_than_host_staging_is_degraded(monkeypatch):
         bandwidth=lambda src, dst: (10.0, 45.0),
     )
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
     assert status.bandwidth_gbps[(0, 1)] == 10.0
@@ -161,6 +164,7 @@ def test_p2p_ratio_gate_can_be_tightened_by_env(monkeypatch):
     # parity link; the default does not.
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (45.0, 45.0))
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_RATIO", "1.1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
@@ -175,6 +179,7 @@ def test_copy_tensor_to_never_bounces_through_host(monkeypatch):
     """
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (1.0, 100.0))
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
 
@@ -196,6 +201,7 @@ def test_copy_tensor_to_never_bounces_through_host(monkeypatch):
 
 def test_p2p_unmeasurable_direct_link_is_degraded(monkeypatch):
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (None, 50.0))
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
     assert status.can_copy(0, 1) is False
@@ -286,6 +292,104 @@ def test_p2p_forced_mode_ignores_relative_gate(monkeypatch):
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (20.0, 45.0))
     monkeypatch.setenv("GPTQMODEL_P2P", "1")
     monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is True
+
+
+def test_p2p_probe_is_opt_in(monkeypatch):
+    """Enabling must not move probe payload unless diagnostics were requested.
+
+    PyTorch already enables peer access in its own copy path, so measuring every
+    directed pair at startup only adds latency; the probe is therefore opt-in.
+    """
+    _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
+
+    def fail(*args, **kwargs):
+        raise AssertionError("bandwidth probe must not run without GPTQMODEL_P2P_PROBE=1")
+
+    monkeypatch.setattr(p2p, "_probe_bandwidth", fail)
+    status = p2p.enable_peer_access([0, 1])
+    assert status.state(0, 1) == p2p.STATE_ENABLED
+    assert status.state(1, 0) == p2p.STATE_ENABLED
+    assert status.bandwidth_gbps == {}
+
+
+def test_indexless_string_and_device_mean_current_device(monkeypatch):
+    p2p.clear_p2p_cache()
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 2)
+    assert p2p._normalize_indices(["cuda", "cuda:1"]) == (2, 1)
+    assert p2p._normalize_indices([torch.device("cuda"), torch.device("cuda:3")]) == (2, 3)
+    assert p2p._normalize_indices(["cpu", 1]) == (1,)
+
+
+def test_probe_mib_invalid_value_falls_back(monkeypatch):
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE_MIB", "not-a-number")
+    assert p2p._probe_mib() == 64
+    monkeypatch.setenv("GPTQMODEL_P2P_PROBE_MIB", "8")
+    assert p2p._probe_mib() == 8
+
+
+def test_strict_mode_raises_even_when_best_effort_result_is_cached(monkeypatch):
+    _fake_topology(
+        monkeypatch,
+        {(0, 1): True, (1, 0): True},
+        enabled=lambda src, dst: (False, "boom") if (src, dst) == (0, 1) else (True, "fake"),
+    )
+    # Automatic (best-effort) call populates the cache with the failure.
+    best_effort = p2p.enable_for_devices([0, 1])
+    assert best_effort.state(0, 1) == p2p.STATE_UNSUPPORTED
+    assert best_effort.errors[(0, 1)] == "boom"
+
+    with pytest.raises(RuntimeError, match="boom"):
+        p2p.enable_peer_access([0, 1], strict=True)
+    with pytest.raises(RuntimeError, match="boom"):
+        p2p.enable_for_devices([0, 1], strict=True)
+
+
+def test_strict_mode_reraises_directly(monkeypatch):
+    _fake_topology(
+        monkeypatch,
+        {(0, 1): True},
+        enabled=lambda src, dst: (False, "no link"),
+    )
+    with pytest.raises(RuntimeError, match="no link"):
+        p2p.enable_for_devices([0, 1], strict=True)
+
+
+def test_host_staged_probe_orders_the_two_legs(monkeypatch):
+    """The D2H leg must complete before the H2D leg reads the staging buffer."""
+    p2p.clear_p2p_cache()
+    events = []
+
+    class FakeTensor:
+        def __init__(self, device):
+            self.device = device
+
+        def copy_(self, other, non_blocking=False):
+            events.append(("copy", self.device, getattr(other, "device", "cpu")))
+            return self
+
+    monkeypatch.setattr(p2p.torch, "empty", lambda *a, **k: FakeTensor(k.get("device") or "cpu"))
+    monkeypatch.setattr(p2p.torch.cuda, "synchronize", lambda dev: events.append(("sync", dev)))
+    monkeypatch.setattr(p2p, "_timed_gbps", lambda step, *a, **k: (step(), 100.0)[1])
+
+    p2p._measure_host_staged_gbps(0, 1, 1024)
+    kinds = [e[0] for e in events]
+    assert kinds == ["copy", "sync", "copy"], events
+    assert events[1][1] == 0
+    assert events[2] == ("copy", "cuda:1", "cpu")
+
+
+def test_device_map_targets_are_normalized():
+    """String, integer and torch.device map targets must all be honoured."""
+    device_map = {"a": "cuda:0", "b": 1, "c": torch.device("cuda", 1), "d": "cpu", "e": None}
+    assert p2p.accelerator_devices_from_device_map(device_map) == [
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+    ]
+    assert p2p.accelerator_devices_from_device_map({"a": 0, "b": 1}) == [
+        torch.device("cuda:0"),
+        torch.device("cuda:1"),
+    ]

@@ -12,11 +12,19 @@ makes repeated calls idempotent.
 Peer access is *directed*: ``i -> j`` and ``j -> i`` are enabled separately, and
 both directions are queried.
 
-A capability bit is not proof of usable bandwidth.  Consumer cards (for example
-RTX 4090) commonly report ``can_device_access_peer == True`` while throughput is
-below a host-staged copy.  Such pairs are therefore classified ``degraded``
-after a measured bandwidth gate and forced onto host staging.  Never assert P2P
-is effective from the call stack or from the capability bit alone.
+PyTorch already enables peer access lazily inside its own copy path
+(``c10/cuda/PeerToPeerAccess.cpp`` -> ``CUDACachingAllocator::enablePeerAccess``),
+so this module is **not** required for ``copy_``/``to`` to stay on the
+interconnect.  Its job is to (a) enable the links before the first cross-device
+copy so the very first transfer is direct, and (b) optionally *diagnose* the
+links.  Enabling is cheap and idempotent; bandwidth probing moves real payload
+and is opt-in via ``GPTQMODEL_P2P_PROBE=1``.
+
+A capability bit is not proof of usable bandwidth, so an opt-in probe classifies
+each direction as ``enabled``/``degraded``.  That classification is diagnostic
+only: peer access cannot be revoked once enabled and no code path here routes a
+``degraded`` link through an explicit host relay.  Never assert P2P is effective
+from the capability bit alone.
 
 The module is opt-out via ``GPTQMODEL_P2P=0`` and force-on via ``GPTQMODEL_P2P=1``
 (default ``auto``).  Results are cached per device tuple for the process.
@@ -40,9 +48,12 @@ log = setup_logger()
 ENV_P2P = "GPTQMODEL_P2P"
 ENV_P2P_MIN_GBPS = "GPTQMODEL_P2P_MIN_GBPS"
 ENV_P2P_MIN_RATIO = "GPTQMODEL_P2P_MIN_RATIO"
+ENV_P2P_PROBE = "GPTQMODEL_P2P_PROBE"
+ENV_P2P_PROBE_MIB = "GPTQMODEL_P2P_PROBE_MIB"
 
 # "auto" enables P2P when the runtime reports a peer link; "1" forces the
-# enablement attempt; "0" disables P2P entirely (host staging everywhere).
+# enablement attempt; "0" skips the pre-enablement call entirely (PyTorch's own
+# lazy peer setup still runs inside its copy path).
 _MODE_AUTO = "auto"
 _MODE_ON = "1"
 _MODE_OFF = "0"
@@ -50,26 +61,24 @@ _OFF_VALUES = frozenset({"0", "false", "off", "no", "disable", "disabled"})
 _ON_VALUES = frozenset({"1", "true", "on", "yes", "enable", "enabled"})
 
 DEFAULT_MIN_GBPS = 5.0
-# A direct link must not be *materially* slower than host staging. An absolute
-# GB/s floor alone cannot detect "the capability bit is set but the transfer is
-# not actually direct", so the measured direct rate is compared with an explicit
-# ``src -> pinned CPU -> dst`` pipeline.
+# A direct link must not be slower than the fallback. The reference is an
+# explicit, correctly ordered ``src -> pinned CPU -> dst`` pipeline: it pays for
+# *two* transfers (D2H then H2D) and is therefore strictly slower than a direct
+# copy at the same link rate -- never at parity.
 #
-# Measured on this host (median of 25 timed copies, both directions, payload in
-# MiB; ratio is direct GB/s / pinned-host GB/s):
+# Measured on this host (64 MiB payload, ordered staging, double-synchronized
+# timer, median of 7 samples):
 #
-#   R9700 gfx1201 (2x AMD, PCIe)   16 MiB 0.92   64 MiB 0.96   256 MiB 0.99
-#   RTX 4090 sm_89  (2x NVIDIA, PCIe) 16 MiB 0.99   64 MiB 1.00   256 MiB 1.00
+#   R9700 gfx1201 (2x AMD, PCIe)       direct 52.99 vs staged 27.35 GB/s (1.94x)
+#   RTX 4090 sm_89  (2x NVIDIA, PCIe)  direct 26.23 vs staged 13.27 GB/s (1.98x)
 #
-# Both rigs are PCIe-attached with no NVLink/Infinity-Fabric bridge, so *enabling*
-# peer access does not add bandwidth: it moves the same bytes over the same PCIe
-# links, and a hand-pipelined pinned bounce can match it. A 1.0 threshold
-# therefore classified every healthy peer link as ``degraded`` and forced an
-# explicit CPU relay -- precisely the ``gpu1 -> CPU -> gpu2`` path that multi-GPU
-# quantization must avoid. 0.9 keeps the direct device-to-device path for a link
-# within 10% of the fallback while still rejecting a link that is genuinely much
-# slower (a real regression, e.g. a degraded or emulated peer link).
-DEFAULT_MIN_RATIO = 0.9
+# Earlier 0.96x "parity" numbers in this tree came from issuing the D2H and H2D
+# legs on two device streams with no dependency, which measured the staged path
+# at ~2x its real speed. With the legs ordered the direct path wins by ~2x, so a
+# 1.0 gate keeps every healthy PCIe peer link direct while still rejecting a
+# link that is genuinely slower than the fallback. ``GPTQMODEL_P2P_MIN_RATIO``
+# can be lowered for a topology that really does measure at parity.
+DEFAULT_MIN_RATIO = 1.0
 
 STATE_ENABLED = "enabled"
 STATE_UNSUPPORTED = "unsupported"
@@ -77,7 +86,7 @@ STATE_DEGRADED = "degraded"
 
 _PEER_ALREADY_ENABLED = 704
 
-_STATUS_CACHE: dict[tuple[str, tuple[int, ...]], "PeerStatus"] = {}
+_STATUS_CACHE: dict[tuple[str, bool, tuple[int, ...]], "PeerStatus"] = {}
 _BANDWIDTH_CACHE: dict[tuple[int, int], tuple[float | None, float | None]] = {}
 
 
@@ -90,6 +99,9 @@ class PeerStatus:
     pairs: dict[tuple[int, int], str] = field(default_factory=dict)
     bandwidth_gbps: dict[tuple[int, int], float | None] = field(default_factory=dict)
     host_staged_gbps: dict[tuple[int, int], float | None] = field(default_factory=dict)
+    # Enablement failures, kept so ``strict=True`` can still raise when the
+    # best-effort result was cached by an earlier automatic call.
+    errors: dict[tuple[int, int], str] = field(default_factory=dict)
     reason: str = ""
 
     def state(self, src: int, dst: int) -> str:
@@ -127,6 +139,11 @@ def clear_p2p_cache() -> None:
     _BANDWIDTH_CACHE.clear()
 
 
+def _cache_namespace() -> bool:
+    """Cache bucket: probing and non-probing results must not be shared."""
+    return probe_enabled()
+
+
 def p2p_mode() -> str:
     """Return the requested mode: ``auto``, ``1`` (force), or ``0`` (off)."""
     raw = os.getenv(ENV_P2P, _MODE_AUTO).strip().lower()
@@ -151,21 +168,83 @@ def _min_ratio() -> float:
         return DEFAULT_MIN_RATIO
 
 
+def probe_enabled() -> bool:
+    """True when bandwidth diagnostics were requested via ``GPTQMODEL_P2P_PROBE``.
+
+    Probing is off by default: PyTorch already keeps cross-device copies on the
+    peer link, so measuring every directed pair only adds startup latency and
+    payload traffic without changing the transfer path.
+    """
+
+    return os.getenv(ENV_P2P_PROBE, "").strip().lower() in _ON_VALUES
+
+
+def _probe_mib() -> int:
+    try:
+        return max(1, int(os.getenv(ENV_P2P_PROBE_MIB, "64")))
+    except (TypeError, ValueError):
+        log.debug("%s=%r is not an integer; using 64 MiB", ENV_P2P_PROBE_MIB, os.getenv(ENV_P2P_PROBE_MIB))
+        return 64
+
+
 def _normalize_indices(devices: Iterable | None) -> tuple[int, ...]:
+    """Resolve device-like values to accelerator ordinals.
+
+    An indexless value (``"cuda"`` or ``torch.device("cuda")``) means "the
+    current device", matching ``torch.device`` semantics; it must never default
+    to ordinal 0. Non-accelerator values are skipped rather than mapped to a
+    bogus ordinal.
+    """
+
     if devices is None:
-        count = torch.cuda.device_count()
-        return tuple(range(count))
+        return tuple(range(torch.cuda.device_count()))
     indices: list[int] = []
     for candidate in devices:
+        if isinstance(candidate, bool):
+            raise TypeError("device must not be a bool")
         if isinstance(candidate, int):
             index = candidate
-        elif isinstance(candidate, torch.device):
-            index = candidate.index if candidate.index is not None else torch.cuda.current_device()
         else:
-            index = torch.device(str(candidate)).index or 0
+            try:
+                device = candidate if isinstance(candidate, torch.device) else torch.device(str(candidate))
+            except (RuntimeError, ValueError) as exc:
+                raise ValueError(f"invalid device {candidate!r}") from exc
+            if device.type != "cuda":
+                continue
+            index = device.index if device.index is not None else torch.cuda.current_device()
         if index not in indices:
             indices.append(index)
     return tuple(indices)
+
+
+def accelerator_devices_from_device_map(device_map: dict | None) -> list[torch.device]:
+    """Return the distinct accelerator devices referenced by a device map.
+
+    Accelerate accepts strings (``"cuda:1"``), integers (bare accelerator
+    ordinals) and ``torch.device`` values; all three must be normalized, or an
+    integer map silently yields no devices at all.
+    """
+
+    devices: list[torch.device] = []
+    for target in (device_map or {}).values():
+        if target is None or isinstance(target, bool):
+            continue
+        try:
+            if isinstance(target, int):
+                device = torch.device(f"cuda:{target}")
+            elif isinstance(target, torch.device):
+                device = target
+            elif isinstance(target, str):
+                device = torch.device(target)
+            else:
+                continue
+        except (TypeError, RuntimeError, ValueError):
+            continue
+        if device.type != "cuda":
+            continue
+        if device not in devices:
+            devices.append(device)
+    return devices
 
 
 def peer_matrix(devices: Iterable | None = None) -> list[list[bool]]:
@@ -379,7 +458,11 @@ def _measure_host_staged_gbps(src: int, dst: int, bytes_moved: int, iterations: 
         target = torch.empty(bytes_moved, dtype=torch.uint8, device=f"cuda:{dst}")
 
         def step():
+            # The D2H leg must complete before the H2D leg reads ``staged``;
+            # otherwise the two device streams race and the measured rate is the
+            # pipelined sum of both legs (~2x the real staging rate).
             staged.copy_(source, non_blocking=True)
+            torch.cuda.synchronize(src)
             target.copy_(staged, non_blocking=True)
 
         return _timed_gbps(step, src, dst, bytes_moved, iterations)
@@ -412,7 +495,7 @@ def _probe_bandwidth(src: int, dst: int) -> tuple[float | None, float | None]:
     if key in _BANDWIDTH_CACHE:
         return _BANDWIDTH_CACHE[key]
 
-    preferred_mib = max(1, int(os.getenv("GPTQMODEL_P2P_PROBE_MIB", "64")))
+    preferred_mib = _probe_mib()
     ladder = [preferred_mib]
     for fallback in (32, 16, 4):
         if fallback < preferred_mib:
@@ -442,13 +525,21 @@ def _probe_bandwidth(src: int, dst: int) -> tuple[float | None, float | None]:
 def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False) -> PeerStatus:
     """Enable peer access for every directed pair and classify each link.
 
-    ``enabled``   - capability reported and measured bandwidth passed the gate.
+    PyTorch enables peer access lazily on its first cross-device copy, so calling
+    this beforehand only removes that first-copy latency; it is not what keeps
+    copies on the interconnect.
+
+    ``enabled``   - capability reported and enablement succeeded.
     ``unsupported`` - capability is false or enablement failed.
-    ``degraded``  - capability is true but measured bandwidth is below the gate;
-                    callers must use host staging for this direction.
+
+    When ``GPTQMODEL_P2P_PROBE=1`` a measured copy additionally downgrades a
+    link to ``degraded`` if it is slower than ordered pinned-host staging. That
+    is a diagnostic verdict: peer access stays enabled and no caller inserts a
+    host relay because of it.
 
     With ``strict=True`` an enablement failure raises; the default is
-    best-effort and only logs one summary line.
+    best-effort and only logs one summary line. A cached best-effort failure
+    still raises for a later ``strict=True`` request.
     """
 
     mode = p2p_mode()
@@ -460,9 +551,14 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
         log.debug("%s", status.summary())
         return status
 
-    cache_key = (mode, indices)
-    if cache_key in _STATUS_CACHE:
-        return _STATUS_CACHE[cache_key]
+    checking = _cache_namespace()
+    cache_key = (mode, checking, indices)
+    cached = _STATUS_CACHE.get(cache_key)
+    if cached is not None:
+        if strict and cached.errors:
+            (src, dst), detail = next(iter(cached.errors.items()))
+            raise RuntimeError(f"P2P {src}->{dst} enablement failed: {detail}")
+        return cached
 
     if len(indices) < 2 or not torch.cuda.is_available():
         status.reason = "fewer than two CUDA/HIP devices"
@@ -472,6 +568,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
 
     threshold = _min_gbps()
     min_ratio = _min_ratio()
+    diagnose = checking
     capability = peer_matrix(indices)
     try:
         original_device = torch.cuda.current_device()
@@ -492,9 +589,14 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                 ok, detail = _enable_one(src, dst)
                 if not ok:
                     status.pairs[(src, dst)] = STATE_UNSUPPORTED
+                    status.errors[(src, dst)] = detail
                     log.debug("P2P %s->%s not enabled: %s", src, dst, detail)
                     if strict:
                         raise RuntimeError(f"P2P {src}->{dst} enablement failed: {detail}")
+                    continue
+
+                if not diagnose:
+                    status.pairs[(src, dst)] = STATE_ENABLED
                     continue
 
                 measured, staged = _probe_bandwidth(src, dst)
@@ -524,8 +626,10 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
         if original_device is not None:
             try:
                 torch.cuda.set_device(original_device)
-            except Exception:
-                pass
+            except Exception as exc:
+                # Best-effort cleanup: never let a failed device restore mask the
+                # original enablement error.
+                log.debug("failed to restore device %s: %s", original_device, exc)
 
     _STATUS_CACHE[cache_key] = status
     log.info("%s", status.summary())
@@ -553,16 +657,27 @@ def copy_tensor_to(dst: torch.Tensor, src: torch.Tensor, status: PeerStatus | No
     # driver-staged transfer otherwise. Both are GPU-side paths; never insert an
     # explicit host relay here. ``status`` is accepted for call-site symmetry and
     # future diagnostics, but must not demote a healthy link to a CPU bounce.
-    del status
+    if status is not None and src.device.index is not None and dst.device.index is not None:
+        state = status.state(src.device.index, dst.device.index)
+        if state == STATE_DEGRADED:
+            log.debug("P2P %s->%s is degraded; driver staging may be used", src.device, dst.device)
     dst.copy_(src, non_blocking=True)
     return dst
 
 
 def enable_for_devices(devices: Sequence | None = None, *, strict: bool = False) -> PeerStatus:
-    """Convenience wrapper used by the quantization loops (best effort)."""
+    """Convenience wrapper used by the quantization loops.
+
+    Default is best effort: a probe failure is logged and reported in
+    ``PeerStatus.reason`` instead of blocking quantization. With ``strict=True``
+    the failure is re-raised.
+    """
+
     try:
         return enable_peer_access(devices, strict=strict)
-    except Exception as exc:  # pragma: no cover - defensive
+    except Exception as exc:
+        if strict:
+            raise
         status = PeerStatus(mode=p2p_mode(), devices=_normalize_indices(devices), reason=str(exc))
         log.info("%s", status.summary())
         return status

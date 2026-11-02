@@ -338,8 +338,8 @@ class ModuleLooper(DeviceAssignmentState):
         # example ``device="cuda:0"`` with
         # ``dense_vram_strategy_devices=["cuda:0", "cuda:1"]``), and module
         # replicas still move tensors across that union.  ``enable_for_devices``
-        # caches, logs a single summary line, and degrades to host staging, so a
-        # failed probe never blocks quantization.
+        # caches, logs a single summary line, and never raises in best-effort
+        # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)

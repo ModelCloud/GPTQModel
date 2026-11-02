@@ -6,21 +6,25 @@
 
 For every ordered device pair this reports, in both directions:
 
-* ``p2p_off`` - ``dst.copy_(src)`` before peer access is enabled (torch host-stages
-  when no peer link is active, which is the baseline)
+* ``pre_enable_gbps`` - ``dst.copy_(src)`` before this process calls
+  ``enable_peer_access``. This is *not* a peer-free baseline: PyTorch enables
+  peer access lazily inside its own copy path, so after the warm-up this copy
+  already uses the peer link whenever one exists.
 * ``p2p_on``  - the same copy after ``gptqmodel.utils.p2p.enable_peer_access()``
-* ``host``    - an explicit ``src -> pinned CPU -> dst`` staging copy
+* ``host``    - an explicit, correctly ordered ``src -> pinned CPU -> dst``
+  staging copy; this is the real non-peer reference
 * ``gate``    - the ``PeerStatus`` state (``enabled`` / ``unsupported`` / ``degraded``)
 
-A capability bit is never treated as proof: a pair that reports
-``can_device_access_peer == True`` but measures below ``GPTQMODEL_P2P_MIN_GBPS``
-is classified ``degraded`` by the module and must fall back to host staging.
+A capability bit is never treated as proof: with ``GPTQMODEL_P2P_PROBE=1`` a pair
+that reports ``can_device_access_peer == True`` but measures below the gate is
+classified ``degraded``. That verdict is diagnostic only -- PyTorch peer access
+cannot be revoked, and no production path inserts a host relay.
 ``--min-gbps`` is exported to that variable before enablement, so the gate and
 this benchmark agree.
 
 ``--sku 4090`` only prints consumer-card caveats (Ada consumer parts often report
-peer capability while direct throughput is below host staging); it never
-hard-codes a whitelist, because the verdict is the measured bandwidth.
+peer capability while direct throughput is limited); it never hard-codes a
+whitelist, because any verdict is the measured bandwidth.
 
 Bandwidth is reported in GB/s (``bytes / seconds / 1e9``, the unit used by the
 P2P module's own gate) with GiB/s alongside, matching the layout of the existing
@@ -80,16 +84,16 @@ def _parse_devices(value: str) -> list[int]:
 def _device_report(devices: list[int]) -> list[dict[str, Any]]:
     report: list[dict[str, Any]] = []
     for index in devices:
-        entry: dict[str, Any] = {"index": index, "name": None, "arch": None, "arch_class": None, "error": None}
+        entry: dict[str, Any] = {"index": index, "name": None, "arch": None, "error": None}
         try:
             entry["name"] = torch.cuda.get_device_name(index)
         except Exception as exc:  # pragma: no cover - runtime dependent
             entry["error"] = f"get_device_name failed: {type(exc).__name__}: {exc}"
         try:
-            from gptqmodel.utils import arch
-
-            entry["arch"] = arch.rocm_arch(index)
-            entry["arch_class"] = arch.arch_class(index)
+            # Standalone: read the architecture straight from device properties
+            # instead of importing repository internals that may not exist.
+            raw = getattr(torch.cuda.get_device_properties(index), "gcnArchName", "") or ""
+            entry["arch"] = raw.split(":", 1)[0].strip().lower() or None
         except Exception as exc:  # pragma: no cover - runtime dependent
             entry["error"] = f"arch probe failed: {type(exc).__name__}: {exc}"
         report.append(entry)
@@ -102,13 +106,19 @@ def _sku_notes(sku: str | None) -> list[str]:
     normalized = sku.strip().lower()
     if normalized in ("4090", "rtx4090", "rtx-4090", "ada-consumer"):
         return [
-            "RTX 4090 (Ada consumer, sm_89): the driver may report P2P enabled for a while; "
-            "consumer parts commonly show can_device_access_peer == True with direct throughput "
-            "below host staging.",
-            "The verdict here is the measured bandwidth, not the capability bit: a pair under "
-            "--min-gbps / GPTQMODEL_P2P_MIN_GBPS is `degraded` and must host-stage.",
-            "When P2P is degraded or unsupported, NCCL is a separate path: verify "
-            "torch.distributed.is_nccl_available() and a real all-reduce/ring transfer independently.",
+            (
+                "RTX 4090 (Ada consumer, sm_89): the driver may report P2P enabled for a while; "
+                "consumer parts commonly show can_device_access_peer == True with direct throughput "
+                "below host staging."
+            ),
+            (
+                "The verdict here is the measured bandwidth, not the capability bit: a pair under "
+                "--min-gbps / GPTQMODEL_P2P_MIN_GBPS is `degraded` and is diagnosed as slow."
+            ),
+            (
+                "When P2P is degraded or unsupported, NCCL is a separate path: verify "
+                "torch.distributed.is_nccl_available() and a real all-reduce/ring transfer independently."
+            ),
         ]
     return [f"SKU {sku!r}: no specific caveat registered; use the measured bandwidth only."]
 
@@ -126,20 +136,28 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         "sku_notes": _sku_notes(args.sku),
         "min_gbps": args.min_gbps if args.min_gbps is not None else os.getenv("GPTQMODEL_P2P_MIN_GBPS", "<default>"),
         "directions": [f"{src}->{dst}" for src in devices for dst in devices if src != dst],
-        "measured_per_direction": ["p2p_off GB/s", "p2p_on GB/s", "host-staged GB/s", "peer state", "capability"],
+        "measured_per_direction": [
+            "pre_enable GB/s",
+            "p2p_on GB/s",
+            "host-staged GB/s",
+            "peer state",
+            "capability",
+        ],
         "sequence": [
             "probe peer matrix (directed, both directions)",
-            "measure p2p_off: dst.copy_(src) before enable_peer_access",
+            "measure pre_enable_gbps: dst.copy_(src) before enable_peer_access (PyTorch may already be peering)",
             "export GPTQMODEL_P2P_MIN_GBPS from --min-gbps, then enable_peer_access(devices)",
             "measure p2p_on: dst.copy_(src) after enablement",
-            "measure host: src -> pinned CPU -> dst",
+            "measure host: ordered src -> pinned CPU -> dst",
         ],
         "env": {
             "GPTQMODEL_P2P": os.getenv("GPTQMODEL_P2P", "auto"),
             "GPTQMODEL_P2P_MIN_GBPS": os.getenv("GPTQMODEL_P2P_MIN_GBPS", "<unset>"),
+            "GPTQMODEL_P2P_PROBE": os.getenv("GPTQMODEL_P2P_PROBE", "<unset>"),
             "GPTQMODEL_P2P_PROBE_MIB": os.getenv("GPTQMODEL_P2P_PROBE_MIB", "<unset>"),
         },
-        "device_info": _device_report(devices) if torch.cuda.is_available() else [],
+        # Hardware metadata is collected in ``run()``: ``--dry-run`` must not
+        # initialize a CUDA/HIP context just to print a plan.
         "commands": {
             "rocm": (
                 "/root/miniconda3/envs/gp_314t_rocm/bin/python scripts/benchmark_multi_gpu_p2p.py "
@@ -213,7 +231,10 @@ def _measure_host_staged(src: torch.Tensor, dst: torch.Tensor, iters: int) -> fl
     staged = torch.empty(src.shape, dtype=src.dtype, pin_memory=True)
 
     def step():
+        # Order the legs: without the synchronize the H2D read races the D2H
+        # write and the reported rate is the pipelined sum (~2x too fast).
         staged.copy_(src, non_blocking=True)
+        torch.cuda.synchronize(src.device)
         dst.copy_(staged, non_blocking=True)
 
     # Payload bytes only: see the docstring for why the 2x transfer volume is
@@ -231,7 +252,7 @@ def _row(capability: bool, src_index: int, dst_index: int, size_bytes: int, iter
         "peer_bandwidth_gbps": None,
         "size_bytes": size_bytes,
         "iters": iters,
-        "p2p_off_gbps": None,
+        "pre_enable_gbps": None,
         "p2p_on_gbps": None,
         "host_gbps": None,
     }
@@ -269,14 +290,17 @@ def run(args: argparse.Namespace) -> int:
 
             row = _row(bool(capability[row_index][col_index]), src_index, dst_index, size_bytes, args.iters)
             # Baseline: peer access has not been requested in this process yet.
-            row["p2p_off_gbps"] = _measure(src, dst, args.iters)
+            row["pre_enable_gbps"] = _measure(src, dst, args.iters)
             row["host_gbps"] = _measure_host_staged(src, dst, args.iters)
             rows.append(row)
             del src, dst
             torch.cuda.empty_cache()
 
     # Enablement happens after every baseline measurement, because peer access
-    # cannot be revoked inside a process.
+    # cannot be revoked inside a process. This script exists to report link
+    # quality, so always run the bandwidth classification here.
+    os.environ[p2p.ENV_P2P_PROBE] = "1"
+    p2p.clear_p2p_cache()
     status = p2p.enable_peer_access(devices)
     print(f"peer status: {status.summary()}", flush=True)
 
@@ -307,6 +331,7 @@ def run(args: argparse.Namespace) -> int:
         "sku_notes": notes,
         "min_gbps": args.min_gbps if args.min_gbps is not None else os.getenv("GPTQMODEL_P2P_MIN_GBPS"),
         "min_ratio": p2p._min_ratio(),
+        "probe": p2p.probe_enabled(),
         "peer_status": status.summary(),
         "direct_copy_allowed": status.direct_copy_allowed(),
         "rows": rows,

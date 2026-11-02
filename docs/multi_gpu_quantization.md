@@ -52,57 +52,63 @@ controls inference placement, not quantization parallelism.
 
 ## GPU peer access (P2P)
 
-Multi-GPU quantization moves quantized tensors between devices. GPT-QModel
-probes and enables peer access automatically, at most once per device set, before
-`clone_module_for_devices()`, from the weight-only looper, and for multi-device
-`device_map` loads. Enablement goes through `hipDeviceEnablePeerAccess` on ROCm
-and `cuCtxEnablePeerAccess` on CUDA; PyTorch has no wrapper for it.
+PyTorch already enables peer access lazily inside its own copy path
+(`c10/cuda/PeerToPeerAccess.cpp` -> `CUDACachingAllocator::enablePeerAccess`), so
+cross-device `copy_`/`.to()` stays on the peer link without any help from
+GPT-QModel. GPT-QModel additionally pre-enables the links before the first
+cross-device transfer, so the first copy does not pay the setup cost, at most
+once per device set: before `clone_module_for_devices()`, from the weight-only
+looper, and for multi-device `device_map` loads. Enablement goes through
+`hipDeviceEnablePeerAccess` on ROCm and `cuCtxEnablePeerAccess` on CUDA; PyTorch
+has no enable wrapper of its own.
 
-Each directed pair is classified after a measured copy:
-
-| State | Meaning | Transfer path |
-|---|---|---|
-| `enabled` | capability true and bandwidth above the gate | direct device-to-device copy |
-| `unsupported` | capability false or enablement failed | host staging |
-| `degraded` | capability true but bandwidth below the gate | forced host staging |
+Enablement never inserts a host relay: the transfer path is always a single
+`dst.copy_(src)`, and PyTorch/the driver chooses peer or internal staging.
 
 Configuration:
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GPTQMODEL_P2P` | `auto` | `0` disables P2P, `1` forces the direct path and bypasses the relative gate |
-| `GPTQMODEL_P2P_MIN_GBPS` | `5.0` | absolute floor; below it the link is `degraded` |
-| `GPTQMODEL_P2P_MIN_RATIO` | `0.9` | direct copy must retain this fraction of pinned host staging, else `degraded` |
+| `GPTQMODEL_P2P` | `auto` | `0` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `1` also attempts pairs the capability bit denies |
+| `GPTQMODEL_P2P_PROBE` | unset | `1` runs the bandwidth diagnostic and records `enabled`/`degraded` |
+| `GPTQMODEL_P2P_MIN_GBPS` | `5.0` | diagnostic floor; below it a link is reported `degraded` |
+| `GPTQMODEL_P2P_MIN_RATIO` | `1.0` | diagnostic: direct copy must reach this fraction of ordered pinned-host staging |
 | `GPTQMODEL_P2P_PROBE_MIB` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
 
-The ratio is deliberately below 1.0. On a plain PCIe topology the traffic crosses
-the same root complex whether it is a peer copy or a pinned-host staged copy, so
-a healthy direct link measures at parity: 53.1 GB/s direct vs 55.1 GB/s staged
-on a 4x R9700 (`gfx1201`) pair and 26.2 vs 26.2 GB/s on a 2x RTX 4090 pair, i.e.
-0.96x and 1.00x (64 MiB payload, double-synchronized timer, best of two
-samples). A 1.0 gate classified every one of those links as `degraded` and forced
-all traffic through host staging, which is the same PCIe path plus an extra
-pinned-buffer hop. A 0.9 floor still catches a genuinely broken or oversubscribed
-link (the tests pin a 0.5x link as `degraded`) while keeping a working peer link
-on the direct path.
+### Bandwidth diagnostics (`GPTQMODEL_P2P_PROBE=1`)
 
-Measurements on this host with the default `GPTQMODEL_P2P=auto` (both directions
-reported `enabled`): R9700 2<->3 at 52.5-53.1 GB/s (0.962-0.970 of staging),
-RTX 4090 0<->1 at 26.2 GB/s (0.999-1.000). Enabling peer access is what makes
-PyTorch's cross-device `copy_`/`.to()` use the direct path; `copy_tensor_to`
-always issues a single `dst.copy_(src)` and never inserts a host relay (the
-driver stages internally when a link is off).
+Probing moves real payload across every directed pair and synchronizes each
+sample, so it is **opt-in** and never runs during normal quantization. Its
+verdict is diagnostic: peer access cannot be revoked once enabled, and no
+production caller routes on it.
+
+The reference is an explicit, correctly ordered `src -> pinned CPU -> dst`
+pipeline. It pays for two transfers (D2H then H2D), so it is strictly slower
+than a direct copy at the same link rate; the legs must be ordered, because
+issuing them on two device streams without a dependency measures the staged path
+at roughly twice its real speed. Measured with ordered legs (64 MiB,
+double-synchronized timer, median of 7 samples):
+
+| pair | direct GB/s | ordered staged GB/s | ratio |
+|---|---|---|---|
+| 2x R9700 (`gfx1201`) | 52.99 | 27.35 | 1.94 |
+| 2x RTX 4090 (`sm_89`) | 26.23 | 13.27 | 1.98 |
+
+A `1.0` gate therefore keeps every healthy PCIe peer link direct while still
+flagging a link that is genuinely slower than the fallback. Lower
+`GPTQMODEL_P2P_MIN_RATIO` if a topology really does measure at parity.
 
 A `strict=False` failure never raises; one informational summary line is
-logged. Measure with `scripts/benchmark_multi_gpu_p2p.py`.
+logged. Measure with `scripts/benchmark_multi_gpu_p2p.py` (its `host` column is
+the non-peer reference; `pre_enable` is already peer-enabled by PyTorch after
+the warm-up, so it is not an "off" baseline).
 
 ### RTX 4090 (consumer Ada) note
 
 Consumer cards frequently report `can_device_access_peer == True` while direct
-throughput is limited by PCIe. They are not special-cased by `sm_89`: every pair
-is measured. A pair that clears the 0.9 ratio keeps the direct path; one that
-does not is marked `degraded` and falls back to host staging.
-`can_device_access_peer` alone is never treated as proof that P2P is in effect.
+throughput is limited by PCIe. They are not special-cased by `sm_89`: with the
+probe enabled every pair is measured, and the measurement is the verdict.
+`can_device_access_peer` alone is never treated as proof that P2P is effective.
 
 P2P and NCCL are different mechanisms. The `gloo`/`nccl` distributed path used by
 GSQ (`gptqmodel/quantization/gsq_distributed.py`) is independent; verify it with

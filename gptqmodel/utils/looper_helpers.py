@@ -427,9 +427,9 @@ def clone_module_for_devices(
     homogeneous_type = all(dev.type == device_type for dev in devices)
 
     if device_type == "cuda" and len(devices) > 1:
-        # Best-effort peer enablement before any cross-device staging.  The
-        # helper caches its result and degrades to host staging on its own, so
-        # a failed probe never blocks quantization.
+        # Best-effort peer enablement before any cross-device staging. The
+        # helper caches its result and never raises in best-effort mode, so a
+        # failed probe never blocks quantization.
         enable_for_devices(devices)
 
     def backend_available(dev_type: str) -> bool:

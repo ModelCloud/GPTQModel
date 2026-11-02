@@ -95,8 +95,8 @@ class WeightOnlyLooper(DeviceAssignmentState):
         # ``self._quant_devices``: a single ``device="cuda:0"`` with
         # ``dense_vram_strategy_devices=["cuda:0", "cuda:1"]`` leaves the quant
         # pool at one device while module replicas still cross devices.  Enable
-        # peer access once, best effort; the helper caches, logs one summary,
-        # and falls back to host staging for unsupported/degraded links.
+        # peer access once, best effort; the helper caches its result, logs one
+        # summary, and never blocks quantization when a link is unsupported.
         cross_device_pool = self._cross_device_pool()
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
