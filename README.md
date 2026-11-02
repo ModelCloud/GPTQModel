@@ -26,6 +26,16 @@
 
 ## Latest News 🗞️🚀
 
+* **7.8.0**:
+  * **GSQ:** Added staged GSQ training with public method adapters, distributed staged training that reuses captured activations, and per-block bit allocation driven by an RCO search verified bit-identical against the IST-DASLab reference (measured results on Llama 3.2 1B). Added a paper-reproduction harness under `scripts/gsq_paper/`, best-epoch restore via `restore_best`, HIPRTC-compiled fused scalar relaxation on ROCm, and segment-sum scale gradients.
+  * **ROCm:** Added RDNA4 (gfx1200/gfx1201/gfx1250) kernel and quantization support through a new architecture abstraction with per-architecture Triton launch tables for GEMM, GEMV, and dequant. MI350/gfx950 behavior is unchanged.
+  * **GGUF:** Added CPU coverage for every ggml tensor type (all K-quant and IQ variants plus explicit MXFP4/NVFP4) and a native ggml SIMD inference path with per-shape autotuning, measured 3–100x faster than the torch paths on AVX2. New `gguf` install extra.
+  * **Multi-GPU:** Added automatic GPU peer-access enablement on CUDA and ROCm with measured-link validation, so multi-GPU quantization copies stay on the interconnect instead of the driver's staging path.
+  * **Experimental W4A:** Revalidated the NVFP4 packed layout in `post_init`, removed the retained E4M3 weight expansion, and tolerated Triton builds without the Gluon `mma_v2` FP8 GEMM.
+  * **Performance:** `import gptqmodel` now builds the kernel registry lazily and defers optional backend probes (previously ~9s and 6767 modules). Vectorized the GPTQ/QQQ MSE shrink-grid and AWQ clip-grid evaluation; grid workspace budgets moved from environment variables to `QuantizeConfig.mse = MSEConfig(...)`.
+  * **Models:** Added RecursiveSI Flint and Raon-1 mini support, Gemma 3 multimodal checkpoint compatibility, Qwen2.5-Omni thinker `lm_head` quantization, and the Transformers 5.22 Qwen-Omni layout.
+  * **Reliability:** Kept the AVX512-BF16 GPTQ/AWQ CPU kernels trainable for PEFT LoRA; fixed OpenAI-server auth, stop handling, and ChatCompletion schema; surfaced compatibility-shim failures instead of failing silently; refreshed the Marlin CPU-offload snapshot after `post_init`; propagated `calibration_data_min_length` correctly; re-checked for an emptied calibration set after min-length filtering; tolerated MoE early-stop in data-parallel forward; bounded remote image fetches; read accelerator memory telemetry from the active device; stopped `to_dict` from mutating dynamic overrides; fixed GPTAQ `quant_log` capture matching and `derive_fast_eval_tasks` metadata coercion.
+
 * **7.7.0**:
   * **CPU inference:** Added the shared AVX512-BF16 `int4_qzero_group_scaled_cpu` kernel for GPTQ/AWQ group sizes 16/32/64/128/256/512 and prioritized it ahead of ATen when supported. Added packed/low-precision CPU decode paths for QQQ, VPTQ, EXL3, FP8, NVFP4, and BitsAndBytes, plus oneDNN BF16x3 accumulation and shape-aware BitsAndBytes INT8 dispatch. GPTQ/AWQ measured up to 2.02x faster than ATen; BitsAndBytes INT8 reached 1.28x at M=64.
   * **GGUF:** Added fused CPU Q4_0/Q8_0/Q4_K/Q5_K/Q6_K forward with FP32 accumulation under oneDNN BF16x3, fused bias, per-shape autotuning, and no retained dense weights. K-quant fused paths measured up to 1.92x faster than dense at M=7.
