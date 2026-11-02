@@ -974,6 +974,40 @@ def convert_gptq_v2_to_v1_format(
 
     return model
 
+
+def resolve_pack_device(
+    quantize_config: Optional[QuantizeConfig],
+    device: Optional[Union[str, torch.device, DEVICE]] = None,
+) -> Optional[torch.device]:
+    """Resolve the accelerator a module should be packed on.
+
+    ``QuantizeConfig.device`` is normalized to an index-less ``DEVICE`` enum by
+    the loader, so on a multi-GPU host it would silently pin GPU packing to
+    ``cuda:0`` even when the module was quantized on another GPU. Callers that
+    know the assigned device pass it here; a CPU assignment keeps the historical
+    auto-select behavior because ``pack_impl="auto"`` still prefers GPU packing
+    when one is available.
+    """
+
+    cfg_device = getattr(quantize_config, "device", None)
+    if device is not None:
+        assigned = device.to_torch_device() if isinstance(device, DEVICE) else torch.device(device)
+        if assigned.type != "cpu":
+            cfg_device = assigned
+
+    if isinstance(cfg_device, DEVICE):
+        return cfg_device.to_torch_device()
+    if isinstance(cfg_device, torch.device):
+        return cfg_device
+    if isinstance(cfg_device, str):
+        try:
+            return torch.device(cfg_device)
+        except (RuntimeError, ValueError):
+            log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
+            return None
+    return None
+
+
 @torch.inference_mode()
 def pack_module(
     name,
@@ -987,6 +1021,7 @@ def pack_module(
     q_scales_extra=None,
     quantize_config: Optional[QuantizeConfig] = None,
     quant_result: Optional[Dict[str, Any]] = None,
+    device: Optional[Union[str, torch.device]] = None,
 ):
     # Limit pack() thread usage to avoid auto-parallizataion regression
     # with ctx(tctl.threadpool_limits(limits=1), lock):
@@ -1011,16 +1046,7 @@ def pack_module(
     target_device = None
     if quantize_config is not None:
         pack_impl = getattr(quantize_config, "pack_impl", "original") or "original"
-        cfg_device = getattr(quantize_config, "device", None)
-        if isinstance(cfg_device, DEVICE):
-            target_device = cfg_device.to_torch_device()
-        elif isinstance(cfg_device, torch.device):
-            target_device = cfg_device
-        elif isinstance(cfg_device, str):
-            try:
-                target_device = torch.device(cfg_device)
-            except (RuntimeError, ValueError):
-                log.warning(f"pack_module: unable to parse target device `{cfg_device}`; defaulting to CUDA auto-select.")
+        target_device = resolve_pack_device(quantize_config, device)
 
     packer_label = None
 

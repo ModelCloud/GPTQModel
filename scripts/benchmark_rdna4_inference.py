@@ -30,9 +30,10 @@ kernel would misattribute evidence: the GEMV kernel has no ``tl.dot`` at all and
 legitimately contains no ``v_wmma``, while the GEMM kernel does.  Each row also
 records the distinct ``v_wmma*`` mnemonics it saw.  If the JIT cache has no
 assembly the script falls back to scanning files under ``TRITON_DUMP_DIR``
-(produced with ``AMDGCN_ENABLE_DUMP=1`` set *before* compilation), and if
-neither yields text it prints ``v_wmma: unknown (no amdgcn dump)``.  It never
-reports a hit it did not see.
+(written when ``TRITON_KERNEL_DUMP=1`` is set *before* compilation;
+``AMDGCN_ENABLE_DUMP=1`` only prints the assembly to stdout and writes no
+files), and if neither yields text it prints ``v_wmma: unknown (no amdgcn
+dump)``.  It never reports a hit it did not see.
 
 ``--dry-run`` prints the plan and exits 0; no GPU is needed.  Without a visible
 GPU the same plan is printed with ``"gpu": "unavailable"`` and exit 0.
@@ -162,8 +163,8 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
         ],
         "asm_probe": {
             "primary": "compiled asm['amdgcn'] of the kernel that ran for this row",
-            "fallback_env": "set TRITON_DUMP_DIR=<dir> AMDGCN_ENABLE_DUMP=1 before compiling",
-            "fallback_scan": "newest *.amdgcn under TRITON_DUMP_DIR",
+            "fallback_env": "set TRITON_DUMP_DIR=<dir> TRITON_KERNEL_DUMP=1 before compiling",
+            "fallback_scan": "newest *.amdgcn under TRITON_DUMP_DIR whose path names the dispatched kernel",
             "if_unavailable": V_WMMA_UNKNOWN,
         },
         "timing": "torch.cuda.synchronize around every measured band",
@@ -174,7 +175,7 @@ def _plan(args: argparse.Namespace, reason: str) -> dict[str, Any]:
                 f"--device {args.device} --dtype {args.dtype} --bits {args.bits}"
             ),
             "asm_dump": (
-                "TRITON_DUMP_DIR=/tmp/triton-dump AMDGCN_ENABLE_DUMP=1 "
+                "TRITON_DUMP_DIR=/tmp/triton-dump TRITON_KERNEL_DUMP=1 "
                 "/root/miniconda3/envs/gp_314t_rocm/bin/python scripts/benchmark_rdna4_inference.py"
             ),
         },

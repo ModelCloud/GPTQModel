@@ -400,6 +400,8 @@ class WeightOnlyLooper(DeviceAssignmentState):
                 move_buffers=True,
                 root_module=getattr(self.gptq_model, "model", None),
             )
+            # Keep the quantization device for the final pack step.
+            named.state["quant_device"] = target_device
             named.target_device = target_device
             named.module.target_device = target_device
         emit_device_telemetry(

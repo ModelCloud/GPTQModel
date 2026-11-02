@@ -42,6 +42,23 @@ class ForwardExecutor:
         self.looper = looper
         self.log = logger or setup_logger()
 
+    def _filter_forward_devices(self, devices: List[torch.device]) -> List[torch.device]:
+        """Apply `compute_device_filter` to the forward device pool, preserving order."""
+
+        quant_config = getattr(self.looper.gptq_model, "quantize_config", None)
+        compute_device_filter = getattr(quant_config, "compute_device_filter", None)
+        if compute_device_filter is None:
+            return list(devices)
+
+        filtered = compute_device_filter(devices)
+        if len(filtered) < 1:
+            self.log.warn(
+                "compute_device_filter returned empty device list. "
+                "Using all devices for forward execution."
+            )
+            return list(devices)
+        return list(filtered)
+
     def _resolve_batch_progress(
         self,
         processor: "LoopProcessor",
@@ -160,6 +177,11 @@ class ForwardExecutor:
             )
 
         devices = select_forward_devices_fn(cur_layer_device)
+        # Apply `compute_device_filter` before staging replicas. Filtering only in
+        # `run_parallel` leaves a full copy of the module on every excluded GPU,
+        # which both defeats the caller's device restriction and can OOM the
+        # device it was meant to avoid.
+        devices = self._filter_forward_devices(devices)
         if len(devices) <= 1:
             return self.run_single(
                 module=module,
@@ -496,16 +518,7 @@ class ForwardExecutor:
             results: Dict[int, torch.Tensor | None] = {}
             processed_rows = 0
 
-            if self.looper.gptq_model.quantize_config.compute_device_filter is not None:
-                forward_devices = self.looper.gptq_model.quantize_config.compute_device_filter(devices)
-                if len(forward_devices) < 1:
-                    self.log.warn(
-                        "compute_device_filter returned empty device list. "
-                        "Using all devices for forward execution."
-                    )
-                    forward_devices = devices
-            else:
-                forward_devices = devices
+            forward_devices = self._filter_forward_devices(devices)
 
             device_segments: Dict[torch.device, List[int]] = {}
             segment_start = 0

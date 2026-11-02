@@ -78,6 +78,7 @@ def test_disabled_tokens_do_not_switch_the_blas_backend(monkeypatch, value):
                 return state["current"]
             calls.append(new_value)
             state["current"] = _FakeBackend("Cublas")
+            return None
 
         return preferred
 

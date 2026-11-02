@@ -359,6 +359,7 @@ class QQQProcessor(LoopProcessor):
                 lock=self.lock,
                 q_scales_extra=q_scales_extra,
                 quantize_config=self.qcfg,
+                device=module.state.get("quant_device"),
             )
 
         # TODO: store module quant results in module, not global processor result

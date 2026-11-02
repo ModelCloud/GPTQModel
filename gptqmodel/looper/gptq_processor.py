@@ -939,6 +939,7 @@ class GPTQProcessor(LoopProcessor):
                     quant_linear_cls=model.qlinear_kernel,
                     lock=self.lock,
                     quantize_config=self.qcfg,
+                    device=module.state.get("quant_device"),
                 )
         if timer is not None and pack_start is not None:
             timer.record(
