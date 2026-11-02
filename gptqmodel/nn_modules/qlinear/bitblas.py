@@ -8,7 +8,6 @@ from __future__ import annotations
 import ctypes
 import os
 import sys
-import types
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -151,9 +150,6 @@ def _is_bitblas_available() -> bool:
     return True
 
 
-_UNSET = object()
-
-
 @lru_cache(maxsize=1)
 def _probe_bitblas_available() -> bool:
     """Probe BitBLAS once, on first real use.
@@ -166,60 +162,38 @@ def _probe_bitblas_available() -> bool:
     return _is_bitblas_available()
 
 
-# ``mod.BITBLAS_AVAILABLE = value`` records an override here instead of creating a module
-# attribute, so it never outlives an explicit ``del``. A real module attribute
-# (``monkeypatch.setattr``, ``vars(mod)[...]``) still wins, exactly like the
-# pre-lazy global did.
-_AVAILABILITY_OVERRIDES: dict = {}
-
-# Set by ``del mod.BITBLAS_AVAILABLE``: before the lazy change the name really was gone
-# after a delete, so attribute access must raise until it is reassigned.
-_AVAILABILITY_DELETED = False
+_probe_cache_clear = _probe_bitblas_available.cache_clear
 
 
 def bitblas_available() -> bool:
     """Return whether a supported BitBLAS is usable.
 
-    Precedence, highest first:
-
-    1. A real module attribute.
-    2. An override recorded by ``mod.BITBLAS_AVAILABLE = ...``.
-    3. The cached probe.
+    The legacy ``BITBLAS_AVAILABLE`` name is materialized from the probe on first
+    attribute access, so this accessor reads the same attribute when present
+    and otherwise probes.
     """
 
     namespace = sys.modules[__name__].__dict__
     if "BITBLAS_AVAILABLE" in namespace:
         return bool(namespace["BITBLAS_AVAILABLE"])
-    if "BITBLAS_AVAILABLE" in _AVAILABILITY_OVERRIDES:
-        return bool(_AVAILABILITY_OVERRIDES["BITBLAS_AVAILABLE"])
     return _probe_bitblas_available()
 
 
-_probe_cache_clear = _probe_bitblas_available.cache_clear
-
-
 def _clear_availability_state() -> None:
-    """Drop the probe result, every override and the validation cache.
+    """Drop the materialized value, the probe result and validation caches.
 
     This is the escape hatch for tests and for long-lived processes where the
     environment changes after the first probe (a package installed later, a
-    toolchain that becomes available). It also un-pins an override left behind
-    by ``monkeypatch.undo()``, which writes the pre-patch value back through
-    ``__setattr__`` and therefore looks like an explicit override.
+    toolchain that becomes available). It also removes a value restored by
+    ``monkeypatch.undo()``, which is indistinguishable from an explicit
+    override once materialized.
 
-    A real module attribute (``vars(mod)[...]``) outranks the private stores, so
-    it has to be removed here too; otherwise it survives the clear and keeps the
-    probe pinned. The kernel's ``cached_validate_once()`` result is invalidated
-    as well, or a kernel that failed before the backend appeared stays
-    unselectable until the process ends.
+    The kernel's ``cached_validate_once()`` result is invalidated as well, or a
+    kernel that failed before the backend appeared stays unselectable until the
+    process ends.
     """
 
-    global _AVAILABILITY_DELETED
-
-    module = sys.modules[__name__]
-    module.__dict__.pop("BITBLAS_AVAILABLE", None)
-    _AVAILABILITY_OVERRIDES.clear()
-    _AVAILABILITY_DELETED = False
+    sys.modules[__name__].__dict__.pop("BITBLAS_AVAILABLE", None)
     _probe_cache_clear()
     cls = globals().get("BitblasLinear")
     if cls is not None:
@@ -235,59 +209,27 @@ def _clear_availability_state() -> None:
 
 
 # ``cache_clear`` is the documented knob; keep it on the probe, extended with
-# the override state so clearing really re-arms everything.
+# the materialized attribute so clearing really re-arms everything.
 _probe_bitblas_available.cache_clear = _clear_availability_state
 
 
 def __getattr__(name: str):
     if name == "BITBLAS_AVAILABLE":
-        if _AVAILABILITY_DELETED:
-            raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-        namespace = sys.modules[__name__].__dict__
-        if "BITBLAS_AVAILABLE" in namespace:
-            return namespace["BITBLAS_AVAILABLE"]
-        if "BITBLAS_AVAILABLE" in _AVAILABILITY_OVERRIDES:
-            return _AVAILABILITY_OVERRIDES["BITBLAS_AVAILABLE"]
-        return _probe_bitblas_available()
+        # Materialize the probe as a normal module attribute. A plain attribute
+        # keeps ``del`` and ``monkeypatch`` semantics working: pytest reads the
+        # old value from ``__dict__`` and restores it on ``undo()``, so two
+        # consecutive patch contexts behave like they did before the lazy
+        # change.
+        value = _probe_bitblas_available()
+        sys.modules[__name__].__dict__[name] = value
+        return value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-class _LazyAvailabilityModule(types.ModuleType):
-    """Module type that keeps ``*_AVAILABLE`` assignments lazy."""
-
-    def __setattr__(self, name, value):
-        global _AVAILABILITY_DELETED
-
-        if name == "BITBLAS_AVAILABLE":
-            _AVAILABILITY_DELETED = False
-            # A real attribute would outrank the private store on read, so an
-            # accessor-visible assignment must evict it instead of writing a
-            # value nothing would observe.
-            sys.modules[self.__name__].__dict__.pop(name, None)
-            _AVAILABILITY_OVERRIDES[name] = value
-            return
-        super().__setattr__(name, value)
-
-    def __delattr__(self, name):
-        global _AVAILABILITY_DELETED
-
-        if name == "BITBLAS_AVAILABLE":
-            # Delete both stores: a leftover real attribute would keep the name
-            # readable after the delete.
-            _AVAILABILITY_OVERRIDES.pop(name, None)
-            sys.modules[self.__name__].__dict__.pop(name, None)
-            _AVAILABILITY_DELETED = True
-            return
-        super().__delattr__(name)
-
-    def __dir__(self):
-        names = set(super().__dir__())
-        if not _AVAILABILITY_DELETED:
-            names.add("BITBLAS_AVAILABLE")
-        return sorted(names)
-
-
-sys.modules[__name__].__class__ = _LazyAvailabilityModule
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()``/star-import unless
+    # advertised. Keep the pre-lazy surface.
+    return sorted(set(globals()) | {"BITBLAS_AVAILABLE"})
 
 
 _BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")

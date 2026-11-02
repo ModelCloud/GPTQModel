@@ -8,6 +8,7 @@ import os
 import pkgutil
 import sys
 import threading
+import time
 from collections import OrderedDict
 from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Type, Union
@@ -46,6 +47,9 @@ SelectorDevices = Union[SelectorDevice, Sequence[SelectorDevice]]
 _VALIDATION_CACHE_MAXSIZE = 1024
 _VALIDATION_CACHE = OrderedDict()
 _VALIDATION_CACHE_LOCK = threading.RLock()
+# Incremented by every ``clear_validation_cache()``. A validation that started
+# before a reset must not publish its (possibly pre-reset) answer afterwards.
+_VALIDATION_CACHE_GENERATION = 0
 
 
 def _device_family(device: SelectorDevice) -> DEVICE:
@@ -259,6 +263,7 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
             _VALIDATION_CACHE.move_to_end(key)
             ok, error_type, error_message = cached
             return ok, _new_validation_error(error_type, error_message)
+        generation = _VALIDATION_CACHE_GENERATION
 
     try:
         result = cls.validate(**kwargs)
@@ -270,6 +275,15 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
     error_message = str(error) if error is not None else None
     cached = (bool(ok), error_type, error_message)
     with _VALIDATION_CACHE_LOCK:
+        if generation != _VALIDATION_CACHE_GENERATION:
+            # A backend reset ran while ``validate()`` was in flight. Its answer
+            # may predate the reset, so publishing it would undo the reset. The
+            # kernel-level ``cached_validate_once()`` cache may also have been
+            # repopulated by this call; drop it so the next lookup re-probes.
+            class_cache_clear = getattr(cls.cached_validate_once, "cache_clear", None)
+            if class_cache_clear is not None:
+                class_cache_clear()
+            return bool(ok), _new_validation_error(error_type, error_message)
         _VALIDATION_CACHE[key] = cached
         _VALIDATION_CACHE.move_to_end(key)
         while len(_VALIDATION_CACHE) > _VALIDATION_CACHE_MAXSIZE:
@@ -278,8 +292,11 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
 
 
 def clear_validation_cache() -> None:
+    global _VALIDATION_CACHE_GENERATION
+
     with _VALIDATION_CACHE_LOCK:
         _VALIDATION_CACHE.clear()
+        _VALIDATION_CACHE_GENERATION += 1
 
 
 def selector_device_family(device: Optional[SelectorDevices]) -> Optional[DEVICE]:
@@ -414,7 +431,9 @@ def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
     that depend on them. Discovery therefore imports them on first use only.
     """
 
-    _import_all_qlinear_kernels()
+    # This is an explicit discovery request, so retry a backing-off failure now
+    # instead of waiting for its timer.
+    _import_all_qlinear_kernels(force_retry=True)
     kernels = []
     seen = set()
 
@@ -452,7 +471,6 @@ def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
 
 
 def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
-    _import_all_qlinear_kernels()
     backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
     for cls in iter_quant_linear_kernels():
@@ -476,16 +494,29 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
 
 _QLINEAR_MODULE_NAMES = None
 _QLINEAR_IMPORTED = set()
+# Import bookkeeping is mutated by every discovery entry point
+# (``iter_quant_linear_kernels()``, ``get_kernel_for_backend()`` and the map
+# builder) and read by the map builder, so all of it is guarded by this lock.
+# It is re-entrant because a kernel module may trigger discovery from its own
+# import (``importlib`` returns the partially initialized module, so the nested
+# pass terminates).
+_QLINEAR_IMPORTS_LOCK = threading.RLock()
 # Kernel module name -> failure kind for modules that did not import.
 #   "optional": an optional dependency is genuinely not installed (``mlx``,
 #               ``tvm``, ...). No retry inside this process can help, so this
-#               must neither mark the registry incomplete nor be retried on
-#               every map lookup.
+#               must neither mark the registry incomplete nor be retried.
 #   "retryable": a transient failure (shared library not on the loader path yet,
 #               an extension installed later, ``sys.modules`` poisoned by a
-#               test). Retried on every call, as before: recovery must never be
-#               permanently blocked by a spent retry budget.
+#               test). Retried with exponential backoff, so recovery is never
+#               permanently blocked but a persistently broken optional stack is
+#               not re-imported on every kernel selection either.
 _QLINEAR_FAILED: Dict[str, str] = {}
+# Retry scheduling for ``"retryable"`` failures. ``_QLINEAR_RETRY_AT`` is a
+# ``time.monotonic()`` deadline; ``_QLINEAR_RETRY_ATTEMPTS`` drives the delay.
+_QLINEAR_RETRY_AT: Dict[str, float] = {}
+_QLINEAR_RETRY_ATTEMPTS: Dict[str, int] = {}
+_QLINEAR_RETRY_BASE_SECONDS = 0.5
+_QLINEAR_RETRY_MAX_SECONDS = 30.0
 
 
 def _classify_import_failure(exc: BaseException) -> str:
@@ -495,11 +526,16 @@ def _classify_import_failure(exc: BaseException) -> str:
     is simply not installed; retrying cannot change that before a restart.
     Everything else (``OSError`` loading a shared library, an ``ImportError``
     raised from inside a kernel module) may recover when the environment
-    changes, so it stays retryable and is re-attempted on every call.
+    changes, so it stays retryable. An explicitly blocked module
+    (``sys.modules[name] = None``) raises ``ModuleNotFoundError`` naming that
+    package, but it is a temporary test/environment state, not evidence that the
+    dependency is absent, so it must stay retryable too.
     """
 
     if isinstance(exc, ModuleNotFoundError):
         missing = getattr(exc, "name", None) or ""
+        if missing and missing in sys.modules and sys.modules[missing] is None:
+            return "retryable"
         if missing and not missing.startswith("gptqmodel"):
             return "optional"
     return "retryable"
@@ -520,7 +556,7 @@ def _qlinear_module_names() -> List[str]:
     return _QLINEAR_MODULE_NAMES
 
 
-def _import_all_qlinear_kernels() -> None:
+def _import_all_qlinear_kernels(*, force_retry: bool = False) -> None:
     """Import every kernel module, retrying only recoverable failures.
 
     A module that cannot be imported right now (shared library not on the
@@ -533,45 +569,94 @@ def _import_all_qlinear_kernels() -> None:
     host, ``tvm`` for the BitBLAS target detector) is remembered as
     ``optional`` and skipped: retrying it on every map lookup would add the
     cost of a failing import to every kernel selection and packing call.
-    Everything else stays retryable forever, so a library that appears later is
-    still picked up without an explicit cache clear.
+
+    Retryable failures back off exponentially (without a permanent attempt
+    limit), so a persistently broken optional stack cannot serialize every map
+    lookup while a library that appears later is still picked up. An explicit
+    discovery request (``force_retry``) bypasses the backoff: a caller asking
+    for a specific backend should not wait for the timer.
     """
 
     from ..nn_modules import qlinear as qlinear_pkg
 
-    for name in _qlinear_module_names():
-        if name in _QLINEAR_IMPORTED:
-            continue
-        if _QLINEAR_FAILED.get(name) == "optional":
-            # Missing optional dependency: no retry can help until restart.
-            continue
-        try:
-            importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
-        except (ImportError, OSError) as exc:
-            log.debug(f"Skipping qlinear module import `{name}`: {exc}")
-            _QLINEAR_FAILED[name] = _classify_import_failure(exc)
-            continue
-        _QLINEAR_IMPORTED.add(name)
-        _QLINEAR_FAILED.pop(name, None)
+    with _QLINEAR_IMPORTS_LOCK:
+        now = time.monotonic()
+        for name in _qlinear_module_names():
+            if name in _QLINEAR_IMPORTED:
+                continue
+            kind = _QLINEAR_FAILED.get(name)
+            if kind == "optional":
+                # Missing optional dependency: no retry can help until restart.
+                continue
+            if (
+                kind == "retryable"
+                and not force_retry
+                and _QLINEAR_RETRY_AT.get(name, 0.0) > now
+            ):
+                continue
+            try:
+                importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
+            except (ImportError, OSError) as exc:
+                log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+                kind = _classify_import_failure(exc)
+                _QLINEAR_FAILED[name] = kind
+                if kind == "retryable":
+                    attempts = _QLINEAR_RETRY_ATTEMPTS.get(name, 0) + 1
+                    _QLINEAR_RETRY_ATTEMPTS[name] = attempts
+                    delay = min(
+                        _QLINEAR_RETRY_BASE_SECONDS * (2 ** (attempts - 1)),
+                        _QLINEAR_RETRY_MAX_SECONDS,
+                    )
+                    _QLINEAR_RETRY_AT[name] = time.monotonic() + delay
+                else:
+                    _QLINEAR_RETRY_AT.pop(name, None)
+                    _QLINEAR_RETRY_ATTEMPTS.pop(name, None)
+                continue
+            _QLINEAR_IMPORTED.add(name)
+            _QLINEAR_FAILED.pop(name, None)
+            _QLINEAR_RETRY_AT.pop(name, None)
+            _QLINEAR_RETRY_ATTEMPTS.pop(name, None)
 
 
 def _retryable_imports_pending() -> bool:
-    """Whether a build may still gain a kernel from a retryable failure."""
+    """Whether any retryable import failure is remembered."""
 
-    return any(kind == "retryable" for kind in _QLINEAR_FAILED.values())
+    with _QLINEAR_IMPORTS_LOCK:
+        return any(kind == "retryable" for kind in _QLINEAR_FAILED.values())
+
+
+def _retryable_retry_due_locked() -> bool:
+    """Whether a retryable failure is due for another attempt (lock held)."""
+
+    now = time.monotonic()
+    return any(
+        kind == "retryable" and _QLINEAR_RETRY_AT.get(name, 0.0) <= now
+        for name, kind in _QLINEAR_FAILED.items()
+    )
+
+
+def _registry_snapshot():
+    """Return ``(imported_modules, retry_due)`` as one atomic observation."""
+
+    with _QLINEAR_IMPORTS_LOCK:
+        return frozenset(_QLINEAR_IMPORTED), _retryable_retry_due_locked()
 
 
 def _imported_kernel_module_count() -> int:
     """Number of kernel modules imported so far (test/introspection helper)."""
 
-    return len(_QLINEAR_IMPORTED)
+    with _QLINEAR_IMPORTS_LOCK:
+        return len(_QLINEAR_IMPORTED)
 
 
 def _reset_kernel_module_imports() -> None:
     """Forget imported modules and failure classification so all are re-probed."""
 
-    _QLINEAR_IMPORTED.clear()
-    _QLINEAR_FAILED.clear()
+    with _QLINEAR_IMPORTS_LOCK:
+        _QLINEAR_IMPORTED.clear()
+        _QLINEAR_FAILED.clear()
+        _QLINEAR_RETRY_AT.clear()
+        _QLINEAR_RETRY_ATTEMPTS.clear()
 
 
 def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
@@ -606,29 +691,35 @@ _REGISTRY_BUILD_OWNER = None
 
 
 _BUILT_MODULES = None
-# True when the cached maps were built while a *retryable* kernel import was
-# still pending, so they may be missing a backend that recovers later. A
-# genuinely absent optional dependency (``mlx``, ``tvm``) does not count: no
-# retry can recover it, and treating it as incomplete made every map lookup
-# re-run the failing imports under the global lock.
-_BUILT_INCOMPLETE = False
+
+
+def _registry_maps_final() -> bool:
+    """Whether the cached maps are complete and no retry is currently due."""
+
+    if not _build_kernel_support_maps_cached.cache_info().currsize:
+        return False
+    imported, retry_due = _registry_snapshot()
+    return not retry_due and imported == _BUILT_MODULES
 
 
 @lru_cache(maxsize=1)
 def _build_kernel_support_maps_cached():
-    global _BUILT_INCOMPLETE, _BUILT_MODULES
+    global _BUILT_MODULES
 
-    _import_all_qlinear_kernels()
+    # Discover the classes first: ``iter_quant_linear_kernels()`` imports the
+    # kernel modules, so snapshotting the import state before this walk would
+    # miss a module that recovers on this pass and make the next lookup rebuild
+    # the maps even though the returned map already contains its kernel.
+    classes = _registry_kernel_classes()
     # Snapshot the modules this build saw. A module that failed to import is not
     # in ``_QLINEAR_IMPORTED``; if it recovers later, the wrapper notices the
     # difference and rebuilds instead of serving a map that omits it forever.
-    _BUILT_MODULES = frozenset(_QLINEAR_IMPORTED)
-    _BUILT_INCOMPLETE = _retryable_imports_pending()
+    _BUILT_MODULES, _ = _registry_snapshot()
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
 
-    for cls in _registry_kernel_classes():
+    for cls in classes:
         supports_formats = cls.SUPPORTS_FORMATS
         if not isinstance(supports_formats, dict):
             raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
@@ -681,27 +772,18 @@ def build_kernel_support_maps():
 
     ``lru_cache`` alone is not single-flight: concurrent cold-start callers each
     build their own copy and only the last result is retained, so a caller can
-    hold and mutate a map nobody will ever read again. Guard the build so every
-    thread observes the one cached instance. The lock is only taken on a miss.
+    hold and mutate a map nobody will ever read again. Every retrieval takes the
+    build lock, so a ``cache_clear()`` can never turn a warm hit into an
+    unlocked miss that races the next builder and returns a different map
+    object.
 
     The build imports every kernel module while the lock is held. A kernel that
     reads this mapping from its own import would re-enter the build; that is
     reported as an error instead of deadlocking on the non-reentrant lock.
     """
 
-    global _BUILT_INCOMPLETE, _REGISTRY_BUILD_OWNER
+    global _REGISTRY_BUILD_OWNER
 
-    if _build_kernel_support_maps_cached.cache_info().currsize:
-        # The fast path is only safe when the build is final and nothing has
-        # imported a kernel since. An incomplete build (a retryable failure was
-        # pending) must fall through to the locked refresh, otherwise a kernel
-        # that recovered through ``get_kernel_for_backend()`` would keep being
-        # omitted from AUTO selection until an explicit cache clear.
-        if (
-            not _BUILT_INCOMPLETE
-            and frozenset(_QLINEAR_IMPORTED) == _BUILT_MODULES
-        ):
-            return _build_kernel_support_maps_cached()
     if _REGISTRY_BUILD_OWNER == threading.get_ident():
         raise RuntimeError(
             "build_kernel_support_maps() was re-entered while building the kernel registry. "
@@ -711,28 +793,16 @@ def build_kernel_support_maps():
     with _REGISTRY_BUILD_LOCK:
         _REGISTRY_BUILD_OWNER = threading.get_ident()
         try:
-            # Re-check under the lock: a racing caller may have rebuilt already.
-            if _build_kernel_support_maps_cached.cache_info().currsize:
-                if (
-                    not _BUILT_INCOMPLETE
-                    and frozenset(_QLINEAR_IMPORTED) == _BUILT_MODULES
-                ):
-                    return _build_kernel_support_maps_cached()
-                # The build was retryably incomplete, so re-attempt the failed
-                # imports now. If one recovered, the maps must be rebuilt.
-                _import_all_qlinear_kernels()
-                if frozenset(_QLINEAR_IMPORTED) != _BUILT_MODULES:
-                    _build_kernel_support_maps_cached.cache_clear()
-                elif not _retryable_imports_pending():
-                    # No retryable failure remains (all resolved, or only
-                    # optional deps are missing): the build is final, so stop
-                    # taking the lock on each lookup.
-                    _BUILT_INCOMPLETE = False
-                    return _build_kernel_support_maps_cached()
-                else:
-                    # Still pending: keep the cached instance so callers observe
-                    # a stable object, but stay on the refresh path.
-                    return _build_kernel_support_maps_cached()
+            # Re-check under the lock: a racing caller may have built or reset
+            # the cache while this call waited.
+            if _registry_maps_final():
+                return _build_kernel_support_maps_cached()
+            # A retryable import may be due, or a kernel may have recovered
+            # through an explicit discovery call. Re-attempt, then rebuild only
+            # if the set of imported modules actually changed.
+            _import_all_qlinear_kernels()
+            if _registry_snapshot()[0] != _BUILT_MODULES:
+                _build_kernel_support_maps_cached.cache_clear()
             return _build_kernel_support_maps_cached()
         finally:
             _REGISTRY_BUILD_OWNER = None
@@ -754,7 +824,7 @@ def _clear_kernel_registry_caches() -> None:
     in place.
     """
 
-    global _BUILT_INCOMPLETE, _BUILT_MODULES, _REGISTRY_BUILD_OWNER
+    global _BUILT_MODULES, _REGISTRY_BUILD_OWNER
 
     # A reset must not race an in-progress build: clearing the snapshot while a
     # builder is between recording it and publishing the maps would make later
@@ -782,7 +852,6 @@ def _clear_kernel_registry_caches() -> None:
 
             _build_kernel_support_maps_cached.cache_clear()
             _BUILT_MODULES = None
-            _BUILT_INCOMPLETE = False
             _reset_kernel_module_imports()
         finally:
             _REGISTRY_BUILD_OWNER = None

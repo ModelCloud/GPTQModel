@@ -450,11 +450,13 @@ def test_missing_optional_version_does_not_escape_validate_once():
 
 
 def test_monkeypatch_undo_restores_the_optional_probe():
-    """Patching a legacy name must not pin the probe for the rest of the process.
+    """Patching a legacy name must survive ``undo()`` and stay re-armable.
 
-    ``monkeypatch.undo()`` writes the pre-patch value back as a real module
-    attribute. If the accessor prefers ``globals()``, that stale value wins
-    forever and defeats both ``cache_clear()`` and the disable env flag.
+    The name is materialized as a normal module attribute on first read, so
+    pytest records the real old value and restores it on ``undo()``. The
+    previous private-store design made pytest delete the name instead, leaving
+    the module permanently in a "deleted" state and breaking later imports and
+    default-raising patches.
     """
 
     from _pytest.monkeypatch import MonkeyPatch
@@ -469,52 +471,65 @@ def test_monkeypatch_undo_restores_the_optional_probe():
          bitblas_module._probe_bitblas_available),
     ):
         baseline = accessor()
-        patcher = MonkeyPatch()
-        try:
-            patcher.setattr(module, name, not baseline, raising=False)
-            assert accessor() == (not baseline), module.__name__
-        finally:
-            patcher.undo()
 
-        assert name not in module.__dict__, f"{module.__name__} leaked a real attribute"
-        # ``undo()`` writes the probe's own value back, which is
-        # indistinguishable from an explicit override of that value. The bug was
-        # that the stale value then survived ``cache_clear()`` and hid every
-        # later environment change. Clearing must now re-arm the probe.
+        # Two consecutive patch contexts must both restore the baseline.
+        for _ in range(2):
+            patcher = MonkeyPatch()
+            try:
+                patcher.setattr(module, name, not baseline)
+                assert getattr(module, name) == (not baseline), module.__name__
+                assert accessor() == (not baseline), module.__name__
+            finally:
+                patcher.undo()
+
+            assert getattr(module, name) == baseline, module.__name__
+            assert accessor() == baseline, module.__name__
+
+        # A later default-raising patch (``tests/test_bitblas.py``) must work.
+        with MonkeyPatch.context() as patcher:
+            patcher.setattr(module, name, True)
+        assert accessor() == baseline, module.__name__
+
+        # ``cache_clear()`` still drops the materialized value and re-arms.
         probe.cache_clear()
-        assert module._AVAILABILITY_OVERRIDES == {}, (
-            f"{module.__name__} kept {module._AVAILABILITY_OVERRIDES!r} after cache_clear()"
-        )
-        assert accessor() == probe(), f"{module.__name__} did not fall back to the probe"
+        assert name not in module.__dict__, module.__name__
+        assert accessor() == probe(), module.__name__
 
 
-def test_overrides_stay_out_of_module_dict_and_delete_cleanly():
-    """Overrides must not become permanent module attributes.
+def test_lazy_availability_names_materialize_as_normal_attributes():
+    """A read stores the probe as a normal attribute so patch/delete behave.
 
-    An ordinary ``setattr`` used to land in ``__dict__``, where the accessor
-    preferred it over the probe forever. Overrides now live in a private dict,
-    so ``__dict__`` stays clean and ``del`` re-arms the real probe.
+    Keeping the value in a private dict left ``monkeypatch`` and ``del`` with
+    surprising semantics. A real attribute gives the same behaviour as the
+    pre-lazy module global while the probe still runs on first access only.
     """
 
-    import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
 
-    baseline = bitblas_module.bitblas_available()
-    bitblas_module.BITBLAS_AVAILABLE = not baseline
-    try:
-        assert bitblas_module.bitblas_available() == (not baseline)
-        assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__, (
-            "override leaked into the module __dict__ and would outlive a delete"
+            baseline = module.bitblas_available()
+            assert "BITBLAS_AVAILABLE" not in module.__dict__
+
+            value = module.BITBLAS_AVAILABLE
+            assert value == baseline
+            assert module.__dict__["BITBLAS_AVAILABLE"] is value
+
+            module.BITBLAS_AVAILABLE = not baseline
+            assert module.bitblas_available() == (not baseline)
+            assert module.BITBLAS_AVAILABLE == (not baseline)
+
+            del module.BITBLAS_AVAILABLE
+            assert "BITBLAS_AVAILABLE" not in module.__dict__
+            assert module.bitblas_available() == baseline
+
+            # The next attribute read re-probes and materializes again.
+            assert module.BITBLAS_AVAILABLE == baseline
+            assert module.__dict__["BITBLAS_AVAILABLE"] == baseline
+            """
         )
-        del bitblas_module.BITBLAS_AVAILABLE
-
-        assert bitblas_module.bitblas_available() == baseline
-        assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__
-        assert bitblas_module.__dict__.get("_AVAILABILITY_DELETED") is True
-    finally:
-        # This test runs in-process: a leaked ``_AVAILABILITY_DELETED`` makes a
-        # later ``from ... import BITBLAS_AVAILABLE`` fail (and default-raising
-        # ``monkeypatch.setattr`` in tests/test_bitblas.py) depending on order.
-        bitblas_module._probe_bitblas_available.cache_clear()
+    )
 
 
 def test_transient_kernel_import_failure_is_retried():
@@ -608,6 +623,9 @@ def test_recovered_kernel_import_refreshes_cached_maps():
                 importlib.import_module = real_import_module
 
             broken[0] = False
+            # The failure is backing off; make the retry due now instead of
+            # sleeping in the test.
+            importer._QLINEAR_RETRY_AT["swordfish"] = 0.0
 
             # Reading the maps alone must retry the failed import and rebuild.
             assert BACKEND.GPTQ_SWORDFISH in swordfish_backends(), swordfish_backends()
@@ -763,12 +781,10 @@ def test_map_reset_drops_a_map_restored_by_monkeypatch_undo():
         )
     )
 
-def test_deleting_a_lazy_availability_name_restores_the_probe():
-    """``del mod.X_AVAILABLE`` must work and re-arm the probe, like a real attribute.
+def test_deleting_a_lazy_availability_name_rearms_the_probe():
+    """``del mod.X_AVAILABLE`` removes the materialized value like a global.
 
-    ``hasattr()`` is always True for the lazy name, so ``delattr`` used to raise
-    ``AttributeError`` even though the attribute was readable. It now drops the
-    override (or the real attribute) and the accessor falls back to the probe.
+    The next read probes again; reassignment and deletion keep working.
     """
 
     _assert_ok(
@@ -778,25 +794,21 @@ def test_deleting_a_lazy_availability_name_restores_the_probe():
 
             baseline = module.bitblas_available()
             module.BITBLAS_AVAILABLE = not baseline
-            assert module.bitblas_available() == (not baseline)
+            assert module.BITBLAS_AVAILABLE == (not baseline)
 
             delattr(module, "BITBLAS_AVAILABLE")
+            assert "BITBLAS_AVAILABLE" not in module.__dict__
             assert module.bitblas_available() == baseline
-            assert module._AVAILABILITY_OVERRIDES == {}
 
-            # Before the lazy change the name was a real attribute, so a delete
-            # really removed it and reading it raised.
-            try:
-                module.BITBLAS_AVAILABLE
-            except AttributeError:
-                pass
-            else:
-                raise AssertionError("the deleted name is still readable")
+            # Re-reading materializes the probe again.
+            assert module.BITBLAS_AVAILABLE == baseline
+            assert module.__dict__["BITBLAS_AVAILABLE"] == baseline
 
-            # Reassigning re-arms it.
+            # Reassigning and deleting keep working.
             module.BITBLAS_AVAILABLE = not baseline
             assert module.BITBLAS_AVAILABLE == (not baseline)
             del module.BITBLAS_AVAILABLE
+            assert "BITBLAS_AVAILABLE" not in module.__dict__
             """
         )
     )
@@ -831,14 +843,8 @@ def test_real_module_attribute_wins_over_the_private_override():
     )
 
 
-def test_assignment_overrides_and_deletes_a_real_attribute():
-    """A real attribute must not survive an accessor-visible assignment/delete.
-
-    ``vars(mod)[NAME] = True`` followed by ``mod.NAME = False`` used to write
-    only the private store while the higher-priority real attribute stayed
-    ``True``, so both reads kept returning ``True``. ``del mod.NAME`` then only
-    removed the private entry and left the attribute readable.
-    """
+def test_assignment_and_delete_act_on_the_materialized_attribute():
+    """Assignment and ``del`` must both act on the same normal attribute."""
 
     _assert_ok(
         _run(
@@ -850,22 +856,13 @@ def test_assignment_overrides_and_deletes_a_real_attribute():
             assert module.bitblas_available() == (not baseline)
 
             module.BITBLAS_AVAILABLE = baseline
-            assert "BITBLAS_AVAILABLE" not in module.__dict__, (
-                "the stale real attribute still shadows the new override"
-            )
+            assert module.__dict__["BITBLAS_AVAILABLE"] is baseline
             assert module.bitblas_available() == baseline
             assert module.BITBLAS_AVAILABLE is baseline
 
-            # A delete must clear the override too, not just one of the stores.
             del module.BITBLAS_AVAILABLE
-            assert module._AVAILABILITY_OVERRIDES == {}
             assert "BITBLAS_AVAILABLE" not in module.__dict__
-            try:
-                module.BITBLAS_AVAILABLE
-            except AttributeError:
-                pass
-            else:
-                raise AssertionError("the deleted name is still readable")
+            assert module.bitblas_available() == baseline
             """
         )
     )
@@ -874,9 +871,10 @@ def test_assignment_overrides_and_deletes_a_real_attribute():
 def test_availability_reset_clears_real_overrides_and_validation_state():
     """``cache_clear()`` must re-arm availability *and* kernel validation.
 
-    A real ``vars(mod)[NAME]`` override outranked the probe, so clearing only the
-    private stores left availability pinned. ``cached_validate_once()`` also
-    remembered a pre-recovery failure, so a recovered backend stayed unselectable.
+    A materialized ``vars(mod)[NAME]`` value outranks the probe, so the reset
+    has to remove it or availability stays pinned. ``cached_validate_once()``
+    also remembered a pre-recovery failure, so a recovered backend stayed
+    unselectable.
     """
 
     _assert_ok(
@@ -894,7 +892,6 @@ def test_availability_reset_clears_real_overrides_and_validation_state():
             assert "BITBLAS_AVAILABLE" not in module.__dict__, (
                 "cache_clear() left the real module attribute behind"
             )
-            assert module._AVAILABILITY_OVERRIDES == {}
             assert module.bitblas_available() == baseline
             assert module._probe_bitblas_available.cache_info().currsize == 1
 
@@ -997,7 +994,7 @@ def test_missing_optional_kernels_do_not_retry_on_every_map_lookup():
             importlib.import_module = counting_import_module
             try:
                 importer.build_kernel_support_maps()
-                assert importer._BUILT_INCOMPLETE is False, (
+                assert not importer._retryable_imports_pending(), (
                     "a stable environment must not look permanently incomplete: "
                     f"{importer._QLINEAR_FAILED!r}"
                 )
@@ -1185,11 +1182,12 @@ def test_registry_reset_does_not_race_an_in_progress_build():
 
 
 def test_retryable_failure_recovery_is_never_permanently_blocked():
-    """Repeated transient failures must not spend a permanent retry budget.
+    """Backoff must not become a permanent retry budget.
 
-    Bounding retries would make a shared library that appears later invisible
-    for the rest of the process. Only a genuinely absent optional dependency
-    (``mlx``/``tvm``) may be skipped permanently.
+    A shared library that appears later has to stay discoverable, but a
+    persistently failing optional stack must not be re-imported on every map
+    lookup. Failures therefore back off exponentially with no attempt limit;
+    an explicit discovery call bypasses the wait.
     """
 
     _assert_ok(
@@ -1203,12 +1201,15 @@ def test_retryable_failure_recovery_is_never_permanently_blocked():
 
             victim = "qlinear.swordfish"
             broken = [True]
+            attempts = {"n": 0}
             real_import_module = importlib.import_module
 
 
             def flaky_import_module(name, *args, **kwargs):
-                if name.endswith(victim) and broken[0]:
-                    raise OSError("transient failure")
+                if name.endswith(victim):
+                    attempts["n"] += 1
+                    if broken[0]:
+                        raise OSError("transient failure")
                 return real_import_module(name, *args, **kwargs)
 
 
@@ -1217,11 +1218,15 @@ def test_retryable_failure_recovery_is_never_permanently_blocked():
                 for _ in range(10):
                     importer.build_kernel_support_maps()
                     assert importer._QLINEAR_FAILED.get("swordfish") == "retryable"
-                    assert importer._BUILT_INCOMPLETE is True
+                    assert importer._QLINEAR_RETRY_AT["swordfish"] > 0.0
             finally:
                 importlib.import_module = real_import_module
 
+            # The backoff must suppress the failing import on cached lookups.
+            assert attempts["n"] < 10, attempts
+
             broken[0] = False
+            # An explicit lookup bypasses the backoff and recovers immediately.
             kernel = importer.get_kernel_for_backend(
                 BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
@@ -1229,6 +1234,330 @@ def test_retryable_failure_recovery_is_never_permanently_blocked():
             assert kernel.__name__ == "SwordfishLinear", kernel
             assert BACKEND.GPTQ_SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
             assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH] is kernel
+            """
+        )
+    )
+
+
+def test_concurrent_discovery_is_serialized_and_keeps_state_consistent():
+    """Discovery bookkeeping is shared, so entry points must serialize.
+
+    Two concurrent ``_import_all_qlinear_kernels()`` passes used to race the
+    membership check against the failure bookkeeping: one could record a
+    failure for a module another had just imported, leaving a permanent
+    retryable entry (and a dict-mutation ``RuntimeError`` in the scan).
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import threading
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+
+            victim = "qlinear.swordfish"
+            real_import_module = importlib.import_module
+            b_entered = threading.Event()
+            release_b = threading.Event()
+            a_done = threading.Event()
+            b_thread = None
+
+
+            def slow_import_module(name, *args):
+                if name.endswith(victim) and threading.current_thread() is b_thread:
+                    b_entered.set()
+                    release_b.wait(timeout=30)
+                    raise OSError("stale failure from the other thread")
+                return real_import_module(name, *args)
+
+
+            def run_b():
+                importer._import_all_qlinear_kernels(force_retry=True)
+
+
+            def run_a():
+                b_entered.wait(timeout=30)
+                importer._import_all_qlinear_kernels(force_retry=True)
+                a_done.set()
+
+
+            importlib.import_module = slow_import_module
+            try:
+                b_thread = threading.Thread(target=run_b)
+                b_thread.start()
+                assert b_entered.wait(timeout=30)
+                a_thread = threading.Thread(target=run_a)
+                a_thread.start()
+                # A must not interleave with B's in-flight import.
+                a_done.wait(timeout=0.3)
+                assert not a_done.is_set(), "discovery passes interleaved"
+                release_b.set()
+                a_thread.join(timeout=60)
+                b_thread.join(timeout=60)
+                assert not (a_thread.is_alive() or b_thread.is_alive())
+            finally:
+                importlib.import_module = real_import_module
+
+            assert "swordfish" in importer._QLINEAR_IMPORTED
+            assert "swordfish" not in importer._QLINEAR_FAILED
+            """
+        )
+    )
+
+
+def test_warm_map_lookup_cannot_race_a_reset():
+    """A warm cache hit must still be synchronized with ``cache_clear()``.
+
+    The fast path used to check the cache and then call the ``lru_cache``
+    outside the build lock. A reset in between turned that hit into an
+    unlocked miss, so two builders could publish different map objects and
+    race the snapshot. Every retrieval now runs under the build lock.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import threading
+
+            import gptqmodel.utils.importer as importer
+
+            real_cached = importer._build_kernel_support_maps_cached
+            owners = []
+
+
+            def checked_cached():
+                owners.append(importer._REGISTRY_BUILD_OWNER == threading.get_ident())
+                return real_cached()
+
+
+            checked_cached.cache_info = real_cached.cache_info
+            checked_cached.cache_clear = real_cached.cache_clear
+            importer._build_kernel_support_maps_cached = checked_cached
+            try:
+                importer.build_kernel_support_maps()   # cold build
+                for _ in range(20):
+                    importer.build_kernel_support_maps()  # warm hits
+                assert owners and all(owners), owners
+            finally:
+                importer._build_kernel_support_maps_cached = real_cached
+            """
+        )
+    )
+
+
+def test_in_flight_validation_does_not_publish_after_reset():
+    """A reset during ``validate()`` must not be undone by the late result.
+
+    ``validate_quant_linear()`` releases the cache lock while the kernel
+    validates. A backend reset in that window used to be followed by the stale
+    failure being stored, so the recovered backend stayed unselectable.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import threading
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+            state = {"ok": False}
+            entered = threading.Event()
+            release = threading.Event()
+            result = {}
+
+
+            class SyntheticLinear(BaseQuantLinear):
+                SUPPORTS_FORMATS = {}
+                SUPPORTS_BACKENDS = []
+                SUPPORTS_METHODS = []
+
+                @classmethod
+                def validate_once(cls):
+                    return (True, None) if state["ok"] else (False, ImportError("missing"))
+
+                @classmethod
+                def validate(cls, **kwargs):
+                    entered.set()
+                    release.wait(timeout=30)
+                    ok, err = cls.cached_validate_once()
+                    return (True, None) if ok else (False, err)
+
+
+            SyntheticLinear.__module__ = "gptqmodel.nn_modules.qlinear.synthetic"
+            kwargs = dict(bits=4, group_size=128, desc_act=False, sym=True)
+
+
+            def run():
+                result["value"] = importer.validate_quant_linear(SyntheticLinear, **kwargs)
+
+
+            thread = threading.Thread(target=run)
+            thread.start()
+            assert entered.wait(timeout=30)
+            importer.clear_validation_cache()
+            release.set()
+            thread.join(timeout=60)
+            assert not thread.is_alive()
+
+            # The in-flight answer predates the reset and must not be cached.
+            assert result["value"][0] is False
+            assert len(importer._VALIDATION_CACHE) == 0, importer._VALIDATION_CACHE
+            assert SyntheticLinear.cached_validate_once.cache_info().currsize == 0
+
+            # The reset re-armed the backend, so a fresh validation sees it.
+            state["ok"] = True
+            assert importer.validate_quant_linear(SyntheticLinear, **kwargs)[0] is True
+            """
+        )
+    )
+
+
+def test_explicit_lookup_imports_a_pending_failure_once():
+    """``get_kernel_for_backend()`` must not run the same failing import twice.
+
+    ``iter_quant_linear_kernels()`` already performs discovery; the explicit
+    call in ``get_kernel_for_backend()`` doubled the cost of every lookup while
+    a retryable failure was pending.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            attempts = {"n": 0}
+            real_import_module = importlib.import_module
+
+
+            def flaky_import_module(name, *args):
+                if name.endswith(victim):
+                    attempts["n"] += 1
+                    raise OSError("still broken")
+                return real_import_module(name, *args)
+
+
+            importlib.import_module = flaky_import_module
+            try:
+                try:
+                    importer.get_kernel_for_backend(
+                        BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("expected the broken import to hide the kernel")
+            finally:
+                importlib.import_module = real_import_module
+
+            assert attempts["n"] == 1, attempts
+            """
+        )
+    )
+
+
+def test_blocked_module_entry_is_retried_not_skipped():
+    """``sys.modules[name] = None`` is a temporary block, not a missing dep.
+
+    CPython raises ``ModuleNotFoundError(name="triton")`` for a blocked entry,
+    which the classifier used to treat as a permanently absent optional
+    dependency, hiding the kernel even after the block was removed.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+            import sys
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            real_import_module = importlib.import_module
+
+
+            def blocked_import_module(name, *args):
+                if name.endswith(victim):
+                    sys.modules["triton"] = None
+                    real_import_module("triton")  # raises ModuleNotFoundError(name="triton")
+                return real_import_module(name, *args)
+
+
+            importlib.import_module = blocked_import_module
+            try:
+                try:
+                    importer.get_kernel_for_backend(
+                        BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                    )
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("expected the blocked import to hide the kernel")
+                assert importer._QLINEAR_FAILED.get("swordfish") == "retryable"
+            finally:
+                sys.modules.pop("triton", None)
+                importlib.import_module = real_import_module
+
+            # Removing the block must make the kernel discoverable again.
+            kernel = importer.get_kernel_for_backend(
+                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+            )
+            assert kernel.__name__ == "SwordfishLinear", kernel
+            """
+        )
+    )
+
+
+def test_map_snapshot_is_taken_after_the_recovery_pass():
+    """A module that recovers during the build must be in the snapshot.
+
+    The import-state snapshot used to be recorded before
+    ``_registry_kernel_classes()`` ran its own discovery pass. A module that
+    failed once and succeeded on that pass appeared in the returned map but not
+    in the snapshot, so the next lookup rebuilt and discarded the map object.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            calls = {"n": 0}
+            real_import_module = importlib.import_module
+
+
+            def fail_once_import_module(name, *args):
+                if name.endswith(victim):
+                    calls["n"] += 1
+                    if calls["n"] == 1:
+                        raise OSError("transient failure")
+                return real_import_module(name, *args)
+
+
+            importlib.import_module = fail_once_import_module
+            try:
+                auto, supports = importer.build_kernel_support_maps()
+            finally:
+                importlib.import_module = real_import_module
+
+            assert calls["n"] == 2, calls
+            assert "swordfish" in importer._BUILT_MODULES
+            assert BACKEND.GPTQ_SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
+            # The snapshot matches the map, so the next lookup must reuse it.
+            assert importer.build_kernel_support_maps()[0] is auto
             """
         )
     )
