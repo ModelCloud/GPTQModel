@@ -263,7 +263,11 @@ def test_hf_pack_layer_matches_pack_original(bits):
     expected.pack_original(linear, scales, zeros, g_idx)
 
     actual = _make_gptq_module(bits=bits)
-    returned = hf_pack_layer(actual, linear, scales, zeros, g_idx)
+    # The v2 flavor keeps the raw packer's words; the default gptq flavor
+    # additionally converts to the v1 (stored zero point minus one) layout.
+    returned = hf_pack_layer(
+        actual, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2
+    )
 
     assert returned is actual
     _assert_packed_equal(expected, actual)
@@ -276,7 +280,9 @@ def test_hf_pack_layer_synthesizes_symmetric_zeros():
     explicit.pack_original(linear, scales, torch.full_like(zeros, 1 << 3), g_idx)
 
     module = _make_gptq_module(sym=True)
-    hf_pack_layer(module, linear, scales, None, g_idx)
+    hf_pack_layer(
+        module, linear, scales, None, g_idx, checkpoint_format=FORMAT.GPTQ_V2
+    )
 
     _assert_packed_equal(explicit, module)
 
@@ -546,8 +552,15 @@ def test_hf_pack_layer_resets_qzero_format_when_reusing_module():
     hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
     assert reused.qzero_format() == 2
 
-    # A second raw pack starts from v1 words again and must not inherit the
-    # previous call's v2 metadata.
+    # Simulate a module previously converted to the v1 (stored zero point minus
+    # one) layout. A second raw pack writes fresh v2-layout words and must not
+    # inherit the stale metadata, or the words would decode one high.
+    convert_gptq_v2_to_v1_format_module(
+        module=reused,
+        quantize_config=QuantizeConfig(bits=reused.bits),
+    )
+    assert reused.qzero_format() == 1
+
     hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ)
 
     shifts = torch.arange(8, dtype=torch.int64).mul(4).view(1, 1, 8)
@@ -555,8 +568,11 @@ def test_hf_pack_layer_resets_qzero_format_when_reusing_module():
         zeros.T.contiguous().view(zeros.shape[1], zeros.shape[0] // 8, 8).to(torch.int64)
         << shifts
     ).sum(dim=-1).to(torch.int32)
+    # The fresh words are converted to the v1 layout (zp-1) because the module
+    # requires the v2 runtime layout; a stale format=1 mark would have skipped
+    # this conversion and left v2 words labeled v1.
     assert reused.qzero_format() == 1
-    assert torch.equal(reused.qzeros, expected_qzeros)
+    assert torch.equal(reused.qzeros, expected_qzeros - 0x11111111)
 
 
 def test_hf_pack_layer_reports_missing_scales():

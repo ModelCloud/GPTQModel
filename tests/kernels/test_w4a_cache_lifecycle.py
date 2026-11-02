@@ -809,3 +809,76 @@ def test_nvfp4_post_init_rejects_non_symmetric_zero_points():
     module.qzeros[0, 0] = 0x66666666
     with pytest.raises(ValueError, match="zero point 8"):
         module.post_init()
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 operand caches need native PyTorch FP4 support",
+)
+@pytest.mark.parametrize("checkpoint_format", ["gptq", "gptq_v2"])
+def test_nvfp4_hf_pack_layer_checkpoint_format(checkpoint_format):
+    """hf_pack_layer must mark the raw packer's v2-layout zero points
+    truthfully, converting only when a v1 kernel checkpoint is requested.
+
+    A mislabeled format either skips the needed v1 conversion or adds one to
+    already-v2 words; both leave post_init's symmetric-zero-point check
+    reading 9 instead of 8."""
+    from gptqmodel.quantization.config import FORMAT
+    from gptqmodel.utils.packing import hf_pack_layer
+
+    module = W4ANVFP4Linear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=K, out_features=N, bias=False,
+    )
+    module.activation_global_scale.fill_(0.03125)
+    linear = torch.nn.Linear(K, N, bias=False)
+    scales = torch.full((N, K // 128), 0.125, dtype=torch.float16)
+    zeros = torch.full((N, K // 128), 8, dtype=torch.int32)
+    g_idx = torch.arange(K, dtype=torch.int32) // 128
+
+    fmt = FORMAT.GPTQ if checkpoint_format == "gptq" else FORMAT.GPTQ_V2
+    hf_pack_layer(module, linear, scales, zeros, g_idx, checkpoint_format=fmt)
+
+    # The v1 flavor stores zp-1 nibbles; the v2 flavor stores logical zeros.
+    expected_word = 0x77777777 if checkpoint_format == "gptq" else -0x77777778
+    assert torch.equal(module.qzeros, torch.full_like(module.qzeros, expected_word))
+
+    # Either way the logical zero point decodes back to the symmetric point.
+    zeros_decoded = W4AFP8Linear._group_zero_points(module)
+    assert torch.equal(
+        zeros_decoded, torch.full((K // 128, N), 8, dtype=zeros_decoded.dtype)
+    )
+    module.post_init()
+    assert module._weight_both.numel() > 0
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 operand caches need native PyTorch FP4 support",
+)
+def test_nvfp4_failed_repost_init_clears_operand_caches():
+    """A failed re-post_init must not leave forward() serving operands decoded
+    from a layout that no longer matches the weights."""
+    module = _module(W4ANVFP4Linear)
+    assert module._weight_both.numel() > 0
+
+    module.qzeros[0, 0] = 0x66666666
+    with pytest.raises(ValueError, match="zero point 8"):
+        module.post_init()
+
+    for name in W4ANVFP4Linear._WEIGHT_CACHE_NAMES:
+        assert getattr(module, name).numel() == 0
+    with pytest.raises(RuntimeError, match="weight cache is absent"):
+        module.forward(torch.zeros(1, K, dtype=torch.float16))
+
+
+def test_failed_repost_init_clears_w4a_readiness():
+    module = _module(W4AFP8Linear)
+    assert module._w4a_weights_ready is True
+
+    module.qzeros[0, 0] = 0x66666666
+    with pytest.raises(ValueError, match="zero point 8"):
+        module.post_init()
+
+    assert module._w4a_weights_ready is False
+    assert module._w4a_layout_token is None
