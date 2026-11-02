@@ -1659,6 +1659,8 @@ def ModelLoader(cls):
 
         if backend in [BACKEND.GPTQ_BITBLAS, BACKEND.AWQ_BITBLAS]:
             from ..nn_modules.qlinear.bitblas import BITBLAS_AVAILABLE, BITBLAS_INSTALL_HINT
+            # ``is False`` (not ``not``) keeps the pre-lazy semantics: an
+            # explicit ``None``/``0`` override means "unknown", not "absent".
             if BITBLAS_AVAILABLE is False:
                 raise ValueError(BITBLAS_INSTALL_HINT)
 

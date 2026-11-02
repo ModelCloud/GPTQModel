@@ -31,7 +31,7 @@ from gptqmodel.nn_modules.qlinear.gguf import (
 from gptqmodel.nn_modules.qlinear.gguf_cpp import (
     GGUFCppKernel,
     _get_ggml_bridge,
-    _llama_cpp_lib,
+    _require_llama_cpp,
 )
 from gptqmodel.quantization.config import (
     FORMAT,
@@ -42,6 +42,12 @@ from gptqmodel.quantization.config import (
     _normalize_gguf_public_format,
 )
 from gptqmodel.utils import internal_gguf as ig
+
+
+# llama-cpp-python is imported on demand by the kernel now, so load it here
+# before the module-level skip guards below read `_llama_cpp_lib`.
+_require_llama_cpp()
+from gptqmodel.nn_modules.qlinear.gguf_cpp import _llama_cpp_lib  # noqa: E402
 
 
 if _GGUF_AVAILABLE:

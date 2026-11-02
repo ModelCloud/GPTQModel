@@ -23,9 +23,9 @@ from ..nn_modules.qlinear import AWQuantLinear, BaseQuantLinear, GPTQQuantLinear
 from ..quantization import FORMAT, METHOD, QuantizeConfig
 from .backend import BACKEND, normalize_backend
 from .importer import (
-    AUTO_BACKEND_KERNEL_MAPPING,
-    BACKEND_TO_METHOD_FORMAT_MAPPING,
     _as_selector_device,
+    get_auto_backend_kernel_mapping,
+    get_backend_to_method_format_mapping,
     select_quant_linear,
     validate_quant_linear,
 )
@@ -461,7 +461,7 @@ def hf_check_best_packing_format(
     method = _normalize_method(quant_method)
 
     if formats is None:
-        candidates = list(BACKEND_TO_METHOD_FORMAT_MAPPING.get(method, {}).keys())
+        candidates = list(get_backend_to_method_format_mapping().get(method, {}).keys())
     else:
         candidates = [_normalize_format(candidate) for candidate in formats]
     if not candidates:
@@ -469,7 +469,7 @@ def hf_check_best_packing_format(
 
     ranked: List[tuple] = []
     for fmt in candidates:
-        kernels = AUTO_BACKEND_KERNEL_MAPPING.get(method, {}).get(fmt)
+        kernels = get_auto_backend_kernel_mapping().get(method, {}).get(fmt)
         if not kernels:
             continue
         best_priority = max(

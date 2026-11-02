@@ -65,17 +65,109 @@ _CPU_INT8_DENSE_TILE_FEATURES = 512
 def _is_bitsandbytes_available() -> bool:
     try:
         import bitsandbytes as bnb
+        return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
     except Exception as exc:  # pragma: no cover - optional dependency
-        log.debug("bitsandbytes import failed: %s", exc)
+        # A missing package, a shared-library failure, or an unparsable
+        # ``__version__`` all mean "this backend is unusable", never a crash.
+        # ``validate_once`` promises a ``(bool, exception)`` tuple, so the probe
+        # must not raise either.
+        log.debug("bitsandbytes is unavailable: %s", exc)
         return False
 
-    return version.parse(bnb.__version__) >= version.parse(MINIMUM_BITSANDBYTES_VERSION)
+
+@lru_cache(maxsize=1)
+def _probe_bitsandbytes_available() -> bool:
+    """Probe bitsandbytes once, on first real use.
+
+    Importing bitsandbytes is expensive and must not happen while the kernel
+    registry is merely being discovered. The probe is cached so repeated
+    ``validate_once`` calls stay cheap.
+    """
+
+    return _is_bitsandbytes_available()
+
+
+_probe_cache_clear = _probe_bitsandbytes_available.cache_clear
+
+
+def bitsandbytes_available() -> bool:
+    """Return whether a supported bitsandbytes is usable.
+
+    The legacy ``BITSANDBYTES_AVAILABLE`` name is materialized from the probe on first
+    attribute access, so this accessor reads the same attribute when present
+    and otherwise probes.
+    """
+
+    namespace = sys.modules[__name__].__dict__
+    if "BITSANDBYTES_AVAILABLE" in namespace:
+        return bool(namespace["BITSANDBYTES_AVAILABLE"])
+    return _probe_bitsandbytes_available()
+
+
+def _clear_availability_state() -> None:
+    """Drop the materialized value, the probe result and validation caches.
+
+    This is the escape hatch for tests and for long-lived processes where the
+    environment changes after the first probe (a package installed later, a
+    toolchain that becomes available). It also removes a value restored by
+    ``monkeypatch.undo()``, which is indistinguishable from an explicit
+    override once materialized.
+
+    The kernel's ``cached_validate_once()`` result is invalidated as well, or a
+    kernel that failed before the backend appeared stays unselectable until the
+    process ends.
+    """
+
+    sys.modules[__name__].__dict__.pop("BITSANDBYTES_AVAILABLE", None)
+    _probe_cache_clear()
+    cls = globals().get("BitsAndBytesLinear")
+    if cls is not None:
+        cls.cached_validate_once.cache_clear()
+    # ``validate_quant_linear()`` keeps its own bounded cache of
+    # ``(bool, error)`` results. Clearing only the kernel-level cache leaves a
+    # stale "unavailable" answer there, and that cache short-circuits before
+    # ``validate()`` is ever called again. Import lazily: ``importer`` imports
+    # the kernel package, so a module-level import here would be circular.
+    from ...utils.importer import clear_validation_cache
+
+    clear_validation_cache()
+
+
+# ``cache_clear`` is the documented knob; keep it on the probe, extended with
+# the materialized attribute so clearing really re-arms everything.
+_probe_bitsandbytes_available.cache_clear = _clear_availability_state
+
+
+def __getattr__(name: str):
+    if name == "BITSANDBYTES_AVAILABLE":
+        # Materialize the probe as a normal module attribute. A plain attribute
+        # keeps ``del`` and ``monkeypatch`` semantics working: pytest reads the
+        # old value from ``__dict__`` and restores it on ``undo()``, so two
+        # consecutive patch contexts behave like they did before the lazy
+        # change.
+        value = _probe_bitsandbytes_available()
+        sys.modules[__name__].__dict__[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()``/star-import unless
+    # advertised. Keep the pre-lazy surface.
+    return sorted(set(globals()) | {"BITSANDBYTES_AVAILABLE"})
 
 
 def import_bitsandbytes():
     import bitsandbytes as bnb
 
-    if version.parse(bnb.__version__) < version.parse(MINIMUM_BITSANDBYTES_VERSION):
+    # ``getattr`` + ``try`` keep a build with a missing or unparsable
+    # ``__version__`` on the documented ``ImportError`` path instead of letting
+    # ``AttributeError`` escape the kernel constructor.
+    try:
+        parsed_version = version.parse(getattr(bnb, "__version__", ""))
+    except Exception as exc:
+        raise ImportError(BITSANDBYTES_INSTALL_HINT) from exc
+    if parsed_version < version.parse(MINIMUM_BITSANDBYTES_VERSION):
         raise ImportError(BITSANDBYTES_INSTALL_HINT)
     return bnb
 
@@ -239,9 +331,6 @@ def _cpu_int8_dense_should_use(
     return in_features * out_features <= _CPU_INT8_DENSE_MAX_WEIGHT_ELEMENTS
 
 
-BITSANDBYTES_AVAILABLE = _is_bitsandbytes_available()
-
-
 def _weight_to_matrix(linear: nn.Module) -> torch.Tensor:
     weight = linear.weight.detach()
     if isinstance(linear, _ConvNd):
@@ -369,7 +458,7 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITSANDBYTES_AVAILABLE:
+        if not bitsandbytes_available():
             return False, ImportError(BITSANDBYTES_INSTALL_HINT)
 
         try:
@@ -845,8 +934,10 @@ class BitsAndBytesLinear(WeightOnlyQuantLinear):
 BitsAndBytes4bitLinear = BitsAndBytesLinear
 
 __all__ = [
-    "BITSANDBYTES_AVAILABLE",
+    # Resolved lazily by module ``__getattr__``; ruff cannot see it as a global.
+    "BITSANDBYTES_AVAILABLE",  # noqa: F822
     "BITSANDBYTES_INSTALL_HINT",
+    "bitsandbytes_available",
     "BitsAndBytes4bitLinear",
     "BitsAndBytesLinear",
     "import_bitsandbytes",

@@ -6,8 +6,11 @@
 import importlib
 import os
 import pkgutil
+import sys
 import threading
+import time
 from collections import OrderedDict
+from functools import lru_cache
 from typing import Dict, List, Optional, Sequence, Type, Union
 
 import torch
@@ -44,6 +47,9 @@ SelectorDevices = Union[SelectorDevice, Sequence[SelectorDevice]]
 _VALIDATION_CACHE_MAXSIZE = 1024
 _VALIDATION_CACHE = OrderedDict()
 _VALIDATION_CACHE_LOCK = threading.RLock()
+# Incremented by every ``clear_validation_cache()``. A validation that started
+# before a reset must not publish its (possibly pre-reset) answer afterwards.
+_VALIDATION_CACHE_GENERATION = 0
 
 
 def _device_family(device: SelectorDevice) -> DEVICE:
@@ -257,6 +263,7 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
             _VALIDATION_CACHE.move_to_end(key)
             ok, error_type, error_message = cached
             return ok, _new_validation_error(error_type, error_message)
+        generation = _VALIDATION_CACHE_GENERATION
 
     try:
         result = cls.validate(**kwargs)
@@ -268,6 +275,15 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
     error_message = str(error) if error is not None else None
     cached = (bool(ok), error_type, error_message)
     with _VALIDATION_CACHE_LOCK:
+        if generation != _VALIDATION_CACHE_GENERATION:
+            # A backend reset ran while ``validate()`` was in flight. Its answer
+            # may predate the reset, so publishing it would undo the reset. The
+            # kernel-level ``cached_validate_once()`` cache may also have been
+            # repopulated by this call; drop it so the next lookup re-probes.
+            class_cache_clear = getattr(cls.cached_validate_once, "cache_clear", None)
+            if class_cache_clear is not None:
+                class_cache_clear()
+            return bool(ok), _new_validation_error(error_type, error_message)
         _VALIDATION_CACHE[key] = cached
         _VALIDATION_CACHE.move_to_end(key)
         while len(_VALIDATION_CACHE) > _VALIDATION_CACHE_MAXSIZE:
@@ -276,8 +292,11 @@ def validate_quant_linear(cls: Type[BaseQuantLinear], **kwargs):
 
 
 def clear_validation_cache() -> None:
+    global _VALIDATION_CACHE_GENERATION
+
     with _VALIDATION_CACHE_LOCK:
         _VALIDATION_CACHE.clear()
+        _VALIDATION_CACHE_GENERATION += 1
 
 
 def selector_device_family(device: Optional[SelectorDevices]) -> Optional[DEVICE]:
@@ -405,6 +424,16 @@ def _iter_dynamic_contracts(
 
 
 def iter_quant_linear_kernels() -> List[Type[BaseQuantLinear]]:
+    """Return every registered kernel class, importing kernel modules on demand.
+
+    Importing the kernel packages at ``gptqmodel`` import time would pull in
+    optional backends (bitsandbytes, BitBLAS, llama-cpp, ...) plus the modules
+    that depend on them. Discovery therefore imports them on first use only.
+    """
+
+    # This is an explicit discovery request, so retry a backing-off failure now
+    # instead of waiting for its timer.
+    _import_all_qlinear_kernels(force_retry=True)
     kernels = []
     seen = set()
 
@@ -463,26 +492,234 @@ def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) 
     return matches[0]
 
 
-def _import_all_qlinear_kernels() -> None:
+_QLINEAR_MODULE_NAMES = None
+_QLINEAR_IMPORTED = set()
+# Import bookkeeping is mutated by every discovery entry point
+# (``iter_quant_linear_kernels()``, ``get_kernel_for_backend()`` and the map
+# builder) and read by the map builder, so all of it is guarded by this lock.
+# It is re-entrant because a kernel module may trigger discovery from its own
+# import (``importlib`` returns the partially initialized module, so the nested
+# pass terminates).
+_QLINEAR_IMPORTS_LOCK = threading.RLock()
+# Kernel module name -> failure kind for modules that did not import.
+#   "optional": an optional dependency is genuinely not installed (``mlx``,
+#               ``tvm``, ...). No retry inside this process can help, so this
+#               must neither mark the registry incomplete nor be retried.
+#   "retryable": a transient failure (shared library not on the loader path yet,
+#               an extension installed later, ``sys.modules`` poisoned by a
+#               test). Retried with exponential backoff, so recovery is never
+#               permanently blocked but a persistently broken optional stack is
+#               not re-imported on every kernel selection either.
+_QLINEAR_FAILED: Dict[str, str] = {}
+# Retry scheduling for ``"retryable"`` failures. ``_QLINEAR_RETRY_AT`` is a
+# ``time.monotonic()`` deadline; ``_QLINEAR_RETRY_ATTEMPTS`` drives the delay.
+_QLINEAR_RETRY_AT: Dict[str, float] = {}
+_QLINEAR_RETRY_ATTEMPTS: Dict[str, int] = {}
+_QLINEAR_RETRY_BASE_SECONDS = 0.5
+_QLINEAR_RETRY_MAX_SECONDS = 30.0
+
+
+def _classify_import_failure(exc: BaseException) -> str:
+    """Classify a kernel import failure as ``optional`` or ``retryable``.
+
+    A ``ModuleNotFoundError`` for an external package means an optional backend
+    is simply not installed; retrying cannot change that before a restart.
+    Everything else (``OSError`` loading a shared library, an ``ImportError``
+    raised from inside a kernel module) may recover when the environment
+    changes, so it stays retryable. An explicitly blocked module
+    (``sys.modules[name] = None``) raises ``ModuleNotFoundError`` naming that
+    package, but it is a temporary test/environment state, not evidence that the
+    dependency is absent, so it must stay retryable too.
+    """
+
+    if isinstance(exc, ModuleNotFoundError):
+        missing = getattr(exc, "name", None) or ""
+        if missing and missing in sys.modules and sys.modules[missing] is None:
+            return "retryable"
+        if missing and not missing.startswith("gptqmodel"):
+            return "optional"
+    return "retryable"
+
+
+def _qlinear_module_names() -> List[str]:
+    """Return the importable module names of the shipped ``qlinear`` package."""
+
+    global _QLINEAR_MODULE_NAMES
+    if _QLINEAR_MODULE_NAMES is None:
+        from ..nn_modules import qlinear as qlinear_pkg
+
+        _QLINEAR_MODULE_NAMES = [
+            module_info.name
+            for module_info in pkgutil.iter_modules(qlinear_pkg.__path__)
+            if not module_info.name.startswith("_")
+        ]
+    return _QLINEAR_MODULE_NAMES
+
+
+def _import_all_qlinear_kernels(*, force_retry: bool = False) -> None:
+    """Import every kernel module, retrying only recoverable failures.
+
+    A module that cannot be imported right now (shared library not on the
+    loader path yet, extension installed later, ``sys.modules`` poisoned by a
+    test) is *not* remembered as imported, so a later call retries it. Caching
+    the failure would hide that kernel for the rest of the process, and
+    ``build_kernel_support_maps.cache_clear()`` could not repair it.
+
+    A module whose optional dependency is simply absent (``mlx`` on a CUDA
+    host, ``tvm`` for the BitBLAS target detector) is remembered as
+    ``optional`` and skipped: retrying it on every map lookup would add the
+    cost of a failing import to every kernel selection and packing call.
+
+    Retryable failures back off exponentially (without a permanent attempt
+    limit), so a persistently broken optional stack cannot serialize every map
+    lookup while a library that appears later is still picked up. An explicit
+    discovery request (``force_retry``) bypasses the backoff: a caller asking
+    for a specific backend should not wait for the timer.
+    """
+
     from ..nn_modules import qlinear as qlinear_pkg
 
-    for module_info in pkgutil.iter_modules(qlinear_pkg.__path__):
-        name = module_info.name
-        if name.startswith("_"):
-            continue
-        try:
-            importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
-        except (ImportError, OSError) as exc:
-            log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+    with _QLINEAR_IMPORTS_LOCK:
+        now = time.monotonic()
+        for name in _qlinear_module_names():
+            if name in _QLINEAR_IMPORTED:
+                continue
+            kind = _QLINEAR_FAILED.get(name)
+            if kind == "optional":
+                # Missing optional dependency: no retry can help until restart.
+                continue
+            if (
+                kind == "retryable"
+                and not force_retry
+                and _QLINEAR_RETRY_AT.get(name, 0.0) > now
+            ):
+                continue
+            try:
+                importlib.import_module(f"{qlinear_pkg.__name__}.{name}")
+            except (ImportError, OSError) as exc:
+                log.debug(f"Skipping qlinear module import `{name}`: {exc}")
+                kind = _classify_import_failure(exc)
+                _QLINEAR_FAILED[name] = kind
+                if kind == "retryable":
+                    attempts = _QLINEAR_RETRY_ATTEMPTS.get(name, 0) + 1
+                    _QLINEAR_RETRY_ATTEMPTS[name] = attempts
+                    delay = min(
+                        _QLINEAR_RETRY_BASE_SECONDS * (2 ** (attempts - 1)),
+                        _QLINEAR_RETRY_MAX_SECONDS,
+                    )
+                    _QLINEAR_RETRY_AT[name] = time.monotonic() + delay
+                else:
+                    _QLINEAR_RETRY_AT.pop(name, None)
+                    _QLINEAR_RETRY_ATTEMPTS.pop(name, None)
+                continue
+            _QLINEAR_IMPORTED.add(name)
+            _QLINEAR_FAILED.pop(name, None)
+            _QLINEAR_RETRY_AT.pop(name, None)
+            _QLINEAR_RETRY_ATTEMPTS.pop(name, None)
 
 
-def build_kernel_support_maps():
-    _import_all_qlinear_kernels()
+def _retryable_imports_pending() -> bool:
+    """Whether any retryable import failure is remembered."""
+
+    with _QLINEAR_IMPORTS_LOCK:
+        return any(kind == "retryable" for kind in _QLINEAR_FAILED.values())
+
+
+def _retryable_retry_due_locked() -> bool:
+    """Whether a retryable failure is due for another attempt (lock held)."""
+
+    now = time.monotonic()
+    return any(
+        kind == "retryable" and _QLINEAR_RETRY_AT.get(name, 0.0) <= now
+        for name, kind in _QLINEAR_FAILED.items()
+    )
+
+
+def _registry_snapshot():
+    """Return ``(imported_modules, retry_due)`` as one atomic observation."""
+
+    with _QLINEAR_IMPORTS_LOCK:
+        return frozenset(_QLINEAR_IMPORTED), _retryable_retry_due_locked()
+
+
+def _imported_kernel_module_count() -> int:
+    """Number of kernel modules imported so far (test/introspection helper)."""
+
+    with _QLINEAR_IMPORTS_LOCK:
+        return len(_QLINEAR_IMPORTED)
+
+
+def _reset_kernel_module_imports() -> None:
+    """Forget imported modules and failure classification so all are re-probed."""
+
+    with _QLINEAR_IMPORTS_LOCK:
+        _QLINEAR_IMPORTED.clear()
+        _QLINEAR_FAILED.clear()
+        _QLINEAR_RETRY_AT.clear()
+        _QLINEAR_RETRY_ATTEMPTS.clear()
+
+
+def _registry_kernel_classes() -> List[Type[BaseQuantLinear]]:
+    """Return the kernels that belong to the shipped ``qlinear`` package.
+
+    ``iter_quant_linear_kernels()`` walks ``BaseQuantLinear.__subclasses__()``,
+    which is a live view of the interpreter's class graph.  While the auto-select
+    maps were frozen during ``import gptqmodel`` that did not matter: a subclass
+    defined later (a test helper, a downstream plugin, a notebook experiment)
+    could never reach them.  The maps are now built on first use, so the walk has
+    to be restricted to the kernels this package actually ships.  Discovery keeps
+    seeing every subclass, so ``get_kernel_for_backend()`` and
+    ``iter_quant_linear_kernels()`` behave exactly as they did before.
+    """
+
+    from ..nn_modules import qlinear as qlinear_pkg
+
+    package = qlinear_pkg.__name__
+    prefix = f"{package}."
+
+    def _in_package(cls: Type[BaseQuantLinear]) -> bool:
+        # A kernel may live in a submodule (``...qlinear.marlin``) or be defined
+        # directly in the package ``__init__`` (``...qlinear``).
+        module = getattr(cls, "__module__", "")
+        return module == package or module.startswith(prefix)
+
+    return [cls for cls in iter_quant_linear_kernels() if _in_package(cls)]
+
+
+_REGISTRY_BUILD_LOCK = threading.Lock()
+_REGISTRY_BUILD_OWNER = None
+
+
+_BUILT_MODULES = None
+
+
+def _registry_maps_final() -> bool:
+    """Whether the cached maps are complete and no retry is currently due."""
+
+    if not _build_kernel_support_maps_cached.cache_info().currsize:
+        return False
+    imported, retry_due = _registry_snapshot()
+    return not retry_due and imported == _BUILT_MODULES
+
+
+@lru_cache(maxsize=1)
+def _build_kernel_support_maps_cached():
+    global _BUILT_MODULES
+
+    # Discover the classes first: ``iter_quant_linear_kernels()`` imports the
+    # kernel modules, so snapshotting the import state before this walk would
+    # miss a module that recovers on this pass and make the next lookup rebuild
+    # the maps even though the returned map already contains its kernel.
+    classes = _registry_kernel_classes()
+    # Snapshot the modules this build saw. A module that failed to import is not
+    # in ``_QLINEAR_IMPORTED``; if it recovers later, the wrapper notices the
+    # difference and rebuilds instead of serving a map that omits it forever.
+    _BUILT_MODULES, _ = _registry_snapshot()
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
 
-    for cls in iter_quant_linear_kernels():
+    for cls in classes:
         supports_formats = cls.SUPPORTS_FORMATS
         if not isinstance(supports_formats, dict):
             raise ValueError(f"{cls.__name__}.SUPPORTS_FORMATS must be a dict of FORMAT -> priority.")
@@ -530,7 +767,155 @@ def build_kernel_support_maps():
     return auto_select_backend_order_map, supports_backend_map
 
 
-AUTO_BACKEND_KERNEL_MAPPING, BACKEND_TO_METHOD_FORMAT_MAPPING = build_kernel_support_maps()
+def build_kernel_support_maps():
+    """Return the cached ``(auto_map, supports_map)`` pair.
+
+    ``lru_cache`` alone is not single-flight: concurrent cold-start callers each
+    build their own copy and only the last result is retained, so a caller can
+    hold and mutate a map nobody will ever read again. Every retrieval takes the
+    build lock, so a ``cache_clear()`` can never turn a warm hit into an
+    unlocked miss that races the next builder and returns a different map
+    object.
+
+    The build imports every kernel module while the lock is held. A kernel that
+    reads this mapping from its own import would re-enter the build; that is
+    reported as an error instead of deadlocking on the non-reentrant lock.
+    """
+
+    global _REGISTRY_BUILD_OWNER
+
+    if _REGISTRY_BUILD_OWNER == threading.get_ident():
+        raise RuntimeError(
+            "build_kernel_support_maps() was re-entered while building the kernel registry. "
+            "A kernel module must not read the auto-select maps at import time; move the "
+            "lookup to call time."
+        )
+    with _REGISTRY_BUILD_LOCK:
+        _REGISTRY_BUILD_OWNER = threading.get_ident()
+        try:
+            # Re-check under the lock: a racing caller may have built or reset
+            # the cache while this call waited.
+            if _registry_maps_final():
+                return _build_kernel_support_maps_cached()
+            # A retryable import may be due, or a kernel may have recovered
+            # through an explicit discovery call. Re-attempt, then rebuild only
+            # if the set of imported modules actually changed.
+            _import_all_qlinear_kernels()
+            if _registry_snapshot()[0] != _BUILT_MODULES:
+                _build_kernel_support_maps_cached.cache_clear()
+            return _build_kernel_support_maps_cached()
+        finally:
+            _REGISTRY_BUILD_OWNER = None
+
+
+# Keep the ``lru_cache`` introspection helpers that callers/tests already use
+# against ``build_kernel_support_maps`` even though the public entry point is now
+# a lock-guarded wrapper.
+build_kernel_support_maps.cache_info = _build_kernel_support_maps_cached.cache_info
+
+
+def _clear_kernel_registry_caches() -> None:
+    """Drop the map cache, stale module attributes and kernel import state.
+
+    ``monkeypatch.undo()`` writes the value it read back as a real module
+    attribute. Since that value is the cached map itself, it would shadow every
+    later rebuild and make the two mapping accessors disagree. Remove attributes
+    that are exactly the cached map, while leaving distinct explicit overrides
+    in place.
+    """
+
+    global _BUILT_MODULES, _REGISTRY_BUILD_OWNER
+
+    # A reset must not race an in-progress build: clearing the snapshot while a
+    # builder is between recording it and publishing the maps would make later
+    # lookups treat an incomplete registry as final. Take the same lock, and
+    # keep the same-thread re-entry guard so a kernel cannot reset the registry
+    # from its own import (it would deadlock the non-reentrant lock).
+    if _REGISTRY_BUILD_OWNER == threading.get_ident():
+        raise RuntimeError(
+            "build_kernel_support_maps.cache_clear() was re-entered while building the "
+            "kernel registry. A kernel module must not reset the registry at import time; "
+            "move the reset to call time."
+        )
+    with _REGISTRY_BUILD_LOCK:
+        _REGISTRY_BUILD_OWNER = threading.get_ident()
+        try:
+            namespace = sys.modules[__name__].__dict__
+            if _build_kernel_support_maps_cached.cache_info().currsize:
+                auto_map, supports_map = _build_kernel_support_maps_cached()
+                for name, cached in (
+                    ("AUTO_BACKEND_KERNEL_MAPPING", auto_map),
+                    ("BACKEND_TO_METHOD_FORMAT_MAPPING", supports_map),
+                ):
+                    if namespace.get(name, _MISSING) is cached:
+                        namespace.pop(name, None)
+
+            _build_kernel_support_maps_cached.cache_clear()
+            _BUILT_MODULES = None
+            _reset_kernel_module_imports()
+        finally:
+            _REGISTRY_BUILD_OWNER = None
+
+
+build_kernel_support_maps.cache_clear = _clear_kernel_registry_caches
+
+
+_MISSING = object()
+
+
+def _module_override(name: str):
+    """Return a real module attribute that shadows the lazy accessor, if any.
+
+    Before this change the two names were plain module globals, so
+    ``monkeypatch.setattr(importer, NAME, ...)`` replaced what the selectors
+    read. Keep that working: a real entry in ``__dict__`` wins over the cache.
+    """
+
+    return sys.modules[__name__].__dict__.get(name, _MISSING)
+
+
+def get_auto_backend_kernel_mapping():
+    """Return the auto-select ``METHOD -> FORMAT -> BACKEND -> kernel`` mapping.
+
+    The kernel registry is built on first use so that ``import gptqmodel`` does
+    not import every optional backend. The mapping object is cached, so callers
+    that mutate it (tests, tooling) keep observing the same instance.
+    """
+
+    override = _module_override("AUTO_BACKEND_KERNEL_MAPPING")
+    if override is not _MISSING:
+        return override
+    return build_kernel_support_maps()[0]
+
+
+def get_backend_to_method_format_mapping():
+    """Return the cached ``METHOD -> FORMAT -> [BACKEND]`` support mapping."""
+
+    override = _module_override("BACKEND_TO_METHOD_FORMAT_MAPPING")
+    if override is not _MISSING:
+        return override
+    return build_kernel_support_maps()[1]
+
+
+_LAZY_EXPORTS = ("AUTO_BACKEND_KERNEL_MAPPING", "BACKEND_TO_METHOD_FORMAT_MAPPING")
+
+
+def __getattr__(name: str):
+    # Backwards-compatible lazy module attributes. Importing gptqmodel must not
+    # materialize the kernel registry; attribute/from-import access still does.
+    if name == "AUTO_BACKEND_KERNEL_MAPPING":
+        return get_auto_backend_kernel_mapping()
+    if name == "BACKEND_TO_METHOD_FORMAT_MAPPING":
+        return get_backend_to_method_format_mapping()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()`` and ``import *`` unless
+    # they are advertised. Keep the pre-change star-import surface intact.
+    return sorted(set(globals()) | set(_LAZY_EXPORTS))
+
+
 
 
 def debug_print_kernel_maps():
@@ -571,14 +956,14 @@ def debug_print_kernel_maps():
         return "\n".join(lines)
 
     auto_tree = {}
-    for method, fmt_map in AUTO_BACKEND_KERNEL_MAPPING.items():
+    for method, fmt_map in get_auto_backend_kernel_mapping().items():
         auto_tree[method] = {}
         for fmt, backend_map in fmt_map.items():
             entries = [f"{backend.value} -> {cls.__name__}" for backend, cls in backend_map.items()]
             auto_tree[method][fmt] = entries
 
     supports_tree = {}
-    for method, fmt_map in BACKEND_TO_METHOD_FORMAT_MAPPING.items():
+    for method, fmt_map in get_backend_to_method_format_mapping().items():
         supports_tree[method] = {}
         for fmt, backends in fmt_map.items():
             supports_tree[method][fmt] = [backend.value for backend in backends]
@@ -587,7 +972,12 @@ def debug_print_kernel_maps():
     print(render_tree("KERNEL BACKEND to METHOD/FORMAT MAPPING", supports_tree))
 
 
-if env_flag("DEBUG"):
+# ``DEBUG`` deliberately does not dump the maps here: printing them requires
+# building the registry, which would import every kernel (and optional backend)
+# at ``import gptqmodel`` and defeat the lazy registry this module provides.
+# Call ``debug_print_kernel_maps()`` explicitly, or set ``GPTQMODEL_DEBUG_KERNEL_MAPS=1``
+# when you accept the eager import cost.
+if env_flag("GPTQMODEL_DEBUG_KERNEL_MAPS", default="0"):
     debug_print_kernel_maps()
 
 
@@ -881,7 +1271,7 @@ def select_quant_linear(
 
     bits = quant_bits_width(_normalize_quant_bits(bits, format_value=format))
 
-    supported_formats = BACKEND_TO_METHOD_FORMAT_MAPPING.get(quant_method)
+    supported_formats = get_backend_to_method_format_mapping().get(quant_method)
     if supported_formats is None:
         raise ValueError(f"Unsupported quantization method: `{quant_method}`")
     if format not in supported_formats:
@@ -920,7 +1310,7 @@ def select_quant_linear(
     validated_qlinears = []
     # Handle the case where backend is AUTO.
     if backend in [BACKEND.AUTO, BACKEND.AUTO_TRAINABLE]:
-        allow_quant_linears = list(AUTO_BACKEND_KERNEL_MAPPING[quant_method].get(format, {}).items())
+        allow_quant_linears = list(get_auto_backend_kernel_mapping()[quant_method].get(format, {}).items())
         if not allow_quant_linears:
             raise ValueError(f"No auto-select kernels found for `{quant_method}` with format `{format}`.")
 
@@ -1048,3 +1438,11 @@ def select_quant_linear(
     if multi_select:
         return [qlinear]
     return qlinear
+
+
+# ``from gptqmodel.utils.importer import *`` used to export every public module
+# global (there was no ``__all__``). Keep that surface, plus the two names that
+# now resolve through ``__getattr__``.
+__all__ = sorted(
+    {name for name in globals() if not name.startswith("_")} | set(_LAZY_EXPORTS)
+)

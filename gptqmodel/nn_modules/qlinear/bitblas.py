@@ -9,6 +9,7 @@ import ctypes
 import os
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
@@ -128,19 +129,109 @@ def _is_bitblas_available() -> bool:
         except Exception as retry_exc:
             log.debug("BitBLAS import retry failed: %s", retry_exc)
             return False
-    parsed_version = version.parse(bitblas.__version__)
-    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    # Capture the attribute once. Reading ``bitblas.__version__`` inside the
+    # handler below would raise again for a module that has no ``__version__``
+    # at all, escaping ``validate_once``'s ``(bool, exception)`` contract.
+    raw_version = getattr(bitblas, "__version__", None)
+    try:
+        parsed_version = version.parse(raw_version)
+        minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    except Exception as exc:
+        # An unparsable or missing ``__version__`` means the build is unusable.
+        log.debug("BitBLAS version %r could not be parsed: %s", raw_version, exc)
+        return False
     if parsed_version < minimum_version:
         log.debug(
             "BitBLAS version %s below minimum required %s",
-            bitblas.__version__,
+            raw_version,
             MINIMUM_BITBLAS_VERSION,
         )
         return False
     return True
 
 
-BITBLAS_AVAILABLE = _is_bitblas_available()
+@lru_cache(maxsize=1)
+def _probe_bitblas_available() -> bool:
+    """Probe BitBLAS once, on first real use.
+
+    Importing BitBLAS is expensive and must not happen while the kernel
+    registry is merely being discovered. The probe is cached so repeated
+    ``validate_once`` calls stay cheap.
+    """
+
+    return _is_bitblas_available()
+
+
+_probe_cache_clear = _probe_bitblas_available.cache_clear
+
+
+def bitblas_available() -> bool:
+    """Return whether a supported BitBLAS is usable.
+
+    The legacy ``BITBLAS_AVAILABLE`` name is materialized from the probe on first
+    attribute access, so this accessor reads the same attribute when present
+    and otherwise probes.
+    """
+
+    namespace = sys.modules[__name__].__dict__
+    if "BITBLAS_AVAILABLE" in namespace:
+        return bool(namespace["BITBLAS_AVAILABLE"])
+    return _probe_bitblas_available()
+
+
+def _clear_availability_state() -> None:
+    """Drop the materialized value, the probe result and validation caches.
+
+    This is the escape hatch for tests and for long-lived processes where the
+    environment changes after the first probe (a package installed later, a
+    toolchain that becomes available). It also removes a value restored by
+    ``monkeypatch.undo()``, which is indistinguishable from an explicit
+    override once materialized.
+
+    The kernel's ``cached_validate_once()`` result is invalidated as well, or a
+    kernel that failed before the backend appeared stays unselectable until the
+    process ends.
+    """
+
+    sys.modules[__name__].__dict__.pop("BITBLAS_AVAILABLE", None)
+    _probe_cache_clear()
+    cls = globals().get("BitblasLinear")
+    if cls is not None:
+        cls.cached_validate_once.cache_clear()
+    # ``validate_quant_linear()`` keeps its own bounded cache of
+    # ``(bool, error)`` results. Clearing only the kernel-level cache leaves a
+    # stale "unavailable" answer there, and that cache short-circuits before
+    # ``validate()`` is ever called again. Import lazily: ``importer`` imports
+    # the kernel package, so a module-level import here would be circular.
+    from ...utils.importer import clear_validation_cache
+
+    clear_validation_cache()
+
+
+# ``cache_clear`` is the documented knob; keep it on the probe, extended with
+# the materialized attribute so clearing really re-arms everything.
+_probe_bitblas_available.cache_clear = _clear_availability_state
+
+
+def __getattr__(name: str):
+    if name == "BITBLAS_AVAILABLE":
+        # Materialize the probe as a normal module attribute. A plain attribute
+        # keeps ``del`` and ``monkeypatch`` semantics working: pytest reads the
+        # old value from ``__dict__`` and restores it on ``undo()``, so two
+        # consecutive patch contexts behave like they did before the lazy
+        # change.
+        value = _probe_bitblas_available()
+        sys.modules[__name__].__dict__[name] = value
+        return value
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__():
+    # ``__getattr__`` names are invisible to ``dir()``/star-import unless
+    # advertised. Keep the pre-lazy surface.
+    return sorted(set(globals()) | {"BITBLAS_AVAILABLE"})
+
+
 _BITBLAS_TARGET_ARCH_RE = pcre.compile(r"\bsm_(\d+)[a-z]*\b")
 _BITBLAS_TARGET_SM_RE = pcre.compile(r"sm_(\d+)")
 
@@ -156,8 +247,14 @@ def import_bitblas():
 
     import bitblas
 
-    parsed_version = version.parse(bitblas.__version__)
-    minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    # ``getattr`` + ``try`` keep a build with a missing or unparsable
+    # ``__version__`` on the documented ``ImportError`` path instead of letting
+    # ``AttributeError`` escape the kernel constructor.
+    try:
+        parsed_version = version.parse(getattr(bitblas, "__version__", ""))
+        minimum_version = version.parse(MINIMUM_BITBLAS_VERSION)
+    except Exception as exc:
+        raise ImportError(BITBLAS_INSTALL_HINT) from exc
     if parsed_version < minimum_version:
         raise ImportError(BITBLAS_INSTALL_HINT)
 
@@ -455,7 +552,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
         del fast_decoding  # unused, kept for signature compatibility
 
-        if not BITBLAS_AVAILABLE:
+        if not bitblas_available():
             raise ImportError(BITBLAS_INSTALL_HINT)
 
         self.TORCH_DTYPE = dtype
@@ -494,7 +591,7 @@ class BitblasBaseQuantLinear(GroupedQuantLinear):
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
-        if not BITBLAS_AVAILABLE:
+        if not bitblas_available():
             return False, ValueError(BITBLAS_INSTALL_HINT)
 
         try:

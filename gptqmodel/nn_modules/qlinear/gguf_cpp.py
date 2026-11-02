@@ -20,17 +20,51 @@ from ...utils.backend import BACKEND
 from .gguf import _GGUF_TYPE_INFO, GGUFTorchLinear
 
 
-try:
-    import llama_cpp as _llama_cpp_pkg
-    from llama_cpp import llama_cpp as _llama_cpp_lib
-    from llama_cpp._ctypes_extensions import load_shared_library as _llama_cpp_load_shared_library
+# Imported lazily by ``_require_llama_cpp``: importing llama-cpp-python costs
+# tens of milliseconds and must not happen while the kernel registry is merely
+# being discovered. The module attributes stay available for callers that read
+# them after an explicit import.
+_llama_cpp_pkg = None
+_llama_cpp_lib = None
+_llama_cpp_load_shared_library = None
+_LLAMA_CPP_IMPORT_ERROR = None
+_LLAMA_CPP_LOADED = False
+_LLAMA_CPP_LOCK = threading.Lock()
 
-    _LLAMA_CPP_IMPORT_ERROR = None
-except Exception as exc:  # pragma: no cover - optional dependency
-    _llama_cpp_pkg = None
-    _llama_cpp_lib = None
-    _llama_cpp_load_shared_library = None
-    _LLAMA_CPP_IMPORT_ERROR = exc
+
+def _require_llama_cpp():
+    """Import llama-cpp-python once and return its module objects.
+
+    The lock keeps a concurrent caller from observing the "already loaded" flag
+    before the module objects are assigned, which used to hand back
+    ``(None, None, None)`` and turn a missing backend into an ``AttributeError``
+    on ``Path(None.__file__)``.
+    """
+
+    global _LLAMA_CPP_LOADED, _LLAMA_CPP_IMPORT_ERROR
+    global _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
+
+    if _LLAMA_CPP_LOADED:
+        return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
+
+    with _LLAMA_CPP_LOCK:
+        if not _LLAMA_CPP_LOADED:
+            try:
+                import llama_cpp as llama_cpp_pkg
+                from llama_cpp import llama_cpp as llama_cpp_lib
+                from llama_cpp._ctypes_extensions import (
+                    load_shared_library as llama_cpp_load_shared_library,
+                )
+
+                _llama_cpp_pkg = llama_cpp_pkg
+                _llama_cpp_lib = llama_cpp_lib
+                _llama_cpp_load_shared_library = llama_cpp_load_shared_library
+                _LLAMA_CPP_IMPORT_ERROR = None
+            except Exception as exc:  # pragma: no cover - optional dependency
+                _LLAMA_CPP_IMPORT_ERROR = exc
+            _LLAMA_CPP_LOADED = True
+
+    return _llama_cpp_pkg, _llama_cpp_lib, _llama_cpp_load_shared_library
 
 
 class _GGMLInitParams(ctypes.Structure):
@@ -100,24 +134,25 @@ class _GGMLBridge:
     GGML_METADATA_BYTES = 1 << 20
 
     def __init__(self) -> None:
+        llama_cpp_pkg, llama_cpp_lib, load_shared_library = _require_llama_cpp()
         if _LLAMA_CPP_IMPORT_ERROR is not None:
             raise ModuleNotFoundError(
                 "GGUFCppKernel requires `llama-cpp-python` to be installed."
             ) from _LLAMA_CPP_IMPORT_ERROR
 
-        lib_dir = Path(_llama_cpp_pkg.__file__).resolve().parent / "lib"
-        self._ggml_base = _llama_cpp_load_shared_library("ggml-base", lib_dir)
-        self._ggml_cpu = _llama_cpp_load_shared_library("ggml-cpu", lib_dir)
+        lib_dir = Path(llama_cpp_pkg.__file__).resolve().parent / "lib"
+        self._ggml_base = load_shared_library("ggml-base", lib_dir)
+        self._ggml_cpu = load_shared_library("ggml-cpu", lib_dir)
         self._ggml_cuda = None
         self._ggml_cuda_error: Optional[Exception] = None
         try:
-            self._ggml_cuda = _llama_cpp_load_shared_library("ggml-cuda", lib_dir)
+            self._ggml_cuda = load_shared_library("ggml-cuda", lib_dir)
         except Exception as exc:  # pragma: no cover - optional shared library
             self._ggml_cuda_error = exc
         self._bind_functions()
 
-        self.ggml_type_f32 = int(_llama_cpp_lib.GGML_TYPE_F32)
-        self.ggml_type_f16 = int(_llama_cpp_lib.GGML_TYPE_F16)
+        self.ggml_type_f32 = int(llama_cpp_lib.GGML_TYPE_F32)
+        self.ggml_type_f16 = int(llama_cpp_lib.GGML_TYPE_F16)
         self.ggml_qtypes = {}
         for name in (
             "F32", "F16", "Q4_0", "Q4_1", "Q5_0", "Q5_1", "Q8_0", "Q8_1",
@@ -126,7 +161,7 @@ class _GGMLBridge:
             "IQ2_S", "IQ4_XS", "I8", "I16", "I32", "I64", "F64", "IQ1_M",
             "BF16", "TQ1_0", "TQ2_0", "MXFP4", "NVFP4", "Q1_0", "Q2_0",
         ):
-            value = getattr(_llama_cpp_lib, f"GGML_TYPE_{name}", None)
+            value = getattr(llama_cpp_lib, f"GGML_TYPE_{name}", None)
             if value is None:
                 value = _GGML_TYPE_ID_FALLBACK.get(name)
             if value is not None:
