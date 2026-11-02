@@ -2466,11 +2466,12 @@ Constraints enforced by `QuantizeConfig`:
 - `w4a_llama_stream` records a `(mode, recipe)` policy on each producer
   boundary. `_boundary_group` maps the post-attention residual and the MLP
   product to the MLP group; every other boundary belongs to attention.
-- `W4ANVFP4Linear` now stages a derived `_weight_e4m3` plane in `post_init`
-  from `_centered_int4_codes()` and dispatches an incoming `w4afp8` carrier to
-  `fp8_linear_prepacked`, mirroring `W4AFP8Linear`'s encoded path. The E4M3
-  plane is a non-persistent buffer, so it is never saved and never changes the
-  INT4 checkpoint.
+- `W4AFP8Linear` builds its E4M3 weight operand per forward from
+  `_centered_int4_codes()` and passes it straight to the GEMM; no full-layer
+  FP8 plane is retained between calls, so the INT4 checkpoint stays the only
+  stored weight. `W4ANVFP4Linear` still stages its own `_weight_e4m3` plane in
+  `post_init` and is unchanged by this note (NVFP4 is SM 12.1-only and is not
+  covered by the Ada validation below).
 - Version-4 NVFP4 producer quantizers are attached only to MLP boundaries; FP8
   attention boundaries pack dynamically and therefore need no calibrated
   global scale.
@@ -2481,6 +2482,8 @@ Constraints enforced by `QuantizeConfig`:
 quantizes, saves, reloads, and asserts that `q_proj` consumes `w4afp8` while
 `gate_proj` consumes `w4a_nvfp4`, that all 14 projections keep `int32`
 `qweight`, and that the derived E4M3 plane matches the INT4 weight size.
+Both the mixed-precision test and that assertion are NVFP4-gated (SM 12.1), so
+they only run on GB10-family hardware.
 
 Status: implementation and boundary contract verified on the tiny model. The
 full 1,209-row paired GSM8K Platinum gate on the real Llama 3.2 1B checkpoint

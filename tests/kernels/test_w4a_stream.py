@@ -240,12 +240,12 @@ def test_sharded_layer_launches_kernels_on_its_own_device():
 
     generator = torch.Generator(device="cuda").manual_seed(1717)
     x = torch.randn((rows, k), device="cuda", dtype=torch.bfloat16, generator=generator)
-    expected = fp8_linear(x, layer._weight_e4m3, layer.scales, None)
+    expected = fp8_linear(x, layer.fp8_weight_operand(), layer.scales, None)
 
     sharded = layer.to("cuda:1")
     torch.cuda.set_device(0)
     assert torch.cuda.current_device() == 0
-    actual = fp8_linear(x.to("cuda:1"), sharded._weight_e4m3, sharded.scales, None)
+    actual = fp8_linear(x.to("cuda:1"), sharded.fp8_weight_operand(), sharded.scales, None)
     assert actual.device == torch.device("cuda:1")
     # The guard restores the ambient device once the launch is done.
     assert torch.cuda.current_device() == 0
