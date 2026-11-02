@@ -13,7 +13,12 @@ from gptqmodel import BACKEND, GPTQModel, QuantizeConfig
 from gptqmodel.models.definitions.qwen2_5_omni import Qwen2_5_OmniGPTQ
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.quantization.config import FORMAT, RTNConfig
-from gptqmodel.utils.model import convert_gptq_v1_to_v2_format
+from gptqmodel.utils.model import (
+    convert_gptq_v1_to_v2_format,
+    get_layers_with_prefixes,
+    thinker_multimodal_model,
+    thinker_text_model,
+)
 
 
 def _tiny_omni():
@@ -69,6 +74,25 @@ def test_omni_lm_head_resolves_to_thinker():
     assert model.get_submodule(Qwen2_5_OmniGPTQ.lm_head) is model.thinker.lm_head
 
 
+def test_omni_module_tree_covers_both_thinker_layouts():
+    assert Qwen2_5_OmniGPTQ.extract_layers_node() == [
+        "thinker.model.layers",
+        "thinker.model.language_model.layers",
+    ]
+
+
+def test_omni_layers_resolve_once():
+    # transformers <5.22 puts the decoder on `thinker.model`; 5.22+ nests it
+    # under `thinker.model.language_model`. Only one layout exists per release
+    # and the missing variant must be skipped without duplicating layers.
+    model = _tiny_omni()
+    layers, layer_names = get_layers_with_prefixes(model, Qwen2_5_OmniGPTQ.extract_layers_node())
+    assert layers is not None
+    assert len(layers) == len({id(layer) for layer in layers}) == 1
+    assert layer_names[0] in ("thinker.model.layers.0", "thinker.model.language_model.layers.0")
+    assert thinker_text_model(model).layers[0] is layers[0]
+
+
 @pytest.mark.parametrize("method", ["gptq", "rtn"])
 @pytest.mark.parametrize("head_bits", [4, 8])
 @pytest.mark.parametrize("device", [
@@ -93,8 +117,8 @@ def test_omni_lm_head_quantize_save_reload(tiny_omni_checkpoint, tmp_path, metho
     head = model.model.thinker.lm_head
     assert isinstance(head, TorchLinear)
     assert head.bits == head_bits
-    assert isinstance(model.model.thinker.model.layers[0].self_attn.q_proj, TorchLinear)
-    assert not any(isinstance(module, TorchLinear) for module in model.model.thinker.visual.modules())
+    assert isinstance(thinker_text_model(model.model).layers[0].self_attn.q_proj, TorchLinear)
+    assert not any(isinstance(module, TorchLinear) for module in thinker_multimodal_model(model.model).visual.modules())
     output = tmp_path / "quantized"
     model.save(str(output))
     # Packing produces checkpoint-format zeros. Prepare the in-memory model
@@ -121,7 +145,7 @@ def test_omni_lm_head_rejects_shared_weights(tiny_omni_checkpoint, method):
     config_cls = QuantizeConfig if method == "gptq" else RTNConfig
     qcfg = config_cls(bits=4, group_size=32, lm_head=True, device="cpu", offload_to_disk=False)
     model = GPTQModel.load(str(tiny_omni_checkpoint), quantize_config=qcfg, backend=BACKEND.TORCH)
-    embedding = model.model.thinker.model.embed_tokens
+    embedding = thinker_text_model(model.model).embed_tokens
     model.model.thinker.lm_head.weight = embedding.weight
     inputs = {"input_ids": torch.arange(4, 36).unsqueeze(0), "attention_mask": torch.ones(1, 32, dtype=torch.long)}
 

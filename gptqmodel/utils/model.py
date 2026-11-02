@@ -322,6 +322,40 @@ def get_module_by_name_prefix(model, module_name: Union[List[str], str]):
     return None, ""
 
 
+def thinker_text_model(model: nn.Module) -> nn.Module:
+    """Return the text decoder owned by a Qwen Omni ``thinker`` submodule.
+
+    transformers 5.22 moved the decoder from ``thinker.model`` to
+    ``thinker.model.language_model``; older releases keep ``embed_tokens``,
+    ``layers``, ``norm`` and ``rotary_emb`` directly on ``thinker.model``.
+    """
+
+    thinker = getattr(model, "thinker", model)
+    inner = getattr(thinker, "model", thinker)
+    return getattr(inner, "language_model", inner)
+
+
+def thinker_text_prefix(model: nn.Module) -> str:
+    """Return the module path of the Qwen Omni thinker text decoder."""
+
+    thinker = getattr(model, "thinker", model)
+    inner = getattr(thinker, "model", None)
+    if inner is not None and getattr(inner, "language_model", None) is not None:
+        return "thinker.model.language_model"
+    return "thinker.model"
+
+
+def thinker_multimodal_model(model: nn.Module) -> nn.Module:
+    """Return the module that owns the thinker's visual and audio encoders.
+
+    transformers 5.22 moved them from ``thinker`` to ``thinker.model``.
+    """
+
+    thinker = getattr(model, "thinker", model)
+    inner = getattr(thinker, "model", thinker)
+    return inner if hasattr(inner, "visual") else thinker
+
+
 def get_layers_with_prefixes(model, module_name: Union[List[str], str]):
     """Resolve one or more layer containers into a flat layer list plus per-layer names.
 
