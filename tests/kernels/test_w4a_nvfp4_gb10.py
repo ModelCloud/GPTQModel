@@ -256,10 +256,15 @@ def test_nvfp4_config_and_exact_weight_planes(tmp_path):
     expected = torch.arange(128).remainder(16).sub(8).float()[:, None].expand(128, 128)
     torch.testing.assert_close(centered, expected, rtol=0, atol=0)
     assert module.qweight.dtype == torch.int32
-    # Mixed-precision attention consumes FP8 carriers, so the module stages a
-    # derived E4M3 plane in post_init. It is non-persistent and never saved.
-    assert module._weight_e4m3.numel() == module.in_features * module.out_features
-    assert module._weight_e4m3.dtype == torch.float8_e4m3fn
+    # The mixed-precision attention lane needs an E4M3 operand, but that plane
+    # is an expansion of the native INT4 codes and is staged per forward. Only
+    # the packed E2M1 planes may persist.
+    assert not hasattr(module, "_weight_e4m3")
+    assert "_weight_e4m3" not in module._WEIGHT_CACHE_NAMES
+    assert module._weight_both.numel() * module._weight_both.element_size() == 128 * 128
+    operand = module.fp8_weight_operand()
+    assert operand.dtype == torch.float8_e4m3fn and operand.numel() == 128 * 128
+    assert not hasattr(module, "_weight_e4m3")
     assert set(module.state_dict()) == {"qweight", "qzeros", "scales", "g_idx", "activation_global_scale_bits"}
     assert nvfp4_global_scale(4 * 448).item() == 1.0
     assert nvfp4_global_scale(6 * 448, recipe="nvidia").item() == 1.0

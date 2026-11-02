@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """NVFP4 activation operands for native GPTQ INT4 weight checkpoints.
 
-This backend uses two exact E2M1 planes for centered INT4 codes. The planes
-are runtime caches; the saved checkpoint retains native GPTQ qweight.
+This backend uses two exact E2M1 planes for centered INT4 codes. Those planes
+are a packed alternate layout of the native GPTQ qweight, so they may persist;
+the saved checkpoint still retains native GPTQ qweight. The E4M3 operand used
+by a mixed FP8 attention lane is an expansion of the same INT4 codes, so it is
+materialized per forward and never cached on the module.
 """
 
 from __future__ import annotations
@@ -105,7 +108,11 @@ class W4ANVFP4Linear(W4AFP8Linear):
     # run on Ada, but the NVFP4 operands may not.
     MIN_COMPUTE_CAPABILITY = (12, 1)
     HARDWARE_FEATURE = "NVFP4"
-    _WEIGHT_CACHE_NAMES = ("_weight_e4m3", "_weight_both", "_unit_weight_scales")
+    # Both entries are packed representations of the native INT4 codes:
+    # ``_weight_both`` holds two E2M1 planes (1 B/weight) and
+    # ``_unit_weight_scales`` holds their block scales. The E4M3 FP8 operand is
+    # an expansion (1 B/weight, one code per weight), so it is not a cache.
+    _WEIGHT_CACHE_NAMES = ("_weight_both", "_unit_weight_scales")
 
     @classmethod
     def validate_once(cls) -> Tuple[bool, Optional[Exception]]:
@@ -130,10 +137,6 @@ class W4ANVFP4Linear(W4AFP8Linear):
         self.register_buffer("activation_global_scale_bits", torch.ones((), dtype=torch.float32).view(torch.int32))
         self.register_buffer("_weight_both", torch.empty(0, dtype=torch.float4_e2m1fn_x2), persistent=False)
         self.register_buffer("_unit_weight_scales", torch.empty(0, dtype=torch.float8_e4m3fn), persistent=False)
-        # Mixed-precision stream: an attention projection consumes an FP8
-        # carrier while the MLP keeps NVFP4. Both operands describe the same
-        # native GPTQ INT4 weights, so only the staging differs.
-        self.register_buffer("_weight_e4m3", torch.empty(0, dtype=torch.float8_e4m3fn), persistent=False)
 
     @property
     def activation_global_scale(self) -> torch.Tensor:
@@ -153,7 +156,6 @@ class W4ANVFP4Linear(W4AFP8Linear):
         # `_centered_int4_codes` is decode-only and assumes them proven.
         self._check_native_weight_layout()
         centered = self._centered_int4_codes()
-        self._weight_e4m3 = centered.to(torch.float8_e4m3fn).contiguous()
         high = torch.floor((centered + 2.0) / 4.0)
         low = centered - 4.0 * high
         low_bytes = _pack_k(_fp4_integer_codes(low)).view(torch.uint8)
@@ -162,10 +164,21 @@ class W4ANVFP4Linear(W4AFP8Linear):
         self._weight_both = both_bytes.view(torch.float4_e2m1fn_x2)
         unit = torch.ones((self.out_features * 2, 8), device=centered.device, dtype=torch.float8_e4m3fn)
         self._unit_weight_scales = _swizzle_scales(unit)
+        # Mark readiness only after every packed cache is built. A mixed FP8
+        # attention lane reuses the inherited per-forward operand staging,
+        # which requires the same layout token contract as W4AFP8Linear.
+        self._w4a_layout_token = self._weight_layout_token()
+        self._w4a_weights_ready = True
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self._weight_both.numel() == 0:
             raise RuntimeError("NVFP4 weight cache is absent; call post_init() after loading or packing.")
+        if not self._weights_are_current():
+            raise RuntimeError(
+                "NVFP4 weights changed since post_init(); call post_init() again before inference."
+            )
+        if not self._layout_token_is_observable():
+            self._warn_unobservable_layout()
         from .w4a_activation import W4AActivation, pack_activation
         from .w4a_nvfp4_triton import nvfp4_accumulate_group, nvfp4_pack_and_swizzle
 
@@ -243,13 +256,12 @@ class W4ANVFP4Linear(W4AFP8Linear):
 
         Mixed-precision recipes keep the MLP on NVFP4 and step attention down
         to FP8. Both operands describe one INT4 weight tensor, so the FP8 lane
-        reuses the E4M3 staging that ``W4AFP8Linear.post_init`` builds.
+        reuses the inherited per-forward E4M3 staging. Nothing expanded is
+        retained between calls.
         """
         from .w4a_activation import pack_activation
         from .w4a_triton import fp8_linear_prepacked
 
-        if self._weight_e4m3.numel() != self.in_features * self.out_features:
-            raise RuntimeError("FP8 weight cache is absent; call post_init() after loading or packing.")
         if x.shape[-1] != self.in_features:
             raise ValueError("W4AFP8 requires a matching scale-aware FP8 activation.")
         needs_rotation = bool(self.online_full_had or self.online_partial_had)
@@ -258,8 +270,9 @@ class W4ANVFP4Linear(W4AFP8Linear):
         if needs_rotation and not x.rotation_applied:
             rotated = self._apply_rotation_to_input(x.decode(torch.float32))
             x = pack_activation(rotated, "w4afp8", model_dtype=x.model_dtype)
+        weight = self.fp8_weight_operand()
         result = fp8_linear_prepacked(
-            x.codes, x.scales, self._weight_e4m3, self.scales, self.bias, torch.float32,
+            x.codes, x.scales, weight, self.scales, self.bias, torch.float32,
         )
         result = result.reshape(x.shape[:-1] + (self.out_features,))
         return result.to(x.model_dtype)
