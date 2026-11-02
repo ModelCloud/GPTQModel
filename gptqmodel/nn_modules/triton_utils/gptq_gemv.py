@@ -35,8 +35,10 @@ K       cdna tile      rdna4 tile     gain
 ======  =============  =============  ========
 
 RDNA4 is wave32, so ``num_warps=4`` covers 128 lanes of a CTA against CDNA's
-wave64 ``num_warps=8`` (512 lanes); the wider ``block_n`` with fewer warps is
-what wins on hardware, and it wins on every shape measured.
+wave64 ``num_warps=8`` (512 lanes).  The wider ``block_n`` with fewer warps is
+what wins at every K in the table above; the one measured exception is
+K=8192/N=2048, where ``num_warps=8`` was marginally faster (44.1 vs 45.6 us),
+so the shipped tile trades that single point for the rest.
 """
 
 from typing import NamedTuple
@@ -62,8 +64,12 @@ class GemvLaunch(NamedTuple):
 _GEMV_LAUNCH_CONFIGS: dict[str, GemvLaunch] = {
     # Measured on gfx950 (MI350X/MI355X) across K,N in 896..17408.
     "cdna4": GemvLaunch(max_block_k=512, block_n=8, num_warps=8),
-    # Measured on gfx1201 (R9700): block_n=16 / num_warps=4 wins for K>=3584
-    # (1.09x-1.17x) and is within 2% at K=2048.  See the module docstring.
+    # Measured on gfx1201 (R9700): block_n=16 / num_warps=4 beats the
+    # block_n=8 tile at K=2048 (1.09x), K=3584 (1.08x), K=4096 (1.07x) and
+    # K=5120 (1.04x).  At K=8192/N=2048 the (block_n=16, num_warps=8) tile was
+    # marginally best (44.1 vs 45.6 us); num_warps=4 is kept because it wins at
+    # every other measured K.  See the module docstring table and
+    # docs/rocm-rdna4.md.
     "rdna4": GemvLaunch(max_block_k=512, block_n=16, num_warps=4),
 }
 

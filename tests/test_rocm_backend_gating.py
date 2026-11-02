@@ -53,6 +53,12 @@ def teardown_function(_function):
     arch_utils.clear_arch_cache()
     awq_scheduler.clear_awq_triton_plan_cache()
     awq_scheduler.clear_awq_triton_rules()
+    # ``validate_once`` is lru-cached per class. A test that simulates ROCm would
+    # otherwise leave a fake refusal cached and break later CUDA constructions in
+    # other test modules on NVIDIA hardware.
+    qqq_module.QQQLinear.cached_validate_once.cache_clear()
+    VPTQCudaLinear.cached_validate_once.cache_clear()
+    gguf_triton_module.GGUFTritonKernel.cached_validate_once.cache_clear()
 
 
 

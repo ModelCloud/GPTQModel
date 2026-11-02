@@ -40,15 +40,56 @@ def test_quantize_tuning_keeps_the_hipblaslt_opt_in(monkeypatch, value):
 
     assert rocm.quantize_tuning("gfx1201")["blas_backend"] == value.strip().lower()
 
-@pytest.mark.parametrize("value", ["", "0", "off", "default", "bogus"])
+@pytest.mark.parametrize("value", ["", "0", "off", "default"])
+def test_quantize_tuning_preserves_disabled_backend_tokens(monkeypatch, value):
+    """Opt-outs must stay no-ops, not silently resolve to rocBLAS."""
+
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+
+    tuning = rocm.quantize_tuning("gfx1201")
+
+    assert tuning["blas_backend"] == value
+    assert tuning["blas_backend"] in rocm.QUANT_BLAS_BACKEND_DISABLED
+
+
+@pytest.mark.parametrize("value", ["bogus", "ROCBLASX"])
 def test_quantize_tuning_falls_back_to_rocblas_for_unknown_values(monkeypatch, value):
     monkeypatch.setattr(rocm, "IS_ROCM", True)
     monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
 
     assert rocm.quantize_tuning("gfx1201")["blas_backend"] == "rocblas"
-    # "Keep torch's default backend" requests make the switch a no-op.
-    if value in ("", "0", "off", "default"):
-        assert value in rocm.QUANT_BLAS_BACKEND_DISABLED
+
+
+@pytest.mark.parametrize("value", ["", "0", "off", "default"])
+def test_disabled_tokens_do_not_switch_the_blas_backend(monkeypatch, value):
+    """Drive ``quant_blas_backend()``: a disabled token must make no setter call."""
+
+    class _FakeBackend:
+        def __init__(self, name):
+            self.name = name
+
+    calls = []
+    state = {"current": _FakeBackend("Cublaslt")}
+
+    def getter():
+        def preferred(new_value=None):
+            if new_value is None:
+                return state["current"]
+            calls.append(new_value)
+            state["current"] = _FakeBackend("Cublas")
+
+        return preferred
+
+    monkeypatch.setattr(rocm, "IS_ROCM", True)
+    monkeypatch.setenv(rocm.QUANT_BLAS_BACKEND_ENV, value)
+    monkeypatch.setattr(rocm, "_preferred_blas_library_getter", getter)
+
+    with rocm.quant_blas_backend("gfx1201"):
+        pass
+
+    assert calls == [], "a disabled token must leave torch's backend unchanged"
+    assert state["current"].name == "Cublaslt"
 
 def test_quantize_tuning_on_non_rocm_hosts(monkeypatch):
     monkeypatch.setattr(rocm, "IS_ROCM", False)
@@ -85,6 +126,7 @@ def test_quant_blas_backend_uses_quantize_tuning(monkeypatch):
                 return state["current"]
             calls.append(value)
             state["current"] = _FakeBackend("Cublas")
+            return None
 
         return preferred
 

@@ -34,18 +34,30 @@ import torch
 
 # A single source of truth for both backends. Warp-level intrinsics are written
 # against ``warpSize`` because the wavefront width is 64 lanes on CDNA (gfx9xx),
-# 32 lanes on RDNA (gfx11xx/gfx12xx), and 32 on NVIDIA.  The synchronisation
-# mask type is 64-bit on HIP and 32-bit on CUDA, but the *active* mask is taken
-# from ``__activemask()`` at runtime so no wave64 assumption is baked into the
-# reduction: on a wave32 target a hard-coded 64-bit all-ones mask would name
-# lanes that do not exist in the wave.
+# 32 lanes on RDNA (gfx11xx/gfx12xx), and 32 on NVIDIA.
+#
+# The reduction mask must be architecture-correct, not just wave-width-correct:
+#
+# * HIP waves are lockstep, so ``__activemask()`` is always the whole wave and
+#   is the portable way to name it on wave32 RDNA and wave64 CDNA alike.  A
+#   hard-coded 64-bit all-ones mask would name lanes that do not exist on a
+#   wave32 target.
+# * CUDA warps are *not* lockstep (Volta+ independent thread scheduling), so
+#   ``__shfl_down_sync(__activemask(), ...)`` is incorrect: lanes can run
+#   different numbers of ``column`` loop iterations and return a partial active
+#   mask, making the shuffle read lanes outside it (undefined values).  NVIDIA
+#   guidance requires the full warp mask (or ``FULL_MASK``) for a
+#   synchronising reduction.  The whole warp reaches this point together, so
+#   the full mask is both valid and required.
 _SOURCE = r'''
 #ifdef __HIP_PLATFORM_AMD__
 typedef unsigned long long gsq_mask_t;
 #define GSQ_FULL_MASK ((gsq_mask_t)0xffffffffffffffffULL)
+#define GSQ_REDUCE_MASK __activemask()
 #else
 typedef unsigned int gsq_mask_t;
 #define GSQ_FULL_MASK ((gsq_mask_t)0xffffffffU)
+#define GSQ_REDUCE_MASK GSQ_FULL_MASK
 #endif
 
 extern "C" {
@@ -156,7 +168,7 @@ __global__ void gsq_scale_reduce(
         sum += terms[row*columns+column];
     }
     for (int offset = warpSize/2; offset > 0; offset >>= 1) {
-        sum += __shfl_down_sync(__activemask(), sum, offset, warpSize);
+        sum += __shfl_down_sync(GSQ_REDUCE_MASK, sum, offset, warpSize);
     }
     if (lane == 0) grad_scales[index] = sum;
 }

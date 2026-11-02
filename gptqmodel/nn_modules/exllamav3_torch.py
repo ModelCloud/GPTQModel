@@ -248,17 +248,37 @@ def _codebook_lut(
     raise ValueError(f"Unsupported EXL3 codebook: {codebook}")
 
 
+def _hadamard_for(x: torch.Tensor) -> torch.Tensor:
+    """Return the cached 128x128 Hadamard matrix in ``x``'s device and dtype.
+
+    ``_hadamard_128`` is cached in FP32, but ``x`` is FP16/BF16 on an
+    accelerator (``_forward_eager`` casts to FP16 off CPU). ``torch.matmul``
+    requires matching dtypes, so an FP32 matrix against FP16 activations raised
+    on ROCm. Cast to the activation dtype (cached per dtype) so the fused
+    EQUALITY backend executes instead of failing at the first forward.
+    """
+    had = _hadamard_128(x.device.type, x.device.index)
+    if had.dtype != x.dtype:
+        had = _hadamard_128_as(x.device.type, x.device.index, x.dtype)
+    return had
+
+
+@lru_cache(maxsize=None)
+def _hadamard_128_as(device_type: str, device_index: int | None, dtype: torch.dtype) -> torch.Tensor:
+    return _hadamard_128(device_type, device_index).to(dtype=dtype)
+
+
 def _apply_hadamard_left(x: torch.Tensor) -> torch.Tensor:
     if x.shape[0] % 128 != 0:
         raise ValueError(f"EXL3 expects in_features to be divisible by 128, got {x.shape[0]}.")
-    had = _hadamard_128(x.device.type, x.device.index)
+    had = _hadamard_for(x)
     return (had @ x.view(-1, 128, x.shape[1])).view_as(x)
 
 
 def _apply_hadamard_right(x: torch.Tensor) -> torch.Tensor:
     if x.shape[1] % 128 != 0:
         raise ValueError(f"EXL3 expects out_features to be divisible by 128, got {x.shape[1]}.")
-    had = _hadamard_128(x.device.type, x.device.index)
+    had = _hadamard_for(x)
     return (x.view(x.shape[0], -1, 128) @ had).view_as(x)
 
 

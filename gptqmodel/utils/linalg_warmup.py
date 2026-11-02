@@ -162,9 +162,10 @@ def _run_quantize_prewarm(
     ``None`` itself for the full historical payload).
 
     The launch-cost figures below were measured on CDNA4 (MI350X, gfx950) unless
-    stated otherwise; RDNA4 (gfx120*) has not been measured yet, so its payload
-    is deliberately a conservative subset and must be validated by the RDNA4
-    benchmark script.
+    stated otherwise.  RDNA4 (gfx120*) has its own measured payload:
+    ``_RDNA4_PREWARM_GROUPS`` in :mod:`gptqmodel.utils.rocm` records the
+    per-group cold costs measured on gfx1201 (R9700) and the reason the
+    ``shape`` group is dropped.
 
     An accelerator runtime resolves a kernel's code object lazily: the first launch
     of each distinct kernel pays a module load, measured at 3-28 ms per kernel on

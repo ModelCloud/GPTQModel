@@ -134,6 +134,21 @@ def _make_module(in_features: int, out_features: int, dtype: torch.dtype,
     return module
 
 
+def _dense_weight_candidates(module: TorchLinear) -> list[str]:
+    """Names of floating tensors large enough to be a full dense weight."""
+    shape = (module.in_features, module.out_features)
+    found = []
+    for name, value in vars(module).items():
+        if not torch.is_tensor(value) or not value.is_floating_point():
+            continue
+        if value.dim() == 2 and tuple(value.shape) in (shape, (shape[1], shape[0])):
+            found.append(f"{name}{tuple(value.shape)}")
+    for name, value in module.named_buffers():
+        if value.is_floating_point() and value.dim() == 2 and tuple(value.shape) in (shape, (shape[1], shape[0])):
+            found.append(f"buffer:{name}{tuple(value.shape)}")
+    return found
+
+
 def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
     torch.manual_seed(810)
     in_features, out_features = shape
@@ -148,6 +163,13 @@ def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
         )
     torch.cuda.synchronize()
     assert visible.dtype == dtype
+    # Storage rule: the fused GEMV path must consume packed weights only and must
+    # not install a dense/dequantized copy on the module.
+    assert _dense_weight_candidates(module) == [], "forward retained a dense weight"
+    with torch.inference_mode():
+        again = module(x)
+    assert again.dtype == dtype
+    assert _dense_weight_candidates(module) == [], "repeated forward retained a dense weight"
 
     # Arithmetic accuracy: raw FP32 accumulation against the independent FP64 oracle.
     drift = (raw.double() - accumulation).abs()

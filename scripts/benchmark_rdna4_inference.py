@@ -31,7 +31,7 @@ legitimately contains no ``v_wmma``, while the GEMM kernel does.  Each row also
 records the distinct ``v_wmma*`` mnemonics it saw.  If the JIT cache has no
 assembly the script falls back to scanning files under ``TRITON_DUMP_DIR``
 (produced with ``AMDGCN_ENABLE_DUMP=1`` set *before* compilation), and if
-neither yields text it prints ``v_wmma: unknown（未取得 amdgcn）``.  It never
+neither yields text it prints ``v_wmma: unknown (no amdgcn dump)``.  It never
 reports a hit it did not see.
 
 ``--dry-run`` prints the plan and exits 0; no GPU is needed.  Without a visible
@@ -63,7 +63,7 @@ DEFAULT_DTYPE = "float16"
 DEFAULT_BITS = 4
 DEFAULT_GROUP_SIZE = 128
 
-V_WMMA_UNKNOWN = "v_wmma: unknown（未取得 amdgcn）"
+V_WMMA_UNKNOWN = "v_wmma: unknown (no amdgcn dump)"
 
 
 def parse_args() -> argparse.Namespace:
@@ -263,21 +263,33 @@ def _asm_from_jit(jit_fn) -> tuple[str | None, str | None]:
     return best, name
 
 
-def _asm_from_dump_dir() -> tuple[str | None, str | None]:
+def _asm_from_dump_dir(kernel: str | None = None) -> tuple[str | None, str | None]:
+    """Return one dumped ``.amdgcn`` text for ``kernel``, or ``(None, None)``.
+
+    Triton writes a dump directory per compiled specialization, and a reused
+    ``TRITON_DUMP_DIR`` also holds dumps from earlier dequantization or other
+    kernel compilations. Picking the newest file unconditionally would attribute
+    another kernel's assembly to the requested row, so every candidate must name
+    the requested kernel before it is accepted.
+    """
+
     dump_dir = os.getenv("TRITON_DUMP_DIR")
     if not dump_dir:
         return None, None
     root = Path(dump_dir)
     if not root.is_dir():
         return None, None
-    candidates = sorted(root.rglob("*.amdgcn"), key=lambda path: path.stat().st_mtime)
+    candidates = sorted(root.rglob("*.amdgcn"), key=lambda path: path.stat().st_mtime, reverse=True)
     if not candidates:
         return None, None
-    path = candidates[-1]
-    try:
-        return path.read_text(errors="replace"), str(path)
-    except OSError:
-        return None, None
+    for path in candidates:
+        if kernel is not None and kernel not in str(path):
+            continue
+        try:
+            return path.read_text(errors="replace"), str(path)
+        except OSError:
+            continue
+    return None, None
 
 
 def _wmma_ops(text: str) -> list[str]:
@@ -308,7 +320,7 @@ def _asm_report(source: str, kernel: str | None) -> tuple[bool | None, str, str 
     if text:
         return (bool(_wmma_ops(text)), f"{label}[{source}]", None, _wmma_ops(text))
 
-    text, path = _asm_from_dump_dir()
+    text, path = _asm_from_dump_dir(kernel)
     if text:
         return (bool(_wmma_ops(text)), f"dump:{path}[{source}]", path, _wmma_ops(text))
     return None, V_WMMA_UNKNOWN, None, []

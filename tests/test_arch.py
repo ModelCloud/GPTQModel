@@ -103,6 +103,31 @@ def test_sm89_device_properties_without_gcnarch(monkeypatch):
     assert arch.gate_limits(device) == (0, 0)
 
 
+def test_wave_size_string_form_matches_device_form(monkeypatch):
+    # gfx9x non-cdna4 targets are wave64; the string form must agree with the
+    # device form instead of falling through to a device-0 query.
+    _fake_device(monkeypatch, "gfx942", warp_size=64)
+    assert arch.wave_size("gfx942") == 64
+    assert arch.wave_size(torch.device("cuda:0")) == 64
+    assert arch.wave_size("gfx90a") == 64
+    assert arch.wave_size("gfx1100") == 32
+
+
+def test_non_cuda_device_reports_no_rocm_arch(monkeypatch):
+    _fake_device(monkeypatch, "gfx1201")
+
+    def _forbidden_current_device():
+        raise AssertionError("a non-cuda device must not initialize the GPU context")
+
+    monkeypatch.setattr(torch.cuda, "current_device", _forbidden_current_device)
+    for device in (torch.device("cpu"), torch.device("meta")):
+        assert arch.rocm_arch(device) is None
+        assert arch.arch_class(device) == "other"
+        assert arch.gate_limits(device) == (0, 0)
+        assert arch.is_rocm_fused_arch(device) is False
+        assert arch.wave_size(device) == 32
+
+
 def test_property_query_failure_returns_none(monkeypatch):
     monkeypatch.setattr(torch.version, "hip", "7.16.26385")
 

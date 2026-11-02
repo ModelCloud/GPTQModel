@@ -281,13 +281,28 @@ def run(args: argparse.Namespace) -> int:
     record("calibration_tokenize", seconds)
 
     blas_before = _blas_report()
+    # ``device_map`` places the *forwarded* model, not the quantization device:
+    # a non-quantize load is always CPU-placed and the loader auto-selects
+    # ``quantize_config.device`` when it is unset. Passing ``device_map`` here
+    # would therefore quantize on an auto-selected GPU while sync/VRAM reporting
+    # watches ``--device``. Select the quantization device explicitly instead
+    # (the loader rejects supplying both).
+    config.device = str(device)
+    # Even with ``config.device`` set, the module looper expands it to *every*
+    # visible device of the same type and round-robins layers across them, so a
+    # multi-GPU host would silently benchmark other GPUs while sync/VRAM
+    # reporting watches ``--device``. Restrict the compute pool to that one
+    # device so the numbers belong to ``--device``.
+    config.compute_device_filter = lambda devices: [
+        candidate for candidate in devices
+        if torch.device(candidate) == device
+    ]
     seconds, model = _timed(
         device,
         lambda: GPTQModel.load(
             args.model,
             quantize_config=config,
             dtype=dtype,
-            device_map={"": str(device)},
         ),
     )
     record("model_load", seconds)

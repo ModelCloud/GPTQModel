@@ -51,8 +51,10 @@ def quantize_tuning(device=None) -> dict:
 
     ``blas_backend``
         Nominal BLAS selection for the quantize phase: ``"rocblas"`` (default),
-        ``"hipblaslt"``/``"cublaslt"`` (experimental), or ``"default"`` on
-        non-ROCm hosts, where no override is applied.
+        ``"hipblaslt"``/``"cublaslt"`` (experimental), a disabled opt-out token
+        (``""``/``"0"``/``"off"``/``"default"``/``"hipblaslt"``/``"cublaslt"``)
+        preserved verbatim so ``quant_blas_backend`` leaves torch's backend
+        unchanged, or ``"default"`` on non-ROCm hosts.
 
         hipBLASLt does ship Tensile libraries for ``gfx1200``/``gfx1201``/
         ``gfx1250`` (the ``hipblaslt/library/`` directories exist), so this is
@@ -82,7 +84,15 @@ def _rocm_quantize_tuning(device=None) -> dict:
     """ROCm quantize tuning without re-checking ``IS_ROCM`` (callers assert it)."""
 
     requested = _requested_quant_blas_backend()
-    blas_backend = requested if requested in _QUANT_BLAS_BACKEND_CHOICES else QUANT_BLAS_BACKEND_DEFAULT
+    # Disabled tokens (``""``/``0``/``off``/``default``) must survive resolution so
+    # ``quant_blas_backend`` can treat them as "keep torch's backend". Only an
+    # unrecognised *name* falls back to the rocBLAS default.
+    if requested in QUANT_BLAS_BACKEND_DISABLED:
+        blas_backend = requested
+    elif requested in _QUANT_BLAS_BACKEND_CHOICES:
+        blas_backend = requested
+    else:
+        blas_backend = QUANT_BLAS_BACKEND_DEFAULT
     cls = arch_class(device)
     prewarm_ops = _RDNA4_PREWARM_GROUPS if cls == "rdna4" else None
     return {"blas_backend": blas_backend, "amp": False, "prewarm_ops": prewarm_ops}

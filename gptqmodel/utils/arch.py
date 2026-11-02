@@ -37,9 +37,10 @@ __all__ = [
 ]
 
 
-# Conservative defaults for the fused small-M GPTQ kernel.  ``cdna4`` keeps the
-# values that were measured on gfx950; RDNA4 inherits them provisionally (see
-# ``gate_limits``) until the crossover is re-measured on gfx120*.
+# Fused small-M GPTQ kernel gates, measured per architecture.  ``cdna4`` keeps
+# the values that were measured on gfx950; ``rdna4`` has its own measured bound
+# below (see ``gate_limits``).  ``cdna4`` values are a compatibility contract
+# pinned by tests -- do not retune them.
 _CDNA4_GATE = (16, 5120)
 # RDNA4 crossover measured on an AMD Radeon AI PRO R9700 (gfx1201, HIP
 # 7.16.26385) with the (32, 32) tile: the fused small-M GEMM beat
@@ -95,13 +96,24 @@ def normalize_arch(name) -> str:
     return text.split(":", 1)[0].strip()
 
 
-def _device_index(device: torch.device | str | int | None) -> int:
+def _device_index(device: torch.device | str | int | None) -> int | None:
+    """Resolve the accelerator index for ``device`` (``None`` for non-CUDA types).
+
+    ``torch.cuda`` reuses the ``cuda`` namespace for HIP, so an int, a bare
+    ``cuda``/``cuda:N`` device, and ``None`` (the current device) all name a GPU.
+    A ``cpu``, ``xpu``, or ``meta`` device must *not* fall through to
+    ``torch.cuda.current_device()``: that would initialize the HIP context and
+    report the current GPU's architecture for an unrelated device.
+    """
+
     if device is None:
         return torch.cuda.current_device()
     if isinstance(device, int):
         return device
     if not isinstance(device, torch.device):
         device = torch.device(device)
+    if device.type != "cuda":
+        return None
     if device.index is not None:
         return device.index
     return torch.cuda.current_device()
@@ -127,6 +139,9 @@ def rocm_arch(device: torch.device | str | int | None = None) -> str | None:
     try:
         index = _device_index(device)
     except Exception:
+        return None
+    if index is None:
+        # Not a GPU device (``cpu``/``xpu``/``meta``): no ROCm architecture.
         return None
 
     key = (index, is_rocm)
@@ -201,6 +216,17 @@ def wave_size(device_or_arch=None) -> int:
         return 32
     if cls == "cdna4":
         return 64
+
+    # Registered families miss gfx9x targets that are not cdna4 (gfx90a, gfx942).
+    # They are wave64, and an architecture *string* has no device to query, so
+    # classify them from the string instead of falling back to device 0.
+    arch = _resolve_arch(device_or_arch)
+    if arch:
+        if arch.startswith("gfx9"):
+            return 64
+        if arch.startswith("gfx1"):
+            return 32
+
     if torch.version.hip is None:
         # NVIDIA warps are 32 lanes wide; MPS/CPU have no wavefront concept.
         return 32
@@ -208,6 +234,8 @@ def wave_size(device_or_arch=None) -> int:
     # Unregistered ROCm target: prefer the runtime's own value when available.
     try:
         index = _device_index(device_or_arch)
+        if index is None:
+            return 32
         return int(torch.cuda.get_device_properties(index).warp_size)
     except Exception:
         return 32

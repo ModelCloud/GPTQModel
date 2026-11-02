@@ -213,13 +213,29 @@ def _dense_weight_candidates(module: TorchLinear) -> list[str]:
 def test_no_dense_weight_retained_after_init_and_forward_paths():
     # Storage rule (AGENTS.md): the fused kernels must consume packed weights
     # only. ``GPTQ_TORCH_CACHE_WEIGHTS`` stays off, and no fallback dequant
-    # result may be installed on the module. Toggling the legacy cache shim
-    # must not resurrect a dense copy.
+    # result may be installed on the module. This exercises the *actual*
+    # forward paths (no ROCm device here, so both the M=1 decode and the
+    # small-M GEMM take the dequantize+matmul fallback), then checks the
+    # persistent state after the first and after repeated forwards. Toggling
+    # the legacy cache shim must not resurrect a dense copy either.
     import warnings
 
     module = _cpu_module(in_features=512, out_features=256)
     assert module._cache_enabled is False
     assert _dense_weight_candidates(module) == []
+
+    # Probe both fallback branches explicitly (the CPU host has no fused ROCm
+    # kernel): M=1 is the GEMV branch and M=4 the small-M GEMM branch, and both
+    # fall through to dequantize+matmul here.
+    assert module._can_use_rocm_gemv(torch.randn(1, 512)) is False
+    assert module._can_use_rocm_gemm(torch.randn(4, 512)) is False
+
+    for _ in range(2):
+        with torch.inference_mode():
+            for rows in (1, 4):
+                out = module(torch.randn(rows, 512, dtype=torch.float16))
+                assert out.shape == (rows, 256)
+                assert _dense_weight_candidates(module) == [], "forward retained a dense weight"
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", FutureWarning)
@@ -297,6 +313,13 @@ def _assert_gemm_case(dtype, shape, group_size, desc_act, bias, bits, m):
     torch.cuda.synchronize()
     assert visible.dtype == dtype
     assert raw.shape == (m, out_features)
+    # Storage rule: the fused GEMM / RDNA4 BF16 split path must not leave a dense
+    # or dequantized weight installed on the module after the forward.
+    assert _dense_weight_candidates(module) == [], "forward retained a dense weight"
+    with torch.inference_mode():
+        again = module(x)
+    assert again.dtype == dtype
+    assert _dense_weight_candidates(module) == [], "repeated forward retained a dense weight"
 
     # Arithmetic accuracy: raw FP32 accumulation against the independent FP64 oracle.
     drift = (raw.double() - accumulation).abs()

@@ -209,6 +209,9 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         self.weight_block_size = block_size
         self.weight_scale_semantics = _normalize_fp8_scale_semantics(weight_scale_semantics)
         self._scaled_mm_hard_disabled = False
+        # Set when a HIP build cannot cast this format natively, so later forwards
+        # go straight to the validated CPU path instead of retrying the GPU cast.
+        self._native_dequant_disabled = False
 
         if self.weight_scale_method == "block" and self.weight_block_size is not None:
             block_rows, block_cols = self.weight_block_size
@@ -387,6 +390,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
             self.bias = None
 
         self._scaled_mm_hard_disabled = False
+        self._native_dequant_disabled = False
         self._invalidate_compiled()
 
     @torch.inference_mode()
@@ -418,6 +422,7 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         else:
             self.bias = None
         self._scaled_mm_hard_disabled = False
+        self._native_dequant_disabled = False
         self._invalidate_compiled()
 
     def _resolve_target(self, device=None, dtype=None) -> tuple[torch.device, torch.dtype]:
@@ -465,20 +470,24 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if target_device.type == "cuda" and not IS_ROCM and not device_supports_native_fp8(target_device):
             prefer_cpu_dequant = True
 
-        if not prefer_cpu_dequant:
+        if not prefer_cpu_dequant and not self._native_dequant_disabled:
             try:
                 return self._dequantize_native(target_device=target_device, target_dtype=target_dtype)
             except Exception as exc:
-                if target_device.type != "cuda":
+                # This is a *ROCm* probe only.  HIP builds advertise FP8 support
+                # differently from CUDA and ``get_device_capability`` cannot be
+                # trusted there, so the native cast is attempted once instead.
+                # On gfx1201 both ``float8_e4m3fn`` and ``float8_e4m3fnuz`` casts
+                # work (measured), so this only fires on builds that lack one.
+                # On NVIDIA a failure is a real error (including OOM) and must
+                # propagate instead of silently turning into a CPU copy.
+                if not IS_ROCM or target_device.type != "cuda":
                     raise
-                # ROCm builds advertise FP8 differently from CUDA, and
-                # ``get_device_capability`` cannot be trusted there, so the
-                # native cast is probed by attempting one instead.  On gfx1201
-                # both ``float8_e4m3fn`` and ``float8_e4m3fnuz`` casts work
-                # (measured), so this only fires on builds that lack one.
+                self._native_dequant_disabled = True
                 log.warn.once(
                     f"FP8 native `{self.fp8_format}` dequantization on {target_device} failed "
-                    f"({type(exc).__name__}: {exc}); falling back to CPU dequantization."
+                    f"({type(exc).__name__}: {exc}); falling back to CPU dequantization "
+                    "for the rest of this module's lifetime."
                 )
 
         return self._dequantize_cpu(target_device=target_device, target_dtype=target_dtype)
@@ -490,9 +499,13 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return (weight / scale_inv).transpose(0, 1).contiguous()
 
     def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
+        # ``dequantize_fp8`` treats ``scale_inv`` heuristically (it multiplies
+        # when every value is <= 1), whereas this module's inverse-scale
+        # semantics always divide. Pass the reciprocal as an ordinary scale so
+        # the CPU fallback is exactly the arithmetic of ``_dequantize_native``.
         weight = dequantize_fp8(
             self.weight.to(device="cpu"),
-            scale_inv=self.weight_scale_inv.to(device="cpu"),
+            scale=torch.reciprocal(self.weight_scale_inv.to(device="cpu", dtype=torch.float32)),
             axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
             target_dtype=target_dtype,
         )

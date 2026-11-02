@@ -150,12 +150,15 @@ single run, not a tuned or repeated benchmark.
 ### Inference numerics (fused GPTQ kernels, gfx1201)
 
 `tests/kernels/test_gptq_rocm_gemv.py` (20 passed) and
-`tests/kernels/test_gptq_rocm_gemm.py` (43 passed) compare the fused kernels
+`tests/kernels/test_gptq_rocm_gemm.py` (44 passed) compare the fused kernels
 against an independent FP64 Torch oracle at `rtol=atol=2e-3` for 2/4/8-bit,
-group sizes 32/64/128, and several K/N shapes; both assert the output dtype
-equals the input dtype. Dense-weight residency is checked separately: a reloaded
-4-bit checkpoint exposes packed `qweight`/`scales`/`qzeros` only, no dequantized
-copy is retained after forward, and `GPTQ_TORCH_CACHE_WEIGHTS` stays unset.
+group sizes 128 and 256, and several K/N shapes; both assert the output dtype
+equals the input dtype. Dense-weight residency is judged from the module's
+persistent state after the first *and* repeated forwards (the fused GEMV/GEMM,
+the RDNA4 BF16 split path, and the CPU dequantize+matmul fallback at M=1 and
+small M): no dense/dequantized copy is installed, `qweight`/`scales`/`qzeros`
+remain the only full-size resident tensors, and `GPTQ_TORCH_CACHE_WEIGHTS` stays
+unset.
 
 ### Activation dtype gate for the fused small-M GEMM (gfx1201)
 
@@ -229,5 +232,5 @@ cd $REPO && $ROCM_PY -m pytest tests/kernels/test_gptq_rocm_gemv.py tests/kernel
 
 # Benchmarks
 cd $REPO && $ROCM_PY scripts/benchmark_rdna4_quant.py --model <local-model> --method gptq --bits 4
-cd $REPO && $ROCM_PY scripts/benchmark_rdna4_inference.py --model <local-model>
+cd $REPO && $ROCM_PY scripts/benchmark_rdna4_inference.py --device cuda:0
 ```

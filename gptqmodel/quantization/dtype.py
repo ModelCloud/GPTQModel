@@ -516,7 +516,12 @@ def _advertised_rocm_linear_dtypes() -> frozenset[torch.dtype]:
 
     supported = {torch.float16, torch.float32, torch.bfloat16}
     supported.update(_FLOAT8_DTYPES)
-    supported.update(_FLOAT4_PACKED_DTYPES)
+    # FP4 is deliberately *not* advertised on ROCm: ``TorchFP4Linear`` executes
+    # through torchao's NVIDIA NVFP4 path, which has no validated HIP kernel.
+    # Advertising it made ``device_supports_native_fp4(..., require_validation=
+    # False)`` return True for every AMD GPU, so FP4 passthrough checkpoints were
+    # routed to a wrapper that fails at the first forward (a behaviour change for
+    # existing gfx9x CDNA users too). Re-add only with a validated ROCm FP4 path.
     return frozenset(supported)
 
 

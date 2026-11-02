@@ -394,6 +394,21 @@ def test_device_supports_native_fp4_reports_capability(monkeypatch):
     assert device_supports_dtype(torch.device("cuda", 0), torch.float4_e2m1fn_x2) is False
 
 
+@pytest.mark.skipif(not hasattr(torch, "float4_e2m1fn_x2"), reason="float4 packed dtype not available")
+def test_rocm_does_not_advertise_unvalidated_nvfp4(monkeypatch):
+    """FP4 routing must not claim ROCm support: torchao's NVFP4 GEMM is CUDA-only."""
+
+    _DTYPE_SUPPORT_CACHE.clear()
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385")
+    monkeypatch.setattr("torch.cuda.is_available", lambda: True)
+
+    support = get_device_dtype_support(torch.device("cuda", 0))
+    assert torch.float4_e2m1fn_x2 not in support.advertised_linear_dtypes
+    assert device_supports_native_fp4(torch.device("cuda", 0)) is False
+    # A probe must not turn the unvalidated surface back on either.
+    assert device_supports_native_fp4(torch.device("cuda", 0), require_validation=True) is False
+
+
 def test_rocm_dtype_support_never_queries_device_capability(monkeypatch):
     """Under HIP ``get_device_capability`` is meaningless, so it must not be used."""
 
@@ -416,7 +431,7 @@ def test_rocm_dtype_support_never_queries_device_capability(monkeypatch):
 
 
 def test_rocm_validation_narrows_advertised_dtypes(monkeypatch):
-    """Runtime validation is what decides e4m3fnzn/fn support on a HIP build."""
+    """Runtime validation is what decides e4m3fnuz/fn support on a HIP build."""
 
     _DTYPE_SUPPORT_CACHE.clear()
     monkeypatch.setattr(torch.version, "hip", "7.16.26385")
@@ -427,12 +442,11 @@ def test_rocm_validation_narrows_advertised_dtypes(monkeypatch):
     if rejected is None:
         pytest.skip("float8_e5m2fnuz not available in this torch build")
 
-    import gptqmodel.quantization.dtype as dtype_module
-
+    module_path = get_device_dtype_support.__module__
+    dtype_module = __import__(module_path, fromlist=["_validate_linear_dtype_support"])
     real_validate = dtype_module._validate_linear_dtype_support
     monkeypatch.setattr(
-        dtype_module,
-        "_validate_linear_dtype_support",
+        f"{module_path}._validate_linear_dtype_support",
         lambda device, dtype: False if dtype is rejected else real_validate(device, dtype),
     )
 
