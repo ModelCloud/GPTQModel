@@ -15,6 +15,7 @@ from parameterized import parameterized
 
 from gptqmodel import BACKEND, GPTQModel
 from gptqmodel.adapter.adapter import Adapter, AdapterCache, Lora
+from gptqmodel.adapter.remote import configure_explicit_remote_adapter
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
 from gptqmodel.nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
@@ -37,6 +38,13 @@ from gptqmodel.utils.swordfish import (
 log = LogBar.shared()
 
 DEVICE = torch.device("cuda:0")
+
+# The EoRA adapter is hosted on the Hub. Remote adapters are opt-in only, so
+# pin the exact commit and adapter digest the kernel comparison was recorded
+# against instead of silently tracking whatever `main` currently serves.
+LORA_PATH = "sliuau/llama-3.2-3b_4bits_128group_size_eora_rank64_mmlu_c4"
+LORA_REVISION = "51218d44c5bf3f4a164a21edc20f05104bb1e8bb"
+LORA_SHA256 = "74f0e92cc952b1619487f8ec7f7791579523a28d10a412be005c35cab6167144"
 
 GREEN = "\033[32m"
 RED = "\033[31m"
@@ -102,7 +110,7 @@ class TestKernelOutput(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         # lora_path = "sliuau/llama3.2-1b-4bit-group128-eora-rank128-arc"  # adapter_model.safetensors
-        lora_path = "sliuau/llama-3.2-3b_4bits_128group_size_eora_rank64_mmlu_c4"
+        lora_path = LORA_PATH
         # hf "sliuau-llama3.2-1b-4bit-group128/llama3.2-1b-4bit-group128-eora-rank128-arc/"
 
         test_dtypes = [torch.float16, torch.bfloat16]
@@ -157,6 +165,12 @@ class TestKernelOutput(unittest.TestCase):
                 rank=64,
                 path=lora_path)
 
+            configure_explicit_remote_adapter(
+                data.adapter,
+                allow_remote=True,
+                revision=LORA_REVISION,
+                sha256=LORA_SHA256,
+            )
             data.adapter.post_init(cls.target, device=DEVICE) # trigger adapter weight load from disk
             data.k = data.adapter.lora_A.shape[0]
 
@@ -180,7 +194,23 @@ class TestKernelOutput(unittest.TestCase):
             torch.cuda.synchronize(device)
 
     def forward(self, backend: BACKEND, dtype: torch.dtype, adapter: Adapter = None) -> ForwardResult:
-        model = GPTQModel.load(self.model_path, backend=backend, adapter=adapter, dtype=dtype, device=DEVICE)
+        load_kwargs = {}
+        if adapter is not None:
+            # `GPTQModel.load` re-validates the explicit adapter, so the pin has
+            # to travel with the call instead of only living on the instance.
+            load_kwargs = {
+                "allow_remote_adapter": True,
+                "adapter_revision": LORA_REVISION,
+                "adapter_sha256": LORA_SHA256,
+            }
+        model = GPTQModel.load(
+            self.model_path,
+            backend=backend,
+            adapter=adapter,
+            dtype=dtype,
+            device=DEVICE,
+            **load_kwargs,
+        )
 
         target_qlinear_cls = self.target_qliner_map[backend]
 
