@@ -25,6 +25,7 @@ from .cpp import (
     default_torch_ops_build_root,
 )
 
+
 _ALLSPARK_OPS_NAME = "gptqmodel_allspark_ops"
 _ALLSPARK_NAMESPACE = "gptqmodel_allspark"
 

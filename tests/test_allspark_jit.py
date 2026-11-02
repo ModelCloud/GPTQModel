@@ -5,6 +5,7 @@
 import pytest
 import torch
 
+
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available(), reason="AllSpark needs a CUDA device"
 )

@@ -19,6 +19,7 @@ class BACKEND(str, Enum):
     BITSANDBYTES = "bitsandbytes"  # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
     GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
+    GPTQ_ALLSPARK = "gptq_allspark"  # Ampere W8A16 fused GEMM, decode-oriented
     GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_MARLIN = "gptq_marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
     GPTQ_W4AFP8 = "gptq_w4afp8"  # INT4 GPTQ weights, token-scaled FP8 input on SM12x
