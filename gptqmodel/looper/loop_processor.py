@@ -292,6 +292,14 @@ class LoopProcessor:
                 calibration_concat_separator=calibration_concat_separator,
             )
 
+            if len(calibration) == 0:
+                raise ValueError(
+                    "Calibration dataset is empty after prepare_dataset_func removed "
+                    "all samples (for example, every input_ids was shorter than "
+                    "calibration_data_min_length). Lower calibration_data_min_length "
+                    "or provide longer calibration samples."
+                )
+
             # Calculate the average length of the average input_ids
             total_input_ids_length = 0
             max_input_id_length = 0

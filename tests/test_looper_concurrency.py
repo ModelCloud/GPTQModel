@@ -63,6 +63,59 @@ def test_loop_processor_initializes_synchronized_state(monkeypatch, tmp_path):
     assert processor.inputs_cache.unwrap().layer_inputs == []
 
 
+def test_loop_processor_rejects_empty_calibration_before_prepare(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    prepare_dataset_func = MagicMock()
+    with pytest.raises(ValueError, match="must not be empty"):
+        LoopProcessor(
+            tokenizer=None,
+            qcfg=MagicMock(),
+            calibration=[],
+            prepare_dataset_func=prepare_dataset_func,
+        )
+    prepare_dataset_func.assert_not_called()
+
+
+def test_loop_processor_raises_when_prepare_empties_calibration(monkeypatch, tmp_path):
+    # Regression: the empty check must rerun after prepare_dataset_func filters
+    # rows (e.g. all input_ids <= calibration_data_min_length), not divide by zero.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    with pytest.raises(ValueError, match="empty after prepare_dataset_func"):
+        LoopProcessor(
+            tokenizer=None,
+            qcfg=MagicMock(),
+            calibration=[{"text": "hi"}],
+            prepare_dataset_func=lambda **kwargs: [],
+        )
+
+
+def test_loop_processor_accepts_nonempty_prepared_calibration(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(LoopProcessor, "_init_device_smi_handles", lambda _self: {})
+    monkeypatch.setattr(LoopProcessor, "_init_cpu_device_handle", lambda _self: None)
+
+    rows = [
+        {"input_ids": torch.arange(16), "attention_mask": torch.ones(16, dtype=torch.long)},
+        {"input_ids": torch.arange(32), "attention_mask": torch.ones(32, dtype=torch.long)},
+    ]
+    processor = LoopProcessor(
+        tokenizer=None,
+        qcfg=MagicMock(),
+        calibration=[{"text": "a"}, {"text": "b"}],
+        prepare_dataset_func=lambda **kwargs: rows,
+    )
+
+    assert processor.num_batches == 2
+    assert processor.calibration_dataset is rows
+    assert processor.total_calibration_tokens == 48
+
+
 def test_collect_worker_results_preserves_submission_order():
     events = []
     futures = [
