@@ -28,6 +28,7 @@ import torch
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
 from gptqmodel.nn_modules.qlinear.w4a_activation import W4AActivation
 from gptqmodel.nn_modules.qlinear.w4a_floatx import W4AFP8Linear, unpack_int4_codes
+from gptqmodel.nn_modules.qlinear.w4a_nvfp4 import W4ANVFP4Linear
 
 
 K, N = 256, 128
@@ -779,3 +780,32 @@ def test_fused_unpack_all_zero_and_all_fifteen_words():
     assert torch.equal(
         _fused_unpack()(full_words, out).float(), torch.full((64, 32), 7.0, device="cuda")
     )
+
+
+# --------------------------------------------------------------------------
+# W4ANVFP4Linear stages its own operand caches and so skips
+# W4AFP8Linear.post_init; its post_init must still revalidate the packed
+# checkpoint layout before decoding, or a bad checkpoint silently corrupts
+# every weight it exports.
+# --------------------------------------------------------------------------
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 operand caches need native PyTorch FP4 support",
+)
+def test_nvfp4_post_init_rejects_desc_act_groups():
+    module = _module(W4ANVFP4Linear)
+    module.g_idx[0], module.g_idx[-1] = module.g_idx[-1].clone(), module.g_idx[0].clone()
+    with pytest.raises(ValueError, match="desc_act"):
+        module.post_init()
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 operand caches need native PyTorch FP4 support",
+)
+def test_nvfp4_post_init_rejects_non_symmetric_zero_points():
+    module = _module(W4ANVFP4Linear)
+    module.qzeros[0, 0] = 0x66666666
+    with pytest.raises(ValueError, match="zero point 8"):
+        module.post_init()
