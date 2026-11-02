@@ -22,6 +22,7 @@ from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import get_layer_name, move_to, nested_move_to
+from ..utils.p2p import enable_for_devices
 from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
 
@@ -59,6 +60,7 @@ def torch_replicate(
                 except Exception:
                     log.debug("torch_sync(%s) before replicate failed", dev, exc_info=True)
         return _THREAD_SAFE_PARALLEL.replicate(module, normalized_devices, detach=detach)
+
 
 log = setup_logger()
 
@@ -423,6 +425,12 @@ def clone_module_for_devices(
     base_device = devices[0]
     device_type = base_device.type
     homogeneous_type = all(dev.type == device_type for dev in devices)
+
+    if device_type == "cuda" and len(devices) > 1:
+        # Best-effort peer enablement before any cross-device staging.  The
+        # helper caches its result and degrades to host staging on its own, so
+        # a failed probe never blocks quantization.
+        enable_for_devices(devices)
 
     def backend_available(dev_type: str) -> bool:
         if dev_type == "cuda":
