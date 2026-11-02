@@ -629,7 +629,12 @@ class ForwardExecutor:
         for idx in range(total_batches):
             primary = results.get(idx)
             if primary is None:
-                raise RuntimeError("Forward batch returned no output; data-parallel execution produced empty result.")
+                # `StopForward` (MoE early-stop) is a normal outcome and yields no
+                # output; `run_single` already tolerates it by skipping the batch.
+                # Mirror that contract instead of failing the whole data-parallel
+                # forward, otherwise multi-device quantization crashes as soon as
+                # an early-stopping subset is reached.
+                continue
             ordered_outputs.append([primary])
 
         return ordered_outputs
