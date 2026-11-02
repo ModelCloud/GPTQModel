@@ -23,6 +23,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
+from ..utils.rocm import IS_ROCM
 from ..utils.structure import LazyTurtle, print_module_tree
 
 
@@ -771,6 +772,29 @@ def _hf_loader_from_pretrained_with_dynamic_module_retry(loader, model_local_pat
         return loader.from_pretrained(model_local_path, **retry_kwargs)
 
 
+def _reject_native_awq_gemv_on_rocm(export_quant_method, format_code) -> None:
+    """Refuse the CUDA-only AWQ GEMV/GEMV_FAST/LLM_AWQ layouts on ROCm.
+
+    Those three layouts are only readable by the native CUDA AWQ extension
+    (``gemv_forward``/``gemmv2_forward``/``gemv_fast_forward_decode``), which
+    hipcc cannot build: the sources include ``cuda_fp16.h`` and CUDA-only inline
+    asm, and the hipified warp-sync reduction rejects wave32.  Without this check
+    an AUTO load fails later with a bare "No valid quant linear", so point at the
+    layout and kernels that do run on ROCm.
+    """
+
+    if not IS_ROCM:
+        return
+    if export_quant_method != METHOD.AWQ:
+        return
+    if format_code not in (FORMAT.GEMV, FORMAT.GEMV_FAST, FORMAT.LLM_AWQ):
+        return
+
+    from ..nn_modules.qlinear.gemv_awq import AWQ_GEMV_ROCM_UNSUPPORTED
+
+    raise NotImplementedError(AWQ_GEMV_ROCM_UNSUPPORTED)
+
+
 def _coerce_quantized_awq_dtype(*, backend: BACKEND, qcfg: QuantizeConfig, dtype):
     if qcfg.quant_method not in (METHOD.AWQ, METHOD.PARO):
         return dtype
@@ -982,6 +1006,25 @@ def _load_quantized_gguf_checkpoint_into_model(
         )
 
     model.tie_weights()
+
+
+def _resolve_exl3_auto_backend(device, *, cuda_available: Optional[bool] = None) -> "BACKEND":
+    """Pick the EXL3 kernel for ``backend=AUTO``.
+
+    Only the CUDA family gets ``EXL3_EXLLAMA_V3``: its tensor-core GEMM dispatch
+    table is populated exclusively for CUDA.  On ROCm every entry of that table
+    is ``nullptr`` (``exl3_gemm.cu`` already rejects HIP with an explicit
+    ``TORCH_CHECK``), so the AUTO branch used to load a backend that cannot run.
+    ROCm -- CDNA and RDNA4 alike -- therefore resolves to ``EXL3_TORCH``, the
+    portable kernel that is the supported ROCm path.
+    """
+
+    if cuda_available is None:
+        cuda_available = torch.cuda.is_available()
+    device_family = selector_device_family(device)
+    if cuda_available and device_family == DEVICE.CUDA:
+        return BACKEND.EXL3_EXLLAMA_V3
+    return BACKEND.EXL3_TORCH
 
 
 def ModelLoader(cls):
@@ -1535,10 +1578,7 @@ def ModelLoader(cls):
             if backend not in (BACKEND.AUTO, BACKEND.EXL3_EXLLAMA_V3, BACKEND.EXL3_TORCH, BACKEND.MLX):
                 raise TypeError("FORMAT.EXL3 requires AUTO, EXL3_EXLLAMA_V3, EXL3_TORCH, or MLX backend.")
             if backend == BACKEND.AUTO:
-                if torch.cuda.is_available() and selector_device_family(device) in (DEVICE.CUDA, DEVICE.ROCM):
-                    backend = BACKEND.EXL3_EXLLAMA_V3
-                else:
-                    backend = BACKEND.EXL3_TORCH
+                backend = _resolve_exl3_auto_backend(device)
             if backend == BACKEND.EXL3_EXLLAMA_V3:
                 if not torch.cuda.is_available():
                     raise ValueError("EXL3 CUDA loading requires CUDA/HIP.")
@@ -1554,6 +1594,8 @@ def ModelLoader(cls):
             # GEMV_FAST and LLM_AWQ only supports torch.float16
             log.info("Loading Quantized Model: Auto fix `dtype` to `torch.float16`")
             dtype = torch.float16
+
+        _reject_native_awq_gemv_on_rocm(export_quant_method, format_code)
 
         dtype = _coerce_quantized_awq_dtype(backend=backend, qcfg=qcfg, dtype=dtype)
 

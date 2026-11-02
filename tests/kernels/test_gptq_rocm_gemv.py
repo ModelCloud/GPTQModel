@@ -1,8 +1,93 @@
+# GPU=-1 for the mocked launch-constant cases; the kernel-oracle cases carry
+# ``pytest.mark.cuda`` and skip without a matching ROCm device.
 import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
-from gptqmodel.nn_modules.triton_utils.gptq_gemv import gptq_gemv
+from gptqmodel.nn_modules.triton_utils.gptq_gemv import (
+    GEMV_BLOCK_N,
+    GEMV_MAX_BLOCK_K,
+    GEMV_NUM_WARPS,
+    block_k_for,
+    gptq_gemv,
+    launch_config,
+)
+from gptqmodel.utils import arch
+
+
+@pytest.fixture(autouse=True)
+def _arch_cache():
+    arch.clear_arch_cache()
+    yield
+    arch.clear_arch_cache()
+
+
+def _device_arch() -> str:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        return ""
+    props = torch.cuda.get_device_properties(0)
+    return arch.normalize_arch(getattr(props, "gcnArchName", ""))
+
+
+def _require_gpu_arch(arch_name: str) -> None:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        pytest.skip("ROCm GPU required")
+    detected = _device_arch()
+    if detected != arch_name:
+        pytest.skip(f"{arch_name} GPU required (found {detected or 'none'})")
+
+
+# --------------------------------------------------------------------------- #
+# CPU-only mocked coverage: launch constants are module-level and arch-tabled.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize(
+    ("arch_name", "expected"),
+    [
+        ("gfx950", (512, 8, 8)),
+        ("gfx1200", (512, 16, 4)),
+        ("gfx1201:sramecc+:xnack-", (512, 16, 4)),
+        ("gfx1250", (512, 16, 4)),
+        ("gfx942", (512, 8, 8)),
+        ("sm_89", (512, 8, 8)),
+    ],
+)
+def test_gemv_launch_constants_are_module_level(arch_name, expected):
+    # The former literals inside gptq_gemv() must exist as module constants so a
+    # future autotune sweep can change them in one place. The module-level
+    # symbols are the non-ROCm/CDNA defaults; the per-arch table supplies the
+    # rest. Both must agree for gfx950, which is the compatibility contract.
+    assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == (512, 8, 8)
+    cfg = launch_config(arch_name)
+    assert (cfg.max_block_k, cfg.block_n, cfg.num_warps) == expected
+    if arch_name.startswith("gfx950"):
+        assert (GEMV_MAX_BLOCK_K, GEMV_BLOCK_N, GEMV_NUM_WARPS) == expected
+
+
+def test_gemv_block_k_keeps_power_of_two_formula():
+    # min(cap, max(32, 1 << (in_features - 1).bit_length()))
+    assert block_k_for(896) == 512
+    assert block_k_for(5120) == 512
+    assert block_k_for(4096) == 512
+    assert block_k_for(256) == 256
+    assert block_k_for(48) == 64
+    assert block_k_for(17) == 32
+    assert block_k_for(1) == 32
+    assert block_k_for(896, "gfx1201") == 512
+
+
+def test_gemv_block_k_respects_cap(monkeypatch):
+    from gptqmodel.nn_modules.triton_utils import gptq_gemv as gemv_mod
+
+    monkeypatch.setitem(gemv_mod._GEMV_LAUNCH_CONFIGS, "rdna4", gemv_mod.GemvLaunch(256, 8, 8))
+    assert block_k_for(4096, "gfx1201") == 256
+    assert block_k_for(256, "gfx1201") == 256
+    assert block_k_for(128, "gfx1201") == 128
+
+
+def test_gemv_cdna_values_unchanged():
+    cfg = launch_config("gfx950")
+    assert cfg == (512, 8, 8)
 
 
 def _oracle_fp64(x: torch.Tensor, module: TorchLinear) -> torch.Tensor:
@@ -49,31 +134,7 @@ def _make_module(in_features: int, out_features: int, dtype: torch.dtype,
     return module
 
 
-@pytest.fixture(autouse=True)
-def require_gfx950():
-    if not torch.cuda.is_available() or torch.version.hip is None:
-        pytest.skip("ROCm GPU required")
-    if not getattr(torch.cuda.get_device_properties(0), "gcnArchName", "").startswith("gfx950"):
-        pytest.skip("gfx950 GPU required")
-
-
-@pytest.mark.cuda
-@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", [
-    ((896, 128), 128, False, False, 4),
-    ((896, 1280), 128, False, False, 4),
-    ((2048, 1024), 128, False, False, 4),
-    ((4096, 4096), 256, False, True, 4),
-    ((5120, 12288), 128, True, False, 4),
-    ((2048, 1024), 128, False, False, 8),
-    ((2048, 1024), 128, True, True, 8),
-    ((2048, 1024), 128, False, False, 2),
-    ((896, 1280), 128, True, False, 2),
-])
-def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
-    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
-    desc_act: bool, bias: bool, bits: int,
-):
+def _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits):
     torch.manual_seed(810)
     in_features, out_features = shape
     module = _make_module(in_features, out_features, dtype, group_size, desc_act, bias, bits)
@@ -117,8 +178,54 @@ def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
         )
 
 
+_SHAPES = [
+    ((896, 128), 128, False, False, 4),
+    ((896, 1280), 128, False, False, 4),
+    ((2048, 1024), 128, False, False, 4),
+    ((4096, 4096), 256, False, True, 4),
+    ((5120, 12288), 128, True, False, 4),
+    ((2048, 1024), 128, False, False, 8),
+    ((2048, 1024), 128, True, True, 8),
+    ((2048, 1024), 128, False, False, 2),
+    ((896, 1280), 128, True, False, 2),
+]
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", _SHAPES)
+def test_gfx950_gptq_gemv_matches_independent_torch_oracle(
+    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
+    desc_act: bool, bias: bool, bits: int,
+):
+    _require_gpu_arch("gfx950")
+    _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("shape,group_size,desc_act,bias,bits", _SHAPES)
+def test_gfx1201_gptq_gemv_matches_independent_torch_oracle(
+    dtype: torch.dtype, shape: tuple[int, int], group_size: int,
+    desc_act: bool, bias: bool, bits: int,
+):
+    _require_gpu_arch("gfx1201")
+    _assert_gemv_case(dtype, shape, group_size, desc_act, bias, bits)
+
+
 @pytest.mark.cuda
 def test_gfx950_gptq_gemv_falls_back_for_multi_token_or_grad():
+    _require_gpu_arch("gfx950")
+    _assert_gemv_fallbacks()
+
+
+@pytest.mark.cuda
+def test_gfx1201_gptq_gemv_falls_back_for_multi_token_or_grad():
+    _require_gpu_arch("gfx1201")
+    _assert_gemv_fallbacks()
+
+
+def _assert_gemv_fallbacks():
     module = _make_module(2048, 1024, torch.float16, 128, False, False)
     assert module._can_use_rocm_gemv(torch.randn(1, 2048, device="cuda", dtype=torch.float16))
     assert not module._can_use_rocm_gemv(torch.randn(2, 2048, device="cuda", dtype=torch.float16))

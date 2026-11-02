@@ -12,6 +12,7 @@ import torch
 
 from .env import env_flag
 from .logger import setup_logger
+from .rocm import quantize_tuning
 from .torch import TORCH_GTE_210
 
 
@@ -37,6 +38,12 @@ _LINEAR_PREWARM_JOIN_TIMEOUT = 120.0
 # payloads dedupe independently while sharing the join machinery.
 _PREWARM_LINEAR = "linear"
 _PREWARM_QUANTIZE = "quantize"
+
+# Quantize prewarm op groups, in execution order.  ``_PREWARM_QUANTIZE_GROUPS``
+# is the full historical payload; ``prewarm_ops`` from
+# ``gptqmodel.utils.rocm.quantize_tuning`` selects a per-architecture subset
+# (RDNA4 currently drops ``shape``).  ``None`` means "all groups".
+_PREWARM_GROUP_ORDER = ("elementwise", "fp32", "reduce", "gather", "shape", "dtype", "bitwise", "softmax")
 
 
 def _get_cuda_preferred_linalg_library():
@@ -142,9 +149,22 @@ def _run_linear_prewarm(device: torch.device, dtype: torch.dtype) -> None:
     torch.nn.functional.linear(activations, weight)
 
 
-def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
+def _run_quantize_prewarm(
+    device: torch.device,
+    dtype: torch.dtype,
+    groups: Optional[tuple[str, ...]] = None,
+) -> None:
     """
     Launch each accelerator kernel the quantization loop uses once, off the critical path.
+
+    ``groups`` selects a subset of the payload; ``None`` resolves it from the
+    architecture via ``quantize_tuning(device)["prewarm_ops"]`` (which is
+    ``None`` itself for the full historical payload).
+
+    The launch-cost figures below were measured on CDNA4 (MI350X, gfx950) unless
+    stated otherwise; RDNA4 (gfx120*) has not been measured yet, so its payload
+    is deliberately a conservative subset and must be validated by the RDNA4
+    benchmark script.
 
     An accelerator runtime resolves a kernel's code object lazily: the first launch
     of each distinct kernel pays a module load, measured at 3-28 ms per kernel on
@@ -169,6 +189,9 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
     """
     if dtype not in _LINEAR_PREWARM_DTYPES:
         return
+
+    if groups is None:
+        groups = quantize_tuning(device)["prewarm_ops"]
 
     dev = device
     half = dtype
@@ -199,7 +222,8 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
     # warmup, and each extra flavor costs ~1 s on ROCm.  Measured, a payload that
     # included them spent 4.0 s of its 4.9 s in `aten.mm` alone, which is worse
     # than the launch latency this warmup exists to remove.
-    ops = (
+    ops_by_group = {
+        "elementwise": (
         # elementwise, the bulk of the per-block update
         lambda: torch.add(a, b),
         lambda: torch.sub(a, b),
@@ -228,7 +252,9 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
         lambda: torch.lerp(a, b, 0.25),
         lambda: torch.addcmul(a, a, b),
         lambda: torch.addcdiv(a, a, b + 1.0),
+        ),
         # fp32 mirrors: the Hessian and its inverse run in fp32
+        "fp32": (
         lambda: torch.add(a32, b32),
         lambda: torch.mul(a32, b32),
         lambda: torch.div(a32, b32 + 1.0),
@@ -237,7 +263,9 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
         lambda: torch.pow(a32.abs() + 0.5, 2.0),
         lambda: torch.where(a32 > b32, a32, b32),
         lambda: torch.clamp(a32, -1.0, 1.0),
+        ),
         # reductions used by the range search and the damped inverse
+        "reduce": (
         lambda: torch.aminmax(a, dim=1),
         lambda: torch.amax(a),
         lambda: torch.amin(a),
@@ -250,7 +278,9 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
         lambda: torch.cumsum(a32, dim=1),
         lambda: torch.sort(a32, dim=1),
         lambda: torch.argsort(a32, dim=1),
+        ),
         # gather / scatter / masking in the block loop
+        "gather": (
         lambda: torch.nonzero(a > b),
         lambda: torch.gather(a, 1, rows.unsqueeze(0).expand(256, 128)),
         lambda: torch.index_select(a, 0, rows),
@@ -258,7 +288,9 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
         lambda: torch.zeros_like(a).index_copy_(0, rows, a[:128]),
         lambda: a.masked_fill(a > b, 0.0),
         lambda: torch.zeros_like(a).scatter_(1, rows.unsqueeze(0).expand(256, 128), a),
-        # shape and movement
+        ),
+        # shape and movement: plain copy kernels, the cheapest to warm
+        "shape": (
         lambda: torch.cat((a, b), dim=0),
         lambda: torch.stack((a, b)),
         lambda: torch.roll(a, 3, dims=1),
@@ -266,26 +298,39 @@ def _run_quantize_prewarm(device: torch.device, dtype: torch.dtype) -> None:
         lambda: a.reshape(-1),
         lambda: a.repeat_interleave(2, dim=0),
         lambda: torch.nn.functional.pad(a, (1, 1, 1, 1)),
+        ),
         # dtype conversions across the quantize path
+        "dtype": (
         lambda: a.to(single),
         lambda: a32.to(half),
         lambda: a32.to(torch.int32),
         lambda: index32.to(torch.uint8),
         lambda: index8.to(half),
         lambda: index32.to(torch.float32),
+        ),
         # bitwise work used when packing
+        "bitwise": (
         lambda: torch.bitwise_and(index32, index32b),
         lambda: torch.bitwise_or(index32, index32b),
         lambda: torch.bitwise_xor(index32, index32b),
         lambda: torch.bitwise_left_shift(index32, index32b),
         lambda: torch.bitwise_right_shift(index32, index32b),
         lambda: torch.bitwise_and(index8, index8),
+        ),
+        "softmax": (
         lambda: torch.nn.functional.softmax(a32, dim=1),
-    )
+        ),
+    }
 
-    for op in ops:
-        with contextlib.suppress(Exception):
-            op()
+    if groups is None:
+        selected = _PREWARM_GROUP_ORDER
+    else:
+        selected = tuple(group for group in _PREWARM_GROUP_ORDER if group in set(groups))
+
+    for group in selected:
+        for op in ops_by_group[group]:
+            with contextlib.suppress(Exception):
+                op()
 
     if dev.type == "cuda":
         torch.cuda.synchronize(device=dev)

@@ -60,7 +60,10 @@ def clone_exllamav3_config_for_module(
 ) -> Optional[EXL3Config]:
     """Clones and applies per-module EXL3 dynamic overrides, or skips the module."""
 
-    if not qcfg.dynamic_get(layer_name=module_full_name):
+    # Skip only explicitly excluded modules; `dynamic_get` returns None when no
+    # rule matches, which must not be treated as an exclusion (truthiness here
+    # skipped every module when `dynamic=None`).
+    if qcfg.dynamic_get(layer_name=module_full_name) is False:
         return None
 
     qcfg_clone = copy.deepcopy(qcfg)

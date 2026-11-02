@@ -70,7 +70,10 @@ class AwqGEMVFastLinear(AWQuantLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    # The decode path calls the same native CUDA AWQ extension as
+    # ``AwqGEMVLinear`` (``gemv_fast_forward_decode``/``gemm_fast_forward_prefill``),
+    # so it has the same ROCm restriction; see ``AWQ_GEMV_ROCM_UNSUPPORTED``.
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]
@@ -293,7 +296,9 @@ class LLMAwqLinear(AwqGEMVFastLinear):
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [1]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [1]
 
-    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
+    # Inherits the native-CUDA-only restriction from ``AwqGEMVFastLinear``; see
+    # ``gemv_awq.AWQ_GEMV_ROCM_UNSUPPORTED``.
+    SUPPORTS_DEVICES = [DEVICE.CUDA]
     SUPPORTS_PLATFORM = [PLATFORM.ALL]
     SUPPORTS_PACK_DTYPES = [torch.int16]
     SUPPORTS_ADAPTERS = [Lora]

@@ -494,10 +494,38 @@ def _advertised_cuda_linear_dtypes(capability: tuple[int, int]) -> frozenset[tor
     return frozenset(supported)
 
 
+def _is_rocm_runtime() -> bool:
+    """True when torch is a HIP/ROCm build (it reuses the ``cuda`` namespace)."""
+
+    return torch.version.hip is not None
+
+
+def _advertised_rocm_linear_dtypes() -> frozenset[torch.dtype]:
+    """Architecture-level linear dtype surface for ROCm devices.
+
+    ``torch.cuda.get_device_capability`` returns an unrelated numeric pair under
+    HIP (for example ``(12, 0)`` on gfx1201), so the CUDA SM table below cannot
+    describe an AMD device.  ROCm instead exposes the float8/float4 dtypes
+    through the same torch dtype registry, and whether a given HIP build can
+    actually execute one of them (``float8_e4m3fnuz`` is AMD-native while
+    ``float8_e4m3fn`` is emulated, and ``_scaled_mm`` accepts only one of them
+    depending on the library) is decided by the runtime probe in
+    :func:`_validate_linear_dtype_support`.  Advertise the surface here and let
+    ``require_validation=True`` narrow it.
+    """
+
+    supported = {torch.float16, torch.float32, torch.bfloat16}
+    supported.update(_FLOAT8_DTYPES)
+    supported.update(_FLOAT4_PACKED_DTYPES)
+    return frozenset(supported)
+
+
 def _advertised_linear_dtypes_for_device(device: torch.device) -> tuple[Optional[tuple[int, int]], frozenset[torch.dtype]]:
     """Return the architecture-level linear dtype support set for ``device``."""
 
     if device.type == "cuda" and torch.cuda.is_available():
+        if _is_rocm_runtime():
+            return None, _advertised_rocm_linear_dtypes()
         capability = _cuda_capability(device)
         assert capability is not None
         return capability, _advertised_cuda_linear_dtypes(capability)

@@ -19,6 +19,8 @@ from ...adapter.adapter import Adapter, Lora
 from ...models._const import DEVICE, HAS_CUDA, PLATFORM
 from ...nn_modules.qlinear import BaseQuantLinear, PackableQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...utils.arch import gemm_fused_dtypes as _arch_gemm_fused_dtypes
+from ...utils.arch import is_rocm_fused_arch, rocm_arch
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from ...utils.rocm import IS_ROCM
@@ -38,25 +40,35 @@ except Exception:  # pragma: no cover - optional dependency
 try:
     from ..triton_utils.gptq_gemm import MAX_IN_FEATURES as _ROCM_GEMM_MAX_IN_FEATURES
     from ..triton_utils.gptq_gemm import SMALL_M_MAX as _ROCM_GEMM_SMALL_M_MAX
+    from ..triton_utils.gptq_gemm import gate_limits as _ROCM_GEMM_GATE_LIMITS
 except Exception:  # pragma: no cover - optional dependency
     _ROCM_GEMM_SMALL_M_MAX = 0
     _ROCM_GEMM_MAX_IN_FEATURES = 0
+    _ROCM_GEMM_GATE_LIMITS = None
 
 
 log = setup_logger()
 
 
-_ROCM_ARCH_CACHE: dict[int, str] = {}
-
-
+# ``gptqmodel.utils.arch`` owns the cached ``gcnArchName`` lookup. The alias is
+# kept so existing imports of ``_rocm_arch_name`` inside this module (and by
+# downstream users) keep working. It returns ``""`` rather than ``None`` because
+# the historical signature always returned a string.
 def _rocm_arch_name(device: torch.device) -> str:
-    """Cache the device architecture string; ``get_device_properties`` is not free."""
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    arch = _ROCM_ARCH_CACHE.get(index)
-    if arch is None:
-        arch = getattr(torch.cuda.get_device_properties(index), "gcnArchName", "")
-        _ROCM_ARCH_CACHE[index] = arch
-    return arch
+    """Normalized ROCm architecture (``gfx950``) or ``""`` when unavailable."""
+    return rocm_arch(device) or ""
+
+
+# One-shot diagnostics for fallbacks: the forward path is hot, so each reason is
+# logged at debug level at most once per process instead of every forward.
+_LOGGED_FALLBACKS: set[str] = set()
+
+
+def _log_fallback_once(reason: str, message: str) -> None:
+    if reason in _LOGGED_FALLBACKS:
+        return
+    _LOGGED_FALLBACKS.add(reason)
+    log.debug(message)
 
 
 def _right_shift_unpack(values: torch.Tensor, shifts: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -393,12 +405,34 @@ class TorchLinear(PackableQuantLinear):
             and self._can_use_rocm_fused(x)
         )
 
+    def _rocm_gemm_gate(self, x: torch.Tensor) -> tuple[int, int]:
+        """Return ``(small_m_max, max_in_features)`` for this device's arch.
+
+        Unregistered architectures yield ``(0, 0)`` so the fused GEMM stays off,
+        matching the pre-RDNA4 behaviour.
+        """
+        if _ROCM_GEMM_GATE_LIMITS is None:
+            return _ROCM_GEMM_SMALL_M_MAX, _ROCM_GEMM_MAX_IN_FEATURES
+        return _ROCM_GEMM_GATE_LIMITS(_rocm_arch_name(x.device))
+
+    def _rocm_gemm_dtype_supported(self, x: torch.Tensor) -> bool:
+        """Return whether the fused GEMM is a measured win for this activation dtype.
+
+        RDNA4's fused small-M GEMM is a uniform win in FP16 (1.11x-2.53x on
+        gfx1201) but not in BF16 (0.43x-1.42x, median 0.85x), so BF16 stays on
+        the split path there.  CDNA keeps both dtypes (its historical values are
+        unchanged).  Unregistered architectures have an empty set.
+        """
+        return str(x.dtype).removeprefix("torch.") in _arch_gemm_fused_dtypes(_rocm_arch_name(x.device))
+
     def _can_use_rocm_gemm(self, x: torch.Tensor) -> bool:
+        small_m_max, max_in_features = self._rocm_gemm_gate(x)
         return (
             self._rocm_gemm_enabled
-            and 2 <= x.shape[0] <= _ROCM_GEMM_SMALL_M_MAX
+            and 2 <= x.shape[0] <= small_m_max
             and x.shape[1] == self.in_features
-            and self.in_features <= _ROCM_GEMM_MAX_IN_FEATURES
+            and self.in_features <= max_in_features
+            and self._rocm_gemm_dtype_supported(x)
             and self._can_use_rocm_fused(x)
         )
 
@@ -420,8 +454,34 @@ class TorchLinear(PackableQuantLinear):
             and not x.requires_grad
             and self.scales.dtype == x.dtype
             and self.qweight.device == x.device
-            and _rocm_arch_name(x.device).startswith("gfx950")
+            and self._rocm_arch_is_fused(x)
         )
+
+    def _rocm_arch_is_fused(self, x: torch.Tensor) -> bool:
+        """Architecture gate for the fused kernels, with a one-shot debug reason.
+
+        Only architecture rejection is logged: the other preconditions (bits,
+        packing, shape, training mode) are ordinary fallbacks that fire on every
+        model and would be noise. Unregistered architectures keep the previous
+        behaviour and silently use dequantize + matmul.
+        """
+        if not IS_ROCM:
+            _log_fallback_once("rocm-not-rocm", "ROCm fused GPTQ kernel skipped: not a ROCm host.")
+            return False
+        arch = _rocm_arch_name(x.device)
+        if not arch:
+            _log_fallback_once(
+                "rocm-arch-unknown",
+                "ROCm fused GPTQ kernel skipped: device architecture is unknown.",
+            )
+            return False
+        if not is_rocm_fused_arch(arch):
+            _log_fallback_once(
+                f"rocm-arch-{arch}",
+                f"ROCm fused GPTQ kernel skipped: {arch} is not a registered fused architecture.",
+            )
+            return False
+        return True
 
     def _forward_streaming(self, x: torch.Tensor, out_shape):
         tile = max(64, min(self._stream_tile_cols, self.out_features))

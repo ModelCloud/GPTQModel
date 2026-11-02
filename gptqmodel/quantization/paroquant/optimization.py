@@ -36,7 +36,7 @@ from ...utils.paroquant import (
     apply_paroquant_rotation_autograd,
     build_identity_rotation_buffers,
 )
-from ...utils.rocm import IS_ROCM
+from ...utils.rocm import IS_ROCM, rocm_amp_disabled
 from ..config import PAROQUANT_OPT_SCALE_CLAMP_MAX_DEFAULT, PAROQUANT_OPT_SCALE_CLAMP_MIN_DEFAULT
 
 
@@ -1714,11 +1714,15 @@ def _resolve_stage_use_amp(inputs_train: torch.Tensor, use_amp: Optional[bool]) 
 
     ``None`` means auto: ROCm hosts skip AMP because the autocast overhead was
     measured slower (and no more accurate) than the plain path on MI355X
-    (gfx950), while other CUDA hosts keep the historical AMP default.
+    (gfx950), while other CUDA hosts keep the historical AMP default.  The
+    decision comes from ``gptqmodel.utils.rocm.rocm_amp_disabled`` so that a
+    future RDNA4 measurement can flip it in one place; RDNA4 currently keeps AMP
+    off pending a real gfx120* measurement.
     """
-    on_cuda = getattr(getattr(inputs_train, "device", None), "type", None) == "cuda"
+    device = getattr(inputs_train, "device", None)
+    on_cuda = getattr(device, "type", None) == "cuda"
     if use_amp is None:
-        return on_cuda and not IS_ROCM
+        return on_cuda and not rocm_amp_disabled(device, is_rocm=IS_ROCM)
     return bool(use_amp) and on_cuda
 
 

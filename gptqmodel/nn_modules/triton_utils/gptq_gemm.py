@@ -40,26 +40,118 @@ hide it) and the split path wins again -- e.g. 0.68x at K=11008/N=4096 and
 0.81x at K=8192/N=4096. The crossover is not monotonic in K or N, so the gate
 uses the conservative bound that was measured to win on every shape at or below
 it (1.05x-1.65x across K in 896..5120).
+
+Launch constants are per architecture class. The ``cdna4`` entry is exactly the
+gfx950 configuration measured above and must not drift.
+
+``rdna4`` (gfx1200/gfx1201/gfx1250) uses a wider ``(block_m, block_n) = (32,
+32)`` tile, measured on an AMD Radeon AI PRO R9700 (``gfx1201``, HIP
+7.16.26385, torch 2.16.0.dev20261029+rocm10.1). The sweep covered K in
+{896, 2048, 3584, 4096, 5120, 6144} x N in {128, 1280, 2048, 3584, 4096, 5120,
+8192, 11008}, M in {2, 8, 16}, ``num_warps`` in {2, 4, 8} and (block_m,
+block_n) in {16, 32}^2: (32, 32) had the lowest worst-case regret (1.138x,
+mean 1.031x) versus (16, 16)'s 1.365x / 1.116x, and is 1.19x faster at
+K=N=4096 (71us vs 87us) and 1.17x at K=N=6144. ``tl.dot`` lowers to
+``v_wmma_f32_16x16x16_f16`` on gfx1201 (read from the kernel's ``amdgcn``
+assembly), so the win is real matrix-core throughput, not an FMA fallback.
+``num_warps=8`` measured 1.4x-1.9x slower.
+
+The activation dtype is a separate gate, applied by ``TorchLinear`` (see
+``gptqmodel.utils.arch.gemm_fused_dtypes``): the RDNA4 fused small-M GEMM is a
+measured win in FP16 but not in BF16, so BF16 takes the split path there.
 """
+
+from typing import NamedTuple
 
 import torch
 import triton
 import triton.language as tl
 
+from ...utils import arch as _arch
+from ...utils.arch import (
+    gate_limits as _arch_gate_limits,
+)
 
-# Largest M handled by the fused small-batch GEMM. Above this the weight would
-# be dequantized once per BLOCK_M tile, which loses to dequantize-once + GEMM.
-SMALL_M_MAX = 16
 
-# Largest in_features for which the fused kernel was measured to beat the split
-# path. See the module docstring.
-MAX_IN_FEATURES = 5120
+class GemmLaunch(NamedTuple):
+    """Resolved launch tile for :func:`gptq_gemm` on one architecture class."""
 
-BLOCK_M = 16
-BLOCK_N = 16
-BLOCK_K = 256
-NUM_WARPS = 4
-NUM_STAGES = 2
+    block_m: int
+    block_n: int
+    block_k: int
+    num_warps: int
+    num_stages: int
+    small_m_max: int
+    max_in_features: int
+
+
+# Launch table keyed by ``arch_class()``. ``cdna4`` is the gfx950 configuration
+# measured for CDNA (see the module docstring); ``rdna4`` was re-measured on
+# gfx1201 rather than inherited from the CDNA values.
+_LAUNCH_CONFIGS: dict[str, GemmLaunch] = {
+    "cdna4": GemmLaunch(
+        block_m=16, block_n=16, block_k=256, num_warps=4, num_stages=2,
+        small_m_max=16, max_in_features=5120,
+    ),
+    # RDNA4 (gfx1200/gfx1201/gfx1250): measured on gfx1201 (R9700).  A sweep
+    # over K in 896..6144 x N in 128..11008, M in {2, 8, 16} and
+    # (block_m, block_n) in {16, 32}^2 with num_warps=4 found (32, 32) has the
+    # lowest worst-case regret (1.138x, mean 1.031x) against (16, 16)'s 1.365x /
+    # 1.116x, and it is up to 1.19x faster on wave32 (K=4096: 71us vs 87us).
+    "rdna4": GemmLaunch(
+        block_m=32, block_n=32, block_k=256, num_warps=4, num_stages=2,
+        small_m_max=16, max_in_features=17408,
+    ),
+}
+
+# Default for non-ROCm (CUDA/MPS) callers of the Triton dequant path, and for
+# callers that pass no architecture. The small-M gate is disabled there.
+_DEFAULT_LAUNCH = GemmLaunch(
+    block_m=16, block_n=16, block_k=256, num_warps=4, num_stages=2,
+    small_m_max=0, max_in_features=0,
+)
+
+# Conservative module-level defaults kept for import compatibility
+# (``tests/kernels/test_gptq_rocm_gemm.py`` imports SMALL_M_MAX/MAX_IN_FEATURES).
+SMALL_M_MAX = _LAUNCH_CONFIGS["cdna4"].small_m_max
+MAX_IN_FEATURES = _LAUNCH_CONFIGS["cdna4"].max_in_features
+BLOCK_M = _LAUNCH_CONFIGS["cdna4"].block_m
+BLOCK_N = _LAUNCH_CONFIGS["cdna4"].block_n
+BLOCK_K = _LAUNCH_CONFIGS["cdna4"].block_k
+NUM_WARPS = _LAUNCH_CONFIGS["cdna4"].num_warps
+NUM_STAGES = _LAUNCH_CONFIGS["cdna4"].num_stages
+
+
+def launch_config(arch=None) -> GemmLaunch:
+    """Return the GEMM launch tile for an architecture string or device.
+
+    Accepts a normalized ``gfxXXXX``/``sm_XX`` string, a ``torch.device``, or
+    ``None``. Unregistered architectures get the conservative default, whose
+    ``small_m_max``/``max_in_features`` are ``0`` so the fused path stays off.
+    """
+
+    if not isinstance(arch, str):
+        return _LAUNCH_CONFIGS.get(_arch.arch_class(arch), _DEFAULT_LAUNCH)
+
+    name = _arch.normalize_arch(arch)
+    if not name.startswith("gfx"):
+        return _DEFAULT_LAUNCH
+    return _LAUNCH_CONFIGS.get(_arch.arch_class(name), _DEFAULT_LAUNCH)
+
+
+def gate_limits(arch=None) -> tuple[int, int]:
+    """Return ``(small_m_max, max_in_features)`` for the fused GEMM gate.
+
+    Delegates to :func:`gptqmodel.utils.arch.gate_limits`; anything that is not
+    a ROCm ``gfx*`` architecture string yields ``(0, 0)`` (gate disabled).
+    """
+
+    if not isinstance(arch, str):
+        return (0, 0)
+    name = _arch.normalize_arch(arch)
+    if not name.startswith("gfx"):
+        return (0, 0)
+    return _arch_gate_limits(name)
 
 
 @triton.jit
@@ -123,17 +215,18 @@ def _gptq_gemm_small_m_kernel(
 def gptq_gemm(x: torch.Tensor, qweight: torch.Tensor, scales: torch.Tensor,
               qzeros: torch.Tensor, g_idx: torch.Tensor,
               out_dtype: torch.dtype = None, bits: int = 4) -> torch.Tensor:
+    cfg = launch_config(_arch.rocm_arch(x.device))
     m, in_features = x.shape
     out_features = qweight.shape[1]
     output = torch.empty(
         (m, out_features), device=x.device, dtype=x.dtype if out_dtype is None else out_dtype,
     )
-    grid = (triton.cdiv(m, BLOCK_M), triton.cdiv(out_features, BLOCK_N))
+    grid = (triton.cdiv(m, cfg.block_m), triton.cdiv(out_features, cfg.block_n))
     with torch.cuda.device(x.device):
         _gptq_gemm_small_m_kernel[grid](
             x, qweight, scales, qzeros, g_idx, output,
             m, in_features, out_features, scales.shape[0],
-            BLOCK_M, BLOCK_N, BLOCK_K, bits,
-            num_warps=NUM_WARPS, num_stages=NUM_STAGES,
+            cfg.block_m, cfg.block_n, cfg.block_k, bits,
+            num_warps=cfg.num_warps, num_stages=cfg.num_stages,
         )
     return output

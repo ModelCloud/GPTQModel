@@ -829,11 +829,18 @@ def test_rocm_string_preserves_device_family_on_non_rocm_host(monkeypatch):
     assert normalize_device_device_map(None, {"": "rocm"}) is DEVICE.ROCM
 
 
-def test_qqq_accepts_exact_rocm_cuda_device(monkeypatch):
+def test_qqq_rejects_native_kernel_on_rocm(monkeypatch):
+    # The Marlin-derived QQQ W4A8 extension is built from CUDA-only inline PTX
+    # (cp.async / mma.sync / ldmatrix), which hipify cannot translate, so it
+    # cannot be compiled by hipcc for gfx120*.  AUTO therefore selects the
+    # portable QQQTorchLinear, and an explicit native placement must fail loudly
+    # instead of compiling for ~18 s and then raising on the first forward.
     monkeypatch.setattr("gptqmodel.nn_modules.qlinear.qqq.IS_ROCM", True)
 
-    QQQLinear.validate_device(torch.device("cuda:1"))
-    assert DEVICE.ROCM in QQQLinear.SUPPORTS_DEVICES
+    with pytest.raises(NotImplementedError):
+        QQQLinear.validate_device(torch.device("cuda:1"))
+    assert DEVICE.ROCM not in QQQLinear.SUPPORTS_DEVICES
+    assert not QQQLinear.validate_once()[0]
 
 
 @pytest.mark.parametrize(

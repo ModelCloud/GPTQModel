@@ -29,6 +29,7 @@ from ...quantization.dtype import (
 )
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
+from ...utils.rocm import IS_ROCM
 from ...utils.torch import TORCH_HAS_COMPILE, torch_compile
 from . import WeightOnlyQuantLinear
 from .gguf import _apply_optional_smoother
@@ -461,24 +462,43 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         # dense weight matrix, so force the validated CPU LUT path for that format.
         if self.fp8_format == "float8_e8m0fnu":
             prefer_cpu_dequant = True
-        if target_device.type == "cuda" and not device_supports_native_fp8(target_device):
+        if target_device.type == "cuda" and not IS_ROCM and not device_supports_native_fp8(target_device):
             prefer_cpu_dequant = True
 
-        if prefer_cpu_dequant:
-            weight = dequantize_fp8(
-                self.weight.to(device="cpu"),
-                scale_inv=self.weight_scale_inv.to(device="cpu"),
-                axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
-                target_dtype=target_dtype,
-            )
-            if target_device.type != "cpu":
-                weight = weight.to(device=target_device)
-            return weight.transpose(0, 1).contiguous()
+        if not prefer_cpu_dequant:
+            try:
+                return self._dequantize_native(target_device=target_device, target_dtype=target_dtype)
+            except Exception as exc:
+                if target_device.type != "cuda":
+                    raise
+                # ROCm builds advertise FP8 differently from CUDA, and
+                # ``get_device_capability`` cannot be trusted there, so the
+                # native cast is probed by attempting one instead.  On gfx1201
+                # both ``float8_e4m3fn`` and ``float8_e4m3fnuz`` casts work
+                # (measured), so this only fires on builds that lack one.
+                log.warn.once(
+                    f"FP8 native `{self.fp8_format}` dequantization on {target_device} failed "
+                    f"({type(exc).__name__}: {exc}); falling back to CPU dequantization."
+                )
 
+        return self._dequantize_cpu(target_device=target_device, target_dtype=target_dtype)
+
+    def _dequantize_native(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
         weight = self.weight if self.weight.device == target_device else self.weight.to(device=target_device)
         weight = weight.to(target_dtype)
         scale_inv = self._expanded_scale_inv(target_device=target_device, target_dtype=target_dtype)
         return (weight / scale_inv).transpose(0, 1).contiguous()
+
+    def _dequantize_cpu(self, *, target_device: torch.device, target_dtype: torch.dtype) -> torch.Tensor:
+        weight = dequantize_fp8(
+            self.weight.to(device="cpu"),
+            scale_inv=self.weight_scale_inv.to(device="cpu"),
+            axis=None if self.weight_scale_method == "block" else (0 if self.weight_scale_method == "row" else 0),
+            target_dtype=target_dtype,
+        )
+        if target_device.type != "cpu":
+            weight = weight.to(device=target_device)
+        return weight.transpose(0, 1).contiguous()
 
     def _scaled_mm_weight_scale(self, *, device: torch.device) -> torch.Tensor:
         scale_inv = self.weight_scale_inv
@@ -502,6 +522,14 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         return x_q, torch.reciprocal(scale_inv).to(torch.float32)
 
     def _can_use_scaled_mm(self, x_flat: torch.Tensor) -> bool:
+        # ROCm support is decided by the guarded call in ``forward``, not by
+        # ``get_device_capability`` (meaningless under HIP).  Measured on gfx1201
+        # (R9700, torch 2.16/ROCm 7.16): ``_scaled_mm`` accepts the OCP
+        # ``float8_e4m3fn``/``float8_e5m2`` encodings and raises
+        # ``HIPBLAS_STATUS_NOT_SUPPORTED`` for the AMD-native
+        # ``float8_e4m3fnuz``/``float8_e5m2fnuz`` ones, i.e. the opposite of
+        # what the gfx9x CDNA path historically did.  The first failure is
+        # logged once and the module then stays on dequantize + matmul.
         return (
             not self._scaled_mm_hard_disabled
             and hasattr(torch, "_scaled_mm")
@@ -577,8 +605,13 @@ class TorchFP8Linear(WeightOnlyQuantLinear):
         if self._can_use_scaled_mm(x_flat):
             try:
                 output = self._forward_scaled_mm(x_flat)
-            except Exception:
+            except Exception as exc:
                 self._scaled_mm_hard_disabled = True
+                log.warn.once(
+                    f"FP8 `torch._scaled_mm` is unavailable for `{self.fp8_format}` on "
+                    f"{x_flat.device} ({type(exc).__name__}: {exc}); "
+                    "falling back to dequantize + matmul for the rest of the process."
+                )
                 output = self._forward_dequant_matmul(x_flat)
         elif self._compiled_forward is not None:
             try:
