@@ -33,7 +33,8 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    # Training mode uses the dequantized matmul fallback in forward().
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [2]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
@@ -111,14 +112,6 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
 
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
-
-    def train(self, mode: bool = True):
-        if mode:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} is an inference-only CPU kernel. "
-                "Use BACKEND.AWQ_TORCH_ATEN for trainable AWQ layers."
-            )
-        return super().train(False)
 
     def transform_cpu(self):
         if self._cpu_transformed:

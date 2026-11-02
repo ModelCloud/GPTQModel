@@ -347,8 +347,44 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
     restored = layer.dequantize_weight()
     torch.testing.assert_close(restored, expected_weight, atol=2e-3, rtol=2e-3)
 
-    with pytest.raises(NotImplementedError, match="inference-only"):
-        layer.train(True)
+
+def test_awq_layer_train_mode_uses_differentiable_dequant_path():
+    # HF/PEFT load with BACKEND.AUTO, which selects this kernel, then call
+    # model.train() for LoRA fine-tuning.
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(2027)
+    in_features, out_features, group_size = 256, 64, 64
+    qweight, qzeros, scales = _make_awq_buffers(
+        in_features,
+        out_features,
+        group_size,
+    )
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+    )
+    _fill_layer(layer, qweight, qzeros, scales)
+    weight = dequantize_gemm(
+        qweight=qweight,
+        qzeros=qzeros,
+        scales=scales,
+        bits=4,
+        group_size=group_size,
+    ).to(torch.bfloat16)
+
+    assert layer.train(True) is layer
+    assert layer.training
+
+    x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
+    output = layer(x)
+    output.float().sum().backward()
+
+    assert layer.linear_mode == "train"
+    assert layer._cpu_transformed is False
+    torch.testing.assert_close(output, x.detach() @ weight, atol=0.2, rtol=0.01)
+    expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
+    torch.testing.assert_close(x.grad, expected_grad, atol=0.2, rtol=0.01)
 
 
 @pytest.mark.parametrize(
