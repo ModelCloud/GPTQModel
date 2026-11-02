@@ -230,10 +230,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             weight = self.dequantize_weight().to(x_flat.dtype)
             out = torch.matmul(x_flat, weight).reshape(out_shape)
             if self.bias is not None:
-                # transform_cpu() keeps the fused kernel's bias in FP32. Cast it
-                # back to the activation dtype so the training fallback matches
-                # the fused/ATen paths instead of promoting BF16 outputs.
-                out = out + self.bias.to(dtype=out.dtype)
+                # transform_cpu() keeps the fused kernel's bias in FP32. Add it
+                # in place so PyTorch computes the sum in FP32 and rounds once
+                # to the output dtype, matching the ATen path.
+                out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

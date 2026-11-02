@@ -921,12 +921,16 @@ def test_layer_train_mode_uses_differentiable_dequant_path():
         group_size=group_size,
         desc_act=False,
     )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 15, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
     _fill_gptq_buffers(
         layer,
-        codes=torch.randint(0, 16, (in_features, out_features), dtype=torch.int32),
-        zeros=torch.randint(0, 15, (groups, out_features), dtype=torch.int32),
-        scales=torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01,
-        g_idx=torch.arange(in_features, dtype=torch.int32) // group_size,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
     )
 
     layer.eval()
@@ -940,7 +944,7 @@ def test_layer_train_mode_uses_differentiable_dequant_path():
     assert layer.training
     assert layer.linear_mode is None
 
-    weight = layer.dequantize_weight().to(torch.bfloat16)
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx).to(scales.dtype).to(torch.bfloat16)
     x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
     output = layer(x)
     output.float().sum().backward()
@@ -948,9 +952,9 @@ def test_layer_train_mode_uses_differentiable_dequant_path():
     assert layer.linear_mode == "train"
     assert layer._cpu_transformed is True
     assert output.dtype == torch.bfloat16
-    torch.testing.assert_close(output, x.detach() @ weight, atol=0.2, rtol=0.01)
+    torch.testing.assert_close(output, x.detach() @ weight, atol=2e-3, rtol=2e-3)
     expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
-    torch.testing.assert_close(x.grad, expected_grad, atol=0.2, rtol=0.01)
+    torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
 
 @pytest.mark.parametrize("desc_act", (False, True))
