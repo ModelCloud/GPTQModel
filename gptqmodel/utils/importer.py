@@ -1294,6 +1294,22 @@ def select_quant_linear(
         else set()
     )
 
+    # HF/optimum load GPTQ/AWQ checkpoints with BACKEND.AUTO, and PEFT or the
+    # Trainer may switch the model to training mode afterwards. Prefer a
+    # trainable CPU kernel when AUTO has one so a newly added inference-only
+    # CPU kernel cannot silently regress fine-tuning again (see #3408). CPU
+    # GPTQ/AWQ trainable kernels are also the fast path, so this costs no
+    # inference speed. Other methods keep their priority order: GGUF prefers
+    # the faster inference-only C++ kernel, and accelerator AUTO selection must
+    # stay on Marlin/ExLlama-class kernels.
+    prefer_trainable_auto = (
+        backend == BACKEND.AUTO
+        and not pack
+        and quant_method in (METHOD.GPTQ, METHOD.AWQ)
+        and selector_families == {DEVICE.CPU}
+    )
+    auto_inference_only_fallback = None
+
     def validate_candidate(cls, **kwargs):
         # A kernel selected for a multi-GPU model must be valid on every target
         # ordinal.  Validate each exact target so device-sensitive kernels query
@@ -1382,6 +1398,16 @@ def select_quant_linear(
                     log.info(f"skip {k} for {str(contract_err)}")
                 continue
 
+            if prefer_trainable_auto and not getattr(cls, "SUPPORTS_TRAINING", False):
+                # Keep the first inference-only candidate as a last resort but
+                # keep scanning for a kernel that supports training.
+                if auto_inference_only_fallback is None:
+                    auto_inference_only_fallback = cls
+                if not multi_select:
+                    if os.environ.get("DEBUG"):
+                        log.info(f"skip {k} because AUTO prefers a trainable CPU kernel")
+                    continue
+
             if pack:
                 if _supports_pack_api(cls):
                     log.info(f"{'Packing ' if pack else ''}Kernel: Auto-selection: adding candidate `{cls.__name__}`")
@@ -1396,7 +1422,22 @@ def select_quant_linear(
                     log.info(f"Kernel: selected -> `{cls.__name__}`.")
                     return cls
 
+        if prefer_trainable_auto and multi_select:
+            # Preserve the validated priority order but surface trainable
+            # kernels first so per-module loaders pick one that can be
+            # fine-tuned.
+            validated_qlinears.sort(
+                key=lambda cls: not bool(getattr(cls, "SUPPORTS_TRAINING", False))
+            )
+
         if len(validated_qlinears) == 0:
+            if auto_inference_only_fallback is not None:
+                log.info(
+                    "Kernel: AUTO found no trainable CPU kernel; selected "
+                    f"inference-only `{auto_inference_only_fallback.__name__}`. "
+                    "Reload with a trainable backend before fine-tuning."
+                )
+                return auto_inference_only_fallback
             if last_err:
                 raise last_err
             raise ValueError("No valid quant linear")

@@ -564,7 +564,12 @@ class BaseQuantLinear(nn.Module):
         # Custom behavior when switching to training mode
         if mode:
             if not self.SUPPORTS_TRAINING:
-                err = f"{self.__class__.__name__}: `{self.name}` switching to training mode."
+                err = (
+                    f"{self.__class__.__name__}: `{self.name}` is an inference-only kernel "
+                    "and cannot switch to training mode. Reload the model with "
+                    '`backend="auto_trainable"` (or a trainable backend for this '
+                    "quantization method) before fine-tuning."
+                )
                 log.error(err)
                 raise NotImplementedError(err)
             else:

@@ -33,7 +33,8 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    SUPPORTS_TRAINING = False
+    # Training mode uses the dequantized matmul fallback in forward().
+    SUPPORTS_TRAINING = True
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [2]
     SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [32]
@@ -113,12 +114,12 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
         return x.dtype == torch.bfloat16
 
     def train(self, mode: bool = True):
-        if mode:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} is an inference-only CPU kernel. "
-                "Use BACKEND.AWQ_TORCH_ATEN for trainable AWQ layers."
-            )
-        return super().train(False)
+        # forward() caches the fused-vs-dequantized dispatch decision. Reset it
+        # on mode changes so an eval forward cannot pin later training forwards
+        # to the no-grad fused kernel.
+        if mode != self.training:
+            self.linear_mode = None
+        return super().train(mode=mode)
 
     def transform_cpu(self):
         if self._cpu_transformed:
@@ -229,7 +230,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             weight = self.dequantize_weight().to(x_flat.dtype)
             out = torch.matmul(x_flat, weight).reshape(out_shape)
             if self.bias is not None:
-                out = out + self.bias
+                # transform_cpu() keeps the fused kernel's bias in FP32. Add it
+                # in place so PyTorch computes the sum in FP32 and rounds once
+                # to the output dtype, matching the ATen path.
+                out.add_(self.bias)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

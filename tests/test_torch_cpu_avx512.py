@@ -906,8 +906,55 @@ def test_layer_transform_dequantize_and_forward(desc_act):
     reference = torch.matmul(x.float(), reference_weight.float()).to(torch.bfloat16)
     torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
 
-    with pytest.raises(NotImplementedError, match="inference-only"):
-        layer.train(True)
+
+def test_layer_train_mode_uses_differentiable_dequant_path():
+    # HF/PEFT load with BACKEND.AUTO, which selects this kernel, then call
+    # model.train() for LoRA fine-tuning. The eval forward must not pin the
+    # cached dispatch to the no-grad fused kernel.
+    _skip_unless_avx512_bf16()
+    torch.manual_seed(92)
+    in_features, out_features, group_size = 256, 64, 64
+    groups = in_features // group_size
+    layer = _make_layer(
+        in_features=in_features,
+        out_features=out_features,
+        group_size=group_size,
+        desc_act=False,
+    )
+    codes = torch.randint(0, 16, (in_features, out_features), dtype=torch.int32)
+    zeros = torch.randint(0, 15, (groups, out_features), dtype=torch.int32)
+    scales = torch.rand((groups, out_features), dtype=torch.float16) * 0.04 + 0.01
+    g_idx = torch.arange(in_features, dtype=torch.int32) // group_size
+    _fill_gptq_buffers(
+        layer,
+        codes=codes,
+        zeros=zeros,
+        scales=scales,
+        g_idx=g_idx,
+    )
+
+    layer.eval()
+    x_eval = torch.randn(5, in_features, dtype=torch.bfloat16)
+    with torch.no_grad():
+        layer(x_eval)
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+
+    assert layer.train(True) is layer
+    assert layer.training
+    assert layer.linear_mode is None
+
+    weight = _layer_dequantize_oracle(codes, zeros, scales, g_idx).to(scales.dtype).to(torch.bfloat16)
+    x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
+    output = layer(x)
+    output.float().sum().backward()
+
+    assert layer.linear_mode == "train"
+    assert layer._cpu_transformed is True
+    assert output.dtype == torch.bfloat16
+    torch.testing.assert_close(output, x.detach() @ weight, atol=2e-3, rtol=2e-3)
+    expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
+    torch.testing.assert_close(x.grad, expected_grad, atol=2e-3, rtol=2e-3)
 
 
 @pytest.mark.parametrize("desc_act", (False, True))

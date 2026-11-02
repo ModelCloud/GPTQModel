@@ -84,10 +84,10 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = True
-    # The fused kernel has no backward path. Keeping this backend inference-only
-    # lets AUTO_TRAINABLE fall back to TorchAtenLinear instead of silently
-    # training through a slow dequantized matmul.
-    SUPPORTS_TRAINING = False
+    # The fused kernel has no backward path, but training mode uses the same
+    # dequantized matmul as TorchAtenLinear. BACKEND.AUTO selects this kernel
+    # (e.g. HF/PEFT loading), so it must stay trainable.
+    SUPPORTS_TRAINING = True
     # The AVX512 kernel walks full groups and requires in_features % group_size == 0.
     SUPPORTS_AUTO_PADDING = False
     SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [2]
@@ -145,6 +145,14 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
 
+    def train(self, mode: bool = True):
+        # forward() caches the fused-vs-dequantized dispatch decision. Reset it
+        # on mode changes so an eval forward cannot pin later training forwards
+        # to the no-grad fused kernel.
+        if mode != self.training:
+            self.linear_mode = None
+        return super().train(mode=mode)
+
     def transform_cpu(self, dtype: torch.dtype | None = None):
         if self._cpu_transformed:
             return
@@ -180,14 +188,6 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
         )
         self._cpu_transform_dtype = torch.bfloat16
         self._cpu_transformed = True
-
-    def train(self, mode: bool = True):
-        if mode:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} is an inference-only CPU kernel. "
-                "Use BACKEND.GPTQ_TORCH_ATEN for trainable GPTQ layers."
-            )
-        return super().train(False)
 
     def dequantize_weight(self, num_itr: int = 1):
         if not self._cpu_transformed:
