@@ -111,14 +111,14 @@ class W4AFP8Linear(PackableQuantLinear):
         # separate serialization step, reversed by the loader before post_init.
         self.qzero_format(2)
 
-    def pack_block(self, linear, scales, zeros, g_idx, **kwargs):
+    def pack_block(self, linear, scales, zeros, g_idx, *args, **kwargs):
         self._invalidate_weight_cache()
-        super().pack_block(linear, scales, zeros, g_idx, **kwargs)
+        super().pack_block(linear, scales, zeros, g_idx, *args, **kwargs)
         self.qzero_format(2)
 
-    def pack_gpu(self, linear, scales, zeros, g_idx, **kwargs):
+    def pack_gpu(self, linear, scales, zeros, g_idx, *args, **kwargs):
         self._invalidate_weight_cache()
-        super().pack_gpu(linear, scales, zeros, g_idx, **kwargs)
+        super().pack_gpu(linear, scales, zeros, g_idx, *args, **kwargs)
         self.qzero_format(2)
 
     def pack_original(self, linear, scales, zeros, g_idx=None):

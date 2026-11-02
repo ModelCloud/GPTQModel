@@ -969,6 +969,17 @@ class GPTQQuantLinear(PackedGroupedQuantLinear):
         self._qzeros_format = format
         return self._qzeros_format
 
+    def _load_from_state_dict(self, *args, **kwargs):
+        super()._load_from_state_dict(*args, **kwargs)
+        # `_qzeros_format` is not serialized; restore it from the checkpoint
+        # format the module was constructed for. Without this a direct
+        # state_dict round-trip of v2 words keeps the v1 default and
+        # format-aware consumers read every zero point one high.
+        if self.format in (FORMAT.GPTQ, "gptq", "gemm"):
+            self._qzeros_format = 1
+        elif self.format in (FORMAT.GPTQ_V2, "gptq_v2"):
+            self._qzeros_format = 2
+
 
 class PackableQuantLinear(GPTQQuantLinear):
     def __init__(self, *args, enable_wf_unsqueeze: bool = False, **kwargs):

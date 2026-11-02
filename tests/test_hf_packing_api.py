@@ -524,7 +524,10 @@ def test_hf_repack_layer_aligns_v1_v2_qzero_flavor(monkeypatch):
     monkeypatch.setattr(TorchAtenLinear, "REQUIRES_FORMAT_V2", False)
     target = hf_repack_layer(source, BACKEND.GPTQ_TORCH_ATEN)
 
-    expected = source.qzeros - 0b00010001000100010001000100010001
+    from gptqmodel.utils.model_dequant import pack_cols, unpack_cols
+
+    v1_fields = (unpack_cols(source.qzeros, 4) - 1) & 15
+    expected = pack_cols(v1_fields, 4, pack_dtype=torch.int32)
     assert torch.equal(target.qzeros, expected)
     assert target.qzero_format() == 1
 
@@ -564,15 +567,64 @@ def test_hf_pack_layer_resets_qzero_format_when_reusing_module():
     hf_pack_layer(reused, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ)
 
     shifts = torch.arange(8, dtype=torch.int64).mul(4).view(1, 1, 8)
+    v1_fields = (zeros.to(torch.int64) - 1) & 15
     expected_qzeros = (
-        zeros.T.contiguous().view(zeros.shape[1], zeros.shape[0] // 8, 8).to(torch.int64)
+        v1_fields.T.contiguous().view(v1_fields.shape[1], v1_fields.shape[0] // 8, 8)
         << shifts
     ).sum(dim=-1).to(torch.int32)
-    # The fresh words are converted to the v1 layout (zp-1) because the module
-    # requires the v2 runtime layout; a stale format=1 mark would have skipped
-    # this conversion and left v2 words labeled v1.
+    # The fresh words are converted to the v1 layout (zp-1 per field) because
+    # the module requires the v2 runtime layout; a stale format=1 mark would
+    # have skipped this conversion and left v2 words labeled v1.
     assert reused.qzero_format() == 1
-    assert torch.equal(reused.qzeros, expected_qzeros - 0x11111111)
+    assert torch.equal(reused.qzeros, expected_qzeros)
+
+
+def test_hf_pack_layer_post_init_restores_v2_runtime_layout():
+    """A `gptq` request leaves zp-1 words for export, but `post_init=True`
+    means the caller wants a usable module: flag-blind torch decoding must see
+    the restored v2 layout, or every weight decodes one scale too high."""
+    module = _make_gptq_module(bits=4, sym=True)
+    linear = nn.Linear(128, 64, bias=False)
+    with torch.no_grad():
+        linear.weight.zero_()
+
+    g_idx = torch.arange(128, dtype=torch.int32) // 32
+    scales = torch.ones(64, 4, dtype=torch.float32)
+    zeros = torch.full((64, 4), 8, dtype=torch.int32)
+
+    hf_pack_layer(module, linear, scales, zeros, g_idx, post_init=True)
+    assert module.qzero_format() == 2
+
+    x = torch.randn(2, 128)
+    # Zero weights: codes equal the zero point, so output must be exactly 0;
+    # decoding zp-1 words raw would return +scale instead.
+    assert torch.equal(module(x), torch.zeros(2, 64))
+
+
+@pytest.mark.parametrize("bits", [2, 4, 8])
+def test_gptq_format_module_conversion_shifts_fields_without_borrow(bits):
+    """v1 stores (zero point - 1) per packed field: a packed-word `-= 1`
+    borrows into the next field when a zero point is 0, and `+= 1` carries
+    when a stored field is maxed."""
+    from gptqmodel.utils.model_dequant import pack_cols, unpack_cols
+
+    pack_factor = 32 // bits
+    # A 0 field next to nonzero neighbors: the case that borrows/carries.
+    fields = torch.full((1, pack_factor), 1 << (bits - 1), dtype=torch.int32)
+    fields[0, 0] = 0
+
+    module = _make_gptq_module(bits=bits)
+    module.qzeros.data = pack_cols(fields, bits, pack_dtype=torch.int32).clone()
+    module.qzero_format(format=2)
+
+    convert_gptq_v2_to_v1_format_module(module, QuantizeConfig(bits=bits))
+    assert module.qzero_format() == 1
+    expected_v1 = (fields - 1) & ((1 << bits) - 1)
+    assert torch.equal(unpack_cols(module.qzeros, bits), expected_v1)
+
+    convert_gptq_v1_to_v2_format_module(module, bits=bits, pack_dtype=torch.int32)
+    assert module.qzero_format() == 2
+    assert torch.equal(unpack_cols(module.qzeros, bits), fields)
 
 
 def test_hf_pack_layer_reports_missing_scales():

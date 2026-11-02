@@ -672,6 +672,21 @@ def hf_pack_layer(
                     )
 
     if post_init:
+        if (
+            isinstance(module, GPTQQuantLinear)
+            and getattr(module, "REQUIRES_FORMAT_V2", False)
+            and module.qzero_format() == 1
+        ):
+            # A v1-checkpoint request left zp-1 words for export, but the v2
+            # runtime layout is what flag-blind decoders read; restore it before
+            # the module becomes usable.
+            from .model import convert_gptq_v1_to_v2_format_module
+
+            convert_gptq_v1_to_v2_format_module(
+                module=module,
+                bits=module.bits,
+                pack_dtype=getattr(module, "pack_dtype", torch.int32),
+            )
         module.post_init(**(post_init_kwargs or {}))
 
     return module

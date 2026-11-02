@@ -821,6 +821,14 @@ class BitblasLinear(BitblasBaseQuantLinear):
         intzeros = None
         if self.quant_config.with_zeros and hasattr(gptq_module, "qzeros") and gptq_module.qzeros is not None:
             intzeros = unpack_gptq_qzeros(gptq_module.qzeros.detach(), bits).contiguous()
+            # A v2-requiring source in the v1 checkpoint domain stores zp-1
+            # fields; shift them back to logical zero points first. Non-v2
+            # sources already carry logical values regardless of the flag.
+            if (
+                getattr(type(gptq_module), "REQUIRES_FORMAT_V2", False)
+                and getattr(gptq_module, "qzero_format", lambda: 2)() == 1
+            ):
+                intzeros = (intzeros + 1) & ((1 << bits) - 1)
             intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
 
         bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None

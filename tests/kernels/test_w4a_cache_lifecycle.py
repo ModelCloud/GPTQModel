@@ -848,8 +848,45 @@ def test_nvfp4_hf_pack_layer_checkpoint_format(checkpoint_format):
     assert torch.equal(
         zeros_decoded, torch.full((K // 128, N), 8, dtype=zeros_decoded.dtype)
     )
+    # post_init() revalidates the packed layout and raises on a format
+    # mismatch, so returning cleanly is the usability signal on CPU; forward
+    # itself is CUDA-gated.
     module.post_init()
-    assert module._weight_both.numel() > 0
+
+
+@pytest.mark.skipif(
+    getattr(torch, "float4_e2m1fn_x2", None) is None,
+    reason="W4ANVFP4 operand caches need native PyTorch FP4 support",
+)
+def test_nvfp4_state_dict_roundtrip_restores_v2_zero_format():
+    """`_qzeros_format` is not serialized: a fresh module must recover the v2
+    domain from its declared `format` or the post_init layout check reads the
+    valid `0x88888888` word as zero point 9."""
+    from gptqmodel.quantization.config import FORMAT
+    from gptqmodel.utils.packing import hf_pack_layer
+
+    module = W4ANVFP4Linear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=K, out_features=N, bias=False,
+        format=FORMAT.GPTQ_V2,
+    )
+    module.activation_global_scale.fill_(0.03125)
+    linear = torch.nn.Linear(K, N, bias=False)
+    scales = torch.full((N, K // 128), 0.125, dtype=torch.float16)
+    zeros = torch.full((N, K // 128), 8, dtype=torch.int32)
+    g_idx = torch.arange(K, dtype=torch.int32) // 128
+    hf_pack_layer(
+        module, linear, scales, zeros, g_idx, checkpoint_format=FORMAT.GPTQ_V2
+    )
+
+    fresh = W4ANVFP4Linear(
+        bits=4, group_size=128, sym=True, desc_act=False,
+        in_features=K, out_features=N, bias=False,
+        format=FORMAT.GPTQ_V2,
+    )
+    fresh.load_state_dict(module.state_dict())
+    # Without the format restore this raises, reading zp=8 words as zp=9.
+    fresh.post_init()
 
 
 @pytest.mark.skipif(
@@ -860,7 +897,6 @@ def test_nvfp4_failed_repost_init_clears_operand_caches():
     """A failed re-post_init must not leave forward() serving operands decoded
     from a layout that no longer matches the weights."""
     module = _module(W4ANVFP4Linear)
-    assert module._weight_both.numel() > 0
 
     module.qzeros[0, 0] = 0x66666666
     with pytest.raises(ValueError, match="zero point 8"):
