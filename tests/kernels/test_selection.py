@@ -319,6 +319,189 @@ def test_cuda_auto_select_prioritizes_triton_then_cpp_then_torch_for_gguf(monkey
     assert candidates[2] is GGUFTorchLinear
 
 
+class _TrainableAutoKernel:
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_TORCH]
+    SUPPORTS_TRAINING = True
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+class _InferenceOnlyAutoKernel:
+    SUPPORTS_DEVICES = [DEVICE.CPU]
+    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+    SUPPORTS_TRAINING = False
+
+    @classmethod
+    def validate(cls, **_):
+        return True, None
+
+
+def _install_auto_candidates(monkeypatch, method, fmt, candidates):
+    monkeypatch.setitem(
+        AUTO_BACKEND_KERNEL_MAPPING[method],
+        fmt,
+        OrderedDict(candidates),
+    )
+
+
+@pytest.mark.parametrize(
+    ("method", "fmt", "inference_backend", "trainable_backend"),
+    (
+        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_TORCH),
+        (METHOD.AWQ, FORMAT.GEMM, BACKEND.AWQ_MARLIN, BACKEND.AWQ_TORCH),
+    ),
+)
+def test_cpu_auto_prefers_trainable_kernel_over_higher_priority_inference_kernel(
+    monkeypatch,
+    method,
+    fmt,
+    inference_backend,
+    trainable_backend,
+):
+    # HF/optimum load with BACKEND.AUTO and PEFT then calls model.train().
+    # AUTO must not hand back an inference-only CPU kernel when a trainable
+    # kernel is available, even if the inference kernel has higher priority.
+    _install_auto_candidates(
+        monkeypatch,
+        method,
+        fmt,
+        [
+            (inference_backend, _InferenceOnlyAutoKernel),
+            (trainable_backend, _TrainableAutoKernel),
+        ],
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is _TrainableAutoKernel
+
+
+@pytest.mark.parametrize(
+    ("method", "fmt", "inference_backend"),
+    (
+        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.GPTQ_MARLIN),
+        (METHOD.AWQ, FORMAT.GEMM, BACKEND.AWQ_MARLIN),
+    ),
+)
+def test_cpu_auto_keeps_inference_only_kernel_when_no_trainable_kernel(
+    monkeypatch,
+    method,
+    fmt,
+    inference_backend,
+):
+    # AUTO must still load inference-only checkpoints on hosts where no
+    # trainable kernel supports the checkpoint contract.
+    _install_auto_candidates(
+        monkeypatch,
+        method,
+        fmt,
+        [(inference_backend, _InferenceOnlyAutoKernel)],
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=fmt,
+        quant_method=method,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is _InferenceOnlyAutoKernel
+
+
+def test_cpu_auto_multi_select_lists_trainable_kernels_first(monkeypatch):
+    _install_auto_candidates(
+        monkeypatch,
+        METHOD.GPTQ,
+        FORMAT.GPTQ,
+        [
+            (BACKEND.GPTQ_MARLIN, _InferenceOnlyAutoKernel),
+            (BACKEND.GPTQ_TORCH, _TrainableAutoKernel),
+        ],
+    )
+
+    candidates = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CPU,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+        multi_select=True,
+    )
+
+    assert candidates == [_TrainableAutoKernel, _InferenceOnlyAutoKernel]
+
+
+def test_cuda_auto_keeps_priority_order_for_inference_only_kernels(monkeypatch):
+    # Accelerator AUTO must keep selecting Marlin/ExLlama-class kernels; the
+    # trainable preference is a CPU-only safeguard.
+    class CudaInferenceOnlyKernel(_InferenceOnlyAutoKernel):
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+    class CudaTrainableKernel(_TrainableAutoKernel):
+        SUPPORTS_DEVICES = [DEVICE.CUDA]
+
+    _install_auto_candidates(
+        monkeypatch,
+        METHOD.GPTQ,
+        FORMAT.GPTQ,
+        [
+            (BACKEND.GPTQ_MARLIN, CudaInferenceOnlyKernel),
+            (BACKEND.GPTQ_TORCH, CudaTrainableKernel),
+        ],
+    )
+
+    selected = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.AUTO,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert selected is CudaInferenceOnlyKernel
+
+
+def test_inference_only_kernel_train_error_names_trainable_backend():
+    class InferenceOnlyLayer(BaseQuantLinear):
+        SUPPORTS_TRAINING = False
+
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+            self.name = "fake.inference_only"
+
+    layer = InferenceOnlyLayer()
+    layer.eval()
+
+    with pytest.raises(NotImplementedError, match="auto_trainable"):
+        layer.train(True)
+
+
 def test_cuda_auto_select_prioritizes_triton_then_torch_for_sign_only_gguf(monkeypatch):
     _force_auto_candidates_valid(monkeypatch, METHOD.GGUF, FORMAT.GGUF)
 
