@@ -65,17 +65,44 @@ has no enable wrapper of its own.
 Enablement never inserts a host relay: the transfer path is always a single
 `dst.copy_(src)`, and PyTorch/the driver chooses peer or internal staging.
 
-Configuration:
+Configuration lives on `BaseQuantizeConfig.p2p` (`P2PConfig`); there are no
+environment variables:
 
-| Variable | Default | Meaning |
+```python
+from gptqmodel import GPTQModel
+from gptqmodel.quantization.config import QuantizeConfig
+from gptqmodel.utils.p2p import P2PConfig
+
+config = QuantizeConfig(
+    bits=4,
+    p2p=P2PConfig(
+        mode="auto",       # "auto" | "on" (force) | "off" (skip pre-enablement)
+        probe=False,       # run the bandwidth diagnostic
+        probe_mib=64,      # preferred probe payload (steps down under pressure)
+        min_gbps=5.0,      # diagnostic floor
+        min_ratio=1.0,     # direct must reach this fraction of host staging
+        use_torch_replicate=True,
+    ),
+)
+
+# Inference on an already-quantized checkpoint:
+model = GPTQModel.load("/path/to/quantized", p2p=P2PConfig(probe=True))
+```
+
+`p2p=` is also accepted by `GPTQModel.from_pretrained(...)` and
+`GPTQModel.from_quantized(...)`; a plain dict with the same keys works anywhere
+a `P2PConfig` is accepted. `None` uses the defaults.
+
+| Field | Default | Meaning |
 |---|---|---|
-| `GPTQMODEL_P2P` | `auto` | `0` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `1` also attempts pairs the capability bit denies |
-| `GPTQMODEL_P2P_PROBE` | unset | `1` runs the bandwidth diagnostic and records `enabled`/`degraded` |
-| `GPTQMODEL_P2P_MIN_GBPS` | `5.0` | diagnostic floor; below it a link is reported `degraded` |
-| `GPTQMODEL_P2P_MIN_RATIO` | `1.0` | diagnostic: direct copy must reach this fraction of ordered pinned-host staging |
-| `GPTQMODEL_P2P_PROBE_MIB` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
+| `mode` | `auto` | `off` skips GPT-QModel's pre-enablement (PyTorch still peers lazily); `on` also attempts pairs the capability bit denies |
+| `probe` | `False` | runs the bandwidth diagnostic and records `enabled`/`degraded` |
+| `min_gbps` | `5.0` | diagnostic floor; below it a link is reported `degraded` |
+| `min_ratio` | `1.0` | diagnostic: direct copy must reach this fraction of ordered pinned-host staging |
+| `probe_mib` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
+| `use_torch_replicate` | `True` | allow `torch.nn.parallel.replicate` on GIL builds (always skipped when the GIL is disabled) |
 
-### Bandwidth diagnostics (`GPTQMODEL_P2P_PROBE=1`)
+### Bandwidth diagnostics (`p2p=P2PConfig(probe=True)`)
 
 Probing moves real payload across every directed pair and synchronizes each
 sample, so it is **opt-in** and never runs during normal quantization. Its
@@ -96,7 +123,7 @@ double-synchronized timer, median of 7 samples):
 
 A `1.0` gate therefore keeps every healthy PCIe peer link direct while still
 flagging a link that is genuinely slower than the fallback. Lower
-`GPTQMODEL_P2P_MIN_RATIO` if a topology really does measure at parity.
+`P2PConfig.min_ratio` if a topology really does measure at parity.
 
 A `strict=False` failure never raises; one informational summary line is
 logged. When a multi-GPU run cannot enable every ordered pair, GPT-QModel also
@@ -124,11 +151,13 @@ shared-Hessian adoption use the same direct GPU-to-GPU path.
 
 Do **not** call `torch.cuda.comm.*` from worker threads. On a free-threaded
 (`PYTHON_GIL=0`) build `broadcast_coalesced` has hung and returned torn copies
-on both ROCm and CUDA, and `reduce_add` has segfaulted. `torch.nn.parallel.replicate`
+on both ROCm and CUDA (small payloads can pass; multi-MiB payloads tear), and
+`reduce_add` has hung inside NCCL and segfaulted. `torch.nn.parallel.replicate`
 internally uses `broadcast_coalesced`; `clone_module_for_devices` skips it when
 the GIL is disabled and uses the deepcopy + `move_module_to_device` path
 instead. It is still serialized by `_THREAD_SAFE_PARALLEL` on GIL builds; set
-`GPTQMODEL_USE_TORCH_REPLICATE=0` to force the deepcopy path there too.
+`p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path there
+too.
 `pytorch_gil_0_compat.md` records the measured status of every PyTorch API we
 use, plus the workaround for each unsafe one.
 

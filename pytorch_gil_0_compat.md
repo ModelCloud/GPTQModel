@@ -29,7 +29,8 @@ Manual findings that a probe cannot express go in
 ## Rules for GPT-QModel code
 
 1. **Never call `torch.cuda.comm.*` from worker threads.** `broadcast_coalesced`
-   has hung and returned torn copies; `reduce_add` has segfaulted. Use
+   has hung and returned torn copies; `reduce_add` has hung inside NCCL and
+   segfaulted. Use
    `gptqmodel.utils.p2p.peer_copy_batch`, which calls
    `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` and releases the
    GIL for the enqueue.
@@ -111,12 +112,12 @@ results below for that build.
 
 | API | Result | Where we use it | Notes / workaround |
 |---|---|---|---|
-| `torch.cuda.comm.broadcast_coalesced` | UNSAFE (hangs / torn data) on **both** ROCm and CUDA | was `gptqmodel/utils/p2p.py`; removed | Confirmed broken on both backends under `PYTHON_GIL=0`. ROCm 4x R9700 (torch `2.16.0.dev20261025+rocm10.1`, Python 3.14.10t): 6/6 trials failed, 4 hangs inside `torch._C._broadcast_coalesced` and 2 torn copies. NVIDIA 2x RTX 4090 (torch `2.16.0.dev+cu130`, Python 3.14.10t): 6/6 trials returned torn copies. Replaced by `gptqmodel.utils.p2p.peer_copy_batch`. |
+| `torch.cuda.comm.broadcast_coalesced` | UNSAFE (hangs / torn data) on **both** ROCm and CUDA; payload-dependent | was `gptqmodel/utils/p2p.py`; removed | Confirmed broken on both backends under `PYTHON_GIL=0`. ROCm 4x R9700 (torch `2.16.0.dev20261025+rocm10.1`, Python 3.14.10t): 6/6 realistic trials failed, 4 hangs inside `torch._C._broadcast_coalesced` and 2 torn copies; a 4-trial rerun gave 2 torn + 1 SIGSEGV. NVIDIA 2x RTX 4090 (torch `2.16.0.dev+cu130`, Python 3.14.10t): 6/6 trials torn, and a 10-trial rerun gave 8 torn + 2 hangs. Nuance: small payloads (two 8192-element tensors) passed 8/8; 1024x1024 (4 MiB) payloads tear ~80% of the time. Treat any size as unsafe. Replaced by `gptqmodel.utils.p2p.peer_copy_batch`. |
 | `torch.cuda.comm.broadcast` | CAUTION | not used | Same `torch._C._broadcast` family. One probe run passed; do not call it from workers. |
-| `torch.cuda.comm.reduce_add` | UNSAFE (crash) | not used | Segfaults (SIGSEGV, exit -11) under concurrent use. Reduce Hessian partials with `add_` on explicit streams instead. |
+| `torch.cuda.comm.reduce_add` | UNSAFE (hang / crash) | not used | Segfaults (SIGSEGV, exit -11) under concurrent use, and on NVIDIA hung 2/3 trials inside `torch/nn/parallel/comm.py:111` -> `torch/cuda/nccl.py:121` (`nccl.reduce`); a 2-thread x 2-task control hung the same way. Reduce Hessian partials with `add_` on explicit streams instead. |
 | `torch.cuda.comm.gather` | CAUTION | not used | One probe run passed; not repeated. Prefer explicit `peer_copy_batch` into preallocated buffers. |
 | `torch.cuda.comm.scatter` | CAUTION | not used | One probe run passed; not repeated. Same caution as `gather`. |
-| `torch.nn.parallel.replicate` | CAUTION (serialized), skipped when GIL=0 | `gptqmodel/utils/looper_helpers.py` replica fast path | Internally calls `broadcast_coalesced`, so it inherits the failure above. It is called through `_THREAD_SAFE_PARALLEL` (a module-wide lock), and `clone_module_for_devices` now skips it entirely when `has_gil_disabled()`; the deepcopy path uses `move_module_to_device`/`peer_copy_batch`. Set `GPTQMODEL_USE_TORCH_REPLICATE=0` to force the deepcopy path on any build. |
+| `torch.nn.parallel.replicate` | CAUTION (serialized), skipped when GIL=0 | `gptqmodel/utils/looper_helpers.py` replica fast path | Internally calls `broadcast_coalesced`, so it inherits the failure above. It is called through `_THREAD_SAFE_PARALLEL` (a module-wide lock), and `clone_module_for_devices` now skips it entirely when `has_gil_disabled()`; the deepcopy path uses `move_module_to_device`/`peer_copy_batch`. Set `p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path on any build. |
 | `gptqmodel.utils.p2p.peer_copy_batch` (ours) | SAFE (concurrent) | module moves, calibration input staging, Hessian copies | `ctypes` call into `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync`; the GIL is released for the call. Returns `False` when the group is not a simple two-device batch so callers can fall back to `Tensor.to`. |
 
 ## Tensor creation and elementwise ops
@@ -187,13 +188,16 @@ ROCm-only bug.
 - Frequency: an isolated `broadcast_coalesced` probe passed 8/8, but the
   realistic pattern (module leaves plus two 1024x1024 inputs plus
   `mem_get_info` per thread) failed in **6 of 6 trials**: 4 hangs (killed after
-  60 s) and 2 torn copies.
+  60 s) and 2 torn copies. A later 4-trial rerun gave 1 pass, 2 torn copies and
+  1 SIGSEGV, so the failure mode is broader than hang/tear.
 
 **NVIDIA: 2x RTX 4090**, torch `2.16.0.dev+cu130`, Python 3.14.10t.
 
-- The same realistic pattern returned **torn copies in 6 of 6 trials**; no
-  hang was observed on this host, but the data corruption alone makes the API
-  unusable from workers.
+- The same realistic pattern returned **torn copies in 6 of 6 trials**; a
+  10-trial rerun gave **8 torn copies + 2 hangs**. No clean run in either set.
+- Payload size matters: a probe with two 8192-element tensors passed 8/8, while
+  a 1024x1024 (4 MiB) variant tore 7/8 and hung once. Small inputs can pass and
+  still be unsafe at production sizes.
 
 Fix: `gptqmodel.utils.p2p.peer_copy_batch` issues
 `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync` through `ctypes` (GIL released) on
@@ -202,11 +206,14 @@ covered by `tests/test_p2p_copy_utils.py` (8 concurrent threads, on 2x RTX 4090
 and on 4x R9700 with the GIL disabled) and by an end-to-end two-GPU quantize ->
 save -> reload -> generate smoke run on both hosts.
 
-### 2. `torch.cuda.comm.reduce_add` segfaults
+### 2. `torch.cuda.comm.reduce_add` hangs and segfaults
 
-The probe died with SIGSEGV (`exit -11`) under 8 concurrent threads. Do not
-reduce cross-device tensors with `comm.reduce_add`; add partials explicitly
-into a destination buffer on the destination stream.
+The probe died with SIGSEGV (`exit -11`) under 8 concurrent threads on ROCm. On
+NVIDIA it hung in 2 of 3 trials, with the stack inside
+`torch/nn/parallel/comm.py:111` -> `torch/cuda/nccl.py:121` (`nccl.reduce`); a
+2-thread x 2-task control hung the same way, so this is the collective path, not
+the payload shape. Do not reduce cross-device tensors with `comm.reduce_add`;
+add partials explicitly into a destination buffer on the destination stream.
 
 ### 3. HIP sticky error 704 after enabling peer access
 
@@ -240,6 +247,7 @@ enable every ordered pair of the GPUs a run actually uses, cache the result,
 and log one actionable warning when a pair cannot be enabled (with the
 motherboard/BIOS/hardware compatibility wording). `peer_copy_batch` then backs
 module replication and per-layer moves, calibration input staging, Hessian
-partial reduction, and shared-Hessian adoption. Set `GPTQMODEL_P2P=0` to skip
-probing, and `GPTQMODEL_P2P_PROBE=1` to additionally measure each directed
-link.
+partial reduction, and shared-Hessian adoption. Control it with
+`BaseQuantizeConfig.p2p` (or `GPTQModel.load(..., p2p=...)` for inference):
+`P2PConfig(mode="off")` skips probing, and `P2PConfig(probe=True)` additionally
+measures each directed link.

@@ -59,7 +59,7 @@ from ..utils.model import (
     get_module_by_name_prefix,
 )
 from ..utils.offload import offload_to_disk
-from ..utils.p2p import enable_for_devices
+from ..utils.p2p import configure_p2p, enable_for_devices
 from .execution_state import DeviceAssignmentState
 from .extension import LoopContext, LoopExtensions, LoopPlan, LoopStep
 
@@ -97,6 +97,7 @@ class WeightOnlyLooper(DeviceAssignmentState):
         # peer access once, best effort; the helper caches its result, logs one
         # summary, and never blocks quantization when a link is unsupported.
         cross_device_pool = self._cross_device_pool()
+        configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 

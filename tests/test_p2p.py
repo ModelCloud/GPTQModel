@@ -9,6 +9,20 @@ import torch
 from gptqmodel.utils import p2p
 
 
+@pytest.fixture(autouse=True)
+def _isolate_p2p_config():
+    """Keep the process-wide P2P policy from leaking between tests."""
+
+    previous = p2p.get_p2p_config()
+    p2p.configure_p2p(None)
+    p2p.clear_p2p_cache()
+    try:
+        yield
+    finally:
+        p2p.configure_p2p(previous)
+        p2p.clear_p2p_cache()
+
+
 def main():
     if not torch.cuda.is_available():
         print("CUDA not available")
@@ -96,13 +110,36 @@ def test_enable_peer_access_idempotent(monkeypatch):
     assert sorted(calls) == [(0, 1), (1, 0)]
 
 
-def test_p2p_env_disable(monkeypatch):
+def test_p2p_config_disable(monkeypatch):
     calls = _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
-    monkeypatch.setenv("GPTQMODEL_P2P", "0")
+    p2p.configure_p2p(p2p.P2PConfig(mode="off"))
     status = p2p.enable_peer_access([0, 1])
     assert calls == []
     assert status.state(0, 1) == p2p.STATE_UNSUPPORTED
     assert status.can_copy(0, 1) is False
+
+
+def test_configure_p2p_installs_policy():
+    """The config object, not the environment, drives every P2P helper."""
+
+    config = p2p.configure_p2p(
+        p2p.P2PConfig(mode="off", probe=True, probe_mib=8, min_gbps=9, min_ratio=2)
+    )
+    assert p2p.p2p_mode() == "off"
+    assert p2p.probe_enabled() is True
+    assert p2p._probe_mib() == 8
+    assert p2p._min_gbps() == 9
+    assert p2p._min_ratio() == 2
+    assert p2p.get_p2p_config() is config
+
+    # A plain dict is accepted anywhere a P2PConfig is.
+    p2p.configure_p2p({"mode": "on"})
+    assert p2p.p2p_mode() == "on"
+
+
+def test_p2p_config_rejects_invalid_mode():
+    with pytest.raises(ValueError):
+        p2p.P2PConfig(mode="bogus")
 
 
 def test_p2p_bandwidth_gate(monkeypatch):
@@ -111,8 +148,7 @@ def test_p2p_bandwidth_gate(monkeypatch):
         {(0, 1): True, (1, 0): True},
         bandwidth=lambda src, dst: (1.0, 0.5) if (src, dst) == (0, 1) else (100.0, 50.0),
     )
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])
     # Capability true but slow: degraded, and direct copy is refused.
     assert status.state(0, 1) == p2p.STATE_DEGRADED
@@ -133,8 +169,7 @@ def test_p2p_parity_with_host_staging_stays_enabled(monkeypatch):
         {(0, 1): True, (1, 0): True},
         bandwidth=lambda src, dst: (45.0, 45.0),
     )
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is True
@@ -149,8 +184,7 @@ def test_p2p_materially_slower_than_host_staging_is_degraded(monkeypatch):
         {(0, 1): True, (1, 0): True},
         bandwidth=lambda src, dst: (10.0, 45.0),
     )
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
     assert status.bandwidth_gbps[(0, 1)] == 10.0
@@ -163,9 +197,7 @@ def test_p2p_ratio_gate_can_be_tightened_by_env(monkeypatch):
     # A stricter 1.1x requirement (direct must strictly beat staging) rejects a
     # parity link; the default does not.
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (45.0, 45.0))
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_RATIO", "1.1")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True, min_ratio=1.1))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
 
@@ -178,8 +210,7 @@ def test_copy_tensor_to_never_bounces_through_host(monkeypatch):
     ``gpu1 -> CPU -> gpu2`` relay multi-GPU quantization must avoid.
     """
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (1.0, 100.0))
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
 
@@ -201,7 +232,7 @@ def test_copy_tensor_to_never_bounces_through_host(monkeypatch):
 
 def test_p2p_unmeasurable_direct_link_is_degraded(monkeypatch):
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (None, 50.0))
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(probe=True))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_DEGRADED
     assert status.can_copy(0, 1) is False
@@ -278,7 +309,7 @@ def test_p2p_probe_is_resilient_to_a_noisy_sample(monkeypatch):
 
     monkeypatch.setattr(p2p, "_measure_gbps", flaky)
     monkeypatch.setattr(p2p, "_measure_host_staged_gbps", lambda *a, **k: 55.0)
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
+    p2p.configure_p2p(p2p.P2PConfig(min_gbps=5))
 
     direct, staged = p2p._probe_bandwidth(0, 1)
     assert direct == 54.0
@@ -286,13 +317,11 @@ def test_p2p_probe_is_resilient_to_a_noisy_sample(monkeypatch):
 
 
 def test_p2p_forced_mode_ignores_relative_gate(monkeypatch):
-    # ``GPTQMODEL_P2P=1`` asks for the direct path explicitly; a link slower than
+    # ``mode='on'`` asks for the direct path explicitly; a link slower than
     # staging must not be vetoed by the relative comparison (the absolute floor
     # still applies).
     _fake_topology(monkeypatch, {(0, 1): True}, bandwidth=lambda src, dst: (20.0, 45.0))
-    monkeypatch.setenv("GPTQMODEL_P2P", "1")
-    monkeypatch.setenv("GPTQMODEL_P2P_MIN_GBPS", "5")
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE", "1")
+    p2p.configure_p2p(p2p.P2PConfig(mode="on", min_gbps=5, probe=True))
     status = p2p.enable_peer_access([0, 1])
     assert status.state(0, 1) == p2p.STATE_ENABLED
     assert status.can_copy(0, 1) is True
@@ -307,7 +336,7 @@ def test_p2p_probe_is_opt_in(monkeypatch):
     _fake_topology(monkeypatch, {(0, 1): True, (1, 0): True})
 
     def fail(*args, **kwargs):
-        raise AssertionError("bandwidth probe must not run without GPTQMODEL_P2P_PROBE=1")
+        raise AssertionError("bandwidth probe must not run unless P2PConfig.probe is set")
 
     monkeypatch.setattr(p2p, "_probe_bandwidth", fail)
     status = p2p.enable_peer_access([0, 1])
@@ -324,10 +353,10 @@ def test_indexless_string_and_device_mean_current_device(monkeypatch):
     assert p2p._normalize_indices(["cpu", 1]) == (1,)
 
 
-def test_probe_mib_invalid_value_falls_back(monkeypatch):
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE_MIB", "not-a-number")
-    assert p2p._probe_mib() == 64
-    monkeypatch.setenv("GPTQMODEL_P2P_PROBE_MIB", "8")
+def test_probe_mib_invalid_value_is_rejected():
+    with pytest.raises(ValueError):
+        p2p.P2PConfig(probe_mib="not-a-number")
+    p2p.configure_p2p(p2p.P2PConfig(probe_mib=8))
     assert p2p._probe_mib() == 8
 
 

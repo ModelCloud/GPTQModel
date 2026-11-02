@@ -60,11 +60,14 @@ follow `$gptqmodel-pytorch-gil0` in
 - Never call `torch.cuda.comm.*` from worker threads; use
   `gptqmodel.utils.p2p.peer_copy_batch`, which drives the runtime peer-copy
   API through `ctypes` with the GIL released.
+- Configure P2P through `BaseQuantizeConfig.p2p` (`P2PConfig`) or
+  `GPTQModel.load(..., p2p=...)`, never through environment variables. Do not
+  add `GPTQMODEL_*` switches for new runtime behavior; extend the config object.
 - `torch.nn.parallel.replicate` internally uses `broadcast_coalesced`. It is
   serialized by `_THREAD_SAFE_PARALLEL` today, and `clone_module_for_devices`
   skips it when the GIL is disabled in favour of the deepcopy +
-  `move_module_to_device` path. Set `GPTQMODEL_USE_TORCH_REPLICATE=0` to force
-  the deepcopy path on a GIL build.
+  `move_module_to_device` path. Set `p2p=P2PConfig(use_torch_replicate=False)`
+  to force the deepcopy path on a GIL build.
 - Treat any API missing from the ledger as UNVERIFIED. Add a probe with
   `scripts/gil0_api_probe.py` and record the result before relying on it from
   threads.

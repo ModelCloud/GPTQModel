@@ -64,7 +64,7 @@ from ..utils.model import (
     untie_word_embeddings,
 )
 from ..utils.offload import offload_to_disk
-from ..utils.p2p import enable_for_devices
+from ..utils.p2p import configure_p2p, enable_for_devices
 from ..utils.python import has_gil_control, has_gil_disabled
 from ..utils.torch import CPU, META, tf32_high_precision_guard
 from .awq_processor import AWQProcessor
@@ -341,6 +341,7 @@ class ModuleLooper(DeviceAssignmentState):
         # caches, logs a single summary line, and never raises in best-effort
         # mode, so a failed probe never blocks quantization.
         cross_device_pool = self._cross_device_pool()
+        configure_p2p(getattr(self.gptq_model.quantize_config, "p2p", None))
         if len(cross_device_pool) > 1:
             enable_for_devices(cross_device_pool)
 

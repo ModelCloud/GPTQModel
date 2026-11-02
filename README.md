@@ -1353,7 +1353,7 @@ Models quantized by GPT-QModel are inference compatible with HF Transformers (mi
 
 ## Operational notes 🗒️
 
-For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide](docs/multi_gpu_quantization.md). Setting `CUDA_VISIBLE_DEVICES` exposes GPUs to the process; MoE device placement and free-threaded parallel quantization also need to be configured. Multi-GPU runs auto-enable CUDA/HIP peer access and use GIL-safe runtime peer copies for module moves, calibration input staging, and Hessian reduction; a one-time warning reports motherboard/BIOS/hardware P2P incompatibility. Set `GPTQMODEL_P2P=0` to skip pre-enablement and `GPTQMODEL_P2P_PROBE=1` for bandwidth diagnostics. On free-threaded builds never call `torch.cuda.comm.*` from worker threads; see [`pytorch_gil_0_compat.md`](pytorch_gil_0_compat.md).
+For MoE quantization across multiple GPUs, see the [multi-GPU quantization guide](docs/multi_gpu_quantization.md). Setting `CUDA_VISIBLE_DEVICES` exposes GPUs to the process; MoE device placement and free-threaded parallel quantization also need to be configured. Multi-GPU runs auto-enable CUDA/HIP peer access and use GIL-safe runtime peer copies for module moves, calibration input staging, and Hessian reduction; a one-time warning reports motherboard/BIOS/hardware P2P incompatibility. Control the behavior with `BaseQuantizeConfig.p2p` (or `GPTQModel.load(..., p2p=...)` for inference): `P2PConfig(mode="off")` skips pre-enablement and `P2PConfig(probe=True)` runs bandwidth diagnostics. On free-threaded builds never call `torch.cuda.comm.*` from worker threads; see [`pytorch_gil_0_compat.md`](pytorch_gil_0_compat.md).
 
 ### Limit log level 🔇
 

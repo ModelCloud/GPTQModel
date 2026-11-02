@@ -23,6 +23,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
+from ..utils.p2p import P2PConfig, configure_p2p
 from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
 
@@ -1033,6 +1034,7 @@ def ModelLoader(cls):
             cls,
             pretrained_model_id_or_path: str,
             quantize_config: BaseQuantizeConfig,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
@@ -1041,6 +1043,10 @@ def ModelLoader(cls):
             device: Optional[Union[str, int]] = None,
             **model_init_kwargs,
     ):
+        if p2p is not None and quantize_config is not None:
+            # The loopers read this field and install it before enabling peers.
+            quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+
         # quantization is unsafe with GIL=0 and torch.compile/graphs
         import torch._dynamo
         torch._dynamo.disable()
@@ -1388,6 +1394,7 @@ def ModelLoader(cls):
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[int, str]]]] = None,
             device: Optional[Union[str, int]] = None,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             dtype: [str | torch.dtype] = "auto",
@@ -1399,6 +1406,10 @@ def ModelLoader(cls):
     ):
 
         warn_unsupported_rocm()
+
+        # Install the peer-to-peer policy before any multi-device load so the
+        # pre-enablement below and the inference-time copies use it.
+        configure_p2p(p2p)
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
 

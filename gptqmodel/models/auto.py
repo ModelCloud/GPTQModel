@@ -67,6 +67,7 @@ from ..utils.linalg_warmup import (  # noqa: E402
     kick_torch_quantize_prewarm,
 )
 from ..utils.model import auto_dtype, find_modules  # noqa: E402
+from ..utils.p2p import P2PConfig  # noqa: E402
 from ..utils.torch import torch_empty_cache  # noqa: E402
 from ._const import DEVICE  # noqa: E402
 from .base import BaseQModel  # noqa: E402
@@ -690,6 +691,7 @@ class GPTQModel:
             cls,
             model_id_or_path: Optional[str],
             quantize_config: Optional[QuantizeConfig | Dict] = None,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, torch.device]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
@@ -717,6 +719,13 @@ class GPTQModel:
         # normalize config to cfg instance
         if isinstance(quantize_config, Dict):
             quantize_config = QuantizeConfig(**quantize_config)
+        # The P2P policy lives on the quantize config for quantization; allow the
+        # same object here so a post-quantized load can control it without env vars.
+        if p2p is not None:
+            if quantize_config is not None:
+                quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+        elif quantize_config is not None:
+            p2p = quantize_config.p2p
 
         backend = normalize_backend(backend)
         profile = normalize_profile(profile)
@@ -765,6 +774,7 @@ class GPTQModel:
                 model_id_or_path=model_id_or_path,
                 device_map=device_map,
                 device=device,
+                p2p=p2p,
                 backend=backend,
                 trust_remote_code=trust_remote_code,
                 tokenizer_trust_remote_code=requested_trust_remote_code,
@@ -800,11 +810,16 @@ class GPTQModel:
             cls,
             model_id_or_path: str,
             quantize_config: QuantizeConfig,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             profile: Union[str, int, PROFILE] = PROFILE.AUTO,
             trust_remote_code: bool = False,
             **model_init_kwargs,
     ) -> BaseQModel:
+        if p2p is not None and quantize_config is not None:
+            # The looper installs this policy before it enables peer access.
+            quantize_config.p2p = P2PConfig(**p2p) if isinstance(p2p, dict) else p2p
+
         if quantize_config is not None:
             _kick_quantize_prewarms(
                 model_init_kwargs.get("device"),
@@ -882,6 +897,7 @@ class GPTQModel:
             model_id_or_path: Optional[str],
             device_map: Optional[Union[str, Dict[str, Union[str, int]]]] = None,
             device: Optional[Union[str, int]] = None,
+            p2p: Optional[Union[P2PConfig, Dict]] = None,
             backend: Union[str, BACKEND] = BACKEND.AUTO,
             adapter: Optional[Adapter | Dict] = None,
             trust_remote_code: bool = False,
@@ -918,6 +934,7 @@ class GPTQModel:
             model_id_or_path=model_id_or_path,
             device_map=device_map,
             device=device,
+            p2p=p2p,
             backend=backend,
             trust_remote_code=trust_remote_code,
             tokenizer_trust_remote_code=tokenizer_trust_remote_code,

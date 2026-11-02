@@ -43,7 +43,8 @@ cover, and never upgrade a row to SAFE based on a single-threaded run.
   prevents concurrent entry; it does not make the entry point safe.
   `clone_module_for_devices` skips it when the GIL is disabled and uses the
   deepcopy + `move_module_to_device` path. Set
-  `GPTQMODEL_USE_TORCH_REPLICATE=0` to force the deepcopy path on a GIL build.
+  `p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path on a
+  GIL build.
 - `torch.cuda.set_device` is thread-local. Set it at the top of every worker;
   never inherit the device of the thread that spawned it.
 - Join work with per-thread streams and events. Avoid

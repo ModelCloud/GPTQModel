@@ -18,7 +18,6 @@ from .. import DEBUG_ON, DEVICE_THREAD_POOL
 from ..nn_modules.hooked_linear import StopForward
 from ..utils.attn_mask import normalize_seq_mask
 from ..utils.device import get_device
-from ..utils.env import env_flag
 from ..utils.inspect import get_supported_kwargs
 from ..utils.logger import setup_logger
 from ..utils.model import get_layer_name, move_to, nested_move_to
@@ -26,14 +25,12 @@ from ..utils.p2p import (
     P2P_NOT_APPLICABLE,
     broadcast_module_to_device,
     enable_for_devices,
+    get_p2p_config,
     p2p_move_nested,
 )
 from ..utils.python import has_gil_disabled
 from ..utils.safe import ThreadSafe
 from ..utils.torch import ALL_DEVICES, CPU, HAS_NPU, torch_sync
-
-
-USE_TORCH_REPLICATE = env_flag("GPTQMODEL_USE_TORCH_REPLICATE", True)
 
 
 _THREAD_SAFE_PARALLEL = ThreadSafe(torch_parallel)
@@ -508,7 +505,7 @@ def clone_module_for_devices(
         _record(step_name, start_ts)
 
     use_replicate = (
-        USE_TORCH_REPLICATE
+        get_p2p_config().use_torch_replicate
         # ``torch.nn.parallel.replicate`` funnels into
         # ``torch.cuda.comm.broadcast_coalesced``, which is unsafe on
         # free-threaded builds. Use the deepcopy + peer-copy path instead.

@@ -26,6 +26,7 @@ from packaging import version
 
 from ..adapter.adapter import Lora, normalize_adapter
 from ..utils.logger import setup_logger
+from ..utils.p2p import P2PConfig
 from ..utils.vptq import vptq_index_bits
 from .gsq_training_config import GSQTrainingConfig
 
@@ -3284,6 +3285,18 @@ def _normalize_gc_mode(value: Union[str, GcMode]) -> GcMode:
     return value
 
 
+def _normalize_p2p_config(
+    value: Optional[Union[P2PConfig, Dict[str, Any]]],
+) -> Optional[P2PConfig]:
+    if value is None:
+        return None
+    if isinstance(value, P2PConfig):
+        return value
+    if not isinstance(value, dict):
+        raise ValueError("QuantizeConfig: `p2p` must be a P2PConfig, dict, or None.")
+    return P2PConfig(**value)
+
+
 def _normalize_moe_config(value: Optional[Union[MoEConfig, Dict[str, Any]]]) -> Optional[MoEConfig]:
     if value is None:
         return None
@@ -3708,6 +3721,17 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         "leading in some cases to slower forwarding or vram OOM"}
     )
 
+    # Peer-to-peer policy for multi-GPU quantization and inference. Replaces the
+    # former GPTQMODEL_P2P* environment variables: `mode` ("auto"/"on"/"off"),
+    # `probe`, `probe_mib`, `min_gbps`, `min_ratio`, `use_torch_replicate`.
+    # `None` uses the P2PConfig defaults.
+    p2p: Optional[Union[P2PConfig, Dict[str, Any]]] = field(
+        default=None,
+        metadata={"help": "Peer-to-peer policy for multi-GPU quantization/inference. "
+                  "Pass P2PConfig(mode='auto'|'on'|'off', probe=..., min_gbps=..., min_ratio=..., "
+                  "use_torch_replicate=...) or an equivalent dict. None uses the defaults."},
+    )
+
     # User-facing dense-pool strategy. The dense pool owns the serial path:
     # qkv, z, out_proj, norms, router, shared expert, and dense MLP modules.
     dense_vram_strategy: VramStrategy = field(
@@ -3997,6 +4021,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
         )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
+        self.p2p = _normalize_p2p_config(self.p2p)
 
         # Normalize calibration_data_device to canonical form if it's a specific device (not "balanced")
         if self.calibration_data_device is not None:
@@ -4345,6 +4370,7 @@ class BaseQuantizeConfig(metaclass=QuantizeConfigMeta):
 
         meta_payload["offload_to_disk"] = self.offload_to_disk
         meta_payload["telemetry"] = asdict(self.telemetry)
+        meta_payload["p2p"] = self.p2p.to_dict() if self.p2p is not None else None
         meta_payload["offload_to_disk_path"] = self.offload_to_disk_path
         meta_payload["pack_impl"] = self.pack_impl
         meta_payload["gc_mode"] = self.gc_mode.value if isinstance(self.gc_mode, GcMode) else self.gc_mode
@@ -5586,6 +5612,7 @@ class EXL3Config(BaseQuantizeConfig):
         )
         self.gc_mode = _normalize_gc_mode(self.gc_mode)
         self.moe = _normalize_moe_config(self.moe)
+        self.p2p = _normalize_p2p_config(self.p2p)
 
     def _update_output_payload(self, out: Dict[str, Any]) -> None:
         out["bits"] = float(self.bits)

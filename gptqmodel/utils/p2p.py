@@ -18,7 +18,7 @@ so this module is **not** required for ``copy_``/``to`` to stay on the
 interconnect.  Its job is to (a) enable the links before the first cross-device
 copy so the very first transfer is direct, and (b) optionally *diagnose* the
 links.  Enabling is cheap and idempotent; bandwidth probing moves real payload
-and is opt-in via ``GPTQMODEL_P2P_PROBE=1``.
+and is opt-in through :class:`P2PConfig` (``probe=True``).
 
 A capability bit is not proof of usable bandwidth, so an opt-in probe classifies
 each direction as ``enabled``/``degraded``.  That classification is diagnostic
@@ -26,8 +26,10 @@ only: peer access cannot be revoked once enabled and no code path here routes a
 ``degraded`` link through an explicit host relay.  Never assert P2P is effective
 from the capability bit alone.
 
-The module is opt-out via ``GPTQMODEL_P2P=0`` and force-on via ``GPTQMODEL_P2P=1``
-(default ``auto``).  Results are cached per device tuple for the process.
+Behavior is controlled by :class:`P2PConfig`, normally supplied as
+``BaseQuantizeConfig.p2p`` (or ``GPTQModel.load(..., p2p=...)`` for inference)
+and installed with :func:`configure_p2p`.  Results are cached per device tuple
+for the process.
 """
 
 from __future__ import annotations
@@ -39,7 +41,8 @@ import glob
 import os
 import site
 import threading
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable, Sequence
 
 import torch
@@ -49,18 +52,12 @@ from .logger import setup_logger
 
 log = setup_logger()
 
-ENV_P2P = "GPTQMODEL_P2P"
-ENV_P2P_MIN_GBPS = "GPTQMODEL_P2P_MIN_GBPS"
-ENV_P2P_MIN_RATIO = "GPTQMODEL_P2P_MIN_RATIO"
-ENV_P2P_PROBE = "GPTQMODEL_P2P_PROBE"
-ENV_P2P_PROBE_MIB = "GPTQMODEL_P2P_PROBE_MIB"
-
-# "auto" enables P2P when the runtime reports a peer link; "1" forces the
-# enablement attempt; "0" skips the pre-enablement call entirely (PyTorch's own
-# lazy peer setup still runs inside its copy path).
+# "auto" enables P2P when the runtime reports a peer link; "on" forces the
+# enablement attempt; "off" skips the pre-enablement call entirely (PyTorch's
+# own lazy peer setup still runs inside its copy path).
 _MODE_AUTO = "auto"
-_MODE_ON = "1"
-_MODE_OFF = "0"
+_MODE_ON = "on"
+_MODE_OFF = "off"
 _OFF_VALUES = frozenset({"0", "false", "off", "no", "disable", "disabled"})
 _ON_VALUES = frozenset({"1", "true", "on", "yes", "enable", "enabled"})
 
@@ -80,9 +77,125 @@ DEFAULT_MIN_GBPS = 5.0
 # legs on two device streams with no dependency, which measured the staged path
 # at ~2x its real speed. With the legs ordered the direct path wins by ~2x, so a
 # 1.0 gate keeps every healthy PCIe peer link direct while still rejecting a
-# link that is genuinely slower than the fallback. ``GPTQMODEL_P2P_MIN_RATIO``
+# link that is genuinely slower than the fallback. ``P2PConfig.min_ratio``
 # can be lowered for a topology that really does measure at parity.
 DEFAULT_MIN_RATIO = 1.0
+
+
+@dataclass
+class P2PConfig:
+    """Peer-to-peer policy for multi-GPU quantization and inference.
+
+    Pass an instance as ``BaseQuantizeConfig(p2p=P2PConfig(...))``, or as
+    ``GPTQModel.load(..., p2p=P2PConfig(...))`` when loading an already
+    quantized model. A plain ``dict`` with the same keys is also accepted.
+
+    ``mode``
+        ``"auto"`` enables peer access when the runtime reports a peer link,
+        ``"on"`` additionally attempts pairs whose capability bit is false, and
+        ``"off"`` skips GPT-QModel's pre-enablement (PyTorch still enables
+        peers lazily inside its own copy path).
+    ``probe``
+        Measure every directed pair and classify a link ``degraded`` when it is
+        slower than ordered pinned-host staging. Diagnostic only; peer access
+        stays enabled and no caller inserts a host relay because of it.
+    ``probe_mib``
+        Preferred probe payload size in MiB; the probe steps down under
+        memory pressure.
+    ``min_gbps`` / ``min_ratio``
+        Diagnostic gates: absolute floor in GB/s, and the fraction of the
+        ordered host-staging rate a direct copy must reach.
+    ``use_torch_replicate``
+        Allow ``torch.nn.parallel.replicate`` when the GIL is enabled. It is
+        skipped on free-threaded builds regardless because it funnels into
+        ``torch.cuda.comm.broadcast_coalesced``, which is not thread-safe.
+    """
+
+    mode: str = _MODE_AUTO
+    probe: bool = False
+    probe_mib: int = 64
+    min_gbps: float = DEFAULT_MIN_GBPS
+    min_ratio: float = DEFAULT_MIN_RATIO
+    use_torch_replicate: bool = True
+
+    def __post_init__(self) -> None:
+        mode = str(self.mode).strip().lower()
+        if mode in _OFF_VALUES:
+            self.mode = _MODE_OFF
+        elif mode in _ON_VALUES:
+            self.mode = _MODE_ON
+        elif mode in ("", "auto", "default", "none"):
+            self.mode = _MODE_AUTO
+        else:
+            raise ValueError(
+                f"P2PConfig.mode must be 'auto', 'on' or 'off'; got {self.mode!r}"
+            )
+
+        self.probe = bool(self.probe)
+        self.use_torch_replicate = bool(self.use_torch_replicate)
+        try:
+            self.probe_mib = max(1, int(self.probe_mib))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"P2PConfig.probe_mib must be an integer; got {self.probe_mib!r}") from exc
+        try:
+            self.min_gbps = max(0.0, float(self.min_gbps))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"P2PConfig.min_gbps must be a number; got {self.min_gbps!r}") from exc
+        try:
+            self.min_ratio = max(0.0, float(self.min_ratio))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"P2PConfig.min_ratio must be a number; got {self.min_ratio!r}") from exc
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _coerce_p2p_config(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfig:
+    if config is None:
+        return P2PConfig()
+    if isinstance(config, P2PConfig):
+        return config
+    if isinstance(config, Mapping):
+        return P2PConfig(**dict(config))
+    raise TypeError(
+        "p2p config must be a P2PConfig, a mapping of its fields, or None; "
+        f"got {type(config).__name__}"
+    )
+
+
+_CONFIG_LOCK = threading.Lock()
+_ACTIVE_CONFIG: P2PConfig = P2PConfig()
+
+
+def configure_p2p(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfig:
+    """Install the process-wide P2P policy used by every helper in this module.
+
+    Quantization calls this from the loopers with ``BaseQuantizeConfig.p2p``;
+    inference calls it with the ``p2p=`` argument of ``GPTQModel.load``. Calling
+    it again replaces the policy and drops cached probe results. ``None``
+    restores the defaults, so callers never need environment variables.
+    """
+
+    global _ACTIVE_CONFIG, _WARNED_DEGRADED
+
+    resolved = _coerce_p2p_config(config)
+    with _CONFIG_LOCK:
+        changed = resolved != _ACTIVE_CONFIG
+        _ACTIVE_CONFIG = resolved
+    if changed:
+        # A new policy is a new run as far as the operator is concerned; let the
+        # actionable warning fire again so a second configuration is not silent.
+        with _WARN_LOCK:
+            _WARNED_DEGRADED = False
+        clear_p2p_cache()
+    return resolved
+
+
+def get_p2p_config() -> P2PConfig:
+    """Return the active P2P policy (never ``None``)."""
+
+    return _ACTIVE_CONFIG
+
 
 STATE_ENABLED = "enabled"
 STATE_UNSUPPORTED = "unsupported"
@@ -161,45 +274,30 @@ def _cache_namespace() -> bool:
 
 def p2p_mode() -> str:
     """Return the requested mode: ``auto``, ``1`` (force), or ``0`` (off)."""
-    raw = os.getenv(ENV_P2P, _MODE_AUTO).strip().lower()
-    if raw in _OFF_VALUES:
-        return _MODE_OFF
-    if raw in _ON_VALUES:
-        return _MODE_ON
-    return _MODE_AUTO
+    return _ACTIVE_CONFIG.mode
 
 
 def _min_gbps() -> float:
-    try:
-        return max(0.0, float(os.getenv(ENV_P2P_MIN_GBPS, DEFAULT_MIN_GBPS)))
-    except ValueError:
-        return DEFAULT_MIN_GBPS
+    return _ACTIVE_CONFIG.min_gbps
 
 
 def _min_ratio() -> float:
-    try:
-        return max(0.0, float(os.getenv(ENV_P2P_MIN_RATIO, DEFAULT_MIN_RATIO)))
-    except ValueError:
-        return DEFAULT_MIN_RATIO
+    return _ACTIVE_CONFIG.min_ratio
 
 
 def probe_enabled() -> bool:
-    """True when bandwidth diagnostics were requested via ``GPTQMODEL_P2P_PROBE``.
+    """True when bandwidth diagnostics were requested via ``P2PConfig.probe``.
 
     Probing is off by default: PyTorch already keeps cross-device copies on the
     peer link, so measuring every directed pair only adds startup latency and
     payload traffic without changing the transfer path.
     """
 
-    return os.getenv(ENV_P2P_PROBE, "").strip().lower() in _ON_VALUES
+    return _ACTIVE_CONFIG.probe
 
 
 def _probe_mib() -> int:
-    try:
-        return max(1, int(os.getenv(ENV_P2P_PROBE_MIB, "64")))
-    except (TypeError, ValueError):
-        log.debug("%s=%r is not an integer; using 64 MiB", ENV_P2P_PROBE_MIB, os.getenv(ENV_P2P_PROBE_MIB))
-        return 64
+    return _ACTIVE_CONFIG.probe_mib
 
 
 def _normalize_indices(devices: Iterable | None) -> tuple[int, ...]:
@@ -566,7 +664,7 @@ def _probe_bandwidth(src: int, dst: int) -> tuple[float | None, float | None]:
       sample is used, so one unlucky run cannot turn a healthy link into a
       ``degraded`` CPU bounce.
 
-    ``GPTQMODEL_P2P_PROBE_MIB`` sets the preferred payload; the ladder below is
+    ``P2PConfig.probe_mib`` sets the preferred payload; the ladder below is
     only used when that size cannot be measured.
     """
 
@@ -631,11 +729,10 @@ def _warn_degraded_once(status: PeerStatus) -> None:
         "slot wiring, ACS/IOMMU), BIOS compatibility (Above 4G decoding, "
         "Resizable BAR, PCIe generation), or hardware compatibility. Cross-GPU "
         "copies will fall back to slower host staging and multi-GPU "
-        "quantization/inference speed may be sub-optimal. Set %s=1 to force an "
-        "enablement attempt; details: %s",
+        "quantization/inference speed may be sub-optimal. Set "
+        "`p2p=P2PConfig(mode='on')` to force an enablement attempt; details: %s",
         enabled,
         total,
-        ENV_P2P,
         status.summary(),
     )
 
@@ -650,7 +747,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     ``enabled``   - capability reported and enablement succeeded.
     ``unsupported`` - capability is false or enablement failed.
 
-    When ``GPTQMODEL_P2P_PROBE=1`` a measured copy additionally downgrades a
+    When ``P2PConfig.probe`` is set a measured copy additionally downgrades a
     link to ``degraded`` if it is slower than ordered pinned-host staging. That
     is a diagnostic verdict: peer access stays enabled and no caller inserts a
     host relay because of it.
@@ -665,7 +762,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
     status = PeerStatus(mode=mode, devices=indices)
 
     if mode == _MODE_OFF:
-        status.reason = f"{ENV_P2P}=0"
+        status.reason = "P2PConfig.mode='off'"
         log.debug("%s", status.summary())
         return status
 
@@ -699,8 +796,8 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
             for col, dst in enumerate(indices):
                 if src == dst:
                     continue
-                # ``GPTQMODEL_P2P=1`` is an explicit request to try the
-                # enablement call even when the capability probe says no.
+                # ``mode='on'`` is an explicit request to try the enablement
+                # call even when the capability probe says no.
                 available = capability[row][col] or mode == _MODE_ON
                 if not available:
                     status.pairs[(src, dst)] = STATE_UNSUPPORTED
@@ -728,7 +825,7 @@ def enable_peer_access(devices: Sequence | None = None, *, strict: bool = False)
                 elif measured < threshold:
                     reason = f"{measured:.2f} GB/s < {threshold:.2f} GB/s gate"
                 elif staged and mode != _MODE_ON and measured < staged * min_ratio:
-                    # ``GPTQMODEL_P2P=1`` is an explicit request for the direct
+                    # ``mode='on'`` is an explicit request for the direct
                     # path, so the relative comparison must not veto it. The
                     # absolute floor above still catches a link that is not
                     # moving data at all.
