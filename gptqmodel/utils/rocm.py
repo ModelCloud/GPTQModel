@@ -4,14 +4,110 @@
 # Contact: qubitium@modelcloud.ai, x.com/qubitium
 
 import os
+import re
 from contextlib import contextmanager
 
 import torch
 
 from .arch import arch_class
+from .logger import setup_logger
 
 
 IS_ROCM = torch.version.hip is not None
+
+# GPT-QModel only supports and validates ROCm 10.1 and newer. The loader and
+# package init warn once on older runtimes; see ``warn_unsupported_rocm``.
+MIN_ROCM_VERSION = (10, 1)
+MIN_ROCM_VERSION_STR = "10.1"
+
+_TORCH_ROCM_TAG_RE = re.compile(r"\+rocm(\d+(?:\.\d+)*)", re.IGNORECASE)
+_ROCM_VERSION_RE = re.compile(r"(\d+(?:\.\d+)*)")
+
+log = setup_logger()
+
+_UNSUPPORTED_ROCM_WARNED = False
+
+
+def _version_tuple(value: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in value.split("."))
+
+
+def parse_rocm_version(value) -> tuple[int, ...] | None:
+    """Parse a ROCm version string into comparable integer components."""
+
+    if not value:
+        return None
+    match = _ROCM_VERSION_RE.search(str(value))
+    if match is None:
+        return None
+    return _version_tuple(match.group(1))
+
+
+def rocm_version() -> tuple[int, ...] | None:
+    """Return the ROCm release used by torch, or ``None`` when undetectable.
+
+    ``torch.version.rocm`` is authoritative and present on current wheels.
+    Older wheels only encode the release in the local version tag
+    (``2.4.0+rocm6.2...``), which is the fallback. ``torch.version.hip`` is the
+    HIP runtime version rather than the ROCm release and is never parsed.
+    """
+
+    if not IS_ROCM:
+        return None
+
+    version = parse_rocm_version(getattr(torch.version, "rocm", None))
+    if version is not None:
+        return version
+
+    match = _TORCH_ROCM_TAG_RE.search(str(getattr(torch, "__version__", "")))
+    if match is None:
+        return None
+    return _version_tuple(match.group(1))
+
+
+def rocm_version_string() -> str | None:
+    """Return the detected ROCm release as ``"major.minor[.patch]"``."""
+
+    version = rocm_version()
+    if version is None:
+        return None
+    return ".".join(str(part) for part in version)
+
+
+def is_supported_rocm_version() -> bool | None:
+    """Return whether ROCm is new enough, or ``None`` off ROCm/undetectable."""
+
+    if not IS_ROCM:
+        return None
+    version = rocm_version()
+    if version is None:
+        return None
+    return version >= MIN_ROCM_VERSION
+
+
+def warn_unsupported_rocm(logger=None) -> bool:
+    """Warn once when ROCm is older than :data:`MIN_ROCM_VERSION`.
+
+    Returns ``True`` when the warning was emitted. The check is inert off ROCm
+    and when torch does not expose a ROCm release, so a supported or
+    undetectable host never produces a false warning.
+    """
+
+    global _UNSUPPORTED_ROCM_WARNED
+
+    if _UNSUPPORTED_ROCM_WARNED:
+        return False
+    if is_supported_rocm_version() is not False:
+        return False
+
+    _UNSUPPORTED_ROCM_WARNED = True
+    target = logger or log
+    target.warn(
+        f"ROCm {rocm_version_string()} is not supported: GPT-QModel requires "
+        f"ROCm >= {MIN_ROCM_VERSION_STR}. Please upgrade to the latest ROCm "
+        "release (>= 10.1) before quantizing or loading models."
+    )
+    return True
 
 # hipBLASLt loads one Tensile library per (dtype, layout) pair on first use. On
 # gfx950 (MI350X) each of those loads spends ~0.8-1.2 s finalizing a code object

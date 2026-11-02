@@ -23,7 +23,7 @@ import torch
 import transformers
 
 from ..utils.modelscope import ensure_modelscope_available
-from ..utils.rocm import IS_ROCM
+from ..utils.rocm import IS_ROCM, warn_unsupported_rocm
 from ..utils.structure import LazyTurtle, print_module_tree
 
 
@@ -1397,6 +1397,8 @@ def ModelLoader(cls):
             adapter_sha256: Optional[str] = None,
             **kwargs,
     ):
+
+        warn_unsupported_rocm()
 
         # post-quant is safe with GIL=0 and torch.compile/graphs
 

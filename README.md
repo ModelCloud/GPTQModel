@@ -322,12 +322,17 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 | Platform | Device |  | Optimized Arch | Kernels |
 |---|---|---|---|---|
 | 🐧 Linux | NVIDIA GPU | ✅ | `Turing+` (`sm_75+`) | Machete, Marlin, Exllama V3 / EXL3, Exllama V2, AWQ GEMM/GEMV, ParoQuant CUDA/Triton, GGUF CUDA/Triton, QQQ, VPTQ, BitBLAS, Triton, BitsAndBytes, Torch |
-| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 6.2+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM, QQQ, FP8 Torch, Torch (fused GPTQ GEMV on gfx950 and gfx120*/gfx125*) |
+| 🐧 Linux | AMD GPU | ✅ | `7900XT+`, `ROCm 10.1+`, `gfx950` (CDNA4), `gfx1200/1201/1250` (RDNA4) | Exllama V2, AWQ Triton GEMM, QQQ, FP8 Torch, Torch (fused GPTQ GEMV on gfx950 and gfx120*/gfx125*) |
 | 🐧 Linux | Huawei Ascend NPU | ✅ | `Ascend 910B`, `torch-npu` / `CANN` | Native Torch kernels for GPTQ, AWQ, ParoQuant, GGUF, QQQ, and EXL3 |
 | 🐧 Linux | Intel XPU | ✅ | `Arc`, `Datacenter Max` | TorchFused, TorchFusedAWQ, FP8 Torch, Torch |
 | 🐧 Linux | Intel/AMD CPU | ✅ | `avx`, `amx` | TorchFused, TorchFusedAWQ, TorchAten int4, TorchInt8, GGUF C++, BitsAndBytes, VPTQ, Torch |
 | 🍎 macOS | GPU (Metal) / CPU | ✅ | `Apple Silicon`, `M1+` | Torch, FP8 Torch, MLX via conversion |
 | 🪟 Windows | GPU (NVIDIA) / CPU | ✅ | `NVIDIA` | Torch |
+
+**ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
+ROCm >= 10.1; older releases are unsupported and `import gptqmodel` or model
+loading logs a warning asking you to upgrade. Use the latest ROCm release and a
+matching ROCm PyTorch build.
 
 ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
 matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
@@ -388,6 +393,10 @@ uv pip install -v gptqmodel
 ```
 
 The package depends on `ninja` for first-use JIT kernel compilation.
+
+AMD ROCm support requires **ROCm >= 10.1** and a matching ROCm PyTorch build.
+Older ROCm releases are unsupported; GPT-QModel logs a warning at import/model
+load time and asks you to upgrade.
 
 ### Install from source 🛠️
 
