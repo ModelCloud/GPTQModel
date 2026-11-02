@@ -160,12 +160,21 @@ while the source device is current puts the work on the source queue, where the
 destination stream never waits for it. See manual finding 5 in
 `pytorch_gil_0_compat.md`.
 
-These copies are a safety and control mechanism, not a throughput win.
-Measured A/B against the pre-change tree (2x RTX 4090, interleaved runs, median
-of 30): module moves are on par with the regular `Tensor.to` path across 12
-module shapes, and calibration staging is about 11% slower because each leaf
-still needs its own allocation and enqueue. End-to-end quantization of a
-438M-parameter model stayed within run-to-run noise (about ±20%).
+The peer path is gated by leaf size: it is used only when the average leaf is
+at most 256 KiB (`_PEER_COPY_MAX_AVG_LEAF_BYTES`). Measured within one process
+against the regular `Tensor.to` path (2x RTX 4090, median of 3 runs x 10
+roundtrips, 12 module shapes), 128-256 KiB leaves are 3-15% faster through the
+peer path, while 2 MiB and larger leaves are 0-6% slower. Large leaves now fall
+back to `Tensor.to`, which keeps the module path within 1.6% of the pre-change
+tree.
+
+Coalescing (pack into one buffer, one peer copy, scatter) was prototyped and is
+7-17% slower on every shape: it replaces N peer transactions with 2N local ones
+plus one peer transaction, and the pack/scatter enqueues cost more than the
+single transfer saves. Do not re-add it without a measurement showing otherwise.
+
+End-to-end quantization of a 438M-parameter model stayed within run-to-run
+noise (about ±20%).
 
 Do **not** call `torch.cuda.comm.*` from worker threads. On a free-threaded
 (`PYTHON_GIL=0`) build `broadcast_coalesced` has hung and returned torn copies

@@ -218,28 +218,29 @@ def test_p2p_move_nested_is_ordered_on_destination_stream():
             assert torch.equal(observed.cpu(), expected.cpu())
 
 
+def _small_leaves(count: int = 5):
+    """Leaves in the peer-copy win region: 256 KiB each, comfortably over 1 MiB."""
+    return [torch.randn(256, 256, device="cuda:0") for _ in range(count)]
+
+
 def test_p2p_move_nested_coalesces_multiple_tensors():
     _require_p2p(0, 1)
 
-    values = {
-        "hidden": torch.randn(1024, 1024, device="cuda:0"),
-        "mask": torch.randn(1024, 1024, device="cuda:0"),
-    }
+    values = _small_leaves()
     moved = p2p_move_nested(values, torch.device("cuda:1"))
 
     assert moved is not P2P_NOT_APPLICABLE
-    assert moved["hidden"].device == torch.device("cuda:1")
-    assert moved["mask"].device == torch.device("cuda:1")
-    torch.testing.assert_close(moved["hidden"].cpu(), values["hidden"].cpu())
-    torch.testing.assert_close(moved["mask"].cpu(), values["mask"].cpu())
+    for observed, expected in zip(moved, values):
+        assert observed.device == torch.device("cuda:1")
+        torch.testing.assert_close(observed.cpu(), expected.cpu())
 
 
 def test_p2p_move_nested_skips_non_contiguous():
     _require_p2p(0, 1)
 
-    base = torch.randn(1024, 1024, device="cuda:0")
-    values = [base.t(), base.t()]
-    assert not values[0].is_contiguous()
+    base = torch.randn(256, 256, device="cuda:0")
+    values = _small_leaves(4) + [base.t()]
+    assert not values[-1].is_contiguous()
     assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
 
 
@@ -247,9 +248,16 @@ def test_p2p_move_nested_skips_autograd():
     _require_p2p(0, 1)
 
     values = [
-        torch.randn(1024, 1024, device="cuda:0", requires_grad=True),
-        torch.randn(1024, 1024, device="cuda:0", requires_grad=True),
+        torch.randn(256, 256, device="cuda:0", requires_grad=True) for _ in range(5)
     ]
+    assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
+
+
+def test_p2p_move_nested_skips_large_leaves():
+    """Large leaves stay on ``.to()``: the peer path is measurably slower there."""
+    _require_p2p(0, 1)
+
+    values = [torch.randn(1024, 512, device="cuda:0") for _ in range(5)]
     assert p2p_move_nested(values, torch.device("cuda:1")) is P2P_NOT_APPLICABLE
 
 
@@ -275,7 +283,7 @@ def test_p2p_moves_are_thread_safe():
         torch.testing.assert_close(module.weight, expected_weight.to("cuda:1"))
         torch.testing.assert_close(module.bias, expected_bias.to("cuda:1"))
 
-        values = [torch.randn(512, 512, device="cuda:0") for _ in range(2)]
+        values = _small_leaves()
         moved = p2p_move_nested(values, torch.device("cuda:1"))
         assert moved is not P2P_NOT_APPLICABLE
         for source, result in zip(values, moved):
@@ -307,7 +315,7 @@ def test_p2p_fast_path_does_not_use_torch_cuda_comm(monkeypatch):
     assert broadcast_module_to_device(module, torch.device("cuda:1")) is True
     assert module.weight.device == torch.device("cuda:1")
 
-    values = [torch.randn(512, 512, device="cuda:0") for _ in range(2)]
+    values = _small_leaves()
     moved = p2p_move_nested(values, torch.device("cuda:1"))
     assert moved is not P2P_NOT_APPLICABLE
     for source, result in zip(values, moved):

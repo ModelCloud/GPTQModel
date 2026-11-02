@@ -1081,6 +1081,15 @@ def _contiguous_like(tensor: torch.Tensor, device: torch.device) -> torch.Tensor
     )
 
 
+# The peer-copy path only wins when per-leaf dispatch overhead dominates the
+# transfer itself. Measured on 2x RTX 4090 (within-process, median of 3 runs x
+# 10 roundtrips, 12 module shapes): at 64 KiB per leaf it is 3-14% faster than
+# the regular ``Tensor.to`` path, while at 512 KiB and above it is 0-6% slower
+# because each leaf needs an extra allocation plus an event join. 256 KiB sits
+# between the measured win and loss regions.
+_PEER_COPY_MAX_AVG_LEAF_BYTES = 256 * 1024
+
+
 def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) -> bool:
     """Move all CUDA leaves of ``module`` to ``device`` with runtime peer copies.
 
@@ -1142,6 +1151,13 @@ def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) ->
     # A non-contiguous parameter would be copied in storage order and silently
     # produce wrong values, so fall back to the regular move instead.
     if any(not entry[2].is_contiguous() for entry in pending):
+        return False
+
+    # Leave large-leaf modules to the regular move path: the peer path adds an
+    # allocation and an event join per leaf, which only pays for itself when
+    # the leaves are small.
+    total_bytes = sum(entry[2].numel() * entry[2].element_size() for entry in pending)
+    if total_bytes > _PEER_COPY_MAX_AVG_LEAF_BYTES * len(pending):
         return False
 
     try:
@@ -1232,6 +1248,12 @@ def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 *
 
     total_bytes = sum(tensor.numel() * tensor.element_size() for tensor in pending)
     if total_bytes < min_bytes:
+        return _P2P_NOT_APPLICABLE
+
+    # Same size gate as the module path: a peer copy needs an extra allocation
+    # and event join per leaf, which only pays off for small leaves. Typical
+    # calibration batches have multi-MiB activations and stay on ``.to()``.
+    if total_bytes > _PEER_COPY_MAX_AVG_LEAF_BYTES * len(pending):
         return _P2P_NOT_APPLICABLE
 
     if not _can_peer_copy(source.index, target.index):

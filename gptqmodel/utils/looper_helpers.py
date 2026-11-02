@@ -106,10 +106,10 @@ def move_module_to_device(
     CUDA and P2P is enabled, the runtime peer-copy batch replaces those with
     one GIL-released enqueue per leaf.
 
-    This is a safety choice, not a speedup: measured throughput is on par with
-    the regular path (interleaved A/B, 12 module shapes, 2x RTX 4090), because
-    each leaf still needs its own copy and allocation. It is preferred on
-    free-threaded builds because it does not route through
+    Throughput depends on leaf size. The peer path is used only for small
+    leaves, where it measures 3-15% faster than ``Tensor.to``; larger leaves
+    fall back to the regular move (see ``_PEER_COPY_MAX_AVG_LEAF_BYTES``). It is
+    also preferred on free-threaded builds because it does not route through
     ``torch.nn.parallel.replicate``/``broadcast_coalesced``.
     """
 
