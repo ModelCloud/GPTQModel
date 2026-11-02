@@ -708,49 +708,60 @@ def test_legacy_map_names_accept_module_attribute_overrides(monkeypatch):
     assert importer.get_auto_backend_kernel_mapping()
 
 
-def test_map_reset_drops_a_map_restored_by_monkeypatch_undo(monkeypatch):
+def test_map_reset_drops_a_map_restored_by_monkeypatch_undo():
     """``undo()`` writes the cached map back as a real attribute.
 
     A real attribute shadows the accessor's cache lookup, so without cleanup the
     selectors keep reading the old map after a rebuild and the two accessors can
     disagree. Distinct explicit overrides must survive the reset.
+
+    This runs in a subprocess: it rebuilds the module-level map, so doing it
+    in-process would invalidate map objects already imported by other test
+    modules (``tests/kernels/test_selection.py`` imports the mapping directly).
     """
 
-    import gptqmodel.utils.importer as importer
+    _assert_ok(
+        _run(
+            """
+            from _pytest.monkeypatch import MonkeyPatch
 
-    cached_auto = importer.get_auto_backend_kernel_mapping()
-    cached_supports = importer.get_backend_to_method_format_mapping()
+            import gptqmodel.utils.importer as importer
 
-    patcher = monkeypatch.__class__()
-    patcher.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", {"patched": True})
-    patcher.setattr(importer, "BACKEND_TO_METHOD_FORMAT_MAPPING", {"patched": True})
-    patcher.undo()
-    if importer.__dict__.get("AUTO_BACKEND_KERNEL_MAPPING") is not cached_auto:
-        # pytest>=9 records ``__dict__`` so ``undo`` deletes the entry; older
-        # releases write the pre-patch value back. Either way the reset must not
-        # leave the stale map behind.
-        importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = cached_auto
-        importer.__dict__["BACKEND_TO_METHOD_FORMAT_MAPPING"] = cached_supports
+            cached_auto = importer.get_auto_backend_kernel_mapping()
+            cached_supports = importer.get_backend_to_method_format_mapping()
 
-    importer.build_kernel_support_maps.cache_clear()
+            patcher = MonkeyPatch()
+            patcher.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", {"patched": True})
+            patcher.setattr(importer, "BACKEND_TO_METHOD_FORMAT_MAPPING", {"patched": True})
+            patcher.undo()
+            if importer.__dict__.get("AUTO_BACKEND_KERNEL_MAPPING") is not cached_auto:
+                # pytest>=9 records ``__dict__`` so ``undo`` deletes the entry;
+                # older releases write the pre-patch value back. Either way the
+                # reset must not leave the stale map behind.
+                importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = cached_auto
+                importer.__dict__["BACKEND_TO_METHOD_FORMAT_MAPPING"] = cached_supports
 
-    assert "AUTO_BACKEND_KERNEL_MAPPING" not in importer.__dict__
-    assert "BACKEND_TO_METHOD_FORMAT_MAPPING" not in importer.__dict__
-    rebuilt_auto = importer.get_auto_backend_kernel_mapping()
-    assert rebuilt_auto is importer.build_kernel_support_maps()[0]
-    assert importer.get_backend_to_method_format_mapping() is importer.build_kernel_support_maps()[1]
+            importer.build_kernel_support_maps.cache_clear()
 
-    # A distinct explicit override is not the cached map and must be preserved.
-    distinct = {"patched": True}
-    importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = distinct
-    try:
-        importer.build_kernel_support_maps.cache_clear()
-        assert importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] is distinct
-        assert importer.get_auto_backend_kernel_mapping() is distinct
-    finally:
-        importer.__dict__.pop("AUTO_BACKEND_KERNEL_MAPPING", None)
-        importer.build_kernel_support_maps.cache_clear()
+            assert "AUTO_BACKEND_KERNEL_MAPPING" not in importer.__dict__
+            assert "BACKEND_TO_METHOD_FORMAT_MAPPING" not in importer.__dict__
+            rebuilt_auto = importer.get_auto_backend_kernel_mapping()
+            assert rebuilt_auto is importer.build_kernel_support_maps()[0]
+            assert importer.get_backend_to_method_format_mapping() is importer.build_kernel_support_maps()[1]
 
+            # A distinct explicit override is not the cached map and must be kept.
+            distinct = {"patched": True}
+            importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = distinct
+            try:
+                importer.build_kernel_support_maps.cache_clear()
+                assert importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] is distinct
+                assert importer.get_auto_backend_kernel_mapping() is distinct
+            finally:
+                importer.__dict__.pop("AUTO_BACKEND_KERNEL_MAPPING", None)
+                importer.build_kernel_support_maps.cache_clear()
+            """
+        )
+    )
 
 def test_deleting_a_lazy_availability_name_restores_the_probe():
     """``del mod.X_AVAILABLE`` must work and re-arm the probe, like a real attribute.
@@ -951,6 +962,273 @@ def test_falsy_bitblas_override_keeps_the_pre_lazy_semantics():
             assert (module.BITBLAS_AVAILABLE is False) is False
             assert not module.bitblas_available()  # the accessor still says unusable
             del module.BITBLAS_AVAILABLE
+            """
+        )
+    )
+
+
+def test_missing_optional_kernels_do_not_retry_on_every_map_lookup():
+    """A permanently absent optional dependency must not poison the cache.
+
+    ``mlx``/``tvm`` are not installed on a CUDA host, so the MLX kernel modules
+    and the BitBLAS target detector always fail their top-level import. Marking
+    that as "incomplete registry" made every map accessor hit take the global
+    build lock and retry all of them, adding failing imports to each kernel
+    selection and packing call.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+
+            attempts = {"n": 0}
+            real_import_module = importlib.import_module
+
+
+            def counting_import_module(name, *args, **kwargs):
+                if name.startswith("gptqmodel.nn_modules.qlinear."):
+                    attempts["n"] += 1
+                return real_import_module(name, *args, **kwargs)
+
+
+            importlib.import_module = counting_import_module
+            try:
+                importer.build_kernel_support_maps()
+                assert importer._BUILT_INCOMPLETE is False, (
+                    "a stable environment must not look permanently incomplete: "
+                    f"{importer._QLINEAR_FAILED!r}"
+                )
+                assert all(
+                    kind == "optional" for kind in importer._QLINEAR_FAILED.values()
+                ), importer._QLINEAR_FAILED
+
+                # Everything is imported now; further lookups must be free.
+                before = attempts["n"]
+                for _ in range(50):
+                    importer.get_auto_backend_kernel_mapping()
+                assert attempts["n"] == before, (
+                    f"{attempts['n'] - before} kernel imports re-attempted on 50 cached lookups"
+                )
+            finally:
+                importlib.import_module = real_import_module
+            """
+        )
+    )
+
+
+def test_recovery_through_discovery_refreshes_maps_without_cache_clear():
+    """A kernel recovered by ``get_kernel_for_backend()`` must reach AUTO maps.
+
+    The retry path only re-imported the module; the maps built while it failed
+    still omitted the backend, so AUTO selection could not use it until an
+    explicit ``cache_clear()``.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            broken = [True]
+            real_import_module = importlib.import_module
+
+
+            def flaky_import_module(name, *args, **kwargs):
+                if name.endswith(victim) and broken[0]:
+                    raise OSError("transient failure")
+                return real_import_module(name, *args, **kwargs)
+
+
+            importlib.import_module = flaky_import_module
+            try:
+                _, supports = importer.build_kernel_support_maps()
+                assert BACKEND.GPTQ_SWORDFISH not in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, [])
+            finally:
+                importlib.import_module = real_import_module
+
+            broken[0] = False
+            # Recover through the OTHER public entry point, not the map accessor.
+            kernel = importer.get_kernel_for_backend(
+                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+            )
+            assert kernel.__name__ == "SwordfishLinear", kernel
+
+            auto, supports = importer.build_kernel_support_maps()
+            assert BACKEND.GPTQ_SWORDFISH in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, []), supports
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH] is kernel
+            """
+        )
+    )
+
+
+def test_availability_reset_clears_the_selector_validation_cache():
+    """Clearing a backend probe must also drop ``validate_quant_linear`` results.
+
+    The kernel-level ``cached_validate_once`` was cleared, but the selector's
+    bounded cache still short-circuited before ``validate()`` was called again,
+    so a backend that appeared later stayed "unavailable" for the process.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.nn_modules.qlinear import BaseQuantLinear
+
+            state = {"ok": False}
+
+
+            class SyntheticLinear(BaseQuantLinear):
+                SUPPORTS_FORMATS = {}
+                SUPPORTS_BACKENDS = []
+                SUPPORTS_METHODS = []
+
+                @classmethod
+                def validate_once(cls):
+                    return (True, None) if state["ok"] else (False, ImportError("missing"))
+
+                # Override the full contract so the test exercises only the
+                # selector cache, not unrelated parameter checks on a stub.
+                @classmethod
+                def validate(cls, **kwargs):
+                    ok, err = cls.cached_validate_once()
+                    return (True, None) if ok else (False, err)
+
+
+            SyntheticLinear.__module__ = "gptqmodel.nn_modules.qlinear.synthetic"
+            kwargs = dict(bits=4, group_size=128, desc_act=False, sym=True)
+
+            assert importer.validate_quant_linear(SyntheticLinear, **kwargs)[0] is False
+            assert len(importer._VALIDATION_CACHE) == 1
+
+            # The documented reset knob for an optional backend must invalidate
+            # the selector cache too.
+            import gptqmodel.nn_modules.qlinear.bitblas as bitblas_module
+
+            bitblas_module._probe_bitblas_available.cache_clear()
+            assert len(importer._VALIDATION_CACHE) == 0, (
+                "bitblas reset left a stale selector validation result"
+            )
+
+            import gptqmodel.nn_modules.qlinear.bitsandbytes as bnb_module
+
+            importer.validate_quant_linear(SyntheticLinear, **kwargs)
+            assert len(importer._VALIDATION_CACHE) == 1
+            bnb_module._probe_bitsandbytes_available.cache_clear()
+            assert len(importer._VALIDATION_CACHE) == 0, (
+                "bitsandbytes reset left a stale selector validation result"
+            )
+
+            # And a recovered backend is selectable afterwards. The kernel's
+            # own ``cached_validate_once`` lru_cache is per class, so reset it
+            # for the synthetic class as a backend reset would for a real one.
+            state["ok"] = True
+            SyntheticLinear.cached_validate_once.cache_clear()
+            assert importer.validate_quant_linear(SyntheticLinear, **kwargs)[0] is True
+            """
+        )
+    )
+
+
+def test_registry_reset_does_not_race_an_in_progress_build():
+    """``cache_clear()`` must take the build lock, not overwrite live metadata."""
+
+    _assert_ok(
+        _run(
+            """
+            import threading
+
+            import gptqmodel.utils.importer as importer
+
+            entered = threading.Event()
+            release = threading.Event()
+            errors = []
+            real_import_module = importer.importlib.import_module
+
+
+            def slow_import_module(name, *args, **kwargs):
+                if name.endswith("qlinear.swordfish") and not entered.is_set():
+                    entered.set()
+                    release.wait(timeout=30)
+                return real_import_module(name, *args, **kwargs)
+
+
+            importer.importlib.import_module = slow_import_module
+            try:
+                builder = threading.Thread(target=importer.build_kernel_support_maps)
+                builder.start()
+                assert entered.wait(timeout=30)
+
+                clearer = threading.Thread(target=importer.build_kernel_support_maps.cache_clear)
+                clearer.start()
+                clearer.join(timeout=0.5)
+                # The reset must block while the build owns the lock.
+                assert clearer.is_alive(), "cache_clear() ran during an in-progress build"
+
+                release.set()
+                builder.join(timeout=60)
+                clearer.join(timeout=60)
+                assert not (builder.is_alive() or clearer.is_alive())
+            finally:
+                importer.importlib.import_module = real_import_module
+            """
+        )
+    )
+
+
+def test_retryable_failure_recovery_is_never_permanently_blocked():
+    """Repeated transient failures must not spend a permanent retry budget.
+
+    Bounding retries would make a shared library that appears later invisible
+    for the rest of the process. Only a genuinely absent optional dependency
+    (``mlx``/``tvm``) may be skipped permanently.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            broken = [True]
+            real_import_module = importlib.import_module
+
+
+            def flaky_import_module(name, *args, **kwargs):
+                if name.endswith(victim) and broken[0]:
+                    raise OSError("transient failure")
+                return real_import_module(name, *args, **kwargs)
+
+
+            importlib.import_module = flaky_import_module
+            try:
+                for _ in range(10):
+                    importer.build_kernel_support_maps()
+                    assert importer._QLINEAR_FAILED.get("swordfish") == "retryable"
+                    assert importer._BUILT_INCOMPLETE is True
+            finally:
+                importlib.import_module = real_import_module
+
+            broken[0] = False
+            kernel = importer.get_kernel_for_backend(
+                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+            )
+            auto, supports = importer.build_kernel_support_maps()
+            assert kernel.__name__ == "SwordfishLinear", kernel
+            assert BACKEND.GPTQ_SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH] is kernel
             """
         )
     )

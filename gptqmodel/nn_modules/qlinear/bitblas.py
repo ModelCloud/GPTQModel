@@ -224,6 +224,14 @@ def _clear_availability_state() -> None:
     cls = globals().get("BitblasLinear")
     if cls is not None:
         cls.cached_validate_once.cache_clear()
+    # ``validate_quant_linear()`` keeps its own bounded cache of
+    # ``(bool, error)`` results. Clearing only the kernel-level cache leaves a
+    # stale "unavailable" answer there, and that cache short-circuits before
+    # ``validate()`` is ever called again. Import lazily: ``importer`` imports
+    # the kernel package, so a module-level import here would be circular.
+    from ...utils.importer import clear_validation_cache
+
+    clear_validation_cache()
 
 
 # ``cache_clear`` is the documented knob; keep it on the probe, extended with
