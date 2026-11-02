@@ -559,9 +559,22 @@ _REGISTRY_BUILD_LOCK = threading.Lock()
 _REGISTRY_BUILD_OWNER = None
 
 
+_BUILT_MODULES = None
+# True when the cached maps were built while at least one kernel module failed
+# to import, so they may be missing a backend that recovers later.
+_BUILT_INCOMPLETE = False
+
+
 @lru_cache(maxsize=1)
 def _build_kernel_support_maps_cached():
+    global _BUILT_INCOMPLETE, _BUILT_MODULES
+
     _import_all_qlinear_kernels()
+    # Snapshot the modules this build saw. A module that failed to import is not
+    # in ``_QLINEAR_IMPORTED``; if it recovers later, the wrapper notices the
+    # difference and rebuilds instead of serving a map that omits it forever.
+    _BUILT_MODULES = frozenset(_QLINEAR_IMPORTED)
+    _BUILT_INCOMPLETE = len(_QLINEAR_IMPORTED) != len(_qlinear_module_names())
     # Build auto-select order and format support from kernel declarations.
     auto_entries = {}
     support_entries = {}
@@ -630,7 +643,8 @@ def build_kernel_support_maps():
     global _REGISTRY_BUILD_OWNER
 
     if _build_kernel_support_maps_cached.cache_info().currsize:
-        return _build_kernel_support_maps_cached()
+        if not _BUILT_INCOMPLETE or frozenset(_QLINEAR_IMPORTED) != _BUILT_MODULES:
+            return _build_kernel_support_maps_cached()
     if _REGISTRY_BUILD_OWNER == threading.get_ident():
         raise RuntimeError(
             "build_kernel_support_maps() was re-entered while building the kernel registry. "
@@ -640,6 +654,17 @@ def build_kernel_support_maps():
     with _REGISTRY_BUILD_LOCK:
         _REGISTRY_BUILD_OWNER = threading.get_ident()
         try:
+            # Re-check under the lock: a racing caller may have rebuilt already.
+            if _build_kernel_support_maps_cached.cache_info().currsize and not _BUILT_INCOMPLETE:
+                return _build_kernel_support_maps_cached()
+            if _build_kernel_support_maps_cached.cache_info().currsize:
+                # The build was incomplete, so retry the failed imports now. If
+                # one recovered, the maps must be rebuilt; otherwise keep the
+                # cached instance so callers observe a stable object.
+                _import_all_qlinear_kernels()
+                if frozenset(_QLINEAR_IMPORTED) == _BUILT_MODULES:
+                    return _build_kernel_support_maps_cached()
+                _build_kernel_support_maps_cached.cache_clear()
             return _build_kernel_support_maps_cached()
         finally:
             _REGISTRY_BUILD_OWNER = None
@@ -652,9 +677,30 @@ build_kernel_support_maps.cache_info = _build_kernel_support_maps_cached.cache_i
 
 
 def _clear_kernel_registry_caches() -> None:
-    """Drop the map cache and re-arm kernel module imports."""
+    """Drop the map cache, stale module attributes and kernel import state.
+
+    ``monkeypatch.undo()`` writes the value it read back as a real module
+    attribute. Since that value is the cached map itself, it would shadow every
+    later rebuild and make the two mapping accessors disagree. Remove attributes
+    that are exactly the cached map, while leaving distinct explicit overrides
+    in place.
+    """
+
+    global _BUILT_INCOMPLETE, _BUILT_MODULES
+
+    namespace = sys.modules[__name__].__dict__
+    if _build_kernel_support_maps_cached.cache_info().currsize:
+        auto_map, supports_map = _build_kernel_support_maps_cached()
+        for name, cached in (
+            ("AUTO_BACKEND_KERNEL_MAPPING", auto_map),
+            ("BACKEND_TO_METHOD_FORMAT_MAPPING", supports_map),
+        ):
+            if namespace.get(name, _MISSING) is cached:
+                namespace.pop(name, None)
 
     _build_kernel_support_maps_cached.cache_clear()
+    _BUILT_MODULES = None
+    _BUILT_INCOMPLETE = False
     _reset_kernel_module_imports()
 
 

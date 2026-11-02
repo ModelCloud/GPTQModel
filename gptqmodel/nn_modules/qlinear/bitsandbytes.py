@@ -124,20 +124,31 @@ _probe_cache_clear = _probe_bitsandbytes_available.cache_clear
 
 
 def _clear_availability_state() -> None:
-    """Drop the probe result and every override so the next access re-probes.
+    """Drop the probe result, every override and the validation cache.
 
     This is the escape hatch for tests and for long-lived processes where the
     environment changes after the first probe (a package installed later, a
     toolchain that becomes available). It also un-pins an override left behind
     by ``monkeypatch.undo()``, which writes the pre-patch value back through
     ``__setattr__`` and therefore looks like an explicit override.
+
+    A real module attribute (``vars(mod)[...]``) outranks the private stores, so
+    it has to be removed here too; otherwise it survives the clear and keeps the
+    probe pinned. The kernel's ``cached_validate_once()`` result is invalidated
+    as well, or a kernel that failed before the backend appeared stays
+    unselectable until the process ends.
     """
 
     global _AVAILABILITY_DELETED
 
+    module = sys.modules[__name__]
+    module.__dict__.pop("BITSANDBYTES_AVAILABLE", None)
     _AVAILABILITY_OVERRIDES.clear()
     _AVAILABILITY_DELETED = False
     _probe_cache_clear()
+    cls = globals().get("BitsAndBytesLinear")
+    if cls is not None:
+        cls.cached_validate_once.cache_clear()
 
 
 # ``cache_clear`` is the documented knob; keep it on the probe, extended with
@@ -166,6 +177,10 @@ class _LazyAvailabilityModule(types.ModuleType):
 
         if name == "BITSANDBYTES_AVAILABLE":
             _AVAILABILITY_DELETED = False
+            # A real attribute would outrank the private store on read, so an
+            # accessor-visible assignment must evict it instead of writing a
+            # value nothing would observe.
+            sys.modules[self.__name__].__dict__.pop(name, None)
             _AVAILABILITY_OVERRIDES[name] = value
             return
         super().__setattr__(name, value)
@@ -174,10 +189,10 @@ class _LazyAvailabilityModule(types.ModuleType):
         global _AVAILABILITY_DELETED
 
         if name == "BITSANDBYTES_AVAILABLE":
-            if name in _AVAILABILITY_OVERRIDES:
-                del _AVAILABILITY_OVERRIDES[name]
-            elif name in sys.modules[self.__name__].__dict__:
-                super().__delattr__(name)
+            # Delete both stores: a leftover real attribute would keep the name
+            # readable after the delete.
+            _AVAILABILITY_OVERRIDES.pop(name, None)
+            sys.modules[self.__name__].__dict__.pop(name, None)
             _AVAILABILITY_DELETED = True
             return
         super().__delattr__(name)

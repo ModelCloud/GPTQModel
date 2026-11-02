@@ -505,12 +505,16 @@ def test_overrides_stay_out_of_module_dict_and_delete_cleanly():
         assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__, (
             "override leaked into the module __dict__ and would outlive a delete"
         )
-    finally:
         del bitblas_module.BITBLAS_AVAILABLE
 
-    assert bitblas_module.bitblas_available() == baseline
-    assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__
-    assert bitblas_module.__dict__.get("_AVAILABILITY_DELETED") is True
+        assert bitblas_module.bitblas_available() == baseline
+        assert "BITBLAS_AVAILABLE" not in bitblas_module.__dict__
+        assert bitblas_module.__dict__.get("_AVAILABILITY_DELETED") is True
+    finally:
+        # This test runs in-process: a leaked ``_AVAILABILITY_DELETED`` makes a
+        # later ``from ... import BITBLAS_AVAILABLE`` fail (and default-raising
+        # ``monkeypatch.setattr`` in tests/test_bitblas.py) depending on order.
+        bitblas_module._probe_bitblas_available.cache_clear()
 
 
 def test_transient_kernel_import_failure_is_retried():
@@ -559,6 +563,58 @@ def test_transient_kernel_import_failure_is_retried():
                 BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
             assert kernel.__name__ == "SwordfishLinear", kernel
+            """
+        )
+    )
+
+
+def test_recovered_kernel_import_refreshes_cached_maps():
+    """Maps built while an import failed must not stay incomplete.
+
+    The retry above only exercised ``get_kernel_for_backend()``. The cached
+    AUTO/support maps were built while the import was broken, so they kept
+    omitting the kernel even after it recovered and AUTO selection still could
+    not use the backend. A cache hit must re-attempt the failed import.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import importlib
+
+            import gptqmodel.utils.importer as importer
+            from gptqmodel.quantization import FORMAT, METHOD
+            from gptqmodel.utils.backend import BACKEND
+
+            victim = "qlinear.swordfish"
+            broken = [True]
+            real_import_module = importlib.import_module
+
+            def flaky_import_module(name, *args, **kwargs):
+                if name.endswith(victim) and broken[0]:
+                    raise OSError("transient failure")
+                return real_import_module(name, *args, **kwargs)
+
+            def swordfish_backends():
+                _, supports = importer.build_kernel_support_maps()
+                return supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, [])
+
+            importlib.import_module = flaky_import_module
+            try:
+                assert BACKEND.GPTQ_SWORDFISH not in swordfish_backends(), (
+                    "the broken import unexpectedly registered the kernel"
+                )
+            finally:
+                importlib.import_module = real_import_module
+
+            broken[0] = False
+
+            # Reading the maps alone must retry the failed import and rebuild.
+            assert BACKEND.GPTQ_SWORDFISH in swordfish_backends(), swordfish_backends()
+            auto, _ = importer.build_kernel_support_maps()
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH].__name__ == (
+                "SwordfishLinear"
+            )
             """
         )
     )
@@ -652,6 +708,50 @@ def test_legacy_map_names_accept_module_attribute_overrides(monkeypatch):
     assert importer.get_auto_backend_kernel_mapping()
 
 
+def test_map_reset_drops_a_map_restored_by_monkeypatch_undo(monkeypatch):
+    """``undo()`` writes the cached map back as a real attribute.
+
+    A real attribute shadows the accessor's cache lookup, so without cleanup the
+    selectors keep reading the old map after a rebuild and the two accessors can
+    disagree. Distinct explicit overrides must survive the reset.
+    """
+
+    import gptqmodel.utils.importer as importer
+
+    cached_auto = importer.get_auto_backend_kernel_mapping()
+    cached_supports = importer.get_backend_to_method_format_mapping()
+
+    patcher = monkeypatch.__class__()
+    patcher.setattr(importer, "AUTO_BACKEND_KERNEL_MAPPING", {"patched": True})
+    patcher.setattr(importer, "BACKEND_TO_METHOD_FORMAT_MAPPING", {"patched": True})
+    patcher.undo()
+    if importer.__dict__.get("AUTO_BACKEND_KERNEL_MAPPING") is not cached_auto:
+        # pytest>=9 records ``__dict__`` so ``undo`` deletes the entry; older
+        # releases write the pre-patch value back. Either way the reset must not
+        # leave the stale map behind.
+        importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = cached_auto
+        importer.__dict__["BACKEND_TO_METHOD_FORMAT_MAPPING"] = cached_supports
+
+    importer.build_kernel_support_maps.cache_clear()
+
+    assert "AUTO_BACKEND_KERNEL_MAPPING" not in importer.__dict__
+    assert "BACKEND_TO_METHOD_FORMAT_MAPPING" not in importer.__dict__
+    rebuilt_auto = importer.get_auto_backend_kernel_mapping()
+    assert rebuilt_auto is importer.build_kernel_support_maps()[0]
+    assert importer.get_backend_to_method_format_mapping() is importer.build_kernel_support_maps()[1]
+
+    # A distinct explicit override is not the cached map and must be preserved.
+    distinct = {"patched": True}
+    importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] = distinct
+    try:
+        importer.build_kernel_support_maps.cache_clear()
+        assert importer.__dict__["AUTO_BACKEND_KERNEL_MAPPING"] is distinct
+        assert importer.get_auto_backend_kernel_mapping() is distinct
+    finally:
+        importer.__dict__.pop("AUTO_BACKEND_KERNEL_MAPPING", None)
+        importer.build_kernel_support_maps.cache_clear()
+
+
 def test_deleting_a_lazy_availability_name_restores_the_probe():
     """``del mod.X_AVAILABLE`` must work and re-arm the probe, like a real attribute.
 
@@ -715,6 +815,87 @@ def test_real_module_attribute_wins_over_the_private_override():
             finally:
                 del module.__dict__["BITBLAS_AVAILABLE"]
             assert module.bitblas_available() == baseline
+            """
+        )
+    )
+
+
+def test_assignment_overrides_and_deletes_a_real_attribute():
+    """A real attribute must not survive an accessor-visible assignment/delete.
+
+    ``vars(mod)[NAME] = True`` followed by ``mod.NAME = False`` used to write
+    only the private store while the higher-priority real attribute stayed
+    ``True``, so both reads kept returning ``True``. ``del mod.NAME`` then only
+    removed the private entry and left the attribute readable.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            baseline = module.bitblas_available()
+            module.__dict__["BITBLAS_AVAILABLE"] = not baseline
+            assert module.bitblas_available() == (not baseline)
+
+            module.BITBLAS_AVAILABLE = baseline
+            assert "BITBLAS_AVAILABLE" not in module.__dict__, (
+                "the stale real attribute still shadows the new override"
+            )
+            assert module.bitblas_available() == baseline
+            assert module.BITBLAS_AVAILABLE is baseline
+
+            # A delete must clear the override too, not just one of the stores.
+            del module.BITBLAS_AVAILABLE
+            assert module._AVAILABILITY_OVERRIDES == {}
+            assert "BITBLAS_AVAILABLE" not in module.__dict__
+            try:
+                module.BITBLAS_AVAILABLE
+            except AttributeError:
+                pass
+            else:
+                raise AssertionError("the deleted name is still readable")
+            """
+        )
+    )
+
+
+def test_availability_reset_clears_real_overrides_and_validation_state():
+    """``cache_clear()`` must re-arm availability *and* kernel validation.
+
+    A real ``vars(mod)[NAME]`` override outranked the probe, so clearing only the
+    private stores left availability pinned. ``cached_validate_once()`` also
+    remembered a pre-recovery failure, so a recovered backend stayed unselectable.
+    """
+
+    _assert_ok(
+        _run(
+            """
+            import gptqmodel.nn_modules.qlinear.bitblas as module
+
+            baseline = module.bitblas_available()
+            module.__dict__["BITBLAS_AVAILABLE"] = not baseline
+            module.BITBLAS_AVAILABLE = not baseline
+            assert module.bitblas_available() == (not baseline)
+
+            module._probe_bitblas_available.cache_clear()
+
+            assert "BITBLAS_AVAILABLE" not in module.__dict__, (
+                "cache_clear() left the real module attribute behind"
+            )
+            assert module._AVAILABILITY_OVERRIDES == {}
+            assert module.bitblas_available() == baseline
+            assert module._probe_bitblas_available.cache_info().currsize == 1
+
+            # The validation cache is keyed on the kernel's methods, so seed it
+            # with a failure and confirm the reset re-probes.
+            from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear
+
+            module.BITBLAS_AVAILABLE = False
+            assert BitblasLinear.cached_validate_once()[0] is False
+            module.BITBLAS_AVAILABLE = True
+            module._probe_bitblas_available.cache_clear()
+            assert BitblasLinear.cached_validate_once.cache_info().currsize == 0
             """
         )
     )
