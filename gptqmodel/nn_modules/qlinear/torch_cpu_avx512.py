@@ -145,6 +145,14 @@ class TorchCpuAvx512Linear(TorchAtenLinear):
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
 
+    def train(self, mode: bool = True):
+        # forward() caches the fused-vs-dequantized dispatch decision. Reset it
+        # on mode changes so an eval forward cannot pin later training forwards
+        # to the no-grad fused kernel.
+        if mode != self.training:
+            self.linear_mode = None
+        return super().train(mode=mode)
+
     def transform_cpu(self, dtype: torch.dtype | None = None):
         if self._cpu_transformed:
             return

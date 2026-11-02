@@ -113,6 +113,14 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
     def _fused_input_dtype(self, x: torch.Tensor) -> bool:
         return x.dtype == torch.bfloat16
 
+    def train(self, mode: bool = True):
+        # forward() caches the fused-vs-dequantized dispatch decision. Reset it
+        # on mode changes so an eval forward cannot pin later training forwards
+        # to the no-grad fused kernel.
+        if mode != self.training:
+            self.linear_mode = None
+        return super().train(mode=mode)
+
     def transform_cpu(self):
         if self._cpu_transformed:
             return
@@ -222,7 +230,10 @@ class TorchCpuAvx512AwqLinear(AWQuantLinear):
             weight = self.dequantize_weight().to(x_flat.dtype)
             out = torch.matmul(x_flat, weight).reshape(out_shape)
             if self.bias is not None:
-                out = out + self.bias
+                # transform_cpu() keeps the fused kernel's bias in FP32. Cast it
+                # back to the activation dtype so the training fallback matches
+                # the fused/ATen paths instead of promoting BF16 outputs.
+                out = out + self.bias.to(dtype=out.dtype)
         if self.adapter:
             out = self.adapter.apply(x=x, out=out)
 

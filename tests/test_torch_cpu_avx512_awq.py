@@ -348,9 +348,11 @@ def test_awq_layer_transform_and_dequantize_match_oracle(desc_act):
     torch.testing.assert_close(restored, expected_weight, atol=2e-3, rtol=2e-3)
 
 
-def test_awq_layer_train_mode_uses_differentiable_dequant_path():
+@pytest.mark.parametrize("bias", (False, True))
+def test_awq_layer_train_mode_uses_differentiable_dequant_path(bias):
     # HF/PEFT load with BACKEND.AUTO, which selects this kernel, then call
-    # model.train() for LoRA fine-tuning.
+    # model.train() for LoRA fine-tuning. The eval forward must not pin the
+    # cached dispatch to the no-grad fused kernel.
     _skip_unless_avx512_bf16()
     torch.manual_seed(2027)
     in_features, out_features, group_size = 256, 64, 64
@@ -363,8 +365,26 @@ def test_awq_layer_train_mode_uses_differentiable_dequant_path():
         in_features=in_features,
         out_features=out_features,
         group_size=group_size,
+        bias=bias,
     )
     _fill_layer(layer, qweight, qzeros, scales)
+    if bias:
+        layer.bias.copy_(torch.randn(out_features, dtype=torch.float16) * 0.01)
+
+    layer.eval()
+    x_eval = torch.randn(5, in_features, dtype=torch.bfloat16)
+    with torch.no_grad():
+        layer(x_eval)
+    assert layer.linear_mode == "inference"
+    assert layer._cpu_transformed is True
+    if bias:
+        # transform_cpu() keeps the fused kernel's bias in FP32.
+        assert layer.bias.dtype == torch.float32
+
+    assert layer.train(True) is layer
+    assert layer.training
+    assert layer.linear_mode is None
+
     weight = dequantize_gemm(
         qweight=qweight,
         qzeros=qzeros,
@@ -373,16 +393,17 @@ def test_awq_layer_train_mode_uses_differentiable_dequant_path():
         group_size=group_size,
     ).to(torch.bfloat16)
 
-    assert layer.train(True) is layer
-    assert layer.training
-
     x = torch.randn(5, in_features, dtype=torch.bfloat16, requires_grad=True)
     output = layer(x)
     output.float().sum().backward()
 
     assert layer.linear_mode == "train"
-    assert layer._cpu_transformed is False
-    torch.testing.assert_close(output, x.detach() @ weight, atol=0.2, rtol=0.01)
+    assert layer._cpu_transformed is True
+    assert output.dtype == torch.bfloat16
+    reference = x.detach() @ weight
+    if bias:
+        reference = reference + layer.bias.to(torch.bfloat16)
+    torch.testing.assert_close(output, reference, atol=0.2, rtol=0.01)
     expected_grad = torch.ones(5, out_features, dtype=torch.bfloat16) @ weight.t()
     torch.testing.assert_close(x.grad, expected_grad, atol=0.2, rtol=0.01)
 
