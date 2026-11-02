@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Callable, Dict, List, Optional
 
+import pytest
 import torch
 from defuser import convert_model
 from defuser.modeling.unfused_moe.qwen2_moe import LinearQwen2MoeSparseMoeBlock
@@ -590,6 +591,13 @@ def test_qwen3_5_moe_subset_early_stop_follows_module_tree_execution_order():
     replace_module_with_hooked_legacy(layer)
 
     is_causal_conv1d_available = importlib.util.find_spec("causal_conv1d") is not None
+    if is_causal_conv1d_available and not torch.cuda.is_available():
+        # `causal_conv1d` replaces the Qwen3.5 conv with a CUDA-only fused
+        # kernel, so installing it on a CPU-only host makes the model forward
+        # fail with "Expected x.is_cuda() to be true" rather than fall back.
+        pytest.skip(
+            "causal_conv1d is installed but its fused conv kernel requires CUDA"
+        )
 
     device = "cuda" if is_causal_conv1d_available else "cpu"
     quant_cfg = _make_quant_config(device)
