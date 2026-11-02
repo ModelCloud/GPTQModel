@@ -336,13 +336,25 @@ def thinker_text_model(model: nn.Module) -> nn.Module:
 
 
 def thinker_text_prefix(model: nn.Module) -> str:
-    """Return the module path of the Qwen Omni thinker text decoder."""
+    """Return the module path of the Qwen Omni thinker text decoder.
 
-    thinker = getattr(model, "thinker", model)
-    inner = getattr(thinker, "model", None)
-    if inner is not None and getattr(inner, "language_model", None) is not None:
-        return "thinker.model.language_model"
-    return "thinker.model"
+    The path is relative to ``model`` and mirrors what
+    :func:`thinker_text_model` resolves, so ``model.get_submodule(path)`` is
+    the decoder whether ``model`` is the outer Omni wrapper or a bare thinker.
+    An empty string means ``model`` is already the decoder.
+    """
+
+    parts = []
+    node = model
+    if hasattr(node, "thinker"):
+        parts.append("thinker")
+        node = node.thinker
+    if hasattr(node, "model"):
+        parts.append("model")
+        node = node.model
+    if getattr(node, "language_model", None) is not None:
+        parts.append("language_model")
+    return ".".join(parts)
 
 
 def thinker_multimodal_model(model: nn.Module) -> nn.Module:

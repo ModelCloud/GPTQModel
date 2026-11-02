@@ -18,6 +18,7 @@ from gptqmodel.utils.model import (
     get_layers_with_prefixes,
     thinker_multimodal_model,
     thinker_text_model,
+    thinker_text_prefix,
 )
 
 
@@ -91,6 +92,16 @@ def test_omni_layers_resolve_once():
     assert len(layers) == len({id(layer) for layer in layers}) == 1
     assert layer_names[0] in ("thinker.model.layers.0", "thinker.model.language_model.layers.0")
     assert thinker_text_model(model).layers[0] is layers[0]
+
+
+def test_thinker_text_prefix_resolves_to_the_decoder():
+    # The prefix is relative to the passed module, so it must stay correct when
+    # the caller hands in the bare thinker instead of the outer wrapper.
+    model = _tiny_omni()
+    for node in (model, model.thinker):
+        prefix = thinker_text_prefix(node)
+        assert prefix
+        assert node.get_submodule(prefix) is thinker_text_model(node)
 
 
 @pytest.mark.parametrize("method", ["gptq", "rtn"])

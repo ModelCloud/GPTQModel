@@ -38,8 +38,9 @@ def test_awq_fused_post_init_calls_adapter(monkeypatch, kernel_cls):
 
     module = kernel_cls(
         bits=4,
-        # Both AWQ CPU kernels share the ATen int4pack group-size contract
-        # (`[32, 64, 128, 256]`); this test only exercises adapter post_init.
+        # `TorchAtenAwqLinear` only accepts [32, 64, 128, 256] and `32` is
+        # also valid for `TorchFusedAwqLinear` ([-1, 16, 32, 64, 128]);
+        # this test only exercises adapter post_init.
         group_size=32,
         sym=True,
         desc_act=False,

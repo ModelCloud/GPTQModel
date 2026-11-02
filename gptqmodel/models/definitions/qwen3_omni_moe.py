@@ -123,7 +123,9 @@ class Qwen3OmniMoeGPTQ(BaseQModel):
     def after_model_load(self, model, load_quantized_model=False):
         # The thinker decoder lives under `thinker.model` before transformers
         # 5.22 and under `thinker.model.language_model` after it.
-        self.pre_lm_head_norm_module = f"{thinker_text_prefix(model)}.norm"
+        text_prefix = thinker_text_prefix(model)
+        if text_prefix:
+            self.pre_lm_head_norm_module = f"{text_prefix}.norm"
         # need to load processor for save processor_config and chat_template
         if not load_quantized_model:
             self.processor = AutoProcessor.from_pretrained(self.model_local_path)
