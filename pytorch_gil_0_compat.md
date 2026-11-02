@@ -250,4 +250,6 @@ module replication and per-layer moves, calibration input staging, Hessian
 partial reduction, and shared-Hessian adoption. Control it with
 `BaseQuantizeConfig.p2p` (or `GPTQModel.load(..., p2p=...)` for inference):
 `P2PConfig(mode="off")` skips probing, and `P2PConfig(probe=True)` additionally
-measures each directed link.
+measures each directed link. `P2PConfig` is a no-op for CPU-only runs and for
+CPU<->CPU transfers: CPU devices are skipped, no warning is emitted, and the
+move helpers keep their regular copy path.

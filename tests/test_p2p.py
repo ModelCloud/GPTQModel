@@ -142,6 +142,29 @@ def test_p2p_config_rejects_invalid_mode():
         p2p.P2PConfig(mode="bogus")
 
 
+def test_p2p_config_is_noop_for_cpu_devices(monkeypatch):
+    """Peer access is accelerator-only; CPU<->CPU must be untouched and silent."""
+
+    warnings = []
+    monkeypatch.setattr(
+        p2p.log, "warning", lambda message, *args, **kwargs: warnings.append(message)
+    )
+    # Even a forced, probing policy must not turn CPU transfers into peer work.
+    p2p.configure_p2p(p2p.P2PConfig(mode="on", probe=True))
+
+    status = p2p.enable_for_devices([torch.device("cpu"), torch.device("cpu")])
+    assert status.devices == ()
+    assert status.pairs == {}
+    assert status.direct_copy_allowed() is False
+    assert warnings == []
+
+    src = torch.arange(4)
+    dst = torch.zeros(4)
+    assert p2p.peer_copy_batch([src], [dst]) is False
+    assert p2p.p2p_move_nested([src, dst], torch.device("cpu")) is p2p.P2P_NOT_APPLICABLE
+    assert p2p.broadcast_module_to_device(torch.nn.Linear(2, 2), torch.device("cpu")) is False
+
+
 def test_p2p_bandwidth_gate(monkeypatch):
     _fake_topology(
         monkeypatch,

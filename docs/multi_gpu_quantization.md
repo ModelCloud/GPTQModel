@@ -102,6 +102,11 @@ a `P2PConfig` is accepted. `None` uses the defaults.
 | `probe_mib` | `64` | preferred probe copy size (steps down to 32/16/4 under memory pressure) |
 | `use_torch_replicate` | `True` | allow `torch.nn.parallel.replicate` on GIL builds (always skipped when the GIL is disabled) |
 
+`P2PConfig` is a no-op for CPU-only runs and for any CPU<->CPU transfer: peer
+access is an accelerator concept, so `enable_peer_access` reports
+"fewer than two CUDA/HIP devices", emits no warning, and the CPU move helpers
+use their regular copy path.
+
 ### Bandwidth diagnostics (`p2p=P2PConfig(probe=True)`)
 
 Probing moves real payload across every directed pair and synchronizes each

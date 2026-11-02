@@ -109,6 +109,11 @@ class P2PConfig:
         Allow ``torch.nn.parallel.replicate`` when the GIL is enabled. It is
         skipped on free-threaded builds regardless because it funnels into
         ``torch.cuda.comm.broadcast_coalesced``, which is not thread-safe.
+
+    Peer access is an accelerator concept: this config only affects CUDA/HIP
+    device-to-device copies. It is a no-op for CPU-only runs and for
+    CPU<->CPU transfers, which never take the peer path (no warning is
+    emitted, and the CPU move helpers fall back to their regular copy).
     """
 
     mode: str = _MODE_AUTO
@@ -173,7 +178,9 @@ def configure_p2p(config: P2PConfig | Mapping[str, Any] | None) -> P2PConfig:
     Quantization calls this from the loopers with ``BaseQuantizeConfig.p2p``;
     inference calls it with the ``p2p=`` argument of ``GPTQModel.load``. Calling
     it again replaces the policy and drops cached probe results. ``None``
-    restores the defaults, so callers never need environment variables.
+    restores the defaults, so callers never need environment variables. The
+    policy has no effect on CPU-only runs: CPU<->CPU transfers never use peer
+    access.
     """
 
     global _ACTIVE_CONFIG, _WARNED_DEGRADED
