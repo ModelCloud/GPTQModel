@@ -111,6 +111,21 @@ class W4AFP8Linear(PackableQuantLinear):
         # separate serialization step, reversed by the loader before post_init.
         self.qzero_format(2)
 
+    def pack_block(self, linear, scales, zeros, g_idx, *args, **kwargs):
+        self._invalidate_weight_cache()
+        super().pack_block(linear, scales, zeros, g_idx, *args, **kwargs)
+        self.qzero_format(2)
+
+    def pack_gpu(self, linear, scales, zeros, g_idx, *args, **kwargs):
+        self._invalidate_weight_cache()
+        super().pack_gpu(linear, scales, zeros, g_idx, *args, **kwargs)
+        self.qzero_format(2)
+
+    def pack_original(self, linear, scales, zeros, g_idx=None):
+        self._invalidate_weight_cache()
+        super().pack_original(linear, scales, zeros, g_idx)
+        self.qzero_format(2)
+
     def _load_from_state_dict(self, *args, **kwargs):
         self._invalidate_weight_cache()
         super()._load_from_state_dict(*args, **kwargs)
@@ -158,6 +173,10 @@ class W4AFP8Linear(PackableQuantLinear):
 
     @torch.no_grad()
     def post_init(self):
+        # Drop any previously staged operand caches first: if validation fails
+        # below, the module must end up unusable rather than silently serving
+        # operands decoded from a layout that no longer matches the weights.
+        self._invalidate_weight_cache()
         super().post_init()
         # Fail early on an unloaded or unsupported checkpoint instead of at the
         # first forward. No derived tensor is built here; see

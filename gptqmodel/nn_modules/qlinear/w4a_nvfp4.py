@@ -141,9 +141,17 @@ class W4ANVFP4Linear(W4AFP8Linear):
 
     @torch.no_grad()
     def post_init(self):
+        # Drop any previously staged operand caches first: if validation fails
+        # below, forward() must see empty caches rather than operands decoded
+        # from a layout that no longer matches the weights.
+        self._invalidate_weight_cache()
         if not bool(torch.isfinite(self.activation_global_scale).all()) or not bool((self.activation_global_scale > 0).all()):
             raise ValueError("NVFP4 calibrated global scale must be positive and finite.")
         PackableQuantLinear.post_init(self)
+        # NVFP4 skips W4AFP8Linear.post_init (it stages its own operand caches),
+        # so the shared packed-layout checks must run here before the decode:
+        # `_centered_int4_codes` is decode-only and assumes them proven.
+        self._check_native_weight_layout()
         centered = self._centered_int4_codes()
         self._weight_e4m3 = centered.to(torch.float8_e4m3fn).contiguous()
         high = torch.floor((centered + 2.0) / 4.0)

@@ -633,18 +633,27 @@ def hf_pack_layer(
             )
 
     if isinstance(module, GPTQQuantLinear):
-        # Every raw GPTQ packer writes the checkpoint/v1 qzero layout.  A
-        # caller may reuse a module that was previously converted to v2, so
-        # reset the metadata before deciding whether another conversion is
-        # needed.  Without this, a second pack can skip v1->v2 or apply
-        # v2->v1 to freshly-written v1 words.
-        module.qzero_format(format=1)
+        # Every raw GPTQ packer writes logical zero points (the internal/v2
+        # qzero layout).  A caller may reuse a module that was previously
+        # converted to v1, so reset the metadata before deciding whether a
+        # conversion is needed.  Without this, a second pack can skip v2->v1
+        # or apply v1->v2 to freshly-written v2 words.
+        module.qzero_format(format=2)
         requested_format = checkpoint_format
         if requested_format is None:
             requested_format = getattr(module, "format", None) or FORMAT.GPTQ
         requested_format = _normalize_format(requested_format)
         if requested_format in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
-            wanted_qzero_format = 1 if requested_format == FORMAT.GPTQ else 2
+            # The v1-checkpoint convention (stored zero point minus one) only
+            # applies to kernels that require the v2 runtime layout; other
+            # kernels keep the raw packer words for both checkpoint flavors,
+            # matching `pack_module`.
+            wanted_qzero_format = (
+                1
+                if requested_format == FORMAT.GPTQ
+                and getattr(module, "REQUIRES_FORMAT_V2", False)
+                else 2
+            )
             if module.qzero_format() != wanted_qzero_format:
                 from .model import (
                     convert_gptq_v1_to_v2_format_module,
@@ -663,6 +672,21 @@ def hf_pack_layer(
                     )
 
     if post_init:
+        if (
+            isinstance(module, GPTQQuantLinear)
+            and getattr(module, "REQUIRES_FORMAT_V2", False)
+            and module.qzero_format() == 1
+        ):
+            # A v1-checkpoint request left zp-1 words for export, but the v2
+            # runtime layout is what flag-blind decoders read; restore it before
+            # the module becomes usable.
+            from .model import convert_gptq_v1_to_v2_format_module
+
+            convert_gptq_v1_to_v2_format_module(
+                module=module,
+                bits=module.bits,
+                pack_dtype=getattr(module, "pack_dtype", torch.int32),
+            )
         module.post_init(**(post_init_kwargs or {}))
 
     return module

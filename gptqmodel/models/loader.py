@@ -40,7 +40,7 @@ from ..adapter.adapter import Adapter, normalize_adapter
 from ..adapter.remote import configure_explicit_remote_adapter, resolve_checkpoint_adapter_path
 from ..nn_modules.exllamav3 import ExllamaV3Linear
 from ..nn_modules.exllamav3_torch import ExllamaV3TorchLinear
-from ..nn_modules.qlinear import BaseQuantLinear
+from ..nn_modules.qlinear import BaseQuantLinear, GPTQQuantLinear
 from ..nn_modules.qlinear.exllamav2 import ExllamaV2Linear
 from ..nn_modules.qlinear.gguf import GGUFTorchLinear
 from ..quantization import QuantizeConfig
@@ -2194,6 +2194,15 @@ def ModelLoader(cls):
                 # offload_buffers=True,
                 key_converter=getattr(cls, "checkpoint_key_for_load", None),
             )
+
+            if format_code == FORMAT.GPTQ_V2:
+                # Native v2 checkpoints store logical zero points; the v1->v2
+                # conversion above only runs for v1 checkpoints. Mark the
+                # loaded modules so decoders and repack bookkeeping read the
+                # words as v2 instead of misreading every zero point one high.
+                for m in model.modules():
+                    if isinstance(m, GPTQQuantLinear):
+                        m.qzero_format(format=2)
 
         if native_gguf_qspec is not None:
             model = simple_dispatch_model(model, dispatch_device_map)

@@ -760,83 +760,51 @@ def convert_gptq_v1_to_v2_format_module(module: BaseQuantLinear, bits: int, pack
 
     log.info.once("Format: Converting GPTQ v1 to v2")
 
-    # v1 checkpoint format used to do `qzeros = qzeros -= 1` before serialization, thus the
-    # additions here do not overflow.
-    # v1 checkpoint format with sym=False saved via convert_gptq_v2_to_v1_format() will
-    # overflow ~<=13% based on testing
-    if bits == 2:
-        if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0101010101010101010101010101010101010101010101010101010101010101
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b01010101010101010101010101010101
-        elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0101010101010101
-        elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b01010101
+    # v1 stores a per-field (zero_point - 1): a packed-word `+= 1` carries
+    # across fields when a stored value is maxed (zp=0 -> stored maxq), so the
+    # correction must decode, shift in logical space, and repack.
+    if bits in (2, 4, 8) or (bits == 3 and pack_dtype == torch.int32):
+        module.qzeros.data.copy_(
+            _correct_gptq_v1_qzeros(module.qzeros.data, bits, planar=getattr(module, "planar", False))
+        )
     elif bits == 3:
-        if pack_dtype == torch.int32:
-            # GPTQ INT3 spills some zero-point bits across adjacent packed words.
-            # Reuse the logical field shift so module conversion matches the
-            # safetensor dequant path and the canonical INT3 pack layout.
-            module.qzeros.data.copy_(
-                _correct_gptq_v1_qzeros(module.qzeros.data, bits, planar=getattr(module, "planar", False))
-            )
-        else:
-            # Only int32 packing words are used for GPTQ INT3 in actual checkpoints.
-            # Keep the legacy constant-offset path for synthetic smaller word sizes.
-            # range 0 offset
-            if pack_dtype == torch.int64:
-                offset = 0b0010010010010010010010010010010000100100100100100100100100100100
-            elif pack_dtype == torch.int16:
-                offset = 0b0010010010010010
-            elif pack_dtype == torch.int8:
-                offset = 0b00100100
-
-            module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
-                offset
-            )
-
-            # range 1 offset
-            if pack_dtype == torch.int64:
-                offset = 0b1001001001001001001001001001001010010010010010010010010010010010
-            elif pack_dtype == torch.int16:
-                offset = 0b1001001001001001
-            elif pack_dtype == torch.int8:
-                offset = 0b10010010
-
-            module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
-                offset
-            )
-
-            # range 2 offset
-            if pack_dtype == torch.int64:
-                offset = 0b0100100100100100100100100100100101001001001001001001001001001001
-            elif pack_dtype == torch.int16:
-                offset = 0b0100100100100100
-            elif pack_dtype == torch.int8:
-                offset = 0b01001001
-
-            module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
-                offset
-            )
-    elif bits == 4:
+        # Only int32 packing words are used for GPTQ INT3 in actual checkpoints.
+        # Keep the legacy constant-offset path for synthetic smaller word sizes.
+        # range 0 offset
         if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0001000100010001000100010001000100010001000100010001000100010001
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b00010001000100010001000100010001
+            offset = 0b0010010010010010010010010010010000100100100100100100100100100100
         elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0001000100010001
+            offset = 0b0010010010010010
         elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b00010001
-    elif bits == 8:
+            offset = 0b00100100
+
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 1 offset
         if pack_dtype == torch.int64:
-            module.qzeros.data += 0b0000000100000001000000010000000100000001000000010000000100000001
-        elif pack_dtype == torch.int32:
-            module.qzeros.data += 0b00000001000000010000000100000001
+            offset = 0b1001001001001001001001001001001010010010010010010010010010010010
         elif pack_dtype == torch.int16:
-            module.qzeros.data += 0b0000000100000001
+            offset = 0b1001001001001001
         elif pack_dtype == torch.int8:
-            module.qzeros.data += 0b00000001
+            offset = 0b10010010
+
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
+
+        # range 2 offset
+        if pack_dtype == torch.int64:
+            offset = 0b0100100100100100100100100100100101001001001001001001001001001001
+        elif pack_dtype == torch.int16:
+            offset = 0b0100100100100100
+        elif pack_dtype == torch.int8:
+            offset = 0b01001001
+
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] += (
+            offset
+        )
     elif bits in (5, 6, 7):
         if pack_dtype != torch.int32:
             raise NotImplementedError(
@@ -915,28 +883,23 @@ def convert_gptq_v2_to_v1_format_module(
 
     bits = getattr(module, "bits", quantize_config.bits)
     pack_dtype = getattr(module, "pack_dtype", quantize_config.pack_dtype)
-    if bits == 2:
-        module.qzeros.data -= 0b01010101010101010101010101010101
+    # v1 stores a per-field (zero_point - 1): a packed-word `-= 1` borrows
+    # across fields when a logical zero point is 0, so the correction must
+    # decode, shift in logical space, and repack.
+    if bits in (2, 4, 8) or (bits == 3 and pack_dtype == torch.int32):
+        module.qzeros.data.copy_(
+            _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits, planar=getattr(module, "planar", False))
+        )
     elif bits == 3:
-        if pack_dtype == torch.int32:
-            # Keep INT3 export symmetric with the load-side logical correction.
-            module.qzeros.data.copy_(
-                _revert_gptq_v1_qzeros_correction(module.qzeros.data, bits, planar=getattr(module, "planar", False))
-            )
-        else:
-            module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
-                0b00100100100100100100100100100100
-            )
-            module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
-                0b10010010010010010010010010010010
-            )
-            module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
-                0b01001001001001001001001001001001
-            )
-    elif bits == 4:
-        module.qzeros.data -= 0b00010001000100010001000100010001
-    elif bits == 8:
-        module.qzeros.data -= 0b00000001000000010000000100000001
+        module.qzeros.data[:, range(0, module.qzeros.data.shape[1], 3)] -= (
+            0b00100100100100100100100100100100
+        )
+        module.qzeros.data[:, range(1, module.qzeros.data.shape[1], 3)] -= (
+            0b10010010010010010010010010010010
+        )
+        module.qzeros.data[:, range(2, module.qzeros.data.shape[1], 3)] -= (
+            0b01001001001001001001001001001001
+        )
     elif bits in (5, 6, 7):
         if pack_dtype != torch.int32:
             raise NotImplementedError(
