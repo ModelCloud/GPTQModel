@@ -26,6 +26,8 @@ def _patch_rocm(monkeypatch, *, release, torch_version, is_rocm=True):
 
 def test_rocm_version_prefers_torch_version_rocm(monkeypatch):
     _patch_rocm(monkeypatch, release="10.1.0", torch_version="2.16.0+rocm6.0")
+    # ROCm 10.1 ships HIP 7.16; the HIP runtime version must never win.
+    monkeypatch.setattr(torch.version, "hip", "7.16.26385", raising=False)
 
     assert rocm.rocm_version() == (10, 1, 0)
     assert rocm.rocm_version_string() == "10.1.0"

@@ -9,7 +9,9 @@ This page describes GPT-QModel behaviour on AMD RDNA4 consumer/workstation GPUs
 
 > **ROCm requirement.** GPT-QModel supports **ROCm >= 10.1** only. On older
 > runtimes `import gptqmodel` and model loading emit a warning asking you to
-> upgrade to the latest ROCm release. The measurements below use ROCm 10.1.
+> upgrade to the latest ROCm release. ROCm 10.1 includes HIP 7.16;
+> `torch.version.hip` is the HIP runtime version, not the ROCm release. The
+> measurements below use ROCm 10.1.
 
 > **Verification status.** Measured on an AMD Radeon AI PRO R9700 (`gfx1201`,
 > HIP 7.16.26385, torch 2.16.0.dev20261029+rocm10.1). Kernel numerics, the

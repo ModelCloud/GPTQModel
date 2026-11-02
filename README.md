@@ -332,7 +332,9 @@ GPT-QModel is validated on Linux, macOS, and Windows 11:
 **ROCm 10.1 or newer is required.** GPT-QModel only supports and validates
 ROCm >= 10.1; older releases are unsupported and `import gptqmodel` or model
 loading logs a warning asking you to upgrade. Use the latest ROCm release and a
-matching ROCm PyTorch build.
+matching ROCm PyTorch build. ROCm 10.1 ships HIP 7.16; `torch.version.hip`
+reports the HIP runtime version, not the ROCm release, so version checks use
+`torch.version.rocm`.
 
 ROCm pip SDK installations that expose `_rocm_sdk_core` as `ROCM_HOME` need the
 matching `rocm-sdk-devel` package and `rocm-sdk init` before building JIT kernels.
