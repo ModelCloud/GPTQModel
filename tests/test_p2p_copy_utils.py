@@ -192,6 +192,32 @@ def test_module_move_is_visible_from_another_stream():
     assert observed == pytest.approx(float(expected.sum().item()), rel=1e-5)
 
 
+def test_p2p_move_nested_is_ordered_on_destination_stream():
+    """A read on the destination device must see the copy without a sync.
+
+    HIP binds a stream to the *current* device's context. Issuing the peer copy
+    while the source device was current placed the work on the source queue, so
+    the destination stream -- and therefore ``Tensor.cpu()`` -- never waited for
+    it. The first, smallest leaf was then reliably read as uninitialised
+    memory. ``torch.cuda.synchronize(target)`` did not fix it; synchronising the
+    source did, which is what pinned the copy to the wrong queue.
+    """
+    _require_p2p(0, 1)
+
+    for _ in range(5):
+        values = {
+            "ids": torch.arange(8 * 512, device="cuda:0").reshape(8, 512) % 32000,
+            "hidden": [torch.full((256, 256), float(i), device="cuda:0") for i in range(4)],
+        }
+        moved = p2p_move_nested(values, torch.device("cuda:1"))
+
+        assert moved is not P2P_NOT_APPLICABLE
+        # Deliberately no synchronize(): the destination stream is already ordered.
+        assert torch.equal(moved["ids"].cpu(), values["ids"].cpu())
+        for observed, expected in zip(moved["hidden"], values["hidden"]):
+            assert torch.equal(observed.cpu(), expected.cpu())
+
+
 def test_p2p_move_nested_coalesces_multiple_tensors():
     _require_p2p(0, 1)
 

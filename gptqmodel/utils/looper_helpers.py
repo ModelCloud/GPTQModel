@@ -99,13 +99,18 @@ def move_module_to_device(
     *,
     root_module: Optional[torch.nn.Module] = None,
 ) -> torch.nn.Module:
-    """Move a module, preferring one coalesced peer copy over per-tensor moves.
+    """Move a module, preferring runtime peer copies over per-tensor moves.
 
     The regular ``move_to`` + ``rehome_module_to_device`` path issues one
     PyTorch copy per parameter/buffer. When the source and destination are both
-    CUDA and P2P is enabled, the runtime peer-copy batch moves the whole block
-    with one GIL-released enqueue per leaf, which is materially faster and safe
-    on free-threaded builds.
+    CUDA and P2P is enabled, the runtime peer-copy batch replaces those with
+    one GIL-released enqueue per leaf.
+
+    This is a safety choice, not a speedup: measured throughput is on par with
+    the regular path (interleaved A/B, 12 module shapes, 2x RTX 4090), because
+    each leaf still needs its own copy and allocation. It is preferred on
+    free-threaded builds because it does not route through
+    ``torch.nn.parallel.replicate``/``broadcast_coalesced``.
     """
 
     target = device if isinstance(device, torch.device) else torch.device(str(device))
@@ -114,13 +119,13 @@ def move_module_to_device(
         try:
             moved = broadcast_module_to_device(module, target)
         except Exception:
-            log.debug("P2P coalesced module move failed; falling back", exc_info=True)
+            log.debug("P2P peer-copy module move failed; falling back", exc_info=True)
             moved = False
 
     if not moved:
         move_to(module, device=target)
 
-    # Realign Accelerate hooks and catch any leaves the coalesced path skipped.
+    # Realign Accelerate hooks and catch any leaves the peer-copy path skipped.
     rehome_module_to_device(
         module,
         target,
@@ -132,7 +137,7 @@ def move_module_to_device(
 
 
 def move_nested_to_device(value, device: torch.device | str):
-    """Move a nested input structure, using coalesced P2P copies when possible."""
+    """Move a nested input structure, using runtime peer copies when possible."""
 
     moved = p2p_move_nested(value, device)
     if moved is not P2P_NOT_APPLICABLE:
@@ -496,8 +501,8 @@ def clone_module_for_devices(
     def _prepare_module(target_device: torch.device, step_name: str) -> None:
         start_ts = time.perf_counter()
         # ``move_module_to_device`` is equivalent to ``module.to()`` plus
-        # ``rehome_module_to_device()``, but coalesces the cross-GPU copies
-        # when P2P is enabled.
+        # ``rehome_module_to_device()``, but routes the cross-GPU copies
+        # through the runtime peer-copy path when P2P is enabled.
         move_module_to_device(module, target_device, root_module=root_module)
         module.eval()
         clear_state_fn(module)

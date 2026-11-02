@@ -91,6 +91,7 @@ results below for that build.
 | `torch.cuda.current_stream` | SAFE (concurrent), thread-local | copies, events | Returns the calling thread's stream. Never cache another thread's stream. |
 | `torch.cuda.Stream` | SAFE (concurrent), per-thread | forward workers | Create one stream per worker; do not share a stream across threads. |
 | `torch.cuda.stream` (context manager) | SAFE (concurrent), per-thread | scoped work | Only affects the calling thread. |
+| `torch.cuda.device` (context manager) | SAFE (concurrent), thread-local | P2P peer copies | Sets the calling thread's current device and restores it on exit. **Required** around a HIP peer copy: see manual finding 5. |
 | `torch.cuda.Event` (record / wait / synchronize) | SAFE (concurrent), per-thread | P2P copy ordering, Hessian readiness | Record on the producing stream, `wait_event` on the consuming one. Do not synchronize an event from a thread that did not record it. |
 | `torch.cuda.synchronize` | SAFE (concurrent) | tests, diagnostics | Safe but waits for the whole device. Use a stream sync in hot paths. |
 | `torch.cuda.empty_cache` | SAFE (concurrent) | VRAM pressure handling | Takes the allocator lock; safe, but it serializes workers. Call it from one place, not per worker. |
@@ -118,7 +119,7 @@ results below for that build.
 | `torch.cuda.comm.gather` | CAUTION | not used | One probe run passed; not repeated. Prefer explicit `peer_copy_batch` into preallocated buffers. |
 | `torch.cuda.comm.scatter` | CAUTION | not used | One probe run passed; not repeated. Same caution as `gather`. |
 | `torch.nn.parallel.replicate` | CAUTION (serialized), skipped when GIL=0 | `gptqmodel/utils/looper_helpers.py` replica fast path | Internally calls `broadcast_coalesced`, so it inherits the failure above. It is called through `_THREAD_SAFE_PARALLEL` (a module-wide lock), and `clone_module_for_devices` now skips it entirely when `has_gil_disabled()`; the deepcopy path uses `move_module_to_device`/`peer_copy_batch`. Set `p2p=P2PConfig(use_torch_replicate=False)` to force the deepcopy path on any build. |
-| `gptqmodel.utils.p2p.peer_copy_batch` (ours) | SAFE (concurrent) | module moves, calibration input staging, Hessian copies | `ctypes` call into `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync`; the GIL is released for the call. Returns `False` when the group is not a simple two-device batch so callers can fall back to `Tensor.to`. |
+| `gptqmodel.utils.p2p.peer_copy_batch` (ours) | SAFE (concurrent) | module moves, calibration input staging, Hessian copies | `ctypes` call into `cudaMemcpyPeerAsync`/`hipMemcpyPeerAsync`; the GIL is released for the call. The enqueue runs with the **destination device current**, which HIP requires (manual finding 5). Returns `False` when the group is not a simple two-device batch so callers can fall back to `Tensor.to`. |
 
 ## Tensor creation and elementwise ops
 
@@ -231,6 +232,36 @@ Printed during shutdown on GIL=0 builds. It comes from Triton's bindings, not
 from GPT-QModel, and does not affect results. Do not treat it as a test
 failure, and do not suppress it globally; it is a useful signal if it starts
 appearing mid-run.
+
+### 5. HIP peer copies bind to the *current* device's context
+
+`hipMemcpyPeerAsync` associates the stream argument with the calling thread's
+current device context, not with the device that owns the stream. Issuing the
+copy while the source device was current put the work on the source device's
+queue, so the destination stream -- and `Tensor.cpu()` -- never waited for it.
+
+Measured on 4x Radeon AI PRO R9700, torch `2.16.0.dev20261025+rocm10.1`,
+`PYTHON_GIL=0`: a `p2p_move_nested` of
+`{ids: 32 KiB int64, hidden: 4 x 256 KiB f32}` read back an all-zero `ids`
+**24 of 24 single-threaded trials**, while the four `hidden` tensors were
+correct. Only `torch.cuda.synchronize(source)` or a full `synchronize()` made
+the values appear; `synchronize(destination)` did not, which pinned the copy to
+the source queue. The same shape returned torn `ids` in a concurrent
+8-thread x 24-task run, failing 3 of 3 processes.
+
+Fix: `peer_copy_batch` wraps the stream lookup, the event join and the copy
+loop in `with torch.cuda.device(target_device)`. Re-measured after the fix:
+24/24 concurrent tasks byte-exact in 3 of 3 processes, and no synchronize is
+needed before a read on the destination device.
+
+CUDA (2x RTX 4090, torch `2.16.0.dev+cu130`, `PYTHON_GIL=0`) ordered the copy
+correctly even without the device scope, so the defect is HIP-specific. Keep
+the scope on both backends: it is what makes the ordering guarantee explicit
+rather than incidental.
+
+Regression test:
+`tests/test_p2p_copy_utils.py::test_p2p_move_nested_is_ordered_on_destination_stream`
+(fails on the pre-fix code, passes after).
 
 ## Adding a probe
 

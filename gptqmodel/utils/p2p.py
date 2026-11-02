@@ -1026,33 +1026,43 @@ def peer_copy_batch(
         if source.numel() * source.element_size() != target.numel() * target.element_size():
             return False
 
-    target_stream = torch.cuda.current_stream(target_device)
-    # Cross-device copies are not ordered against the producing stream unless
-    # we join them explicitly; the calling thread's own stream is what produced
-    # (or will consume) these tensors.
-    event = torch.cuda.Event()
-    event.record(torch.cuda.current_stream(source_device))
-    target_stream.wait_event(event)
-    stream_handle = ctypes.c_void_p(target_stream.cuda_stream)
-
+    # The runtime binds a stream to the *current* device's context, so the
+    # destination stream must be used with the destination device current.
+    # HIP does not do this implicitly: issuing the copy while the source device
+    # is current places the work on the source device's queue, where the
+    # destination stream -- and therefore ``Tensor.cpu()`` -- never waits for
+    # it. Measured on ROCm as reads of uninitialised memory immediately after
+    # ``p2p_move_nested``; ``torch.cuda.synchronize(target)`` alone did not fix
+    # it while ``synchronize(source)`` did. CUDA orders the copy correctly
+    # either way, but the explicit device scope is correct on both backends.
     try:
-        for source, target in zip(sources, targets):
-            byte_count = source.numel() * source.element_size()
-            if byte_count == 0:
-                continue
-            rc = peer_copy(
-                ctypes.c_void_p(target.data_ptr()),
-                int(target_device.index),
-                ctypes.c_void_p(source.data_ptr()),
-                int(source_device.index),
-                ctypes.c_size_t(byte_count),
-                stream_handle,
-            )
-            if rc != 0:
-                # A failed peer copy leaves a sticky runtime error that would
-                # otherwise surface from an unrelated PyTorch call later.
-                _clear_last_error_for_backend(lib)
-                return False
+        with torch.cuda.device(target_device):
+            target_stream = torch.cuda.current_stream(target_device)
+            # Cross-device copies are not ordered against the producing stream
+            # unless we join them explicitly; the calling thread's own stream
+            # is what produced (or will consume) these tensors.
+            event = torch.cuda.Event()
+            event.record(torch.cuda.current_stream(source_device))
+            target_stream.wait_event(event)
+            stream_handle = ctypes.c_void_p(target_stream.cuda_stream)
+
+            for source, target in zip(sources, targets):
+                byte_count = source.numel() * source.element_size()
+                if byte_count == 0:
+                    continue
+                rc = peer_copy(
+                    ctypes.c_void_p(target.data_ptr()),
+                    int(target_device.index),
+                    ctypes.c_void_p(source.data_ptr()),
+                    int(source_device.index),
+                    ctypes.c_size_t(byte_count),
+                    stream_handle,
+                )
+                if rc != 0:
+                    # A failed peer copy leaves a sticky runtime error that
+                    # would otherwise surface from an unrelated PyTorch call.
+                    _clear_last_error_for_backend(lib)
+                    return False
     except Exception:
         _clear_last_error_for_backend(lib)
         return False
@@ -1164,12 +1174,14 @@ P2P_NOT_APPLICABLE = _P2P_NOT_APPLICABLE
 
 
 def p2p_move_nested(value: Any, device: torch.device, *, min_bytes: int = 1024 * 1024) -> Any:
-    """Move a nested tensor structure to ``device`` using coalesced peer copies.
+    """Move a nested tensor structure to ``device`` using runtime peer copies.
 
     Returns ``P2P_NOT_APPLICABLE`` when the fast path cannot be used so the
     caller can fall back to its regular move helper. The fast path only
     triggers for at least two tensors living on one CUDA source device, which
-    is exactly the multi-batch/multi-kwarg case where per-tensor copies add up.
+    is exactly the multi-batch/multi-kwarg case. Each leaf still costs one
+    enqueue, so this is on par with, not faster than, ``Tensor.to``; it exists
+    so the copies do not go through ``torch.cuda.comm``.
     """
 
     target = device if isinstance(device, torch.device) else torch.device(str(device))

@@ -154,6 +154,19 @@ stream. `move_module_to_device` and `move_nested_to_device` in
 input/mask/`position_ids` staging; the Hessian partial reduction and
 shared-Hessian adoption use the same direct GPU-to-GPU path.
 
+The copy is enqueued with the **destination device current**. HIP binds a
+stream to the calling thread's current device context, so issuing the copy
+while the source device is current puts the work on the source queue, where the
+destination stream never waits for it. See manual finding 5 in
+`pytorch_gil_0_compat.md`.
+
+These copies are a safety and control mechanism, not a throughput win.
+Measured A/B against the pre-change tree (2x RTX 4090, interleaved runs, median
+of 30): module moves are on par with the regular `Tensor.to` path across 12
+module shapes, and calibration staging is about 11% slower because each leaf
+still needs its own allocation and enqueue. End-to-end quantization of a
+438M-parameter model stayed within run-to-run noise (about ±20%).
+
 Do **not** call `torch.cuda.comm.*` from worker threads. On a free-threaded
 (`PYTHON_GIL=0`) build `broadcast_coalesced` has hung and returned torn copies
 on both ROCm and CUDA (small payloads can pass; multi-MiB payloads tear), and
