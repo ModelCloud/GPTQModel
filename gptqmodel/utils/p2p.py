@@ -318,8 +318,8 @@ def _clear_hip_last_error(lib) -> None:
         return
     try:
         getter()
-    except Exception:  # pragma: no cover - never let cleanup raise
-        pass
+    except Exception as exc:  # pragma: no cover - never let cleanup raise
+        log.debug("hipGetLastError drain failed: %s", exc)
 
 
 def _clear_cuda_last_error() -> None:
@@ -342,8 +342,8 @@ def _clear_cuda_last_error() -> None:
             getter.restype = ctypes.c_int
             getter.argtypes = []
             getter()
-        except Exception:  # pragma: no cover - never let cleanup raise
-            pass
+        except Exception as exc:  # pragma: no cover - never let cleanup raise
+            log.debug("cudaGetLastError drain failed: %s", exc)
         return
 
 

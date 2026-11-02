@@ -105,20 +105,13 @@ def _sku_notes(sku: str | None) -> list[str]:
         return []
     normalized = sku.strip().lower()
     if normalized in ("4090", "rtx4090", "rtx-4090", "ada-consumer"):
+        # One literal per note: adjacent literals inside a list read like a
+        # missing comma (py/implicit-string-concatenation-in-list), and an
+        # explicit ``+`` trips ruff's ISC003.
         return [
-            (
-                "RTX 4090 (Ada consumer, sm_89): the driver may report P2P enabled for a while; "
-                "consumer parts commonly show can_device_access_peer == True with direct throughput "
-                "below host staging."
-            ),
-            (
-                "The verdict here is the measured bandwidth, not the capability bit: a pair under "
-                "--min-gbps / GPTQMODEL_P2P_MIN_GBPS is `degraded` and is diagnosed as slow."
-            ),
-            (
-                "When P2P is degraded or unsupported, NCCL is a separate path: verify "
-                "torch.distributed.is_nccl_available() and a real all-reduce/ring transfer independently."
-            ),
+            "RTX 4090 (Ada consumer, sm_89): the driver may report P2P enabled while throughput stays PCIe-limited.",
+            "The verdict is the measured bandwidth, not the capability bit; a slow pair is reported `degraded`.",
+            "NCCL is a separate path: verify is_nccl_available() and a real transfer independently.",
         ]
     return [f"SKU {sku!r}: no specific caveat registered; use the measured bandwidth only."]
 
