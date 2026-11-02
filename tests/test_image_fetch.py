@@ -6,10 +6,12 @@ Regression coverage for the unguarded ``requests.get(url, stream=True)`` calls
 that used to make a bad image URL hang a quantization run forever.
 """
 
+import ast
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -68,6 +70,7 @@ class _Handler(BaseHTTPRequestHandler):
                 for _ in range(4):
                     self.wfile.write(PNG)
             except OSError:
+                # The client aborts once the size cap is hit; expected here.
                 pass
         elif path == "/slow-drip":
             # Trickle bytes below the per-read timeout so only a wall-clock
@@ -84,6 +87,7 @@ class _Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b"\x00")
                     self.wfile.flush()
             except OSError:
+                # The client aborts once its deadline expires; expected here.
                 pass
         elif path == "/huge-dimensions":
             # Tiny compressed payload that expands to a huge bitmap.
@@ -310,3 +314,37 @@ def test_replace_image_with_pil_surfaces_fetch_failure(monkeypatch, model_cls):
     sample = [{"role": "user", "content": [{"type": "image", "image": "https://example.invalid/x.png"}]}]
     with pytest.raises(ImageFetchError):
         model_cls.replace_image_with_pil(sample)
+
+
+def _empty_except_without_comment(source_path):
+    """Return ``except ...: pass`` blocks that carry no explanatory comment.
+
+    Mirrors CodeQL's ``py/empty-except`` rule: a comment anywhere between the
+    ``except`` line and the last statement of its body satisfies it.
+    """
+
+    source = source_path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    offenders = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.ExceptHandler):
+            continue
+        if not all(isinstance(stmt, ast.Pass) for stmt in node.body):
+            continue
+        last_line = max(stmt.end_lineno or stmt.lineno for stmt in node.body)
+        commented = any(
+            "#" in lines[number - 1]
+            for number in range(node.lineno, last_line + 1)
+        )
+        if not commented:
+            offenders.append(node.lineno)
+    return offenders
+
+
+def test_best_effort_except_blocks_are_documented():
+    here = Path(__file__).resolve()
+    repo_root = here.parents[1]
+    for source_path in (repo_root / "gptqmodel" / "utils" / "image.py", here):
+        assert _empty_except_without_comment(source_path) == [], (
+            f"{source_path.name} has an empty `except` with no explanatory comment"
+        )

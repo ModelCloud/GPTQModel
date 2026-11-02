@@ -81,6 +81,8 @@ def _abort_response(response: requests.Response) -> None:
     try:
         sockets.append(response.raw._fp.fp.raw._sock)
     except Exception:
+        # Response backends need not expose this private path; the socket from
+        # ``raw._connection`` above is still tried.
         pass
     for sock in sockets:
         if sock is None:
@@ -88,6 +90,8 @@ def _abort_response(response: requests.Response) -> None:
         try:
             sock.shutdown(socket.SHUT_RDWR)
         except Exception:
+            # Best effort: the socket may already be closed or racing another
+            # thread's teardown; aborting is only an optimization.
             pass
 
 
