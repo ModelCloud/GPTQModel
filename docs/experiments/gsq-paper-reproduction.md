@@ -439,10 +439,11 @@ match the `IST-DASLab/RCO` reference numerically (`alpha` difference 0.0 at
 tolerance 0.05 and 1e-6), and its knapsack rounder is bit-identical to the
 reference solver at 16 and 112 groups.
 
-Because a staged GSQ checkpoint stores one width per decoder block, the search
-runs at block granularity. That keeps the budget it enforces equal to the
-budget a checkpoint can actually express; a per-projection search would have to
-be reduced to per-block widths afterwards, which moves the achieved budget.
+The legacy driver searches at block granularity using cross-entropy, W2/W3
+options and one Gumbel draw per update. The measurements below used that
+configuration. The opt-in `--preset paper` path described below searches
+individual projections and materializes their selected packed tensors directly;
+it does not reduce projection decisions to one width per block.
 
 ```bash
 python scripts/gsq_paper/rco_allocate.py --model meta-llama/Llama-3.2-1B-Instruct \
@@ -494,3 +495,59 @@ Two things remain untested and would be the next steps: a wider option set than
 {W2, W3} (the paper searches more widths, which gives the optimizer more room
 to differentiate blocks), and a larger model where per-layer sensitivity is
 actually heterogeneous.
+
+
+### Teacher-KL and per-projection allocation
+
+Use `--preset paper` to select the RCO paper's LLM distillation objective,
+independent projection decisions and four Gumbel draws per update. The preset
+uses W2/W3/W4 staged arms and 200 steps. Explicit `--objective ce|kl`,
+`--grouping block|projection`, `--gumbel-samples`, and `--options` override its
+defaults; omitting the preset retains the legacy configuration.
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/rco_allocate.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --corpus /workspace/fineweb-paper-llama31 \
+    --arms '/workspace/w{bits}-gsq/ckpt' \
+    --out /workspace/rco-kl-2375 --target-bits 2.375 --preset paper
+
+PYTHONPATH=. python scripts/gsq_paper/rco_materialize.py \
+    --model meta-llama/Llama-3.1-8B-Instruct \
+    --assignment /workspace/rco-kl-2375/assignment.json \
+    --arms '/workspace/w{bits}-gsq/ckpt' --out /workspace/rco-kl-2375/model
+```
+
+Create all selected width arms first, from the same source model and group
+size. Use GPTQ-only staged arms to evaluate the paper's GPTQ-database setting,
+or GSQ-refined arms to evaluate allocation over those deployed candidates.
+The current staged arm format supports W2/W3/W4, not the paper's full W2-W8
+option set. Calibration still defaults to 64 validation sequences from the
+supplied corpus. This is a paper-style allocation configuration, not a claim
+of reproducing the paper's complete dataset, option set or measured results.
+
+The teacher is captured from the dense model before any candidate weights are
+installed. Its final hidden states are temporarily cached on disk, and the
+unchanged output head reconstructs its distributions. KL is averaged over all
+calibration token positions, including the last next-token context. Uneven
+final batches receive their token-count weight. `--kl-chunk-tokens` (default
+128) bounds vocabulary intermediates using activation checkpointing; the
+cache stores hidden states rather than the much larger full-vocabulary logits.
+The temporary cache is removed on normal completion and handled exceptions.
+Decoder activations and the candidate weight database still consume memory;
+this option does not bound their size.
+
+`assignment.json` records the effective objective, grouping, sample count,
+calibration size, group size, per-projection widths and measured code bits per
+quantized projection parameter. The budget excludes scale storage and the
+unquantized embedding/head. The existing 500-tick DP grid is retained, so the
+continuous expected-budget equality does not imply an exactly equal decoded
+code budget. Materialization preserves each selected projection's packed codes
+and exports its width through `dynamic`; legacy block assignment files remain
+accepted. Arm block indices, group sizes and shared non-projection state are
+validated before combining tensors.
+
+Allocation uses the validation split for optimization. Evaluate quality on a
+separate test corpus or the zero-shot suite; NLL on that same validation split
+is a search diagnostic. No full-model quality gain is established by the
+numerical and tiny-model round-trip tests for this configuration.

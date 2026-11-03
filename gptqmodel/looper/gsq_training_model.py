@@ -103,12 +103,14 @@ def _restore_packed_layer(layer, state_dict, *, names, bits, group_size, device)
     import copy
 
     from ..nn_modules.qlinear.torch import TorchLinear
+    from ..quantization.gsq_training import resolve_projection_bits
     from ..utils.backend import BACKEND
 
+    widths = resolve_projection_bits(bits, projections=names)
     packed = copy.deepcopy(layer).cpu()
     for name in names:
         source = packed.get_submodule(name)
-        linear = TorchLinear(bits=bits, group_size=group_size, sym=True, desc_act=False,
+        linear = TorchLinear(bits=widths[name], group_size=group_size, sym=True, desc_act=False,
                              in_features=source.in_features, out_features=source.out_features,
                              bias=source.bias is not None, backend=BACKEND.TORCH)
         parent, leaf = name.rsplit('.', 1)
@@ -581,6 +583,20 @@ def prepare_llama_gsq_export(model, run):
             if int(width) != base
         } or None
         qcfg.meta['gsq_layer_bits'] = {str(k): int(v) for k, v in sorted(layer_bits.items())}
+    projection_bits = run.get('projection_bits')
+    if projection_bits is not None:
+        expected = {f'model.layers.{index}.{name}' for index in range(len(model.model.layers)) for name in names}
+        if set(projection_bits) != expected:
+            raise ValueError('Projection export requires an exact all-layer projection assignment')
+        if any(isinstance(width, bool) or not isinstance(width, int) or width not in (2, 3, 4)
+               for width in projection_bits.values()):
+            raise ValueError('Projection export requires W2/W3/W4 widths')
+        if any(model.get_submodule(name).bits != width for name, width in projection_bits.items()):
+            raise ValueError('Packed projection widths differ from the export assignment')
+        qcfg.bits = min(projection_bits.values())
+        qcfg.dynamic = {name: {'bits': width} for name, width in sorted(projection_bits.items())
+                        if width != qcfg.bits} or None
+        qcfg.meta['gsq_projection_bits'] = dict(sorted(projection_bits.items()))
     qcfg.meta['gsq_training'] = run['gsq_training']
     qcfg.meta['gsq_training_recipe'] = 'experimental_staged_llama_v1'
     model.half()
