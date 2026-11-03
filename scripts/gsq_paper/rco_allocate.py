@@ -5,8 +5,8 @@
 
 """Search block or projection bit allocations from staged GSQ/GPTQ arms.
 
-Use --preset paper for dense-teacher KL, independent projection decisions,
-W2/W3/W4 candidates and four Gumbel draws per update. The legacy default keeps
+The default paper preset uses dense-teacher KL, independent projection decisions,
+W2/W3/W4 candidates and four Gumbel draws per update. Use --preset legacy for
 cross-entropy, block decisions, W2/W3 and one draw. Both use the supplied arms;
 this does not construct the paper's full W2-W8 GPTQ database automatically.
 """
@@ -41,7 +41,8 @@ def parse_args(argv=None):
     parser.add_argument('--out', required=True)
     parser.add_argument('--target-bits', type=float, required=True,
                         help='paper budgets are 2.375 and 2.625 bits per parameter')
-    parser.add_argument('--preset', choices=('legacy', 'paper'), default='legacy')
+    parser.add_argument('--preset', choices=('legacy', 'paper'), default='paper',
+                        help='allocation configuration (default: paper)')
     parser.add_argument('--objective', choices=('ce', 'kl'))
     parser.add_argument('--grouping', choices=('block', 'projection'))
     parser.add_argument('--gumbel-samples', type=int)

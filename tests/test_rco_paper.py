@@ -105,11 +105,15 @@ def test_weighted_multisample_search_is_invariant_to_batch_partition(tmp_path):
 
 def test_preset_defaults_and_explicit_overrides():
     required = ['--model', 'model', '--corpus', 'data', '--out', 'out', '--target-bits', '2.5', '--arms', 'w{bits}']
-    old = allocate.parse_args(required)
+    default = allocate.parse_args(required)
+    assert default.preset == 'paper'
+    assert (default.objective, default.grouping, default.gumbel_samples, default.options) == ('kl', 'projection', 4, '2,3,4')
+    old = allocate.parse_args(required + ['--preset', 'legacy'])
     assert (old.objective, old.grouping, old.gumbel_samples, old.options) == ('ce', 'block', 1, '2,3')
     paper = allocate.parse_args(required + ['--preset', 'paper'])
     assert (paper.objective, paper.grouping, paper.gumbel_samples, paper.options) == ('kl', 'projection', 4, '2,3,4')
-    custom = allocate.parse_args(required + ['--preset', 'paper', '--grouping', 'block', '--gumbel-samples', '8'])
+    assert vars(paper) == vars(default)
+    custom = allocate.parse_args(required + ['--grouping', 'block', '--gumbel-samples', '8'])
     assert (custom.objective, custom.grouping, custom.gumbel_samples) == ('kl', 'block', 8)
     with pytest.raises(SystemExit):
         allocate.parse_args(required + ['--gumbel-samples', '0'])
@@ -202,12 +206,13 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
     command = [sys.executable, str(root / 'scripts/gsq_paper/rco_allocate.py'),
                '--model', str(tmp_path / 'dense'), '--corpus', str(tmp_path / 'corpus'),
                '--out', str(tmp_path / 'allocation'), '--arms', str(tmp_path / 'w{bits}'),
-               '--preset', 'paper', '--options', '2,3', '--target-bits', '2.5',
+               '--options', '2,3', '--target-bits', '2.5',
                '--group-size', '32', '--calib-seqs', '3', '--batch-size', '2',
                '--steps', '2', '--device', 'cpu']
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads((tmp_path / 'allocation' / 'assignment.json').read_text())
+    assert payload['preset'] == 'paper'
     assert payload['objective'] == 'kl' and payload['grouping'] == 'projection'
     assert payload['gumbel_samples'] == 4 and payload['group_count'] == 7
     assert len(payload['projection_bits']) == 7 and payload['group_size'] == 32

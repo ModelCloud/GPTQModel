@@ -441,14 +441,15 @@ reference solver at 16 and 112 groups.
 
 The legacy driver searches at block granularity using cross-entropy, W2/W3
 options and one Gumbel draw per update. The measurements below used that
-configuration. The opt-in `--preset paper` path described below searches
+configuration, selected explicitly with `--preset legacy`. The default
+`paper` preset described below searches
 individual projections and materializes their selected packed tensors directly;
 it does not reduce projection decisions to one width per block.
 
 ```bash
 python scripts/gsq_paper/rco_allocate.py --model meta-llama/Llama-3.2-1B-Instruct \
     --corpus /models/datasets/gsq-bench/fineweb-paper \
-    --out /workspace/rco-2375 --target-bits 2.375 \
+    --out /workspace/rco-2375 --target-bits 2.375 --preset legacy \
     --arms '/workspace/w{bits}gsq4096/ckpt' --layers 16 --steps 200
 python scripts/gsq_paper/rco_materialize.py --model meta-llama/Llama-3.2-1B-Instruct \
     --assignment /workspace/rco-2375/assignment.json \
@@ -499,18 +500,19 @@ actually heterogeneous.
 
 ### Teacher-KL and per-projection allocation
 
-Use `--preset paper` to select the RCO paper's LLM distillation objective,
-independent projection decisions and four Gumbel draws per update. The preset
+The default `paper` preset uses the RCO paper's LLM distillation objective,
+independent projection decisions and four Gumbel draws per update. It
 uses W2/W3/W4 staged arms and 200 steps. Explicit `--objective ce|kl`,
 `--grouping block|projection`, `--gumbel-samples`, and `--options` override its
-defaults; omitting the preset retains the legacy configuration.
+defaults. Use `--preset legacy` for cross-entropy, block decisions, W2/W3 arms
+and one Gumbel draw.
 
 ```bash
 PYTHONPATH=. python scripts/gsq_paper/rco_allocate.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
     --corpus /workspace/fineweb-paper-llama31 \
     --arms '/workspace/w{bits}-gsq/ckpt' \
-    --out /workspace/rco-kl-2375 --target-bits 2.375 --preset paper
+    --out /workspace/rco-kl-2375 --target-bits 2.375
 
 PYTHONPATH=. python scripts/gsq_paper/rco_materialize.py \
     --model meta-llama/Llama-3.1-8B-Instruct \
