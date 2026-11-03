@@ -361,6 +361,7 @@ JIT builds on ROCm always use the HIP/torch headers only: NVIDIA `nvidia` wheel
 headers are never added to a hipcc command line, even when those packages are
 installed in the environment, because their `vector_types.h` conflicts with
 HIP's vector type aliases.
+
 On gfx950 (CDNA4) and the gfx120*/gfx125* RDNA4 family, the Torch GPTQ backend
 uses a fused Triton GEMV for single-token 2/4/8-bit inference and a fused
 small-M GEMM for M=2..16, and falls back to the existing path for other shapes
