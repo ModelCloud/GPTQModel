@@ -16,6 +16,9 @@ from pathlib import Path
 import numpy as np
 
 
+SUPPORTED_MODEL_TYPES = frozenset({"llama", "qwen3"})
+
+
 def rco_mlx_available() -> bool:
     """Return whether Apple silicon has the MLX packages needed by RCO."""
     import platform
@@ -29,6 +32,11 @@ def rco_mlx_available() -> bool:
     except ImportError:
         return False
     return True
+
+
+def rco_mlx_supports_model(model_type) -> bool:
+    """Return whether the dense decoder layout is supported by the MLX path."""
+    return model_type in SUPPORTED_MODEL_TYPES
 
 
 def _child(model, name):
@@ -192,7 +200,7 @@ def budget_constrained_argmax_mlx(scores, weights, costs, target, resolution=500
 
 
 class MLXInterpolatedLlamaLayers:
-    """Differentiable interpolation of Llama projection candidates in MLX."""
+    """Differentiable interpolation of dense decoder projection candidates."""
 
     def __init__(self, model, layer_weights, weights, costs, *, groups=None):
         import mlx.core as mx
@@ -227,7 +235,7 @@ class MLXInterpolatedLlamaLayers:
             module = _child(model, name)
             if not hasattr(module, "weight") or module.weight.ndim != 2:
                 raise ValueError(
-                    f"MLX RCO requires an unquantized Llama Linear at {name}"
+                    f"MLX RCO requires an unquantized dense Linear at {name}"
                 )
             dtype = module.weight.dtype
             options = [
@@ -327,7 +335,7 @@ class _MLXWeightInterpolation:
                 if self.bias is not None:
                     output = output + self.bias
                 # The candidate search must not silently change the activation
-                # dtype observed by the surrounding Llama block.
+                # dtype observed by the surrounding decoder block.
                 return output.astype(self.output_dtype)
 
         self.module = Interpolation()

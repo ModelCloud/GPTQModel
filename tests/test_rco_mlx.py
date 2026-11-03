@@ -45,11 +45,78 @@ def tiny_mlx_model():
     return model
 
 
+def tiny_qwen3_mlx_model():
+    mx, _ = mlx_modules()
+    from mlx_lm.models import qwen3
+
+    args = qwen3.ModelArgs(
+        model_type="qwen3",
+        hidden_size=16,
+        num_hidden_layers=1,
+        intermediate_size=32,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+        rms_norm_eps=1e-5,
+        vocab_size=32,
+        max_position_embeddings=64,
+        tie_word_embeddings=True,
+        rope_theta=1_000_000,
+    )
+    model = qwen3.Model(args)
+    mx.eval(model.parameters())
+    return model
+
+
 def to_torch(array):
     import mlx.core as mx
 
     mx.eval(array)
     return torch.from_dlpack(array)
+
+
+def test_mlx_supports_qwen3_dense_decoder_layout():
+    assert rco_mlx.rco_mlx_supports_model("llama")
+    assert rco_mlx.rco_mlx_supports_model("qwen3")
+    assert not rco_mlx.rco_mlx_supports_model("qwen3_moe")
+
+
+def test_qwen3_mlx_teacher_kl_and_interpolation():
+    mx, _ = mlx_modules()
+    model = tiny_qwen3_mlx_model()
+    name = "model.layers.0.mlp.down_proj"
+    reference = to_torch(rco_mlx._child(model, name).weight).detach().cpu()
+    ids = np.array([[1, 2, 3, 4]], dtype=np.int64)
+    objective = rco_mlx.MLXTeacherKL(
+        model,
+        [ids],
+        "/tmp/rco-mlx-qwen3-test",
+        chunk_tokens=2,
+        resident_cache=True,
+    )
+    interpolated = rco_mlx.MLXInterpolatedLlamaLayers(
+        model,
+        {name: [reference * 0.75, reference]},
+        torch.tensor([reference.numel()]),
+        torch.tensor([2.0, 3.0]),
+    )
+    try:
+        interpolated.retract(2.5)
+        probabilities, history = rco_mlx.projected_gumbel_search_mlx(
+            interpolated,
+            [0],
+            2.5,
+            steps=1,
+            gumbel_samples=1,
+            objective=objective,
+            log_every=0,
+        )
+        mx.eval(probabilities)
+        assert probabilities.shape == (1, 2)
+        assert history[-1]["drift"] < 1e-6
+    finally:
+        interpolated.cleanup()
+        objective.cleanup()
 
 
 def test_mlx_budget_argmax_matches_torch_bit_for_bit():

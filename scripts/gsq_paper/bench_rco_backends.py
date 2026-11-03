@@ -5,7 +5,7 @@
 
 """Compare the differentiable RCO search on Torch MPS and native MLX.
 
-The benchmark uses one Llama MLP projection per decoder layer, resident dense
+The benchmark uses one dense-decoder MLP projection per layer, resident dense
 teacher hidden states, shared token IDs, and a reproducible seed in each
 backend's Gumbel generator. Candidate weights and teacher activations are dense
 offline search scratch; the packed inference checkpoint is neither loaded nor
@@ -84,10 +84,10 @@ def _median(samples):
 
 
 def _torch_trial(
-    model_path, token_ids, *, device_name, tokens, steps, draws, warmup, repeats,
+    model_path, model_type, token_ids, *, device_name, tokens, steps, draws, warmup, repeats,
     include_probabilities,
 ):
-    from transformers import LlamaForCausalLM
+    from transformers import AutoModelForCausalLM
 
     from gptqmodel.quantization.rco import (
         InterpolatedLlamaLayers,
@@ -97,7 +97,7 @@ def _torch_trial(
 
     device = torch.device(device_name)
     torch.manual_seed(7)
-    model = LlamaForCausalLM.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_path, dtype=torch.bfloat16, local_files_only=True
     )
     model = model.to(device).eval().requires_grad_(False)
@@ -153,6 +153,7 @@ def _torch_trial(
     probabilities, history = final
     result = {
         "backend": "torch",
+        "model_type": model_type,
         "device": str(device),
         "dtype": "bfloat16",
         "layers": len(names),
@@ -174,7 +175,7 @@ def _torch_trial(
 
 
 def _mlx_trial(
-    model_path, token_ids, *, tokens, steps, draws, warmup, repeats,
+    model_path, model_type, token_ids, *, tokens, steps, draws, warmup, repeats,
     include_probabilities,
 ):
     import mlx.core as mx
@@ -188,6 +189,8 @@ def _mlx_trial(
     )
 
     model, config = load_model(Path(model_path))
+    if config.get("model_type") != model_type:
+        raise ValueError(f"Torch and MLX loaded different model types: {model_type!r}, {config.get('model_type')!r}")
     model.eval()
     names = [
         f"model.layers.{index}.mlp.down_proj"
@@ -237,6 +240,7 @@ def _mlx_trial(
     probabilities, history = final
     result = {
         "backend": "mlx",
+        "model_type": model_type,
         "device": "metal",
         "dtype": "model-native",
         "layers": len(names),
@@ -298,6 +302,13 @@ def main():
     from transformers import AutoConfig
 
     config = AutoConfig.from_pretrained(args.model, local_files_only=True)
+    from gptqmodel.quantization.rco_mlx import rco_mlx_supports_model
+
+    if not rco_mlx_supports_model(config.model_type):
+        raise SystemExit(
+            "RCO backend benchmark supports dense Llama and Qwen3 models, "
+            f"got {config.model_type}"
+        )
     torch.manual_seed(7)
     token_ids = torch.randint(1, config.vocab_size, (1, args.tokens), dtype=torch.long)
     results = []
@@ -307,6 +318,7 @@ def main():
         results.append(
             _torch_trial(
                 args.model,
+                config.model_type,
                 token_ids,
                 device_name="mps",
                 tokens=args.tokens,
@@ -321,6 +333,7 @@ def main():
         results.append(
             _mlx_trial(
                 args.model,
+                config.model_type,
                 token_ids,
                 tokens=args.tokens,
                 steps=args.steps,
@@ -350,6 +363,7 @@ def main():
         },
         "configuration": {
             "model": str(args.model),
+            "model_type": config.model_type,
             "tokens": args.tokens,
             "steps": args.steps,
             "gumbel_samples": args.draws,

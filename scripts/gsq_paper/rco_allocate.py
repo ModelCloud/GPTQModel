@@ -145,7 +145,10 @@ def main():
         budget_constrained_argmax,
         projected_gumbel_search,
     )
-    from gptqmodel.quantization.rco_mlx import rco_mlx_available
+    from gptqmodel.quantization.rco_mlx import (
+        rco_mlx_available,
+        rco_mlx_supports_model,
+    )
     from gptqmodel.utils.torch import resolve_torch_device
 
     device = resolve_torch_device(args.device)
@@ -225,7 +228,7 @@ def main():
             )
 
             # Releasing the reconstruction model before loading MLX avoids
-            # keeping two full dense Llama graphs resident in unified memory.
+            # keeping two full dense decoder graphs resident in unified memory.
             # The packed candidates have already been copied to layer_weights.
             mlx_batches = [batch.detach().cpu().numpy() for batch in text]
             del text, database, wrapper
@@ -236,8 +239,11 @@ def main():
                 torch.mps.empty_cache()
 
             model, _, config = load_mlx(args.model, return_config=True, trust_remote_code=True)
-            if config.get('model_type') != 'llama':
-                raise SystemExit(f'MLX RCO currently supports Llama, got {config.get("model_type")}')
+            if not rco_mlx_supports_model(config.get('model_type')):
+                raise SystemExit(
+                    'MLX RCO supports dense Llama and Qwen3 models, got '
+                    f'{config.get("model_type")}'
+                )
             model.eval()
             objective = (MLXTeacherKL(model, mlx_batches, cache, chunk_tokens=args.kl_chunk_tokens,
                                       resident_cache=args.teacher_cache == 'device')
