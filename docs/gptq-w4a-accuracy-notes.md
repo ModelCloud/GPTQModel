@@ -2469,9 +2469,11 @@ Constraints enforced by `QuantizeConfig`:
 - `W4AFP8Linear` builds its E4M3 weight operand per forward from
   `_centered_int4_codes()` and passes it straight to the GEMM; no full-layer
   FP8 plane is retained between calls, so the INT4 checkpoint stays the only
-  stored weight. `W4ANVFP4Linear` still stages its own `_weight_e4m3` plane in
-  `post_init` and is unchanged by this note (NVFP4 is SM 12.1-only and is not
-  covered by the Ada validation below).
+  stored weight. `W4ANVFP4Linear` retains only its packed E2M1 planes
+  (`_weight_both`, 1 B/weight) and stages the mixed-attention E4M3 operand
+  through the same per-forward path, so no expanded plane is retained there
+  either. NVFP4 itself is SM 12.1-only and is not covered by the Ada
+  validation below.
 - Version-4 NVFP4 producer quantizers are attached only to MLP boundaries; FP8
   attention boundaries pack dynamically and therefore need no calibrated
   global scale.

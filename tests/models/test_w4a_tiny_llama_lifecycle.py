@@ -155,9 +155,12 @@ def test_tiny_llama_mixed_fp8_attention_nvfp4_mlp(tmp_path):
     selected = [(name, module) for name, module in model.model.named_modules()
                 if isinstance(module, W4ANVFP4Linear)]
     assert len(selected) == 14
-    # The INT4 weights are untouched; only the derived E4M3 staging is added.
+    # The INT4 weights are untouched; only packed E2M1 planes are retained.
+    # The mixed attention lane stages its E4M3 operand per forward.
     assert all(module.qweight.dtype == torch.int32 for _, module in selected)
-    assert all(module._weight_e4m3.numel() == module.in_features * module.out_features
+    assert all(not hasattr(module, "_weight_e4m3") for _, module in selected)
+    assert all(module._weight_both.numel() * module._weight_both.element_size()
+               == module.in_features * module.out_features
                for _, module in selected)
     model.save(str(saved))
     loaded = GPTQModel.load(str(saved), backend=BACKEND.AUTO, device="cuda", dtype=torch.bfloat16)
