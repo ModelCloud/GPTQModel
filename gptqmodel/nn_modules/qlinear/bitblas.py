@@ -926,7 +926,11 @@ class BitblasLinear(BitblasBaseQuantLinear):
                 and getattr(gptq_module, "qzero_format", lambda: 2)() == 1
             ):
                 intzeros = (intzeros + 1) & ((1 << bits) - 1)
-            intzeros = intzeros - 1  # GPTQ stores qzeros offset by +1
+            # Remove the unpacker's +1 and keep each code in its unsigned
+            # field. The v1 correction above wraps a maximum zero point to
+            # zero; subtracting one then leaves -1, whose sign bits would
+            # overwrite neighboring fields in BitBLAS's OR-based compressor.
+            intzeros = (intzeros - 1) & ((1 << bits) - 1)
 
         bias = gptq_module.bias.detach() if self.bias is not None and getattr(gptq_module, "bias", None) is not None else None
         self._load_bitblas_quant_state(
