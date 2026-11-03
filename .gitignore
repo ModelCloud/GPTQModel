@@ -207,7 +207,7 @@ tmp
 # BUT: some ROCm kernels here are HAND-WRITTEN, and hand-written kernels reuse
 # the same ``_hip`` / ``.hip`` naming. A new hand-written file therefore matches
 # the ignore patterns and is SILENTLY DROPPED from the commit. ``git status``
-# shows nothing, the file commits fine locally, and CI/other machines fail to
+# shows nothing, other changes commit successfully, and CI/other machines fail to
 # build because the source never left your disk.
 #
 # Verified failure mode (do not assume this is theoretical):
@@ -217,8 +217,10 @@ tmp
 # So: if you add a hand-written ROCm kernel, you MUST either
 #   (a) add a ``!<exact-path>`` negation to the allow-list below, or
 #   (b) name it so it does not match these patterns.
-# Always confirm with ``git check-ignore -v <path>`` (exit 1 = tracked) AND
-# ``git status --short`` before committing. Prefer one negation per file over a
+# Always inspect ``git check-ignore -v --no-index <path>`` for the matching
+# rule and confirm tracking with ``git ls-files <path>`` after staging.
+# Exit 1 from check-ignore means not ignored, not necessarily tracked.
+# Prefer one negation per file over a
 # wildcard, so each hand-written exception is explicit and reviewable.
 # ---------------------------------------------------------------------------
 
@@ -233,5 +235,5 @@ gptqmodel_ext/exllamav2/hip/
 # thing keeping these files in the repo. A missing entry = an unbuildable
 # checkout, not a compile error.
 !gptqmodel_ext/allspark_hip/allspark_hip.cu
-!gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh
 !gptqmodel_ext/allspark_hip/allspark_torch_hip.cpp
+!gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh

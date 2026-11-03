@@ -2,8 +2,6 @@
 #include <torch/all.h>
 #include <cublas_v2.h>
 
-at::Tensor as_g_workspace;
-
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ < 800
 
 torch::Tensor allspark_w8a16_gemm(
@@ -244,10 +242,6 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
     if (EnableFuse) {
       this_block_C_base_ptr =
           params.C_ptr + blockIdx.x * Mtile * params.N + blockIdx.y * Ntile;
-    } else {
-      this_block_C_base_ptr =
-          params.C_split_ptr + blockIdx.z * params.M * params.N +
-          blockIdx.x * Mtile * params.N + blockIdx.y * Ntile;
     }
     int store_thds_in_row = WARP_NTILE / 8;
     store_c_row_base_idx = lane_id / store_thds_in_row;
@@ -424,6 +418,26 @@ struct ComputeTile_W8A16_PerC_MtilexNtilex32_multistage_SM8x_SplitK {
   }
 
   __device__ void stg(char* smem) {
+    if constexpr (!EnableFuse) {
+      // Preserve FP32 MMA accumulators until all K slices are reduced. Rounding
+      // each slice to BF16 loses information before cancellation in the sum.
+      #pragma unroll
+      for (int mi = 0; mi < Mtile / 16; ++mi) {
+        #pragma unroll
+        for (int ni = 0; ni < WARP_NITER; ++ni) {
+          #pragma unroll
+          for (int ri = 0; ri < 4; ++ri) {
+            const int row = blockIdx.x * Mtile + mi * 16 + lane_id / 4 + (ri / 2) * 8;
+            const int col = blockIdx.y * Ntile + warp_id * WARP_NTILE +
+                ni * 8 +
+                (lane_id % 4) * 2 + ri % 2;
+            if (row < params.M && col < params.N)
+              params.C_split_ptr[(blockIdx.z * params.M + row) * params.N + col] = C_frag[mi][ni][ri];
+          }
+        }
+      }
+      return;
+    }
     if (EnableFuse) {
       if (blockIdx.z != gridDim.z - 1) return;
     }
@@ -698,7 +712,7 @@ void ampere_hgemm_W8A16_perc_f16_f16_MtilexNtilex32_mma16816_multistage_AN_BTN32
     __CALL_IF(64, 128, 128, true, true)
     __CALL_IF(64, 256, 256, true, true)
   } else {
-    FType* C_split = reinterpret_cast<FType*>(workspace);
+    float* C_split = reinterpret_cast<float*>(workspace);
     SM8x_GEMM_W8A16_Splitk_Params<FType, QType> params{
         A, B,      B_scale, B_zero, C,       M,       N,
         K, SplitK, 0,       -1,     C_split, nullptr, nullptr};
@@ -757,7 +771,7 @@ size_t allspark_qgemm_w8a16_perc_n32k16_ampere_workspace_size(
     ws_size = grid_x * Mtile * grid_y * Ntile * sizeof(float)  // For C_tmp
               + grid_x * grid_y * sizeof(uint32_t);            // For red_count
   } else {
-    ws_size = grid_z * m * n * sizeof(__half);
+    ws_size = size_t(grid_z) * m * n * sizeof(float);
   }
 
   fused_gemm_params.Mtile = Mtile;
@@ -973,11 +987,10 @@ torch::Tensor allspark_w8a16_gemm(
   }
 
   auto ws_options = torch::TensorOptions().dtype(at::kChar).device(a.device());
-  if (as_g_workspace.numel() <
-      ws_size) {  // ws_options: kChar, so numel() is bytes
-    as_g_workspace = torch::empty({long(ws_size)}, ws_options);
-  }
-  void* ws = reinterpret_cast<void*>(as_g_workspace.data_ptr());
+  // Per-call storage is device/stream safe and releases dequantized fallback
+  // weights after use. The caching allocator tracks the allocating stream.
+  auto workspace = torch::empty({int64_t(ws_size)}, ws_options);
+  void* ws = workspace.data_ptr();
 
   if (a.dtype() == at::ScalarType::Half) {
     allspark::allspark_qgemm_w8a16_perc_ampere<__half, uint8_t>(

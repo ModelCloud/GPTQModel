@@ -2,9 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """AllSpark W8A16 linear (bits=8, group_size=-1, desc_act=False).
 
-Load-only for now: the module takes GPTQ-format ``qweight`` / ``scales`` and
-repacks them into the kernel layout in ``post_init``. Raw-weight packing is a
-separate decision, see the draft PR.
+The module takes GPTQ-format ``qweight`` / ``scales`` and repacks them into
+the kernel layout in ``post_init``.
 
 Two device paths share this module and the ``allspark`` backend:
 
@@ -31,6 +30,7 @@ from ...utils.allspark import (
     ALLSPARK_N_ALIGN,
     allspark_gemm,
     allspark_repack,
+    allspark_supported,
     prewarm_allspark_extension,
 )
 from ...utils.allspark_hip import (
@@ -62,6 +62,9 @@ class AllSparkLinear(GPTQQuantLinear):
     SUPPORTS_SYM = [True]
     SUPPORTS_SHARDS = False
     SUPPORTS_TRAINING = False
+    # GPTQ loading/repacking is supported; the inherited generic packer expects
+    # buffers this load-only module does not allocate.
+    SUPPORTS_RAW_PACKING = False
     SUPPORTS_AUTO_PADDING = False
     # The ROCm port has the same K contract (16) and pads N up to 128 inside its
     # repack, so the CUDA-side 16-column contract is sufficient for both paths.
@@ -75,15 +78,13 @@ class AllSparkLinear(GPTQQuantLinear):
 
     @classmethod
     def validate_once(cls):
-        """Reject ROCm devices the WMMA port does not cover (e.g. gfx1100).
-
-        On CUDA the module keeps its previous behaviour: the loader's runtime
-        capability check is authoritative.
-        """
+        """Reject devices outside the compiled kernel's architecture contract."""
         if IS_ROCM and not allspark_hip_supported():
             return False, NotImplementedError(
                 "AllSpark on ROCm requires an RDNA4 device (gfx1200/gfx1201)"
             )
+        if not IS_ROCM and not allspark_supported():
+            return False, NotImplementedError("AllSpark requires CUDA compute capability 80-120")
         return True, None
 
     def __init__(
@@ -191,7 +192,7 @@ class AllSparkLinear(GPTQQuantLinear):
         if not self._repacked:
             self.post_init()
         shape = x.shape[:-1] + (self.out_features,)
-        x2d = x.reshape(-1, self.in_features)
+        x2d = x.reshape(-1, self.in_features).contiguous()
         if self._hip:
             out = allspark_hip_gemm(
                 x2d, self.qweight_packed, self.scales_packed, self.out_features

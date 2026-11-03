@@ -49,6 +49,15 @@ def _prewarm() -> bool:
     return prewarm_allspark_extension()
 
 
+def test_gptq_load_only_packing_contract():
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+    from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
+    from gptqmodel.utils.importer import _supports_pack_api
+
+    assert not _supports_pack_api(AllSparkLinear)
+    assert _supports_pack_api(AllSparkAwqLinear)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("m", [1, 16, 64])
 def test_allspark_linear_matches_dequant(m, dtype):
@@ -61,6 +70,7 @@ def test_allspark_linear_matches_dequant(m, dtype):
     assert _prewarm()
 
     k, n = 256, 512
+    torch.manual_seed(42 + m)
     # Random, non-zero weights: a zero weight would let the hardware skip work
     # and would hide both repack bugs and dequant bugs.
     weight = torch.randn(k, n, dtype=torch.float32, device="cuda")
@@ -79,7 +89,8 @@ def test_allspark_linear_matches_dequant(m, dtype):
     out = mod(x)
     assert out.dtype == dtype
     # Reference in fp64 from the original codes: no reuse of kernel state.
-    ref = x.double() @ ((codes.double() - 128) * scales.double())
+    ref = x.double() @ ((codes.double() - 128) * scales.double()).to(dtype).double()
 
     rel = (out.double() - ref).abs().mean() / ref.abs().mean()
-    assert rel < 0.02, f"m={m} relative error {rel.item():.5f}"
+    assert torch.isfinite(out).all()
+    assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"

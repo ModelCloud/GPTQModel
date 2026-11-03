@@ -310,8 +310,8 @@ def benchmark_shape_awq(k, n, dtype, device, m_values, modes, warmup, iters, flu
         qweight, qzeros, scales, n, k
     )
 
-    # fp64 oracle from the original codes/zeros/scales; the reference weight is
-    # rounded to the activation dtype exactly as the tensor cores see it.
+    # Exact dequantized weights from original codes/zeros/scales. This reported
+    # error includes weight rounding, split reduction and output rounding.
     reference_weight = ((codes.float() - zeros.float()) * scales.float()).to(torch.float64)
     weight_bytes = k * n
     rows = []
@@ -412,6 +412,8 @@ def main():
         help="benchmark the AWQ 8-bit path (group_size=-1) instead of GPTQ vs Marlin",
     )
     args = parser.parse_args()
+    if args.iters < 1 or args.warmup < 0 or any(m < 1 for m in args.m):
+        parser.error("iters and M must be positive; warmup must be nonnegative")
 
     if not torch.cuda.is_available():
         print("no CUDA/ROCm device visible", file=sys.stderr)
@@ -419,12 +421,16 @@ def main():
 
     from gptqmodel.utils.allspark import allspark_supported
 
+    device = torch.device(args.device)
+    torch.cuda.set_device(device)
     if torch.version.hip is not None:
+        if not args.awq:
+            parser.error("ROCm requires --awq here; use benchmark_allspark_hip_w8a16.py for GPTQ")
         from gptqmodel.utils.allspark_hip import allspark_hip_supported
 
-        supported = allspark_hip_supported()
+        supported = allspark_hip_supported(device)
     else:
-        supported = allspark_supported()
+        supported = allspark_supported(device)
 
     if not supported:
         print(
@@ -434,7 +440,6 @@ def main():
         )
         return 1
 
-    device = torch.device(args.device)
     dtype = getattr(torch, args.dtype)
     properties = torch.cuda.get_device_properties(device)
     print(f"GPU: {torch.cuda.get_device_name(device)} "
@@ -444,11 +449,12 @@ def main():
     print(f"torch {torch.__version__} cuda={torch.version.cuda} hip={torch.version.hip}")
 
     # Raise clocks before measuring; a cold GPU reports numbers ~30% too low.
-    sink = torch.randn(8192, 8192, dtype=dtype, device=device)
+    sink = torch.randn(2048, 2048, dtype=dtype, device=device)
+    warm_weight = torch.randn_like(sink) / (2048 ** 0.5)
     for _ in range(60):
-        sink = sink @ sink * 1e-4
+        sink = sink @ warm_weight
     torch.cuda.synchronize()
-    del sink
+    del sink, warm_weight
     torch.cuda.empty_cache()
 
     flush_buf = None

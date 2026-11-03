@@ -29,6 +29,7 @@ from gptqmodel.utils.allspark_hip import (
     allspark_hip_supported,
     prewarm_allspark_hip_extension,
 )
+from tests.test_allspark_hip import _assert_visible_midpoint_neighbors
 
 
 pytestmark = pytest.mark.skipif(
@@ -84,11 +85,12 @@ def _ulp_of(dtype: torch.dtype, ref64: torch.Tensor) -> torch.Tensor:
 def _check(out, raw32, ref64, dtype, label):
     assert out.dtype == dtype, f"{label}: dtype {out.dtype} != {dtype}"
     assert raw32.dtype == torch.float32
+    _assert_visible_midpoint_neighbors(out, raw32, ref64, label)
     torch.testing.assert_close(raw32, ref64.float(), rtol=RTOL, atol=ATOL)
     arith = (raw32.to(torch.float64) - ref64).abs().max().item()
     vis = (out.to(torch.float64) - ref64).abs()
     ulp = _ulp_of(dtype, ref64)
-    over = (vis > 1.5 * ulp + ATOL).sum().item()
+    over = (vis > ulp + ATOL).sum().item()
     report = (
         f"{label}: dtype={dtype} arith_max_abs={arith:.3e} "
         f"visible_max_abs={vis.max().item():.3e} visible_over_1ulp={over} "
@@ -166,9 +168,13 @@ def test_awq_prefill_fallback(dtype):
     gc.collect()
     after = torch.cuda.memory_allocated()
     ref64 = a.to(torch.float64) @ _round_weights(codes, zeros, scales, g, dtype)
+    independent_weights = _round_weights(codes, zeros, scales, g, dtype).to(dtype)
+    raw32 = a.float() @ independent_weights.float()
+    _assert_visible_midpoint_neighbors(out, raw32, ref64, "AWQ prefill",
+                                      matmul_reference=a @ independent_weights)
     vis = (out.to(torch.float64) - ref64).abs()
     ulp = _ulp_of(dtype, ref64)
-    assert (vis > 1.5 * ulp + ATOL).sum().item() == 0, (
+    assert (vis > ulp + ATOL).sum().item() == 0, (
         f"fallback visible error exceeds one ULP: max={vis.max().item():.3e}"
     )
     assert after - before <= out.numel() * out.element_size() + (1 << 20)
@@ -263,19 +269,24 @@ def test_awq_module_runs_on_rdna4():
         )
         mod = AllSparkAwqLinear(
             bits=8, group_size=group, sym=True, desc_act=False,
-            in_features=k, out_features=n, bias=False, dtype=dtype,
+            in_features=k, out_features=n, bias=False,
+            dtype=torch.bfloat16 if dtype == torch.float16 else torch.float16,
         ).cuda().to(dtype)
         mod.qweight = torch.nn.Parameter(qweight, requires_grad=False)
         mod.qzeros = torch.nn.Parameter(qzeros, requires_grad=False)
         mod.scales = torch.nn.Parameter(scales, requires_grad=False)
         mod.post_init()
         assert mod.qweight is None and mod.qzeros is None
+        assert mod.scales_packed.dtype == dtype
+        a = torch.stack((a, a), dim=-1).reshape(m, k * 2)[:, ::2]
+        assert not a.is_contiguous()
         out = mod(a)
         assert out.dtype == dtype
         ref64 = a.to(torch.float64) @ _round_weights(codes, zeros, scales, g, dtype)
+        torch.testing.assert_close(out, ref64.to(dtype), rtol=RTOL, atol=ATOL)
         vis = (out.to(torch.float64) - ref64).abs()
         ulp = _ulp_of(dtype, ref64)
-        assert (vis > 1.5 * ulp + ATOL).sum().item() == 0
+        assert (vis > ulp + ATOL).sum().item() == 0
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -303,11 +314,13 @@ def test_awq_pack_roundtrip_from_dense_weight(dtype):
 
     mod = AllSparkAwqLinear(
         bits=8, group_size=group_size, sym=False, desc_act=False,
-        in_features=k, out_features=n, bias=False, dtype=dtype,
+        in_features=k, out_features=n, bias=False,
+        dtype=torch.bfloat16 if dtype == torch.float16 else torch.float16,
         register_buffers=True,
     ).cuda().to(dtype)
     with torch.no_grad():
         mod.pack(_Dense(weight), scales, zeros)
+    assert mod.scales.dtype == dtype
     # post_init drops the on-disk tensors, so keep copies for the oracle.
     qw, qz, sc = mod.qweight.clone(), mod.qzeros.clone(), mod.scales.clone()
     mod.post_init()
@@ -328,7 +341,7 @@ def test_awq_pack_roundtrip_from_dense_weight(dtype):
     ref = x.to(torch.float64) @ wq.to(torch.float64)
     vis = (out.to(torch.float64) - ref).abs()
     ulp = _ulp_of(dtype, ref)
-    assert (vis > 1.5 * ulp + ATOL).sum().item() == 0, (
+    assert (vis > ulp + ATOL).sum().item() == 0, (
         f"visible error exceeds one ULP: max={vis.max().item():.3e}"
     )
     # The stored codes must reproduce the dense weight to within 8-bit noise.
@@ -376,3 +389,57 @@ def test_awq_selectable_through_registry():
         pack_dtype=torch.int32,
     )
     assert cls.__name__ == "AllSparkAwqLinear"
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("m", [1, 16, 17])
+def test_awq_explicit_full_k_group(dtype, m):
+    n, k = 144, 272
+    qw, qz, scales, codes, zeros, a, g = _awq_case(n, k, m, k, dtype, seed=71)
+    p, s, z = allspark_hip_repack_awq(qw, qz, scales, n, k, k)
+    out = allspark_hip_gemm(a, p, s, n, z, k)
+    ref = a.double() @ _round_weights(codes, zeros, scales, g, dtype)
+    torch.testing.assert_close(out, ref.to(dtype), rtol=RTOL, atol=ATOL)
+    if m <= 16:
+        raw = allspark_hip_gemm_f32(a, p, s, n, z, k)
+        _check(out, raw, ref, dtype, f"full-K AWQ M={m}")
+
+
+@pytest.mark.parametrize("group_size", [0, -2, 16])
+def test_awq_rejects_group_before_unpack(monkeypatch, group_size):
+    from gptqmodel.quantization.awq.utils import packing_utils
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid grouping reached unpack_awq")
+    monkeypatch.setattr(packing_utils, "unpack_awq", forbidden)
+    with pytest.raises(ValueError, match="group_size=-1 or K"):
+        allspark_hip_repack_awq(None, None, None, 128, 32, group_size)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_awq_zero_endpoints_and_padded_unpack(dtype):
+    n, k = 144, 48
+    qw, qz, scales, codes, zeros, _, _ = _awq_case(n, k, 1, -1, dtype, seed=72)
+    codes.flatten()[:4] = torch.tensor([0, 127, 128, 255], device="cuda")
+    zeros.flatten()[:4] = torch.tensor([255, 128, 127, 0], device="cuda")
+    qw, qz = pack_awq(codes, zeros, 8)
+    p, s, z = allspark_hip_repack_awq(qw, qz, scales, n, k, -1)
+    assert torch.equal(z[:n], zeros.flatten().to(dtype))
+    assert torch.equal(z[n:], torch.zeros_like(z[n:]))
+    unpacked = torch.ops.gptqmodel_allspark_hip.allspark_hip_unpack(p, s, n, k, z)
+    assert torch.equal(unpacked, _round_weights(codes, zeros, scales, k, dtype).to(dtype))
+
+
+@pytest.mark.parametrize("bad", ["weight_dtype", "zero_dtype", "weight_shape", "zero_rows",
+                                 "scale_rows", "scale_dtype", "zero_device"])
+def test_awq_repack_rejects_invalid_format(bad):
+    n, k = 128, 32
+    qw, qz, scales, *_ = _awq_case(n, k, 1, -1, torch.float16, seed=80)
+    if bad == "weight_dtype": qw = qw.long()
+    if bad == "zero_dtype": qz = qz.long()
+    if bad == "weight_shape": qw = qw[:-1]
+    if bad == "zero_rows": qz = qz.repeat(2, 1)
+    if bad == "scale_rows": scales = scales.repeat(2, 1)
+    if bad == "scale_dtype": scales = scales.float()
+    if bad == "zero_device": qz = qz.cpu()
+    with pytest.raises(ValueError):
+        allspark_hip_repack_awq(qw, qz, scales, n, k, -1)

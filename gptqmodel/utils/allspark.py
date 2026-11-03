@@ -6,11 +6,8 @@ Kernel sources are vendored from vLLM (vllm-project/vllm#12931, Apache-2.0) and
 live in ``gptqmodel_ext/allspark``.  Upstream gates the kernel to Ampere
 (compute capability 80..89); the CUDA code itself only requires
 ``__CUDA_ARCH__ >= 800`` and is numerically correct on sm_120, so the runtime
-check below is deliberately wider than vLLM's while the default selection keeps
-the Ampere window.
-
-Not wired into ``BACKEND`` yet - this module exists so the kernel can be built
-and validated before the linear module lands.
+check below allows 80..120. Select it explicitly with ``BACKEND.ALLSPARK``;
+the backend routes GPTQ and AWQ checkpoints to their matching linear module.
 """
 
 from __future__ import annotations
@@ -98,6 +95,8 @@ def allspark_supported(device: torch.device | None = None) -> bool:
     # kernel. The RDNA4 path lives in gptqmodel/utils/allspark_hip.py.
     if torch.version.hip is not None:
         return False
+    if device is not None and torch.device(device).type != "cuda":
+        return False
     capability = torch.cuda.get_device_capability(device)
     return ALLSPARK_MIN_CAPABILITY <= capability[0] * 10 + capability[1] <= ALLSPARK_MAX_CAPABILITY
 
@@ -153,24 +152,20 @@ def allspark_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
 
     The kernel computes ``(code - 128) - B_zero``, so the stored buffer is
     ``zero_awq - 128`` converted to the scale dtype. ``group_size`` must be -1
-    (one group over all of K), which the kernel enforces.
+    (one group over all of K); ``k`` is the equivalent normalized spelling.
     """
     from ..quantization.awq.utils.packing_utils import (
-        AWQ_ORDER,
         reverse_awq_order,
         unpack_awq,
     )
 
-    assert AWQ_ORDER is not None
+    if group_size not in (-1, k):
+        raise ValueError(f"AWQ AllSpark supports group_size=-1 (or K) only, got {group_size}")
     iweights, izeros = unpack_awq(qweight, qzeros, 8, n)
     iweights, izeros = reverse_awq_order(iweights, izeros, 8)
     codes = (iweights.to(torch.int64) & 0xFF).to(torch.uint8).contiguous()
     zeros = (izeros.to(torch.int64) & 0xFF).reshape(-1, n)
     scales_1d = scales.reshape(-1, n)
-    if group_size not in (-1, k):
-        raise ValueError(
-            f"AWQ AllSpark supports group_size=-1 only, got {group_size}"
-        )
     if zeros.shape[0] != 1 or scales_1d.shape[0] != 1:
         raise ValueError(
             "AWQ AllSpark needs one scale/zero row per output channel, got "

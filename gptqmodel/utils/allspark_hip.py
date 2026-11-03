@@ -9,7 +9,7 @@ m16n8k16, none of which exist on RDNA4; this module builds the HIP port in
 
 Supported configuration: bits=8 with fp16 or bf16 activations, for both
 GPTQ 8-bit (neutral zero point) and AWQ 8-bit. The kernel loads one scale and
-one zero point per output channel (``group_size=-1``, i.e. a single group over
+one zero point per output channel (``group_size=-1`` or ``group_size=K``, a single group over
 all of K) once, outside the k-loop, so AWQ checkpoints must be per-channel.
 """
 
@@ -131,6 +131,8 @@ _SELFTESTED = False
 
 def prewarm_allspark_hip_extension() -> bool:
     global _SELFTESTED
+    if not allspark_hip_supported():
+        return False
     if not _EXTENSION.load():
         return False
     if not _SELFTESTED:
@@ -155,8 +157,10 @@ def _device_arch(device: torch.device | None = None) -> str:
 def allspark_hip_supported(device: torch.device | None = None) -> bool:
     if not torch.cuda.is_available() or torch.version.hip is None:
         return False
-    arch = _device_arch(device)
-    return arch.startswith("gfx1200") or arch.startswith("gfx1201")
+    if device is not None and torch.device(device).type != "cuda":
+        return False
+    arch = _device_arch(device).split(":", 1)[0]
+    return arch in ("gfx1200", "gfx1201")
 
 
 def _n32(n: int) -> int:
@@ -207,28 +211,32 @@ def allspark_hip_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
     GPTQ 8-bit. Both are unpacked here with the shared AWQ helpers, so the
     kernel only ever sees ``(K, N)`` codes plus one scale/zero row per N.
 
-    ``group_size`` must be -1 (one group over all of K): per-output-channel
+    ``group_size`` must be -1 or K (one group over all of K): per-output-channel
     zeros are the shape the kernel loads once outside the k-loop.
     """
     from ..quantization.awq.utils.packing_utils import (
-        AWQ_ORDER,
         reverse_awq_order,
         unpack_awq,
     )
 
     # bits=8 means ``_pack_contiguous`` was used, which is a plain little-endian
     # 4-codes-per-int32 stream; AWQ_ORDER only applies to the 4-bit layout.
-    assert AWQ_ORDER is not None
+    _validate_group_size(group_size, k)
+    if k <= 0 or k % 16 or n <= 0 or n % 16:
+        raise ValueError("K and N must be positive multiples of 16")
+    if qweight.dtype != torch.int32 or qzeros.dtype != torch.int32:
+        raise ValueError("AWQ qweight and qzeros must be int32")
+    if qweight.shape != (k, n // 4) or qzeros.shape != (1, n // 4):
+        raise ValueError("AWQ needs (K, N/4) qweight and one (1, N/4) zero row")
+    if scales.numel() != n or not allspark_hip_dtype_supported(scales.dtype):
+        raise ValueError("AWQ needs one fp16/bf16 scale row per output channel")
+    if qweight.device != qzeros.device or qweight.device != scales.device:
+        raise ValueError("AWQ weights, scales and zeros must be on the same device")
     iweights, izeros = unpack_awq(qweight, qzeros, 8, n)
     iweights, izeros = reverse_awq_order(iweights, izeros, 8)
     codes = (iweights.to(torch.int64) & 0xFF).to(torch.uint8).contiguous()
     zeros = (izeros.to(torch.int64) & 0xFF).reshape(-1, n)
     scales_1d = scales.reshape(-1, n)
-    # -1 and "group_size == in_features" both mean one group over all of K.
-    if group_size not in (-1, k):
-        raise ValueError(
-            f"AWQ AllSpark supports group_size=-1 only, got {group_size}"
-        )
     if zeros.shape[0] != 1 or scales_1d.shape[0] != 1:
         raise ValueError(
             "AWQ AllSpark needs one scale/zero row per output channel, got "
@@ -238,17 +246,38 @@ def allspark_hip_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
                                zeros=zeros.reshape(n))
 
 
+def _validate_group_size(group_size: int, k: int) -> None:
+    if group_size not in (-1, k):
+        raise ValueError(
+            f"AllSpark HIP supports group_size=-1 or K ({k}), got {group_size}"
+        )
+
+
+def _validate_activation(a: torch.Tensor, group_size: int) -> int:
+    if a.ndim != 2 or a.shape[-1] <= 0 or a.shape[-1] % ALLSPARK_HIP_K_ALIGN:
+        raise ValueError("a must be a matrix with positive K divisible by 16")
+    if a.device.type != "cuda" or not a.is_contiguous():
+        raise ValueError("a must be a contiguous CUDA tensor")
+    if not allspark_hip_dtype_supported(a.dtype):
+        raise ValueError("a dtype must be fp16 or bf16")
+    _validate_group_size(group_size, a.shape[-1])
+    if not allspark_hip_supported(a.device):
+        raise ValueError("AllSpark HIP requires gfx1200/gfx1201")
+    return a.shape[-1]
+
+
 def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,
                       n: int, b_qzeros: torch.Tensor | None = None, group_size: int = -1):
     """W8A16 GEMM against weights already in the HIP packed layout.
 
     ``b_qzeros`` is the packed zero-point buffer (AWQ). Scale and zero are
-    per-output-channel, so ``group_size`` is -1 and is only kept for signature
-    stability with the CUDA entry point.
+    per-output-channel; ``group_size`` accepts -1 or K for one full-K group.
     """
+    k = _validate_activation(a, group_size)
+    if b_scales.device != a.device or b_scales.dtype != a.dtype:
+        raise ValueError("activation and scale devices/dtypes must match")
     props = torch.cuda.get_device_properties(a.device)
-    k = a.shape[-1]
-    m = a.numel() // k
+    m = a.shape[0]
     if m <= ALLSPARK_HIP_MAX_M:
         return torch.ops.gptqmodel_allspark_hip.allspark_w8a16_gemm(
             a,
@@ -274,6 +303,7 @@ def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.
 def allspark_hip_gemm_f32(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,
                           n: int, b_qzeros: torch.Tensor | None = None, group_size: int = -1):
     """fp32-accumulator output (test/diagnostic path; M<=16)."""
+    _validate_activation(a, group_size)
     props = torch.cuda.get_device_properties(a.device)
     return torch.ops.gptqmodel_allspark_hip.allspark_hip_gemm_f32(
         a, b_qweight, b_scales, n, props.multi_processor_count, b_qzeros

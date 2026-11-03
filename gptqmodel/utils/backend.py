@@ -26,7 +26,7 @@ class BACKEND(str, Enum):
 
     # AllSpark kernels
     # A single backend covers both AllSpark sub-kernels. The quantization method
-    # and the device select the concrete GPTQ (CUDA/HIP) or AWQ (RDNA4) module.
+    # and the device select the concrete GPTQ or AWQ module (CUDA/HIP).
     ALLSPARK = "allspark"  # W8A16 fused GEMM, decode-oriented
 
     # Marlin kernels

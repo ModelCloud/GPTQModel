@@ -2,6 +2,7 @@
 
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAException.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
@@ -14,10 +15,8 @@ namespace allspark {
   do {                                                              \
     cudaError_t cuda_status = cmd;                                  \
     if (cuda_status != cudaSuccess) {                               \
-      std::string err_str = cudaGetErrorString(cuda_status);        \
-      std::cerr << "Failed: " << __FILE__ << ":" << __LINE__ << " " \
-                << err_str;                                         \
-      exit(-1);                                                     \
+      TORCH_CHECK(false, "AllSpark CUDA error: ",                   \
+                  cudaGetErrorString(cuda_status));                 \
     }                                                               \
   } while (0)
 
@@ -25,9 +24,7 @@ namespace allspark {
   do {                                                               \
     cublasStatus_t cublas_status = cmd;                              \
     if (cublas_status != CUBLAS_STATUS_SUCCESS) {                    \
-      std::cerr << "Failed:  " << __FILE__ << ":" << __LINE__ << " " \
-                << cublas_status << std::endl;                       \
-      exit(-1);                                                      \
+      TORCH_CHECK(false, "AllSpark cuBLAS error: ", int(cublas_status)); \
     }                                                                \
   } while (0)
 
@@ -44,7 +41,7 @@ struct SM8x_GEMM_W8A16_Splitk_Params {
   int SplitK;
   int GroupCnt;
   int GroupSize;
-  FType* C_split_ptr;       // for non-fused splitk reduce
+  float* C_split_ptr;       // FP32 partials for non-fused splitk reduce
   float* C_tmp_ptr;         // for fused splitk reduce
   uint32_t* red_count_ptr;  // for fused splitk reduce
 };
@@ -57,7 +54,7 @@ struct alignas(16) BlockTileSplitkParams {
 };
 
 template <typename FType, int BLOCK, int N_MATRIX>
-__global__ void f16_gemm_splitk_reduce_kernel(const FType* C_split, FType* C,
+__global__ void f16_gemm_splitk_reduce_kernel(const float* C_split, FType* C,
                                               uint32_t n, uint32_t n_matrix,
                                               uint32_t matrix_size) {
   int idx = blockIdx.x * BLOCK + threadIdx.x;
@@ -66,25 +63,26 @@ __global__ void f16_gemm_splitk_reduce_kernel(const FType* C_split, FType* C,
     return;
   }
 
-  FType sum(0);
+  // Tensor cores accumulate in FP32; keep the split reduction in FP32 too.
+  float sum = 0.0f;
 
   int n_mat = N_MATRIX > 0 ? N_MATRIX : (int)n_matrix;
   for (int i = 0; i < n_mat; ++i) {
-    sum += C_split[idx + i * matrix_size];
+    sum += static_cast<float>(C_split[idx + i * matrix_size]);
   }
 
-  C[idx] = sum;
+  C[idx] = static_cast<FType>(sum);
 }
 
 template <typename FType>
-void f16_gemm_splitk_reduce(const FType* C_split, FType* C, const uint32_t m,
+void f16_gemm_splitk_reduce(const float* C_split, FType* C, const uint32_t m,
                             const uint32_t n, const uint32_t n_matrix,
                             cudaStream_t stream) {
   const int BLOCK = 128;
   uint32_t matrix_size = m * n;
   int grid = (matrix_size + BLOCK - 1) / BLOCK;
 
-  void (*kernel)(const FType*, FType*, uint32_t, uint32_t, uint32_t) = nullptr;
+  void (*kernel)(const float*, FType*, uint32_t, uint32_t, uint32_t) = nullptr;
 
   switch (n_matrix) {
     case 4:

@@ -67,12 +67,7 @@ class AllSparkAwqLinear(AWQuantLinear):
     # GPTQ module: the numbers come first, promotion to AUTO later.
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0}
     SUPPORTS_BITS = [8]
-    # Per-channel only. AWQ's grouped qzeros put a different zero point on each
-    # K-group, which forces a scale/zero reload per 16-wide k-tile inside the
-    # GEMV and costs 2-6% at group_size=128 (~18% at 32) on gfx1201 with no
-    # accuracy benefit for the decode shapes this kernel targets. With -1 there
-    # is one group over all of K, so scales/zeros are (1, N) and the kernel
-    # loads them once outside the k-loop.
+    # Per-channel only: one scale/zero row covers all of K.
     SUPPORTS_GROUP_SIZE = [-1]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
@@ -95,9 +90,7 @@ class AllSparkAwqLinear(AWQuantLinear):
     def validate_device(cls, device):
         # ROCm runs in torch's CUDA namespace, so a ``torch.device("cuda")``
         # selector is ambiguous: it means ROCm under HIP and CUDA otherwise.
-        # Because this module now accepts both families, map the ambiguous case
-        # explicitly instead of rejecting it, otherwise CUDA would be filtered
-        # out by the base class's ``DEVICE("cuda") -> DEVICE.CUDA`` mapping.
+        # Both runtime families are declared above.
         if IS_ROCM and _device_type(device) == "cuda":
             return
         super().validate_device(device)
@@ -187,7 +180,7 @@ class AllSparkAwqLinear(AWQuantLinear):
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales
 
-        scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
+        scale_dtype = self.scales.dtype if getattr(self, "scales", None) is not None else self.compute_dtype
         self.register_buffer("scales", scales.clone().to(scale_dtype))
         if linear.bias is not None:
             bias_dtype = (linear.bias.dtype
@@ -213,7 +206,8 @@ class AllSparkAwqLinear(AWQuantLinear):
         if self._repacked:
             return
 
-        scales = self.scales.data.reshape(-1, self.out_features).to(self.compute_dtype)
+        # Honor dtype moves performed after construction, before repacking.
+        scales = self.scales.data.reshape(-1, self.out_features).contiguous()
         if self._hip:
             if not prewarm_allspark_hip_extension():
                 raise RuntimeError("AllSpark HIP extension failed to build")
@@ -249,7 +243,7 @@ class AllSparkAwqLinear(AWQuantLinear):
         if not self._repacked:
             self.post_init()
         shape = x.shape[:-1] + (self.out_features,)
-        x2d = x.reshape(-1, self.in_features)
+        x2d = x.reshape(-1, self.in_features).contiguous()
         if self._hip:
             out = allspark_hip_gemm(
                 x2d,

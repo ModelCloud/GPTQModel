@@ -19,7 +19,8 @@ def _quantize_per_column(weight: torch.Tensor):
 
 
 @pytest.mark.parametrize("m", [1, 16, 256, 2048])
-def test_allspark_gemm_matches_dequant_reference(m):
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_allspark_gemm_matches_dequant_reference(m, dtype):
     from gptqmodel.utils.allspark import (
         allspark_gemm,
         allspark_repack,
@@ -33,7 +34,7 @@ def test_allspark_gemm_matches_dequant_reference(m):
     assert prewarm_allspark_extension(), "AllSpark extension failed to build"
 
     n, k = 4096, 4096
-    dtype = torch.float16
+    torch.manual_seed(42 + m)
     a = torch.randn(m, k, dtype=dtype, device="cuda")
     weight = torch.randn(k, n, dtype=dtype, device="cuda")
 
@@ -45,4 +46,6 @@ def test_allspark_gemm_matches_dequant_reference(m):
     reference = a @ ((qweight.float() - 128) * scales.float()).to(dtype)
 
     rel = (out.float() - reference.float()).abs().mean() / reference.float().abs().mean()
-    assert rel < 0.02, f"m={m} relative error {rel.item():.5f}"
+    assert out.dtype == dtype
+    assert torch.isfinite(out).all()
+    assert rel < 2e-3, f"m={m} relative error {rel.item():.5f}"
