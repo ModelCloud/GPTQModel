@@ -29,6 +29,7 @@ def script(name):
 allocate = script('rco_allocate')
 materialize = script('rco_materialize')
 qwen3_ane = script('bench_qwen3_ane')
+qwen3_ane_teacher = script('bench_qwen3_ane_teacher')
 
 
 def tiny_model(dtype=torch.float64, hidden=16, layers=1):
@@ -55,6 +56,45 @@ def test_qwen3_ane_shape_parser_and_accuracy_gate():
     assert not qwen3_ane._results_pass_accuracy_gate([], ('raw', 'rounded'))
     failing = {'accuracy': {'raw': passing, 'rounded': {**passing, 'allclose': False}}}
     assert not qwen3_ane._results_pass_accuracy_gate([failing], ('raw', 'rounded'))
+
+
+def test_qwen3_ane_teacher_oracles_and_plan_gate():
+    import numpy as np
+
+    oracle = np.array([[[0.0, 1.0, 2.0, 3.0, 4.0]]], dtype=np.float32)
+    accuracy = qwen3_ane_teacher._accuracy(oracle, oracle)
+    assert qwen3_ane_teacher._passes_accuracy_gate(accuracy)
+    assert not qwen3_ane_teacher._passes_accuracy_gate(
+        {**accuracy, 'normalized_l2_error': 2.01e-3}
+    )
+
+    distribution = qwen3_ane_teacher._distribution_metrics(oracle, oracle)
+    assert distribution['kl_oracle_to_actual_mean'] == 0
+    assert distribution['top1_matches'] == distribution['tokens'] == 1
+    assert distribution['top5_overlap_mean'] == 5
+
+    plan = qwen3_ane_teacher._summarize_plan(
+        [
+            {'op': 'linear', 'preferred': 'MLNeuralEngineComputeDevice', 'cores': 32},
+            {'op': 'linear', 'preferred': 'MLNeuralEngineComputeDevice', 'cores': 32},
+            {'op': 'gather', 'preferred': 'MLCPUComputeDevice', 'cores': None},
+        ]
+    )
+    assert plan['operation_count'] == 3
+    assert plan['ane_operation_share'] == pytest.approx(2 / 3)
+    assert plan['ane_cores'] == [32]
+    assert plan['non_ane_non_cpu_devices'] == {}
+    assert not qwen3_ane_teacher._passes_placement_gate(plan)
+    assert qwen3_ane_teacher._passes_placement_gate(
+        {**plan, 'ane_operation_share': 0.99}
+    )
+    assert not qwen3_ane_teacher._passes_placement_gate(
+        {
+            **plan,
+            'ane_operation_share': 0.995,
+            'non_ane_non_cpu_devices': {'MLGPUComputeDevice': 1},
+        }
+    )
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])

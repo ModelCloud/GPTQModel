@@ -708,6 +708,58 @@ composing the Qwen3 MLP already violates the accuracy gate. A future ANE path
 would need end-to-end teacher-logit or KL parity plus a persistent compiled
 graph and a scheduler win on real search batches.
 
+The follow-up full-teacher experiment converts all 28 dense Qwen3 layers into
+one fixed-shape Core ML program and forces every supported operation to ANE.
+`scripts/gsq_paper/bench_qwen3_ane_teacher.py` evaluates the final hidden state
+and logits against an independent FP32 Torch forward, compares teacher KL and
+top-token agreement with MLX Metal, and records conversion, forced-plan,
+package-load, and steady-state timing separately.
+
+The `1x16` cold setup took 28.07 s end to end: 1.10 s to load and trace the
+FP16 model, 7.26 s for Core ML conversion, 4.28 s to load the initial plan,
+8.06 s to apply the forced plan, 0.09 s to save the package, 5.28 s to reload
+it, and 2.00 s to load the final plan. The package contained 1,193,366,269
+bytes (1.11 GiB). The forced plan placed 1,793 of 1,803 operations on the
+32-core ANE and the remaining 10 on CPU, a 99.45% operation share. The script
+requires at least 99% ANE placement in addition to accuracy and performance.
+This is placement metadata, not a claim that every operation achieved peak ANE
+use.
+
+The warm steady-state result used real calibration tokens, two warmups and ten
+timed repetitions:
+
+| Backend | Median | Relative result |
+| --- | ---: | ---: |
+| Core ML forced ANE, FP16 | 0.02600 s | 6.96x slower |
+| MLX 0.32.4 Metal, model-native BF16 | **0.003734 s** | baseline |
+
+ANE failed the accuracy gates decisively. Final hidden-state normalized L2
+error against the FP32 Torch oracle was 1.721; logit normalized L2 error was
+1.540. Teacher KL from the FP32 oracle to ANE was 13.565 nats on average, and
+none of 16 top-1 tokens or any top-5 entries matched. MLX matched all 16 top-1
+tokens, averaged 4.875 of five top-5 entries, and had mean teacher KL 0.000962
+nats. MLX's raw BF16 logits still exceed the elementwise `2e-3` limit, so the
+script reports raw-logit and distributional checks separately.
+
+The ANE failure is not a conversion rejection. The complete graph compiles and
+executes, but FP16 drift compounds through the 28 layers; a one-layer probe
+already showed about 1.1% normalized L2 error after its MLP. The complete ANE
+teacher is both inaccurate and slower, so production dispatch remains disabled.
+This result rules out the complete frozen teacher path tested here, not every
+possible ANE subgraph. Core ML still has no autograd, so differentiable student,
+loss, and backward work remain in MLX Metal.
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/bench_qwen3_ane_teacher.py \
+    --model /path/to/Qwen3-0.6B \
+    --revision c1899de289a04d12100db370d81485cdf75e47ca \
+    --corpus /path/to/qwen3-corpus \
+    --tokens 16 \
+    --mlpackage /tmp/qwen3-teacher-1x16.mlpackage \
+    --warmup 2 --repeats 10 \
+    --json-out /tmp/qwen3-ane-teacher.json
+```
+
 ```bash
 PYTHONPATH=. python scripts/gsq_paper/bench_qwen3_ane.py \
     --model /path/to/Qwen3-0.6B \
