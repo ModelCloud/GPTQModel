@@ -173,6 +173,15 @@ Coalescing (pack into one buffer, one peer copy, scatter) was prototyped and is
 plus one peer transaction, and the pack/scatter enqueues cost more than the
 single transfer saves. Do not re-add it without a measurement showing otherwise.
 
+Contiguity is not the reason coalescing needs a pack step, so making tensors
+contiguous does not remove it. Every parameter and buffer is already contiguous
+(checked by `gptqmodel.utils.tensor_layout.assert_model_tensors_contiguous`
+across load, quantize, save and reload, and by
+`tests/test_tiny_moe_quant_smoke.py`); they simply live in separate
+allocations, which no single memcpy can span. The peer-copy path still requires
+contiguity, and refuses non-contiguous leaves rather than copying storage order,
+because a raw byte copy of a strided view would silently produce wrong values.
+
 End-to-end quantization of a 438M-parameter model stayed within run-to-run
 noise (about ±20%).
 

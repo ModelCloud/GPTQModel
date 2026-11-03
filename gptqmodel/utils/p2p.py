@@ -1150,7 +1150,19 @@ def broadcast_module_to_device(module: torch.nn.Module, device: torch.device) ->
     # The peer-copy path moves raw storage, so every leaf must be contiguous.
     # A non-contiguous parameter would be copied in storage order and silently
     # produce wrong values, so fall back to the regular move instead.
-    if any(not entry[2].is_contiguous() for entry in pending):
+    non_contiguous = [entry for entry in pending if not entry[2].is_contiguous()]
+    if non_contiguous:
+        # Observable, not silent: the regular path is correct but skips the
+        # peer-copy fast path, and a non-contiguous leaf usually means a new
+        # load path or kernel skipped its ``.contiguous()``.
+        log.debug(
+            "P2P peer copy skipped for %d non-contiguous leaf/leaves: %s",
+            len(non_contiguous),
+            ", ".join(
+                f"{type(sub).__name__}.{name}{tuple(tensor.shape)} stride={tuple(tensor.stride())}"
+                for sub, name, tensor, _ in non_contiguous[:5]
+            ),
+        )
         return False
 
     # Leave large-leaf modules to the regular move path: the peer path adds an
