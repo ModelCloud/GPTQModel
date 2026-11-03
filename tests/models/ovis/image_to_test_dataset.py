@@ -20,6 +20,8 @@ from gptqmodel.models.definitions.interns1 import InternS1QModel
 from gptqmodel.models.definitions.internvl import InternVLQModel
 from gptqmodel.models.definitions.internvl_chat import InternVLChatQModel
 from gptqmodel.models.definitions.lfm2_vl import LFM2VLQModel
+from gptqmodel.models.definitions.lfm3_omni import LFM3OmniQModel
+from gptqmodel.models.definitions.lfm3_vl import LFM3VLQModel
 from gptqmodel.models.definitions.llava import LlavaQModel
 from gptqmodel.models.definitions.locateanything import LocateAnythingQModel
 from gptqmodel.models.definitions.minicpm_o import MiniCPMOQModel
@@ -296,6 +298,8 @@ def get_calib_dataset(model):
         or isinstance(model, Ernie4_5_VLMoeQModel)
         or isinstance(model, Gemma3ForConditionalGenerationGPTQ)
         or isinstance(model, LFM2VLQModel)
+        or isinstance(model, LFM3VLQModel)
+        or isinstance(model, LFM3OmniQModel)
         or isinstance(model, MuseGlimmerQModel)
         or isinstance(model, SmolVLMQModel)
         or isinstance(model, ZDTaichu5QModel)
