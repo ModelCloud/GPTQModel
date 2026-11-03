@@ -32,9 +32,10 @@ from datasets import load_from_disk
 from gptqmodel.quantization.rco import (
     InterpolatedLlamaLayers,
     achieved_bits,
+    budget_constrained_argmax,
     projected_gumbel_search,
-    round_with_budget,
 )
+
 
 PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
                'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
@@ -197,11 +198,13 @@ def main():
 
     # Persist the search result before rounding: the search is the expensive
     # part, and a failure in the cheap tail must not force another run.
-    torch.save({'probs': probs.detach().cpu(), 'history': history,
+    torch.save({'probs': probs.detach().cpu(), 'logits': interpolated.alpha.detach().cpu(),
+                'history': history,
                 'weights': weights.cpu(), 'costs': costs.cpu(), 'names': names,
                 'target_bits': args.target_bits}, out / 'probs.pt')
 
-    assignment = round_with_budget(probs, weights, costs, args.target_bits)
+    assignment = budget_constrained_argmax(interpolated.alpha.detach(), weights.to(args.device),
+                                           costs.to(args.device), args.target_bits)
     exact = achieved_bits(assignment, weights, costs)
 
     # One width per decoder block: the unit staged GSQ trains. The assignment
