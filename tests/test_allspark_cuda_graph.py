@@ -13,6 +13,8 @@ or the cuBLAS fallback from ``M`` at call time, and the fallback allocates its
 dequantized weights. That decision has to stay in the captured region.
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -41,10 +43,11 @@ def _prepare(dtype, m, k=256, n=512):
     if not prewarm_allspark_extension():
         pytest.fail("AllSpark JIT extension failed to build on this device")
 
-    weight = torch.randn(k, n, dtype=dtype, device="cuda") * 0.02
+    generator = torch.Generator(device="cuda").manual_seed(3515 + m)
+    weight = torch.randn(k, n, dtype=dtype, device="cuda", generator=generator) * 0.02
     qweight, scales = _quantize_per_column(weight)
     packed, packed_scales, _ = allspark_repack(qweight, scales, n, k)
-    x = torch.randn(m, k, dtype=dtype, device="cuda") * 0.02
+    x = torch.randn(m, k, dtype=dtype, device="cuda", generator=generator) * 0.02
     dense = ((qweight.float() - 128) * scales.float()).to(dtype)
     return x, packed, packed_scales, dense
 
@@ -60,6 +63,16 @@ def _capture(fn, warmup=3):
     return graph, output
 
 
+def _assert_matches_reference(output, x, dense):
+    # Accumulate independently in FP64 over the dtype-rounded W8A16 weights.
+    # Keep the returned dtype check: casting output to float would hide a
+    # regression in the kernel's output contract.
+    reference = x.double() @ dense.double()
+    assert output.dtype == x.dtype
+    torch.testing.assert_close(output.double(), reference, rtol=2e-3, atol=2e-3)
+    torch.testing.assert_close(output, reference.to(x.dtype), rtol=2e-3, atol=2e-3)
+
+
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("m", [1, 16])
 def test_allspark_gemm_captures_and_replays(m, dtype):
@@ -71,7 +84,7 @@ def test_allspark_gemm_captures_and_replays(m, dtype):
     graph, output = _capture(lambda: allspark_gemm(x, packed, packed_scales, n))
     graph.replay()
     torch.cuda.synchronize()
-    torch.testing.assert_close(output.float(), (x @ dense).float(), rtol=.05, atol=.05)
+    _assert_matches_reference(output, x, dense)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -88,7 +101,25 @@ def test_allspark_graph_replay_reads_current_input(dtype):
         x.copy_(torch.randn(x.shape, dtype=dtype, device="cuda", generator=generator) * 0.02)
         graph.replay()
         torch.cuda.synchronize()
-        torch.testing.assert_close(output.float(), (x @ dense).float(), rtol=.05, atol=.05)
+        _assert_matches_reference(output, x, dense)
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("corruption", ["zero", "stale"])
+def test_replay_check_rejects_incorrect_output(monkeypatch, dtype, corruption):
+    """Pin sensitivity to zero output and a graph that stops reading its input."""
+    capture = _capture
+
+    def broken_capture(fn, warmup=3):
+        graph, output = capture(fn, warmup)
+        graph.replay()
+        torch.cuda.synchronize()
+        frozen = output.clone() if corruption == "stale" else torch.zeros_like(output)
+        return SimpleNamespace(replay=lambda: None), frozen
+
+    monkeypatch.setitem(globals(), "_capture", broken_capture)
+    with pytest.raises(AssertionError):
+        test_allspark_graph_replay_reads_current_input(dtype)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -102,7 +133,7 @@ def test_allspark_cublas_fallback_captures(dtype):
     graph, output = _capture(lambda: allspark_gemm(x, packed, packed_scales, n))
     graph.replay()
     torch.cuda.synchronize()
-    torch.testing.assert_close(output.float(), (x @ dense).float(), rtol=.05, atol=.05)
+    _assert_matches_reference(output, x, dense)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -137,5 +168,5 @@ def test_allspark_module_forward_captures(dtype):
     graph, output = _capture(lambda: module(x))
     graph.replay()
     torch.cuda.synchronize()
-    torch.testing.assert_close(output.float(), (x @ dense).float(), rtol=.05, atol=.05)
+    _assert_matches_reference(output, x, dense)
     assert output.shape == (2, 4, n)
