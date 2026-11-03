@@ -47,6 +47,8 @@ def parse_args(argv=None):
     parser.add_argument('--grouping', choices=('block', 'projection'))
     parser.add_argument('--gumbel-samples', type=int)
     parser.add_argument('--kl-chunk-tokens', type=int, default=128)
+    parser.add_argument('--teacher-cache', choices=('device', 'disk'), default='device',
+                        help='retain teacher hidden states on the search device or stream them from disk')
     parser.add_argument('--options', help='ordered, comma-separated staged widths (2, 3, 4)')
     parser.add_argument('--arms', required=True,
                         help='comma-separated staged checkpoint arms, one per width, '
@@ -60,7 +62,7 @@ def parse_args(argv=None):
     parser.add_argument('--steps', type=int, default=200)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=7)
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='auto', help='Torch device; auto prefers CUDA, then MPS, then CPU')
     args = parser.parse_args(argv)
     paper = args.preset == 'paper'
     args.objective = args.objective or ('kl' if paper else 'ce')
@@ -140,13 +142,16 @@ def main():
         budget_constrained_argmax,
         projected_gumbel_search,
     )
+    from gptqmodel.utils.torch import resolve_torch_device
 
+    device = resolve_torch_device(args.device)
+    args.device = str(device)
     config = GPTQConfig(bits=options[-1], group_size=args.group_size, sym=True, desc_act=False,
-                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=args.device,
+                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=device,
                         offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                             attn_implementation='sdpa')
-    wrapper.model.to(args.device).eval().requires_grad_(False)
+    wrapper.model.to(device).eval().requires_grad_(False)
     layers = len(wrapper.model.model.layers)
     if args.layers is not None and args.layers != layers:
         raise SystemExit('--layers must cover the complete model for an exportable allocation')
@@ -194,17 +199,18 @@ def main():
     if len(lengths) != 1:
         raise SystemExit(f'calibration documents must share one length, saw {sorted(lengths)}')
     stacked = torch.stack(stacked)
-    text = [chunk.to(args.device) for chunk in stacked.split(args.batch_size)]
+    text = [chunk.to(device) for chunk in stacked.split(args.batch_size)]
     print(f'calibration: {len(calib_docs)} documents of {lengths.pop()} tokens '
           f'in {len(text)} batches of {args.batch_size}', flush=True)
 
     # Cache the dense teacher BEFORE setup replaces the live projections.
     with TemporaryDirectory(prefix='rco-teacher-', dir=out) as cache:
-        objective = (LlamaTeacherKL(wrapper.model, text, cache, chunk_tokens=args.kl_chunk_tokens)
+        objective = (LlamaTeacherKL(wrapper.model, text, cache, chunk_tokens=args.kl_chunk_tokens,
+                                     resident_cache=args.teacher_cache == 'device')
                      if args.objective == 'kl' else
                      lambda index: wrapper.model(input_ids=text[index], labels=text[index], use_cache=False).loss)
         interpolated = InterpolatedLlamaLayers(wrapper.model, layer_weights, weights, costs,
-                                               control_device=args.device, groups=groups).setup()
+                                               control_device=device, groups=groups).setup()
         search_started = time.monotonic()
         try:
             interpolated.retract(args.target_bits)
@@ -223,8 +229,8 @@ def main():
                 'weights': weights.cpu(), 'costs': costs.cpu(), 'names': names, 'groups': groups,
                 'target_bits': args.target_bits}, out / 'probs.pt')
 
-    assignment = budget_constrained_argmax(interpolated.alpha.detach(), weights.to(args.device),
-                                           costs.to(args.device), args.target_bits)
+    assignment = budget_constrained_argmax(interpolated.alpha.detach(), weights.to(device),
+                                           costs.to(device), args.target_bits)
     exact = achieved_bits(assignment, weights, costs)
 
     projection_bits = {name: options[option] for group, option in zip(groups, assignment.tolist())
@@ -240,12 +246,14 @@ def main():
         'projection_bits': projection_bits,
         'group_size': args.group_size,
         'preset': args.preset,
+        'device': str(device),
+        'teacher_cache': args.teacher_cache,
+        'calibration_tokens': sum(document['input_ids'].__len__() for document in calib_docs),
         'objective': args.objective,
         'grouping': args.grouping,
         'gumbel_samples': args.gumbel_samples,
         'calibration_split': 'validation',
         'calibration_sequences': len(calib_docs),
-        'calibration_tokens': sum(ids.numel() for ids in text),
         'dp_resolution': 500,
         'budget_unit': 'quantized_projection_code_bits',
         'projection_count': len(names),

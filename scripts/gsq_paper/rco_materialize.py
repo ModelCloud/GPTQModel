@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument('--assignment', required=True)
     parser.add_argument('--arms', required=True, help='template with {bits}')
     parser.add_argument('--out', required=True)
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='auto', help='Torch device; auto prefers CUDA, then MPS, then CPU')
     return parser.parse_args()
 
 
@@ -93,21 +93,23 @@ def main():
         finalize_llama_gsq_wrapper,
     )
     from gptqmodel.quantization import FORMAT, GPTQConfig
+    from gptqmodel.utils.torch import resolve_torch_device, torch_empty_cache
 
+    device = resolve_torch_device(args.device)
     base = min(payload.get('projection_bits', payload.get('layer_bits', {})).values())
     group_size = payload.get('group_size', 128)
     config = GPTQConfig(bits=base, group_size=group_size, sym=True, desc_act=False,
-                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=args.device,
+                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=device,
                         offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                              attn_implementation='sdpa')
-    model = wrapper.model.to(args.device)
+    model = wrapper.model.to(device)
 
     projection_bits = assignment_projection_bits(payload, len(model.model.layers))
     for block in range(len(model.model.layers)):
         widths = {name: projection_bits[f'model.layers.{block}.{name}'] for name in PROJECTIONS}
         model.model.layers[block] = restore_assignment_block(
-            model.model.layers[block], block, widths, args.arms, group_size=group_size, device=args.device)
+            model.model.layers[block], block, widths, args.arms, group_size=group_size, device=device)
         print(f'  block {block:02d} <- {widths}', flush=True)
 
     run = {
@@ -125,9 +127,9 @@ def main():
     print(f'saved {out}', flush=True)
 
     # Pin placement explicitly while verifying that dynamic widths reload.
-    reloaded = GPTQModel.load(str(out), backend=None, device=args.device, dtype=torch.float16,
+    reloaded = GPTQModel.load(str(out), backend=None, device=device, dtype=torch.float16,
                               attn_implementation='sdpa')
-    reloaded.model.to(args.device).eval()
+    reloaded.model.to(device).eval()
     mismatched = []
     for name, width in sorted(projection_bits.items()):
         module = reloaded.model.get_submodule(name)
@@ -138,11 +140,12 @@ def main():
         raise SystemExit(f'Reload did not preserve widths: {mismatched[:5]}')
 
     with torch.inference_mode():
-        ids = torch.tensor([[1, 2, 3, 4]], device=args.device)
+        ids = torch.tensor([[1, 2, 3, 4]], device=device)
         loss = float(reloaded.model(input_ids=ids, labels=ids).loss)
     if not torch.isfinite(torch.tensor(loss)):
         raise RuntimeError('RCO materialized model produced a nonfinite reload loss')
     print(f'reloaded forward loss={loss:.4f}', flush=True)
+    torch_empty_cache(device, gc=False)
 
 
 if __name__ == '__main__':

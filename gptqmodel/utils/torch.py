@@ -484,7 +484,19 @@ def torch_empty_cache_any(
 def torch_empty_cache(device: torch.device = None, gc: bool = True, sync: bool = False) -> bool:
     return torch_empty_cache_any(device=device, gc=gc, sync=sync)
 
+def resolve_torch_device(device: Union[torch.device, str, int, None] = None):
+    """Resolve ``auto`` or a concrete device without assuming CUDA exists."""
+    if device is None or (isinstance(device, str) and device.lower() == "auto"):
+        return auto_select_torch_device()
+    return _normalize_device(device)
+
+
 def auto_select_torch_device(index: int = 0):
+    """Return the fastest available Torch accelerator, with CUDA precedence.
+
+    The ordering preserves existing multi-GPU defaults while allowing the same
+    callers to run on Apple MPS and CPU-only machines.
+    """
     assert index >= 0, f"device index should be a positive integer: actual = `{index}`"
 
     if HAS_CUDA:
