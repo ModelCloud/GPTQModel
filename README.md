@@ -264,6 +264,7 @@ The table mirrors every explicit registration in `gptqmodel.models.auto.MODEL_MA
 | Klear | `klear` |
 | Laguna | `laguna` |
 | LFM2 / LFM2 MoE / LFM2-VL | `lfm2`, `lfm2_moe`, `lfm2_vl` |
+| LFM3 / LFM3 Omni / LFM3-VL | `lfm3`, `lfm3_omni`, `lfm3_vl` |
 | LLaDA2 MoE | `llada2_moe` |
 | Llama 1-4 / TinyLlama / Nemotron Ultra | `llama`, `llama4`, `llama4_text` |
 | Llama 3.2 VL | `mllama`, `mllama_text_model` |
