@@ -2176,7 +2176,7 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend in (BACKEND.GPTQ_MACHETE, BACKEND.AWQ_MACHETE):
+        if backend == BACKEND.MACHETE:
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Machete is currently not supported."
@@ -2220,8 +2220,7 @@ def ModelLoader(cls):
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
         if load_checkpoint_in_model and backend not in [
-            BACKEND.GPTQ_MACHETE,
-            BACKEND.AWQ_MACHETE,
+            BACKEND.MACHETE,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:

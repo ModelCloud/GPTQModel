@@ -18,7 +18,6 @@ class BACKEND(str, Enum):
     GPTQ_TRITON = "gptq_triton"  # VERY GOOD: all-around kernel
     BITSANDBYTES = "bitsandbytes"  # bitsandbytes 4-bit/8-bit kernel with optional CPU/CUDA support
     GPTQ_EXLLAMA_V2 = "gptq_exllama_v2"  # FASTER: optimized for batching > 1
-    GPTQ_MACHETE = "gptq_machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
     GPTQ_SWORDFISH = "gptq_swordfish"  # Blackwell (sm100/sm110) w4a16/w8a16 GEMM kernel
     GPTQ_W4AFP8 = "gptq_w4afp8"  # INT4 GPTQ weights, token-scaled FP8 input on SM12x
     GPTQ_W4A_NVFP4 = "gptq_w4a_nvfp4"  # INT4 GPTQ weights, NVFP4 input on SM12x
@@ -30,6 +29,11 @@ class BACKEND(str, Enum):
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
     MARLIN = "marlin"  # marlin reduce ops, fp32 by default; controlled by GPTQMODEL_MARLIN_USE_FP32
+
+    # Machete kernels
+    # A single backend covers both Machete sub-kernels. The quantization method
+    # and checkpoint format select the concrete GPTQ or AWQ implementation.
+    MACHETE = "machete"  # CUTLASS-based kernel optimized for Hopper (SM90+)
 
     # QQQ kernels
     QQQ = "qqq"  # marlin-based qqq kernel
@@ -46,7 +50,6 @@ class BACKEND(str, Enum):
     AWQ_TORCH_CPU_AVX512 = "awq_torch_cpu_avx512"  # CPU AVX512-BF16 kernel shared with GPTQ
     AWQ_TORCH = "awq_torch"
     AWQ_BITBLAS = "awq_bitblas"
-    AWQ_MACHETE = "awq_machete"
     AWQ_SWORDFISH = "awq_swordfish"
     AWQ_EXLLAMA_V2 = "awq_exllama_v2"
 
@@ -83,7 +86,6 @@ class BACKEND(str, Enum):
     TRITON = "triton"
     EXLLAMA_V2 = "exllama_v2"
     EXLLAMA_V3 = "exllama_v3"
-    MACHETE = "machete"
     SWORDFISH = "swordfish"
     BITBLAS = "bitblas"
     GEMM = "gemm"
@@ -111,7 +113,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.TORCH: BACKEND.GPTQ_TORCH,
         BACKEND.TRITON: BACKEND.GPTQ_TRITON,
         BACKEND.EXLLAMA_V2: BACKEND.GPTQ_EXLLAMA_V2,
-        BACKEND.MACHETE: BACKEND.GPTQ_MACHETE,
         BACKEND.SWORDFISH: BACKEND.GPTQ_SWORDFISH,
         BACKEND.BITBLAS: BACKEND.GPTQ_BITBLAS,
     },
@@ -128,7 +129,6 @@ _LEGACY_BACKEND_BY_METHOD = {
         BACKEND.TORCH_FUSED_AWQ: BACKEND.AWQ_TORCH_FUSED,
         BACKEND.BITBLAS: BACKEND.AWQ_BITBLAS,
         BACKEND.BITBLAS_AWQ: BACKEND.AWQ_BITBLAS,
-        BACKEND.MACHETE: BACKEND.AWQ_MACHETE,
         BACKEND.SWORDFISH: BACKEND.AWQ_SWORDFISH,
         BACKEND.EXLLAMA_V2: BACKEND.AWQ_EXLLAMA_V2,
     },
@@ -147,12 +147,14 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
 }
 
-# Method-qualified Marlin names from older releases. These are accepted by the
-# stable HF-facing selection/repacking APIs, but they resolve to the single
-# ``BACKEND.MARLIN`` backend; method/format choose the sub-kernel later.
+# Method-qualified Marlin/Machete names from older releases. These are accepted
+# by the stable HF-facing selection/repacking APIs, but they resolve to the
+# single shared backend; method/format choose the sub-kernel later.
 _LEGACY_BACKEND_ALIASES = {
     "gptq_marlin": BACKEND.MARLIN,
     "awq_marlin": BACKEND.MARLIN,
+    "gptq_machete": BACKEND.MACHETE,
+    "awq_machete": BACKEND.MACHETE,
 }
 
 _PROFILE_BY_INDEX = {

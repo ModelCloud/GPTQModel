@@ -831,6 +831,110 @@ def test_explicit_gptq_machete_backend_selects_asymmetric_kernel(monkeypatch):
     assert qlinear_cls is MacheteLinear
 
 
+def test_machete_backend_routes_gptq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        MacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        MacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.MACHETE,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is MacheteLinear
+
+
+def test_machete_backend_routes_awq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    for fmt in (FORMAT.GEMM, FORMAT.MARLIN):
+        qlinear_cls = select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            device=DEVICE.CUDA,
+            backend=BACKEND.MACHETE,
+            format=fmt,
+            quant_method=METHOD.AWQ,
+            pack_dtype=torch.int32,
+        )
+
+        assert qlinear_cls is AwqMacheteLinear
+
+
+def test_legacy_machete_backend_strings_route_to_shared_kernels(monkeypatch):
+    monkeypatch.setattr(
+        MacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        MacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMacheteLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend="gptq_machete",
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend="awq_machete",
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is MacheteLinear
+    assert awq_cls is AwqMacheteLinear
+
+
 def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):
     monkeypatch.setattr(importer, "HAS_CUDA", True)
     monkeypatch.setattr(importer, "HAS_XPU", False)

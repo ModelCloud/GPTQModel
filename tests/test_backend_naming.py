@@ -18,6 +18,20 @@ def test_legacy_method_qualified_marlin_names_resolve_to_shared_backend():
     assert normalize_backend("awq_marlin", quant_method=METHOD.AWQ) == BACKEND.MARLIN
 
 
+def test_machete_backend_is_method_agnostic():
+    assert normalize_backend(BACKEND.MACHETE, quant_method=METHOD.GPTQ) == BACKEND.MACHETE
+    assert normalize_backend(BACKEND.MACHETE, quant_method=METHOD.AWQ) == BACKEND.MACHETE
+
+
+def test_legacy_method_qualified_machete_names_resolve_to_shared_backend():
+    assert normalize_backend("gptq_machete") == BACKEND.MACHETE
+    assert normalize_backend("awq_machete") == BACKEND.MACHETE
+    assert normalize_backend("GPTQ_MACHETE") == BACKEND.MACHETE
+    assert normalize_backend("AWQ_MACHETE") == BACKEND.MACHETE
+    assert normalize_backend("gptq_machete", quant_method=METHOD.GPTQ) == BACKEND.MACHETE
+    assert normalize_backend("awq_machete", quant_method=METHOD.AWQ) == BACKEND.MACHETE
+
+
 def test_removed_mentaray_backend_names_are_rejected():
     with pytest.raises(ValueError):
         normalize_backend("mentaray", quant_method=METHOD.GPTQ)

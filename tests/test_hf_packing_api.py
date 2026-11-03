@@ -145,13 +145,15 @@ def test_feasibility_rejects_cuda_only_kernel_on_cpu():
     )
 
 
-def test_hf_public_apis_accept_legacy_marlin_backend_strings(monkeypatch):
-    """The stable ``hf_`` APIs keep accepting the pre-refactor Marlin names."""
+def test_hf_public_apis_accept_legacy_method_qualified_backend_strings(monkeypatch):
+    """The stable ``hf_`` APIs keep accepting the pre-refactor kernel names."""
+    from gptqmodel.nn_modules.qlinear.machete import MacheteLinear
+    from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
     from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
     from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
     from gptqmodel.utils.importer import hf_select_quant_linear_v2
 
-    for kernel_cls in (MarlinLinear, AwqMarlinLinear):
+    for kernel_cls in (MarlinLinear, AwqMarlinLinear, MacheteLinear, AwqMacheteLinear):
         monkeypatch.setattr(
             kernel_cls,
             "cached_validate_once",
@@ -163,40 +165,45 @@ def test_hf_public_apis_accept_legacy_marlin_backend_strings(monkeypatch):
             classmethod(lambda cls, _device: None),
         )
 
-    gptq_cls = hf_select_quant_linear_v2(
-        bits=4,
-        group_size=128,
-        desc_act=False,
-        sym=True,
-        format=FORMAT.GPTQ,
-        quant_method=METHOD.GPTQ,
-        backend="gptq_marlin",
-        pack=False,
+    cases = (
+        ("gptq_marlin", "awq_marlin", MarlinLinear, AwqMarlinLinear),
+        ("gptq_machete", "awq_machete", MacheteLinear, AwqMacheteLinear),
     )
-    awq_cls = hf_select_quant_linear_v2(
-        bits=4,
-        group_size=128,
-        desc_act=False,
-        sym=False,
-        format=FORMAT.GEMM,
-        quant_method=METHOD.AWQ,
-        backend="awq_marlin",
-        pack=False,
-    )
+    for gptq_legacy, awq_legacy, gptq_kernel, awq_kernel in cases:
+        gptq_cls = hf_select_quant_linear_v2(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            format=FORMAT.GPTQ,
+            quant_method=METHOD.GPTQ,
+            backend=gptq_legacy,
+            pack=False,
+        )
+        awq_cls = hf_select_quant_linear_v2(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            format=FORMAT.GEMM,
+            quant_method=METHOD.AWQ,
+            backend=awq_legacy,
+            pack=False,
+        )
 
-    assert gptq_cls is MarlinLinear
-    assert awq_cls is AwqMarlinLinear
+        assert gptq_cls is gptq_kernel
+        assert awq_cls is awq_kernel
 
-    # Feasibility probing resolves the same legacy strings to the shared
-    # Marlin backend instead of reporting an unknown backend.
-    assert hf_check_packing_feasibility(
-        4, 128, False, True, quant_method=METHOD.GPTQ,
-        backend="gptq_marlin", device=DEVICE.CPU, repack=True,
-    )
-    assert hf_check_packing_feasibility(
-        4, 128, False, False, format=FORMAT.GEMM, quant_method=METHOD.AWQ,
-        backend="awq_marlin", device=DEVICE.CPU, repack=True,
-    )
+        # Feasibility probing resolves the same legacy strings to the shared
+        # backend instead of reporting an unknown backend.
+        assert hf_check_packing_feasibility(
+            4, 128, False, True, quant_method=METHOD.GPTQ,
+            backend=gptq_legacy, device=DEVICE.CPU, repack=True,
+        )
+        assert hf_check_packing_feasibility(
+            4, 128, False, False, format=FORMAT.GEMM, quant_method=METHOD.AWQ,
+            backend=awq_legacy, device=DEVICE.CPU, repack=True,
+        )
 
 
 def test_feasibility_repack_targets_include_plain_gptq_kernels():
