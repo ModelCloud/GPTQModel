@@ -1654,7 +1654,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         else:
             x_work = x_flat
 
-        output = torch.zeros((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=accum_dtype)
+        # Cast activations once and reuse the operation-local FP32 accumulator.
+        x_work = x_work.to(accum_dtype)
+        output = torch.empty((x_flat.shape[0], self.out_features), device=x_flat.device, dtype=accum_dtype)
         precision_context = cpu_bf16x3_matmul() if is_cpu else nullcontext()
 
         with precision_context:
@@ -1692,8 +1694,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
                 x_chunk = x_work[
                     :, start * self.gguf_block_size : end * self.gguf_block_size
-                ].to(accum_dtype)
-                output = output + torch.matmul(x_chunk, weight_chunk.transpose(0, 1))
+                ]
+                # beta=0 on the first chunk avoids reading the uninitialized output.
+                output.addmm_(x_chunk, weight_chunk.transpose(0, 1), beta=0 if start == 0 else 1)
 
         if bias is not None:
             output = output + bias.to(device=x_flat.device, dtype=accum_dtype)
