@@ -22,6 +22,15 @@ Torch float64 oracle.
 Not every split-K run is worth undoing. Narrower outputs such as ``k_proj``
 (1024 columns) are cheap enough that padding costs far more than the extra
 pass, so the rule is restricted to the measured win region.
+
+Below ``get_qmv_batch_limit`` MLX runs ``qmv_wide`` instead of the matrix
+kernel. ``qmv_wide`` streams ``vecs_per_tg`` input vectors per threadgroup and
+caps that tile at five, so a batch above five rows is split into
+``ceil(rows / 5)`` tiles and the whole weight matrix is re-read once per tile.
+That is the same trade split-K makes, only worse: on an M5 Ultra a 5120-wide
+projection falls from 945 GB/s of weight bandwidth at one row to 152 GB/s at
+eleven rows. Those row counts are also worth evaluating as the smallest
+unsplit matrix batch.
 """
 
 from functools import lru_cache
@@ -32,6 +41,17 @@ import mlx.core as mx
 # Keep these in sync with mlx/backend/metal/quantized.cpp.
 _SPLIT_K_TARGET_THREADGROUPS = 512
 _SPLIT_K_TILE = 32
+# ``qmv_wide`` caps its input-vector tile at five rows and re-reads the weights
+# per tile, so batches above this size pay multiple passes over the weights.
+# FP16 activations are weight-traffic bound there, so a single-pass matrix
+# kernel wins from six rows up. BF16 decode is ALU bound instead and still
+# reaches ~430 GB/s at six rows, so it only wins once the vector kernel's extra
+# weight passes outweigh its cheaper arithmetic; measured crossover is nine.
+_QMV_WIDE_ESCAPE_ROWS = {mx.float16: 6, mx.bfloat16: 9}
+# The escape must never move more weight traffic than the vector kernel it
+# replaces. ``qmv_wide`` makes ``ceil(rows / 5)`` passes, which is two or three
+# for the row counts above, so the matrix kernel is capped at two 32-row tiles.
+_MAX_ESCAPE_ROW_TILES = 2
 # Below this output width the split-K pass is cheaper than the padded rows.
 _MIN_OUTPUT_DIMS = 3072
 # Evaluating more than this many times the requested rows loses more to tile
@@ -111,31 +131,69 @@ def _split_k(rows, input_dims, output_dims, group_size):
     return split_k
 
 
-@lru_cache(maxsize=4096)
-def padded_rows(rows, input_dims, output_dims, group_size):
-    """Return the row count that avoids MLX's split-K pass, or ``None``.
+def _qmv_wide_is_wasteful(rows, generation, dtype):
+    """True when the vector path costs more than an unsplit matrix batch.
 
-    ``None`` means the caller should run the matmul unchanged: either MLX never
-    reaches split-K for this shape, split-K is already off, or padding would
-    cost more than the pass it removes.
+    Only affine quantization reaches this module, and ``use_qmv_wide`` enables
+    the wide vector kernel for affine weights on generation 15 and newer.
     """
-    if rows < _qmv_batch_limit(input_dims, output_dims):
-        # MLX uses its vector kernels below this row count and never splits K.
-        return None
-    if _split_k(rows, input_dims, output_dims, group_size) == 1:
-        return None
-    if output_dims < _MIN_OUTPUT_DIMS:
-        # Narrow outputs finish in microseconds; the extra rows dominate.
-        return None
+    if generation < 15:
+        return False
+    floor = _QMV_WIDE_ESCAPE_ROWS.get(dtype)
+    return floor is not None and rows >= floor
+
+
+def _padding_target(
+    rows, input_dims, output_dims, group_size, floor, max_row_tiles=32,
+):
+    """Smallest row count at or above ``floor`` that avoids the split-K pass."""
     limit = _MAX_ROW_GROWTH * rows
-    for row_tiles in range(-(-rows // _SPLIT_K_TILE) + 1, 33):
-        # The shortest row count that still needs ``row_tiles`` 32-row tiles.
+    if floor > limit:
+        return None
+    if _split_k(floor, input_dims, output_dims, group_size) == 1:
+        return floor
+    for row_tiles in range(2, max_row_tiles + 1):
         candidate = row_tiles * _SPLIT_K_TILE - (_SPLIT_K_TILE - 1)
+        if candidate < floor:
+            continue
         if candidate > limit:
             break
         if _split_k(candidate, input_dims, output_dims, group_size) == 1:
             return candidate
     return None
+
+
+@lru_cache(maxsize=4096)
+def padded_rows(rows, input_dims, output_dims, group_size, dtype):
+    """Return the row count that avoids MLX's split-K pass, or ``None``.
+
+    ``None`` means the caller should run the matmul unchanged: either MLX never
+    reaches split-K for this shape, split-K is already off, or padding would
+    cost more than the pass it removes. Below ``get_qmv_batch_limit`` the same
+    applies to the repeated weight passes of ``qmv_wide``.
+    """
+    if output_dims < _MIN_OUTPUT_DIMS:
+        # Narrow outputs finish in microseconds; the extra rows dominate.
+        return None
+    vector_limit = _qmv_batch_limit(input_dims, output_dims)
+    if rows < vector_limit:
+        # MLX runs its vector kernels below this row count and never splits K.
+        # That is one pass over the weights while the batch fits one wide tile;
+        # past the dtype's measured crossover the wide kernel's extra weight
+        # passes cost more than the rows we add to reach the matrix kernel.
+        if not _qmv_wide_is_wasteful(rows, _architecture()[0], dtype):
+            return None
+        return _padding_target(
+            rows,
+            input_dims,
+            output_dims,
+            group_size,
+            vector_limit,
+            _MAX_ESCAPE_ROW_TILES,
+        )
+    if _split_k(rows, input_dims, output_dims, group_size) == 1:
+        return None
+    return _padding_target(rows, input_dims, output_dims, group_size, rows)
 
 
 def quantized_matmul(x, weight, scales, biases, *, group_size, bits, mode="affine"):
@@ -152,7 +210,7 @@ def quantized_matmul(x, weight, scales, biases, *, group_size, bits, mode="affin
         return mx.quantized_matmul(x, weight, scales=scales, biases=biases, **kwargs)
     rows = x.size // input_dims
     output_dims = weight.shape[0]
-    target = padded_rows(rows, input_dims, output_dims, group_size)
+    target = padded_rows(rows, input_dims, output_dims, group_size, x.dtype)
     if target is None:
         return mx.quantized_matmul(x, weight, scales=scales, biases=biases, **kwargs)
     flat = x.reshape(rows, input_dims)

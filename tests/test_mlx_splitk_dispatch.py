@@ -73,6 +73,18 @@ def test_splitk_dispatch_matches_oracle_for_all_projections(dtype, group_size, b
 
 
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
+@pytest.mark.parametrize("group_size,bits", [(64, 4), (64, 8)])
+def test_splitk_dispatch_matches_oracle_for_qmv_wide_rows(dtype, group_size, bits):
+    # Six to eleven rows are the batches qmv_wide splits into multiple weight
+    # passes, so they are the rows the padded matrix kernel replaces.
+    for _, output_dims, input_dims in QWEN38_27B_PROJECTIONS:
+        for rows in (6, 8, 11):
+            _check_shape(
+                rows, input_dims, output_dims, group_size, bits, dtype,
+            )
+
+
+@pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
 def test_splitk_dispatch_preserves_leading_batch_dims(dtype):
     input_dims, output_dims, group_size, bits = 6144, 5120, 64, 4
     source = mx.random.normal((output_dims, input_dims)).astype(mx.float16)
@@ -96,7 +108,7 @@ def test_splitk_dispatch_preserves_leading_batch_dims(dtype):
 def test_splitk_dispatch_is_identity_without_splitk(dtype):
     # gate_proj's split_k is already 1, so the dispatcher must not pad.
     input_dims, output_dims, group_size, bits = 5120, 17408, 64, 4
-    assert padded_rows(16, input_dims, output_dims, group_size) is None
+    assert padded_rows(16, input_dims, output_dims, group_size, dtype) is None
     source = mx.random.normal((output_dims, input_dims)).astype(mx.float16)
     weight, scales, biases = mx.quantize(source, group_size=group_size, bits=bits)
     x = mx.random.normal((16, input_dims)).astype(dtype)
@@ -131,7 +143,7 @@ def test_splitk_padding_target_clears_splitk():
         pytest.skip("split-K avoidance targets Apple GPU generation 13+")
     for input_dims, output_dims in ((6144, 5120), (17408, 5120)):
         for rows in (12, 16, 24, 32):
-            target = padded_rows(rows, input_dims, output_dims, 64)
+            target = padded_rows(rows, input_dims, output_dims, 64, mx.float16)
             assert target is not None
             assert target > rows
             assert _split_k(target, input_dims, output_dims, 64) == 1
@@ -141,23 +153,70 @@ def test_splitk_padding_target_clears_splitk():
 
 def test_splitk_padding_declines_when_already_unsplit():
     for input_dims, output_dims in ((5120, 17408), (5120, 10240)):
-        for rows in (9, 12, 16, 32):
+        for rows in (12, 16, 32):
             assert _split_k(rows, input_dims, output_dims, 64) == 1
-            assert padded_rows(rows, input_dims, output_dims, 64) is None
+            assert padded_rows(rows, input_dims, output_dims, 64, mx.float16) is None
 
 
-def test_splitk_padding_declines_below_vector_limit():
-    # MLX runs its vector kernels below get_qmv_batch_limit and never splits K.
-    input_dims, output_dims = 6144, 5120
-    limit = _qmv_batch_limit(input_dims, output_dims)
-    for rows in range(1, limit):
-        assert padded_rows(rows, input_dims, output_dims, 64) is None
-        assert padded_rows(rows, input_dims, output_dims, 64) is None
-    assert padded_rows(limit, input_dims, output_dims, 64) is not None
+def test_splitk_padding_declines_inside_one_qmv_wide_tile():
+    # qmv_wide reads the whole weight matrix once while the batch fits a single
+    # five-row input-vector tile, so padding would only add work.
+    generation, _ = _architecture()
+    if generation < 15:
+        pytest.skip("qmv_wide handles affine weights on Apple GPU generation 15+")
+    for input_dims, output_dims in ((5120, 17408), (6144, 5120), (17408, 5120)):
+        for rows in range(1, 6):
+            for dtype in (mx.float16, mx.bfloat16):
+                assert padded_rows(rows, input_dims, output_dims, 64, dtype) is None
+
+
+def test_splitk_padding_escapes_multi_tile_qmv_wide():
+    # Past five rows qmv_wide re-reads the weights once per tile, which costs
+    # more than the rows needed to reach the single-pass matrix kernel.
+    generation, _ = _architecture()
+    if generation < 15:
+        pytest.skip("qmv_wide handles affine weights on Apple GPU generation 15+")
+    for input_dims, output_dims in ((5120, 17408), (6144, 5120), (17408, 5120)):
+        limit = _qmv_batch_limit(input_dims, output_dims)
+        for rows in (6, 7, 8, 9, 10, 11):
+            assert rows < limit
+            target = padded_rows(rows, input_dims, output_dims, 64, mx.float16)
+            assert target is not None
+            assert target > rows
+            assert _split_k(target, input_dims, output_dims, 64) == 1
+            assert target <= 8 * rows
+
+
+def test_splitk_padding_bf16_crossover_is_later():
+    # BF16 decode stays ALU bound in qmv_wide, so the matrix kernel only wins
+    # once the vector kernel has accumulated enough extra weight passes.
+    generation, _ = _architecture()
+    if generation < 15:
+        pytest.skip("qmv_wide handles affine weights on Apple GPU generation 15+")
+    for input_dims, output_dims in ((5120, 17408), (6144, 5120)):
+        for rows in range(6, 9):
+            assert padded_rows(rows, input_dims, output_dims, 64, mx.bfloat16) is None
+        for rows in (9, 10, 11):
+            target = padded_rows(rows, input_dims, output_dims, 64, mx.bfloat16)
+            assert target is not None
+            assert _split_k(target, input_dims, output_dims, 64) == 1
+
+
+def test_splitk_padding_never_exceeds_two_row_tiles():
+    # qmv_wide makes two or three weight passes at these row counts, so the
+    # matrix kernel must not be handed a batch that needs more than two.
+    generation, _ = _architecture()
+    if generation < 15:
+        pytest.skip("qmv_wide handles affine weights on Apple GPU generation 15+")
+    # Both shapes only drop split-K at 65 rows (three tiles), so they decline.
+    assert padded_rows(11, 4096, 4096, 64, mx.float16) is None
+    assert padded_rows(11, 14336, 4096, 64, mx.float16) is None
+    # Two tiles are still allowed where they clear split-K.
+    assert padded_rows(11, 8192, 8192, 64, mx.float16) == 33
 
 
 def test_splitk_padding_declines_for_narrow_outputs():
     # k_proj/v_proj: split_k is large but the padded rows cost more than it.
-    for rows in (9, 12, 16, 32):
+    for rows in (6, 9, 12, 16, 32):
         assert _split_k(rows, 5120, 1024, 64) > 1
-        assert padded_rows(rows, 5120, 1024, 64) is None
+        assert padded_rows(rows, 5120, 1024, 64, mx.float16) is None
