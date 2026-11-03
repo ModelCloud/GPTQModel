@@ -24,6 +24,7 @@ import torch
 from datasets import load_from_disk
 
 from gptqmodel import BACKEND, GPTQModel
+from gptqmodel.utils.torch import resolve_torch_device, torch_empty_cache
 
 
 def _score_range(model_path, ids_by_document, device, backend, dtype):
@@ -45,8 +46,7 @@ def _score_range(model_path, ids_by_document, device, backend, dtype):
             total += float(output.loss) * counted
             tokens += counted
     del model
-    if device.startswith('cuda'):
-        torch.cuda.empty_cache()
+    torch_empty_cache(resolve_torch_device(device), gc=False)
     return per_document, total, tokens
 
 
@@ -57,10 +57,13 @@ def score(model_path, ids_by_document, backend, dtype, devices=None):
     pooled NLL is identical to a single-device pass.
     """
     if not devices:
-        devices = ['cuda:0']
+        devices = ['auto']
+    devices = [str(resolve_torch_device(device)) for device in devices]
     if len(devices) == 1:
         per_document, total, tokens = _score_range(
             model_path, ids_by_document, devices[0], backend, dtype)
+    elif any(resolve_torch_device(device).type != 'cuda' for device in devices):
+        raise ValueError('document-sharded evaluation across multiple devices requires CUDA')
     else:
         import multiprocessing as mp
         shards = {device: {} for device in devices}
@@ -100,7 +103,7 @@ def parse_args():
     parser.add_argument('--dense', default=None,
                         help='optional unquantized reference model')
     parser.add_argument('--n', type=int, default=128, help='validation documents to score')
-    parser.add_argument('--devices', default='cuda:0',
+    parser.add_argument('--devices', default='auto',
                         help='comma-separated devices for document-sharded scoring')
     parser.add_argument('--backend', default='TORCH')
     parser.add_argument('--dtype', default='bfloat16')

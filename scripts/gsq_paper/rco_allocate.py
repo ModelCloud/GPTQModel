@@ -12,6 +12,7 @@ this does not construct the paper's full W2-W8 GPTQ database automatically.
 """
 
 import argparse
+import gc
 import json
 import time
 from pathlib import Path
@@ -47,6 +48,8 @@ def parse_args(argv=None):
     parser.add_argument('--grouping', choices=('block', 'projection'))
     parser.add_argument('--gumbel-samples', type=int)
     parser.add_argument('--kl-chunk-tokens', type=int, default=128)
+    parser.add_argument('--teacher-cache', choices=('device', 'disk'), default='device',
+                        help='retain teacher hidden states on the search device or stream them from disk')
     parser.add_argument('--options', help='ordered, comma-separated staged widths (2, 3, 4)')
     parser.add_argument('--arms', required=True,
                         help='comma-separated staged checkpoint arms, one per width, '
@@ -60,7 +63,9 @@ def parse_args(argv=None):
     parser.add_argument('--steps', type=int, default=200)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=7)
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='auto', help='Torch device used to reconstruct staged arms')
+    parser.add_argument('--backend', choices=('auto', 'torch', 'mlx'), default='auto',
+                        help='differentiable search backend; auto prefers MLX on Apple silicon')
     args = parser.parse_args(argv)
     paper = args.preset == 'paper'
     args.objective = args.objective or ('kl' if paper else 'ce')
@@ -140,13 +145,20 @@ def main():
         budget_constrained_argmax,
         projected_gumbel_search,
     )
+    from gptqmodel.quantization.rco_mlx import rco_mlx_available
+    from gptqmodel.utils.torch import resolve_torch_device
 
+    device = resolve_torch_device(args.device)
+    args.device = str(device)
+    args.backend = ('mlx' if rco_mlx_available() else 'torch') if args.backend == 'auto' else args.backend
+    if args.backend == 'mlx' and not rco_mlx_available():
+        raise SystemExit('MLX RCO requires macOS arm64 with `pip install "gptqmodel[mlx]"`')
     config = GPTQConfig(bits=options[-1], group_size=args.group_size, sym=True, desc_act=False,
-                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=args.device,
+                        act_group_aware=False, format=FORMAT.GPTQ_V2, device=device,
                         offload_to_disk=False)
     wrapper = GPTQModel.load(args.model, quantize_config=config, dtype=torch.bfloat16,
                             attn_implementation='sdpa')
-    wrapper.model.to(args.device).eval().requires_grad_(False)
+    wrapper.model.to(device).eval().requires_grad_(False)
     layers = len(wrapper.model.model.layers)
     if args.layers is not None and args.layers != layers:
         raise SystemExit('--layers must cover the complete model for an exportable allocation')
@@ -194,37 +206,100 @@ def main():
     if len(lengths) != 1:
         raise SystemExit(f'calibration documents must share one length, saw {sorted(lengths)}')
     stacked = torch.stack(stacked)
-    text = [chunk.to(args.device) for chunk in stacked.split(args.batch_size)]
+    text = [chunk.to(device) for chunk in stacked.split(args.batch_size)]
     print(f'calibration: {len(calib_docs)} documents of {lengths.pop()} tokens '
           f'in {len(text)} batches of {args.batch_size}', flush=True)
 
     # Cache the dense teacher BEFORE setup replaces the live projections.
     with TemporaryDirectory(prefix='rco-teacher-', dir=out) as cache:
-        objective = (LlamaTeacherKL(wrapper.model, text, cache, chunk_tokens=args.kl_chunk_tokens)
-                     if args.objective == 'kl' else
-                     lambda index: wrapper.model(input_ids=text[index], labels=text[index], use_cache=False).loss)
-        interpolated = InterpolatedLlamaLayers(wrapper.model, layer_weights, weights, costs,
-                                               control_device=args.device, groups=groups).setup()
-        search_started = time.monotonic()
-        try:
-            interpolated.retract(args.target_bits)
-            probs, history = projected_gumbel_search(
-                interpolated, list(range(len(text))), args.target_bits, steps=args.steps, lr=args.lr,
-                objective=objective, gumbel_samples=args.gumbel_samples, log_every=10,
-                batch_weights=[ids.numel() for ids in text])
-        finally:
-            interpolated.cleanup()
-        search_seconds = time.monotonic() - search_started
+        if args.backend == 'mlx':
+            import mlx.core as mx
+            from mlx_lm.utils import load as load_mlx
+
+            from gptqmodel.quantization.rco_mlx import (
+                MLXCausalLMLoss,
+                MLXInterpolatedLlamaLayers,
+                MLXTeacherKL,
+                projected_gumbel_search_mlx,
+                write_mlx_assignment,
+            )
+
+            # Releasing the reconstruction model before loading MLX avoids
+            # keeping two full dense Llama graphs resident in unified memory.
+            # The packed candidates have already been copied to layer_weights.
+            mlx_batches = [batch.detach().cpu().numpy() for batch in text]
+            del text, database, wrapper
+            gc.collect()
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
+            elif device.type == 'mps':
+                torch.mps.empty_cache()
+
+            model, _, config = load_mlx(args.model, return_config=True, trust_remote_code=True)
+            if config.get('model_type') != 'llama':
+                raise SystemExit(f'MLX RCO currently supports Llama, got {config.get("model_type")}')
+            model.eval()
+            objective = (MLXTeacherKL(model, mlx_batches, cache, chunk_tokens=args.kl_chunk_tokens,
+                                      resident_cache=args.teacher_cache == 'device')
+                         if args.objective == 'kl' else MLXCausalLMLoss(model, mlx_batches))
+            try:
+                interpolated = MLXInterpolatedLlamaLayers(
+                    model, layer_weights, weights, costs, groups=groups)
+                del layer_weights
+                mx.random.seed(args.seed)
+                search_started = time.monotonic()
+                probs, history = projected_gumbel_search_mlx(
+                    interpolated, list(range(len(mlx_batches))), args.target_bits,
+                    steps=args.steps, lr=args.lr, objective=objective,
+                    gumbel_samples=args.gumbel_samples, log_every=10,
+                    batch_weights=[ids.size for ids in mlx_batches])
+                mlx_probabilities = probs
+                mlx_logits = interpolated.alpha
+                mlx_weights = weights.detach().cpu().numpy()
+                mlx_costs = costs.detach().cpu().numpy()
+            finally:
+                objective.cleanup()
+                if 'interpolated' in locals():
+                    interpolated.cleanup()
+                    del interpolated
+            del objective, model, mlx_batches
+            search_seconds = time.monotonic() - search_started
+            saved = write_mlx_assignment(
+                out / 'probs.pt', probabilities=mlx_probabilities,
+                logits=mlx_logits, history=history, weights=mlx_weights,
+                costs=mlx_costs, names=names, groups=groups,
+                target_bits=args.target_bits)
+            probs, logits = saved['probs'], saved['logits']
+        else:
+            objective = (LlamaTeacherKL(wrapper.model, text, cache, chunk_tokens=args.kl_chunk_tokens,
+                                         resident_cache=args.teacher_cache == 'device')
+                         if args.objective == 'kl' else
+                         lambda index: wrapper.model(input_ids=text[index], labels=text[index], use_cache=False).loss)
+            interpolated = InterpolatedLlamaLayers(wrapper.model, layer_weights, weights, costs,
+                                                   control_device=device, groups=groups).setup()
+            search_started = time.monotonic()
+            try:
+                interpolated.retract(args.target_bits)
+                probs, history = projected_gumbel_search(
+                    interpolated, list(range(len(text))), args.target_bits, steps=args.steps, lr=args.lr,
+                    objective=objective, gumbel_samples=args.gumbel_samples, log_every=10,
+                    batch_weights=[ids.numel() for ids in text])
+            finally:
+                interpolated.cleanup()
+                if args.objective == 'kl':
+                    objective.cleanup()
+            search_seconds = time.monotonic() - search_started
+            logits = interpolated.alpha.detach().cpu()
 
     # Persist the search result before rounding: the search is the expensive
     # part, and a failure in the cheap tail must not force another run.
-    torch.save({'probs': probs.detach().cpu(), 'logits': interpolated.alpha.detach().cpu(),
-                'history': history,
-                'weights': weights.cpu(), 'costs': costs.cpu(), 'names': names, 'groups': groups,
-                'target_bits': args.target_bits}, out / 'probs.pt')
+    if args.backend != 'mlx':
+        torch.save({'probs': probs.detach().cpu(), 'logits': logits,
+                    'history': history,
+                    'weights': weights.cpu(), 'costs': costs.cpu(), 'names': names, 'groups': groups,
+                    'target_bits': args.target_bits}, out / 'probs.pt')
 
-    assignment = budget_constrained_argmax(interpolated.alpha.detach(), weights.to(args.device),
-                                           costs.to(args.device), args.target_bits)
+    assignment = budget_constrained_argmax(logits, weights, costs, args.target_bits)
     exact = achieved_bits(assignment, weights, costs)
 
     projection_bits = {name: options[option] for group, option in zip(groups, assignment.tolist())
@@ -240,12 +315,16 @@ def main():
         'projection_bits': projection_bits,
         'group_size': args.group_size,
         'preset': args.preset,
+        'device': str(device),
+        'backend': args.backend,
+        'seed': args.seed,
+        'teacher_cache': args.teacher_cache,
+        'calibration_tokens': sum(document['input_ids'].__len__() for document in calib_docs),
         'objective': args.objective,
         'grouping': args.grouping,
         'gumbel_samples': args.gumbel_samples,
         'calibration_split': 'validation',
         'calibration_sequences': len(calib_docs),
-        'calibration_tokens': sum(ids.numel() for ids in text),
         'dp_resolution': 500,
         'budget_unit': 'quantized_projection_code_bits',
         'projection_count': len(names),

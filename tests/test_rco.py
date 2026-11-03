@@ -48,6 +48,21 @@ def test_saturated_scores_preserve_budget_tradeoff(dtype, temperature):
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
+def test_budget_constraint_rounding_handles_scores_on_mps(dtype):
+    if dtype == torch.float64:
+        pytest.skip("MPS does not provide FP64 storage")
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS is unavailable")
+    device = torch.device("mps")
+    scores = torch.tensor([[0., 1.], [0., 2.]], device=device, dtype=dtype)
+    actual = rco.budget_constrained_argmax(
+        scores, torch.ones(2, device=device), torch.tensor([2., 3.], device=device), 2.5)
+    expected, _ = exhaustive_assignment(scores.cpu(), torch.ones(2), torch.tensor([2., 3.]), 2.5)
+    assert any(torch.equal(actual.cpu(), candidate) for candidate in expected)
+    assert actual.device.type == "mps"
+
+
+@pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
 def test_score_tie_and_representable_neighbors(dtype):
     one = torch.tensor(1., dtype=dtype)
     for second in (torch.nextafter(one, torch.tensor(0., dtype=dtype)), one,

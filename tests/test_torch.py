@@ -349,6 +349,14 @@ def test_repeated_forward_with_inference_tensors():
     torch.testing.assert_close(first, second, rtol=0, atol=0)
 
 
+def test_resolve_torch_device_accepts_auto_and_preserves_explicit_devices(monkeypatch):
+    monkeypatch.setattr(torch_utils, "auto_select_torch_device", lambda index=0: torch.device("mps"))
+
+    assert torch_utils.resolve_torch_device("auto") == torch.device("mps")
+    assert torch_utils.resolve_torch_device(None) == torch.device("mps")
+    assert torch_utils.resolve_torch_device("cpu") == torch.device("cpu")
+
+
 def test_torch_empty_cache_syncs_before_releasing_allocator(monkeypatch):
     calls = []
     device = torch.device("cpu")

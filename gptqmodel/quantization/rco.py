@@ -171,7 +171,7 @@ def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
     # table on the host: the search calls this once per Gumbel draw, so a Python
     # loop over positions here would dominate the step time.
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
-    gained = scores.detach().double().cpu().numpy()
+    gained = scores.detach().cpu().double().numpy()
     steps = unit_costs.detach().cpu().numpy()
 
     table = np.full(budget + 1, -np.inf, dtype=np.float64)
@@ -249,7 +249,13 @@ class InterpolatedLlamaLayers:
         """
         self.model = model
         self.layer_weights = layer_weights
-        self.control_device = torch.device(control_device or 'cuda:0')
+        if control_device is None:
+            control_device = next(model.parameters()).device
+        elif isinstance(control_device, str) and control_device.lower() == 'auto':
+            from ..utils.torch import auto_select_torch_device
+
+            control_device = auto_select_torch_device()
+        self.control_device = torch.device(control_device)
         # Every control tensor must live on the same device as ``alpha``: the
         # budget helpers combine them elementwise, and the database is built on
         # the host while the search runs on an accelerator.
@@ -367,21 +373,24 @@ class LlamaTeacherKL:
     """Mean-token KL from a frozen dense Llama teacher to the searched model.
 
     Construct before installing weight interpolation. Cache final teacher
-    hidden states on disk, then reconstruct teacher distributions with the
-    unchanged LM head. Checkpoint token chunks of the KL to bound vocabulary
-    intermediates in both forward and backward; no full-corpus logits cache.
+    hidden states on the search device or disk, then reconstruct teacher
+    distributions with the unchanged LM head. Checkpoint token chunks of the KL
+    to bound vocabulary intermediates in both forward and backward; no
+    full-corpus logits cache.
     Batches must contain fixed-length, unpadded token IDs. Every position is a
     next-token context, including the last. The caller owns the cache directory
     lifetime and must keep the embedding/output head outside the search.
     """
 
-    def __init__(self, model, batches, directory, *, chunk_tokens=128):
+    def __init__(self, model, batches, directory, *, chunk_tokens=128, resident_cache=False):
         if model.training or not batches:
             raise ValueError('RCO teacher KL requires an eval model and nonempty batches')
         if isinstance(chunk_tokens, bool) or not isinstance(chunk_tokens, int) or chunk_tokens < 1:
             raise ValueError('RCO KL chunk_tokens must be a positive integer')
         self.model, self.batches = model, batches
         self.chunk_tokens = chunk_tokens
+        self.resident_cache = resident_cache
+        self._resident = []
         self.head = model.get_output_embeddings()
         if any(parameter.requires_grad for parameter in self.head.parameters()):
             raise ValueError('RCO teacher KL requires a frozen output head')
@@ -393,15 +402,27 @@ class LlamaTeacherKL:
                 if ids.ndim != 2 or ids.numel() == 0:
                     raise ValueError('RCO KL batches require nonempty [batch, tokens] IDs')
                 hidden = model.model(input_ids=ids, use_cache=False).last_hidden_state
-                path = directory / f'{index:05d}.pt'
-                torch.save(hidden.detach().cpu(), path)
-                self.paths.append(path)
+                if self.resident_cache:
+                    self._resident.append(hidden.detach())
+                    self.paths.append(None)
+                else:
+                    path = directory / f'{index:05d}.pt'
+                    torch.save(hidden.detach().cpu(), path)
+                    self.paths.append(path)
+
+    def cleanup(self):
+        """Release teacher scratch; the caller owns the cache directory."""
+        self._resident.clear()
+        self.paths.clear()
 
     def __call__(self, index):
         from torch.utils.checkpoint import checkpoint
 
         student = self.model.model(input_ids=self.batches[index], use_cache=False).last_hidden_state
-        reference = torch.load(self.paths[index], map_location='cpu', weights_only=True)
+        if self.resident_cache:
+            reference = self._resident[index]
+        else:
+            reference = torch.load(self.paths[index], map_location='cpu', weights_only=True)
         if reference.shape != student.shape:
             raise ValueError('RCO teacher/student hidden shapes differ')
         student = student.reshape(-1, student.shape[-1])

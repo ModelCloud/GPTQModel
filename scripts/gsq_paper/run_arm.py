@@ -32,6 +32,7 @@ from pathlib import Path
 import torch
 from datasets import load_from_disk
 
+
 # Direct script execution must use this checkout, including isolated worktrees.
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -41,6 +42,12 @@ from gptqmodel.looper.gsq_training_model import (
     quantize_llama_gsq_model,
 )
 from gptqmodel.quantization import FORMAT, GPTQConfig, GSQTrainingConfig
+from gptqmodel.utils.torch import (
+    resolve_torch_device,
+    torch_empty_cache,
+    torch_sync,
+)
+
 
 ZERO_SHOT_TASKS = ['arc_easy', 'arc_challenge', 'hellaswag', 'winogrande', 'piqa']
 
@@ -75,7 +82,7 @@ def parse_args():
                         help='uniform width, ignored when --assignment is given')
     parser.add_argument('--assignment', default=None,
                         help='RCO assignment.json: one width per decoder block')
-    parser.add_argument('--device', default='cuda:0')
+    parser.add_argument('--device', default='auto', help='Torch device; auto prefers CUDA, then MPS, then CPU')
     parser.add_argument('--distributed', action='store_true',
                         help='run with torchrun; batch-size remains the global batch')
     parser.add_argument('--target-cache', choices=['none', 'cpu', 'device'], default='none',
@@ -113,7 +120,7 @@ def parse_args():
 def main():
     args = parse_args()
     distributed = None
-    device = torch.device(args.device)
+    device = resolve_torch_device(args.device)
     if args.distributed:
         import torch.distributed as dist
 
@@ -197,7 +204,7 @@ def main():
     finalize_llama_gsq_wrapper(wrapper, run)
     wrapper.save(str(model_dir))
     del wrapper, run
-    torch.cuda.empty_cache()
+    torch_empty_cache(device, gc=False)
 
     evaluation, eval_seconds = None, 0.0
     if not args.skip_eval:
@@ -221,7 +228,7 @@ def main():
         'seed': args.seed,
         'restore_best': args.restore_best,
         'model': args.model,
-        'device': torch.cuda.get_device_name(device),
+        'device': str(device),
         'world_size': 1 if distributed is None else distributed.world_size,
         'target_cache': args.target_cache,
         'activation_checkpointing': args.activation_checkpointing,
@@ -242,6 +249,7 @@ def main():
         'per_layer': per_layer,
         'eval': evaluation,
     }
+    torch_sync(device)
     (out / 'results.json').write_text(json.dumps(result, indent=2, default=str))
     print(json.dumps({'variant': args.variant, 'bits': result['bits'],
                       'quantize_seconds': result['quantize_seconds'],
