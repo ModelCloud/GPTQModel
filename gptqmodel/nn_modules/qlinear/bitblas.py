@@ -357,16 +357,25 @@ def _normalize_bitblas_target(target):
 def unpack_gptq_qzeros(qzeros: torch.Tensor, bits: int, is_gptq_v2: bool = False) -> torch.Tensor:
     qzeros = qzeros.view(torch.int32)
     elems_per_int32 = 32 // bits
+    # int8 holds 0..15 with room to spare but cannot represent an 8-bit zero
+    # point above 127: 200 wraps to -56, and the caller then subtracts one and
+    # hands it to BitBLAS as a negative offset.
+    unpacked_dtype = torch.int16 if bits > 7 else torch.int8
     unpacked_zeros = torch.zeros(
         (qzeros.shape[0], qzeros.shape[1] * elems_per_int32),
-        dtype=torch.int8,
+        dtype=unpacked_dtype,
         device=qzeros.device,
         requires_grad=False,
     )
 
+    # Mask with the full field width. A hardcoded 0xF is only correct at
+    # bits == 4: at 8 bits it drops the high nibble (127 unpacks as 15), and at
+    # 2 bits it keeps two bits of the neighbouring field (0,1,2,3 unpacks as
+    # 4,9,14,3). Both are silent - the result is still a small integer.
+    mask = (1 << bits) - 1
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32
-        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & 0xF
+        unpacked_zeros[:, col] = (qzeros[:, col // elems_per_int32] >> (bits * i)) & mask
 
     if not is_gptq_v2:
         return unpacked_zeros + 1
