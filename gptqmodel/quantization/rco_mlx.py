@@ -330,7 +330,17 @@ class _MLXWeightInterpolation:
                 probabilities = self.owner.probabilities(self.owner.index_of(self.name))
                 mixed = self.reference
                 for offset, delta in enumerate(self.deltas):
-                    mixed = mixed + probabilities[offset] * delta
+                    # Keep the interpolation in the model dtype. The Torch
+                    # backend multiplies a zero-dimensional float32
+                    # probability by a model-dtype delta, and Torch treats a
+                    # zero-dimensional operand as a scalar for type
+                    # promotion, so that product stays in the delta's dtype.
+                    # MLX promotes a float32 array against a low-precision
+                    # array to float32 instead, which would widen every
+                    # projection to float32 and diverge from the reference
+                    # search. Cast the scalar explicitly so both backends run
+                    # the same arithmetic in the same precision.
+                    mixed = mixed + probabilities[offset].astype(mixed.dtype) * delta
                 output = values @ mixed.T
                 if self.bias is not None:
                     output = output + self.bias
