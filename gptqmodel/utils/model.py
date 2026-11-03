@@ -561,9 +561,12 @@ def create_quant_module(
     else:
         ori_layer_device = submodule.list_buffers()[0].device
 
-    if ori_layer_device.type != CPU.type:
+    # Transformers builds quantized models on the meta device before assigning
+    # checkpoint tensors, so allow either CPU or meta here and keep the
+    # replacement layer on the device the original layer occupied.
+    if ori_layer_device.type not in {CPU.type, "meta"}:
         raise AssertionError(
-            f"Expected `{name}` to reside on CPU during quant module creation, "
+            f"Expected `{name}` to reside on CPU or meta during quant module creation, "
             f"but found tensors on `{ori_layer_device}`."
         )
 
@@ -1422,6 +1425,15 @@ def simple_dispatch_model(model, device_map):
 def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: QuantizeConfig = None,
                         max_input_length: Optional[int] = None):
     return gptqmodel_post_init(model, use_act_order, quantize_config, max_input_length)
+
+
+# public/stable api exposed to transformers/optimum: native load bridge.
+# Re-exported here so callers can keep importing from `gptqmodel.utils.model`.
+from .hf_load import (  # noqa: E402,F401
+    HFGPTQModelLoadContext,
+    hf_gptqmodel_post_init_for_load,
+    hf_gptqmodel_prepare_model_for_load,
+)
 
 
 def _post_init_cpu_offloaded_marlin(module: MarlinLinear) -> None:
