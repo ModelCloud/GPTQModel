@@ -170,15 +170,33 @@ class W4ANVFP4Linear(W4AFP8Linear):
         self._w4a_layout_token = self._weight_layout_token()
         self._w4a_weights_ready = True
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self._weight_both.numel() == 0:
-            raise RuntimeError("NVFP4 weight cache is absent; call post_init() after loading or packing.")
+    def _require_current_weights(self) -> None:
+        """Reject changed native weights instead of revalidating them in place.
+
+        ``W4AFP8Linear`` may revalidate a changed layout on the fly because it
+        derives nothing from the weights: ``fp8_weight_operand()`` decodes the
+        current ``qweight`` every call. This class also retains ``_weight_both``,
+        a packed plane built from those codes in ``post_init()``. Letting the
+        inherited refresh run would rewrite ``_w4a_layout_token`` to the *new*
+        weights while the packed planes still encode the previous ones, so the
+        freshness check in ``forward()`` would accept a stale cache. A changed
+        native weight must therefore force a rebuild.
+        """
+        if not self._w4a_weights_ready:
+            raise RuntimeError(
+                "NVFP4 weights are not initialized; call post_init() after loading or packing."
+            )
         if not self._weights_are_current():
             raise RuntimeError(
-                "NVFP4 weights changed since post_init(); call post_init() again before inference."
+                "NVFP4 weights changed since post_init(); call post_init() again to rebuild the packed cache."
             )
         if not self._layout_token_is_observable():
             self._warn_unobservable_layout()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._weight_both.numel() == 0:
+            raise RuntimeError("NVFP4 weight cache is absent; call post_init() after loading or packing.")
+        self._require_current_weights()
         from .w4a_activation import W4AActivation, pack_activation
         from .w4a_nvfp4_triton import nvfp4_accumulate_group, nvfp4_pack_and_swizzle
 
