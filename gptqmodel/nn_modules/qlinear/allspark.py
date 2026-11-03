@@ -168,7 +168,7 @@ class AllSparkLinear(GPTQQuantLinear):
         if self._hip:
             if not prewarm_allspark_hip_extension():
                 raise RuntimeError("AllSpark HIP extension failed to build")
-            packed, packed_scales = allspark_hip_repack(
+            packed, packed_scales, _ = allspark_hip_repack(
                 codes.contiguous(), scales, self.out_features, self.in_features
             )
         else:

@@ -35,6 +35,7 @@ class BACKEND(str, Enum):
     # AWQ kernels
     AWQ_GEMM = "awq_gemm"
     AWQ_GEMM_TRITON = "awq_gemm_triton"
+    AWQ_ALLSPARK = "awq_allspark"  # AllSpark W8A16 with zero point, RDNA4 only
     AWQ_GEMV = "awq_gemv"
     AWQ_GEMV_FAST = "awq_gemv_fast"
     AWQ_TORCH_INT8 = "awq_torch_int8"

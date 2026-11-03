@@ -145,7 +145,7 @@ def _check(out, raw32, ref64, exact64, dtype, label):
 )
 def test_gemm_matches_fp64_oracle(dtype, n, k, m):
     codes, scales, a = _make_case(n, k, m, dtype, seed=n * 31 + k + m)
-    packed, packed_scales = allspark_hip_repack(codes, scales, n, k)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
     out = allspark_hip_gemm(a, packed, packed_scales, n)
     raw32 = allspark_hip_gemm_f32(a, packed, packed_scales, n)
     ref64 = _oracle(codes, scales, a, dtype)
@@ -158,7 +158,7 @@ def test_gemm_non_aligned_n(dtype):
     """N not a multiple of 128 exercises the padded tail of the repack."""
     n, k, m = 11024, 256, 3
     codes, scales, a = _make_case(n, k, m, dtype, seed=7)
-    packed, packed_scales = allspark_hip_repack(codes, scales, n, k)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
     out = allspark_hip_gemm(a, packed, packed_scales, n)
     raw32 = allspark_hip_gemm_f32(a, packed, packed_scales, n)
     assert out.shape == (m, n)
@@ -173,7 +173,7 @@ def test_gemm_prefill_fallback(dtype):
     leave a dense weight behind."""
     n, k, m = 256, 256, 32
     codes, scales, a = _make_case(n, k, m, dtype, seed=11)
-    packed, packed_scales = allspark_hip_repack(codes, scales, n, k)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
     before = torch.cuda.memory_allocated()
     out = allspark_hip_gemm(a, packed, packed_scales, n)
     torch.cuda.synchronize()
@@ -218,7 +218,7 @@ def test_no_dense_weight_cache_across_forwards(dtype):
     """AGENTS.md storage rule: only packed weights may persist between calls."""
     n, k = 512, 512
     codes, scales, a = _make_case(n, k, 1, dtype, seed=13)
-    packed, packed_scales = allspark_hip_repack(codes, scales, n, k)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
     del codes, scales
     torch.cuda.empty_cache()
 

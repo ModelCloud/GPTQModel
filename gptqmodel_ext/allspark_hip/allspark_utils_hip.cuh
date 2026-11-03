@@ -157,25 +157,39 @@ __device__ __forceinline__ uint32_t cvt_pk_bf16_rne(uint32_t u0, uint32_t u1) {
   return perm_b32(a, b, 0x03020706u);
 }
 
-// 4 uint8 -> 4 bfloat16, biased by 128, multiplied by `scale` in fp32 and
-// rounded to nearest bf16. Doing the scale in fp32 halves the visible error
-// versus the CUDA kernel's bf16 `__hmul2` (bf16 has only 8 mantissa bits, so
-// this matters for the 2e-3 acceptance gate).
-__device__ __forceinline__ void cvt_8bx4_to_16bx4_bias128_bf16_scaled(
-    const uint32_t& idata, float scale, uint32_t& o0, uint32_t& o1) {
+// 4 uint8 -> 4 bfloat16, multiplied by `scale` in fp32 and rounded to nearest
+// bf16. Doing the scale in fp32 halves the visible error versus the CUDA
+// kernel's bf16 `__hmul2` (bf16 has only 8 mantissa bits, so this matters for
+// the 2e-3 acceptance gate).
+//
+// `zero` is the dequantisation zero point **code** (AWQ), not a bias-128
+// offset: (raw - 2^23 - zero) * scale is exactly (code - zero) * scale, and
+// the constant 2^23 + zero stays exactly representable in fp32 for any 8-bit
+// code, so this is one subtract plus one multiply per element with no
+// cancellation loss.
+constexpr float kTwoPow23 = 8388608.0f;
+__device__ __forceinline__ void cvt_8bx4_to_16bx4_bf16_scaled(
+    const uint32_t& idata, float scale, float zero, uint32_t& o0,
+    uint32_t& o1) {
   // 0x4B000000 has bytes {00,00,00,4B}. Selector bytes, low to high:
   //   4+i (src0.byte i), 0 (src1.b0 = 00), 1 (src1.b1 = 00), 3 (src1.b3 = 4B)
   constexpr uint32_t kSel[4] = {0x03010004u, 0x03010005u, 0x03010006u,
                                 0x03010007u};
+  const float bias = kTwoPow23 + zero;
   float f[4];
 #pragma unroll
   for (int i = 0; i < 4; ++i) {
     uint32_t bits = perm_b32(idata, 0x4B000000u, kSel[i]);
-    f[i] = __uint_as_float(bits) - 8388736.0f;  // 2^23 + 128
-    f[i] *= scale;
+    f[i] = (__uint_as_float(bits) - bias) * scale;
   }
   o0 = cvt_pk_bf16_rne(__float_as_uint(f[0]), __float_as_uint(f[1]));
   o1 = cvt_pk_bf16_rne(__float_as_uint(f[2]), __float_as_uint(f[3]));
+}
+
+// Back-compat shim: GPTQ 8-bit neutral zero point is 128.
+__device__ __forceinline__ void cvt_8bx4_to_16bx4_bias128_bf16_scaled(
+    const uint32_t& idata, float scale, uint32_t& o0, uint32_t& o1) {
+  cvt_8bx4_to_16bx4_bf16_scaled(idata, scale, 128.0f, o0, o1);
 }
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@ in either dequant path shows up as a dtype gap in the ``hot`` column.
 
     python scripts/benchmark_allspark_hip_w8a16.py
     python scripts/benchmark_allspark_hip_w8a16.py --triton
+    python scripts/benchmark_allspark_hip_w8a16.py --awq-group -1 128
 
 Protocol (identical to the CUDA script):
 
@@ -122,12 +123,39 @@ def build_triton(k, n, dtype):
     return module
 
 
-def benchmark_shape(k, n, dtype, m_values, warmup, iters, flush_buf, use_triton):
+def benchmark_shape(k, n, dtype, m_values, warmup, iters, flush_buf, use_triton,
+                    awq_group=None):
     device = torch.device("cuda")
     torch.manual_seed(0)
     codes = torch.randint(0, 256, (k, n), dtype=torch.uint8, device=device)
     scales = (torch.rand(n, dtype=torch.float32, device=device) * 0.01 + 0.005).to(dtype)
-    packed, packed_scales = allspark_hip_repack(codes, scales, n, k)
+    packed, packed_scales, _ = allspark_hip_repack(codes, scales, n, k)
+
+    # AWQ: same K x N codes, but a per-group zero point and per-group scales.
+    # The zero point is deliberately not 128, so a kernel that silently assumes
+    # the GPTQ neutral value cannot look fast by skipping the subtraction.
+    awq_args = (None, -1)
+    if awq_group is not None:
+        from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+        from gptqmodel.utils.allspark_hip import allspark_hip_repack_awq
+
+        g = k if awq_group in (-1, k) else awq_group
+        assert k % g == 0, f"K={k} must be divisible by the AWQ group size {g}"
+        groups = k // g
+        icodes = torch.randint(0, 256, (k, n), dtype=torch.int32, device=device)
+        izeros = torch.randint(0, 256, (groups, n), dtype=torch.int32, device=device)
+        iscales = (torch.rand(groups, n, dtype=torch.float32, device=device) * 0.01
+                   + 0.005).to(dtype)
+        qweight_awq, qzeros_awq = pack_awq(icodes, izeros, 8)
+        # int32 AWQ words -> the uint8 (K, N) codes the kernel repacks; this is
+        # the same conversion post_init performs, so the timing covers the real
+        # runtime layout.
+        codes = (icodes & 0xFF).to(torch.uint8).contiguous()
+        packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
+            qweight_awq, qzeros_awq, iscales, n, k, awq_group
+        )
+        awq_args = (packed_zeros, awq_group)
+        del qweight_awq, qzeros_awq, icodes, izeros
 
     triton = build_triton(k, n, dtype) if use_triton else None
     props = torch.cuda.get_device_properties(0)
@@ -138,11 +166,14 @@ def benchmark_shape(k, n, dtype, m_values, warmup, iters, flush_buf, use_triton)
     for m in m_values:
         x = (torch.randn(m, k, dtype=torch.float32, device=device) * 0.5).to(dtype)
         with torch.inference_mode():
+            packed_zeros, gsz = awq_args
+
             # Call the raw op so Python attribute lookups do not pollute timing.
             def hip_fn():
                 return torch.ops.gptqmodel_allspark_hip.allspark_w8a16_gemm(
-                    x, packed, packed_scales, None, n, -1, sm_count,
-                    props.major * 10 + props.minor, 1024, False, True,
+                    x, packed, packed_scales, packed_zeros, n, gsz, sm_count,
+                    props.major * 10 + props.minor, 1024,
+                    packed_zeros is not None, True,
                 )
 
             hip_fn()  # build/warm any lazy state before the graph capture
@@ -153,6 +184,7 @@ def benchmark_shape(k, n, dtype, m_values, warmup, iters, flush_buf, use_triton)
             row = {
                 "dtype": str(dtype).split(".")[-1],
                 "m": m,
+                "awq_group": awq_group,
                 "hot_ms": hot,
                 "flushed_ms": flushed,
                 "graph_ms": graph,
@@ -202,6 +234,10 @@ def main():
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--triton", action="store_true", help="also time the Triton ROCm path")
+    parser.add_argument(
+        "--awq-group", type=int, nargs="*", default=None,
+        help="also time the AWQ 8-bit path with these group sizes (-1 = per-channel)",
+    )
     parser.add_argument("--json", type=str, default=None, help="write raw results here")
     args = parser.parse_args()
 
@@ -237,6 +273,12 @@ def main():
             results["rows"] += benchmark_shape(
                 k, n, dtype, args.m, args.warmup, args.iters, flush_buf, args.triton
             )
+            for awq_group in (args.awq_group or []):
+                print(f"  AWQ group_size={awq_group}")
+                results["rows"] += benchmark_shape(
+                    k, n, dtype, args.m, args.warmup, args.iters, flush_buf,
+                    args.triton, awq_group=awq_group,
+                )
 
     if args.json:
         with open(args.json, "w") as handle:
