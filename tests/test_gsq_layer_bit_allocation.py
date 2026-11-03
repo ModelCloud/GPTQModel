@@ -155,6 +155,63 @@ def test_block_exports_mixed_projection_widths():
         assert torch.isfinite(module.dequantize_weight()).all()
 
 
+def test_qwen3_block_capture_and_packing_match_dense_layout():
+    """Qwen3 shares the staged dense-decoder projection contract."""
+    from transformers.models.qwen3.modeling_qwen3 import (
+        Qwen3Config,
+        Qwen3ForCausalLM,
+    )
+
+    from gptqmodel.looper.gsq_training_capture import capture_llama_gsq_inputs
+    from gptqmodel.quantization.gsq_training import quantize_llama_gsq_block
+    from gptqmodel.quantization.gsq_training_config import GSQTrainingConfig
+
+    torch.manual_seed(5)
+    config = Qwen3Config(
+        vocab_size=128,
+        hidden_size=256,
+        intermediate_size=768,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        head_dim=64,
+        max_position_embeddings=256,
+        num_hidden_layers=1,
+        tie_word_embeddings=True,
+    )
+    config._attn_implementation = "eager"
+    model = Qwen3ForCausalLM(config).eval()
+    documents = [
+        {"input_ids": torch.randint(0, 128, (32,)).tolist()}
+        for _ in range(2)
+    ]
+    cache = capture_llama_gsq_inputs(model, documents, layer_index=0)
+    batches = [
+        (hidden[0], kwargs)
+        for hidden, kwargs in zip(cache.layer_inputs, cache.layer_input_kwargs)
+    ]
+    gsq = GSQTrainingConfig(
+        enabled=False,
+        epochs=1,
+        batch_size=1,
+        microbatch_size=1,
+        qk_steps=1,
+    )
+    packed, result = quantize_llama_gsq_block(
+        model.model.layers[0],
+        batches,
+        bits=2,
+        group_size=128,
+        gsq=gsq,
+        pack=True,
+    )
+
+    assert set(result["projection_bits"].values()) == {2}
+    for name, bits in result["projection_bits"].items():
+        module = packed.get_submodule(name)
+        assert int(module.bits) == bits
+        assert torch.isfinite(module.dequantize_weight()).all()
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='needs an accelerator')
 def test_search_state_keeps_one_device():
     """Costs must follow the control device, not stay on the host.

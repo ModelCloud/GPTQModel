@@ -562,8 +562,9 @@ runtime with `pip install "gptqmodel[mlx]"`. `--backend auto` selects MLX when
 that package tree is importable and otherwise falls back to Torch. Select a
 backend explicitly with `--backend mlx` or `--backend torch`; explicit MLX
 selection fails rather than silently changing backends. `assignment.json`
-records the backend that actually ran the search. The MLX path currently
-supports Llama models; its candidate interpolation, teacher KL,
+records the backend that actually ran the search. The MLX path supports dense
+Llama and Qwen3 decoder layouts; `qwen3_moe` is rejected because its expert
+routing is outside this interpolation adapter. Candidate interpolation, teacher KL,
 straight-through Gumbel gradients, Adam recurrence, and momentum
 transport run in MLX on Metal. The discrete budget DP runs in NumPy on the
 host. Search gradients are evaluated and accumulated one batch and draw at a time,
@@ -585,7 +586,7 @@ neither loads nor modifies a packed inference checkpoint.
 The M5 Ultra has 256 GiB of unified memory and 1.2 TB/s memory bandwidth. It has
 no HBM: CPU, Metal GPU, and the Apple Neural Engine (ANE/NPU) address the same
 memory pool. The search uses Metal through MLX for differentiablity rather than
-copying the dense Llama graph between accelerators.
+copying the dense decoder graph between accelerators.
 
 A reproducible warm benchmark compares the same teacher-cache policy, model,
 and token IDs with a deterministic Gumbel seed in each backend on Torch MPS and
@@ -629,6 +630,95 @@ part of this result. MLX main could not replace the release runtime in this
 environment because only Apple Command Line Tools are installed and the Metal
 compiler is absent.
 
+#### Qwen3 dense-decoder qualification
+
+The closest official dense checkpoint to the requested 0.8B Qwen3 size is
+`Qwen/Qwen3-0.6B` at revision
+`c1899de289a04d12100db370d81485cdf75e47ca`. It has 28 dense decoder layers,
+hidden width 1024 and MLP width 3072. The separately named Qwen3.5-0.8B uses a
+different hybrid architecture and was not substituted for this test.
+
+A reduced-budget pipeline run created W2/W3/W4 GSQ arms from two training
+sequences, two GPTQ initialization sequences and one validation sequence, each
+128 tokens. Every arm trained all 28 blocks on MPS with one epoch, one Q/K step,
+batch and microbatch size one. Quantization completed in 58.9 s, 60.3 s and
+57.5 s for W2, W3 and W4. These runs qualify architecture and checkpoint
+compatibility only; the tiny training budget does not establish quantization
+quality.
+
+The paper allocation preset then ran against those arms with teacher KL,
+per-projection decisions, four Gumbel draws and W2/W3/W4 candidates. With one
+128-token calibration sequence and eight steps, the native MLX search completed
+in 2.89 s and produced a 196-projection assignment. The discrete decoder chose
+162 W2 projections and 34 W3 projections, for 2.1548 code bits per quantized
+projection parameter under a 2.625 target. This underspend is expected from the
+current score-maximizing inequality constraint when the search strongly prefers
+the lower width; it is not a quality result. Materialization restored all
+selected widths with zero reload mismatches and a finite reload loss.
+
+A warm backend comparison used all 28 Qwen3 `mlp.down_proj` decisions, 16
+tokens, three steps, the paper's four Gumbel draws, two warmups and seven timed
+repetitions:
+
+| Search backend | Median | Seconds/step |
+| --- | ---: | ---: |
+| Torch 2.15.0, MPS, BF16 | 0.5239 s | 0.1746 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.2592 s** | **0.0864** |
+
+MLX was 2.02x faster for this Qwen3 search-component workload. Backend RNG
+streams differ, so the final losses are not a cross-backend accuracy
+comparison. The component benchmark does not measure GSQ training or complete
+quantization time.
+
+`scripts/gsq_paper/bench_qwen3_ane.py` extends the ANE qualification to real
+Qwen3 layer-0 weights and activations captured from the validation corpus. It
+compares identical FP16 inputs and weights on a forced-ANE Core ML graph and
+MLX Metal, checks every result against an independent FP32 Torch calculation,
+and separately compares against the Torch result rounded to FP16. For batch 1
+and 128 tokens:
+
+| Task | ANE | Metal | Metal/ANE | ANE normalized L2 error | Gate |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Q projection | 0.000381 s | 0.001170 s | 3.07x | 4.72e-4 | pass |
+| K projection | 0.000272 s | 0.000969 s | 3.56x | 4.29e-4 | pass |
+| V projection | 0.000277 s | 0.000977 s | 3.53x | 1.01e-3 | pass |
+| O projection | 0.000347 s | 0.000598 s | 1.72x | 1.27e-3 | pass |
+| Gate projection | 0.000374 s | 0.001258 s | 3.36x | 2.70e-4 | pass |
+| Up projection | 0.000394 s | 0.001478 s | 3.75x | 4.89e-4 | pass |
+| Down projection | 0.000408 s | 0.001248 s | 3.06x | 2.35e-3 | fail |
+| Composed MLP | 0.000378 s | 0.001526 s | 4.04x | 5.47e-3 | fail |
+
+The `down_proj` result also failed the stricter normalized-L2 gate, although
+its elementwise `rtol=atol=2e-3` check happened to pass. The composed MLP failed
+both checks at every tested shape from batch 1/16 tokens through batch 4/128
+tokens. Metal passed the composed-MLP gate at all four shapes. ANE compilation
+and forced-plan creation took a median 0.358 s per shape, so dispatch would also
+need a persistent compiled-model cache.
+
+The scheduler test overlapped ANE teacher-shaped MLP calls with an independent
+MLX Metal student/backward graph. One ANE call improved serial time by only
+1.040x; seven calls improved by 1.016x, while 28 calls regressed to 0.898x. The
+concurrent path therefore did not clear the 1.05x dispatch threshold once the
+ANE work represented model-scale volume.
+
+Production ANE dispatch is not enabled. Core ML has no autograd, so the
+differentiable student and backward pass remain on MLX Metal. The faster
+standalone projections are not sufficient evidence for teacher offload:
+composing the Qwen3 MLP already violates the accuracy gate. A future ANE path
+would need end-to-end teacher-logit or KL parity plus a persistent compiled
+graph and a scheduler win on real search batches.
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/bench_qwen3_ane.py \
+    --model /path/to/Qwen3-0.6B \
+    --corpus /path/to/qwen3-corpus \
+    --tasks q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mlp \
+    --shapes 1x16,1x128,2x128,4x128 \
+    --warmup 5 --repeats 20 --student-repeats 4 \
+    --scheduler-teacher-calls 1,7,28 \
+    --json-out /tmp/qwen3-ane.json
+```
+
 The synthetic `scripts/gsq_paper/bench_gpu_ane.py` probe requests ANE
 placement through a Core ML compute plan and measures an independent MLX Metal
 workload. It uses GELU and scaled residuals on both engines, checks outputs for
@@ -641,11 +731,11 @@ The corrected probe measured ANE 0.000608 s, Metal 0.003519 s, serial
 0.004279 s, and concurrent 0.003518 s: 1.22x serial throughput. Earlier
 measurements included thread creation in each sample and used different GPU
 activations; their conclusion against concurrent execution is withdrawn.
-This demonstrates a benefit for these independent synthetic workloads.
-It does not establish the speed or accuracy of offloading the RCO teacher or
-backward graph. Core ML supplies no autograd for this implementation; a custom
-ANE backward implementation or teacher offload would require separate
-validation. RCO currently uses MLX Metal without ANE dispatch.
+This demonstrates overlap for the synthetic workloads. The equal-work Qwen3
+qualification above is the dispatch decision because the synthetic graph does
+not establish teacher or backward accuracy. Core ML supplies no autograd for
+this implementation; a custom ANE backward implementation or teacher offload
+would require separate validation.
 
 Install Core ML Tools alongside the MLX runtime and run:
 

@@ -156,7 +156,7 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
                              checkpoint_directory=None, distributed=None,
                              target_cache='none', activation_checkpointing=False,
                              resume_prefix_directory=None, reuse_capture=False):
-    """Quantize selected Llama blocks in place and replay the packed prefix.
+    """Quantize selected dense decoder blocks in place and replay the packed prefix.
 
     Defaults select every decoder block. This runtime entry point does not write
     a complete checkpoint or replace GPTQModel.quantize dispatch. The caller
@@ -168,10 +168,10 @@ def quantize_llama_gsq_model(model, documents, *, bits, group_size, gsq=None, la
     run configuration. Checkpoints contain tensor state and use weights-only
     loading.
     """
-    from transformers.models.llama.modeling_llama import LlamaForCausalLM
-
-    if not isinstance(model, LlamaForCausalLM) or model.training:
-        raise ValueError('Staged model quantization requires an eval-mode LlamaForCausalLM')
+    if getattr(getattr(model, "config", None), "model_type", None) not in ("llama", "qwen3"):
+        raise ValueError('Staged model quantization requires an eval-mode Llama or Qwen3 causal LM')
+    if model.training:
+        raise ValueError('Staged model quantization requires an eval-mode dense decoder causal LM')
     if gsq is None:
         gsq = GSQTrainingConfig()
     elif isinstance(gsq, dict):
@@ -603,11 +603,9 @@ def prepare_llama_gsq_export(model, run):
     # RoPE inverse frequencies are nonpersistent. Casting their FP32 values to
     # FP16 would change the live runtime while reload reconstructs them from
     # config in FP32. Rebuild the same canonical rotary state as a fresh load.
-    from transformers.models.llama.modeling_llama import LlamaRotaryEmbedding
-
     # The public loader constructs these frequencies on CPU before transfer;
     # constructing directly on CUDA can differ by FP32 ulps in pow/division.
-    model.model.rotary_emb = LlamaRotaryEmbedding(model.config).to(
+    model.model.rotary_emb = type(model.model.rotary_emb)(model.config).to(
         model.model.embed_tokens.weight.device).eval()
     return qcfg
 
