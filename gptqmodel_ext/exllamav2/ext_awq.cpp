@@ -4,6 +4,7 @@
 
 #include "cuda/q_matrix.cuh"
 #include "cuda/q_gemm.cuh"
+#include "config.h"
 
 int64_t make_q_matrix(
     torch::Tensor q_weight,
@@ -68,7 +69,7 @@ int64_t make_q_matrix(
         height = q_weight.size(0) * 8;
     }
 
-    TORCH_CHECK(temp_dq.size(0) >= width * height, "Insufficient size of temp_dq buffer");
+    // Reconstruction scratch is allocated per forward, never retained.
 
     QMatrix* m = new QMatrix(
         device,
@@ -84,7 +85,7 @@ int64_t make_q_matrix(
         (!gptq_qzeros.defined() || gptq_qzeros.device().is_meta()) ? NULL : (uint32_t*) gptq_qzeros.data_ptr(),
         (!gptq_scales.defined() || gptq_scales.device().is_meta()) ? NULL : (half*) gptq_scales.data_ptr(),
         (!gptq_g_idx.defined() || gptq_g_idx.device().is_meta()) ? NULL : (uint32_t*) gptq_g_idx.data_ptr(),
-        (half*) temp_dq.data_ptr()
+        nullptr
     );
 
     return static_cast<int64_t>(reinterpret_cast<uintptr_t>(m));
@@ -99,13 +100,23 @@ void gemm_half_q_half(
 {
     QMatrix* qm = reinterpret_cast<QMatrix*>(static_cast<uintptr_t>(b));
 
-    TORCH_CHECK_DTYPE(a, kHalf);
-    TORCH_CHECK_DTYPE(c, kHalf);
+    TORCH_CHECK(a.scalar_type() == at::kHalf || a.scalar_type() == at::kBFloat16 || a.scalar_type() == at::kFloat,
+                "ExLlamaV2 requires FP16, BF16 or FP32 activations");
+    TORCH_CHECK(c.scalar_type() == a.scalar_type(), "output dtype must match input");
     TORCH_CHECK_SHAPES(a, 0, c, 0, 1);
     TORCH_CHECK(qm->height == a.size(1), "a and b have incompatible shapes");
     TORCH_CHECK(qm->width == c.size(1), "b and c have incompatible shapes");
-
     const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+
+    if (a.scalar_type() != at::kHalf || (a.size(0) > MAX_Q_GEMM_ROWS && !force_cuda)) {
+        auto weights = torch::empty({qm->height, qm->width}, a.options().dtype(at::kHalf));
+        qm->reconstruct(reinterpret_cast<half*>(weights.data_ptr()));
+        if (a.scalar_type() == at::kHalf)
+            c.copy_(at::mm(a, weights, at::kFloat));
+        else
+            c.copy_(at::matmul(a.to(at::kFloat), weights.to(at::kFloat)));
+        return;
+    }
 
     gemm_half_q_half_cuda(
         at::cuda::getCurrentCUDABlasHandle(),
@@ -117,7 +128,7 @@ void gemm_half_q_half(
         a.size(1),
         true,
         NULL,
-        force_cuda
+        true
     );
 }
 

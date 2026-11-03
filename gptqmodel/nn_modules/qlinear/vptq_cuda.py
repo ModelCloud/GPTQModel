@@ -8,12 +8,12 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import torch
-from torch.nn import functional as F
 
 from ...models._const import DEVICE
 from ...quantization import FORMAT, METHOD
 from ...utils.backend import BACKEND
 from ...utils.rocm import IS_ROCM
+from ._numerics import linear_fp32_reduce
 from .vptq_torch import VPTQLinear
 
 
@@ -149,7 +149,7 @@ class VPTQCudaLinear(VPTQLinear):
             weight = self._dequantize_cuda().to(dtype=x.dtype)
             if bias is not None and bias.dtype != x.dtype:
                 bias = bias.to(dtype=x.dtype)
-            out = F.linear(x, weight, bias)
+            out = linear_fp32_reduce(x, weight, bias)
 
         if self.adapter is not None:
             out = self.adapter.apply(x=x, out=out)

@@ -13,6 +13,7 @@ from ...quantization.awq.utils.packing_utils import dequantize_gemm, pack_awq
 from ...utils.backend import BACKEND
 from ...utils.logger import setup_logger
 from . import AWQuantLinear
+from ._numerics import matmul_fp32_reduce
 from ._runtime_cache import tensor_cache_key
 
 
@@ -282,7 +283,7 @@ class AwqTorchLinear(AWQuantLinear):
         # AVX512 path is selected explicitly through TorchCpuAvx512AwqLinear.
         # Subclasses such as ParoQuant use the shared dequantize helper.
         weight = self._dequantize_weight_for_inference(x_flat, dtype=compute_dtype)
-        output = torch.matmul(x_flat, weight)
+        output = matmul_fp32_reduce(x_flat, weight)
         if self.bias is not None:
             output = output + self.bias
 

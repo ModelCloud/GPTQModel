@@ -34,6 +34,7 @@ from ...utils.backend import BACKEND
 from ...utils.cpu_features import cpu_bf16x3_matmul
 from ...utils.logger import setup_logger
 from . import WeightOnlyQuantLinear
+from ._numerics import matmul_fp32_reduce
 
 
 try:
@@ -1523,9 +1524,9 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
         dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         target_device, output_dtype = self._resolve_dequant_target(device=device, dtype=dtype)
-        # Reconstruct in FP32 before the final CPU cast; BF16 scale arithmetic
-        # otherwise rounds each intermediate, not just the reconstructed weight.
-        dtype = torch.float32 if target_device.type == "cpu" else output_dtype
+        # Scale products and minimum subtraction must retain their range until
+        # the reconstructed weight is rounded, on every device.
+        dtype = torch.float32
         if self.gguf_tensor_qtype == "Q4_0":
             weight = self._dequantize_q4_0(device=device, dtype=dtype)
         elif self.gguf_tensor_qtype == "Q8_0":
@@ -1636,7 +1637,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
 
     def _forward_dequant_matmul(self, x_flat: torch.Tensor) -> torch.Tensor:
         weight = self.dequantize_weight(device=x_flat.device, dtype=x_flat.dtype)
-        return torch.matmul(x_flat, weight)
+        return matmul_fp32_reduce(x_flat, weight)
 
     def _forward_fused_k(
         self,
@@ -1645,7 +1646,7 @@ class GGUFTorchLinear(WeightOnlyQuantLinear):
     ) -> torch.Tensor:
         target_dtype = x_flat.dtype
         is_cpu = x_flat.device.type == "cpu"
-        accum_dtype = torch.float32 if is_cpu else target_dtype
+        accum_dtype = torch.float32
         blocks, _, num_blocks = self._reshape_blocks(device=x_flat.device)
 
         if x_flat.shape[-1] != self.padded_in_features:

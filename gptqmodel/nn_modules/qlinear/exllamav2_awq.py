@@ -45,7 +45,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = [Lora]
 
-    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16]
+    SUPPORTS_DTYPES = [torch.float16, torch.bfloat16, torch.float32]
 
     REQUIRES_FORMAT_V2 = True
 
@@ -125,8 +125,7 @@ class AwqExllamaV2Linear(AWQuantLinear):
             self.qweight, self.qzeros, self.bits
         )
 
-        temp_dq_size = self.temp_dq_size()
-        temp_dq = scratch_space.get_slice(temp_dq_size)
+        temp_dq = torch.empty(0, dtype=torch.float16, device=self.qweight.device)
         self.q_handle = self.ext_make_q_matrix_awq(self.qweight, self.qzeros, self.scales, temp_dq)
 
         super().post_init()
@@ -143,14 +142,11 @@ class AwqExllamaV2Linear(AWQuantLinear):
         input_dtype = x.dtype
         out_shape = x.shape[:-1] + (self.out_features,)
 
-        if input_dtype != torch.float16:
-            x = x.to(dtype=torch.float16)
-
         x = x.view(-1, x.shape[-1])
 
         out = torch.empty(
             (x.shape[0], self.out_features),
-            dtype=torch.float16,
+            dtype=x.dtype,
             device=x.device,
         )
         exllamav2_awq_gemm_half_q_half(x, self.q_handle, out, False)

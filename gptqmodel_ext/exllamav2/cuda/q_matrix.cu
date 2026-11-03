@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include "q_matrix.cuh"
 #include "matrix_view.cuh"
 #include "util.cuh"
@@ -146,7 +147,7 @@ QMatrix::QMatrix
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = 1;
 
-    shuffle_kernel<<<gridDim, blockDim>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
+    shuffle_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>(cuda_q_weight, height, width, rows_8, rows_6, rows_5, rows_4, rows_3, rows_2);
 }
 
 QMatrix::~QMatrix()
@@ -459,7 +460,7 @@ void QMatrix::reconstruct(half* out)
     if (!is_gptq)
     {
         gridDim.x = DIVIDE(width, BLOCK_KN_SIZE);
-        reconstruct_kernel<<<gridDim, blockDim>>>
+        reconstruct_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>
         (
             cuda_q_weight,
             cuda_q_perm,
@@ -482,7 +483,7 @@ void QMatrix::reconstruct(half* out)
     else
     {
         gridDim.x = DIVIDE(width, BLOCK_KN_SIZE * 4);
-        reconstruct_gptq_kernel<<<gridDim, blockDim>>>
+        reconstruct_gptq_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>
         (
             cuda_q_weight,
             cuda_q_perm,
@@ -601,7 +602,7 @@ bool QMatrix::make_sequential(const uint32_t* cpu_g_idx)
     gridDim.x = DIVIDE(width, THREADS_X);
     gridDim.y = height / 8;
 
-    make_sequential_kernel<<<gridDim, blockDim>>>
+    make_sequential_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>
     (
         cuda_q_weight,
         cuda_new_qweight,

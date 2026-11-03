@@ -39,7 +39,22 @@ def _cpu_int4pack_zero_offsets(
     # Convert stored GPTQ zero codes so the fused kernel reproduces:
     #   scale * (code - zero_code)
     zero_center = 1 << (bits - 1)
-    return (zero_center - zero_codes.to(dtype=scales.dtype)) * scales
+    return (zero_center - zero_codes.float()) * scales.float()
+
+
+def _cpu_int4pack_scale_dtype(scales, zero_codes, bits, target_dtype):
+    # The fused op stores affine offsets instead of integer zero points. Check
+    # their range before replacing checkpoint buffers with the packed layout.
+    offsets = _cpu_int4pack_zero_offsets(zero_codes, scales.to(target_dtype), bits)
+    # Rounded offsets can turn an exactly zero decoded weight into a nonzero
+    # value. Preserve the affine identity as well as finite range.
+    if not torch.equal(offsets.to(target_dtype).float(), offsets):
+        return torch.float32
+    for value in (scales, offsets):
+        narrowed = value.to(target_dtype)
+        if not torch.isfinite(narrowed).all() or ((value != 0) & (narrowed == 0)).any():
+            return torch.float32
+    return target_dtype
 
 
 class TorchAtenLinear(PackableQuantLinear):
@@ -228,9 +243,13 @@ class TorchAtenLinear(PackableQuantLinear):
         target_dtype = dtype if dtype in (torch.float16, torch.bfloat16) else self.scales.dtype
         if target_dtype not in (torch.float16, torch.bfloat16, torch.float32):
             target_dtype = torch.bfloat16
-        if self.scales.dtype != target_dtype:
-            self.scales = self.scales.to(target_dtype)
-        self.scales = self.scales.contiguous()
+        zero_codes = torch.bitwise_right_shift(
+            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
+            self.wf_unsqueeze_zero,
+        ).to(torch.uint8)
+        zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
+        compute_dtype = _cpu_int4pack_scale_dtype(self.scales, zero_codes, self.bits, target_dtype)
+        self.scales = self.scales.to(compute_dtype).contiguous()
 
         weight = torch.bitwise_and(
             torch.bitwise_right_shift(
@@ -246,12 +265,7 @@ class TorchAtenLinear(PackableQuantLinear):
         weight = weight.t().contiguous()
         self.qweight = torch.ops.aten._convert_weight_to_int4pack_for_cpu(weight.int(), 1).contiguous()
 
-        zero_codes = torch.bitwise_right_shift(
-            torch.unsqueeze(self.qzeros, 2).expand(-1, -1, self.pack_factor),
-            self.wf_unsqueeze_zero,
-        ).to(torch.uint8)
-        zero_codes = torch.bitwise_and(zero_codes, self.maxq).reshape(self.scales.shape)
-        self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).contiguous()
+        self.qzeros = _cpu_int4pack_zero_offsets(zero_codes, self.scales, self.bits).to(compute_dtype).contiguous()
         self.scales_and_zeros = pack_scales_and_zeros(self.scales, self.qzeros)
         self._cpu_transform_dtype = target_dtype
         self._cpu_transformed = True
@@ -314,12 +328,12 @@ class TorchAtenLinear(PackableQuantLinear):
                 f"{self.scales_and_zeros.dtype}, got {x.dtype}."
             )
         out = torch.ops.aten._weight_int4pack_mm_for_cpu(
-            x,
+            x.to(self.scales_and_zeros.dtype),
             self.qweight,
             self.group_size,
             self.scales_and_zeros,
         )
-        return out
+        return out.to(x.dtype)
 
     def _empty_gptq_only_weights(self):
         self.qzeros = None

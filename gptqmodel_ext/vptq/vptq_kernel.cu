@@ -95,7 +95,7 @@ __device__ __forceinline__ float reconstructed_weight(
     if (has_residual) {
       const uint32_t residual_index = (packed_index >> index_bits) & ((1u << res_bits) - 1u);
       const float residual = load_float(res_centroids, (static_cast<int64_t>(group) * num_res_centroids + residual_index) * vector_len + component);
-      value = static_cast<float>(rounded<weight_t>(value + residual));
+      value = value + residual;
     }
   }
 
@@ -103,10 +103,10 @@ __device__ __forceinline__ float reconstructed_weight(
     const int norm_index = norm_dim == 0 ? channel : row;
     const float scale = load_float(weight_scale, norm_index);
     const float bias = load_float(weight_bias, norm_index);
-    value = static_cast<float>(rounded<weight_t>(value * scale));
-    value = static_cast<float>(rounded<weight_t>(value + bias));
+    value = value * scale;
+    value = value + bias;
   }
-  return value;
+  return static_cast<float>(rounded<weight_t>(value));
 }
 
 template <typename scalar_t, typename weight_t>
@@ -302,15 +302,14 @@ __global__ void vptq_linear_vec4_kernel(
       if (has_residual) {
         const float residual = load_float(res_centroids,
             (static_cast<int64_t>(group) * num_res_centroids + residual_index) * 4 + component);
-        weight = static_cast<float>(rounded<weight_t>(weight + residual));
+        weight = weight + residual;
       }
       if (has_norm) {
         const int norm_index = norm_dim == 0 ? channel : row;
-        weight = static_cast<float>(rounded<weight_t>(
-            weight * load_float(weight_scale, norm_index)));
-        weight = static_cast<float>(rounded<weight_t>(
-            weight + load_float(weight_bias, norm_index)));
+        weight = weight * load_float(weight_scale, norm_index);
+        weight = weight + load_float(weight_bias, norm_index);
       }
+      weight = static_cast<float>(rounded<weight_t>(weight));
       sums[component] = fmaf(activation, weight, sums[component]);
     }
   }

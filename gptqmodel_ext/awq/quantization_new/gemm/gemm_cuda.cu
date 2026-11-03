@@ -1,3 +1,4 @@
+#include <ATen/cuda/CUDAContext.h>
 #include <cuda_fp16.h>
 #include "semaphore.h"
 #include "gemm_cuda.h"
@@ -33,14 +34,14 @@
   if (kSmemByteSize >= 99 * 1024)                                                                                                                       \
   {                                                                                                                                                     \
     printf("This kernel requires %d Bytes of shared memory, which exceeds device limit.\n", kSmemByteSize);                                             \
-    return _out_feats;                                                                                                                                  \
+    return _out_feats.to(_in_feats.scalar_type());                                                                                                                                  \
   }                                                                                                                                                     \
   int j_factors1 = num_out_channels / CTA_N / 1;                                                                                                        \
   dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1 * SPLITK);                                                                           \
   dim3 threads_per_block(WARP_SIZE, NUM_WARPS);                                                                                                         \
   auto kernel_func = gemm_w4a16_T1<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G, SPLITK>;                                                     \
   cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);                                                        \
-  kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(                                                                                        \
+  kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(                                                                                        \
       in_feats, kernel, scales, zeros, out_feats, semaphores, num_in_feats, num_out_channels, num_in_channels);
 
 template <int N>
@@ -289,7 +290,7 @@ __device__ __inline__ void share_to_reg_one_stage_B(half *src, half *src_scales,
 }
 
 template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G, int SPLITK>
-__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, half *__restrict__ C, int *__restrict__ semaphores, int M, int N, int K)
+__global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, float *__restrict__ C, int *__restrict__ semaphores, int M, int N, int K)
 {
   constexpr int NUM_WARPS_MN = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int NUM_WARPS = NUM_WARPS_MN * CTA_K / WARP_K;
@@ -532,14 +533,15 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
 
             if (write_row < M)
             {
-              half2 *existing_psum_ptr = reinterpret_cast<half2 *>(
+              float2 *existing_psum_ptr = reinterpret_cast<float2 *>(
                   C + write_row * N +
                   cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
                   (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2);
 
-              *existing_psum_ptr = __hadd2(*existing_psum_ptr,
-                                           __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                                         ax1_0_1 * 8 + local_id)));
+              const float2 partial = *reinterpret_cast<float2 *>(
+                  C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 + ax1_0_1 * 8 + local_id);
+              existing_psum_ptr->x += partial.x;
+              existing_psum_ptr->y += partial.y;
             }
           };
         }
@@ -556,12 +558,12 @@ __global__ void gemm_w4a16_T1(half *__restrict__ A, half *__restrict__ B, half *
             int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
             if (write_row < M)
             {
-              *reinterpret_cast<half2 *>(
+              *reinterpret_cast<float2 *>(
                   C + write_row * N +
                   cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
                   (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-                  __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                                ax1_0_1 * 8 + local_id));
+                  *reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
+                                                                ax1_0_1 * 8 + local_id);
             }
           };
         }
@@ -745,7 +747,7 @@ __device__ __inline__ void share_to_reg_one_stage_B_T2(half *src, half *src_scal
 }
 
 template <int CTA_M, int CTA_N, int CTA_K, int WARP_M, int WARP_N, int WARP_K, int STAGES, int G>
-__global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, half *__restrict__ C, int M, int N, int K)
+__global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *__restrict__ scales, half *__restrict__ zeros, float *__restrict__ C, int M, int N, int K)
 {
   constexpr int NUM_WARPS = CTA_M / WARP_M * CTA_N / WARP_N;
   constexpr int CTA_SIZE = NUM_WARPS * WARP_SIZE;
@@ -915,12 +917,12 @@ __global__ void gemm_w4a16_T2(half *__restrict__ A, half *__restrict__ B, half *
         int write_row = cta_offset_m + warp_offset_m + ax0_0_1 * OP_M + ((local_id % 4) / 2 * 8 + (threadIdx.x / 4));
         if (write_row < M)
         {
-          *reinterpret_cast<half2 *>(
+          *reinterpret_cast<float2 *>(
               C + write_row * N +
               cta_offset_n + warp_offset_n + ax1_0_1 * 16 +
               (local_id / 4) * 8 + (local_id % 2) + (threadIdx.x % 4) * 2) =
-              __float22half2_rn(*reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
-                                                            ax1_0_1 * 8 + local_id));
+              *reinterpret_cast<float2 *>(C_warp + ax0_0_1 * WARP_N / INTRIN_N * 8 +
+                                                            ax1_0_1 * 8 + local_id);
         }
       };
     }
@@ -942,13 +944,13 @@ torch::Tensor gemm_forward_cuda_prefill(
   auto scales = reinterpret_cast<half *>(_scales.data_ptr<at::Half>());
   auto zeros = reinterpret_cast<half *>(_zeros.data_ptr<at::Half>());
   auto options =
-      torch::TensorOptions().dtype(_in_feats.dtype()).device(_in_feats.device());
+      torch::TensorOptions().dtype(torch::kFloat32).device(_in_feats.device());
   auto options_int =
       torch::TensorOptions().dtype(torch::kInt32).device(_in_feats.device());
   at::Tensor _out_feats = torch::empty(output_shape, options);
   int num_out_feats = _out_feats.numel() / _out_feats.size(-1);
   int num_out_channels = _out_feats.size(-1);
-  auto out_feats = reinterpret_cast<half *>(_out_feats.data_ptr<at::Half>());
+  auto out_feats = _out_feats.data_ptr<float>();
 
   if (num_out_feats <= 32)
   {
@@ -1019,16 +1021,16 @@ torch::Tensor gemm_forward_cuda_prefill(
     if (kSmemByteSize >= 99 * 1024)
     {
       printf("This kernel requires %d Bytes of shared memory, which exceeds device limit.\n", kSmemByteSize);
-      return _out_feats;
+      return _out_feats.to(_in_feats.scalar_type());
     }
     int j_factors1 = num_out_channels / CTA_N / 1;
     dim3 num_blocks((num_out_feats + CTA_M - 1) / CTA_M * j_factors1);
     dim3 threads_per_block(WARP_SIZE, NUM_WARPS);
     auto kernel_func = gemm_w4a16_T2<CTA_M, CTA_N, CTA_K, WARP_M, WARP_N, WARP_K, STAGES, G>;
     cudaFuncSetAttribute(kernel_func, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemByteSize);
-    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize>>>(
+    kernel_func<<<num_blocks, threads_per_block, kSmemByteSize, at::cuda::getCurrentCUDAStream()>>>(
         in_feats, kernel, scales, zeros, out_feats, num_in_feats, num_out_channels, num_in_channels);
   }
 
-  return _out_feats;
+  return _out_feats.to(_in_feats.scalar_type());
 }

@@ -88,8 +88,11 @@ class Int8PackedModule(torch.nn.Module):
         self.register_buffer(INT8_SCALE_BUFFER_NAME, channel_scales, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        channel_scales = self.int8_channel_scale.to(dtype=x.dtype)
-        return torch.ops.aten._weight_int8pack_mm(x, self.int8_weight_nk, channel_scales)
+        # The op requires matching activation/scale dtypes. FP32 preserves tiny
+        # channel scales and delays output rounding until after accumulation.
+        return torch.ops.aten._weight_int8pack_mm(
+            x.float(), self.int8_weight_nk, self.int8_channel_scale.float()
+        ).to(x.dtype)
 
 
 class TorchInt8Linear(GPTQQuantLinear):

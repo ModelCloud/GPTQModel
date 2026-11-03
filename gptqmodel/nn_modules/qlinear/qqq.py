@@ -484,7 +484,9 @@ class QQQLinear(GroupedQuantLinear):
 
     # activation int8 quantization
     def dynamic_quant(self, x: torch.Tensor):
-        quant_scale = x.abs().max(dim=-1, keepdim=True)[0].div(127.0).to(torch.float32)
+        x = x.float()
+        quant_scale = x.abs().amax(dim=-1, keepdim=True).div(127.0)
+        quant_scale = torch.where(quant_scale == 0, torch.ones_like(quant_scale), quant_scale)
         x = (x / quant_scale).round().clamp(-128, 127).to(torch.int8)
         return x, quant_scale
 

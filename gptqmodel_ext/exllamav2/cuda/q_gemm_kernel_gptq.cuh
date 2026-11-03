@@ -11,11 +11,16 @@ __forceinline__ __device__ half2 dot22_8(half2(&dq)[4], const half* a_ptr, const
 
 __forceinline__ __device__ float dot22_8_f(half2(&dq)[4], const half* a_ptr)
 {
-    half2 result = {};
+    float result = 0.0f;
     const half2* a2_ptr = (const half2*)a_ptr;
     #pragma unroll
-    for (int i = 0; i < 4; i++) result = __hfma2(dq[i], *a2_ptr++, result);
-    return __half2float(__low2half(result)) + __half2float(__high2half(result));
+    for (int i = 0; i < 4; i++) {
+        const float2 w = __half22float2(dq[i]);
+        const float2 a = __half22float2(*a2_ptr++);
+        result = fmaf(w.x, a.x, result);
+        result = fmaf(w.y, a.y, result);
+    }
+    return result;
 }
 
 typedef void (*fp_gemm_half_q_half_gptq_kernel)
@@ -24,7 +29,7 @@ typedef void (*fp_gemm_half_q_half_gptq_kernel)
     const uint32_t*,
     const uint32_t*,
     const half*,
-    half*,
+    float*,
     const int,
     const int,
     const int,
@@ -42,7 +47,7 @@ __global__ void gemm_half_q_half_gptq_kernel
     const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_gptq_qzeros,
     const half* __restrict__ b_gptq_scales,
-    half* __restrict__ c,
+    float* __restrict__ c,
     const int size_m,
     const int size_n,
     const int size_k,
@@ -54,7 +59,6 @@ __global__ void gemm_half_q_half_gptq_kernel
 )
 {
     MatrixView_half a_(a, size_m, size_k);
-    MatrixView_half_rw c_(c, size_m, size_n);
     MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
     MatrixView_half b_gptq_scales_(b_gptq_scales, groups, size_n);
 
@@ -93,12 +97,6 @@ __global__ void gemm_half_q_half_gptq_kernel
     // Zero output
 
     if (n >= size_n) return;
-
-    if (clear && blockIdx.z == 0) // && (threadIdx.x & 1) == 0)
-    {
-        for (int m = 0; m < m_count; m++)
-            *((uint64_t*)c_.item_ptr(offset_m + m, n)) = 0;
-    }
 
     __syncthreads();
 
@@ -185,11 +183,10 @@ __global__ void gemm_half_q_half_gptq_kernel
 
     for (int m = 0; m < m_count; m++)
     {
-        half2 *out = (half2*) c_.item_ptr(offset_m + m, n);
-        half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]), __float2half_rn(block_c[m][1]));
-        half2 result23 = __halves2half2(__float2half_rn(block_c[m][2]), __float2half_rn(block_c[m][3]));
-        atomicAdd(out    , result01);
-        atomicAdd(out + 1, result23);
+        float* out = c + (offset_m + m) * size_n + n;
+        #pragma unroll
+        for (int lane = 0; lane < 4; ++lane)
+            atomicAdd(out + lane, block_c[m][lane]);
     }
 }
 

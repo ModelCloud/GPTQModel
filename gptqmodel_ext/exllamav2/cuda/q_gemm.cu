@@ -1,3 +1,4 @@
+#include <ATen/ATen.h>
 #include "q_gemm.cuh"
 #include "util.cuh"
 #include "matrix_view.cuh"
@@ -29,7 +30,8 @@ void gemm_half_q_half_cuda_part
     int size_n,
     int size_k,
     int m_count,
-    bool clear
+    bool clear,
+    float* c_float = nullptr
 )
 {
     if (!b->is_gptq)
@@ -44,7 +46,7 @@ void gemm_half_q_half_cuda_part
 
         fp_gemm_half_q_half_kernel kernel = pick_gemm_half_q_half_kernel(true, m_count);
 
-        kernel<<<gridDim, blockDim>>>
+        kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>
         (
             a,
             b->cuda_q_weight,
@@ -82,13 +84,13 @@ void gemm_half_q_half_cuda_part
 //         DBGI(b->rows_4);
 //         DBGI(b->height);
 
-        kernel<<<gridDim, blockDim>>>
+        kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>
         (
             a,
             b->cuda_q_weight,
             b->cuda_gptq_qzeros,
             b->cuda_gptq_scales,
-            c,
+            c_float,
             size_m,
             size_n,
             size_k,
@@ -164,19 +166,29 @@ void gemm_half_q_half_cuda
 
         //if (clear) clear_tensor_cuda(c, size_m, size_n);
 
+        auto options = at::TensorOptions().dtype(at::kFloat).device(at::kCUDA);
+        at::Tensor accum;
+        if (b->is_gptq) accum = at::zeros({size_m, size_n}, options);
+        float* c_float = b->is_gptq ? accum.data_ptr<float>() : nullptr;
+
         int max_chunks = size_m / BLOCK_M_SIZE_MAX;
         int last_chunk = max_chunks * BLOCK_M_SIZE_MAX;
         int last_chunk_size = size_m - last_chunk;
 
         if (max_chunks)
         {
-            gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear);
+            gemm_half_q_half_cuda_part(a, b, c, last_chunk, size_n, size_k, BLOCK_M_SIZE_MAX, clear, c_float);
         }
 
         if (last_chunk_size)
         {
-            gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear);
+            gemm_half_q_half_cuda_part(a + last_chunk * size_k, b, c + last_chunk * size_n, last_chunk_size, size_n, size_k, last_chunk_size, clear, c_float ? c_float + last_chunk * size_n : nullptr);
         }
+        if (b->is_gptq) {
+            auto output = at::from_blob(c, {size_m, size_n}, options.dtype(at::kHalf));
+            output.copy_(accum);
+        }
+
     }
 }
 
@@ -207,5 +219,5 @@ void clear_tensor_cuda
     blockDim.y = 1;
     gridDim.x = DIVIDE(size_n / 8, CLEAR_N_SIZE);
     gridDim.y = size_m;
-    clear_kernel<<<gridDim, blockDim>>>(c, size_m, size_n);
+    clear_kernel<<<gridDim, blockDim, 0, at::cuda::getCurrentCUDAStream()>>>(c, size_m, size_n);
 }
