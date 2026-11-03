@@ -345,7 +345,7 @@ class _Dense(torch.nn.Module):
 
 
 def test_awq_backend_registered():
-    """AWQ is RDNA4-only and must not be selectable on CUDA."""
+    """AWQ shares the AllSpark backend and is offered on RDNA4 and Ampere+ CUDA."""
     from gptqmodel.models._const import DEVICE
     from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
     from gptqmodel.utils.backend import BACKEND
@@ -353,7 +353,7 @@ def test_awq_backend_registered():
 
     # One shared AllSpark backend; the checkpoint method picks the AWQ module.
     assert BACKEND.ALLSPARK in get_kernel_backends(AllSparkAwqLinear)
-    assert AllSparkAwqLinear.SUPPORTS_DEVICES == [DEVICE.ROCM]
+    assert set(AllSparkAwqLinear.SUPPORTS_DEVICES) == {DEVICE.CUDA, DEVICE.ROCM}
     # Per-output-channel zeros only.
     assert AllSparkAwqLinear.SUPPORTS_GROUP_SIZE == [-1]
 

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""AllSpark AWQ W8A16 linear for RDNA4 (gfx1200 / gfx1201) only.
+"""AllSpark AWQ W8A16 linear (RDNA4 gfx1200/gfx1201 and Ampere+ CUDA).
 
 The AllSpark GEMM already had a zero-point branch (``has_zp``); this module adds
 the missing half: AWQ's on-disk layout. GPTQ-8bit and AWQ-8bit differ only by a
@@ -10,12 +10,18 @@ per-group zero point, so both share one kernel:
 * AWQ 8-bit: codes packed along N, arbitrary per-group zero point and scale.
 
 The AWQ tensors are unpacked with the shared AWQ packer helpers, then repacked
-into the WMMA fragment order used by ``gptqmodel_ext/allspark_hip``. Only the
-packed form is retained; the dense weight never exists outside ``post_init``.
+into the fragment order of the active extension: the WMMA order in
+``gptqmodel_ext/allspark_hip`` on ROCm, the N32K16 order in
+``gptqmodel_ext/allspark`` on CUDA. Only the packed form is retained; the dense
+weight never exists outside ``post_init``.
 
-CUDA (Ampere) is deliberately not offered: the CUDA AllSpark kernel applies the
-zero point *after* its bias-128 conversion, so it expects a pre-adjusted
-``zero - 128`` buffer, and that path is not exercised by this PR.
+The two kernels apply the zero point at different points, which is the one
+device-specific detail here:
+
+* HIP subtracts the zero inside the fp32 dequant, ``(code - zero) * scale``, so
+  it consumes the raw AWQ zero code.
+* CUDA subtracts it after its bias-128 conversion, ``((code - 128) - zero) *
+  scale``, so it consumes ``zero - 128``.
 """
 
 from __future__ import annotations
@@ -25,9 +31,15 @@ import torch
 from ...models._const import DEVICE, PLATFORM
 from ...nn_modules.qlinear import AWQuantLinear
 from ...quantization import FORMAT, METHOD
+from ...utils.allspark import (
+    ALLSPARK_K_ALIGN,
+    ALLSPARK_N_ALIGN,
+    allspark_gemm,
+    allspark_repack_awq,
+    allspark_supported,
+    prewarm_allspark_extension,
+)
 from ...utils.allspark_hip import (
-    ALLSPARK_HIP_K_ALIGN,
-    ALLSPARK_HIP_N_ALIGN,
     allspark_hip_gemm,
     allspark_hip_repack_awq,
     allspark_hip_supported,
@@ -67,9 +79,9 @@ class AllSparkAwqLinear(AWQuantLinear):
     SUPPORTS_SHARDS = False
     SUPPORTS_TRAINING = False
     SUPPORTS_AUTO_PADDING = False
-    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [ALLSPARK_HIP_K_ALIGN]
-    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [ALLSPARK_HIP_N_ALIGN]
-    SUPPORTS_DEVICES = [DEVICE.ROCM]
+    SUPPORTS_IN_FEATURES_DIVISIBLE_BY = [ALLSPARK_K_ALIGN]
+    SUPPORTS_OUT_FEATURES_DIVISIBLE_BY = [ALLSPARK_N_ALIGN]
+    SUPPORTS_DEVICES = [DEVICE.CUDA, DEVICE.ROCM]
     SUPPORTS_PLATFORM = [PLATFORM.LINUX]
     SUPPORTS_PACK_DTYPES = [torch.int32]
     SUPPORTS_ADAPTERS = []
@@ -82,17 +94,25 @@ class AllSparkAwqLinear(AWQuantLinear):
     @classmethod
     def validate_device(cls, device):
         # ROCm runs in torch's CUDA namespace, so a ``torch.device("cuda")``
-        # selector is ambiguous. It means ROCm when HIP is the active runtime
-        # and must be rejected otherwise: this module is RDNA4-only.
+        # selector is ambiguous: it means ROCm under HIP and CUDA otherwise.
+        # Because this module now accepts both families, map the ambiguous case
+        # explicitly instead of rejecting it, otherwise CUDA would be filtered
+        # out by the base class's ``DEVICE("cuda") -> DEVICE.CUDA`` mapping.
         if IS_ROCM and _device_type(device) == "cuda":
             return
         super().validate_device(device)
 
     @classmethod
     def validate_once(cls):
-        if not allspark_hip_supported():
+        if IS_ROCM:
+            if not allspark_hip_supported():
+                return False, NotImplementedError(
+                    "AWQ AllSpark requires an RDNA4 device (gfx1200/gfx1201)"
+                )
+            return True, None
+        if not allspark_supported():
             return False, NotImplementedError(
-                "AWQ AllSpark requires an RDNA4 device (gfx1200/gfx1201)"
+                "AWQ AllSpark requires an Ampere+ CUDA device (compute capability 80-120)"
             )
         return True, None
 
@@ -133,6 +153,10 @@ class AllSparkAwqLinear(AWQuantLinear):
             if self.bias is not None and self.bias.dtype != self.compute_dtype:
                 self.bias = self.bias.to(dtype=self.compute_dtype)
         self._repacked = False
+        # Pick the kernel family once. The two extensions use different packed
+        # layouts (WMMA fragments on ROCm, N32K16 on CUDA), and pairing a buffer
+        # with the wrong kernel yields garbage rather than an error.
+        self._hip = IS_ROCM
 
     @property
     def _kernel_group_size(self) -> int:
@@ -188,18 +212,30 @@ class AllSparkAwqLinear(AWQuantLinear):
     def post_init(self):
         if self._repacked:
             return
-        if not prewarm_allspark_hip_extension():
-            raise RuntimeError("AllSpark HIP extension failed to build")
 
         scales = self.scales.data.reshape(-1, self.out_features).to(self.compute_dtype)
-        packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
-            self.qweight.data,
-            self.qzeros.data,
-            scales,
-            self.out_features,
-            self.in_features,
-            self._kernel_group_size,
-        )
+        if self._hip:
+            if not prewarm_allspark_hip_extension():
+                raise RuntimeError("AllSpark HIP extension failed to build")
+            packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
+                self.qweight.data,
+                self.qzeros.data,
+                scales,
+                self.out_features,
+                self.in_features,
+                self._kernel_group_size,
+            )
+        else:
+            if not prewarm_allspark_extension():
+                raise RuntimeError("AllSpark CUDA extension failed to build")
+            packed, packed_scales, packed_zeros = allspark_repack_awq(
+                self.qweight.data,
+                self.qzeros.data,
+                scales,
+                self.out_features,
+                self.in_features,
+                self._kernel_group_size,
+            )
         self.register_buffer("qweight_packed", packed, persistent=False)
         self.register_buffer("scales_packed", packed_scales, persistent=False)
         self.register_buffer("zeros_packed", packed_zeros, persistent=False)
@@ -214,14 +250,23 @@ class AllSparkAwqLinear(AWQuantLinear):
             self.post_init()
         shape = x.shape[:-1] + (self.out_features,)
         x2d = x.reshape(-1, self.in_features)
-        out = allspark_hip_gemm(
-            x2d,
-            self.qweight_packed,
-            self.scales_packed,
-            self.out_features,
-            b_qzeros=self.zeros_packed,
-            group_size=self._kernel_group_size,
-        )
+        if self._hip:
+            out = allspark_hip_gemm(
+                x2d,
+                self.qweight_packed,
+                self.scales_packed,
+                self.out_features,
+                b_qzeros=self.zeros_packed,
+                group_size=self._kernel_group_size,
+            )
+        else:
+            out = allspark_gemm(
+                x2d,
+                self.qweight_packed,
+                self.scales_packed,
+                self.out_features,
+                b_qzeros=self.zeros_packed,
+            )
         out = out.reshape(shape)
         bias = getattr(self, "bias", None)
         if bias is not None:

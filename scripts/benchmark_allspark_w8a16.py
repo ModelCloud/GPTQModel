@@ -13,6 +13,12 @@ fp16 scales, K=4096 N=11008, median of ``--iters`` timed calls after
 ``--warmup`` warmups. Marlin is called through ``gptq_marlin_gemm`` with the
 same GPTQ-format ``qweight``/``scales``.
 
+``--awq`` switches the same protocol to the AWQ 8-bit path (per-channel zero
+point, ``group_size=-1``). Marlin has no AWQ entry point, so AWQ reports only
+AllSpark timings plus its fp64-oracle error. This is the mode used for the
+CUDA and ROCm AWQ numbers on PR #3490; it works on both by selecting the
+extension that matches the runtime (``torch.version.hip``).
+
 Three timing modes are reported:
 
 ``hot``
@@ -174,7 +180,7 @@ def benchmark_shape(k, n, dtype, device, m_values, modes, warmup, iters, flush_b
     torch.manual_seed(0)
     weight = torch.randn(k, n, dtype=dtype, device=device)
     qweight, scales, codes = pack_gptq_8bit(weight)
-    packed, packed_scales = allspark_repack(
+    packed, packed_scales, _ = allspark_repack(
         codes.to(torch.uint8).contiguous(),
         scales.reshape(-1).contiguous(),
         n,
@@ -251,12 +257,125 @@ def benchmark_shape(k, n, dtype, device, m_values, modes, warmup, iters, flush_b
     }
 
 
+def _awq_tensors(k, n, dtype, device, seed=0):
+    """Random AWQ 8-bit on-disk tensors. Never zero: zero data lets hardware
+    skip work and hides layout/dequant bugs."""
+    from gptqmodel.quantization.awq.utils.packing_utils import pack_awq
+
+    gen = torch.Generator(device=device).manual_seed(seed)
+    codes = torch.randint(0, 256, (k, n), dtype=torch.int32, device=device, generator=gen)
+    zeros = torch.randint(0, 256, (1, n), dtype=torch.int32, device=device, generator=gen)
+    scales = (
+        torch.rand(1, n, dtype=torch.float32, device=device, generator=gen) * 0.01 + 0.005
+    ).to(dtype)
+    qweight, qzeros = pack_awq(codes, zeros, 8)
+    return qweight, qzeros, scales, codes, zeros
+
+
+def pack_awq_for_runtime(qweight, qzeros, scales, n, k):
+    """Repack AWQ tensors with the extension matching this runtime."""
+    if torch.version.hip is not None:
+        from gptqmodel.utils.allspark_hip import allspark_hip_repack_awq
+
+        return allspark_hip_repack_awq(qweight, qzeros, scales, n, k, -1)
+    from gptqmodel.utils.allspark import allspark_repack_awq
+
+    return allspark_repack_awq(qweight, qzeros, scales, n, k, -1)
+
+
+def awq_gemm(x, packed, packed_scales, packed_zeros, n):
+    if torch.version.hip is not None:
+        from gptqmodel.utils.allspark_hip import allspark_hip_gemm
+
+        return allspark_hip_gemm(x, packed, packed_scales, n, b_qzeros=packed_zeros)
+    from gptqmodel.utils.allspark import allspark_gemm
+
+    return allspark_gemm(x, packed, packed_scales, n, b_qzeros=packed_zeros)
+
+
+def benchmark_shape_awq(k, n, dtype, device, m_values, modes, warmup, iters, flush_buf):
+    if torch.version.hip is not None:
+        from gptqmodel.utils.allspark_hip import prewarm_allspark_hip_extension
+
+        if not prewarm_allspark_hip_extension():
+            raise RuntimeError("AllSpark HIP extension failed to build")
+    else:
+        from gptqmodel.utils.allspark import prewarm_allspark_extension
+
+        if not prewarm_allspark_extension():
+            raise RuntimeError("AllSpark CUDA extension failed to build")
+
+    qweight, qzeros, scales, codes, zeros = _awq_tensors(k, n, dtype, device)
+    packed, packed_scales, packed_zeros = pack_awq_for_runtime(
+        qweight, qzeros, scales, n, k
+    )
+
+    # fp64 oracle from the original codes/zeros/scales; the reference weight is
+    # rounded to the activation dtype exactly as the tensor cores see it.
+    reference_weight = ((codes.float() - zeros.float()) * scales.float()).to(torch.float64)
+    weight_bytes = k * n
+    rows = []
+
+    for m in m_values:
+        x = torch.randn(m, k, dtype=dtype, device=device)
+
+        def run():
+            return awq_gemm(x, packed, packed_scales, packed_zeros, n)
+
+        reference = (x.to(torch.float64) @ reference_weight).float()
+        err = (run().float() - reference).abs().max().item() / reference.abs().max().item()
+
+        row = {"m": m, "allspark_err": err}
+        if "hot" in modes:
+            row["allspark_hot_ms"] = time_per_call(run, None, warmup, iters)
+        if "flushed" in modes:
+            row["allspark_flushed_ms"] = time_per_call(run, flush_buf, warmup, iters)
+        if "graph" in modes:
+            flush_graph = capture_graph(lambda: flush_buf.sum())
+            flush_only_ms = replay_ms(flush_graph)
+            row["allspark_graph_ms"] = replay_ms(capture_graph(run))
+            row["allspark_graph_flushed_ms"] = (
+                replay_ms(capture_graph(lambda: (flush_buf.sum(), run()))) - flush_only_ms
+            )
+
+        for key, value in list(row.items()):
+            if key.endswith("_ms"):
+                row[key.replace("_ms", "_gbps")] = weight_bytes / (value * 1e-3) / 1e9
+        rows.append(row)
+
+    return {
+        "k": k,
+        "n": n,
+        "dtype": str(dtype).replace("torch.", ""),
+        "method": "awq",
+        "weight_bytes": weight_bytes,
+        "rows": rows,
+    }
+
+
 def print_report(report):
     print(f"\nK={report['k']} N={report['n']} dtype={report['dtype']} "
           f"weights={report['weight_bytes']/1e6:.1f} MB")
 
     def fmt(value):
         return "-" if value is None else f"{value:.4f}"
+
+    if report.get("method") == "awq":
+        header = (f"{'M':>5} | {'as hot':>7} | {'as flush':>8} | {'as GB/s':>8} | "
+                  f"{'as graph':>8} | {'as gfl':>8} | {'as err':>8}")
+        print(header)
+        print("-" * len(header))
+        for row in report["rows"]:
+            print(
+                f"{row['m']:>5} | "
+                f"{fmt(row.get('allspark_hot_ms')):>7} | "
+                f"{fmt(row.get('allspark_flushed_ms')):>8} | "
+                f"{fmt(row.get('allspark_flushed_gbps')):>8} | "
+                f"{fmt(row.get('allspark_graph_ms')):>8} | "
+                f"{fmt(row.get('allspark_graph_flushed_ms')):>8} | "
+                f"{row['allspark_err']:>8.2e}"
+            )
+        return
 
     header = (f"{'M':>5} | {'as hot':>7} {'mr hot':>7} | "
               f"{'as flush':>8} {'mr flush':>8} | {'as GB/s':>8} {'mr GB/s':>8} | "
@@ -287,6 +406,11 @@ def main():
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--iters", type=int, default=100)
     parser.add_argument("--json", type=Path, default=None, help="write results as JSON")
+    parser.add_argument(
+        "--awq",
+        action="store_true",
+        help="benchmark the AWQ 8-bit path (group_size=-1) instead of GPTQ vs Marlin",
+    )
     args = parser.parse_args()
 
     if not torch.cuda.is_available():
@@ -295,10 +419,17 @@ def main():
 
     from gptqmodel.utils.allspark import allspark_supported
 
-    if not allspark_supported():
+    if torch.version.hip is not None:
+        from gptqmodel.utils.allspark_hip import allspark_hip_supported
+
+        supported = allspark_hip_supported()
+    else:
+        supported = allspark_supported()
+
+    if not supported:
         print(
             f"AllSpark is not supported on {torch.cuda.get_device_name(0)}; "
-            "it needs compute capability 8.0-12.0",
+            "it needs compute capability 8.0-12.0 (CUDA) or gfx1200/gfx1201 (ROCm)",
             file=sys.stderr,
         )
         return 1
@@ -326,7 +457,8 @@ def main():
 
     reports = []
     for k, n in parse_shapes(args.shapes):
-        report = benchmark_shape(
+        bench = benchmark_shape_awq if args.awq else benchmark_shape
+        report = bench(
             k, n, dtype, device, args.m, args.modes, args.warmup, args.iters, flush_buf
         )
         reports.append(report)

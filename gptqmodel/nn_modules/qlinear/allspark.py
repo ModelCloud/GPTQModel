@@ -177,7 +177,7 @@ class AllSparkLinear(GPTQQuantLinear):
         else:
             if not prewarm_allspark_extension():
                 raise RuntimeError("AllSpark extension failed to build")
-            packed, packed_scales = allspark_repack(
+            packed, packed_scales, _ = allspark_repack(
                 codes.contiguous(), scales, self.out_features, self.in_features
             )
         self.register_buffer("qweight_packed", packed, persistent=False)

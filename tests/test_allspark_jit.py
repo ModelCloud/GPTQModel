@@ -38,7 +38,7 @@ def test_allspark_gemm_matches_dequant_reference(m):
     weight = torch.randn(k, n, dtype=dtype, device="cuda")
 
     qweight, scales = _quantize_per_column(weight)
-    qweight_reordered, scales_reordered = allspark_repack(qweight, scales, n, k)
+    qweight_reordered, scales_reordered, _ = allspark_repack(qweight, scales, n, k)
     assert qweight_reordered.shape == (n, k)
 
     out = allspark_gemm(a, qweight_reordered, scales_reordered, n)
