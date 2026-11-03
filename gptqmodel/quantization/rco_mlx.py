@@ -373,12 +373,14 @@ class MLXTeacherKL:
         self.chunk_tokens = chunk_tokens
         self.resident_cache = resident_cache
         self._resident = []
+        self._entropy = []
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         self.paths = []
         for index, ids in enumerate(self.batches):
             hidden = mx.stop_gradient(model.model(ids))
             mx.eval(hidden)  # Finish each batch before capturing the next one.
+            self._entropy.append(self._teacher_entropy(hidden))
             if resident_cache:
                 self._resident.append(hidden)
                 self.paths.append(None)
@@ -386,17 +388,38 @@ class MLXTeacherKL:
                 path = directory / f"{index:05d}.safetensors"
                 mx.save_safetensors(str(path), {"hidden": hidden})
                 self.paths.append(path)
-        mx.eval(self._resident)
+        mx.eval(self._resident, self._entropy)
 
     def cleanup(self):
         """Release dense teacher hidden-state scratch after optimization."""
         self._resident.clear()
+        self._entropy.clear()
         self.paths.clear()
 
     def _logits(self, hidden):
         if self.model.args.tie_word_embeddings:
             return self.model.model.embed_tokens.as_linear(hidden)
         return self.model.lm_head(hidden)
+
+    def _teacher_entropy(self, hidden):
+        """Return ``sum(t * log t)`` for one batch of teacher hidden states.
+
+        This is the constant term of ``KL(t || s)``: it depends only on the
+        frozen teacher, so it is folded into the objective once at construction
+        instead of being recomputed on every optimizer step.
+        """
+        import mlx.core as mx
+        import mlx.nn as nn
+
+        flat = hidden.reshape(-1, hidden.shape[-1])
+        total = mx.zeros((), dtype=mx.float32)
+        for start in range(0, flat.shape[0], self.chunk_tokens):
+            stop = start + self.chunk_tokens
+            teacher_logp = nn.log_softmax(
+                self._logits(flat[start:stop]).astype(mx.float32), axis=-1
+            )
+            total = total + mx.sum(mx.exp(teacher_logp) * teacher_logp)
+        return mx.stop_gradient(total)
 
     def __call__(self, index):
         import mlx.core as mx
@@ -411,14 +434,19 @@ class MLXTeacherKL:
             raise ValueError("RCO teacher/student hidden shapes differ")
         student = student.reshape(-1, student.shape[-1])
         teacher = teacher.reshape(-1, teacher.shape[-1])
+
         def chunk_loss(student_hidden, teacher_hidden):
-            student_logp = nn.log_softmax(
-                self._logits(student_hidden).astype(mx.float32), axis=-1
-            )
+            student_logits = self._logits(student_hidden).astype(mx.float32)
             teacher_logp = mx.stop_gradient(nn.log_softmax(
                 self._logits(teacher_hidden).astype(mx.float32), axis=-1
             ))
-            return mx.sum(mx.exp(teacher_logp) * (teacher_logp - student_logp))
+            # KL(t || s) = sum(t log t) - sum(t * s_logits) + logsumexp(s_logits).
+            # The teacher entropy is constant and folded in below, so a step runs
+            # two student reductions over the vocabulary instead of materializing
+            # the full-vocabulary student log-probabilities.
+            return -mx.sum(mx.exp(teacher_logp) * student_logits) + mx.sum(
+                mx.logsumexp(student_logits, axis=-1)
+            )
 
         # Rematerialize vocabulary intermediates in backward instead of retaining
         # all chunks' logits for the lifetime of the decoder graph.
@@ -427,7 +455,7 @@ class MLXTeacherKL:
         for start in range(0, student.shape[0], self.chunk_tokens):
             stop = start + self.chunk_tokens
             loss = loss + checkpointed_loss(student[start:stop], teacher[start:stop])
-        return loss / student.shape[0]
+        return (loss + self._entropy[index]) / student.shape[0]
 
 
 class MLXCausalLMLoss:

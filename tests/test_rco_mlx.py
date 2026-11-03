@@ -495,7 +495,7 @@ def test_mlx_search_restores_original_linear_and_exact_budget():
         objective.cleanup()
         interpolated.cleanup()
     assert rco_mlx._child(model, name) is original
-    assert not objective._resident and not objective.paths
+    assert not objective._resident and not objective.paths and not objective._entropy
 
 
 def test_mlx_search_honors_batch_ids_weights_and_clears_override_on_error():
