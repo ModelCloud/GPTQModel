@@ -24,6 +24,11 @@ class BACKEND(str, Enum):
     GPTQ_TORCH_ATEN = "gptq_torch_aten"  # CPU int4pack ATen kernel folded into GPT-QModel
     GPTQ_TORCH_CPU_AVX512 = "gptq_torch_cpu_avx512"  # CPU AVX512-BF16 GPTQ kernel ported from HF kernels
 
+    # AllSpark kernels
+    # A single backend covers both AllSpark sub-kernels. The quantization method
+    # and the device select the concrete GPTQ or AWQ module (CUDA/HIP).
+    ALLSPARK = "allspark"  # W8A16 fused GEMM, decode-oriented
+
     # Marlin kernels
     # A single backend covers both Marlin sub-kernels. The quantization method
     # and checkpoint format select the concrete GPTQ or AWQ implementation.
@@ -147,10 +152,12 @@ _LEGACY_BACKEND_BY_METHOD = {
     },
 }
 
-# Method-qualified Marlin/Machete/Swordfish names from older releases. These are
-# accepted by the stable HF-facing selection/repacking APIs, but they resolve to
-# the single shared backend; method/format choose the sub-kernel later.
+# Method-qualified Marlin/Machete/Swordfish/AllSpark names from older releases.
+# These are accepted by the stable HF-facing selection/repacking APIs, but they
+# resolve to the single shared backend; method/format choose the sub-kernel later.
 _LEGACY_BACKEND_ALIASES = {
+    "gptq_allspark": BACKEND.ALLSPARK,
+    "awq_allspark": BACKEND.ALLSPARK,
     "gptq_marlin": BACKEND.MARLIN,
     "awq_marlin": BACKEND.MARLIN,
     "gptq_machete": BACKEND.MACHETE,
