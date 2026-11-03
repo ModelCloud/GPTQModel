@@ -3,7 +3,6 @@
 
 """Teacher-KL oracles and projection allocation/materialization regressions."""
 
-import argparse
 import copy
 import importlib.util
 import json
@@ -28,8 +27,6 @@ def script(name):
 
 allocate = script('rco_allocate')
 materialize = script('rco_materialize')
-qwen3_ane = script('bench_qwen3_ane')
-qwen3_ane_teacher = script('bench_qwen3_ane_teacher')
 
 
 def tiny_model(dtype=torch.float64, hidden=16, layers=1):
@@ -38,63 +35,6 @@ def tiny_model(dtype=torch.float64, hidden=16, layers=1):
                          num_attention_heads=4, num_key_value_heads=2, num_hidden_layers=layers)
     config._attn_implementation = 'eager'
     return LlamaForCausalLM(config).to(dtype=dtype).eval().requires_grad_(False)
-
-
-def test_qwen3_ane_shape_parser_and_accuracy_gate():
-    assert qwen3_ane._parse_shapes('1x16,2x128,1x16') == ((1, 16), (2, 128))
-    assert qwen3_ane._parse_positive_ints('1,7,28,7') == (1, 7, 28)
-    with pytest.raises(argparse.ArgumentTypeError):
-        qwen3_ane._parse_shapes('0x16')
-    with pytest.raises(argparse.ArgumentTypeError):
-        qwen3_ane._parse_positive_ints('1,0')
-    passing = {'allclose': True, 'normalized_l2_error': 2e-3}
-    assert qwen3_ane._passes_accuracy_gate(passing)
-    assert not qwen3_ane._passes_accuracy_gate({**passing, 'normalized_l2_error': 2.01e-3})
-    assert not qwen3_ane._passes_accuracy_gate({**passing, 'allclose': False})
-    result = {'accuracy': {'raw': passing, 'rounded': passing}}
-    assert qwen3_ane._results_pass_accuracy_gate([result], ('raw', 'rounded'))
-    assert not qwen3_ane._results_pass_accuracy_gate([], ('raw', 'rounded'))
-    failing = {'accuracy': {'raw': passing, 'rounded': {**passing, 'allclose': False}}}
-    assert not qwen3_ane._results_pass_accuracy_gate([failing], ('raw', 'rounded'))
-
-
-def test_qwen3_ane_teacher_oracles_and_plan_gate():
-    import numpy as np
-
-    oracle = np.array([[[0.0, 1.0, 2.0, 3.0, 4.0]]], dtype=np.float32)
-    accuracy = qwen3_ane_teacher._accuracy(oracle, oracle)
-    assert qwen3_ane_teacher._passes_accuracy_gate(accuracy)
-    assert not qwen3_ane_teacher._passes_accuracy_gate(
-        {**accuracy, 'normalized_l2_error': 2.01e-3}
-    )
-
-    distribution = qwen3_ane_teacher._distribution_metrics(oracle, oracle)
-    assert distribution['kl_oracle_to_actual_mean'] == 0
-    assert distribution['top1_matches'] == distribution['tokens'] == 1
-    assert distribution['top5_overlap_mean'] == 5
-
-    plan = qwen3_ane_teacher._summarize_plan(
-        [
-            {'op': 'linear', 'preferred': 'MLNeuralEngineComputeDevice', 'cores': 32},
-            {'op': 'linear', 'preferred': 'MLNeuralEngineComputeDevice', 'cores': 32},
-            {'op': 'gather', 'preferred': 'MLCPUComputeDevice', 'cores': None},
-        ]
-    )
-    assert plan['operation_count'] == 3
-    assert plan['ane_operation_share'] == pytest.approx(2 / 3)
-    assert plan['ane_cores'] == [32]
-    assert plan['non_ane_non_cpu_devices'] == {}
-    assert not qwen3_ane_teacher._passes_placement_gate(plan)
-    assert qwen3_ane_teacher._passes_placement_gate(
-        {**plan, 'ane_operation_share': 0.99}
-    )
-    assert not qwen3_ane_teacher._passes_placement_gate(
-        {
-            **plan,
-            'ane_operation_share': 0.995,
-            'non_ane_non_cpu_devices': {'MLGPUComputeDevice': 1},
-        }
-    )
 
 
 @pytest.mark.parametrize('dtype', [torch.float32, torch.float64])
@@ -219,6 +159,8 @@ def test_preset_defaults_and_explicit_overrides():
     assert (custom.objective, custom.grouping, custom.gumbel_samples) == ('kl', 'block', 8)
     with pytest.raises(SystemExit):
         allocate.parse_args(required + ['--gumbel-samples', '0'])
+    with pytest.raises(SystemExit):
+        allocate.parse_args(required + ['--backend', 'ane'])
 
 
 def test_projection_groups_preserve_unequal_parameter_counts():

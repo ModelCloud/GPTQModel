@@ -584,9 +584,15 @@ weights and teacher hidden states are offline search scratch only: the search
 neither loads nor modifies a packed inference checkpoint.
 
 The M5 Ultra has 256 GiB of unified memory and 1.2 TB/s memory bandwidth. It has
-no HBM: CPU, Metal GPU, and the Apple Neural Engine (ANE/NPU) address the same
-memory pool. The search uses Metal through MLX for differentiablity rather than
-copying the dense decoder graph between accelerators.
+no HBM. The active RCO target is its Metal GPU: MLX executes candidate replay,
+teacher KL, loss, and backward on Metal, while the CPU host handles only the
+small discrete budget DP and scalar retraction steps. Torch MPS and CUDA remain
+the explicit fallback and numerical implementation oracle.
+
+ANE/NPU is outside the maintained GPTQ/GSQ-RCO pipeline. The historical
+qualification failed its accuracy and performance gates, so ANE has no backend,
+dispatch path, or benchmark target here. Differentiable student, loss, and
+backward work remains on the GPU.
 
 A reproducible warm benchmark compares the same teacher-cache policy, model,
 and token IDs with a deterministic Gumbel seed in each backend on Torch MPS and
@@ -669,129 +675,3 @@ MLX was 2.02x faster for this Qwen3 search-component workload. Backend RNG
 streams differ, so the final losses are not a cross-backend accuracy
 comparison. The component benchmark does not measure GSQ training or complete
 quantization time.
-
-`scripts/gsq_paper/bench_qwen3_ane.py` extends the ANE qualification to real
-Qwen3 layer-0 weights and activations captured from the validation corpus. It
-compares identical FP16 inputs and weights on a forced-ANE Core ML graph and
-MLX Metal, checks every result against an independent FP32 Torch calculation,
-and separately compares against the Torch result rounded to FP16. For batch 1
-and 128 tokens:
-
-| Task | ANE | Metal | Metal/ANE | ANE normalized L2 error | Gate |
-| --- | ---: | ---: | ---: | ---: | --- |
-| Q projection | 0.000381 s | 0.001170 s | 3.07x | 4.72e-4 | pass |
-| K projection | 0.000272 s | 0.000969 s | 3.56x | 4.29e-4 | pass |
-| V projection | 0.000277 s | 0.000977 s | 3.53x | 1.01e-3 | pass |
-| O projection | 0.000347 s | 0.000598 s | 1.72x | 1.27e-3 | pass |
-| Gate projection | 0.000374 s | 0.001258 s | 3.36x | 2.70e-4 | pass |
-| Up projection | 0.000394 s | 0.001478 s | 3.75x | 4.89e-4 | pass |
-| Down projection | 0.000408 s | 0.001248 s | 3.06x | 2.35e-3 | fail |
-| Composed MLP | 0.000378 s | 0.001526 s | 4.04x | 5.47e-3 | fail |
-
-The `down_proj` result also failed the stricter normalized-L2 gate, although
-its elementwise `rtol=atol=2e-3` check happened to pass. The composed MLP failed
-both checks at every tested shape from batch 1/16 tokens through batch 4/128
-tokens. Metal passed the composed-MLP gate at all four shapes. ANE compilation
-and forced-plan creation took a median 0.358 s per shape, so dispatch would also
-need a persistent compiled-model cache.
-
-The scheduler test overlapped ANE teacher-shaped MLP calls with an independent
-MLX Metal student/backward graph. One ANE call improved serial time by only
-1.040x; seven calls improved by 1.016x, while 28 calls regressed to 0.898x. The
-concurrent path therefore did not clear the 1.05x dispatch threshold once the
-ANE work represented model-scale volume.
-
-Production ANE dispatch is not enabled. Core ML has no autograd, so the
-differentiable student and backward pass remain on MLX Metal. The faster
-standalone projections are not sufficient evidence for teacher offload:
-composing the Qwen3 MLP already violates the accuracy gate. A future ANE path
-would need end-to-end teacher-logit or KL parity plus a persistent compiled
-graph and a scheduler win on real search batches.
-
-The follow-up full-teacher experiment converts all 28 dense Qwen3 layers into
-one fixed-shape Core ML program and forces every supported operation to ANE.
-`scripts/gsq_paper/bench_qwen3_ane_teacher.py` evaluates the final hidden state
-and logits against an independent FP32 Torch forward, compares teacher KL and
-top-token agreement with MLX Metal, and records conversion, forced-plan,
-package-load, and steady-state timing separately.
-
-The `1x16` cold setup took 28.07 s end to end: 1.10 s to load and trace the
-FP16 model, 7.26 s for Core ML conversion, 4.28 s to load the initial plan,
-8.06 s to apply the forced plan, 0.09 s to save the package, 5.28 s to reload
-it, and 2.00 s to load the final plan. The package contained 1,193,366,269
-bytes (1.11 GiB). The forced plan placed 1,793 of 1,803 operations on the
-32-core ANE and the remaining 10 on CPU, a 99.45% operation share. The script
-requires at least 99% ANE placement in addition to accuracy and performance.
-This is placement metadata, not a claim that every operation achieved peak ANE
-use.
-
-The warm steady-state result used real calibration tokens, two warmups and ten
-timed repetitions:
-
-| Backend | Median | Relative result |
-| --- | ---: | ---: |
-| Core ML forced ANE, FP16 | 0.02600 s | 6.96x slower |
-| MLX 0.32.4 Metal, model-native BF16 | **0.003734 s** | baseline |
-
-ANE failed the accuracy gates decisively. Final hidden-state normalized L2
-error against the FP32 Torch oracle was 1.721; logit normalized L2 error was
-1.540. Teacher KL from the FP32 oracle to ANE was 13.565 nats on average, and
-none of 16 top-1 tokens or any top-5 entries matched. MLX matched all 16 top-1
-tokens, averaged 4.875 of five top-5 entries, and had mean teacher KL 0.000962
-nats. MLX's raw BF16 logits still exceed the elementwise `2e-3` limit, so the
-script reports raw-logit and distributional checks separately.
-
-The ANE failure is not a conversion rejection. The complete graph compiles and
-executes, but FP16 drift compounds through the 28 layers; a one-layer probe
-already showed about 1.1% normalized L2 error after its MLP. The complete ANE
-teacher is both inaccurate and slower, so production dispatch remains disabled.
-This result rules out the complete frozen teacher path tested here, not every
-possible ANE subgraph. Core ML still has no autograd, so differentiable student,
-loss, and backward work remain in MLX Metal.
-
-```bash
-PYTHONPATH=. python scripts/gsq_paper/bench_qwen3_ane_teacher.py \
-    --model /path/to/Qwen3-0.6B \
-    --revision c1899de289a04d12100db370d81485cdf75e47ca \
-    --corpus /path/to/qwen3-corpus \
-    --tokens 16 \
-    --mlpackage /tmp/qwen3-teacher-1x16.mlpackage \
-    --warmup 2 --repeats 10 \
-    --json-out /tmp/qwen3-ane-teacher.json
-```
-
-```bash
-PYTHONPATH=. python scripts/gsq_paper/bench_qwen3_ane.py \
-    --model /path/to/Qwen3-0.6B \
-    --corpus /path/to/qwen3-corpus \
-    --tasks q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj,mlp \
-    --shapes 1x16,1x128,2x128,4x128 \
-    --warmup 5 --repeats 20 --student-repeats 4 \
-    --scheduler-teacher-calls 1,7,28 \
-    --json-out /tmp/qwen3-ane.json
-```
-
-The synthetic `scripts/gsq_paper/bench_gpu_ane.py` probe requests ANE
-placement through a Core ML compute plan and measures an independent MLX Metal
-workload. It uses GELU and scaled residuals on both engines, checks outputs for
-finiteness, and reuses an ANE worker while invoking MLX on the main thread.
-The plan reports ANE preference for every reported operation and a 32-core
-device. This is placement metadata, not a measurement of actual engine or
-per-core utilization.
-
-The corrected probe measured ANE 0.000608 s, Metal 0.003519 s, serial
-0.004279 s, and concurrent 0.003518 s: 1.22x serial throughput. Earlier
-measurements included thread creation in each sample and used different GPU
-activations; their conclusion against concurrent execution is withdrawn.
-This demonstrates overlap for the synthetic workloads. The equal-work Qwen3
-qualification above is the dispatch decision because the synthetic graph does
-not establish teacher or backward accuracy. Core ML supplies no autograd for
-this implementation; a custom ANE backward implementation or teacher offload
-would require separate validation.
-
-Install Core ML Tools alongside the MLX runtime and run:
-
-```bash
-PYTHONPATH=. python scripts/gsq_paper/bench_gpu_ane.py \
-    --json-out /tmp/gpu-ane.json
-```
