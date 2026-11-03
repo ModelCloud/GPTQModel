@@ -862,7 +862,19 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
   if (prob_n <= 4096) max_par = 16 * 8;
   int max_shared_mem_new = max_shared_mem;
   int rest_m = prob_m;
-  int max_thread_m_blocks = 4;
+  // Ada's narrow AWQ projections have too few independent output tiles for
+  // the default 64-row tile. Avoid long chains of ordered FP32 reductions.
+  const bool narrow_fp32_awq =
+      major_capability == 8 && minor_capability == 9 &&
+      q_type == vllm::kU4 && !has_act_order && !is_zp_float &&
+      group_size == 128 && use_fp32_reduce && !use_atomic_add &&
+      thread_k_init == -1 && thread_n_init == -1 &&
+      prob_m <= 128 && prob_n <= 2048 && prob_n % 128 == 0 &&
+      prob_k >= 2048 && prob_k <= 8192;
+  // Exact 16-row multiples can use smaller M tiles in one launch. Keep the
+  // normal tile selection for row tails rather than adding remainder launches.
+  const bool narrow_small_m_tiles = narrow_fp32_awq && prob_m % 16 == 0;
+  int max_thread_m_blocks = narrow_small_m_tiles ? 1 : 4;
   bool full_sm80 =
       marlin_prefers_full_sm80(major_capability, minor_capability, sms);
   bool disable_full_sm80_exact_split = false;
@@ -898,7 +910,10 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
     // Set thread config
     exec_config_t exec_cfg;
     thread_config_t thread_tfg;
-    if (thread_k != -1 && thread_n != -1) {
+    if (narrow_small_m_tiles) {
+      exec_cfg = exec_config_t{1, thread_config_t{128, 128, 256}};
+      thread_tfg = exec_cfg.tb_cfg;
+    } else if (thread_k != -1 && thread_n != -1) {
       thread_tfg = thread_config_t{thread_k, thread_n, default_threads};
       exec_cfg = exec_config_t{1, thread_tfg};
       TORCH_CHECK(prob_n % thread_n == 0, "prob_n = ", prob_n,
@@ -934,6 +949,15 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* b_bias,
 
     int thread_k_blocks = thread_k / 16;
     int thread_n_blocks = thread_n / 16;
+
+    // Keep FP32 reduction, with longer K stripes and fewer lock waiters.
+    if (narrow_fp32_awq) {
+      const int tile_m = m_block_size_8 ? 8 : 16 * thread_m_blocks;
+      const int output_tiles = std::max(1, prob_m_split / tile_m) *
+                               (prob_n / thread_n);
+      const int max_splits = (thread_m_blocks >= 2 && prob_k >= 4096) ? 8 : 4;
+      blocks = std::min(blocks, output_tiles * max_splits);
+    }
 
     TORCH_CHECK(
         is_valid_config(thread_tfg, thread_m_blocks, prob_m_split, prob_n,
