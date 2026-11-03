@@ -849,6 +849,21 @@ def test_gguf_q6_k_packing_matches_torch_oracle(rows, width):
     np.testing.assert_array_equal(np.asarray(actual), expected)
 
 
+@pytest.mark.parametrize("rows", [1, 2, 3, 5, 7, 9])
+def test_gguf_q6_k_packing_partial_final_warp_group(rows):
+    # The packer runs four blocks per threadgroup. Sizes that are not a multiple
+    # of four leave idle warps in the final group; they must not read past the
+    # weight buffer or write a neighbouring block.
+    weight = np.random.default_rng(117).standard_normal((rows, 256)).astype(
+        np.float32
+    )
+    weight[-1, -1] = -0.0
+    actual = native.gguf_quantize_weight_mlx(mx.array(weight), "Q6_K")
+    expected = _torch_gguf_q6_k_oracle(weight)
+    assert actual.shape == (rows, 210)
+    np.testing.assert_array_equal(np.asarray(actual), expected)
+
+
 @pytest.mark.parametrize("dtype", [mx.float16, mx.bfloat16])
 def test_gguf_q6_k_packing_promotes_low_precision_inputs(dtype):
     weight = mx.array(np.random.default_rng(109).standard_normal((4, 512))).astype(
