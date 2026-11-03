@@ -9,6 +9,7 @@ from functools import lru_cache
 import mlx.core as mx
 import mlx.nn as nn
 
+from .mlx_gptq import _mlx_forward
 from .mlx_group16 import MlxGroup16Linear
 
 
@@ -195,4 +196,4 @@ class MlxAWQLinear(nn.Module):
         self.freeze()
 
     def __call__(self, x):
-        return self.linear(x).astype(x.dtype)
+        return _mlx_forward(self.linear, x)
