@@ -339,15 +339,13 @@ def test_mlx_projection_matches_torch_oracle_in_low_precision(dtype_name):
         raw = to_torch(actual.astype(mx.float32)).detach().cpu().float()
         visible = to_torch(actual).detach().cpu().float()
 
-        # Reconstruct the exact candidate storage and FP32 interpolation used
-        # by MLX, then evaluate the projection in float64. This separates
-        # kernel arithmetic error from the required output cast.
+        # Reconstruct the exact candidate storage and model-dtype interpolation
+        # used by both backends, then evaluate the projection in float64. This
+        # separates kernel arithmetic error from the required output cast.
         stored_low = mx.array(low.numpy()).astype(dtype)
         stored_reference = mx.array(reference.numpy()).astype(dtype)
-        mixed_delta = stored_low.astype(mx.float32) - stored_reference.astype(mx.float32)
-        mixed = stored_reference.astype(mx.float32) + mx.array(
-            probabilities[0].item(), dtype=mx.float32
-        ) * mixed_delta
+        mixed_delta = stored_low - stored_reference
+        mixed = stored_reference + mx.array(probabilities[0].item()).astype(dtype) * mixed_delta
         mx.eval(mixed)
         mixed_oracle = to_torch(mixed).detach().cpu().float()
         oracle = values.double() @ mixed_oracle.double().T
@@ -377,6 +375,95 @@ def test_mlx_projection_matches_torch_oracle_in_low_precision(dtype_name):
         else:
             assert not bool(outside_tolerance.any())
         assert visible_drift <= 0.00390625
+    finally:
+        interpolated.cleanup()
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16"])
+def test_mlx_interpolation_matches_torch_backend_precision(dtype_name):
+    """MLX must interpolate in the same dtype as the Torch backend.
+
+    ``rco._WeightInterpolation`` multiplies a zero-dimensional float32
+    probability by a model-dtype delta, and Torch's scalar type promotion keeps
+    that product in the model dtype. MLX promotes a float32 array against a
+    low-precision array to float32 instead, which would widen every
+    interpolated projection and search a different objective than Torch.
+    """
+    mx, _ = mlx_modules()
+    mx.random.seed(20260518)
+    torch.manual_seed(20260518)
+    model = tiny_mlx_model()
+    dtype = getattr(mx, dtype_name)
+    model.set_dtype(dtype)
+    mx.eval(model.parameters())
+
+    name = "model.layers.0.mlp.down_proj"
+    source = to_torch(rco_mlx._child(model, name).weight).detach().cpu()
+    torch_dtype = torch.float16 if dtype_name == "float16" else torch.bfloat16
+    source = source.to(torch_dtype)
+    low = (source.float() * 0.7).to(torch_dtype)
+    mid = (source.float() * 0.85).to(torch_dtype)
+    probabilities = torch.tensor([0.35, 0.42, 0.23], dtype=torch.float32)
+
+    class _Owner:
+        def __init__(self):
+            self._deltas = [(low - source).to(torch_dtype), (mid - source).to(torch_dtype)]
+            self._probs = probabilities
+
+        def deltas(self, _name):
+            return self._deltas
+
+        def probabilities(self, _index):
+            return self._probs
+
+        def index_of(self, _name):
+            return 0
+
+        def reference_index(self):
+            return len(self._deltas)
+
+    with torch.no_grad():
+        torch_mixed = rco._WeightInterpolation(_Owner(), name)(source).to(torch_dtype)
+        values = torch.randn(64, source.shape[1], dtype=torch.float32).to(torch_dtype)
+        torch_out = (values @ torch_mixed.T).to(torch_dtype).float()
+
+    interpolated = rco_mlx.MLXInterpolatedLlamaLayers(
+        model,
+        {name: [low.float(), mid.float(), source.float()]},
+        torch.tensor([source.numel()]),
+        torch.tensor([2.0, 3.0, 4.0]),
+    )
+    interpolated.set_probs(mx.array(probabilities[None].numpy()))
+    try:
+        actual = rco_mlx._child(model, name)(
+            mx.array(values.float().numpy()).astype(dtype)
+        )
+        assert actual.dtype == dtype
+        visible = to_torch(actual).detach().cpu().float()
+        drift = (visible - torch_out).abs()
+        tolerance = 2e-3 + 2e-3 * torch_out.abs()
+        outside_tolerance = drift > tolerance
+        if dtype_name == "bfloat16" and bool(outside_tolerance.any()):
+            # A BF16 output step is larger than 2e-3 around zero. Require any
+            # out-of-tolerance element to be exactly the adjacent representable
+            # BF16 value, so kernel error stays distinguishable from the
+            # mandatory output rounding both backends perform.
+            rounded = torch_out.to(torch.bfloat16)
+            lower = torch.nextafter(
+                rounded, torch.full_like(rounded, float("-inf"))
+            ).float()
+            upper = torch.nextafter(
+                rounded, torch.full_like(rounded, float("inf"))
+            ).float()
+            one_step = outside_tolerance & ((visible == lower) | (visible == upper))
+            assert bool(one_step[outside_tolerance].all())
+        else:
+            assert not bool(outside_tolerance.any())
+        # Both backends must run the same arithmetic, so only mandatory output
+        # rounding may separate the two visible results. Interpolating in
+        # float32 instead changes most of the output bits.
+        differing = visible.to(torch_dtype) != torch_out.to(torch_dtype)
+        assert int(differing.sum()) <= max(2, int(0.01 * differing.numel()))
     finally:
         interpolated.cleanup()
 
