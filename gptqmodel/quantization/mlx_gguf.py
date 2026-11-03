@@ -544,6 +544,9 @@ def _gguf_tq1_0_kernel():
     )
 
 
+_TQ1_0_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_tq1_0_parallel_kernel():
     import mlx.core as mx
@@ -553,31 +556,54 @@ def _gguf_tq1_0_parallel_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            // Cache this lane's eight weights for the block in registers: the
+            // maximum pass and the first packing pass read exactly these
+            // elements, so they no longer issue a second stream of global
+            // reads.
+            float own[8];
+            #pragma unroll
+            for (uint g = 0; g < 8; ++g) {
+                own[g] = float(weights[block * 256 + g * 32 + lane]);
+            }
             float maximum = 0.0f;
-            for (uint k = lane; k < 256; k += 32) {
-                maximum = metal::max(
-                    maximum, metal::abs(float(weights[block * 256 + k])));
+            #pragma unroll
+            for (uint g = 0; g < 8; ++g) {
+                maximum = metal::max(maximum, metal::abs(own[g]));
             }
             maximum = simd_max(maximum);
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
+            // The two tail passes need lane `lane + 16` of sub-blocks 5..7 and
+            // lanes 16..31 of sub-block 7, so fetch them with warp shuffles.
+            // Hoisted out of the divergent branches below.
+            float s5 = simd_shuffle_xor(own[5], 16u);
+            float s6 = simd_shuffle_xor(own[6], 16u);
+            float t16 = simd_shuffle_xor(own[7], 16u);
+            float t20 = simd_shuffle_xor(own[7], 20u);
+            float t24 = simd_shuffle_xor(own[7], 24u);
+            float t28 = simd_shuffle_xor(own[7], 28u);
             uint offset = block * 54;
             uint powers[5] = {81, 27, 9, 3, 1};
             uint value = 0;
+            #pragma unroll
             for (uint digit = 0; digit < 5; ++digit) {
-                float normalized = float(weights[
-                    block * 256 + digit * 32 + lane]) * inverse;
+                float normalized = own[digit] * inverse;
                 uint code = normalized >= 0.5f
                     ? 2 : (normalized <= -0.5f ? 0 : 1);
                 value += code * powers[digit];
             }
             packed[offset + lane] = uchar((value * 256 + 242) / 243);
             if (lane < 16) {
+                float src[5] = {own[5], s5, own[6], s6, own[7]};
                 value = 0;
+                #pragma unroll
                 for (uint digit = 0; digit < 5; ++digit) {
-                    float normalized = float(weights[
-                        block * 256 + 160 + digit * 16 + lane]) * inverse;
+                    float normalized = src[digit] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -586,10 +612,11 @@ def _gguf_tq1_0_parallel_kernel():
                     (value * 256 + 242) / 243);
             }
             if (lane < 4) {
+                float src[4] = {t16, t20, t24, t28};
                 value = 0;
+                #pragma unroll
                 for (uint digit = 0; digit < 4; ++digit) {
-                    float normalized = float(weights[
-                        block * 256 + 240 + digit * 4 + lane]) * inverse;
+                    float normalized = src[digit] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     value += code * powers[digit];
@@ -977,14 +1004,12 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         launch = _packed_warp_launch(blocks, _Q4_K_WARPS)
     elif normalized.startswith("Q5_K"):
         launch = _packed_warp_launch(blocks, _Q5_K_WARPS)
+    elif normalized == "TQ1_0" and blocks >= 65536:
+        launch = _packed_warp_launch(blocks, _TQ1_0_WARPS)
     elif normalized == "TQ2_0" and blocks >= 65536:
         launch = _packed_warp_launch(blocks, _TQ2_0_WARPS)
     else:
-        launch = (
-            {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-            if (normalized == "TQ1_0" and blocks >= 65536)
-            else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
-        )
+        launch = {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
         or normalized in (
