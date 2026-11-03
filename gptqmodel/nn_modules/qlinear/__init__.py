@@ -1189,9 +1189,11 @@ class PackableQuantLinear(GPTQQuantLinear):
         g_idx = g_idx.to("cpu")
         self.register_buffer("g_idx", g_idx)
 
-        # ---------- ORIGINAL scales/zeros logic (unchanged) ----------
-        scales = scales.T.contiguous()  # [G, out]
-        zeros = zeros.T.contiguous()  # [G, out]
+        # ---------- affine parameters ----------
+        # Match the native/GPU packers: affine intermediates can overflow FP16
+        # even when the original and reconstructed weights are finite.
+        scales = scales.T.to(t.float32).contiguous()  # [G, out]
+        zeros = zeros.T.to(t.float32).contiguous()  # [G, out]
         scale_zeros = zeros * scales  # [G, out]
         num_groups = scales.shape[0]
 
@@ -1336,7 +1338,7 @@ class PackableQuantLinear(GPTQQuantLinear):
             s_blk_T = scales.index_select(0, gsel).T  # [out, blk]
 
             # int_block = round((W + scale_zeros[g_idx]^T) / scales[g_idx]^T)
-            int_block = t.round((Wblk + sz_blk_T) / s_blk_T)  # [out, blk]
+            int_block = t.round((Wblk.to(t.float32) + sz_blk_T) / s_blk_T)  # [out, blk]
             # Values that drift outside the representable range must saturate.
             # Bit-packing an unchecked value wraps it modulo 2**bits and turns
             # a small reconstruction error into a full-range weight error.
@@ -1642,8 +1644,11 @@ class PackableQuantLinear(GPTQQuantLinear):
             # self.g_idx = g_idx.clone() if g_idx is not None else self.g_idx
             self.register_buffer("g_idx", g_idx if g_idx is not None else self.g_idx )
 
-            scales = scales.T.contiguous()
-            zeros = zeros.T.contiguous()
+            # Widen before multiplying/adding, not after a low-precision
+            # intermediate has already overflowed or rounded an endpoint.
+            W = W.to(t.float32)
+            scales = scales.T.to(t.float32).contiguous()
+            zeros = zeros.T.to(t.float32).contiguous()
             scale_zeros = zeros * scales
 
             # TODO why clone?

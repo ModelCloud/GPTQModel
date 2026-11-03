@@ -96,7 +96,9 @@ def _compute_scale_inv(abs_max: torch.Tensor, fp8_max: float) -> torch.Tensor:
     eps = torch.finfo(torch.float32).tiny
     return torch.where(
         abs_max > 0,
-        torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps),
+        # tiny bounds the denominator but does not bound the quotient: even
+        # fp8_max / tiny overflows FP32. Keep zero*scale finite too.
+        (torch.full_like(abs_max, float(fp8_max)) / abs_max.clamp_min(eps)).clamp_max(torch.finfo(torch.float32).max),
         torch.ones_like(abs_max),
     )
 

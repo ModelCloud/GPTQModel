@@ -129,9 +129,9 @@ class AWQBitBlasKernel(BitblasBaseQuantLinear):
         maxq = (1 << self.bits) - 1
 
         # Broadcast per-group affine parameters across K so we can recover the stored AWQ integer codes.
-        scale_zeros = (zeros * scales).index_select(0, group_idx).t()
-        scales_by_input = scales.index_select(0, group_idx).t()
-        intweight = torch.round((weight + scale_zeros) / scales_by_input).clamp_(0, maxq).to(torch.int8)
+        scale_zeros = (zeros.float() * scales.float()).index_select(0, group_idx).t()
+        scales_by_input = scales.index_select(0, group_idx).t().float()
+        intweight = torch.round((weight.float() + scale_zeros) / scales_by_input).clamp_(0, maxq).to(torch.int8)
 
         self._load_bitblas_quant_state(
             intweight_out_in=intweight,
