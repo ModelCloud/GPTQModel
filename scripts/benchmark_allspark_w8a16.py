@@ -123,7 +123,7 @@ def build_marlin(k, n, dtype, device):
         out_features=n,
         bias=False,
         dtype=dtype,
-        backend=BACKEND.GPTQ_MARLIN,
+        backend=BACKEND.MARLIN,
     ).to(device=device, dtype=dtype)
     return module
 
