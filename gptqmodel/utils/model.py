@@ -1429,6 +1429,9 @@ def hf_gptqmodel_post_init(model, use_act_order: bool, quantize_config: Quantize
 
 # public/stable api exposed to transformers/optimum: native load bridge.
 # Re-exported here so callers can keep importing from `gptqmodel.utils.model`.
+# These names are intentionally not referenced in this module: they exist only to
+# keep the `gptqmodel.utils.model` entry point stable for transformers/optimum,
+# so the unused-import exemption is deliberate rather than dead code.
 from .hf_load import (  # noqa: E402,F401
     HFGPTQModelLoadContext,
     hf_gptqmodel_post_init_for_load,

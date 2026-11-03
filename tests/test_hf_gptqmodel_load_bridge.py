@@ -9,7 +9,7 @@ import pytest
 import torch
 from accelerate import init_empty_weights
 from safetensors.torch import save_file
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, GPTQConfig
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear
@@ -109,7 +109,7 @@ def test_hf_load_bridge_uses_checkpoint_manifest_and_preserves_dense_module(tmp_
     ],
 )
 def test_native_provenance_ignores_optimum_owned_checkpoints(tmp_path, quantizers, expected):
-    from gptqmodel.utils.hf_load import is_native_gptqmodel_checkpoint
+    from gptqmodel.utils.hf_load import is_native_gptqmodel_checkpoint  # noqa: PLC0415
 
     payload = {"bits": 4, "group_size": 128, "format": "gptq", "meta": {"quantizer": quantizers}}
     (tmp_path / "quantize_config.json").write_text(json.dumps(payload), encoding="utf-8")
@@ -119,7 +119,7 @@ def test_native_provenance_ignores_optimum_owned_checkpoints(tmp_path, quantizer
 
 
 def test_native_provenance_declines_unresolvable_hub_repo():
-    from gptqmodel.utils.hf_load import is_native_gptqmodel_checkpoint
+    from gptqmodel.utils.hf_load import is_native_gptqmodel_checkpoint  # noqa: PLC0415
 
     model = torch.nn.Module()
     model.config = SimpleNamespace(_name_or_path="ModelCloud/Does-Not-Exist")
@@ -213,9 +213,10 @@ def test_hf_load_bridge_defuses_laguna_experts_on_meta(tmp_path):
 
 
 def test_hf_load_post_init_restores_gptqmodel_config_fields(monkeypatch):
-    from transformers import GPTQConfig
-
-    import gptqmodel.utils.model as model_utils
+    # Local import keeps the module object needed by `monkeypatch.setattr`, which
+    # matches how other tests here patch internals; importing at module scope
+    # would bind the symbol instead of the module.
+    import gptqmodel.utils.model as model_utils  # noqa: PLC0415
 
     qcfg = QuantizeConfig(
         bits=4,
