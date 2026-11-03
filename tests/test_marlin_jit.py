@@ -1361,6 +1361,7 @@ def test_marlin_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(mo
     for header_name in marlin_utils._MARLIN_REQUIRED_CUDA_HEADERS:
         (wheel_cuda_include / header_name).write_text("// stub", encoding="utf-8")
 
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     monkeypatch.setattr(marlin_utils, "_marlin_root", lambda: root)
     monkeypatch.setattr(cpp_module, "detected_local_cuda_include_paths", lambda: [str(local_cuda_include)])
     monkeypatch.setattr(cpp_module, "detected_cuda_wheel_include_paths", lambda: [str(wheel_cuda_include)])

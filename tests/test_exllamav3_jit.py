@@ -154,6 +154,7 @@ def test_exllamav3_bc_linear_wrapper_surfaces_jit_error(monkeypatch):
 
 
 def test_exllamav3_include_paths_use_wheel_headers_when_local_cuda_is_incomplete(monkeypatch, tmp_path):
+    monkeypatch.setattr(cpp_module, "IS_ROCM", False)
     source_root = tmp_path / "exllamav3"
     local_cuda_include = tmp_path / "local_cuda_include"
     wheel_cuda_include = tmp_path / "wheel_cuda_include"

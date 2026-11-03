@@ -537,7 +537,17 @@ def _is_system_or_dependency_header(include_name: str) -> bool:
 
 
 def detected_cuda_wheel_include_paths() -> list[str]:
-    """Discover CUDA developer headers shipped via NVIDIA Python wheels."""
+    """Discover CUDA developer headers shipped via NVIDIA Python wheels.
+
+    NVIDIA wheel headers are for `nvcc` only. A ROCm host can still have the
+    `nvidia` namespace packages installed (for example through a
+    `torchao`/`vllm` dependency), but adding those `vector_types.h` and
+    `cuda_runtime.h` copies to a hipcc command line makes HIP and CUDA type
+    aliases (``uint1``, ``int2``, ...) collide. Never offer them on ROCm.
+    """
+
+    if IS_ROCM:
+        return []
 
     try:
         import nvidia  # type: ignore
@@ -675,10 +685,16 @@ def cuda_include_paths_with_fallback(
     *,
     required_header_names: Sequence[str] = (),
 ) -> list[str]:
-    """Append NVIDIA wheel headers when the local CUDA toolkit is absent or incomplete."""
+    """Append NVIDIA wheel headers when the local CUDA toolkit is absent or incomplete.
+
+    The fallback exists for `nvcc` builds that have no local CUDA toolkit. On
+    ROCm the only valid headers are the HIP/torch ones, so NVIDIA wheel headers
+    are never appended; mixing them breaks hipcc with conflicting CUDA/HIP
+    vector types.
+    """
 
     resolved_include_paths = _dedupe_path_strings(include_paths)
-    if not _detected_local_cuda_has_required_headers(required_header_names):
+    if not IS_ROCM and not _detected_local_cuda_has_required_headers(required_header_names):
         resolved_include_paths.extend(detected_cuda_wheel_include_paths())
     return _dedupe_path_strings(resolved_include_paths)
 
