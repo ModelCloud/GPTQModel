@@ -19,11 +19,31 @@ mx = pytest.importorskip("mlx.core")
 
 from gptqmodel.quantization.mlx_splitk_dispatch import (  # noqa: E402
     _architecture,
+    _dispatch_version,
+    _mirrors_installed_dispatch,
     _qmv_batch_limit,
     _split_k,
     padded_rows,
     quantized_matmul,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_dispatch_caches():
+    yield
+    _dispatch_version.cache_clear()
+    padded_rows.cache_clear()
+
+
+def _use_mlx_version(version):
+    mx.__version__ = version
+    _dispatch_version.cache_clear()
+    padded_rows.cache_clear()
+
+
+def _require_mirrored_dispatch():
+    if not _mirrors_installed_dispatch():
+        pytest.skip("installed MLX no longer uses the dispatch mirrored here")
 
 
 def _reference(x, weight, scales, biases, group_size, bits, dtype):
@@ -138,6 +158,7 @@ def test_splitk_split_choice_matches_mlx_dispatch():
 
 
 def test_splitk_padding_target_clears_splitk():
+    _require_mirrored_dispatch()
     generation, _ = _architecture()
     if generation < 13:
         pytest.skip("split-K avoidance targets Apple GPU generation 13+")
@@ -171,6 +192,7 @@ def test_splitk_padding_declines_inside_one_qmv_wide_tile():
 
 
 def test_splitk_padding_escapes_multi_tile_qmv_wide():
+    _require_mirrored_dispatch()
     # Past five rows qmv_wide re-reads the weights once per tile, which costs
     # more than the rows needed to reach the single-pass matrix kernel.
     generation, _ = _architecture()
@@ -188,6 +210,7 @@ def test_splitk_padding_escapes_multi_tile_qmv_wide():
 
 
 def test_splitk_padding_bf16_crossover_is_later():
+    _require_mirrored_dispatch()
     # BF16 decode stays ALU bound in qmv_wide, so the matrix kernel only wins
     # once the vector kernel has accumulated enough extra weight passes.
     generation, _ = _architecture()
@@ -203,6 +226,7 @@ def test_splitk_padding_bf16_crossover_is_later():
 
 
 def test_splitk_padding_never_exceeds_two_row_tiles():
+    _require_mirrored_dispatch()
     # qmv_wide makes two or three weight passes at these row counts, so the
     # matrix kernel must not be handed a batch that needs more than two.
     generation, _ = _architecture()
@@ -213,6 +237,36 @@ def test_splitk_padding_never_exceeds_two_row_tiles():
     assert padded_rows(11, 14336, 4096, 64, mx.float16) is None
     # Two tiles are still allowed where they clear split-K.
     assert padded_rows(11, 8192, 8192, 64, mx.float16) == 33
+
+
+def test_splitk_dispatch_version_gate():
+    # This module mirrors the MLX 0.32.4 dispatch. 0.32.5 replaces qmv_wide with
+    # qmv_mma and routes split-K through a NAX kernel, so the padding rules stop
+    # applying and the dispatcher must be left alone.
+    original = mx.__version__
+    try:
+        _use_mlx_version("0.32.4")
+        assert _dispatch_version() == (0, 32, 4)
+        assert _mirrors_installed_dispatch() is True
+        for version in ("0.32.5", "0.33.0", "1.0.0"):
+            _use_mlx_version(version)
+            assert _mirrors_installed_dispatch() is False
+        _use_mlx_version("nightly")
+        assert _dispatch_version() is None
+        assert _mirrors_installed_dispatch() is False
+    finally:
+        _use_mlx_version(original)
+
+
+def test_splitk_padding_declines_on_newer_mlx():
+    original = mx.__version__
+    try:
+        _use_mlx_version("0.32.5")
+        for input_dims, output_dims in ((5120, 17408), (6144, 5120), (8192, 8192)):
+            for rows in (6, 8, 11, 16, 32):
+                assert padded_rows(rows, input_dims, output_dims, 64, mx.float16) is None
+    finally:
+        _use_mlx_version(original)
 
 
 def test_splitk_padding_declines_for_narrow_outputs():

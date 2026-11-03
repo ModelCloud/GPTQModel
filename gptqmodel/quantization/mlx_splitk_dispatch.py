@@ -38,6 +38,31 @@ from functools import lru_cache
 import mlx.core as mx
 
 
+# This module mirrors the Metal dispatch in
+# ``mlx/backend/metal/quantized.cpp`` as of MLX 0.32.4. MLX 0.32.5 reworks that
+# dispatch: ``qmv_mma`` replaces ``qmv_wide`` from six rows up, and
+# ``qmm_splitk`` first diverts to a NAX kernel with a different split-K
+# formula. Neither assumption survives the change, so stop steering the
+# dispatcher instead of padding batches the new heuristics already handle.
+_MIRRORED_DISPATCH = (0, 32, 4)
+
+
+@lru_cache(maxsize=1)
+def _dispatch_version():
+    """Return the installed MLX version as a tuple, or ``None`` if unknown."""
+    try:
+        parts = getattr(mx, "__version__", "").split(".")[:3]
+        return tuple(int(part) for part in parts)
+    except (AttributeError, ValueError):
+        return None
+
+
+def _mirrors_installed_dispatch():
+    """True when the installed MLX still uses the dispatch mirrored here."""
+    version = _dispatch_version()
+    return version is not None and version <= _MIRRORED_DISPATCH
+
+
 # Keep these in sync with mlx/backend/metal/quantized.cpp.
 _SPLIT_K_TARGET_THREADGROUPS = 512
 _SPLIT_K_TILE = 32
@@ -172,6 +197,9 @@ def padded_rows(rows, input_dims, output_dims, group_size, dtype):
     cost more than the pass it removes. Below ``get_qmv_batch_limit`` the same
     applies to the repeated weight passes of ``qmv_wide``.
     """
+    if not _mirrors_installed_dispatch():
+        # A newer MLX dispatches these shapes itself; do not pad blindly.
+        return None
     if output_dims < _MIN_OUTPUT_DIMS:
         # Narrow outputs finish in microseconds; the extra rows dominate.
         return None
