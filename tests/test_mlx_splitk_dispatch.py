@@ -11,13 +11,18 @@ import torch
 
 from tests.qwen38_27b_shapes import QWEN38_27B_PROJECTIONS
 
+
 if sys.platform != "darwin":
     pytest.skip("Metal kernels require macOS", allow_module_level=True)
 
 mx = pytest.importorskip("mlx.core")
 
 from gptqmodel.quantization.mlx_splitk_dispatch import (  # noqa: E402
-    _architecture, _qmv_batch_limit, _split_k, padded_rows, quantized_matmul,
+    _architecture,
+    _qmv_batch_limit,
+    _split_k,
+    padded_rows,
+    quantized_matmul,
 )
 
 

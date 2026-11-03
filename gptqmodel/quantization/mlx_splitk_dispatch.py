@@ -28,6 +28,7 @@ from functools import lru_cache
 
 import mlx.core as mx
 
+
 # Keep these in sync with mlx/backend/metal/quantized.cpp.
 _SPLIT_K_TARGET_THREADGROUPS = 512
 _SPLIT_K_TILE = 32
@@ -143,7 +144,7 @@ def quantized_matmul(x, weight, scales, biases, *, group_size, bits, mode="affin
     Falls back to :func:`mlx.core.quantized_matmul` whenever the split-K
     avoidance does not apply, so shapes outside the win region are untouched.
     """
-    kwargs = dict(transpose=True, group_size=group_size, bits=bits, mode=mode)
+    kwargs = {"transpose": True, "group_size": group_size, "bits": bits, "mode": mode}
     if mode != "affine":
         return mx.quantized_matmul(x, weight, scales=scales, biases=biases, **kwargs)
     input_dims = x.shape[-1]
