@@ -238,3 +238,158 @@ def test_hf_load_post_init_restores_gptqmodel_config_fields(monkeypatch):
     assert model.config.quantization_config.lm_head is True
     assert model.config.quantization_config.method == qcfg.method
     assert model.config.quantization_config.pack_dtype == "int32"
+
+
+class _RotationModel(torch.nn.Module):
+    """One-layer shell with the ``mlp.down_proj`` the rotation path rewrites."""
+
+    def __init__(self, checkpoint_path):
+        super().__init__()
+        self.config = SimpleNamespace(model_type="llama", _name_or_path=str(checkpoint_path))
+        self.model = torch.nn.Module()
+        self.model.layers = torch.nn.ModuleList([_RotationLayer()])
+
+
+class _RotationLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.self_attn = torch.nn.Module()
+        self.self_attn.q_proj = torch.nn.Linear(32, 32, bias=False, device="meta")
+        self.mlp = torch.nn.Module()
+        self.mlp.down_proj = torch.nn.Linear(128, 32, bias=False, device="meta")
+
+
+def _write_rotation_checkpoint(checkpoint_path, rotation):
+    config = {
+        "bits": 4,
+        "group_size": 128,
+        "desc_act": False,
+        "sym": True,
+        "format": "gptq",
+        "quant_method": "gptq",
+        "rotation": rotation,
+        "meta": {"quantizer": ["gptqmodel:7.8.0"]},
+    }
+    (checkpoint_path / "quantize_config.json").write_text(json.dumps(config), encoding="utf-8")
+    save_file(
+        {
+            "model.layers.0.self_attn.q_proj.qweight": torch.zeros((8, 32), dtype=torch.int32),
+            "model.layers.0.mlp.down_proj.qweight": torch.zeros((32, 32), dtype=torch.int32),
+        },
+        checkpoint_path / "model.safetensors",
+    )
+
+
+def test_hf_load_bridge_auto_backend_picks_rotation_kernel(tmp_path):
+    _write_rotation_checkpoint(tmp_path, "hadamard")
+
+    context = hf_gptqmodel_prepare_model_for_load(
+        _RotationModel(tmp_path),
+        checkpoint_files=[tmp_path / "model.safetensors"],
+        device_map={"": "cpu"},
+        backend=BACKEND.AUTO,
+        dtype=torch.float16,
+    )
+
+    # AUTO must resolve to a rotation-aware kernel instead of raising or
+    # defaulting to a backend that cannot apply the online transform.
+    assert context.quant_linear is TorchLinear
+
+
+def test_hf_load_bridge_rejects_rotation_on_incompatible_backend(tmp_path):
+    _write_rotation_checkpoint(tmp_path, "hadamard")
+
+    with pytest.raises(NotImplementedError, match="rotation"):
+        hf_gptqmodel_prepare_model_for_load(
+            _RotationModel(tmp_path),
+            checkpoint_files=[tmp_path / "model.safetensors"],
+            device_map={"": "cpu"},
+            backend=BACKEND.MARLIN,
+            dtype=torch.float16,
+        )
+
+
+def test_hf_load_post_init_restores_online_hadamard_state(monkeypatch):
+    """A rotated checkpoint must leave the online transform armed on ``mlp.down_proj``.
+
+    Metadata alone is not enough: without ``online_full_had`` the rotated weights
+    consume untransformed activations and the forward result is silently wrong.
+    This drives the real post-init hook, so dropping the rotation setup fails here.
+    """
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, rotation="hadamard")
+    context = HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=TorchLinear)
+
+    model = _RotationModel("unused")
+    model.model.layers[0].mlp.down_proj = TorchLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=128,
+        out_features=32,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+        bias=False,
+    )
+    model.model.layers[0].self_attn.q_proj = TorchLinear(
+        bits=4,
+        group_size=128,
+        sym=True,
+        desc_act=False,
+        in_features=32,
+        out_features=32,
+        pack_dtype=torch.int32,
+        register_buffers=True,
+        bias=False,
+    )
+
+    # Stub only the parts that need real checkpoint tensors; keep the rotation
+    # setup that this test is about. Both helpers are imported inside the hook
+    # from `gptqmodel.utils.model`, so patch them at their source.
+    import gptqmodel.utils.model as model_utils
+
+    monkeypatch.setattr(
+        model_utils, "hf_convert_gptq_v1_to_v2_format", lambda model, **kwargs: (model, False)
+    )
+    monkeypatch.setattr(model_utils, "gptqmodel_post_init", lambda model, **kwargs: model)
+
+    assert model.model.layers[0].mlp.down_proj.online_full_had is not True
+
+    returned = hf_gptqmodel_post_init_for_load(model, context)
+
+    assert returned is model
+    assert model.model.layers[0].mlp.down_proj.online_full_had is True
+    assert getattr(model.model.layers[0].mlp.down_proj, "K", None) is not None
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("w4afp8", BACKEND.GPTQ_W4AFP8),
+        ("w4a_nvfp4", BACKEND.GPTQ_W4A_NVFP4),
+    ],
+)
+def test_hf_load_bridge_auto_backend_applies_saved_activation_policy(mode, expected):
+    """A saved W4A policy must pin its kernel even when the caller asked for AUTO.
+
+    W4AFP8/NVFP4 kernels have no AUTO-selection priority, so without this step an
+    AUTO load installs ordinary GPTQ kernels and post-init then fails because the
+    required W4A projections are absent.
+    """
+
+    from gptqmodel.utils.hf_load import _resolve_backend_for_checkpoint
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, activation={"mode": mode})
+
+    assert _resolve_backend_for_checkpoint(qcfg, BACKEND.AUTO) is expected
+    assert _resolve_backend_for_checkpoint(qcfg, expected) is expected
+
+
+def test_hf_load_bridge_still_rejects_incompatible_activation_backend():
+    from gptqmodel.utils.hf_load import _resolve_backend_for_checkpoint
+
+    qcfg = QuantizeConfig(bits=4, group_size=128, activation={"mode": "w4afp8"})
+
+    with pytest.raises(ValueError, match="requires backend"):
+        _resolve_backend_for_checkpoint(qcfg, BACKEND.GPTQ_TRITON)

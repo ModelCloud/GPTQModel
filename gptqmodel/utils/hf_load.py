@@ -29,7 +29,7 @@ from ..models._const import DEVICE
 from ..nn_modules.qlinear import BaseQuantLinear
 from ..quantization import FORMAT, QuantizeConfig
 from ..quantization.config import resolve_quant_format
-from .backend import BACKEND
+from .backend import BACKEND, backend_for_activation, normalize_backend
 from .hf import get_hf_config_dtype
 from .logger import setup_logger
 
@@ -196,6 +196,49 @@ def _checkpoint_tensor_keys(checkpoint_path: str, checkpoint_files) -> set:
     return keys
 
 
+# Backends the normal loader allows for rotated (QuaRot/SpinQuant) checkpoints.
+# Kept in sync with `BaseQModel.from_quantized` in `gptqmodel/models/loader.py`.
+_ROTATION_BACKENDS = (
+    BACKEND.GPTQ_TORCH,
+    BACKEND.GPTQ_TRITON,
+    BACKEND.GPTQ_W4AFP8,
+    BACKEND.GPTQ_W4A_NVFP4,
+)
+
+
+def _resolve_backend_for_checkpoint(qcfg: QuantizeConfig, backend: Optional[Union[str, BACKEND]]) -> BACKEND:
+    """Normalize the caller backend the way the normal loader does.
+
+    ``make_quant`` already normalizes the backend on its own, but two checkpoint
+    policies have to be applied *before* kernel selection:
+
+    - a saved W4A activation stream pins the matching W4AFP8/NVFP4 kernel, which
+      AUTO never selects on its own because those kernels have no AUTO priority;
+    - rotated checkpoints are only valid on rotation-aware backends.
+    """
+
+    export_quant_method = qcfg.export_quant_method()
+    backend = normalize_backend(backend, quant_method=export_quant_method)
+
+    if qcfg.rotation:
+        format_code = resolve_quant_format(qcfg.format, qcfg.method)
+        if format_code not in (FORMAT.GPTQ, FORMAT.GPTQ_V2):
+            raise NotImplementedError(
+                f"`rotation` is only supported for GPTQ/GPTQ_V2 checkpoints, got `{format_code}`."
+            )
+        if backend in (None, BACKEND.AUTO):
+            backend = BACKEND.GPTQ_TORCH
+        if backend not in _ROTATION_BACKENDS:
+            raise NotImplementedError(
+                "`rotation` is only supported with `gptq_torch`, `gptq_triton`, "
+                f"`gptq_w4afp8`, or `gptq_w4a_nvfp4` backend, got `{backend}`."
+            )
+        return backend
+
+    backend = backend_for_activation(qcfg.activation_mode, backend)
+    return BACKEND.AUTO if backend is None else backend
+
+
 def hf_gptqmodel_prepare_model_for_load(
     model: nn.Module,
     checkpoint_files=None,
@@ -274,6 +317,8 @@ def hf_gptqmodel_prepare_model_for_load(
         config_dtype = get_hf_config_dtype(model.config)
         dtype = config_dtype if isinstance(config_dtype, torch.dtype) else None
 
+    backend = _resolve_backend_for_checkpoint(qcfg, backend)
+
     # Apply full dynamic settings while selecting a supported kernel per module.
     quant_linear = make_quant(
         model,
@@ -298,6 +343,7 @@ def hf_gptqmodel_post_init_for_load(
 ):
     """Finish a native GPTQModel load after Transformers assigned checkpoint tensors."""
 
+    from ..models.loader import _setup_rotation_online_had
     from .model import gptqmodel_post_init, hf_convert_gptq_v1_to_v2_format
 
     qcfg = context.quantize_config
@@ -321,9 +367,16 @@ def hf_gptqmodel_post_init_for_load(
         )
         hf_quantization_config.pack_dtype = str(qcfg.pack_dtype).removeprefix("torch.")
 
-    return gptqmodel_post_init(
+    model = gptqmodel_post_init(
         model,
         use_act_order=qcfg.desc_act,
         quantize_config=qcfg,
         max_input_length=max_input_length,
     )
+
+    # Rotated checkpoints fuse an orthogonal Q and an exact Hadamard H into the
+    # weights; the H has to be re-applied to activations at inference. Without
+    # this the rotated weights consume untransformed activations and produce
+    # silently wrong outputs, so mirror the normal loader's post-init step.
+    _setup_rotation_online_had(model, qcfg.rotation)
+    return model
