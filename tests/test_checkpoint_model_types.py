@@ -38,7 +38,7 @@ def test_supported_architectures_pass_the_gate(model_type):
 
 
 def test_qwen2_is_supported():
-    """Qwen2.5 tie_word_embeddings models checkpoint correctly - see the PR."""
+    """Gate only: real tied/untied recovery lives in test_checkpoint_quantization.py."""
     assert "qwen2" in CHECKPOINT_MODEL_TYPES
     validate_checkpoint_support(_model("qwen2"))
 
