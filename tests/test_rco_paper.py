@@ -29,6 +29,34 @@ allocate = script('rco_allocate')
 materialize = script('rco_materialize')
 
 
+@pytest.mark.parametrize(
+    'requested,backend,sequence_length,batch_tokens,expected',
+    [
+        (None, 'torch', 128, 2048, 4),
+        (None, 'torch', 1, 2048, 4),
+        (None, 'mlx', 128, 2048, 16),
+        (None, 'mlx', 512, 2048, 4),
+        (None, 'mlx', 2048, 2048, 1),
+    ],
+)
+def test_batch_size_defaults_follow_the_backend(
+    requested, backend, sequence_length, batch_tokens, expected
+):
+    assert (
+        allocate.resolve_batch_size(requested, backend, sequence_length, batch_tokens)
+        == expected
+    )
+
+
+def test_explicit_batch_size_overrides_the_mlx_token_budget():
+    assert allocate.resolve_batch_size(3, 'mlx', 128, 2048) == 3
+    assert allocate.resolve_batch_size(64, 'mlx', 128, 2048) == 64
+
+
+def test_mlx_batch_size_never_drops_below_one_sequence():
+    assert allocate.resolve_batch_size(None, 'mlx', 100_000, 2048) == 1
+
+
 def tiny_model(dtype=torch.float64, hidden=16, layers=1):
     torch.manual_seed(13)
     config = LlamaConfig(vocab_size=32, hidden_size=hidden, intermediate_size=2*hidden,
