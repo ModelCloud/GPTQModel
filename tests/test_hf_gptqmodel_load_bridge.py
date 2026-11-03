@@ -393,3 +393,61 @@ def test_hf_load_bridge_still_rejects_incompatible_activation_backend():
 
     with pytest.raises(ValueError, match="requires backend"):
         _resolve_backend_for_checkpoint(qcfg, BACKEND.GPTQ_TRITON)
+
+
+def test_hf_load_post_init_opts_paged_attention_out_of_cuda_graphs(monkeypatch):
+    """Paged Flash Attention is not CUDA-graph capture safe.
+
+    The normal loader disables graph capture for paged models so
+    `generate_batch` / `init_continuous_batching` work without a caller-side
+    monkey patch. The bridge must do the same after loading.
+    """
+
+    from transformers import ContinuousBatchingConfig, PretrainedConfig
+
+    qcfg = QuantizeConfig(bits=4, group_size=128)
+    context = HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=TorchLinear)
+
+    model = torch.nn.Module()
+    model.config = PretrainedConfig()
+    model.config._attn_implementation = "flash_attention_2|paged"
+    model.model = torch.nn.Module()
+    model.quantize_config = qcfg
+
+    import gptqmodel.utils.model as model_utils
+
+    monkeypatch.setattr(
+        model_utils, "hf_convert_gptq_v1_to_v2_format", lambda model, **kwargs: (model, False)
+    )
+    monkeypatch.setattr(model_utils, "gptqmodel_post_init", lambda model, **kwargs: model)
+
+    hf_gptqmodel_post_init_for_load(model, context)
+
+    cb_config = model.generation_config.continuous_batching_config
+    assert isinstance(cb_config, ContinuousBatchingConfig)
+    assert cb_config.use_cuda_graph == (False, False)
+
+
+def test_hf_load_post_init_leaves_non_paged_attention_untouched(monkeypatch):
+    """A non-paged model must not gain a continuous-batching config."""
+
+    from transformers import PretrainedConfig
+
+    qcfg = QuantizeConfig(bits=4, group_size=128)
+    context = HFGPTQModelLoadContext(quantize_config=qcfg, quant_linear=TorchLinear)
+
+    model = torch.nn.Module()
+    model.config = PretrainedConfig()
+    model.config._attn_implementation = "sdpa"
+    model.quantize_config = qcfg
+
+    import gptqmodel.utils.model as model_utils
+
+    monkeypatch.setattr(
+        model_utils, "hf_convert_gptq_v1_to_v2_format", lambda model, **kwargs: (model, False)
+    )
+    monkeypatch.setattr(model_utils, "gptqmodel_post_init", lambda model, **kwargs: model)
+
+    hf_gptqmodel_post_init_for_load(model, context)
+
+    assert getattr(model, "generation_config", None) is None

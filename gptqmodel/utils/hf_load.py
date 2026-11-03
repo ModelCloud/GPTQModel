@@ -343,7 +343,7 @@ def hf_gptqmodel_post_init_for_load(
 ):
     """Finish a native GPTQModel load after Transformers assigned checkpoint tensors."""
 
-    from ..models.loader import _setup_rotation_online_had
+    from ..models.loader import _set_paged_attention_safe_cuda_graphs, _setup_rotation_online_had
     from .model import gptqmodel_post_init, hf_convert_gptq_v1_to_v2_format
 
     qcfg = context.quantize_config
@@ -379,4 +379,9 @@ def hf_gptqmodel_post_init_for_load(
     # this the rotated weights consume untransformed activations and produce
     # silently wrong outputs, so mirror the normal loader's post-init step.
     _setup_rotation_online_had(model, qcfg.rotation)
+
+    # Paged Flash Attention is not CUDA-graph capture safe; the normal loader
+    # opts paged models out of graph capture so ``generate_batch`` /
+    # ``init_continuous_batching`` work without a caller-side monkey patch.
+    _set_paged_attention_safe_cuda_graphs(model)
     return model
