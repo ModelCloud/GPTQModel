@@ -81,6 +81,9 @@ def _gguf_q2_0_kernel():
     )
 
 
+_Q5_K_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_q5_k_kernel():
     import mlx.core as mx
@@ -90,27 +93,53 @@ def _gguf_q5_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            threadgroup float minima[8];
-            threadgroup float scales[8];
-            threadgroup uint scale_codes[8];
-            threadgroup uint min_codes[8];
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
-            float scale = 0.0f;
-            float minimum = 0.0f;
-            if (lane < 8) {
-                float low = float(weights[block * 256 + lane * 32]);
-                float high = low;
-                for (uint k = 1; k < 32; ++k) {
-                    float value = float(
-                        weights[block * 256 + lane * 32 + k]);
-                    low = metal::min(low, value);
-                    high = metal::max(high, value);
-                }
-                minimum = metal::max(-low, 0.0f);
-                scale = (high + minimum) / 31.0f;
-                minima[lane] = minimum;
-                scales[lane] = scale;
+            threadgroup float values[uint(WARPS) * 256u];
+            threadgroup float minima[uint(WARPS) * 8u];
+            threadgroup float scales[uint(WARPS) * 8u];
+            threadgroup uint scale_codes[uint(WARPS) * 8u];
+            threadgroup uint min_codes[uint(WARPS) * 8u];
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint slot = warp * 8u;
+            uint values_offset = warp * 256u;
+            uint weight_offset = block * 256;
+            // Read the block once, coalesced: every lane takes one element of
+            // each 32-element sub-block. Staging it in shared memory lets the
+            // min/max pass read four lanes per sub-block and the packing pass
+            // read lane `lane` of each sub-block, instead of the strided
+            // eight-lane scan this kernel used to issue from global memory.
+            #pragma unroll
+            for (uint group = 0; group < 8; ++group) {
+                values[values_offset + group * 32 + lane] =
+                    float(weights[weight_offset + group * 32 + lane]);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+            // Four lanes per sub-block, eight elements each, so every lane
+            // participates and the serial scan is only eight steps deep.
+            uint group = lane >> 2;
+            uint part = lane & 3u;
+            uint start = values_offset + group * 32 + part * 8;
+            float low = values[start];
+            float high = low;
+            #pragma unroll
+            for (uint k = 1; k < 8; ++k) {
+                float value = values[start + k];
+                low = metal::min(low, value);
+                high = metal::max(high, value);
+            }
+            low = metal::min(low, simd_shuffle_xor(low, 1u));
+            high = metal::max(high, simd_shuffle_xor(high, 1u));
+            low = metal::min(low, simd_shuffle_xor(low, 2u));
+            high = metal::max(high, simd_shuffle_xor(high, 2u));
+            float minimum = metal::max(-low, 0.0f);
+            float scale = (high + minimum) / 31.0f;
+            if (part == 0) {
+                minima[slot + group] = minimum;
+                scales[slot + group] = scale;
             }
             float max_scale = simd_max(scale);
             float max_minimum = simd_max(minimum);
@@ -126,43 +155,50 @@ def _gguf_q5_k_kernel():
                 packed[offset + 3] = uchar(dmin >> 8);
             }
             if (lane < 8) {
-                scale_codes[lane] = base > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(scales[lane] / base)), 0, 63))
-                    : 0;
-                min_codes[lane] = min_base > 0.0f
+                scale_codes[slot + lane] = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(minima[lane] / min_base)), 0, 63))
+                        int(metal::rint(scales[slot + lane] / base)), 0, 63))
+                    : 0;
+                min_codes[slot + lane] = min_base > 0.0f
+                    ? uint(metal::clamp(
+                        int(metal::rint(minima[slot + lane] / min_base)), 0, 63))
                     : 0;
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (lane < 4) {
                 packed[offset + 4 + lane] = uchar(
-                    (scale_codes[lane] & 63) | ((scale_codes[lane + 4] & 48) << 2));
+                    (scale_codes[slot + lane] & 63)
+                    | ((scale_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 8 + lane] = uchar(
-                    (min_codes[lane] & 63) | ((min_codes[lane + 4] & 48) << 2));
+                    (min_codes[slot + lane] & 63)
+                    | ((min_codes[slot + lane + 4] & 48) << 2));
                 packed[offset + 12 + lane] = uchar(
-                    (scale_codes[lane + 4] & 15) | ((min_codes[lane + 4] & 15) << 4));
+                    (scale_codes[slot + lane + 4] & 15)
+                    | ((min_codes[slot + lane + 4] & 15) << 4));
             }
             uchar high_bits = 0;
-            for (uint group = 0; group < 8; group += 2) {
-                float step0 = base * float(scale_codes[group]);
-                float step1 = base * float(scale_codes[group + 1]);
-                float bias0 = min_base * float(min_codes[group]);
-                float bias1 = min_base * float(min_codes[group + 1]);
-                float shifted0 = float(
-                    weights[block * 256 + group * 32 + lane]) + bias0;
-                float shifted1 = float(weights[
-                    block * 256 + (group + 1) * 32 + lane]) + bias1;
+            #pragma unroll
+            for (uint pair = 0; pair < 8; pair += 2) {
+                float step0 = base * float(scale_codes[slot + pair]);
+                float step1 = base * float(scale_codes[slot + pair + 1]);
+                float bias0 = min_base * float(min_codes[slot + pair]);
+                float bias1 = min_base * float(min_codes[slot + pair + 1]);
+                float shifted0 =
+                    values[values_offset + pair * 32 + lane] + bias0;
+                float shifted1 =
+                    values[values_offset + (pair + 1) * 32 + lane] + bias1;
                 uint code0 = step0 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted0 / step0)), 0, 31))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted0 / step0)), 0, 31))
                     : 0;
                 uint code1 = step1 > 0.0f
-                    ? uint(metal::clamp(int(metal::rint(shifted1 / step1)), 0, 31))
+                    ? uint(metal::clamp(
+                        int(metal::rint(shifted1 / step1)), 0, 31))
                     : 0;
                 high_bits |= uchar(
-                    ((code0 >> 4) & 1) << group
-                    | ((code1 >> 4) & 1) << (group + 1));
-                packed[offset + 48 + group * 16 + lane] = uchar(
+                    ((code0 >> 4) & 1) << pair
+                    | ((code1 >> 4) & 1) << (pair + 1));
+                packed[offset + 48 + pair * 16 + lane] = uchar(
                     (code0 & 15) | ((code1 & 15) << 4));
             }
             packed[offset + 16 + lane] = high_bits;
@@ -939,13 +975,14 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         launch = _packed_warp_launch(blocks, _Q6_K_WARPS)
     elif normalized.startswith("Q4_K"):
         launch = _packed_warp_launch(blocks, _Q4_K_WARPS)
+    elif normalized.startswith("Q5_K"):
+        launch = _packed_warp_launch(blocks, _Q5_K_WARPS)
     elif normalized == "TQ2_0" and blocks >= 65536:
         launch = _packed_warp_launch(blocks, _TQ2_0_WARPS)
     else:
         launch = (
             {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-            if normalized.startswith("Q5_K")
-            or (normalized == "TQ1_0" and blocks >= 65536)
+            if (normalized == "TQ1_0" and blocks >= 65536)
             else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
         )
     direct_input = (
