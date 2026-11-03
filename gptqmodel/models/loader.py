@@ -1666,22 +1666,21 @@ def ModelLoader(cls):
             return instance
 
         if format_code == FORMAT.MARLIN:
-            # CUDA requires the matching Marlin kernel; MLX transcodes AWQ/GPTQ
-            # source packing into the native Metal layout during model loading.
-            expected_marlin_backend = BACKEND.AWQ_MARLIN if qcfg.quant_method == METHOD.AWQ else BACKEND.GPTQ_MARLIN
-            expected_marlin_backends = [expected_marlin_backend]
+            # CUDA uses the shared Marlin backend and lets the checkpoint
+            # method/format route to the GPTQ or AWQ sub-kernel. MLX transcodes
+            # AWQ/GPTQ source packing into the native Metal layout during load.
             if backend == BACKEND.MLX:
                 pass
-            elif backend not in expected_marlin_backends and backend != BACKEND.AUTO:
+            elif backend not in (BACKEND.MARLIN, BACKEND.AUTO):
                 raise TypeError(
-                    f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.{expected_marlin_backend.name}: actual = `{backend}`."
+                    f"FORMAT.MARLIN requires BACKEND.AUTO or BACKEND.MARLIN: actual = `{backend}`."
                 )
             else:
-                backend = expected_marlin_backend
+                backend = BACKEND.MARLIN
 
         # marlin_compatible = False if backend == BACKEND.IPEX else _validate_marlin_device_support()
         # check for marlin compat for cuda device only
-        # if backend not in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and device == DEVICE.CUDA:
+        # if backend != BACKEND.MARLIN and device == DEVICE.CUDA:
         #     unsupported = _validate_marlin_compatibility(qcfg)
         #     if unsupported is None and marlin_compatible:
         #         logger.info(
@@ -2177,25 +2176,23 @@ def ModelLoader(cls):
 
                     qcfg.runtime_format = FORMAT.GPTQ_V2
 
-        if backend in (BACKEND.GPTQ_MACHETE, BACKEND.AWQ_MACHETE):
+        if backend == BACKEND.MACHETE:
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Machete is currently not supported."
                 )
 
-        if backend in [BACKEND.GPTQ_MARLIN, BACKEND.AWQ_MARLIN] and (
+        if backend == BACKEND.MARLIN and (
                 preload_qlinear_kernel == ExllamaV2Linear or format_code == FORMAT.MARLIN):
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Marlin is currently not supported."
                 )
-            # GPTQ Marlin and AWQ Marlin support fp16 and bf16 compute on Ampere+.
-            if backend == BACKEND.GPTQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
+            # Both Marlin sub-kernels support fp16 and bf16 compute on Ampere+.
+            if dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
-            if backend == BACKEND.AWQ_MARLIN and dtype not in (torch.float16, torch.bfloat16):
-                raise ValueError("AWQ Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
-        if backend in [BACKEND.GPTQ_SWORDFISH, BACKEND.AWQ_SWORDFISH, BACKEND.SWORDFISH]:
+        if backend == BACKEND.SWORDFISH:
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Swordfish is currently not supported."
@@ -2223,8 +2220,7 @@ def ModelLoader(cls):
         # If we use marlin or bitblas to load the quantized model, the model is already a converted model,
         # and we no longer need to call load_checkpoint_in_model()
         if load_checkpoint_in_model and backend not in [
-            BACKEND.GPTQ_MACHETE,
-            BACKEND.AWQ_MACHETE,
+            BACKEND.MACHETE,
             BACKEND.GPTQ_BITBLAS,
             BACKEND.AWQ_BITBLAS,
         ]:

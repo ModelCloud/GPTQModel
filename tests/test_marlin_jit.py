@@ -341,11 +341,11 @@ def test_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
         "dtype": torch.float16,
     }
 
-    with pytest.raises(NotImplementedError, match="request GPTQ_MARLIN explicitly"):
+    with pytest.raises(NotImplementedError, match="request BACKEND.MARLIN explicitly"):
         marlin_qlinear_module.MarlinLinear(**kwargs, backend=BACKEND.AUTO)
 
     explicit = marlin_qlinear_module.MarlinLinear(
-        **kwargs, backend=BACKEND.GPTQ_MARLIN
+        **kwargs, backend=BACKEND.MARLIN
     )
     assert explicit.in_features == 288
     assert explicit.out_features == 200
@@ -450,13 +450,13 @@ def test_awq_marlin_auto_selection_keeps_tile_padding_opt_in(monkeypatch):
         "dtype": torch.float16,
     }
 
-    with pytest.raises(NotImplementedError, match="request AWQ_MARLIN explicitly"):
+    with pytest.raises(NotImplementedError, match="request BACKEND.MARLIN explicitly"):
         marlin_awq_qlinear_module.AwqMarlinLinear(
             **kwargs, backend=BACKEND.AUTO
         )
 
     explicit = marlin_awq_qlinear_module.AwqMarlinLinear(
-        **kwargs, backend=BACKEND.AWQ_MARLIN
+        **kwargs, backend=BACKEND.MARLIN
     )
     assert explicit.in_features == 288
     assert explicit.out_features == 200

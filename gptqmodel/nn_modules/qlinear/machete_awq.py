@@ -74,7 +74,10 @@ def _replace_registered_tensor(
 
 
 class AwqMacheteLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_MACHETE]
+    # AWQ sub-kernel of the shared Machete backend. ``BACKEND.MACHETE`` plus
+    # the checkpoint method/format selects this class; no separate AWQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
     SUPPORTS_METHODS = [METHOD.AWQ]
     SUPPORTS_FORMATS = {FORMAT.GEMM: 100, FORMAT.MARLIN: 100}
     SUPPORTS_BITS = [4, 8]
@@ -128,7 +131,7 @@ class AwqMacheteLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.AWQ_MACHETE),
+            backend=kwargs.pop("backend", BACKEND.MACHETE),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs)

@@ -563,7 +563,7 @@ def test_transient_kernel_import_failure_is_retried():
             importlib.import_module = flaky_import_module
             try:
                 try:
-                    importer.get_kernel_for_backend(BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ)
+                    importer.get_kernel_for_backend(BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ)
                 except ValueError:
                     pass
                 else:
@@ -575,7 +575,7 @@ def test_transient_kernel_import_failure_is_retried():
             # without clearing any cache.
             broken[0] = False
             kernel = importer.get_kernel_for_backend(
-                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
             assert kernel.__name__ == "SwordfishLinear", kernel
             """
@@ -616,7 +616,7 @@ def test_recovered_kernel_import_refreshes_cached_maps():
 
             importlib.import_module = flaky_import_module
             try:
-                assert BACKEND.GPTQ_SWORDFISH not in swordfish_backends(), (
+                assert BACKEND.SWORDFISH not in swordfish_backends(), (
                     "the broken import unexpectedly registered the kernel"
                 )
             finally:
@@ -628,9 +628,9 @@ def test_recovered_kernel_import_refreshes_cached_maps():
             importer._QLINEAR_RETRY_AT["swordfish"] = 0.0
 
             # Reading the maps alone must retry the failed import and rebuild.
-            assert BACKEND.GPTQ_SWORDFISH in swordfish_backends(), swordfish_backends()
+            assert BACKEND.SWORDFISH in swordfish_backends(), swordfish_backends()
             auto, _ = importer.build_kernel_support_maps()
-            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH].__name__ == (
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.SWORDFISH].__name__ == (
                 "SwordfishLinear"
             )
             """
@@ -1047,20 +1047,20 @@ def test_recovery_through_discovery_refreshes_maps_without_cache_clear():
             importlib.import_module = flaky_import_module
             try:
                 _, supports = importer.build_kernel_support_maps()
-                assert BACKEND.GPTQ_SWORDFISH not in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, [])
+                assert BACKEND.SWORDFISH not in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, [])
             finally:
                 importlib.import_module = real_import_module
 
             broken[0] = False
             # Recover through the OTHER public entry point, not the map accessor.
             kernel = importer.get_kernel_for_backend(
-                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
             assert kernel.__name__ == "SwordfishLinear", kernel
 
             auto, supports = importer.build_kernel_support_maps()
-            assert BACKEND.GPTQ_SWORDFISH in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, []), supports
-            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH] is kernel
+            assert BACKEND.SWORDFISH in supports.get(METHOD.GPTQ, {}).get(FORMAT.GPTQ, []), supports
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.SWORDFISH] is kernel
             """
         )
     )
@@ -1228,12 +1228,12 @@ def test_retryable_failure_recovery_is_never_permanently_blocked():
             broken[0] = False
             # An explicit lookup bypasses the backoff and recovers immediately.
             kernel = importer.get_kernel_for_backend(
-                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
             auto, supports = importer.build_kernel_support_maps()
             assert kernel.__name__ == "SwordfishLinear", kernel
-            assert BACKEND.GPTQ_SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
-            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.GPTQ_SWORDFISH] is kernel
+            assert BACKEND.SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
+            assert auto[METHOD.GPTQ][FORMAT.GPTQ][BACKEND.SWORDFISH] is kernel
             """
         )
     )
@@ -1447,7 +1447,7 @@ def test_explicit_lookup_imports_a_pending_failure_once():
             try:
                 try:
                     importer.get_kernel_for_backend(
-                        BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                        BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
                     )
                 except ValueError:
                     pass
@@ -1495,7 +1495,7 @@ def test_blocked_module_entry_is_retried_not_skipped():
             try:
                 try:
                     importer.get_kernel_for_backend(
-                        BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                        BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
                     )
                 except ValueError:
                     pass
@@ -1508,7 +1508,7 @@ def test_blocked_module_entry_is_retried_not_skipped():
 
             # Removing the block must make the kernel discoverable again.
             kernel = importer.get_kernel_for_backend(
-                BACKEND.GPTQ_SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
+                BACKEND.SWORDFISH, METHOD.GPTQ, FORMAT.GPTQ
             )
             assert kernel.__name__ == "SwordfishLinear", kernel
             """
@@ -1555,7 +1555,7 @@ def test_map_snapshot_is_taken_after_the_recovery_pass():
 
             assert calls["n"] == 2, calls
             assert "swordfish" in importer._BUILT_MODULES
-            assert BACKEND.GPTQ_SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
+            assert BACKEND.SWORDFISH in supports[METHOD.GPTQ][FORMAT.GPTQ]
             # The snapshot matches the map, so the next lookup must reuse it.
             assert importer.build_kernel_support_maps()[0] is auto
             """
