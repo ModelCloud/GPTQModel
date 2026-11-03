@@ -170,6 +170,9 @@ def _gguf_q5_k_kernel():
     )
 
 
+_Q6_K_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_q6_k_kernel():
     import mlx.core as mx
@@ -179,10 +182,26 @@ def _gguf_q6_k_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            threadgroup float scales[16];
-            threadgroup uint scale_codes[16];
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            threadgroup float scales[uint(WARPS) * 16u];
+            threadgroup uint scale_codes[uint(WARPS) * 16u];
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint scale_offset = warp * 16u;
+            // Cache this lane's eight weights for the block in registers so the
+            // packing pass below does not issue a second stream of global reads.
+            float own[8];
+            #pragma unroll
+            for (uint segment = 0; segment < 2; ++segment) {
+                #pragma unroll
+                for (uint value_lane = 0; value_lane < 4; ++value_lane) {
+                    own[segment * 4 + value_lane] = float(weights[
+                        block * 256 + segment * 128 + value_lane * 32 + lane]);
+                }
+            }
             float scale = 0.0f;
             if (lane < 16) {
                 float maximum = 0.0f;
@@ -192,7 +211,7 @@ def _gguf_q6_k_kernel():
                             weights[block * 256 + lane * 16 + k])));
                 }
                 scale = maximum / 31.0f;
-                scales[lane] = scale;
+                scales[scale_offset + lane] = scale;
             }
             float largest_scale = simd_max(scale);
             float base = largest_scale / 127.0f;
@@ -200,9 +219,10 @@ def _gguf_q6_k_kernel():
             if (lane < 16) {
                 uint code = base > 0.0f
                     ? uint(metal::clamp(
-                        int(metal::rint(scales[lane] / base)), 0, 127))
+                        int(metal::rint(scales[scale_offset + lane] / base)),
+                        0, 127))
                     : 0;
-                scale_codes[lane] = code;
+                scale_codes[scale_offset + lane] = code;
                 packed[offset + 192 + lane] = uchar(code);
             }
             if (lane == 0) {
@@ -216,10 +236,10 @@ def _gguf_q6_k_kernel():
                 for (uint value_lane = 0; value_lane < 4; ++value_lane) {
                     uint index = segment * 128 + value_lane * 32 + lane;
                     uint group = index / 16;
-                    float step = base * float(scale_codes[group]);
+                    float step = base * float(scale_codes[scale_offset + group]);
                     int code = step > 0.0f
                         ? metal::clamp(int(metal::rint(
-                            float(weights[block * 256 + index]) / step)), -32, 31)
+                            own[segment * 4 + value_lane] / step)), -32, 31)
                         : 0;
                     raw[value_lane] = uint(code + 32);
                 }
@@ -847,13 +867,24 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
         kernel, bytes_per_block = _gguf_q4_0_kernel(), 18
     else:
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
-    launch = (
-        {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
-        if normalized.startswith(("Q4_K", "Q5_K", "Q6_K"))
-        or (normalized == "TQ1_0" and blocks >= 65536)
-        or (normalized == "TQ2_0" and blocks >= 65536)
-        else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
-    )
+    if normalized == "Q6_K":
+        # One warp still owns a 256-element block, but pack several warps into
+        # a threadgroup so each SM gets enough resident warps to hide the
+        # latency of a single dependent 512-byte read per block.
+        groups = (blocks + _Q6_K_WARPS - 1) // _Q6_K_WARPS
+        launch = {
+            "grid": (32 * _Q6_K_WARPS, groups, 1),
+            "threadgroup": (32 * _Q6_K_WARPS, 1, 1),
+            "template": [("WARPS", _Q6_K_WARPS), ("BLOCKS", blocks)],
+        }
+    else:
+        launch = (
+            {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
+            if normalized.startswith(("Q4_K", "Q5_K"))
+            or (normalized == "TQ1_0" and blocks >= 65536)
+            or (normalized == "TQ2_0" and blocks >= 65536)
+            else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
+        )
     direct_input = (
         normalized.startswith(("Q1_0", "Q4_K", "Q5_K"))
         or normalized in (
