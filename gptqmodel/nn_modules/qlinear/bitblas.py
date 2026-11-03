@@ -368,9 +368,10 @@ def unpack_gptq_qzeros(qzeros: torch.Tensor, bits: int, is_gptq_v2: bool = False
         requires_grad=False,
     )
 
-    # Mask with the full field width. A hardcoded 0xF is only correct for
-    # bits <= 4; at bits=8 it silently drops the high nibble, so a zero point of
-    # 127 unpacks as 15 and every weight is dequantized against a wrong offset.
+    # Mask with the full field width. A hardcoded 0xF is only correct at
+    # bits == 4: at 8 bits it drops the high nibble (127 unpacks as 15), and at
+    # 2 bits it keeps two bits of the neighbouring field (0,1,2,3 unpacks as
+    # 4,9,14,3). Both are silent - the result is still a small integer.
     mask = (1 << bits) - 1
     for col in range(unpacked_zeros.shape[1]):
         i = col % elems_per_int32

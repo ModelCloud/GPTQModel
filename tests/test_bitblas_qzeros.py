@@ -28,23 +28,45 @@ def _pack_zeros(zeros: torch.Tensor, bits: int) -> torch.Tensor:
     return packed
 
 
-@pytest.mark.parametrize("bits", BITBLAS_SUPPORTED_BITS)
-def test_v2_unpack_round_trips_every_value(bits):
-    """v2 checkpoints store the logical zero point directly."""
+def _all_field_values(bits: int) -> torch.Tensor:
+    """Every stored value for this width, padded to whole int32 words."""
     per_word = 32 // bits
-    values = (torch.arange(2 * per_word) % (1 << bits)).to(torch.int32).reshape(1, -1)
+    span = 1 << bits
+    values = torch.arange(span, dtype=torch.int32).repeat(per_word)
+    assert values.numel() % per_word == 0
+    return values.reshape(1, -1)
+
+
+@pytest.mark.parametrize("bits", BITBLAS_SUPPORTED_BITS)
+def test_v2_unpack_round_trips_every_stored_value(bits):
+    """v2 checkpoints store the logical zero point directly."""
+    values = _all_field_values(bits)
     unpacked = unpack_gptq_qzeros(_pack_zeros(values, bits), bits, is_gptq_v2=True)
     assert torch.equal(unpacked.to(torch.int32), values)
 
 
 @pytest.mark.parametrize("bits", BITBLAS_SUPPORTED_BITS)
-def test_v1_unpack_restores_the_offset(bits):
-    """v1 checkpoints store zero - 1, so unpacking has to add one back."""
+def test_v1_unpack_restores_the_offset_for_every_stored_value(bits):
+    """v1 checkpoints store zero - 1, so unpacking has to add one back.
+
+    Stored 255 is the top of the 8-bit range and yields 256; the field cannot
+    represent that as a zero point, and the caller masks it afterwards. The
+    point of covering it is that the unpacker must not wrap it to 0.
+    """
+    stored = _all_field_values(bits)
+    unpacked = unpack_gptq_qzeros(_pack_zeros(stored, bits), bits, is_gptq_v2=False)
+    assert torch.equal(unpacked.to(torch.int32), stored + 1)
+
+
+@pytest.mark.parametrize("bits", BITBLAS_SUPPORTED_BITS)
+def test_high_bit_and_max_code_boundaries(bits):
+    """The two values a short mask truncates or borrows from the next field."""
     per_word = 32 // bits
-    span = (1 << bits) - 1
-    values = ((torch.arange(2 * per_word) % span) + 1).to(torch.int32).reshape(1, -1)
-    unpacked = unpack_gptq_qzeros(_pack_zeros(values - 1, bits), bits, is_gptq_v2=False)
-    assert torch.equal(unpacked.to(torch.int32), values)
+    span = 1 << bits
+    boundaries = torch.tensor([[span // 2, span - 1] * (per_word // 2)], dtype=torch.int32)
+    assert boundaries.numel() % per_word == 0
+    unpacked = unpack_gptq_qzeros(_pack_zeros(boundaries, bits), bits, is_gptq_v2=True)
+    assert torch.equal(unpacked.to(torch.int32), boundaries)
 
 
 def test_8bit_zero_point_keeps_its_high_nibble():
@@ -52,3 +74,11 @@ def test_8bit_zero_point_keeps_its_high_nibble():
     zeros = torch.tensor([[127, 200, 130, 255]], dtype=torch.int32)
     unpacked = unpack_gptq_qzeros(_pack_zeros(zeros, 8), 8, is_gptq_v2=True)
     assert unpacked.reshape(-1).tolist() == [127, 200, 130, 255]
+
+
+def test_2bit_zero_point_does_not_borrow_from_the_next_field():
+    """Reproduces the other half of the same bug: 0,1,2,3 used to unpack as
+    4,9,14,3 because 0xF kept the next field's low two bits."""
+    values = torch.tensor([[0, 1, 2, 3] * 4], dtype=torch.int32)
+    unpacked = unpack_gptq_qzeros(_pack_zeros(values, 2), 2, is_gptq_v2=True)
+    assert unpacked.reshape(-1).tolist() == values.reshape(-1).tolist()
