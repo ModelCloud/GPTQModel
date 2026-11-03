@@ -563,10 +563,12 @@ that package tree is importable and otherwise falls back to Torch. Select a
 backend explicitly with `--backend mlx` or `--backend torch`; explicit MLX
 selection fails rather than silently changing backends. `assignment.json`
 records the backend that actually ran the search. The MLX path currently
-supports Llama models; its teacher KL, candidate interpolation,
-straight-through Gumbel gradients, budget projection, retraction, and Adam
-recurrence all execute in MLX on Metal. The Torch path remains available on
-CUDA and other platforms and is the implementation oracle.
+supports Llama models; its candidate interpolation, teacher KL,
+straight-through Gumbel gradients, budget DP, Adam recurrence, and momentum
+transport run in MLX on Metal. The rank-one retraction solves a scalar
+bisection on host NumPy after one transfer of the small control tensors; this
+avoids synchronizing Metal for every bisection probe. The Torch path remains
+available on CUDA and other platforms and is the implementation oracle.
 
 `--teacher-cache device` is the default. It retains detached dense-teacher
 hidden states in unified memory during the search; `--teacher-cache disk`
@@ -603,12 +605,18 @@ one warmup, and five timed repetitions:
 
 | Search backend | Median | Seconds/step |
 | --- | ---: | ---: |
-| Torch 2.15.0, MPS, BF16 | 0.2511 s | 0.0837 |
-| MLX 0.32.4, Metal, model-native BF16 | **0.0966 s** | **0.0322** |
+| Torch 2.15.0, MPS, BF16 | 0.2716 s | 0.0905 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.0726 s** | **0.0242** |
 
-MLX was 2.60x faster for this search-shaped workload. This is a tiny-model
+MLX was 3.74x faster for this search-shaped workload. This is a tiny-model
 component benchmark, not an end-to-end quantization speedup or a claim about
-all model sizes. The measured upstream source checkouts were MLX main
+all model sizes. A final optimization moves only the scalar retraction
+bisection to host NumPy after one transfer of the small control tensors. The
+model replay, teacher KL, Gumbel gradient, and optimizer remain in MLX. This
+avoids a Metal synchronization for every bisection probe; the independent
+Torch retraction test requires the same budget and retracted logits. Compiling
+the full MLX value-and-gradient step was also measured, but was slower than the
+eager recurrence and is not enabled. The measured upstream source checkouts were MLX main
 `c69303b00f5f61860436e832f23fa8c34b96f93a` and MLX-LM main
 `736ab0d8c1d0edc79c3d798044fe6904e2fa23be`. An official MLX
 `frontend-macOS-ARM64-py3.13` artifact reporting 0.32.5 was tested but failed
@@ -619,9 +627,21 @@ compiler is absent.
 
 The ANE can execute a deliberately simple Core ML inference graph when forced
 onto `MLNeuralEngineComputeDevice`, but Core ML does not expose autograd for the
-RCO search graph. A synthetic ANE-alone, MPS-alone, serial, and threaded probe
-measured 0.000553 s, 0.003427 s, 0.004123 s, and 0.004476 s respectively. The
-threaded GPU/ANE version ran at 0.921x the serial throughput, so allocation
-does not split work across GPU and ANE. ANE offload remains an inference-only
-avenue that would require a separate model graph and scheduler; it is not a
-missing switch in this search.
+RCO search graph. The committed `scripts/gsq_paper/bench_gpu_ane.py` probe uses
+MLX Metal for the GPU leg, forces every eligible operation onto the ANE, and
+measures ANE alone, GPU alone, serial execution, and threaded overlap. On
+2026-11-02 all 16 operation nodes selected 32 ANE cores and also reported GPU
+eligibility. ANE measured 0.001218 s, MLX Metal 0.003841 s, serial execution
+0.005107 s, and threaded overlap 0.005257 s. Overlap achieved 0.971x serial
+throughput, so allocation does not split work across GPU and ANE. The probe is
+synthetic and its GPU workload is deliberately balanced against the ANE leg;
+that makes the scheduling result useful even though it does not represent the
+RCO recurrence. ANE remains an inference-only avenue requiring a separate model
+graph and scheduler.
+
+Run the probe on the target host with:
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/bench_gpu_ane.py \
+    --json-out /tmp/gpu-ane.json
+```

@@ -75,13 +75,20 @@ def test_mlx_retraction_reaches_the_torch_budget():
         [[-0.3, 0.2, 0.1], [0.4, -0.1, 0.3], [-0.2, 0.6, -0.4]],
         dtype=mx.float32,
     )
+    # The scalar bisection runs once on host arrays after a single DLPack
+    # transfer, rather than synchronizing Metal for every candidate shift.
     shift = rco_mlx._retraction(alpha, costs, 2.65, fraction)
-    actual = float(rco_mlx._expected_cost(alpha + shift * costs, costs, fraction).item())
+    retracted = alpha + shift * costs
+    actual = float(rco_mlx._expected_cost(retracted, costs, fraction).item())
+    torch_alpha = torch.tensor(np.asarray(alpha), requires_grad=True)
     torch_cost = rco.retraction(
-        torch.tensor(np.asarray(alpha)), torch.tensor([2.0, 3.0, 4.0]),
+        torch_alpha, torch.tensor([2.0, 3.0, 4.0]),
         target=2.65, weights=torch.tensor([0.15, 0.35, 0.5])
     )
     assert actual == pytest.approx(torch_cost, abs=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(retracted), torch_alpha.detach().numpy(), rtol=2e-6, atol=1e-6
+    )
 
 
 @pytest.mark.parametrize("resident_cache", [False, True])

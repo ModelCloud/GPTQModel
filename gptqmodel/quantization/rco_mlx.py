@@ -94,20 +94,32 @@ def _adam_update(alpha, gradient, momentum, velocity, step_number, learning_rate
 
 
 def _retraction(alpha, costs, target, fraction, *, max_iter=60, tol=1e-6):
-    """Shift logits along the cost vector until the exact budget is restored."""
-    import mlx.core as mx
+    """Shift logits along the cost vector until the exact budget is restored.
+
+    The rank-one retraction converges through a scalar bisection. Keep that
+    scalar recurrence on the host in NumPy, synchronizing the small control
+    tensors once instead of synchronizing every bisection probe on Metal. The
+    updated alpha is still submitted to MLX for the model replay.
+    """
+    alpha_values = np.asarray(alpha, dtype=np.float64)
+    cost_values = np.asarray(costs, dtype=np.float64)
+    fractions = np.asarray(fraction, dtype=np.float64)
 
     def cost_at(shift):
-        return _expected_cost(alpha + mx.array(shift) * costs, costs, fraction)
+        shifted = alpha_values + float(shift) * cost_values
+        shifted -= shifted.max(axis=-1, keepdims=True)
+        probabilities = np.exp(shifted)
+        probabilities /= probabilities.sum(axis=-1, keepdims=True)
+        return float(np.sum(probabilities * cost_values, axis=-1) @ fractions)
 
-    current = float(cost_at(0.0).item())
+    current = cost_at(0.0)
     if abs(current - target) < tol:
         return 0.0
 
     low, high = -1.0, 1.0
     for _ in range(64):
-        low_cost = float(cost_at(low).item())
-        high_cost = float(cost_at(high).item())
+        low_cost = cost_at(low)
+        high_cost = cost_at(high)
         if low_cost <= target <= high_cost:
             break
         if high_cost < target:
@@ -119,10 +131,10 @@ def _retraction(alpha, costs, target, fraction, *, max_iter=60, tol=1e-6):
 
     for _ in range(max_iter):
         mid = 0.5 * (low + high)
-        if abs(float(cost_at(mid).item()) - target) < tol:
+        if abs(cost_at(mid) - target) < tol:
             low = high = mid
             break
-        if float(cost_at(mid).item()) > target:
+        if cost_at(mid) > target:
             high = mid
         else:
             low = mid
