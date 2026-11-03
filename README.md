@@ -133,11 +133,13 @@ Canonical backend names are shown below. Method-specific aliases are only accept
 | `METHOD.BITSANDBYTES` | `FORMAT.BITSANDBYTES` | `BACKEND.BITSANDBYTES` |
 | `METHOD.EXL3` | `FORMAT.EXL3` | `BACKEND.EXL3_EXLLAMA_V3`, `BACKEND.EXL3_TORCH` |
 
-Marlin and Machete are each one backend (`BACKEND.MARLIN`, `BACKEND.MACHETE`).
-The quantization method and checkpoint format select the GPTQ or AWQ sub-kernel
-automatically, so `gptq_marlin`/`awq_marlin` and `gptq_machete`/`awq_machete`
-are no longer separate backend names. The stable `hf_` packing and repacking
-APIs still accept those legacy strings and resolve them to the shared backend.
+Marlin, Machete, and Swordfish are each one backend (`BACKEND.MARLIN`,
+`BACKEND.MACHETE`, `BACKEND.SWORDFISH`). The quantization method and checkpoint
+format select the GPTQ or AWQ sub-kernel automatically, so `gptq_marlin`/
+`awq_marlin`, `gptq_machete`/`awq_machete`, and `gptq_swordfish`/
+`awq_swordfish` are no longer separate backend names. The stable `hf_` packing
+and repacking APIs still accept those legacy strings and resolve them to the
+shared backend.
 
 `BACKEND.GPTQ_TORCH_CPU_AVX512` and `BACKEND.AWQ_TORCH_CPU_AVX512` share the
 same AVX512-BF16 int4 GEMM on Linux x86-64 hosts with AVX512-BF16,

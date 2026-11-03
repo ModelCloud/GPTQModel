@@ -2192,7 +2192,7 @@ def ModelLoader(cls):
             if dtype not in (torch.float16, torch.bfloat16):
                 raise ValueError("Marlin kernel requires dtype=torch.float16 or dtype=torch.bfloat16.")
 
-        if backend in [BACKEND.GPTQ_SWORDFISH, BACKEND.AWQ_SWORDFISH, BACKEND.SWORDFISH]:
+        if backend == BACKEND.SWORDFISH:
             if is_sharded:
                 raise ValueError(
                     "Format: The loading of sharded checkpoints with Swordfish is currently not supported."

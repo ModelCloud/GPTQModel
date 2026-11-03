@@ -32,6 +32,20 @@ def test_legacy_method_qualified_machete_names_resolve_to_shared_backend():
     assert normalize_backend("awq_machete", quant_method=METHOD.AWQ) == BACKEND.MACHETE
 
 
+def test_swordfish_backend_is_method_agnostic():
+    assert normalize_backend(BACKEND.SWORDFISH, quant_method=METHOD.GPTQ) == BACKEND.SWORDFISH
+    assert normalize_backend(BACKEND.SWORDFISH, quant_method=METHOD.AWQ) == BACKEND.SWORDFISH
+
+
+def test_legacy_method_qualified_swordfish_names_resolve_to_shared_backend():
+    assert normalize_backend("gptq_swordfish") == BACKEND.SWORDFISH
+    assert normalize_backend("awq_swordfish") == BACKEND.SWORDFISH
+    assert normalize_backend("GPTQ_SWORDFISH") == BACKEND.SWORDFISH
+    assert normalize_backend("AWQ_SWORDFISH") == BACKEND.SWORDFISH
+    assert normalize_backend("gptq_swordfish", quant_method=METHOD.GPTQ) == BACKEND.SWORDFISH
+    assert normalize_backend("awq_swordfish", quant_method=METHOD.AWQ) == BACKEND.SWORDFISH
+
+
 def test_removed_mentaray_backend_names_are_rejected():
     with pytest.raises(ValueError):
         normalize_backend("mentaray", quant_method=METHOD.GPTQ)

@@ -151,9 +151,17 @@ def test_hf_public_apis_accept_legacy_method_qualified_backend_strings(monkeypat
     from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
     from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
     from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+    from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
     from gptqmodel.utils.importer import hf_select_quant_linear_v2
 
-    for kernel_cls in (MarlinLinear, AwqMarlinLinear, MacheteLinear, AwqMacheteLinear):
+    for kernel_cls in (
+        MarlinLinear,
+        AwqMarlinLinear,
+        MacheteLinear,
+        AwqMacheteLinear,
+        SwordfishLinear,
+        AwqSwordfishLinear,
+    ):
         monkeypatch.setattr(
             kernel_cls,
             "cached_validate_once",
@@ -168,6 +176,7 @@ def test_hf_public_apis_accept_legacy_method_qualified_backend_strings(monkeypat
     cases = (
         ("gptq_marlin", "awq_marlin", MarlinLinear, AwqMarlinLinear),
         ("gptq_machete", "awq_machete", MacheteLinear, AwqMacheteLinear),
+        ("gptq_swordfish", "awq_swordfish", SwordfishLinear, AwqSwordfishLinear),
     )
     for gptq_legacy, awq_legacy, gptq_kernel, awq_kernel in cases:
         gptq_cls = hf_select_quant_linear_v2(

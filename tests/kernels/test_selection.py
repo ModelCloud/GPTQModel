@@ -21,6 +21,7 @@ from gptqmodel.nn_modules.qlinear.machete_awq import AwqMacheteLinear
 from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
 from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 from gptqmodel.nn_modules.qlinear.qqq import QQQLinear
+from gptqmodel.nn_modules.qlinear.swordfish import AwqSwordfishLinear, SwordfishLinear
 from gptqmodel.nn_modules.qlinear.torch import TorchLinear, TorchQuantEmbeddings
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel import TorchAtenLinear
 from gptqmodel.nn_modules.qlinear.torch_aten_kernel_awq import TorchAtenAwqLinear
@@ -933,6 +934,109 @@ def test_legacy_machete_backend_strings_route_to_shared_kernels(monkeypatch):
 
     assert gptq_cls is MacheteLinear
     assert awq_cls is AwqMacheteLinear
+
+
+def test_swordfish_backend_routes_gptq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        SwordfishLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        SwordfishLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend=BACKEND.SWORDFISH,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is SwordfishLinear
+
+
+def test_swordfish_backend_routes_awq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        AwqSwordfishLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqSwordfishLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    qlinear_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend=BACKEND.SWORDFISH,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert qlinear_cls is AwqSwordfishLinear
+
+
+def test_legacy_swordfish_backend_strings_route_to_shared_kernels(monkeypatch):
+    monkeypatch.setattr(
+        SwordfishLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        SwordfishLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+    monkeypatch.setattr(
+        AwqSwordfishLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqSwordfishLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend="gptq_swordfish",
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend="awq_swordfish",
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is SwordfishLinear
+    assert awq_cls is AwqSwordfishLinear
 
 
 def test_torch_fused_auto_device_prefers_xpu_or_cpu(monkeypatch):
