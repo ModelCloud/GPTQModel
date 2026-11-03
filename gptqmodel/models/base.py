@@ -850,7 +850,7 @@ class BaseQModel(nn.Module):
         Each layer can have only ONE MoE module marked with :moe flag.
         For example:
         - GLM-4: "mlp:moe" -> returns "mlp"
-        - MiniMax-M2: "block_sparse_moe:moe" -> returns "block_sparse_moe"
+        - MiniMax-M2 / MiniMax-Text-01: "mlp:moe" -> returns "mlp"
 
         Returns:
             The names of MoE modules (without flags), or ``None`` when no
@@ -2083,6 +2083,7 @@ class BaseQModel(nn.Module):
             try:
                 return module_looper.loop(backend=backend, fallback=self.quantize_config.fallback)
             finally:
+                module_looper.layer_module_coverage.report(type(self).__name__)
                 # Keep the run lease until every worker has stopped accessing
                 # the attempt directory, including exceptional/stop exits.
                 if extension is not None:
@@ -2149,6 +2150,7 @@ class BaseQModel(nn.Module):
             try:
                 return module_looper.loop(backend=backend)
             finally:
+                module_looper.layer_module_coverage.report(type(self).__name__)
                 if checkpoint:
                     DEVICE_THREAD_POOL.wait()
 

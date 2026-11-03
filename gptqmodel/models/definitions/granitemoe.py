@@ -9,8 +9,7 @@ class GraniteMoeQModel(BaseQModel):
     """Quantization definition for the Transformers Granite MoE decoder.
 
     Defuser expands Granite's packed expert projections into numbered expert
-    containers. Each container exposes one ``linear`` module for the input
-    and output projection, which are the leaves targeted by this tree.
+    containers exposing ``gate_proj``/``up_proj``/``down_proj`` leaves.
     """
 
     layer_modules_strict = False
@@ -27,11 +26,8 @@ class GraniteMoeQModel(BaseQModel):
             "self_attn": ("q_proj:0", "k_proj:0", "v_proj:0", "o_proj:1"),
             "post_attention_layernorm": ("post_attention_layernorm:!",),
             "block_sparse_moe:moe:?": {
-                "input_linear": {
-                    "#": ("linear:0",),
-                },
-                "output_linear": {
-                    "#": ("linear:1",),
+                "experts": {
+                    "#": ("gate_proj:0", "up_proj:0", "down_proj:1"),
                 },
             },
         },

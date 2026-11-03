@@ -30,6 +30,7 @@ from ..looper.eora_processor import EoraProcessor
 from ..looper.gptq_processor import GPTQProcessor
 from ..looper.input_cache import InputCache
 from ..looper.loop_processor import LoopProcessor
+from ..looper.module_coverage import LayerModuleCoverageMixin, LayerModuleCoverageTracker
 from ..looper.named_module import NamedModule
 from ..models import BaseQModel
 from ..models._const import SUPPORTS_MODULE_TYPES
@@ -168,7 +169,7 @@ def io_write_performance(enabled: bool = True) -> Optional[float]:
     return _IO_WRITE_SPEED_MB
 
 
-class ModuleLooper(DeviceAssignmentState):
+class ModuleLooper(LayerModuleCoverageMixin, DeviceAssignmentState):
     """Drive the per-layer quantisation workflow over one or more devices.
 
     The looper executes work on the shared global :class:`DeviceThreadPool`
@@ -192,6 +193,7 @@ class ModuleLooper(DeviceAssignmentState):
         self.processors = processors
         self.extensions = LoopExtensions(extensions)
         self.gptq_model = model
+        self.layer_module_coverage = LayerModuleCoverageTracker()
         self.embed_quant_mode = embed_quant_config.embed_quant_mode if embed_quant_config else None
         self.embed_only = embed_quant_config.embed_only if embed_quant_config else None
 
@@ -1875,13 +1877,16 @@ class ModuleLooper(DeviceAssignmentState):
                 n = n.split(CAPTURE_ONLY_FLAG, 1)[0]
             if n in full:
                 subset[n] = full[n]
+                self.layer_module_coverage.record_hit(n, layer_index)
             elif capture_only:
                 # Obtain the CAPTURE_ONLY_FLAG Module separately
                 subset[n], _ = get_module_by_name_prefix(module, module_name=n)
-            # some modules have layer_modules that are dynamic based on config
-            # ref: deepseek v2/v3/r1
-            elif self.gptq_model.layer_modules_strict:
-                raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
+            else:
+                self.layer_module_coverage.record_miss(n, layer_index)
+                # some modules have layer_modules that are dynamic based on config
+                # ref: deepseek v2/v3/r1
+                if self.gptq_model.layer_modules_strict:
+                    raise ValueError(f"layer module item `{n}` not found in model, please check your model config.")
             if capture_only:
                 capture_only_flags[n] = True  # forward-only modules should not be finalized
         skipped_modules = []
