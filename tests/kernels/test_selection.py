@@ -331,7 +331,7 @@ class _TrainableAutoKernel:
 
 class _InferenceOnlyAutoKernel:
     SUPPORTS_DEVICES = [DEVICE.CPU]
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+    SUPPORTS_BACKENDS = [BACKEND.MARLIN]
     SUPPORTS_TRAINING = False
 
     @classmethod
@@ -350,8 +350,8 @@ def _install_auto_candidates(monkeypatch, method, fmt, candidates):
 @pytest.mark.parametrize(
     ("method", "fmt", "inference_backend", "trainable_backend"),
     (
-        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.GPTQ_MARLIN, BACKEND.GPTQ_TORCH),
-        (METHOD.AWQ, FORMAT.GEMM, BACKEND.AWQ_MARLIN, BACKEND.AWQ_TORCH),
+        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.MARLIN, BACKEND.GPTQ_TORCH),
+        (METHOD.AWQ, FORMAT.GEMM, BACKEND.MARLIN, BACKEND.AWQ_TORCH),
     ),
 )
 def test_cpu_auto_prefers_trainable_kernel_over_higher_priority_inference_kernel(
@@ -392,8 +392,8 @@ def test_cpu_auto_prefers_trainable_kernel_over_higher_priority_inference_kernel
 @pytest.mark.parametrize(
     ("method", "fmt", "inference_backend"),
     (
-        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.GPTQ_MARLIN),
-        (METHOD.AWQ, FORMAT.GEMM, BACKEND.AWQ_MARLIN),
+        (METHOD.GPTQ, FORMAT.GPTQ, BACKEND.MARLIN),
+        (METHOD.AWQ, FORMAT.GEMM, BACKEND.MARLIN),
     ),
 )
 def test_cpu_auto_keeps_inference_only_kernel_when_no_trainable_kernel(
@@ -432,7 +432,7 @@ def test_cpu_auto_multi_select_lists_trainable_kernels_first(monkeypatch):
         METHOD.GPTQ,
         FORMAT.GPTQ,
         [
-            (BACKEND.GPTQ_MARLIN, _InferenceOnlyAutoKernel),
+            (BACKEND.MARLIN, _InferenceOnlyAutoKernel),
             (BACKEND.GPTQ_TORCH, _TrainableAutoKernel),
         ],
     )
@@ -467,7 +467,7 @@ def test_cuda_auto_keeps_priority_order_for_inference_only_kernels(monkeypatch):
         METHOD.GPTQ,
         FORMAT.GPTQ,
         [
-            (BACKEND.GPTQ_MARLIN, CudaInferenceOnlyKernel),
+            (BACKEND.MARLIN, CudaInferenceOnlyKernel),
             (BACKEND.GPTQ_TORCH, CudaTrainableKernel),
         ],
     )
@@ -670,6 +670,111 @@ def test_explicit_awq_marlin_backend_selects_asymmetric_kernel(monkeypatch):
     )
 
     assert qlinear_cls is AwqMarlinLinear
+
+
+def test_marlin_backend_routes_gptq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        MarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        MarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    for fmt in (FORMAT.GPTQ, FORMAT.GPTQ_V2, FORMAT.MARLIN):
+        qlinear_cls = select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=True,
+            device=DEVICE.CUDA,
+            backend=BACKEND.MARLIN,
+            format=fmt,
+            quant_method=METHOD.GPTQ,
+            pack_dtype=torch.int32,
+        )
+
+        assert qlinear_cls is MarlinLinear
+
+
+def test_marlin_backend_routes_awq_sub_kernel_by_format(monkeypatch):
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    for fmt in (FORMAT.GEMM, FORMAT.MARLIN):
+        qlinear_cls = select_quant_linear(
+            bits=4,
+            group_size=128,
+            desc_act=False,
+            sym=False,
+            device=DEVICE.CUDA,
+            backend=BACKEND.MARLIN,
+            format=fmt,
+            quant_method=METHOD.AWQ,
+            pack_dtype=torch.int32,
+        )
+
+        assert qlinear_cls is AwqMarlinLinear
+
+
+def test_legacy_marlin_backend_strings_route_to_shared_kernels(monkeypatch):
+    monkeypatch.setattr(
+        MarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        MarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "cached_validate_once",
+        classmethod(lambda qlinear_cls: (True, None)),
+    )
+    monkeypatch.setattr(
+        AwqMarlinLinear,
+        "validate_device",
+        classmethod(lambda qlinear_cls, _device: None),
+    )
+
+    gptq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        device=DEVICE.CUDA,
+        backend="gptq_marlin",
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        pack_dtype=torch.int32,
+    )
+    awq_cls = select_quant_linear(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        device=DEVICE.CUDA,
+        backend="awq_marlin",
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+
+    assert gptq_cls is MarlinLinear
+    assert awq_cls is AwqMarlinLinear
 
 
 def test_explicit_awq_machete_backend_selects_asymmetric_kernel(monkeypatch):
@@ -1145,7 +1250,7 @@ def test_validation_cache_is_contract_and_device_sensitive():
 def test_allow_marlin_false_filters_auto_and_rejects_explicit(monkeypatch):
     class MarlinKernel:
         SUPPORTS_DEVICES = [DEVICE.CPU]
-        SUPPORTS_BACKENDS = [BACKEND.GPTQ_MARLIN]
+        SUPPORTS_BACKENDS = [BACKEND.MARLIN]
 
         @classmethod
         def validate(cls, **_kwargs):
@@ -1164,7 +1269,7 @@ def test_allow_marlin_false_filters_auto_and_rejects_explicit(monkeypatch):
         FORMAT.GPTQ,
         OrderedDict(
             [
-                (BACKEND.GPTQ_MARLIN, MarlinKernel),
+                (BACKEND.MARLIN, MarlinKernel),
                 (BACKEND.GPTQ_TORCH, FallbackKernel),
             ]
         ),
@@ -1191,7 +1296,7 @@ def test_allow_marlin_false_filters_auto_and_rejects_explicit(monkeypatch):
             desc_act=False,
             sym=True,
             device=torch.device("cpu"),
-            backend=BACKEND.GPTQ_MARLIN,
+            backend=BACKEND.MARLIN,
             format=FORMAT.GPTQ,
             quant_method=METHOD.GPTQ,
             pack_dtype=torch.int32,

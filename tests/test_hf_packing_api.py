@@ -137,11 +137,65 @@ def test_feasibility_accepts_supported_cpu_kernel():
 
 def test_feasibility_rejects_cuda_only_kernel_on_cpu():
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CPU
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CPU
     )
     # Marlin is a repack target, but not on CPU.
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CPU, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CPU, repack=True
+    )
+
+
+def test_hf_public_apis_accept_legacy_marlin_backend_strings(monkeypatch):
+    """The stable ``hf_`` APIs keep accepting the pre-refactor Marlin names."""
+    from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
+    from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
+    from gptqmodel.utils.importer import hf_select_quant_linear_v2
+
+    for kernel_cls in (MarlinLinear, AwqMarlinLinear):
+        monkeypatch.setattr(
+            kernel_cls,
+            "cached_validate_once",
+            classmethod(lambda cls: (True, None)),
+        )
+        monkeypatch.setattr(
+            kernel_cls,
+            "validate_device",
+            classmethod(lambda cls, _device: None),
+        )
+
+    gptq_cls = hf_select_quant_linear_v2(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=True,
+        format=FORMAT.GPTQ,
+        quant_method=METHOD.GPTQ,
+        backend="gptq_marlin",
+        pack=False,
+    )
+    awq_cls = hf_select_quant_linear_v2(
+        bits=4,
+        group_size=128,
+        desc_act=False,
+        sym=False,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        backend="awq_marlin",
+        pack=False,
+    )
+
+    assert gptq_cls is MarlinLinear
+    assert awq_cls is AwqMarlinLinear
+
+    # Feasibility probing resolves the same legacy strings to the shared
+    # Marlin backend instead of reporting an unknown backend.
+    assert hf_check_packing_feasibility(
+        4, 128, False, True, quant_method=METHOD.GPTQ,
+        backend="gptq_marlin", device=DEVICE.CPU, repack=True,
+    )
+    assert hf_check_packing_feasibility(
+        4, 128, False, False, format=FORMAT.GEMM, quant_method=METHOD.AWQ,
+        backend="awq_marlin", device=DEVICE.CPU, repack=True,
     )
 
 
@@ -453,7 +507,7 @@ def test_hf_repack_layer_rejects_unsupported_target():
 
     # Marlin requires CUDA, so the CPU-only target must be rejected.
     with pytest.raises(ValueError):
-        hf_repack_layer(module, BACKEND.GPTQ_MARLIN, device=DEVICE.CPU)
+        hf_repack_layer(module, BACKEND.MARLIN, device=DEVICE.CPU)
 
 
 def test_hf_repack_layer_rejects_non_quant_linear():
@@ -651,13 +705,13 @@ def test_gpu_feasibility_and_best_format():
     # Marlin has no raw-weight packer; it is a repack target that consumes
     # GPTQ-packed tensors.
     assert not hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=device
+        4, 32, False, True, backend=BACKEND.MARLIN, device=device
     )
     assert hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=device, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=device, repack=True
     )
     assert not hf_check_packing_feasibility(
-        4, 32, False, False, backend=BACKEND.GPTQ_MARLIN, device=device, repack=True
+        4, 32, False, False, backend=BACKEND.MARLIN, device=device, repack=True
     )
 
     best = hf_check_best_packing_format(4, 32, False, True, device=device)
@@ -704,7 +758,7 @@ def test_hf_repack_layer_to_marlin_matches_source():
     hf_pack_layer(source, linear, scales, None, g_idx)
     source.to(device)
 
-    target = hf_repack_layer(source, BACKEND.GPTQ_MARLIN, device=device)
+    target = hf_repack_layer(source, BACKEND.MARLIN, device=device)
 
     assert isinstance(target, MarlinLinear)
     assert target.qweight.device.type == "cuda"
@@ -786,7 +840,7 @@ def test_hf_packing_api_accepts_device_enum_and_ordinal():
 
     # DEVICE.CUDA covers every visible ordinal.
     assert hf_check_packing_feasibility(
-        4, 32, False, True, backend=BACKEND.GPTQ_MARLIN, device=DEVICE.CUDA, repack=True
+        4, 32, False, True, backend=BACKEND.MARLIN, device=DEVICE.CUDA, repack=True
     )
 
     linear, scales, _, g_idx = _make_inputs(4, group_size=32)
@@ -794,7 +848,7 @@ def test_hf_packing_api_accepts_device_enum_and_ordinal():
     hf_pack_layer(source, linear, scales, None, g_idx)
 
     # Public integer device values are accelerator ordinals.
-    target = hf_repack_layer(source, BACKEND.GPTQ_MARLIN, device=2)
+    target = hf_repack_layer(source, BACKEND.MARLIN, device=2)
 
     assert isinstance(target, MarlinLinear)
     assert target.qweight.device == torch.device("cuda:2")

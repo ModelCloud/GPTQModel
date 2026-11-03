@@ -4,9 +4,18 @@ from gptqmodel.quantization.config import METHOD
 from gptqmodel.utils.backend import BACKEND, PROFILE, normalize_backend, normalize_profile
 
 
-def test_legacy_marlin_backend_normalizes_by_quant_method():
-    assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.GPTQ) == BACKEND.GPTQ_MARLIN
-    assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.AWQ) == BACKEND.AWQ_MARLIN
+def test_marlin_backend_is_method_agnostic():
+    assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.GPTQ) == BACKEND.MARLIN
+    assert normalize_backend(BACKEND.MARLIN, quant_method=METHOD.AWQ) == BACKEND.MARLIN
+
+
+def test_legacy_method_qualified_marlin_names_resolve_to_shared_backend():
+    assert normalize_backend("gptq_marlin") == BACKEND.MARLIN
+    assert normalize_backend("awq_marlin") == BACKEND.MARLIN
+    assert normalize_backend("GPTQ_MARLIN") == BACKEND.MARLIN
+    assert normalize_backend("AWQ_MARLIN") == BACKEND.MARLIN
+    assert normalize_backend("gptq_marlin", quant_method=METHOD.GPTQ) == BACKEND.MARLIN
+    assert normalize_backend("awq_marlin", quant_method=METHOD.AWQ) == BACKEND.MARLIN
 
 
 def test_removed_mentaray_backend_names_are_rejected():
@@ -31,7 +40,7 @@ def test_awq_specific_legacy_backends_normalize_to_canonical_names():
 
 
 def test_name_based_lookup_accepts_canonical_member_names():
-    assert normalize_backend("GPTQ_MARLIN") == BACKEND.GPTQ_MARLIN
+    assert normalize_backend("MARLIN") == BACKEND.MARLIN
     assert normalize_backend("AWQ_GEMM_TRITON") == BACKEND.AWQ_GEMM_TRITON
 
 

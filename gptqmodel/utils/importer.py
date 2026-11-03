@@ -471,6 +471,12 @@ def get_kernel_backends(cls: Type[BaseQuantLinear]) -> List[BACKEND]:
 
 
 def get_kernel_for_backend(backend: BACKEND, quant_method: METHOD, fmt: FORMAT) -> Type[BaseQuantLinear]:
+    """Return the kernel declared for one backend/method/format triple.
+
+    A backend may own more than one sub-kernel.  For example, ``BACKEND.MARLIN``
+    is declared by both the GPTQ and AWQ Marlin implementations; the
+    quantization method and checkpoint format pick the concrete one.
+    """
     backend = normalize_backend(backend, quant_method=quant_method)
     matches = []
     for cls in iter_quant_linear_kernels():
@@ -1280,10 +1286,7 @@ def select_quant_linear(
     backend = BACKEND.AUTO if backend is None else backend
 
     trainable = backend == BACKEND.AUTO_TRAINABLE
-    marlin_backends = {
-        BACKEND.GPTQ_MARLIN,
-        BACKEND.AWQ_MARLIN,
-    }
+    marlin_backends = {BACKEND.MARLIN}
     if not allow_marlin and backend in marlin_backends:
         raise ValueError("Marlin kernel selection was disabled by allow_marlin=False.")
 

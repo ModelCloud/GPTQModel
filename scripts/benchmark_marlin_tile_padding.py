@@ -905,13 +905,13 @@ def _build_candidate(
         from gptqmodel.nn_modules.qlinear.marlin_awq import AwqMarlinLinear
 
         module_cls = AwqMarlinLinear
-        backend = BACKEND.AWQ_MARLIN
+        backend = BACKEND.MARLIN
     else:
         from gptqmodel.nn_modules.qlinear.marlin import MarlinLinear
         from gptqmodel.quantization import FORMAT
 
         module_cls = MarlinLinear
-        backend = BACKEND.GPTQ_MARLIN
+        backend = BACKEND.MARLIN
         format_kwargs = {"format": FORMAT.GPTQ_V2}
 
     candidate = module_cls(
