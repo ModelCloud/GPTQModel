@@ -32,12 +32,37 @@ from ..models.writer import (
 )
 from ..quantization.config import QuantizeConfig
 from ..utils.colors import ANSIColor, color_text
+from ..utils.env import env_flag
 from ..utils.logger import setup_logger
 from ..utils.random_str import get_random_string
 from ..utils.torch import CPU, DEVICE_0, DEVICE_1, HAS_NPU, memory_stats_for_device
 
 
 log = setup_logger()
+
+# Per-processor logs land in ``logs/`` and are useful only while a run is in
+# flight or after it fails. Successful runs were leaving one file behind each
+# time; the flag keeps them on request.
+_KEEP_PROCESSOR_LOGS_ENV = "GPTQMODEL_KEEP_PROCESSOR_LOGS"
+
+
+def remove_processor_log(log_path: Optional[str]) -> bool:
+    """Delete a processor log file unless GPTQMODEL_KEEP_PROCESSOR_LOGS is set.
+
+    Returns True when a file was removed.
+    """
+
+    if not log_path or env_flag(_KEEP_PROCESSOR_LOGS_ENV):
+        return False
+    try:
+        path = Path(log_path)
+        if not path.is_file():
+            return False
+        path.unlink()
+        return True
+    except OSError:
+        log.debug("Failed to remove processor log file %s", log_path, exc_info=True)
+        return False
 
 _PROJECT_LOG_DIR = Path("logs")
 
@@ -1033,10 +1058,9 @@ class LoopProcessor:
         del self.inputs_cache
         del self._results
 
-        # TODO make this file delete based on user toggle
-        # cleanup temp log file
-        # if os.path.exists(self.log_tmp_log_file_name):
-        #     os.remove(file_path)
+        # Keep the log when the run failed: ``finalize`` only runs after the
+        # loop completed, and a failed run is exactly when the log is useful.
+        remove_processor_log(getattr(self, "log_tmp_log_file_name", None))
 
     def release_calibration_dataset(self):
         """Drops the retained calibration dataset to free host memory."""
