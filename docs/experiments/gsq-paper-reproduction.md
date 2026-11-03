@@ -565,7 +565,8 @@ selection fails rather than silently changing backends. `assignment.json`
 records the backend that actually ran the search. The MLX path currently
 supports Llama models; its candidate interpolation, teacher KL,
 straight-through Gumbel gradients, Adam recurrence, and momentum
-transport run in MLX on Metal. The discrete budget DP runs in NumPy on the host. Search gradients are evaluated and accumulated one batch and draw at a time,
+transport run in MLX on Metal. The discrete budget DP runs in NumPy on the
+host. Search gradients are evaluated and accumulated one batch and draw at a time,
 and KL vocabulary chunks are checkpointed for backward recomputation.
 The CLI seeds MLX before search for reproducible runs. The rank-one retraction solves a scalar
 bisection on host NumPy after one transfer of the small control tensors; this
@@ -574,10 +575,10 @@ available on CUDA and other platforms and is the implementation oracle.
 
 `--teacher-cache device` is the default. It retains detached dense-teacher
 hidden states in unified memory during the search; `--teacher-cache disk`
-streams those states from a temporary directory instead. For the full
-paper-shaped Llama 3.1 8B run, resident states consume substantially more than
-the packed candidates. Use disk mode when the resident activation set does not
-fit. Teacher scratch is released when the allocation script exits. Dense candidate
+streams those states from a temporary directory instead. Hidden-state storage
+is approximately sequences × tokens × hidden width × bytes per element:
+64 sequences of 2048 tokens at width 4096 in BF16 require 1 GiB. Use disk mode
+when these states and the remaining search working set do not fit. Teacher scratch is released when the allocation script exits. Dense candidate
 weights and teacher hidden states are offline search scratch only: the search
 neither loads nor modifies a packed inference checkpoint.
 
@@ -619,7 +620,7 @@ model replay, teacher KL, Gumbel gradient, and optimizer remain in MLX. This
 avoids a Metal synchronization for every bisection probe; the independent
 Torch retraction test requires the same budget and retracted logits. Compiling
 the full MLX value-and-gradient step was also measured, but was slower than the
-eager recurrence and is not enabled. The measured upstream source checkouts were MLX main
+eager recurrence and is not enabled. The inspected upstream source checkouts were MLX main
 `c69303b00f5f61860436e832f23fa8c34b96f93a` and MLX-LM main
 `736ab0d8c1d0edc79c3d798044fe6904e2fa23be`. An official MLX
 `frontend-macOS-ARM64-py3.13` artifact reporting 0.32.5 was tested but failed
