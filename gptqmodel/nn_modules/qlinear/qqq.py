@@ -357,7 +357,9 @@ class QQQLinear(GroupedQuantLinear):
         else:
             packed_s_group = None
             packed_s_channel = (
-                (raw_scales / (2 ** (8 - self.bits)))
+                # The stored channel scale is FP32; dividing in FP16 first
+                # can round a representable FP32 scale all the way to zero.
+                (raw_scales.float() / (2 ** (8 - self.bits)))
                 .reshape((-1, len(self._scale_perm_single)))[:, self._scale_perm_single]
                 .to(dtype=torch.float32)
                 .reshape((-1, self.out_features))
@@ -407,11 +409,14 @@ class QQQLinear(GroupedQuantLinear):
 
                 weight_chunk = weight[output_start:output_end, input_start:input_end].transpose(0, 1)
                 scale_chunk_view = scale_chunk[:, output_start:output_end]
-                codes = torch.round(weight_chunk / scale_chunk_view).to(dtype=torch.int32)
+                codes = torch.round(weight_chunk.float() / scale_chunk_view.float())
                 if self.group_size != self.in_features:
                     codes.add_((self.maxq + 1) // 2).clamp_(0, self.maxq)
                 else:
-                    codes.clamp_(-self.maxq, self.maxq)
+                    # Channelwise codes are signed INT4, unlike the biased
+                    # unsigned codes used by the grouped representation.
+                    codes.clamp_(-(1 << (self.bits - 1)), (1 << (self.bits - 1)) - 1)
+                codes = codes.to(dtype=torch.int32)
 
                 transformed = codes.reshape(
                     input_size // self.tile,

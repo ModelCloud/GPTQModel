@@ -371,7 +371,9 @@ def _gguf_e8m0_to_fp32_half(values: np.ndarray) -> np.ndarray:
 def _gguf_quantize_mxfp4(blocks: np.ndarray) -> np.ndarray:
     d = np.abs(blocks).max(axis=-1, keepdims=True)
     with np.errstate(divide="ignore"):
-        e = np.where(d > 0, np.floor(np.log2(d)) - 2 + 127, 0).astype(np.uint8)
+        # Negative exponents must saturate at the smallest E8M0 scale, not
+        # wrap to a large unsigned exponent (255 is reserved for NaN).
+        e = np.clip(np.where(d > 0, np.floor(np.log2(d)) - 2 + 127, 0), 0, 254).astype(np.uint8)
     scales = _gguf_e8m0_to_fp32_half(e)
     errors = np.abs(
         scales.reshape(blocks.shape[0], 1, 1) * _GGUF_FP4_VALUES.astype(np.float32).reshape(1, 1, 16)

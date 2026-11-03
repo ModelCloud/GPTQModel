@@ -31,9 +31,8 @@ def _pack_awq_columns(codes: torch.Tensor, bits: int) -> torch.Tensor:
     """Pack AWQ code columns with the classic shift/OR order.
 
     Thin wrapper over the shared :func:`pack_awq_columns` helper that applies
-    the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave.  The vectorized shift/OR
-    (including int32 sign extension for out-of-range codes) stays bit-identical
-    to the previous per-column ``|=`` loop.
+    the AWQ ``[0, 2, 4, 6, 1, 3, 5, 7]`` interleave. Each code is masked
+    before shifting to keep sign or excess bits out of adjacent fields.
     """
 
     return pack_awq_columns(codes, bits, order=AWQ_ORDER)
@@ -246,7 +245,7 @@ class AwqGEMMLinear(AWQuantLinear):
         assert scales is not None and zeros is not None
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         self.register_buffer("scales", scales.clone().to(scale_dtype))
@@ -264,9 +263,9 @@ class AwqGEMMLinear(AWQuantLinear):
         weight = linear.weight.data
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (weight.t() + scale_zeros.index_select(0, group_index))
-            / self.scales.index_select(0, group_index)
-        ).to(torch.int32).contiguous()
+            (weight.t().float() + scale_zeros.index_select(0, group_index))
+            / self.scales.index_select(0, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32).contiguous()
 
         best_device = str(linear.weight.device)
 

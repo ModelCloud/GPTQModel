@@ -274,7 +274,7 @@ def _torch_gguf_mxfp4_oracle(weight):
     maxima = blocks.abs().amax(dim=1)
     exponents = torch.where(
         maxima > 0, torch.floor(torch.log2(maxima)) + 125, 0
-    ).to(torch.int32).to(torch.uint8).to(torch.int32)
+    ).clamp(0, 254).to(torch.int32)
     scale_bits = torch.where(
         exponents < 2, 0x00200000 << exponents, (exponents - 1) << 23
     ).to(torch.int32)
@@ -457,6 +457,19 @@ def test_gguf_mxfp4_packing_at_subnormal_scale_boundaries():
         expected = _fallback_gguf_quantize(weight, "MXFP4")
     np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
     np.testing.assert_array_equal(actual, expected)
+
+
+def test_gguf_mxfp4_minimum_scale_preserves_representable_tiny_weights():
+    # These exact values must use exponent 0, rather than wrapping negative
+    # exponents to bytes 253..255. Include mixed subnormal lanes at scale 2.
+    weight = np.zeros((4, 32), dtype=np.float32)
+    weight[:3] = np.array([2.0 ** -126, 2.0 ** -127, 2.0 ** -128], dtype=np.float32)[:, None]
+    weight[3, 0] = 2.0 ** -123
+    weight[3, 1:4] = [2.0 ** -127, 2.0 ** -128, 2.0 ** -126]
+    actual = np.asarray(native.gguf_quantize_weight_mlx(mx.array(weight), "MXFP4"))
+    np.testing.assert_array_equal(actual[:3, 0], [0, 0, 0])
+    np.testing.assert_array_equal(actual[:3, 1:], np.repeat(np.array([0x44, 0x22, 0x11], dtype=np.uint8)[:, None], 16, axis=1))
+    np.testing.assert_array_equal(actual, _torch_gguf_mxfp4_oracle(weight))
 
 
 def test_gguf_mxfp4_bytes_are_accepted_by_existing_runtime():

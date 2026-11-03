@@ -771,7 +771,9 @@ def test_hf_repack_layer_to_marlin_matches_source():
 
     # Marlin supports symmetric 4-bit weights only.
     source = _make_gptq_module(group_size=128, sym=True)
-    hf_pack_layer(source, linear, scales, None, g_idx)
+    # Torch forward consumes logical (v2) zeros, while the repack API aligns
+    # the copied buffers to Marlin's convention itself.
+    hf_pack_layer(source, linear, scales, None, g_idx, checkpoint_format=FORMAT.GPTQ_V2)
     source.to(device)
 
     target = hf_repack_layer(source, BACKEND.MARLIN, device=device)
@@ -781,7 +783,7 @@ def test_hf_repack_layer_to_marlin_matches_source():
 
     x = torch.randn(4, 128, dtype=torch.float16, device=device)
     with torch.no_grad():
-        torch.testing.assert_close(target(x), source(x), atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(target(x), source(x), atol=2e-3, rtol=2e-3)
 
 
 @pytest.mark.cuda

@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from gptqmodel.nn_modules.qlinear.bitblas import BitblasLinear, BitblasQuantizationConfig
+from gptqmodel.nn_modules.qlinear.bitblas_awq import AWQBitBlasKernel
 
 
 def _compress_without_mask(values, source_bits=4, storage_dtype=np.int8):
@@ -106,3 +107,35 @@ def test_gptq_repack_preserves_every_zero_byte(compressor, bits, requires_v2, fo
         assert torch.equal(module.qweight.view(torch.uint8), expected_weights)
         assert set(module.state_dict()) == {"qweight", "scales", "qzeros"}
         assert module.qweight.numel() == k * n * bits // 8
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_awq_pack_affine_overflow_and_endpoints(compressor, device, dtype):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA or ROCm device required")
+    module = object.__new__(AWQBitBlasKernel)
+    torch.nn.Module.__init__(module)
+    module.bits, module.group_size, module.in_features = 4, 128, 128
+    module.TORCH_DTYPE = dtype
+    module.quant_config = BitblasQuantizationConfig(4, 128, False, False, torch_dtype=dtype)
+    module.bitblas_matmul = SimpleNamespace(weight_transform=None)
+    module.bias = None
+    module.register_buffer("qweight", torch.empty(0, dtype=torch.int8, device=device))
+    module.register_buffer("scales", torch.empty(0, dtype=dtype, device=device))
+    module.register_buffer("qzeros", torch.empty(0, dtype=torch.int8, device=device))
+    linear = torch.nn.Linear(128, 64, bias=False, dtype=dtype, device=device)
+    scales = torch.full((64, 1), 5000., dtype=dtype, device=device)
+    zeros = torch.full((64, 1), 8, dtype=torch.int32, device=device)
+    samples = torch.tensor([-65504., -40000., 0., 30000., 65504.], dtype=dtype, device=device)
+    with torch.no_grad():
+        linear.weight.copy_(samples.repeat(1639)[:8192].reshape(64, 128))
+    expected = ((linear.weight.detach().double() + scales.double() * zeros.double()) / scales.double())
+    codes = expected.round().clamp(0, 15).long()
+    expected_bytes = (codes[:, 0::2] | (codes[:, 1::2] << 4)).to(torch.uint8)
+    for _ in range(2):
+        module.pack(linear, scales, zeros)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        assert torch.equal(module.qweight.view(torch.uint8), expected_bytes)
+        assert torch.equal(module.qzeros.view(torch.uint8), torch.full((1, 32), 0x88, dtype=torch.uint8, device=device))

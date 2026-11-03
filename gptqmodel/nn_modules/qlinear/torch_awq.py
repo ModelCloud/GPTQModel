@@ -117,7 +117,7 @@ class AwqTorchLinear(AWQuantLinear):
 
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         scale_dtype = scales.dtype if scales.dtype in (torch.float16, torch.bfloat16) else torch.float16
         self.register_buffer("scales", scales.clone().to(scale_dtype))
@@ -132,9 +132,9 @@ class AwqTorchLinear(AWQuantLinear):
         weight = linear.weight.data
         group_index = torch.arange(self.in_features, device=weight.device) // self.group_size
         intweight = torch.round(
-            (weight.t() + scale_zeros.index_select(0, group_index))
-            / self.scales.index_select(0, group_index)
-        ).to(torch.int32).contiguous()
+            (weight.t().float() + scale_zeros.index_select(0, group_index))
+            / self.scales.index_select(0, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32).contiguous()
 
         qweight, qzeros = pack_awq(intweight, zeros.to(torch.int32), self.bits)
 

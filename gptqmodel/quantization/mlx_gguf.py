@@ -777,23 +777,29 @@ def _gguf_mxfp4_kernel():
                 if (maximum_bits >= ((maximum_bits & 0x7f800000u)
                     + 0x00800000u - cutoff)) power = next_power;
             }
-            uint exponent = uint(power + 125) & 255u;
+            uint exponent = uint(metal::clamp(power + 125, 0, 254));
             uint scale_bits = exponent < 2
                 ? (0x00200000u << exponent) : ((exponent - 1) << 23);
             float scale = as_type<float>(scale_bits);
-            // Metal flushes subnormal arithmetic. For e8m0 scales 0 and 1,
-            // move both operands into the normal range before comparison.
-            float multiplier = exponent < 2 ? 0x1p126f : 1.0f;
-            float comparison_scale = exponent < 2
-                ? (exponent == 0 ? 0.25f : 0.5f) : scale;
+            // Metal flushes subnormal arithmetic. Scale 2 also has a
+            // subnormal rounding midpoint, so compare in a normal range.
+            float multiplier = exponent <= 2 ? 0x1p126f : 1.0f;
+            float comparison_scale = exponent <= 2
+                ? (exponent == 0 ? 0.25f : (exponent == 1 ? 0.5f : 1.0f)) : scale;
             float fp4[8] = {
                 0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 6.0f, 8.0f, 12.0f
             };
             uchar codes[32];
             for (uint k = 0; k < 32; ++k) {
-                float weight = float(weights[block * 32 + k]) * multiplier;
-                uint sign = as_type<uint>(weight) >> 31;
-                float magnitude = metal::abs(weight);
+                float weight = float(weights[block * 32 + k]);
+                uint weight_bits = as_type<uint>(weight);
+                uint sign = weight_bits >> 31;
+                uint magnitude_bits = weight_bits & 0x7fffffffu;
+                // Recover subnormal inputs from their mantissa; multiplying
+                // the original float would flush it before the rescaling.
+                float magnitude = exponent <= 2 && magnitude_bits < 0x00800000u
+                    ? float(magnitude_bits) * 0x1p-23f
+                    : metal::abs(weight) * multiplier;
                 uint best = 0;
                 float best_error = magnitude;
                 for (uint candidate = 1; candidate < 8; ++candidate) {

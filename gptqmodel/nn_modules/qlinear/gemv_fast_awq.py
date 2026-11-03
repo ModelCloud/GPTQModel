@@ -18,11 +18,15 @@ from ...utils.awq import (
 )
 from ...utils.backend import BACKEND
 from ...utils.gemv import calculate_zeros_width
+from ...utils.packing_math import scaled_zero_offset
 
 
 def pack_intweight(unpacked_qweight, interleave, kstride):
     # unpacked_qweight: [N, K] int32 codes.  Every permutation runs on the
     # input device, so packing no longer round-trips through host numpy.
+    # Confine each code to its nibble before shifting, including narrow input
+    # dtypes and negative values supplied directly to the layout helper.
+    unpacked_qweight = unpacked_qweight.to(torch.int32) & 15
     N = unpacked_qweight.shape[0]
     K = unpacked_qweight.shape[1]
 
@@ -233,7 +237,7 @@ class AwqGEMVFastLinear(AWQuantLinear):
     def pack(self, linear: nn.Module, scales: torch.Tensor, zeros: torch.Tensor, g_idx: torch.Tensor = None):
         # need scales and zeros info for real quantization
         assert scales is not None and zeros is not None
-        scale_zeros = zeros * scales
+        scale_zeros = zeros.float() * scales.float()
 
         pack_num = 32 // self.bits
         qscales = torch.zeros(
@@ -245,6 +249,9 @@ class AwqGEMVFastLinear(AWQuantLinear):
             device=scales.device,
         )
         qscales[:, : scales.shape[1]] = scales
+        # GEMV_FAST/LLM_AWQ store FP16 offsets in the checkpoint. Reject an
+        # unrepresentable offset before replacing any packed module state.
+        offsets = scaled_zero_offset(qscales[:, : scales.shape[1]], zeros)
         self.register_buffer("scales", qscales.transpose(1, 0).contiguous())
         if linear.bias is not None:
             self.register_buffer("bias", linear.bias.clone().half())
@@ -255,19 +262,16 @@ class AwqGEMVFastLinear(AWQuantLinear):
         # of launching one tiny kernel per input column.
         group_index = torch.arange(self.in_features, device=linear.weight.device) // self.group_size
         intweight = torch.round(
-            (linear.weight.data + scale_zeros.index_select(1, group_index))
-            / qscales.index_select(1, group_index)
-        ).to(torch.int32)
+            (linear.weight.data.float() + scale_zeros.index_select(1, group_index))
+            / qscales.index_select(1, group_index).float()
+        ).clamp_(0, (1 << self.bits) - 1).to(torch.int32)
         self.register_buffer("qweight", pack_intweight(
             intweight.contiguous(), interleave=4, kstride=64
         ))
 
-        zeros = zeros.to(dtype=torch.int32)
         qzeros = torch.zeros_like(qscales)
 
-        qzeros[:, : scales.shape[1]] = -(
-                qscales[:, : scales.shape[1]] * (zeros.to(torch.float32))
-        ).to(torch.float16)
+        qzeros[:, : scales.shape[1]] = offsets
         self.register_buffer(self.zeros_name, qzeros.transpose(1, 0).contiguous())
 
     def extra_repr(self) -> str:
