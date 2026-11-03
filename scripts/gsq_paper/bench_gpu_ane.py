@@ -14,7 +14,8 @@ no autograd. The probe answers two narrower questions relevant to scheduling:
   other on this host?
 
 The GPU leg is an MLX Metal recurrent MLP. The ANE leg is a Core ML MIL program
-with four fused linear/GELU/residual blocks mapped to all available ANE cores.
+with linear/GELU/residual blocks requesting ANE placement. The compute plan
+reports preferred placement and device core count, not measured core utilization.
 Both read and write the same unified-memory pool, with no HBM transfer.
 
     python scripts/gsq_paper/bench_gpu_ane.py --json-out /tmp/gpu-ane.json
@@ -25,8 +26,8 @@ import json
 import platform
 import statistics
 import sys
-import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from importlib import metadata
 from pathlib import Path
 
@@ -63,7 +64,7 @@ def _program(tokens, width, blocks):
             a = mb.linear(x=value, weight=weight, name=f"linear_a_{index}")
             b = mb.gelu(x=a, name=f"gelu_{index}")
             c = mb.linear(x=b, weight=weight, name=f"linear_b_{index}")
-            value = mb.add(x=value, y=c, name=f"residual_{index}")
+            value = mb.add(x=value, y=mb.mul(x=c, y=np.float16(0.1)), name=f"residual_{index}")
         return value
 
     return ct, program
@@ -88,7 +89,7 @@ def _plan_rows(plan):
     return rows
 
 
-def _median_milliseconds(fn, repeats):
+def _timed(fn, repeats):
     for _ in range(3):
         fn()
     samples = []
@@ -100,51 +101,15 @@ def _median_milliseconds(fn, repeats):
 
 
 def _threaded(first, second, repeats=9):
-    """Median wall time for two concurrent calls, with errors captured."""
-    for _ in range(3):
-        errors = []
-
-        def guarded(fn):
+    """Use a persistent ANE worker while Metal stays on the calling thread."""
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        def run():
+            pending = executor.submit(first)
             try:
-                fn()
-            except BaseException as error:  # pragma: no cover - host probe
-                errors.append(repr(error))
-
-        workers = [
-            threading.Thread(target=guarded, args=(first,)),
-            threading.Thread(target=guarded, args=(second,)),
-        ]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join()
-        if errors:
-            raise RuntimeError(f"Concurrent engine invocation failed: {errors}")
-
-    samples = []
-    for _ in range(repeats):
-        errors = []
-
-        def guarded(fn):
-            try:
-                fn()
-            except BaseException as error:  # pragma: no cover - host probe
-                errors.append(repr(error))
-
-        started = time.perf_counter()
-        workers = [
-            threading.Thread(target=guarded, args=(first,)),
-            threading.Thread(target=guarded, args=(second,)),
-        ]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join()
-        elapsed = time.perf_counter() - started
-        if errors:
-            raise RuntimeError(f"Concurrent engine invocation failed: {errors}")
-        samples.append(elapsed)
-    return statistics.median(samples), samples
+                second()
+            finally:
+                pending.result()  # Propagate worker failures and finish both legs.
+        return _timed(run, repeats)
 
 
 def main():
@@ -168,8 +133,8 @@ def main():
     try:
         import coremltools as ct
         import mlx.core as mx
+        import mlx.nn as nn
         import numpy as np
-        import torch
         from coremltools.models.compute_plan import MLComputePlan
         from coremltools.models.ml_program.experimental.compute_plan_utils import apply_compute_plan
     except ImportError as error:
@@ -200,19 +165,22 @@ def main():
         (1, args.tokens, args.width), dtype=np.float32
     ).astype(np.float16)
 
+    mx.set_default_device(mx.gpu)
+    if not mx.metal.is_available():
+        raise SystemExit("MLX Metal is unavailable")
     gpu_weight = mx.full((args.width, args.width), 1 / args.width, dtype=mx.float16)
     gpu_input = mx.array(input_value)
 
     def run_ane():
-        forced.predict({"x": input_value})
+        return forced.predict({"x": input_value})
 
     def run_gpu():
         value = gpu_input
         for _ in range(args.gpu_repeats):
             a = value @ gpu_weight
-            b = mx.maximum(a * 0.5, a) + mx.minimum(a, 0) * 0.0
+            b = nn.gelu(a)
             c = b @ gpu_weight
-            value = value + c
+            value = value + 0.1 * c
         mx.eval(value)
         return value
 
@@ -221,28 +189,31 @@ def main():
         run_ane()
         run_gpu()
 
-    ane_median, ane_samples = _median_milliseconds(run_ane, args.repeats)
-    gpu_median, gpu_samples = _median_milliseconds(run_gpu, args.repeats)
-    serial_median, serial_samples = _median_milliseconds(
+    for output in run_ane().values():
+        if not np.isfinite(output).all():
+            raise RuntimeError("ANE output is nonfinite")
+    if not bool(mx.all(mx.isfinite(run_gpu())).item()):
+        raise RuntimeError("Metal output is nonfinite")
+
+    ane_median, ane_samples = _timed(run_ane, args.repeats)
+    gpu_median, gpu_samples = _timed(run_gpu, args.repeats)
+    serial_median, serial_samples = _timed(
         lambda: (run_ane(), run_gpu()), args.repeats
     )
     overlap_median, overlap_samples = _threaded(run_ane, run_gpu, repeats=args.repeats)
 
     forced_rows = _plan_rows(forced_plan)
-    all_core_ops = all(
+    all_core_ops = bool(forced_rows) and all(
         row["preferred"] == "MLNeuralEngineComputeDevice" for row in forced_rows
     )
     if not all_core_ops:
         raise RuntimeError(f"forced compute plan left non-ANE operations: {forced_rows}")
-    if any("MLGPUComputeDevice" not in row["supported"] for row in forced_rows):
-        raise RuntimeError("forced ANE plan does not report GPU eligibility for every operation")
 
     result = {
         "host": {
             "platform": platform.platform(),
             "machine": platform.machine(),
             "python": platform.python_version(),
-            "torch": torch.__version__,
             "mlx": _version("mlx"),
             "coremltools": ct.__version__,
         },
@@ -252,9 +223,9 @@ def main():
             "ane_blocks": args.ane_blocks,
             "gpu_repeat_blocks": args.gpu_repeats,
             "storage": "unified_memory",
-            "ane_forced": all_core_ops,
+            "ane_preferred_in_plan": all_core_ops,
             "ane_core_count": max((row["cores"] or 0 for row in forced_rows), default=0),
-            "ane_autograd": False,
+            "coreml_autograd": False,
         },
         "compute_plan": {
             "initial": _plan_rows(initial_plan),
@@ -273,11 +244,7 @@ def main():
                 "threaded": overlap_samples,
             },
         },
-        "recommendation": (
-            "integrate_concurrent_dispatch"
-            if overlap_median < serial_median
-            else "keep_single_allocator_on_gpu"
-        ),
+        "scope": "Synthetic scheduling probe; does not establish RCO offload performance or actual engine utilization.",
     }
     output = Path(args.json_out)
     output.parent.mkdir(parents=True, exist_ok=True)

@@ -75,8 +75,8 @@ def test_mlx_retraction_reaches_the_torch_budget():
         [[-0.3, 0.2, 0.1], [0.4, -0.1, 0.3], [-0.2, 0.6, -0.4]],
         dtype=mx.float32,
     )
-    # The scalar bisection runs once on host arrays after a single DLPack
-    # transfer, rather than synchronizing Metal for every candidate shift.
+    # The scalar bisection reads control arrays once rather than
+    # synchronizing Metal for every candidate shift.
     shift = rco_mlx._retraction(alpha, costs, 2.65, fraction)
     retracted = alpha + shift * costs
     actual = float(rco_mlx._expected_cost(retracted, costs, fraction).item())
@@ -342,3 +342,37 @@ def test_mlx_search_restores_original_linear_and_exact_budget():
         interpolated.cleanup()
     assert rco_mlx._child(model, name) is original
     assert not objective._resident and not objective.paths
+
+
+def test_mlx_search_honors_batch_ids_weights_and_clears_override_on_error():
+    mx, _ = mlx_modules()
+    model = tiny_mlx_model()
+    name = "model.layers.0.mlp.down_proj"
+    source = to_torch(rco_mlx._child(model, name).weight)
+    search = rco_mlx.MLXInterpolatedLlamaLayers(
+        model, {name: [source * 0.2, source]}, [source.numel()], [2., 3.]
+    )
+    calls = []
+
+    def objective(batch):
+        calls.append(batch)
+        return mx.sum(search.probabilities(0)) * batch
+
+    try:
+        _, history = rco_mlx.projected_gumbel_search_mlx(
+            search, [7, 11], 2.5, steps=1, gumbel_samples=2,
+            batch_weights=[1, 3], objective=objective, log_every=0,
+        )
+        assert calls == [7, 11, 7, 11]
+        assert history[0]["loss"] == pytest.approx(10., abs=1e-6)
+
+        def failed(_):
+            raise RuntimeError("objective failed")
+
+        with pytest.raises(RuntimeError, match="objective failed"):
+            rco_mlx.projected_gumbel_search_mlx(
+                search, [7], 2.5, steps=1, objective=failed, log_every=0,
+            )
+        assert search._probs_override is None
+    finally:
+        search.cleanup()

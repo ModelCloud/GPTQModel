@@ -564,8 +564,10 @@ backend explicitly with `--backend mlx` or `--backend torch`; explicit MLX
 selection fails rather than silently changing backends. `assignment.json`
 records the backend that actually ran the search. The MLX path currently
 supports Llama models; its candidate interpolation, teacher KL,
-straight-through Gumbel gradients, budget DP, Adam recurrence, and momentum
-transport run in MLX on Metal. The rank-one retraction solves a scalar
+straight-through Gumbel gradients, Adam recurrence, and momentum
+transport run in MLX on Metal. The discrete budget DP runs in NumPy on the host. Search gradients are evaluated and accumulated one batch and draw at a time,
+and KL vocabulary chunks are checkpointed for backward recomputation.
+The CLI seeds MLX before search for reproducible runs. The rank-one retraction solves a scalar
 bisection on host NumPy after one transfer of the small control tensors; this
 avoids synchronizing Metal for every bisection probe. The Torch path remains
 available on CUDA and other platforms and is the implementation oracle.
@@ -575,7 +577,7 @@ hidden states in unified memory during the search; `--teacher-cache disk`
 streams those states from a temporary directory instead. For the full
 paper-shaped Llama 3.1 8B run, resident states consume substantially more than
 the packed candidates. Use disk mode when the resident activation set does not
-fit. Both modes are deleted when the allocation script exits. Dense candidate
+fit. Teacher scratch is released when the allocation script exits. Dense candidate
 weights and teacher hidden states are offline search scratch only: the search
 neither loads nor modifies a packed inference checkpoint.
 
@@ -584,14 +586,15 @@ no HBM: CPU, Metal GPU, and the Apple Neural Engine (ANE/NPU) address the same
 memory pool. The search uses Metal through MLX for differentiablity rather than
 copying the dense Llama graph between accelerators.
 
-A reproducible warm benchmark compares the same resident teacher cache, model,
+A reproducible warm benchmark compares the same teacher-cache policy, model,
 and token IDs with a deterministic Gumbel seed in each backend on Torch MPS and
-MLX Metal:
+MLX Metal. Backend RNGs differ, so equal seeds do not produce identical
+Gumbel draws; this is a timing comparison, not an accuracy comparison:
 
 ```bash
 PYTHONPATH=. python scripts/gsq_paper/bench_rco_backends.py \
     --model /path/to/SmolLM2-135M \
-    --tokens 16 --steps 3 --draws 2 --warmup 1 --repeats 5 \
+    --tokens 16 --steps 3 --draws 2 --warmup 2 --repeats 7 \
     --mlx-source /path/to/mlx \
     --mlx-lm-source /path/to/mlx-lm \
     --json-out /tmp/rco-backends.json
@@ -601,14 +604,14 @@ The benchmark synchronizes Torch MPS and evaluates MLX before stopping the
 timer. It records all samples, the median, model and search dimensions, dtype,
 Python/Torch/MLX versions, and optional source revisions. On 2026-11-02 it used
 SmolLM2-135M's 30 `mlp.down_proj` modules with 16 tokens, three steps, two draws,
-one warmup, and five timed repetitions:
+two warmups, and seven timed repetitions:
 
 | Search backend | Median | Seconds/step |
 | --- | ---: | ---: |
-| Torch 2.15.0, MPS, BF16 | 0.2716 s | 0.0905 |
-| MLX 0.32.4, Metal, model-native BF16 | **0.0726 s** | **0.0242** |
+| Torch 2.15.0, MPS, BF16 | 0.2503 s | 0.0834 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.0854 s** | **0.0285** |
 
-MLX was 3.74x faster for this search-shaped workload. This is a tiny-model
+After the review fixes, MLX was 2.93x faster for this search-shaped workload. This is a tiny-model
 component benchmark, not an end-to-end quantization speedup or a claim about
 all model sizes. A final optimization moves only the scalar retraction
 bisection to host NumPy after one transfer of the small control tensors. The
@@ -625,21 +628,25 @@ part of this result. MLX main could not replace the release runtime in this
 environment because only Apple Command Line Tools are installed and the Metal
 compiler is absent.
 
-The ANE can execute a deliberately simple Core ML inference graph when forced
-onto `MLNeuralEngineComputeDevice`, but Core ML does not expose autograd for the
-RCO search graph. The committed `scripts/gsq_paper/bench_gpu_ane.py` probe uses
-MLX Metal for the GPU leg, forces every eligible operation onto the ANE, and
-measures ANE alone, GPU alone, serial execution, and threaded overlap. On
-2026-11-02 all 16 operation nodes selected 32 ANE cores and also reported GPU
-eligibility. ANE measured 0.001218 s, MLX Metal 0.003841 s, serial execution
-0.005107 s, and threaded overlap 0.005257 s. Overlap achieved 0.971x serial
-throughput, so allocation does not split work across GPU and ANE. The probe is
-synthetic and its GPU workload is deliberately balanced against the ANE leg;
-that makes the scheduling result useful even though it does not represent the
-RCO recurrence. ANE remains an inference-only avenue requiring a separate model
-graph and scheduler.
+The synthetic `scripts/gsq_paper/bench_gpu_ane.py` probe requests ANE
+placement through a Core ML compute plan and measures an independent MLX Metal
+workload. It uses GELU and scaled residuals on both engines, checks outputs for
+finiteness, and reuses an ANE worker while invoking MLX on the main thread.
+The plan reports ANE preference for every reported operation and a 32-core
+device. This is placement metadata, not a measurement of actual engine or
+per-core utilization.
 
-Run the probe on the target host with:
+The corrected probe measured ANE 0.000608 s, Metal 0.003519 s, serial
+0.004279 s, and concurrent 0.003518 s: 1.22x serial throughput. Earlier
+measurements included thread creation in each sample and used different GPU
+activations; their conclusion against concurrent execution is withdrawn.
+This demonstrates a benefit for these independent synthetic workloads.
+It does not establish the speed or accuracy of offloading the RCO teacher or
+backward graph. Core ML supplies no autograd for this implementation; a custom
+ANE backward implementation or teacher offload would require separate
+validation. RCO currently uses MLX Metal without ANE dispatch.
+
+Install Core ML Tools alongside the MLX runtime and run:
 
 ```bash
 PYTHONPATH=. python scripts/gsq_paper/bench_gpu_ane.py \

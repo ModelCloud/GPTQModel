@@ -213,6 +213,7 @@ def main():
     # Cache the dense teacher BEFORE setup replaces the live projections.
     with TemporaryDirectory(prefix='rco-teacher-', dir=out) as cache:
         if args.backend == 'mlx':
+            import mlx.core as mx
             from mlx_lm.utils import load as load_mlx
 
             from gptqmodel.quantization.rco_mlx import (
@@ -245,6 +246,7 @@ def main():
                 interpolated = MLXInterpolatedLlamaLayers(
                     model, layer_weights, weights, costs, groups=groups)
                 del layer_weights
+                mx.random.seed(args.seed)
                 search_started = time.monotonic()
                 probs, history = projected_gumbel_search_mlx(
                     interpolated, list(range(len(mlx_batches))), args.target_bits,
@@ -284,6 +286,8 @@ def main():
                     batch_weights=[ids.numel() for ids in text])
             finally:
                 interpolated.cleanup()
+                if args.objective == 'kl':
+                    objective.cleanup()
             search_seconds = time.monotonic() - search_started
             logits = interpolated.alpha.detach().cpu()
 
@@ -313,6 +317,7 @@ def main():
         'preset': args.preset,
         'device': str(device),
         'backend': args.backend,
+        'seed': args.seed,
         'teacher_cache': args.teacher_cache,
         'calibration_tokens': sum(document['input_ids'].__len__() for document in calib_docs),
         'objective': args.objective,

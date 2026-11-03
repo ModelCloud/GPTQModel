@@ -283,3 +283,15 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
         assert set(saved) == {'probs', 'logits', 'history', 'weights', 'costs', 'names', 'groups',
                               'target_bits'}
         assert not list((tmp_path / 'mlx-allocation').glob('rco-teacher-*'))
+        assert mlx_payload['seed'] == 7
+        repeated = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+        assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+        repeated_saved = torch.load(tmp_path / 'mlx-allocation' / 'probs.pt', weights_only=True)
+        torch.testing.assert_close(saved['logits'], repeated_saved['logits'], rtol=0, atol=0)
+        command = [sys.executable, str(root / 'scripts/gsq_paper/rco_materialize.py'),
+                   '--model', str(tmp_path / 'dense'),
+                   '--assignment', str(tmp_path / 'mlx-allocation' / 'assignment.json'),
+                   '--arms', str(tmp_path / 'w{bits}'), '--out', str(tmp_path / 'mlx-cli-model'),
+                   '--device', 'cpu']
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stdout + result.stderr

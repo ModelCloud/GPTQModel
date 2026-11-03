@@ -410,6 +410,11 @@ class LlamaTeacherKL:
                     torch.save(hidden.detach().cpu(), path)
                     self.paths.append(path)
 
+    def cleanup(self):
+        """Release teacher scratch; the caller owns the cache directory."""
+        self._resident.clear()
+        self.paths.clear()
+
     def __call__(self, index):
         from torch.utils.checkpoint import checkpoint
 

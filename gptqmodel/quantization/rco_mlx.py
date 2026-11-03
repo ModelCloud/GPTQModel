@@ -7,7 +7,7 @@
 
 Torch remains the checkpoint and allocation-schema boundary. This module owns
 the expensive model replay: interpolation, teacher KL, projected Gumbel
-straight-through gradients, Adam, and manifold retraction all run in MLX.
+straight-through gradients, and Adam run in MLX. The small budget DP and retraction solve on the CPU.
 """
 
 import math
@@ -142,7 +142,7 @@ def _retraction(alpha, costs, target, fraction, *, max_iter=60, tol=1e-6):
 
 
 def budget_constrained_argmax_mlx(scores, weights, costs, target, resolution=500):
-    """Native-MLX DP matching the Torch solver's objective and tie behavior."""
+    """Host DP returning an MLX assignment with the Torch solver's tie behavior."""
     import mlx.core as mx
 
     scores = np.asarray(scores, dtype=np.float64)
@@ -359,7 +359,8 @@ class MLXTeacherKL:
         directory.mkdir(parents=True, exist_ok=True)
         self.paths = []
         for index, ids in enumerate(self.batches):
-            hidden = model.model(ids)
+            hidden = mx.stop_gradient(model.model(ids))
+            mx.eval(hidden)  # Finish each batch before capturing the next one.
             if resident_cache:
                 self._resident.append(hidden)
                 self.paths.append(None)
@@ -392,18 +393,22 @@ class MLXTeacherKL:
             raise ValueError("RCO teacher/student hidden shapes differ")
         student = student.reshape(-1, student.shape[-1])
         teacher = teacher.reshape(-1, teacher.shape[-1])
+        def chunk_loss(student_hidden, teacher_hidden):
+            student_logp = nn.log_softmax(
+                self._logits(student_hidden).astype(mx.float32), axis=-1
+            )
+            teacher_logp = mx.stop_gradient(nn.log_softmax(
+                self._logits(teacher_hidden).astype(mx.float32), axis=-1
+            ))
+            return mx.sum(mx.exp(teacher_logp) * (teacher_logp - student_logp))
+
+        # Rematerialize vocabulary intermediates in backward instead of retaining
+        # all chunks' logits for the lifetime of the decoder graph.
+        checkpointed_loss = mx.checkpoint(chunk_loss)
         loss = mx.zeros((), dtype=mx.float32)
         for start in range(0, student.shape[0], self.chunk_tokens):
             stop = start + self.chunk_tokens
-            student_logp = nn.log_softmax(
-                self._logits(student[start:stop]).astype(mx.float32), axis=-1
-            )
-            teacher_logp = nn.log_softmax(
-                self._logits(teacher[start:stop]).astype(mx.float32), axis=-1
-            )
-            loss = loss + mx.sum(
-                mx.exp(teacher_logp) * (teacher_logp - student_logp)
-            )
+            loss = loss + checkpointed_loss(student[start:stop], teacher[start:stop])
         return loss / student.shape[0]
 
 
@@ -499,17 +504,24 @@ def projected_gumbel_search_mlx(
             onehot = mx.eye(interpolated.n_options, dtype=mx.float32)[hard]
             draws.append((noise, onehot))
 
-        def training_loss(alpha):
-            total = mx.zeros((), dtype=mx.float32)
-            for noise, onehot in draws:
-                soft = _softmax((alpha + noise) / mx.array(temperature))
-                interpolated.set_probs(onehot - mx.stop_gradient(soft) + soft)
-                for batch_index, fraction in enumerate(batch_fractions):
-                    total = total + objective(batch_index) * (fraction / gumbel_samples)
-            interpolated.clear_probs()
-            return total
+        loss = mx.zeros((), dtype=mx.float32)
+        raw_gradient = mx.zeros_like(interpolated.alpha)
+        for noise, onehot in draws:
+            for batch, fraction in zip(batches, batch_fractions):
+                def training_loss(alpha):
+                    soft = _softmax((alpha + noise) / mx.array(temperature))
+                    interpolated.set_probs(onehot - mx.stop_gradient(soft) + soft)
+                    try:
+                        return objective(batch) * (fraction / gumbel_samples)
+                    finally:
+                        interpolated.clear_probs()
 
-        loss, raw_gradient = mx.value_and_grad(training_loss)(interpolated.alpha)
+                batch_loss, batch_gradient = mx.value_and_grad(training_loss)(interpolated.alpha)
+                loss = loss + batch_loss
+                raw_gradient = raw_gradient + batch_gradient
+                # A lazy sum would retain every batch/draw's decoder activations.
+                mx.eval(loss, raw_gradient)
+                del batch_loss, batch_gradient
         gradient = _tangent_gradient(
             interpolated.alpha,
             raw_gradient,
