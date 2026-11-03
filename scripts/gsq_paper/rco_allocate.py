@@ -24,6 +24,28 @@ import torch
 PROJECTIONS = ('self_attn.q_proj', 'self_attn.k_proj', 'self_attn.v_proj', 'self_attn.o_proj',
                'mlp.gate_proj', 'mlp.up_proj', 'mlp.down_proj')
 
+DEFAULT_BATCH_SIZE = 4
+DEFAULT_BATCH_TOKENS = 2048
+
+
+def resolve_batch_size(requested, backend, sequence_length, batch_tokens):
+    """Choose how many sequences share one forward pass.
+
+    Torch keeps the reference default of four sequences per forward. The native
+    MLX search additionally materializes every interpolated candidate weight on
+    each forward, and that work is proportional to the parameter count rather
+    than the token count, so a short forward spends most of its time rebuilding
+    weights that a wider forward would amortize. Sizing the forward by a token
+    budget instead keeps that overhead small. It does not change the objective:
+    the per-batch fractions are token-weighted, so any partition of the
+    calibration set yields the same token mean.
+    """
+    if requested is not None:
+        return requested
+    if backend != 'mlx':
+        return DEFAULT_BATCH_SIZE
+    return max(1, batch_tokens // max(1, sequence_length))
+
 
 def documents(corpus, split, count):
     from datasets import load_from_disk
@@ -58,8 +80,12 @@ def parse_args(argv=None):
     parser.add_argument('--group-size', type=int, default=128)
     parser.add_argument('--gptq-seqs', type=int, default=512)
     parser.add_argument('--calib-seqs', type=int, default=64)
-    parser.add_argument('--batch-size', type=int, default=4,
-                        help='sequences per forward pass; matches the reference default')
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help='sequences per forward pass; defaults to 4 on Torch and to the '
+                             'largest count that fits --batch-tokens on MLX')
+    parser.add_argument('--batch-tokens', type=int, default=DEFAULT_BATCH_TOKENS,
+                        help='token budget used to size the MLX forward pass '
+                             f'(default: {DEFAULT_BATCH_TOKENS})')
     parser.add_argument('--steps', type=int, default=200)
     parser.add_argument('--lr', type=float, default=0.1)
     parser.add_argument('--seed', type=int, default=7)
@@ -72,9 +98,11 @@ def parse_args(argv=None):
     args.grouping = args.grouping or ('projection' if paper else 'block')
     args.gumbel_samples = args.gumbel_samples if args.gumbel_samples is not None else (4 if paper else 1)
     args.options = args.options or ('2,3,4' if paper else '2,3')
-    for name in ('calib_seqs', 'batch_size', 'steps', 'gumbel_samples', 'kl_chunk_tokens'):
+    for name in ('calib_seqs', 'batch_tokens', 'steps', 'gumbel_samples', 'kl_chunk_tokens'):
         if getattr(args, name) < 1:
             parser.error(f'--{name.replace("_", "-")} must be positive')
+    if args.batch_size is not None and args.batch_size < 1:
+        parser.error('--batch-size must be positive')
     return args
 
 
@@ -208,9 +236,13 @@ def main():
     lengths = {int(ids.numel()) for ids in stacked}
     if len(lengths) != 1:
         raise SystemExit(f'calibration documents must share one length, saw {sorted(lengths)}')
+    sequence_length = lengths.pop()
+    args.batch_size = resolve_batch_size(
+        args.batch_size, args.backend, sequence_length, args.batch_tokens
+    )
     stacked = torch.stack(stacked)
     text = [chunk.to(device) for chunk in stacked.split(args.batch_size)]
-    print(f'calibration: {len(calib_docs)} documents of {lengths.pop()} tokens '
+    print(f'calibration: {len(calib_docs)} documents of {sequence_length} tokens '
           f'in {len(text)} batches of {args.batch_size}', flush=True)
 
     # Cache the dense teacher BEFORE setup replaces the live projections.
