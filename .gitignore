@@ -202,3 +202,8 @@ tmp
 gptqmodel_ext/**/*_hip.*
 gptqmodel_ext/**/*.hip
 gptqmodel_ext/exllamav2/hip/
+# The RDNA4 AllSpark port is hand-written, not hipify output, so its sources
+# must be tracked even though the file names match the patterns above.
+!gptqmodel_ext/allspark_hip/allspark_hip.cu
+!gptqmodel_ext/allspark_hip/allspark_utils_hip.cuh
+!gptqmodel_ext/allspark_hip/allspark_torch_hip.cpp

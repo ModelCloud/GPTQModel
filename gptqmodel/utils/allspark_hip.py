@@ -1,0 +1,231 @@
+# SPDX-FileCopyrightText: 2025 ModelCloud.ai
+# SPDX-License-Identifier: Apache-2.0
+"""JIT loader for the AllSpark HIP/RDNA4 W8A16 fused GEMM.
+
+Port of ``gptqmodel/utils/allspark.py`` to AMD RDNA4 (gfx1200 / gfx1201).
+The CUDA AllSpark kernel relies on cp.async, ldmatrix and ``mma.sync``
+m16n8k16, none of which exist on RDNA4; this module builds the HIP port in
+``gptqmodel_ext/allspark_hip`` instead.
+
+Supported configuration matches AllSpark's: bits=8, group_size=-1,
+desc_act=False, sym=True, fp16 or bf16 activations.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+import torch
+
+from .cpp import TorchOpsJitExtension, default_jit_cuda_cflags, default_torch_ops_build_root
+
+
+_ALLSPARK_HIP_OPS_NAME = "gptqmodel_allspark_hip_ops"
+_ALLSPARK_HIP_NAMESPACE = "gptqmodel_allspark_hip"
+
+# The HIP repack pads N to a multiple of 128 so every launch block owns a full
+# 128-column tile; the CUDA kernel only needed 32.
+ALLSPARK_HIP_N_ALIGN = 128
+ALLSPARK_HIP_K_ALIGN = 16
+ALLSPARK_HIP_MAX_M = 16
+
+
+def _root() -> Path:
+    return Path(__file__).resolve().parents[2] / "gptqmodel_ext" / "allspark_hip"
+
+
+def _sources() -> list[str]:
+    root = _root()
+    return [
+        str(root / "allspark_torch_hip.cpp"),
+        str(root / "allspark_hip.cu"),
+    ]
+
+
+def _rocm_root() -> Path | None:
+    """Locate a ROCm root that has the development layout hipcc needs.
+
+    The pip ROCm wheels split the toolkit: torch's ``ROCM_HOME`` points at
+    ``_rocm_sdk_core``, which carries the runtime soname (``libamdhip64.so.7``)
+    but no unversioned ``libamdhip64.so`` symlink, and the device bitcode lives
+    under a separate ``core-*`` package. A system install (``/opt/rocm``) has
+    both, so prefer the first candidate that looks complete.
+    """
+    from torch.utils import cpp_extension
+
+    candidates = [
+        os.environ.get("ROCM_PATH"),
+        os.environ.get("ROCM_HOME"),
+        getattr(cpp_extension, "ROCM_HOME", None),
+        "/opt/rocm",
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = Path(candidate)
+        if (root / "lib" / "libamdhip64.so").exists():
+            return root
+    return None
+
+
+def _cuda_cflags() -> list[str]:
+    flags = default_jit_cuda_cflags(
+        enable_bf16=True,
+        include_lineinfo=True,
+        include_nvcc_threads=True,
+        include_ptxas_optimizations=True,
+    )
+    flags += [
+        "-U__CUDA_NO_HALF_OPERATORS__",
+        "-U__CUDA_NO_HALF_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_HALF2_OPERATORS__",
+        # torch's HIP build defines these; the kernel relies on ordinary
+        # float <-> half/bfloat16 conversions.
+        "-U__HIP_NO_HALF_OPERATORS__",
+        "-U__HIP_NO_HALF_CONVERSIONS__",
+        "-U__HIP_NO_BFLOAT16_CONVERSIONS__",
+    ]
+    # The pip ROCm runtime wheel ships no device bitcode; point hipcc at the
+    # full toolkit so the gfx1201 device library resolves.
+    rocm_root = _rocm_root()
+    if rocm_root is not None:
+        flags.append(f"--rocm-path={rocm_root}")
+    return flags
+
+
+def _ldflags() -> list[str]:
+    # Torch adds -lamdhip64 for every HIP extension, but ROCM_HOME (the pip
+    # runtime wheel) only carries the versioned soname. /opt/rocm/lib has the
+    # development symlink.
+    rocm_root = _rocm_root()
+    return [f"-L{rocm_root / 'lib'}"] if rocm_root is not None else []
+
+
+_EXTENSION = TorchOpsJitExtension(
+    name=_ALLSPARK_HIP_OPS_NAME,
+    namespace=_ALLSPARK_HIP_NAMESPACE,
+    required_ops=(
+        "allspark_w8a16_gemm",
+        "rearrange_kn_weight_as_n32k16_order",
+        "allspark_hip_unpack",
+        "allspark_hip_selftest",
+    ),
+    sources=_sources,
+    build_root_env="GPTQMODEL_ALLSPARK_HIP_BUILD_ROOT",
+    default_build_root=lambda: default_torch_ops_build_root("allspark_hip"),
+    display_name="AllSpark W8A16 (HIP/RDNA4)",
+    extra_cuda_cflags=_cuda_cflags,
+    extra_ldflags=_ldflags,
+    force_rebuild_env="GPTQMODEL_ALLSPARK_HIP_FORCE_REBUILD",
+    verbose_env="GPTQMODEL_EXT_VERBOSE",
+    requires_cuda=True,
+    python_abi_dependent=False,
+)
+
+_SELFTESTED = False
+
+
+def prewarm_allspark_hip_extension() -> bool:
+    global _SELFTESTED
+    if not _EXTENSION.load():
+        return False
+    if not _SELFTESTED:
+        # Proves the device code ran: the kernel stamps a sentinel word. An
+        # empty kernel body (the `#if __CUDA_ARCH__` failure mode) would leave
+        # it untouched.
+        ref = torch.zeros(1, dtype=torch.float16, device='cuda')
+        if not torch.ops.gptqmodel_allspark_hip.allspark_hip_selftest(ref):
+            raise RuntimeError(
+                "allspark_hip: kernel did not execute (sentinel missing) - "
+                "device code was compiled empty or the wrong arch was targeted"
+            )
+        _SELFTESTED = True
+    return True
+
+
+def _device_arch(device: torch.device | None = None) -> str:
+    props = torch.cuda.get_device_properties(device)
+    return getattr(props, "gcnArchName", "") or ""
+
+
+def allspark_hip_supported(device: torch.device | None = None) -> bool:
+    if not torch.cuda.is_available() or torch.version.hip is None:
+        return False
+    arch = _device_arch(device)
+    return arch.startswith("gfx1200") or arch.startswith("gfx1201")
+
+
+def _n32(n: int) -> int:
+    return (n + ALLSPARK_HIP_N_ALIGN - 1) // ALLSPARK_HIP_N_ALIGN * ALLSPARK_HIP_N_ALIGN
+
+
+def allspark_hip_repack(qweight_codes: torch.Tensor, scales: torch.Tensor, n: int, k: int):
+    """Repack (K, N) uint8 codes into the RDNA4 WMMA fragment order."""
+    n32 = _n32(n)
+    packed = torch.empty((n32 // 4, k * 4), dtype=torch.uint8, device=qweight_codes.device)
+    scales_packed = torch.empty((n32,), dtype=scales.dtype, device=scales.device)
+    torch.ops.gptqmodel_allspark_hip.rearrange_kn_weight_as_n32k16_order(
+        qweight_codes,
+        scales,
+        None,
+        False,
+        packed,
+        scales_packed,
+        None,
+        k,
+        n,
+        n32,
+    )
+    return packed.view(n32, k), scales_packed
+
+
+def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor, n: int):
+    """W8A16 GEMM against weights already in the HIP packed layout."""
+    props = torch.cuda.get_device_properties(a.device)
+    k = a.shape[-1]
+    m = a.numel() // k
+    if m <= ALLSPARK_HIP_MAX_M:
+        return torch.ops.gptqmodel_allspark_hip.allspark_w8a16_gemm(
+            a,
+            b_qweight,
+            b_scales,
+            None,
+            n,
+            -1,
+            props.multi_processor_count,
+            props.major * 10 + props.minor,
+            1024,
+            False,
+            True,
+        )
+    # Prefill fallback: unpack per call and hand off to torch.matmul. The dense
+    # tensor is a local temporary; nothing is cached on the module.
+    w = torch.ops.gptqmodel_allspark_hip.allspark_hip_unpack(b_qweight, b_scales, n, k)
+    return torch.matmul(a, w)
+
+
+def allspark_hip_gemm_f32(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor, n: int):
+    """fp32-accumulator output (test/diagnostic path; M<=16)."""
+    props = torch.cuda.get_device_properties(a.device)
+    return torch.ops.gptqmodel_allspark_hip.allspark_hip_gemm_f32(
+        a, b_qweight, b_scales, n, props.multi_processor_count
+    )
+
+
+def allspark_hip_dtype_supported(dtype: torch.dtype) -> bool:
+    return dtype in (torch.float16, torch.bfloat16)
+
+
+__all__ = [
+    "ALLSPARK_HIP_K_ALIGN",
+    "ALLSPARK_HIP_MAX_M",
+    "ALLSPARK_HIP_N_ALIGN",
+    "allspark_hip_dtype_supported",
+    "allspark_hip_gemm",
+    "allspark_hip_gemm_f32",
+    "allspark_hip_repack",
+    "allspark_hip_supported",
+    "prewarm_allspark_hip_extension",
+]

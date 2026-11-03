@@ -93,6 +93,11 @@ def prewarm_allspark_extension() -> bool:
 def allspark_supported(device: torch.device | None = None) -> bool:
     if not torch.cuda.is_available():
         return False
+    # ROCm reports a fake compute capability (gfx1201 -> 12.0), which would fall
+    # inside the Ampere..Blackwell window and send the loader to this CUDA-only
+    # kernel. The RDNA4 path lives in gptqmodel/utils/allspark_hip.py.
+    if torch.version.hip is not None:
+        return False
     capability = torch.cuda.get_device_capability(device)
     return ALLSPARK_MIN_CAPABILITY <= capability[0] * 10 + capability[1] <= ALLSPARK_MAX_CAPABILITY
 

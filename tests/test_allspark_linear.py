@@ -1,9 +1,17 @@
 # SPDX-FileCopyrightText: 2025 ModelCloud.ai
 # SPDX-License-Identifier: Apache-2.0
-"""AllSparkLinear: GPTQ 8-bit layout -> repack -> GEMM."""
+"""AllSparkLinear: GPTQ 8-bit layout -> repack -> GEMM.
+
+Runs on both device paths of the ``gptq_allspark`` backend: CUDA (Ampere+) and
+ROCm RDNA4 (gfx1200/gfx1201, WMMA port). The module must pick the matching
+repack/kernel pair from the runtime device, so this is also the guard against
+silently pairing a CUDA-packed weight with the HIP kernel.
+"""
 
 import pytest
 import torch
+
+from gptqmodel.utils.rocm import IS_ROCM
 
 
 pytestmark = pytest.mark.skipif(
@@ -21,30 +29,57 @@ def _pack_gptq_8bit(weight: torch.Tensor):
     return qweight.contiguous(), scale.view(1, n).to(weight.dtype), codes
 
 
-@pytest.mark.parametrize("m", [1, 16, 64])
-def test_allspark_linear_matches_dequant(m):
-    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
-    from gptqmodel.utils.allspark import allspark_supported, prewarm_allspark_extension
+def _kernel_supported() -> bool:
+    if IS_ROCM:
+        from gptqmodel.utils.allspark_hip import allspark_hip_supported
 
-    if not allspark_supported():
-        pytest.skip("AllSpark requires compute capability >= 8.0")
-    assert prewarm_allspark_extension()
+        return allspark_hip_supported()
+    from gptqmodel.utils.allspark import allspark_supported
+
+    return allspark_supported()
+
+
+def _prewarm() -> bool:
+    if IS_ROCM:
+        from gptqmodel.utils.allspark_hip import prewarm_allspark_hip_extension
+
+        return prewarm_allspark_hip_extension()
+    from gptqmodel.utils.allspark import prewarm_allspark_extension
+
+    return prewarm_allspark_extension()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("m", [1, 16, 64])
+def test_allspark_linear_matches_dequant(m, dtype):
+    from gptqmodel.nn_modules.qlinear.allspark import AllSparkLinear
+
+    if not _kernel_supported():
+        pytest.skip(
+            "AllSpark requires compute capability >= 8.0 (CUDA) or gfx1200/gfx1201 (ROCm)"
+        )
+    assert _prewarm()
 
     k, n = 256, 512
-    weight = torch.randn(k, n, dtype=torch.float16, device="cuda")
+    # Random, non-zero weights: a zero weight would let the hardware skip work
+    # and would hide both repack bugs and dequant bugs.
+    weight = torch.randn(k, n, dtype=torch.float32, device="cuda")
+    weight = (weight * 0.02).to(dtype)
     qweight, scales, codes = _pack_gptq_8bit(weight)
 
     mod = AllSparkLinear(
         bits=8, group_size=-1, desc_act=False, sym=True,
-        in_features=k, out_features=n, bias=False,
-    ).cuda().half()
+        in_features=k, out_features=n, bias=False, dtype=dtype,
+    ).cuda().to(dtype)
     mod.qweight.data.copy_(qweight)
     mod.scales.data.copy_(scales)
     mod.post_init()
 
-    x = torch.randn(m, k, dtype=torch.float16, device="cuda") * 0.02
+    x = (torch.randn(m, k, dtype=torch.float32, device="cuda") * 0.02).to(dtype)
     out = mod(x)
-    ref = x @ ((codes.float() - 128) * scales.float()).half()
+    assert out.dtype == dtype
+    # Reference in fp64 from the original codes: no reuse of kernel state.
+    ref = x.double() @ ((codes.double() - 128) * scales.double())
 
-    rel = (out.float() - ref.float()).abs().mean() / ref.float().abs().mean()
+    rel = (out.double() - ref).abs().mean() / ref.abs().mean()
     assert rel < 0.02, f"m={m} relative error {rel.item():.5f}"
