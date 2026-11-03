@@ -146,7 +146,8 @@ def test_preset_defaults_and_explicit_overrides():
     required = ['--model', 'model', '--corpus', 'data', '--out', 'out', '--target-bits', '2.5', '--arms', 'w{bits}']
     default = allocate.parse_args(required)
     assert default.preset == 'paper'
-    assert default.device == 'auto' and default.teacher_cache == 'device'
+    assert default.device == 'auto' and default.backend == 'auto'
+    assert default.teacher_cache == 'device'
     assert (default.objective, default.grouping, default.gumbel_samples, default.options) == ('kl', 'projection', 4, '2,3,4')
     old = allocate.parse_args(required + ['--preset', 'legacy'])
     assert (old.objective, old.grouping, old.gumbel_samples, old.options) == ('ce', 'block', 1, '2,3')
@@ -248,11 +249,12 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
                '--out', str(tmp_path / 'allocation'), '--arms', str(tmp_path / 'w{bits}'),
                '--options', '2,3', '--target-bits', '2.5',
                '--group-size', '32', '--calib-seqs', '3', '--batch-size', '2',
-               '--steps', '2', '--device', 'cpu']
+               '--steps', '2', '--device', 'cpu', '--backend', 'torch']
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     payload = json.loads((tmp_path / 'allocation' / 'assignment.json').read_text())
     assert payload['preset'] == 'paper'
+    assert payload['backend'] == 'torch'
     assert payload['objective'] == 'kl' and payload['grouping'] == 'projection'
     assert payload['gumbel_samples'] == 4 and payload['group_count'] == 7
     assert len(payload['projection_bits']) == 7 and payload['group_size'] == 32
@@ -262,3 +264,22 @@ def test_projection_materialization_packed_bytes_and_save_reload(tmp_path):
                '--arms', str(tmp_path / 'w{bits}'), '--out', str(tmp_path / 'cli-model'), '--device', 'cpu']
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
+
+    from gptqmodel.quantization.rco_mlx import rco_mlx_available
+    if rco_mlx_available():
+        command = [sys.executable, str(root / 'scripts/gsq_paper/rco_allocate.py'),
+                   '--model', str(tmp_path / 'dense'), '--corpus', str(tmp_path / 'corpus'),
+                   '--out', str(tmp_path / 'mlx-allocation'), '--arms', str(tmp_path / 'w{bits}'),
+                   '--options', '2,3', '--target-bits', '2.5',
+                   '--group-size', '32', '--calib-seqs', '3', '--batch-size', '2',
+                   '--steps', '1', '--device', 'cpu', '--backend', 'mlx']
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=180)
+        assert result.returncode == 0, result.stdout + result.stderr
+        mlx_payload = json.loads((tmp_path / 'mlx-allocation' / 'assignment.json').read_text())
+        assert mlx_payload['backend'] == 'mlx'
+        assert mlx_payload['grouping'] == 'projection'
+        assert len(mlx_payload['projection_bits']) == 7
+        saved = torch.load(tmp_path / 'mlx-allocation' / 'probs.pt', weights_only=True)
+        assert set(saved) == {'probs', 'logits', 'history', 'weights', 'costs', 'names', 'groups',
+                              'target_bits'}
+        assert not list((tmp_path / 'mlx-allocation').glob('rco-teacher-*'))

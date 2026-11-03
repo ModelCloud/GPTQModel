@@ -529,15 +529,15 @@ supplied corpus. This is a paper-style allocation configuration, not a claim
 of reproducing the paper's complete dataset, option set or measured results.
 
 The teacher is captured from the dense model before any candidate weights are
-installed. Its final hidden states are temporarily cached on disk, and the
-unchanged output head reconstructs its distributions. KL is averaged over all
-calibration token positions, including the last next-token context. Uneven
-final batches receive their token-count weight. `--kl-chunk-tokens` (default
-128) bounds vocabulary intermediates using activation checkpointing; the
-cache stores hidden states rather than the much larger full-vocabulary logits.
-The temporary cache is removed on normal completion and handled exceptions.
-Decoder activations and the candidate weight database still consume memory;
-this option does not bound their size.
+installed. Its final hidden states are retained on the search device by default
+or temporarily cached on disk, and the unchanged output head reconstructs its
+distributions. KL is averaged over all calibration token positions, including
+the last next-token context. Uneven final batches receive their token-count
+weight. `--kl-chunk-tokens` (default 128) bounds vocabulary intermediates using
+activation checkpointing; the cache stores hidden states rather than the much
+larger full-vocabulary logits. The temporary cache is removed on normal
+completion and handled exceptions. Decoder activations and the candidate weight
+database still consume memory; this option does not bound their size.
 
 `assignment.json` records the effective objective, grouping, sample count,
 calibration size, group size, per-projection widths and measured code bits per
@@ -553,3 +553,75 @@ Allocation uses the validation split for optimization. Evaluate quality on a
 separate test corpus or the zero-shot suite; NLL on that same validation split
 is a search diagnostic. No full-model quality gain is established by the
 numerical and tiny-model round-trip tests for this configuration.
+
+### Apple Silicon backend
+
+On macOS on Apple silicon, the allocation search defaults to the native MLX
+implementation in `gptqmodel/quantization/rco_mlx.py`. Install its optional
+runtime with `pip install "gptqmodel[mlx]"`. `--backend auto` selects MLX when
+that package tree is importable and otherwise falls back to Torch. Select a
+backend explicitly with `--backend mlx` or `--backend torch`; explicit MLX
+selection fails rather than silently changing backends. `assignment.json`
+records the backend that actually ran the search. The MLX path currently
+supports Llama models; its teacher KL, candidate interpolation,
+straight-through Gumbel gradients, budget projection, retraction, and Adam
+recurrence all execute in MLX on Metal. The Torch path remains available on
+CUDA and other platforms and is the implementation oracle.
+
+`--teacher-cache device` is the default. It retains detached dense-teacher
+hidden states in unified memory during the search; `--teacher-cache disk`
+streams those states from a temporary directory instead. For the full
+paper-shaped Llama 3.1 8B run, resident states consume substantially more than
+the packed candidates. Use disk mode when the resident activation set does not
+fit. Both modes are deleted when the allocation script exits. Dense candidate
+weights and teacher hidden states are offline search scratch only: the search
+neither loads nor modifies a packed inference checkpoint.
+
+The M5 Ultra has 256 GiB of unified memory and 1.2 TB/s memory bandwidth. It has
+no HBM: CPU, Metal GPU, and the Apple Neural Engine (ANE/NPU) address the same
+memory pool. The search uses Metal through MLX for differentiablity rather than
+copying the dense Llama graph between accelerators.
+
+A reproducible warm benchmark compares the same resident teacher cache, model,
+and token IDs with a deterministic Gumbel seed in each backend on Torch MPS and
+MLX Metal:
+
+```bash
+PYTHONPATH=. python scripts/gsq_paper/bench_rco_backends.py \
+    --model /path/to/SmolLM2-135M \
+    --tokens 16 --steps 3 --draws 2 --warmup 1 --repeats 5 \
+    --mlx-source /path/to/mlx \
+    --mlx-lm-source /path/to/mlx-lm \
+    --json-out /tmp/rco-backends.json
+```
+
+The benchmark synchronizes Torch MPS and evaluates MLX before stopping the
+timer. It records all samples, the median, model and search dimensions, dtype,
+Python/Torch/MLX versions, and optional source revisions. On 2026-11-02 it used
+SmolLM2-135M's 30 `mlp.down_proj` modules with 16 tokens, three steps, two draws,
+one warmup, and five timed repetitions:
+
+| Search backend | Median | Seconds/step |
+| --- | ---: | ---: |
+| Torch 2.15.0, MPS, BF16 | 0.2511 s | 0.0837 |
+| MLX 0.32.4, Metal, model-native BF16 | **0.0966 s** | **0.0322** |
+
+MLX was 2.60x faster for this search-shaped workload. This is a tiny-model
+component benchmark, not an end-to-end quantization speedup or a claim about
+all model sizes. The measured upstream source checkouts were MLX main
+`c69303b00f5f61860436e832f23fa8c34b96f93a` and MLX-LM main
+`736ab0d8c1d0edc79c3d798044fe6904e2fa23be`. An official MLX
+`frontend-macOS-ARM64-py3.13` artifact reporting 0.32.5 was tested but failed
+to import with a missing `mlx::core::cu::get_arch_list()` symbol, so it is not
+part of this result. MLX main could not replace the release runtime in this
+environment because only Apple Command Line Tools are installed and the Metal
+compiler is absent.
+
+The ANE can execute a deliberately simple Core ML inference graph when forced
+onto `MLNeuralEngineComputeDevice`, but Core ML does not expose autograd for the
+RCO search graph. A synthetic ANE-alone, MPS-alone, serial, and threaded probe
+measured 0.000553 s, 0.003427 s, 0.004123 s, and 0.004476 s respectively. The
+threaded GPU/ANE version ran at 0.921x the serial throughput, so allocation
+does not split work across GPU and ANE. ANE offload remains an inference-only
+avenue that would require a separate model graph and scheduler; it is not a
+missing switch in this search.
