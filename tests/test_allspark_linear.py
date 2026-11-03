@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """AllSparkLinear: GPTQ 8-bit layout -> repack -> GEMM.
 
-Runs on both device paths of the ``gptq_allspark`` backend: CUDA (Ampere+) and
+Runs on both device paths of the ``allspark`` backend: CUDA (Ampere+) and
 ROCm RDNA4 (gfx1200/gfx1201, WMMA port). The module must pick the matching
 repack/kernel pair from the runtime device, so this is also the guard against
 silently pairing a CUDA-packed weight with the HIP kernel.

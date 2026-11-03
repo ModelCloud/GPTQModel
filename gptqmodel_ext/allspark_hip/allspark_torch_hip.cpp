@@ -27,17 +27,15 @@ int allspark_hip_pick_splitk(int M, int N, int N32, int K, int sm_count);
 void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
                          const void* Bz, void* C, void* ws, int M, int N,
                          int N32, int K, int splitk, int dtype, int out_fp32,
-                         void* stream, uint32_t* ran, int group_cnt,
-                         int group_size);
+                         void* stream, uint32_t* ran);
 
 void allspark_hip_launch_repack(const void* B, const void* Bs, const void* Bz,
                                 void* Bq_out, void* Bs_out, void* Bz_out, int K,
-                                int N, int N32, int dtype, void* stream,
-                                int group_cnt);
+                                int N, int N32, int dtype, void* stream);
 
 void allspark_hip_launch_unpack(const void* Bq, const void* Bs, const void* Bz,
                                 void* B, int K, int N, int N32, int dtype,
-                                void* stream, int group_cnt, int group_size);
+                                void* stream);
 }
 
 namespace {
@@ -71,8 +69,9 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
               "b_qweight must be contiguous");
   TORCH_CHECK(b_scales.is_cuda() && b_scales.is_contiguous(),
               "b_scales must be contiguous");
-  TORCH_CHECK(group_size == -1 || group_size > 0,
-              "allspark_hip: group_size must be -1 or a positive multiple of 16");
+  TORCH_CHECK(group_size == -1,
+              "allspark_hip keeps one scale/zero row per output channel; "
+              "grouped AWQ (group_size > 0) is not supported");
   TORCH_CHECK(a.scalar_type() == b_scales.scalar_type(),
               "activation and scale dtypes must match");
 
@@ -91,20 +90,9 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
   const int64_t N32 = b_qweight.numel() / K;
   TORCH_CHECK(N32 % 32 == 0 && N32 >= N, "packed weight has an invalid N padding");
 
-  // Packed scale/zero are (GroupCnt, N32) flattened. GroupCnt == 1 is GPTQ
-  // 8-bit (per-channel); GroupCnt > 1 is grouped AWQ along K.
-  TORCH_CHECK(b_scales.numel() % N32 == 0,
-              "b_scales must hold a whole number of (GroupCnt, N32) rows");
-  const int64_t group_cnt = b_scales.numel() / N32;
-  TORCH_CHECK(group_cnt >= 1, "b_scales is empty");
-  if (group_cnt > 1) {
-    TORCH_CHECK(group_size > 0, "grouped scales need an explicit group_size");
-    TORCH_CHECK(group_size % 16 == 0,
-                "allspark_hip: group_size must be a multiple of the 16-wide k-tile");
-    TORCH_CHECK(K % group_size == 0, "K must be divisible by group_size");
-    TORCH_CHECK(group_cnt == K / group_size,
-                "b_scales group count does not match K / group_size");
-  }
+  // Scale/zero are per-output-channel: exactly one padded N32 row each.
+  TORCH_CHECK(b_scales.numel() == N32,
+              "b_scales must hold exactly one row of N32 per-channel scales");
 
   auto c = torch::empty({M, N}, a.options());
 
@@ -132,9 +120,7 @@ torch::Tensor allspark_w8a16_gemm_dispatch(
                       c.data_ptr(), ws_ptr, static_cast<int>(M),
                       static_cast<int>(N), static_cast<int>(N32),
                       static_cast<int>(K), splitk, dtype_code(a), 0,
-                      current_stream(), nullptr,
-                      static_cast<int>(group_cnt),
-                      static_cast<int>(group_size));
+                      current_stream(), nullptr);
   return c;
 }
 
@@ -145,15 +131,15 @@ torch::Tensor allspark_hip_gemm_f32_dispatch(torch::Tensor a,
                                              torch::Tensor b_qweight,
                                              torch::Tensor b_scales, int64_t n,
                                              int64_t sm_count,
-                                             std::optional<torch::Tensor> b_qzeros,
-                                             int64_t group_size) {
+                                             std::optional<torch::Tensor> b_qzeros) {
   const c10::cuda::CUDAGuard device_guard_ = device_guard(a);
   const int64_t K = a.size(-1);
   const int64_t M = a.numel() / K;
   const int64_t N = n;
   TORCH_CHECK(M <= 16, "fp32 output path supports M<=16 only");
   const int64_t N32 = b_qweight.numel() / K;
-  const int64_t group_cnt = b_scales.numel() / N32;
+  TORCH_CHECK(b_scales.numel() == N32,
+              "b_scales must hold exactly one row of N32 per-channel scales");
   auto c = torch::empty({M, N}, a.options().dtype(torch::kFloat32));
   const int sm = static_cast<int>(sm_count);
   int splitk = allspark_hip_pick_splitk(static_cast<int>(M), static_cast<int>(N),
@@ -177,8 +163,7 @@ torch::Tensor allspark_hip_gemm_f32_dispatch(torch::Tensor a,
                       bz, c.data_ptr(), ws_ptr, static_cast<int>(M),
                       static_cast<int>(N), static_cast<int>(N32),
                       static_cast<int>(K), splitk, dtype_code(a), 1,
-                      current_stream(), nullptr,
-                      static_cast<int>(group_cnt), static_cast<int>(group_size));
+                      current_stream(), nullptr);
   return c;
 }
 
@@ -198,19 +183,15 @@ void rearrange_kn_weight_as_n32k16_order_dispatch(
   TORCH_CHECK(k % 16 == 0, "K must be a multiple of 16");
   TORCH_CHECK(n_32align % 32 == 0 && n_32align >= n, "invalid n_32align");
 
-  // Scale/zero may be (N,) for GPTQ 8-bit or (GroupCnt, N) for grouped AWQ.
-  // They are packed row-major into (GroupCnt, n_32align).
-  const int64_t group_cnt = b_scales.numel() / n;
-  TORCH_CHECK(group_cnt >= 1 && group_cnt * n == b_scales.numel(),
-              "b_scales must be (N,) or (GroupCnt, N)");
-  TORCH_CHECK(b_scales_reorder.numel() == group_cnt * n_32align,
-              "b_scales_reorder size must be GroupCnt * n_32align");
+  // One per-output-channel row of scale/zero, padded from N to n_32align.
+  TORCH_CHECK(b_scales.numel() == n, "b_scales must be (N,) per-channel scales");
+  TORCH_CHECK(b_scales_reorder.numel() == n_32align,
+              "b_scales_reorder size must be n_32align");
 
   const void* bz = nullptr;
   void* bz_out = nullptr;
   if (has_zp && b_zeros.has_value() && b_zeros_reorder.has_value()) {
-    TORCH_CHECK(b_zeros->numel() == group_cnt * n,
-                "b_zeros must match the b_scales group shape");
+    TORCH_CHECK(b_zeros->numel() == n, "b_zeros must be (N,) like b_scales");
     bz = b_zeros->data_ptr();
     bz_out = b_zeros_reorder->data_ptr();
   }
@@ -219,7 +200,7 @@ void rearrange_kn_weight_as_n32k16_order_dispatch(
       b_qweight.data_ptr(), b_scales.data_ptr(), bz,
       b_qweight_reorder.data_ptr(), b_scales_reorder.data_ptr(), bz_out,
       static_cast<int>(k), static_cast<int>(n), static_cast<int>(n_32align),
-      dtype_code(b_scales), current_stream(), static_cast<int>(group_cnt));
+      dtype_code(b_scales), current_stream());
 }
 
 // Fragment-order packed weights -> dense (K, N). Only used by the M > 16
@@ -227,11 +208,11 @@ void rearrange_kn_weight_as_n32k16_order_dispatch(
 torch::Tensor allspark_hip_unpack_dispatch(torch::Tensor b_qweight,
                                            torch::Tensor b_scales, int64_t n,
                                            int64_t k,
-                                           std::optional<torch::Tensor> b_qzeros,
-                                           int64_t group_size) {
+                                           std::optional<torch::Tensor> b_qzeros) {
   const c10::cuda::CUDAGuard device_guard_ = device_guard(b_qweight);
   const int64_t N32 = b_qweight.numel() / k;
-  const int64_t group_cnt = b_scales.numel() / N32;
+  TORCH_CHECK(b_scales.numel() == N32,
+              "b_scales must hold exactly one row of N32 per-channel scales");
   auto out = torch::empty({k, n}, b_scales.options());
   const void* bz = nullptr;
   if (b_qzeros.has_value()) {
@@ -240,9 +221,7 @@ torch::Tensor allspark_hip_unpack_dispatch(torch::Tensor b_qweight,
   allspark_hip_launch_unpack(b_qweight.data_ptr(), b_scales.data_ptr(), bz,
                              out.data_ptr(), static_cast<int>(k),
                              static_cast<int>(n), static_cast<int>(N32),
-                             dtype_code(b_scales), current_stream(),
-                             static_cast<int>(group_cnt),
-                             static_cast<int>(group_size));
+                             dtype_code(b_scales), current_stream());
   return out;
 }
 
@@ -262,7 +241,7 @@ bool allspark_hip_selftest(torch::Tensor ref) {
   allspark_hip_launch(a.data_ptr(), bq.data_ptr(), bs.data_ptr(), nullptr,
                       c.data_ptr(), nullptr, M, N, N, K, 1, 0, 0,
                       current_stream(),
-                      reinterpret_cast<uint32_t*>(ran.data_ptr()), 1, -1);
+                      reinterpret_cast<uint32_t*>(ran.data_ptr()));
   auto host = ran.cpu();
   const uint32_t got = static_cast<uint32_t>(host.data_ptr<int32_t>()[0]);
   return got == 0x41535350u;
@@ -282,10 +261,10 @@ TORCH_LIBRARY(gptqmodel_allspark_hip, m) {
       "int n_32align) -> ()");
   m.def(
       "allspark_hip_unpack(Tensor b_qweight, Tensor b_scales, int n, int k, "
-      "Tensor? b_qzeros, int group_size) -> Tensor");
+      "Tensor? b_qzeros) -> Tensor");
   m.def(
       "allspark_hip_gemm_f32(Tensor a, Tensor b_qweight, Tensor b_scales, int n, "
-      "int sm_count, Tensor? b_qzeros, int group_size) -> Tensor");
+      "int sm_count, Tensor? b_qzeros) -> Tensor");
   m.def("allspark_hip_selftest(Tensor ref) -> bool");
 }
 

@@ -46,15 +46,22 @@ def _device_type(device) -> str:
 
 
 class AllSparkAwqLinear(AWQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.AWQ_ALLSPARK]
+    # AWQ sub-kernel of the shared AllSpark backend. ``BACKEND.ALLSPARK`` plus
+    # the checkpoint method/format selects this class; no AWQ-specific backend
+    # name is required.
+    SUPPORTS_BACKENDS = [BACKEND.ALLSPARK]
     SUPPORTS_METHODS = [METHOD.AWQ]
     # 0 keeps the format registered but opts out of AUTO selection, like the
     # GPTQ module: the numbers come first, promotion to AUTO later.
     SUPPORTS_FORMATS = {FORMAT.GEMM: 0}
     SUPPORTS_BITS = [8]
-    # The kernel selects one scale/zero row per 16-wide k-tile, so any group
-    # size that is a multiple of 16 works; -1 is the per-channel case.
-    SUPPORTS_GROUP_SIZE = [-1, 16, 32, 64, 128]
+    # Per-channel only. AWQ's grouped qzeros put a different zero point on each
+    # K-group, which forces a scale/zero reload per 16-wide k-tile inside the
+    # GEMV and costs 2-6% at group_size=128 (~18% at 32) on gfx1201 with no
+    # accuracy benefit for the decode shapes this kernel targets. With -1 there
+    # is one group over all of K, so scales/zeros are (1, N) and the kernel
+    # loads them once outside the k-loop.
+    SUPPORTS_GROUP_SIZE = [-1]
     SUPPORTS_DESC_ACT = [True, False]
     SUPPORTS_SYM = [True, False]
     SUPPORTS_SHARDS = False
@@ -70,7 +77,7 @@ class AllSparkAwqLinear(AWQuantLinear):
 
     REQUIRES_FORMAT_V2 = False
 
-    QUANT_TYPE = "awq_allspark"
+    QUANT_TYPE = "allspark"
 
     @classmethod
     def validate_device(cls, device):
@@ -115,7 +122,7 @@ class AllSparkAwqLinear(AWQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.AWQ_ALLSPARK),
+            backend=kwargs.pop("backend", BACKEND.ALLSPARK),
             adapter=adapter,
             register_buffers=register_buffers,
             **kwargs,
@@ -129,9 +136,10 @@ class AllSparkAwqLinear(AWQuantLinear):
 
     @property
     def _kernel_group_size(self) -> int:
-        # -1 and group_size == in_features both mean one per-channel group.
-        requested = getattr(self, "requested_group_size", self.group_size)
-        return -1 if requested in (-1, self.in_features) else requested
+        # The kernel keeps one scale/zero row per output channel, so the only
+        # accepted grouping is "all of K". ``group_size == in_features`` is how
+        # the base class spells -1 internally.
+        return -1
 
     def pack(self, linear: torch.nn.Module, scales: torch.Tensor,
              zeros: torch.Tensor, g_idx: torch.Tensor = None):
@@ -146,6 +154,11 @@ class AllSparkAwqLinear(AWQuantLinear):
         del g_idx
         assert scales is not None and zeros is not None
 
+        if self.requested_group_size not in (-1, self.in_features):
+            raise ValueError(
+                "AWQ AllSpark supports group_size=-1 only, got "
+                f"{self.requested_group_size}"
+            )
         scales = scales.t().contiguous()
         zeros = zeros.t().contiguous()
         scale_zeros = zeros * scales

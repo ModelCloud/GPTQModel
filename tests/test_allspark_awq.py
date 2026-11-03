@@ -99,12 +99,14 @@ def _check(out, raw32, ref64, dtype, label):
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("group_size", [-1, 16, 32, 64, 128])
 @pytest.mark.parametrize("m", [1, 4, 16])
-def test_awq_8bit_matches_fp64_oracle(dtype, group_size, m):
+def test_awq_8bit_matches_fp64_oracle(dtype, m):
+    # group_size=-1 only: AWQ's qzeros are per output channel, which is the one
+    # layout the kernel can load outside the k-loop.
+    group_size = -1
     n, k = 256, 256
     qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, group_size, dtype,
-                                                            seed=group_size + m)
+                                                            seed=m)
     packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
         qweight, qzeros, scales, n, k, group_size
     )
@@ -139,12 +141,12 @@ def test_awq_zero_point_is_not_assumed_128(dtype):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_awq_non_aligned_n(dtype):
     n, k, m = 11024, 128, 3
-    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, 32, dtype, seed=99)
+    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, -1, dtype, seed=99)
     packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
-        qweight, qzeros, scales, n, k, 32
+        qweight, qzeros, scales, n, k, -1
     )
-    out = allspark_hip_gemm(a, packed, packed_scales, n, packed_zeros, 32)
-    raw32 = allspark_hip_gemm_f32(a, packed, packed_scales, n, packed_zeros, 32)
+    out = allspark_hip_gemm(a, packed, packed_scales, n, packed_zeros, -1)
+    raw32 = allspark_hip_gemm_f32(a, packed, packed_scales, n, packed_zeros, -1)
     assert out.shape == (m, n)
     ref64 = a.to(torch.float64) @ _round_weights(codes, zeros, scales, g, dtype)
     _check(out, raw32, ref64, dtype, f"awq tail N={n} K={k} M={m}")
@@ -152,14 +154,14 @@ def test_awq_non_aligned_n(dtype):
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_awq_prefill_fallback(dtype):
-    """M > 16 goes through the grouped unpack + matmul and must not cache."""
+    """M > 16 goes through the unpack + matmul fallback and must not cache."""
     n, k, m = 256, 256, 32
-    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, 32, dtype, seed=17)
+    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, m, -1, dtype, seed=17)
     packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
-        qweight, qzeros, scales, n, k, 32
+        qweight, qzeros, scales, n, k, -1
     )
     before = torch.cuda.memory_allocated()
-    out = allspark_hip_gemm(a, packed, packed_scales, n, packed_zeros, 32)
+    out = allspark_hip_gemm(a, packed, packed_scales, n, packed_zeros, -1)
     torch.cuda.synchronize()
     gc.collect()
     after = torch.cuda.memory_allocated()
@@ -201,14 +203,14 @@ def _tensor_bytes(module: torch.nn.Module) -> int:
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_awq_no_dense_weight_cache(dtype):
     n, k = 512, 512
-    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, 1, 128, dtype, seed=23)
+    qweight, qzeros, scales, codes, zeros, a, g = _awq_case(n, k, 1, -1, dtype, seed=23)
     packed, packed_scales, packed_zeros = allspark_hip_repack_awq(
-        qweight, qzeros, scales, n, k, 128
+        qweight, qzeros, scales, n, k, -1
     )
     del codes, zeros, qweight, qzeros
     torch.cuda.empty_cache()
 
-    module = _AwqHipLinear(packed, packed_scales, packed_zeros, n, 128)
+    module = _AwqHipLinear(packed, packed_scales, packed_zeros, n, -1)
     baseline = _tensor_bytes(module)
     packed_bytes = (packed.numel() + packed_scales.numel() * packed_scales.element_size()
                     + packed_zeros.numel() * packed_zeros.element_size())
@@ -227,7 +229,7 @@ def test_awq_second_gpu_matches_first(dtype):
     """A custom op gets no dispatcher device guard, so running on cuda:1 while
     cuda:0 is current must still use cuda:1's pointers. Without the guard the
     kernel reads another device's memory and the output is NaN."""
-    n, k, m, gsz = 256, 256, 8, 128
+    n, k, m, gsz = 256, 256, 8, -1
     qweight, qzeros, scales, codes, zeros, a, _ = _awq_case(
         n, k, m, gsz, dtype, seed=41
     )
@@ -255,7 +257,7 @@ def test_awq_module_runs_on_rdna4():
     from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 
     for dtype in (torch.float16, torch.bfloat16):
-        k, n, m, group = 512, 512, 8, 128
+        k, n, m, group = 512, 512, 8, -1
         qweight, qzeros, scales, codes, zeros, a, g = _awq_case(
             n, k, m, group, dtype, seed=31
         )
@@ -277,8 +279,7 @@ def test_awq_module_runs_on_rdna4():
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("group_size", [-1, 128])
-def test_awq_pack_roundtrip_from_dense_weight(dtype, group_size):
+def test_awq_pack_roundtrip_from_dense_weight(dtype):
     """Full quantisation path: dense weight -> pack() -> post_init() -> forward.
 
     This is the only test that exercises the module's own AWQ packer against a
@@ -287,8 +288,8 @@ def test_awq_pack_roundtrip_from_dense_weight(dtype, group_size):
     """
     from gptqmodel.nn_modules.qlinear.allspark_awq import AllSparkAwqLinear
 
-    k, n = 512, 512
-    g = k if group_size == -1 else group_size
+    # group_size=-1 is one group over all of K.
+    group_size, k, n, g = -1, 512, 512, 512
     torch.manual_seed(5)
     weight = (torch.randn(n, k, dtype=torch.float32, device="cuda") * 0.02)
     groups = k // g
@@ -350,26 +351,28 @@ def test_awq_backend_registered():
     from gptqmodel.utils.backend import BACKEND
     from gptqmodel.utils.importer import get_kernel_backends
 
-    assert BACKEND.AWQ_ALLSPARK in get_kernel_backends(AllSparkAwqLinear)
+    # One shared AllSpark backend; the checkpoint method picks the AWQ module.
+    assert BACKEND.ALLSPARK in get_kernel_backends(AllSparkAwqLinear)
     assert AllSparkAwqLinear.SUPPORTS_DEVICES == [DEVICE.ROCM]
+    # Per-output-channel zeros only.
+    assert AllSparkAwqLinear.SUPPORTS_GROUP_SIZE == [-1]
 
 
 def test_awq_selectable_through_registry():
-    """The loader path, not just the class: AWQ + GEMM + awq_allspark resolves."""
+    """The loader path, not just the class: AWQ + GEMM + allspark resolves."""
     from gptqmodel.quantization import FORMAT, METHOD
     from gptqmodel.utils.backend import BACKEND
     from gptqmodel.utils.importer import select_quant_linear
 
-    for group_size in (-1, 128):
-        cls = select_quant_linear(
-            bits=8,
-            group_size=group_size,
-            desc_act=False,
-            sym=True,
-            device="cuda",
-            backend=BACKEND.AWQ_ALLSPARK,
-            format=FORMAT.GEMM,
-            quant_method=METHOD.AWQ,
-            pack_dtype=torch.int32,
-        )
-        assert cls.__name__ == "AllSparkAwqLinear"
+    cls = select_quant_linear(
+        bits=8,
+        group_size=-1,
+        desc_act=False,
+        sym=True,
+        device="cuda",
+        backend=BACKEND.ALLSPARK,
+        format=FORMAT.GEMM,
+        quant_method=METHOD.AWQ,
+        pack_dtype=torch.int32,
+    )
+    assert cls.__name__ == "AllSparkAwqLinear"

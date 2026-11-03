@@ -80,8 +80,8 @@ struct SM8x_GEMM_W8A16_Splitk_Params {
   int K;
   int N32;  // N padded to a multiple of 32 (packed-weight column count)
   int SplitK;
-  int GroupCnt;
-  int GroupSize;
+  // Scale/zero are per-output-channel (one group over all of K), so there is no
+  // group index to track: the kernel reads B_scale_ptr[n] / B_zero_ptr[n] once.
   FType* C_split_ptr;       // non-fused split-K workspace (low precision)
   float* C_tmp_ptr;         // split-K fp32 partials (non-fused reduce)
   float* C32_ptr;           // when set, write fp32 accumulators here instead

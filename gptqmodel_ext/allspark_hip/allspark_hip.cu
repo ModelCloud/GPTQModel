@@ -166,29 +166,14 @@ __global__ __launch_bounds__(kBlock) void allspark_w8a16_kernel(
   const int n_a = n0 + warp * kNPerWarp + (lane % 16);
   const int n_b = n_a + 16;
 
-  // Scale/zero layout is (GroupCnt, N32) in natural N order. GPTQ 8-bit has a
-  // single per-channel group (GroupCnt == 1); AWQ 8-bit adds a zero point and
-  // may be grouped along K, in which case the row is selected per k-tile.
-  const bool grouped = p.GroupCnt > 1;
-  auto scale_at = [&](int g, int n) {
-    return static_cast<float>(p.B_scale_ptr[static_cast<size_t>(g) * p.N32 + n]);
-  };
-  auto zero_at = [&](int g, int n) {
-    return HAS_ZP
-               ? static_cast<float>(p.B_zero_ptr[static_cast<size_t>(g) * p.N32 + n])
-               : 128.0f;
-  };
-  // Group bookkeeping is incremental on purpose: `(k / (GroupSize / kKTile))`
-  // is an integer division, and RDNA has no integer divide instruction, so
-  // doing it per k-tile showed up as a measurable slowdown for grouped AWQ.
-  // One divide at entry plus a compare per k-tile is enough.
-  const int kt_per_group = grouped ? (p.GroupSize / kKTile) : 0;
-  int cur_g = grouped ? (kt_begin / kt_per_group) : 0;
-  int next_g_kt = grouped ? (cur_g + 1) * kt_per_group : 0;
-  float scale_a = scale_at(cur_g, n_a);
-  float scale_b = scale_at(cur_g, n_b);
-  float zero_a = zero_at(cur_g, n_a);
-  float zero_b = zero_at(cur_g, n_b);
+  // Scale/zero are per-output-channel and live in natural N order. GPTQ 8-bit
+  // has scale only; AWQ 8-bit adds a zero point. Both are one row per N (one
+  // group over all of K), so they are loaded once here and reused for every
+  // k-tile: no per-tile reload and no group arithmetic in the k-loop.
+  const float scale_a = static_cast<float>(p.B_scale_ptr[n_a]);
+  const float scale_b = static_cast<float>(p.B_scale_ptr[n_b]);
+  const float zero_a = HAS_ZP ? static_cast<float>(p.B_zero_ptr[n_a]) : 128.0f;
+  const float zero_b = HAS_ZP ? static_cast<float>(p.B_zero_ptr[n_b]) : 128.0f;
 
   const int a_row = m0 + (lane % 16);
   const int a_koff = (lane / 16) * 8;
@@ -240,15 +225,6 @@ __global__ __launch_bounds__(kBlock) void allspark_w8a16_kernel(
     const uint4 na = (pf < kt_end && tid < 32) ? load_a(pf) : make_uint4(0, 0, 0, 0);
 
     // ---- compute the stage staged kNStage-1 iterations ago -------------
-    // Grouped AWQ: the scale/zero row changes every GroupSize/KTile k-tiles.
-    if (grouped && kt_begin + i >= next_g_kt) {
-      ++cur_g;
-      next_g_kt += kt_per_group;
-      scale_a = scale_at(cur_g, n_a);
-      scale_b = scale_at(cur_g, n_b);
-      zero_a = zero_at(cur_g, n_a);
-      zero_b = zero_at(cur_g, n_b);
-    }
 
     U4Frag16 a4;
     a4.u = *reinterpret_cast<const uint4*>(a_frag_src + slot * kSmemA);
@@ -395,20 +371,6 @@ __global__ void pad_scale_kernel(const FType* __restrict__ src,
   dst[n] = (n < N) ? src[n] : pad;
 }
 
-// Grouped variant: copies a (GroupCnt, N) / (GroupCnt, N32) block row by row
-// and pads the N tail with `pad`.
-template <typename FType>
-__global__ void pad_scale_grouped_kernel(const FType* __restrict__ src,
-                                         FType* __restrict__ dst, int G, int N,
-                                         int N32, FType pad) {
-  const int n = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n >= N32) return;
-  for (int g = 0; g < G; ++g) {
-    dst[static_cast<size_t>(g) * N32 + n] =
-        (n < N) ? src[static_cast<size_t>(g) * N + n] : pad;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Unpack: fragment order -> (K, N) dense, used only for the M > 16 fallback.
 // The result is a per-call temporary in Python; it is never cached.
@@ -417,8 +379,7 @@ template <typename FType>
 __global__ void unpack_kernel(const uint8_t* __restrict__ Bq,
                               const FType* __restrict__ Bs,
                               const FType* __restrict__ Bz, FType* __restrict__ B,
-                              int K, int N, int N32, int kt_total, int G,
-                              int gsize) {
+                              int K, int N, int N32, int kt_total) {
   const int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
   const int64_t per_pair = static_cast<int64_t>(kt_total) * 64;
   const int64_t total = static_cast<int64_t>(N32 / 32) * per_pair;
@@ -436,11 +397,8 @@ __global__ void unpack_kernel(const uint8_t* __restrict__ Bq,
   const int kbase = kt * 16 + (lane / 16) * 8;
   const uint8_t* src = Bq + (static_cast<int64_t>(p) * kt_total + kt) * 512 +
                        lane * 16 + q * 8;
-  const int g = (G > 1) ? (kbase / gsize) : 0;
-  const float s = static_cast<float>(Bs[static_cast<size_t>(g) * N32 + n]);
-  const float z = (Bz != nullptr)
-                      ? static_cast<float>(Bz[static_cast<size_t>(g) * N32 + n])
-                      : 128.0f;
+  const float s = static_cast<float>(Bs[n]);
+  const float z = (Bz != nullptr) ? static_cast<float>(Bz[n]) : 128.0f;
 #pragma unroll
   for (int j = 0; j < 8; ++j) {
     const int k = kbase + j;
@@ -481,18 +439,12 @@ int allspark_hip_pick_splitk(int M, int N, int N32, int K, int sm_count) {
 void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
                          const void* Bz, void* C, void* ws, int M, int N,
                          int N32, int K, int splitk, int dtype, int out_fp32,
-                         void* stream, uint32_t* ran, int group_cnt,
-                         int group_size) {
+                         void* stream, uint32_t* ran) {
   hipStream_t s = reinterpret_cast<hipStream_t>(stream);
   const int kt_total = K / kKTile;
   const int kt_per_split = (kt_total + splitk - 1) / splitk;
   const int grid_z = (kt_total + kt_per_split - 1) / kt_per_split;
   dim3 grid((M + 15) / 16, (N32 + kNtile - 1) / kNtile, grid_z);
-  // A grouped AWQ scale row must line up with a k-tile, otherwise the k-loop
-  // cannot select a single scale per WMMA step.
-  const bool grouped = group_cnt > 1;
-  const int gsize = grouped ? (group_size > 0 ? group_size : K) : K;
-
   SM8x_GEMM_W8A16_Splitk_Params<f16_t, uint8_t> pf;
   SM8x_GEMM_W8A16_Splitk_Params<__bf16, uint8_t> pb;
 
@@ -507,8 +459,6 @@ void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
     (P).N = N;                                                                \
     (P).K = K;                                                                \
     (P).SplitK = grid_z;                                                      \
-    (P).GroupCnt = grouped ? group_cnt : 1;                                    \
-    (P).GroupSize = gsize;                                                     \
     (P).C_split_ptr = nullptr;                                                \
     (P).C_tmp_ptr = reinterpret_cast<float*>(ws);                             \
     (P).C32_ptr = out_fp32 ? reinterpret_cast<float*>(C) : nullptr;           \
@@ -555,89 +505,61 @@ void allspark_hip_launch(const void* A, const void* Bq, const void* Bs,
 
 void allspark_hip_launch_repack(const void* B, const void* Bs, const void* Bz,
                                 void* Bq_out, void* Bs_out, void* Bz_out, int K,
-                                int N, int N32, int dtype, void* stream,
-                                int group_cnt) {
+                                int N, int N32, int dtype, void* stream) {
   hipStream_t s = reinterpret_cast<hipStream_t>(stream);
   const int kt_total = K / kKTile;
   const int64_t total = static_cast<int64_t>(N32 / 32) * kt_total * 64;
   const int block = 256;
   const int grid = static_cast<int>((total + block - 1) / block);
   const int sgrid = (N32 + block - 1) / block;
-  const int g = group_cnt > 1 ? group_cnt : 1;
 
   repack_kernel<<<grid, block, 0, s>>>(reinterpret_cast<const uint8_t*>(B),
                                        reinterpret_cast<uint8_t*>(Bq_out), K, N,
                                        N32, kt_total);
 
   // scale / zero stay in natural N order; pad the tail so the kernel can read
-  // a full 32-column pair without branching.
+  // a full 32-column pair without branching. One row per N: AWQ -1 has a single
+  // group over all of K, and GPTQ 8-bit is per-channel.
   if (dtype == 0) {
-    if (g > 1) {
-      pad_scale_grouped_kernel<f16_t><<<sgrid, block, 0, s>>>(
-          reinterpret_cast<const f16_t*>(Bs), reinterpret_cast<f16_t*>(Bs_out),
-          g, N, N32, f16_t(1.0f));
-      if (Bz != nullptr) {
-        pad_scale_grouped_kernel<f16_t><<<sgrid, block, 0, s>>>(
-            reinterpret_cast<const f16_t*>(Bz),
-            reinterpret_cast<f16_t*>(Bz_out), g, N, N32, f16_t(0.0f));
-      }
-    } else {
+    pad_scale_kernel<f16_t><<<sgrid, block, 0, s>>>(
+        reinterpret_cast<const f16_t*>(Bs), reinterpret_cast<f16_t*>(Bs_out),
+        N, N32, f16_t(1.0f));
+    if (Bz != nullptr) {
       pad_scale_kernel<f16_t><<<sgrid, block, 0, s>>>(
-          reinterpret_cast<const f16_t*>(Bs), reinterpret_cast<f16_t*>(Bs_out),
-          N, N32, f16_t(1.0f));
-      if (Bz != nullptr) {
-        pad_scale_kernel<f16_t><<<sgrid, block, 0, s>>>(
-            reinterpret_cast<const f16_t*>(Bz),
-            reinterpret_cast<f16_t*>(Bz_out), N, N32, f16_t(0.0f));
-      }
+          reinterpret_cast<const f16_t*>(Bz), reinterpret_cast<f16_t*>(Bz_out),
+          N, N32, f16_t(0.0f));
     }
   } else {
-    if (g > 1) {
-      pad_scale_grouped_kernel<__bf16><<<sgrid, block, 0, s>>>(
-          reinterpret_cast<const __bf16*>(Bs),
-          reinterpret_cast<__bf16*>(Bs_out), g, N, N32,
-          static_cast<__bf16>(1.0f));
-      if (Bz != nullptr) {
-        pad_scale_grouped_kernel<__bf16><<<sgrid, block, 0, s>>>(
-            reinterpret_cast<const __bf16*>(Bz),
-            reinterpret_cast<__bf16*>(Bz_out), g, N, N32,
-            static_cast<__bf16>(0.0f));
-      }
-    } else {
+    pad_scale_kernel<__bf16><<<sgrid, block, 0, s>>>(
+        reinterpret_cast<const __bf16*>(Bs),
+        reinterpret_cast<__bf16*>(Bs_out), N, N32, static_cast<__bf16>(1.0f));
+    if (Bz != nullptr) {
       pad_scale_kernel<__bf16><<<sgrid, block, 0, s>>>(
-          reinterpret_cast<const __bf16*>(Bs),
-          reinterpret_cast<__bf16*>(Bs_out), N, N32,
-          static_cast<__bf16>(1.0f));
-      if (Bz != nullptr) {
-        pad_scale_kernel<__bf16><<<sgrid, block, 0, s>>>(
-            reinterpret_cast<const __bf16*>(Bz),
-            reinterpret_cast<__bf16*>(Bz_out), N, N32,
-            static_cast<__bf16>(0.0f));
-      }
+          reinterpret_cast<const __bf16*>(Bz),
+          reinterpret_cast<__bf16*>(Bz_out), N, N32,
+          static_cast<__bf16>(0.0f));
     }
   }
 }
 
 void allspark_hip_launch_unpack(const void* Bq, const void* Bs, const void* Bz,
                                 void* B, int K, int N, int N32, int dtype,
-                                void* stream, int group_cnt, int group_size) {
+                                void* stream) {
   hipStream_t s = reinterpret_cast<hipStream_t>(stream);
   const int kt_total = K / kKTile;
   const int64_t total = static_cast<int64_t>(N32 / 32) * kt_total * 64;
   const int block = 256;
   const int grid = static_cast<int>((total + block - 1) / block);
-  const int g = group_cnt > 1 ? group_cnt : 1;
-  const int gsize = group_size > 0 ? group_size : K;
   if (dtype == 0) {
     unpack_kernel<f16_t><<<grid, block, 0, s>>>(
         reinterpret_cast<const uint8_t*>(Bq), reinterpret_cast<const f16_t*>(Bs),
         reinterpret_cast<const f16_t*>(Bz), reinterpret_cast<f16_t*>(B), K, N, N32,
-        kt_total, g, gsize);
+        kt_total);
   } else {
     unpack_kernel<__bf16><<<grid, block, 0, s>>>(
         reinterpret_cast<const uint8_t*>(Bq), reinterpret_cast<const __bf16*>(Bs),
         reinterpret_cast<const __bf16*>(Bz), reinterpret_cast<__bf16*>(B), K,
-        N, N32, kt_total, g, gsize);
+        N, N32, kt_total);
   }
 }
 

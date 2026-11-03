@@ -7,9 +7,10 @@ The CUDA AllSpark kernel relies on cp.async, ldmatrix and ``mma.sync``
 m16n8k16, none of which exist on RDNA4; this module builds the HIP port in
 ``gptqmodel_ext/allspark_hip`` instead.
 
-Supported configuration: bits=8, fp16 or bf16 activations, and either
-per-channel (``group_size=-1``, GPTQ 8-bit neutral zero point) or grouped
-AWQ 8-bit with an arbitrary per-group zero point on the K axis.
+Supported configuration: bits=8 with fp16 or bf16 activations, for both
+GPTQ 8-bit (neutral zero point) and AWQ 8-bit. The kernel loads one scale and
+one zero point per output channel (``group_size=-1``, i.e. a single group over
+all of K) once, outside the k-loop, so AWQ checkpoints must be per-channel.
 """
 
 from __future__ import annotations
@@ -166,19 +167,18 @@ def allspark_hip_repack(qweight_codes: torch.Tensor, scales: torch.Tensor, n: in
                         zeros: torch.Tensor | None = None):
     """Repack (K, N) uint8 codes into the RDNA4 WMMA fragment order.
 
-    ``scales`` is ``(N,)`` for GPTQ 8-bit or ``(GroupCnt, N)`` for grouped AWQ,
-    where ``GroupCnt == k // group_size``. ``zeros`` has the same shape as
-    ``scales`` and holds the zero-point **codes** (AWQ qzeros), so the weight
-    is ``(code - zero) * scale``.
+    ``scales`` is ``(N,)`` and per-output-channel: the kernel keeps one scale
+    row per N (one group over all of K). ``zeros`` has the same shape and holds
+    the zero-point **codes** (AWQ qzeros), so the weight is
+    ``(code - zero) * scale``.
     """
     n32 = _n32(n)
     packed = torch.empty((n32 // 4, k * 4), dtype=torch.uint8, device=qweight_codes.device)
-    group_cnt = scales.numel() // n
-    scales_2d = scales.reshape(group_cnt, n)
-    scales_packed = torch.empty((group_cnt, n32), dtype=scales.dtype, device=scales.device)
+    scales_2d = scales.reshape(n)
+    scales_packed = torch.empty(n32, dtype=scales.dtype, device=scales.device)
     if zeros is not None:
-        zeros_packed = torch.empty((group_cnt, n32), dtype=scales.dtype, device=scales.device)
-        zeros_2d = zeros.reshape(group_cnt, n).to(scales.dtype)
+        zeros_packed = torch.empty(n32, dtype=scales.dtype, device=scales.device)
+        zeros_2d = zeros.reshape(n).to(scales.dtype)
     else:
         zeros_packed = None
         zeros_2d = None
@@ -194,9 +194,7 @@ def allspark_hip_repack(qweight_codes: torch.Tensor, scales: torch.Tensor, n: in
         n,
         n32,
     )
-    if zeros_packed is not None:
-        zeros_packed = zeros_packed.reshape(-1)
-    return packed.view(n32, k), scales_packed.reshape(-1), zeros_packed
+    return packed.view(n32, k), scales_packed, zeros_packed
 
 
 def allspark_hip_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
@@ -207,7 +205,10 @@ def allspark_hip_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
     AWQ packs along the output axis (``qweight`` is ``(K, ceil(N*8/32))`` and
     ``qzeros`` is ``(K/group, ceil(N*8/32))``), which is a different layout from
     GPTQ 8-bit. Both are unpacked here with the shared AWQ helpers, so the
-    kernel only ever sees ``(K, N)`` codes plus per-group scale/zero rows.
+    kernel only ever sees ``(K, N)`` codes plus one scale/zero row per N.
+
+    ``group_size`` must be -1 (one group over all of K): per-output-channel
+    zeros are the shape the kernel loads once outside the k-loop.
     """
     from ..quantization.awq.utils.packing_utils import (
         AWQ_ORDER,
@@ -222,24 +223,28 @@ def allspark_hip_repack_awq(qweight: torch.Tensor, qzeros: torch.Tensor,
     iweights, izeros = reverse_awq_order(iweights, izeros, 8)
     codes = (iweights.to(torch.int64) & 0xFF).to(torch.uint8).contiguous()
     zeros = (izeros.to(torch.int64) & 0xFF).reshape(-1, n)
-
-    scales_2d = scales.reshape(-1, n)
-    if group_size > 0 and scales_2d.shape[0] == 1 and k != group_size:
-        # A checkpoint can carry per-channel scales while the layer reports a
-        # grouped size only when G == K/group_size, so this is a real mismatch.
+    scales_1d = scales.reshape(-1, n)
+    # -1 and "group_size == in_features" both mean one group over all of K.
+    if group_size not in (-1, k):
         raise ValueError(
-            f"AWQ scale rows ({scales_2d.shape[0]}) do not match K/group_size "
-            f"({k // group_size})"
+            f"AWQ AllSpark supports group_size=-1 only, got {group_size}"
         )
-    return allspark_hip_repack(codes, scales_2d, n, k, zeros=zeros)
+    if zeros.shape[0] != 1 or scales_1d.shape[0] != 1:
+        raise ValueError(
+            "AWQ AllSpark needs one scale/zero row per output channel, got "
+            f"{scales_1d.shape[0]} scale rows and {zeros.shape[0]} zero rows"
+        )
+    return allspark_hip_repack(codes, scales_1d.reshape(n), n, k,
+                               zeros=zeros.reshape(n))
 
 
 def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.Tensor,
                       n: int, b_qzeros: torch.Tensor | None = None, group_size: int = -1):
     """W8A16 GEMM against weights already in the HIP packed layout.
 
-    ``b_qzeros`` is the packed zero-point buffer (AWQ) and ``group_size`` is the
-    K grouping of ``b_scales`` (-1 for per-channel).
+    ``b_qzeros`` is the packed zero-point buffer (AWQ). Scale and zero are
+    per-output-channel, so ``group_size`` is -1 and is only kept for signature
+    stability with the CUDA entry point.
     """
     props = torch.cuda.get_device_properties(a.device)
     k = a.shape[-1]
@@ -261,7 +266,7 @@ def allspark_hip_gemm(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: torch.
     # Prefill fallback: unpack per call and hand off to torch.matmul. The dense
     # tensor is a local temporary; nothing is cached on the module.
     w = torch.ops.gptqmodel_allspark_hip.allspark_hip_unpack(
-        b_qweight, b_scales, n, k, b_qzeros, group_size
+        b_qweight, b_scales, n, k, b_qzeros
     )
     return torch.matmul(a, w)
 
@@ -271,7 +276,7 @@ def allspark_hip_gemm_f32(a: torch.Tensor, b_qweight: torch.Tensor, b_scales: to
     """fp32-accumulator output (test/diagnostic path; M<=16)."""
     props = torch.cuda.get_device_properties(a.device)
     return torch.ops.gptqmodel_allspark_hip.allspark_hip_gemm_f32(
-        a, b_qweight, b_scales, n, props.multi_processor_count, b_qzeros, group_size
+        a, b_qweight, b_scales, n, props.multi_processor_count, b_qzeros
     )
 
 

@@ -6,7 +6,7 @@ Load-only for now: the module takes GPTQ-format ``qweight`` / ``scales`` and
 repacks them into the kernel layout in ``post_init``. Raw-weight packing is a
 separate decision, see the draft PR.
 
-Two device paths share this module and the ``gptq_allspark`` backend:
+Two device paths share this module and the ``allspark`` backend:
 
 * CUDA (Ampere+) -> ``gptqmodel_ext/allspark`` (cp.async + mma.sync).
 * ROCm RDNA4 (gfx1200/gfx1201) -> ``gptqmodel_ext/allspark_hip``
@@ -48,7 +48,10 @@ log = setup_logger()
 
 
 class AllSparkLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_ALLSPARK]
+    # GPTQ sub-kernel of the shared AllSpark backend. ``BACKEND.ALLSPARK`` plus
+    # the checkpoint method/format selects this class; no GPTQ-specific backend
+    # name is required.
+    SUPPORTS_BACKENDS = [BACKEND.ALLSPARK]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     # 0 keeps the format registered but opts out of AUTO selection: AllSpark overlaps
     # Marlin on bits=8/group_size=-1 and should only run when asked for explicitly.
