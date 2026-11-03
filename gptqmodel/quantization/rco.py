@@ -135,17 +135,31 @@ def vector_transport(optimizer, alpha, costs, weights=None):
 
 
 def round_with_budget(probs, weights, costs, target, resolution=500):
-    """Exact discrete assignment under the budget (multiple-choice knapsack).
+    """Decode probabilities with the legacy probability-input API.
 
-    Maximizes the total log-probability of the soft solution subject to the
-    discretized budget, so ``sum_i w_i * cost(choice_i) / sum_i w_i`` is as
-    close to ``target`` as the width grid allows. Returns option indices.
+    Use ``budget_constrained_argmax`` with the original logits during search
+    and final decoding. Once softmax underflows, probabilities cannot preserve
+    the relative scores needed by a budget-constrained assignment.
     """
-    if probs.ndim != 2:
-        raise ValueError('RCO rounding requires [layers, options] probabilities')
-    n_layers, n_options = probs.shape
+    return budget_constrained_argmax(torch.log(probs.clamp_min(1e-30)), weights,
+                                     costs, target, resolution=resolution)
+
+
+def budget_constrained_argmax(scores, weights, costs, target, resolution=500):
+    """Maximize additive logit scores under the discretized budget (RCO Eq. 4).
+
+    Accept raw perturbed logits during search and unperturbed logits for final
+    decoding. Subtracting a row constant (including logsumexp) does not change
+    the optimum, but clipping log-probabilities does. The DP may underspend:
+    discrete feasibility is an inequality, unlike the continuous manifold.
+    """
+    if scores.ndim != 2 or not scores.is_floating_point() or not torch.isfinite(scores).all():
+        raise ValueError('RCO scores must be finite floating [groups, options] logits')
+    n_layers, n_options = scores.shape
+    if not n_layers or not n_options:
+        raise ValueError('RCO assignment requires nonempty groups and options')
     if weights.shape != (n_layers,) or costs.shape != (n_options,):
-        raise ValueError('RCO rounding requires per-layer weights and per-option costs')
+        raise ValueError('RCO assignment requires per-group weights and per-option costs')
 
     budget = round(target * resolution)
     totals = float(weights.sum())
@@ -155,9 +169,8 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
     # Compute the rounded unit costs on the caller's device, then read the
     # table on the host: the search calls this once per Gumbel draw, so a Python
     # loop over positions here would dominate the step time.
-    log_probs = torch.log(probs.clamp_min(1e-30))
     unit_costs = torch.round(costs * weights[:, None] / totals * resolution).to(torch.long)
-    gained = log_probs.detach().float().cpu().numpy()
+    gained = scores.detach().double().cpu().numpy()
     steps = unit_costs.detach().cpu().numpy()
 
     table = np.full(budget + 1, -np.inf, dtype=np.float64)
@@ -183,7 +196,7 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
         table = updated
 
     # Select the best objective over every feasible budget, not the largest
-    # feasible budget: the table entry is the total log-probability, and a
+    # feasible budget: the table entry is the total score, and a
     # lower-cost assignment can score better. Matches the reference solver.
     if not np.isfinite(table).any():
         raise RuntimeError('RCO rounding found no feasible assignment under the budget')
@@ -196,7 +209,7 @@ def round_with_budget(probs, weights, costs, target, resolution=500):
         position -= int(steps[layer, option])
     # Return on the caller's device: the search indexes this alongside the
     # probability tensors it keeps on the accelerator.
-    return assignment.to(probs.device)
+    return assignment.to(scores.device)
 
 
 def achieved_bits(assignment, weights, costs):
@@ -385,9 +398,9 @@ def projected_gumbel_search(interpolated, batches, target, *, steps=200, lr=0.1,
             # must be rebuilt per batch, since a second backward through a
             # retained logit graph would free the saved intermediates.
             with torch.no_grad():
-                detached = F.softmax((interpolated.alpha + noise) / tau, dim=-1)
-                hard = round_with_budget(detached, interpolated.weights,
-                                         interpolated.costs, target)
+                detached = (interpolated.alpha + noise) / tau
+                hard = budget_constrained_argmax(detached, interpolated.weights,
+                                                  interpolated.costs, target)
                 onehot = F.one_hot(hard, interpolated.n_options).float()
             for batch in batches:
                 noisy = (interpolated.alpha + noise) / tau

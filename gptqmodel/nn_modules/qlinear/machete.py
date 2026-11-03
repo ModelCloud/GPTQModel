@@ -38,7 +38,10 @@ log = setup_logger()
 
 
 class MacheteLinear(GPTQQuantLinear):
-    SUPPORTS_BACKENDS = [BACKEND.GPTQ_MACHETE]
+    # GPTQ sub-kernel of the shared Machete backend. ``BACKEND.MACHETE`` plus
+    # the checkpoint method/format selects this class; no separate GPTQ-specific
+    # backend name is required.
+    SUPPORTS_BACKENDS = [BACKEND.MACHETE]
     SUPPORTS_METHODS = [METHOD.GPTQ]
     SUPPORTS_FORMATS = {FORMAT.GPTQ: 100}
     SUPPORTS_BITS = [4, 8]
@@ -93,7 +96,7 @@ class MacheteLinear(GPTQQuantLinear):
             out_features=out_features,
             bias=bias,
             pack_dtype=pack_dtype,
-            backend=kwargs.pop("backend", BACKEND.GPTQ_MACHETE),
+            backend=kwargs.pop("backend", BACKEND.MACHETE),
             adapter=adapter,
             register_buffers=False,
             **kwargs)
