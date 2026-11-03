@@ -8,6 +8,7 @@ from functools import lru_cache
 import mlx.core as mx
 import mlx.nn as nn
 
+from ...quantization.mlx_splitk_dispatch import quantized_matmul as _dispatch_matmul
 from .mlx_group16 import MlxGroup16Linear
 
 
@@ -188,6 +189,22 @@ class MlxGPTQGroup16Linear(MlxGroup16Linear):
         return output.reshape(output_shape)
 
 
+def _mlx_forward(linear, x):
+    """Apply the wrapped quantized affine layer, avoiding MLX's split-K pass."""
+    out = _dispatch_matmul(
+        x,
+        linear.weight,
+        linear.scales,
+        linear.get("biases"),
+        group_size=linear.group_size,
+        bits=linear.bits,
+        mode=linear.mode,
+    )
+    if "bias" in linear:
+        out = out + linear["bias"]
+    return out.astype(x.dtype)
+
+
 class MlxGPTQLinear(nn.Module):
     """Run MLX affine GPTQ matmul and round its output to the input dtype."""
 
@@ -197,4 +214,4 @@ class MlxGPTQLinear(nn.Module):
         self.freeze()
 
     def __call__(self, x):
-        return self.linear(x).astype(x.dtype)
+        return _mlx_forward(self.linear, x)
