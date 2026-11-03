@@ -448,8 +448,16 @@ class BaseQuantLinear(nn.Module):
         if DEVICE.ALL not in cls.SUPPORTS_DEVICES and device is not None:
             try:
                 cls.validate_device(device)
-            except NotImplementedError:
+            except NotImplementedError as exc:
+                # `validate_device` overrides raise for reasons that are not
+                # about the device family - compute capability, missing ROCm,
+                # a kernel image that only exists for one SM version. Replacing
+                # that with "does not support device" hides the only actionable
+                # part, so keep the original text.
+                reason = str(exc).strip()
                 e = f"{cls} does not support device: {device}"
+                if reason:
+                    e = f"{e} ({reason})"
                 return False, NotImplementedError(e)
 
         if trainable and not cls.SUPPORTS_TRAINING:
