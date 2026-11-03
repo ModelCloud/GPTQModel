@@ -170,6 +170,21 @@ def _gguf_q5_k_kernel():
     )
 
 
+def _packed_warp_launch(blocks, warps):
+    """Give each 256-element GGUF block one warp, packing `warps` per group.
+
+    A single-warp threadgroup keeps only one dependent 512-byte read in flight
+    per block, so packing several warps per threadgroup raises resident warps
+    per SM and hides that latency.
+    """
+    groups = (blocks + warps - 1) // warps
+    return {
+        "grid": (32 * warps, groups, 1),
+        "threadgroup": (32 * warps, 1, 1),
+        "template": [("WARPS", warps), ("BLOCKS", blocks)],
+    }
+
+
 _Q6_K_WARPS = 4
 
 
@@ -555,6 +570,9 @@ def _gguf_tq2_0_kernel():
     )
 
 
+_TQ2_0_WARPS = 4
+
+
 @lru_cache(maxsize=1)
 def _gguf_tq2_0_parallel_kernel():
     import mlx.core as mx
@@ -564,22 +582,34 @@ def _gguf_tq2_0_parallel_kernel():
         input_names=["weights"],
         output_names=["packed"],
         source="""
-            uint lane = thread_position_in_threadgroup.x;
-            uint block = threadgroup_position_in_grid.y;
+            uint lane = thread_position_in_threadgroup.x & 31u;
+            uint warp = thread_position_in_threadgroup.x >> 5;
+            uint block = threadgroup_position_in_grid.y * uint(WARPS) + warp;
+            if (block >= uint(BLOCKS)) {
+                return;
+            }
+            uint base_index = block * 256;
+            // Keep this lane's eight weights in registers: the packing pass
+            // below would otherwise re-read the whole block from memory.
+            float own[8];
+            #pragma unroll
+            for (uint value_lane = 0; value_lane < 8; ++value_lane) {
+                own[value_lane] = float(
+                    weights[base_index + value_lane * 32 + lane]);
+            }
             float maximum = 0.0f;
-            for (uint k = lane; k < 256; k += 32) {
-                maximum = metal::max(
-                    maximum, metal::abs(float(weights[block * 256 + k])));
+            #pragma unroll
+            for (uint value_lane = 0; value_lane < 8; ++value_lane) {
+                maximum = metal::max(maximum, metal::abs(own[value_lane]));
             }
             maximum = simd_max(maximum);
             float inverse = maximum == 0.0f ? 0.0f : 1.0f / maximum;
             uint offset = block * 66;
             for (uint segment = 0; segment < 2; ++segment) {
                 uchar bits = 0;
+                #pragma unroll
                 for (uint value_lane = 0; value_lane < 4; ++value_lane) {
-                    float normalized = float(weights[
-                        block * 256 + segment * 128 + value_lane * 32 + lane])
-                        * inverse;
+                    float normalized = own[segment * 4 + value_lane] * inverse;
                     uint code = normalized >= 0.5f
                         ? 2 : (normalized <= -0.5f ? 0 : 1);
                     bits |= uchar(code << (2 * value_lane));
@@ -868,21 +898,14 @@ def gguf_quantize_weight_mlx(weight, qtype: str):
     else:
         kernel, bytes_per_block = _gguf_q8_0_kernel(), 34
     if normalized == "Q6_K":
-        # One warp still owns a 256-element block, but pack several warps into
-        # a threadgroup so each SM gets enough resident warps to hide the
-        # latency of a single dependent 512-byte read per block.
-        groups = (blocks + _Q6_K_WARPS - 1) // _Q6_K_WARPS
-        launch = {
-            "grid": (32 * _Q6_K_WARPS, groups, 1),
-            "threadgroup": (32 * _Q6_K_WARPS, 1, 1),
-            "template": [("WARPS", _Q6_K_WARPS), ("BLOCKS", blocks)],
-        }
+        launch = _packed_warp_launch(blocks, _Q6_K_WARPS)
+    elif normalized == "TQ2_0" and blocks >= 65536:
+        launch = _packed_warp_launch(blocks, _TQ2_0_WARPS)
     else:
         launch = (
             {"grid": (32, blocks, 1), "threadgroup": (32, 1, 1)}
             if normalized.startswith(("Q4_K", "Q5_K"))
             or (normalized == "TQ1_0" and blocks >= 65536)
-            or (normalized == "TQ2_0" and blocks >= 65536)
             else {"grid": (blocks, 1, 1), "threadgroup": (min(blocks, 256), 1, 1)}
         )
     direct_input = (
